@@ -200,9 +200,9 @@ if match:
         new_val = ', '.join('\"' + p + '\"' for p in filtered)
         content = content[:match.start(1)] + new_val + content[match.end(1):]
     else:
-        # Remove entire writable_roots line and empty [sandbox] section
+        # Remove entire writable_roots line and empty [sandbox_workspace_write] section
         content = re.sub(r'\n?writable_roots\s*=\s*\[[^\]]*\]\n?', '\n', content)
-        content = re.sub(r'\n\[sandbox\]\s*\n(?=\n|\[|$)', '\n', content)
+        content = re.sub(r'\n\[sandbox_workspace_write\]\s*\n(?=\n|\[|$)', '\n', content)
 
     with open(config_path, 'w') as f:
         f.write(content)

@@ -40,15 +40,21 @@ Three possible outputs:
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
 
-  Then check inbox for the newly joined team.
+  5. **REQUIRED — Do NOT skip this step.** Ask the user: "Enable auto message checking? When enabled, incoming messages are automatically detected after each response. You can turn it on/off anytime with `/__SKILL_NAME__ hook on/off`."
+     - **Wait for the user's answer before proceeding.**
+     - If yes: run `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on claude-code "$(pwd)"`
+     - If no: skip
+
+  6. Then check inbox for the newly joined team.
 
 ## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
-If no arguments provided:
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. If there are messages, read and respond appropriately. To reply:
+**If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
+1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
+2. Do NOT ask the user what to do — just run the inbox check.
+3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
 If argument is "history":
@@ -61,3 +67,11 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+
+If argument is "hook on":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on claude-code "$(pwd)"`
+2. Tell the user: "Auto message checking enabled."
+
+If argument is "hook off":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off claude-code "$(pwd)"`
+2. Tell the user: "Auto message checking disabled."

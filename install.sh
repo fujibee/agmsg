@@ -70,7 +70,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   SKILL_NAME="$(basename "$SKILL_DIR")"
   echo "  Updating $SKILL_NAME..."
-  sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/SKILL.md" > "$SKILL_DIR/SKILL.md"
+  sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
   cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
   for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$tmpl" > "$SKILL_DIR/templates/$(basename "$tmpl")"
@@ -91,6 +91,7 @@ if [ "$INTERACTIVE" = true ]; then
   read -r input
   CMD_NAME="${input:-agmsg}"
   echo ""
+
 fi
 
 # --- Apply defaults ---
@@ -101,7 +102,8 @@ SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
 mkdir -p "$SKILL_DIR"/{scripts,templates,db,agents}
 
-sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/SKILL.md" > "$SKILL_DIR/SKILL.md"
+# SKILL.md is generated from the Codex command template (Codex reads SKILL.md directly)
+sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
 cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
 
 # Replace placeholder in templates with actual skill name
@@ -164,17 +166,17 @@ if match:
     else:
         new_entry = entries
     content = content[:match.start(1)] + new_entry + content[match.end(1):]
-elif re.search(r'^\[sandbox\]\s*$', content, re.MULTILINE):
-    # [sandbox] section exists but no writable_roots — add under it
+elif re.search(r'^\[sandbox_workspace_write\]\s*$', content, re.MULTILINE):
+    # [sandbox_workspace_write] section exists but no writable_roots — add under it
     content = re.sub(
-        r'(\[sandbox\]\s*\n)',
+        r'(\[sandbox_workspace_write\]\s*\n)',
         r'\1writable_roots = [' + entries + ']\n',
         content,
         count=1
     )
 else:
-    # No [sandbox] section at all
-    content += '\n[sandbox]\nwritable_roots = [' + entries + ']\n'
+    # No [sandbox_workspace_write] section at all
+    content += '\n[sandbox_workspace_write]\nwritable_roots = [' + entries + ']\n'
 
 with open(config_path, 'w') as f:
     f.write(content)

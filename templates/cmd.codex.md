@@ -1,5 +1,6 @@
 ---
-description: Agent messaging — check inbox, send messages, view history
+name: __SKILL_NAME__
+description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
 ---
 
 Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
@@ -40,15 +41,16 @@ Three possible outputs:
   > - `$__SKILL_NAME__ team` — list team members
   > - `$__SKILL_NAME__ history` — message history
 
-  Then check inbox for the newly joined team.
+  5. Then check inbox for the newly joined team.
 
 ## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
-If no arguments provided:
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. If there are messages, read and respond appropriately. To reply:
+**If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
+1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
+2. Do NOT ask the user what to do — just run the inbox check.
+3. If there are messages, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
 If argument is "history":
@@ -61,3 +63,4 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+

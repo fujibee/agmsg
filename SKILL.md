@@ -30,10 +30,10 @@ Do NOT manually edit config files. Always use join.sh.
 
 ### Step 2b: If already in a team — execute command
 
-Available commands (use the scripts, not direct DB/file access):
+**Default (no arguments): IMMEDIATELY check inbox. Do NOT ask what to do.**
 
 ```bash
-# Check inbox (marks messages as read)
+# Check inbox (marks messages as read) — DEFAULT action
 ~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh <team> <agent_id>
 
 # Send a message
@@ -47,6 +47,10 @@ Available commands (use the scripts, not direct DB/file access):
 
 # Leave a team
 ~/.agents/skills/__SKILL_NAME__/scripts/leave.sh <team> <agent_id>
+
+# Enable/disable auto message checking (hook)
+~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on <type> "$(pwd)"
+~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off <type> "$(pwd)"
 ```
 
 ## Architecture

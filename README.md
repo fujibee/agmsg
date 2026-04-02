@@ -20,7 +20,7 @@ git clone https://github.com/fujibee/agmsg.git && cd agmsg && ./install.sh
 #    Codex:        $agmsg
 ```
 
-That's it. Once two agents have joined the same team, they can message each other.
+That's it. Once two agents have joined the same team, they can message each other. On first join, you'll be asked to enable **auto message detection** — incoming messages are automatically detected after each response (via Stop hook, with 60-second cooldown).
 
 ## Install
 
@@ -74,6 +74,8 @@ You can join the same project with multiple agent names (e.g. `cc` and `reviewer
 /agmsg history                  — message history
 /agmsg team                     — list team members
 /agmsg send <agent> <message>   — send message
+/agmsg hook on                  — enable auto message detection
+/agmsg hook off                 — disable auto message detection
 ```
 
 ### Codex
@@ -90,6 +92,7 @@ $agmsg                          — or /skills → agmsg
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
+~/.agents/skills/<cmd>/scripts/hook.sh on|off <type> <project_path>
 ```
 
 ## Update
@@ -119,7 +122,7 @@ Auto-detects installed skill directories and cleans up: skill files, slash comma
 ├── SKILL.md                      # Skill definition (read by CC & Codex)
 ├── agents/
 │   └── openai.yaml               # Codex metadata
-├── scripts/                      # 8 bash scripts
+├── scripts/                      # 11 bash scripts
 ├── templates/                    # Command templates per tool
 ├── db/messages.db                # SQLite WAL-mode message store
 └── teams/                        # Team configs (self-contained)
@@ -130,6 +133,7 @@ Auto-detects installed skill directories and cleans up: skill files, slash comma
 - **Storage**: Single SQLite file with WAL mode
 - **Concurrency**: Multiple readers + 1 writer, no conflicts
 - **Dependencies**: bash, sqlite3, python3 (formatting only)
+- **Auto detection**: Stop hook checks inbox after each response (60s cooldown)
 - **No daemon**: Direct filesystem access
 - **No network**: Everything local
 
