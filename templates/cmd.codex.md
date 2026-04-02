@@ -4,19 +4,21 @@ description: Agent messaging — check inbox, send messages, view history
 
 Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
 
-## Step 1: Identity check
+## Identity
 
-Run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" codex`
+If you already know your AGENT and TEAMS from a previous `$__SKILL_NAME__` call in this session, skip to **Execute** below.
+
+Otherwise, run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" codex`
 
 Three possible outputs:
 
 **A) Single identity:**
 `agent=<name> teams=<t1,t2,...> type=codex project=<path>`
-→ Go to Step 2.
+→ Remember AGENT and TEAMS, then go to **Execute**.
 
 **B) Multiple identities:**
 `multiple=true agents=<n1,n2,...> teams=<t1,t2,...> type=codex project=<path>`
-→ Ask the user which agent name to use for this session, then proceed to Step 2.
+→ Ask the user which agent name to use for this session, then go to **Execute**.
 
 **C) Not in a team:**
 `not_joined=true available_teams=<t1,t2,...>` (or `available_teams=none`)
@@ -40,10 +42,7 @@ Three possible outputs:
 
   Then check inbox for the newly joined team.
 
-## Step 2: Execute command (after joining a team)
-
-Parse AGENT from `agent=` and TEAMS from `teams=` (comma-separated) in the whoami output.
-If in multiple teams, operate on ALL teams unless the user specifies one.
+## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
