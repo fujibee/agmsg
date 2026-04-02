@@ -1,0 +1,4 @@
+# Runtime data (created at install destination, not in repo)
+db/
+teams/
+.DS_Store
