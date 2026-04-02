@@ -56,6 +56,15 @@ To leave a team:
 ~/.agents/skills/agmsg/scripts/leave.sh myteam alice
 ```
 
+### Multiple identities
+
+You can join the same project with multiple agent names (e.g. `cc` and `reviewer`). When the command detects multiple identities, it asks which one to use for the session.
+
+```bash
+~/.agents/skills/agmsg/scripts/join.sh myteam cc claude-code /path/to/project
+~/.agents/skills/agmsg/scripts/join.sh myteam reviewer claude-code /path/to/project
+```
+
 ## Usage
 
 ### Claude Code

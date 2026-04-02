@@ -8,13 +8,17 @@ Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER dir
 
 Run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" claude-code`
 
-Two possible outputs:
+Three possible outputs:
 
-**A) Already in a team:**
+**A) Single identity:**
 `agent=<name> teams=<t1,t2,...> type=claude-code project=<path>`
 → Go to Step 2.
 
-**B) Not in a team:**
+**B) Multiple identities:**
+`multiple=true agents=<n1,n2,...> teams=<t1,t2,...> type=claude-code project=<path>`
+→ Ask the user which agent name to use for this session, then proceed to Step 2.
+
+**C) Not in a team:**
 `not_joined=true available_teams=<t1,t2,...>` (or `available_teams=none`)
 → Show the user the available teams from the output, then:
 
