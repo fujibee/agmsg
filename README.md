@@ -22,6 +22,8 @@ git clone https://github.com/fujibee/agmsg.git && cd agmsg && ./install.sh
 
 That's it. Once two agents have joined the same team, they can message each other. On first join, you'll be asked to enable **auto message detection** — incoming messages are automatically detected after each response (via Stop hook, with 60-second cooldown).
 
+After setup, your agent handles everything — just talk to it naturally. "Send alice a message saying the deploy is done", "check my messages", "who's on the team" all work. The shell scripts below are for reference and advanced use.
+
 ## Install
 
 ```bash
