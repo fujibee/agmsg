@@ -117,6 +117,12 @@ DB and team configs are preserved. Only scripts and assets are updated.
 
 Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 
+## Tests
+
+```bash
+bats tests/    # requires bats-core: brew install bats-core
+```
+
 ## Architecture
 
 ```
