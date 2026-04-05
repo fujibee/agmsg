@@ -20,27 +20,28 @@ if [ ! -f "$TEAM_CONFIG" ]; then
 fi
 
 # --- Update team config ---
-python3 -c "
-import json, sys
+CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
-config_path = '$TEAM_CONFIG'
-with open(config_path) as f:
-    config = json.load(f)
+# Check old exists
+OLD_VAL=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  "SELECT json_extract(:json, '$.agents.$OLD_NAME');")
+if [ -z "$OLD_VAL" ] || [ "$OLD_VAL" = "null" ]; then
+  echo "Agent $OLD_NAME not in team $TEAM"
+  exit 1
+fi
 
-agents = config.get('agents', {})
-if '$OLD_NAME' not in agents:
-    print('Agent $OLD_NAME not in team $TEAM')
-    sys.exit(1)
-if '$NEW_NAME' in agents:
-    print('Agent $NEW_NAME already exists in team $TEAM')
-    sys.exit(1)
+# Check new doesn't exist
+NEW_VAL=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  "SELECT json_extract(:json, '$.agents.$NEW_NAME');")
+if [ -n "$NEW_VAL" ] && [ "$NEW_VAL" != "null" ]; then
+  echo "Agent $NEW_NAME already exists in team $TEAM"
+  exit 1
+fi
 
-agents['$NEW_NAME'] = agents.pop('$OLD_NAME')
-
-with open(config_path, 'w') as f:
-    json.dump(config, f, indent=2, ensure_ascii=False)
-    f.write('\n')
-"
+# Rename: set new key with old value, remove old key
+UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  "SELECT json_remove(json_set(:json, '$.agents.$NEW_NAME', json_extract(:json, '$.agents.$OLD_NAME')), '$.agents.$OLD_NAME');")
+echo "$UPDATED" > "$TEAM_CONFIG"
 
 # --- Update messages in DB ---
 if [ -f "$DB" ]; then

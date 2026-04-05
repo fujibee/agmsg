@@ -20,36 +20,42 @@ if [ ! -d "$TEAMS_DIR" ]; then
   exit 0
 fi
 
-python3 -c "
-import json, os, glob
+# Scan all team configs
+MATCHES=""
+ALL_TEAMS=""
 
-teams_dir = '$TEAMS_DIR'
-project = '$PROJECT_PATH'
-agent_type = '$AGENT_TYPE'
+for config_file in "$TEAMS_DIR"/*/config.json; do
+  [ -f "$config_file" ] || continue
+  CONFIG_ESCAPED=$(sed "s/'/''/g" "$config_file")
+  TEAM_NAME=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+    "SELECT json_extract(:json, '$.name');")
+  ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
 
-# Collect all matches: (agent_name, team)
-matches = []
-all_teams = []
+  # Find agents matching project and type
+  while IFS='	' read -r agent_name; do
+    [ -n "$agent_name" ] || continue
+    MATCHES="${MATCHES:+$MATCHES
+}$agent_name	$TEAM_NAME"
+  done < <(sqlite3 -separator '	' :memory: ".param set :json '$CONFIG_ESCAPED'" \
+    "SELECT key FROM json_each(json_extract(:json, '$.agents'))
+     WHERE json_extract(value, '$.project') = '$PROJECT_PATH'
+       AND json_extract(value, '$.type') = '$AGENT_TYPE';")
+done
 
-for config_path in sorted(glob.glob(os.path.join(teams_dir, '*/config.json'))):
-    with open(config_path) as f:
-        config = json.load(f)
-    team = config.get('name', '')
-    all_teams.append(team)
-    for name, info in config.get('agents', {}).items():
-        if info.get('project', '') == project and info.get('type', '') == agent_type:
-            matches.append((name, team))
+if [ -z "$MATCHES" ]; then
+  echo "not_joined=true available_teams=${ALL_TEAMS:-none}"
+  exit 0
+fi
 
-if not matches:
-    available = ','.join(all_teams) if all_teams else 'none'
-    print(f'not_joined=true available_teams={available}')
-else:
-    # Group by unique agent names
-    agent_names = list(dict.fromkeys(m[0] for m in matches))
-    team_names = list(dict.fromkeys(m[1] for m in matches))
+# Deduplicate agent names and team names
+AGENT_NAMES=$(echo "$MATCHES" | cut -f1 | awk '!seen[$0]++' | paste -sd, -)
+TEAM_NAMES=$(echo "$MATCHES" | cut -f2 | awk '!seen[$0]++' | paste -sd, -)
 
-    if len(agent_names) == 1:
-        print(f'agent={agent_names[0]} teams={','.join(team_names)} type={agent_type} project={project}')
-    else:
-        print(f'multiple=true agents={','.join(agent_names)} teams={','.join(team_names)} type={agent_type} project={project}')
-"
+# Count unique agent names
+AGENT_COUNT=$(echo "$MATCHES" | cut -f1 | sort -u | wc -l | tr -d ' ')
+
+if [ "$AGENT_COUNT" -eq 1 ]; then
+  echo "agent=$AGENT_NAMES teams=$TEAM_NAMES type=$AGENT_TYPE project=$PROJECT_PATH"
+else
+  echo "multiple=true agents=$AGENT_NAMES teams=$TEAM_NAMES type=$AGENT_TYPE project=$PROJECT_PATH"
+fi
