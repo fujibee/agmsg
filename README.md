@@ -4,7 +4,7 @@ Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
 
 Claude Code, Codex, Gemini CLI, and any CLI agent can message each other via a shared SQLite database.
 
-![Claude Code and Codex exchanging code review messages via agmsg](assets/screenshot.png)
+![Claude Code and Codex exchanging code review messages via agmsg](docs/screenshot.png)
 
 ## Quick Start
 
