@@ -48,3 +48,12 @@ teardown() {
   run bash "$SCRIPTS/config.sh" get nonexistent.key fallback
   [ "$output" = "fallback" ]
 }
+
+@test "config set: same field name in different sections" {
+  bash "$SCRIPTS/config.sh" set hook.format abc
+  bash "$SCRIPTS/config.sh" set display.format xyz
+  run bash "$SCRIPTS/config.sh" get hook.format
+  [ "$output" = "abc" ]
+  run bash "$SCRIPTS/config.sh" get display.format
+  [ "$output" = "xyz" ]
+}
