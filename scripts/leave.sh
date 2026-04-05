@@ -17,29 +17,29 @@ if [ ! -f "$TEAM_CONFIG" ]; then
   exit 1
 fi
 
-python3 -c "
-import json, sys, os
+CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
-config_path = '$TEAM_CONFIG'
-with open(config_path) as f:
-    config = json.load(f)
+# Check if agent exists
+EXISTS=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  "SELECT json_extract(:json, '$.agents.$AGENT_ID');")
+if [ -z "$EXISTS" ] || [ "$EXISTS" = "null" ]; then
+  echo "Agent $AGENT_ID not in team $TEAM"
+  exit 1
+fi
 
-agents = config.get('agents', {})
-if '$AGENT_ID' not in agents:
-    print('Agent $AGENT_ID not in team $TEAM')
-    sys.exit(1)
+# Remove agent
+UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  "SELECT json_remove(:json, '$.agents.$AGENT_ID');")
 
-del agents['$AGENT_ID']
+# Check if agents is now empty
+AGENT_COUNT=$(sqlite3 :memory: \
+  "SELECT count(*) FROM json_each(json_extract('$(echo "$UPDATED" | sed "s/'/''/g")', '$.agents'));")
 
-if not agents:
-    # Team is empty, remove it
-    os.remove(config_path)
-    os.rmdir(os.path.dirname(config_path))
-    print('Left team $TEAM (team removed — no members left)')
-else:
-    config['agents'] = agents
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-        f.write('\n')
-    print('Left team $TEAM')
-"
+if [ "$AGENT_COUNT" -eq 0 ]; then
+  rm -f "$TEAM_CONFIG"
+  rmdir "$TEAMS_DIR/$TEAM" 2>/dev/null || true
+  echo "Left team $TEAM (team removed — no members left)"
+else
+  echo "$UPDATED" > "$TEAM_CONFIG"
+  echo "Left team $TEAM"
+fi

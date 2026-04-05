@@ -12,7 +12,7 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Prevent infinite loop: if stop hook is already active, exit silently
 INPUT=$(cat 2>/dev/null || true)
-if echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); exit(0 if d.get('stop_hook_active') else 1)" 2>/dev/null; then
+if echo "$INPUT" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' 2>/dev/null; then
   exit 0
 fi
 
@@ -63,11 +63,12 @@ done
 
 # Exit 0 + JSON block decision = shown to model without "error" label
 if [ -n "$OUTPUT" ]; then
-  ESCAPED=$(echo "$OUTPUT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+  # Escape for JSON: backslash, double-quote, newlines, tabs
+  ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/\\n$//')
   cat <<ENDJSON
 {
   "decision": "block",
-  "reason": $ESCAPED
+  "reason": "$ESCAPED"
 }
 ENDJSON
   exit 0

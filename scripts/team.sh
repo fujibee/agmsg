@@ -14,17 +14,16 @@ if [ ! -f "$CONFIG" ]; then
   exit 1
 fi
 
-python3 -c "
-import json
-with open('$CONFIG') as f:
-    config = json.load(f)
-print(f\"Team: {config['name']}\")
-print()
-agents = config.get('agents', {})
-for name, info in agents.items():
-    t = info.get('type', '?')
-    desc = info.get('description', info.get('project', ''))
-    print(f'  {name} ({t}) — {desc}')
-print()
-print(f'{len(agents)} member(s)')
-"
+echo "Team: $TEAM"
+echo ""
+
+COUNT=0
+while IFS='	' read -r name type project; do
+  echo "  $name ($type) — $project"
+  COUNT=$((COUNT + 1))
+done < <(sqlite3 -separator '	' :memory: \
+  ".param set :json '$(sed "s/'/''/g" "$CONFIG")'" \
+  "SELECT key, json_extract(value, '$.type'), json_extract(value, '$.project') FROM json_each(json_extract(:json, '$.agents'));")
+
+echo ""
+echo "$COUNT member(s)"
