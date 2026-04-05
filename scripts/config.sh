@@ -129,7 +129,10 @@ yaml_set() {
 create_default_config() {
   cat > "$CONFIG_FILE" <<'YAML'
 # agmsg configuration
+# https://agmsg.cc/
+
 hook:
+  # Seconds between inbox checks (Stop hook cooldown)
   check_interval: 60
 YAML
 }
