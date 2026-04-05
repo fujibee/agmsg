@@ -87,7 +87,11 @@ yaml_set() {
     # Check if section exists
     if ! grep -q "^${section}:" "$CONFIG_FILE" 2>/dev/null; then
       printf '\n%s:\n  %s: %s\n' "$section" "$field" "$value" >> "$CONFIG_FILE"
-    elif grep -q "^  ${field}:" "$CONFIG_FILE" 2>/dev/null; then
+    elif awk -v section="$section" -v field="$field" '
+      /^[^ #]/ { in_section = ($0 ~ "^" section ":") }
+      in_section && $0 ~ "^  " field ":" { found=1; exit }
+      END { exit !found }
+    ' "$CONFIG_FILE" 2>/dev/null; then
       # Update existing field under section
       awk -v section="$section" -v field="$field" -v value="$value" '
         /^[^ #]/ { in_section = ($0 ~ "^" section ":") }

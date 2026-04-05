@@ -45,6 +45,8 @@ if [ -f "$MARKER" ]; then
   fi
   now=$(date +%s)
   INTERVAL=$("$SCRIPT_DIR/config.sh" get hook.check_interval 60)
+  # Fallback to default if non-numeric
+  case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=60 ;; esac
   if [ $(( now - last )) -lt "$INTERVAL" ]; then
     exit 0
   fi

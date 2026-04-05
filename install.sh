@@ -130,6 +130,12 @@ if [ ! -f "$SKILL_DIR/db/messages.db" ]; then
   bash "$SKILL_DIR/scripts/init-db.sh"
 fi
 
+# Initialize config
+if [ ! -f "$SKILL_DIR/db/config.yaml" ]; then
+  bash "$SKILL_DIR/scripts/config.sh" show >/dev/null
+  echo "  + created default config at db/config.yaml"
+fi
+
 # --- Install Claude Code global command ---
 CC_COMMANDS_DIR="$HOME/.claude/commands"
 if [ -d "$HOME/.claude" ]; then
