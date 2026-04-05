@@ -130,6 +130,12 @@ if [ ! -f "$SKILL_DIR/db/messages.db" ]; then
   bash "$SKILL_DIR/scripts/init-db.sh"
 fi
 
+# Initialize config
+if [ ! -f "$SKILL_DIR/db/config.yaml" ]; then
+  bash "$SKILL_DIR/scripts/config.sh" show >/dev/null
+  echo "  + created default config at db/config.yaml"
+fi
+
 # --- Install Claude Code global command ---
 CC_COMMANDS_DIR="$HOME/.claude/commands"
 if [ -d "$HOME/.claude" ]; then
@@ -193,4 +199,6 @@ echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
+echo ""
+echo "  Docs: https://agmsg.cc/"
 echo ""
