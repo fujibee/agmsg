@@ -12,6 +12,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL_NAME="$(basename "$SKILL_DIR")"
 
+# Read settings file or return empty object, escaped for SQL
+read_settings_escaped() {
+  if [ -f "$1" ]; then
+    sed "s/'/''/g" "$1"
+  else
+    echo '{}'
+  fi
+}
+
 # --- Actions ---
 
 do_on() {
@@ -24,33 +33,50 @@ do_on() {
       local CHECK_CMD="'$SKILL_DIR/scripts/check-inbox.sh' '$TYPE' '$PROJECT'"
       mkdir -p "$PROJECT/.claude"
 
-      python3 - "$SETTINGS_FILE" "$CHECK_CMD" "$SKILL_NAME" <<'PYEOF'
-import json, os, sys
+      local SETTINGS_ESC
+      SETTINGS_ESC=$(read_settings_escaped "$SETTINGS_FILE")
+      local HOOK_ENTRY="{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"$CHECK_CMD\"}]}"
+      local HOOK_ESC
+      HOOK_ESC=$(echo "$HOOK_ENTRY" | sed "s/'/''/g")
 
-settings_file, check_cmd, marker = sys.argv[1], sys.argv[2], sys.argv[3]
-
-settings = json.load(open(settings_file)) if os.path.exists(settings_file) else {}
-
-hook_entry = {
-    "matcher": "",
-    "hooks": [{"type": "command", "command": check_cmd}]
-}
-
-hooks = settings.setdefault("hooks", {})
-stop_hooks = hooks.setdefault("Stop", [])
-
-idx = next((i for i, h in enumerate(stop_hooks)
-            if any(marker in hh.get("command", "") for hh in h.get("hooks", []))), None)
-
-if idx is not None:
-    stop_hooks[idx] = hook_entry
-else:
-    stop_hooks.append(hook_entry)
-
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-PYEOF
+      local UPDATED
+      UPDATED=$(sqlite3 :memory: "
+        SELECT CASE
+          WHEN json_extract('$SETTINGS_ESC', '\$.hooks.Stop') IS NULL THEN
+            json_set(
+              CASE WHEN json_extract('$SETTINGS_ESC', '\$.hooks') IS NULL
+                THEN json_set('$SETTINGS_ESC', '\$.hooks', json('{}'))
+                ELSE '$SETTINGS_ESC'
+              END,
+              '\$.hooks.Stop', json_array(json('$HOOK_ESC')))
+          WHEN EXISTS (
+            SELECT 1 FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS s,
+              json_each(json_extract(s.value, '\$.hooks')) AS h
+            WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          ) THEN
+            json_set('$SETTINGS_ESC', '\$.hooks.Stop',
+              (SELECT json_group_array(
+                CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
+                    WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                  ) THEN json('$HOOK_ESC')
+                  ELSE json(s.value)
+                END
+              ) FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS s)
+            )
+          ELSE
+            json_set('$SETTINGS_ESC', '\$.hooks.Stop',
+              (SELECT json_group_array(json(v.value))
+               FROM (
+                 SELECT value FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop'))
+                 UNION ALL
+                 SELECT '$HOOK_ESC'
+               ) v)
+            )
+        END;
+      ")
+      echo "$UPDATED" > "$SETTINGS_FILE"
       echo "Hook enabled for $PROJECT (claude-code)"
       ;;
     codex)
@@ -77,33 +103,49 @@ do_off() {
         exit 0
       fi
 
-      python3 - "$SETTINGS_FILE" "$SKILL_NAME" "$PROJECT" <<'PYEOF'
-import json, sys
+      local SETTINGS_ESC
+      SETTINGS_ESC=$(sed "s/'/''/g" "$SETTINGS_FILE")
 
-settings_file, marker, project = sys.argv[1], sys.argv[2], sys.argv[3]
+      local UPDATED
+      UPDATED=$(sqlite3 :memory: "
+        SELECT CASE
+          WHEN json_extract('$SETTINGS_ESC', '\$.hooks.Stop') IS NULL THEN
+            'NO_HOOK'
+          WHEN NOT EXISTS (
+            SELECT 1 FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS s,
+              json_each(json_extract(s.value, '\$.hooks')) AS h
+            WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          ) THEN
+            'NO_HOOK'
+          WHEN (SELECT count(*) FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS s
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
+                  WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                )) = 0 THEN
+            CASE
+              WHEN (SELECT count(*) FROM json_each(json_extract(json_remove('$SETTINGS_ESC', '\$.hooks.Stop'), '\$.hooks'))) = 0 THEN
+                json_remove('$SETTINGS_ESC', '\$.hooks')
+              ELSE
+                json_remove('$SETTINGS_ESC', '\$.hooks.Stop')
+            END
+          ELSE
+            json_set('$SETTINGS_ESC', '\$.hooks.Stop',
+              (SELECT json_group_array(json(s.value))
+               FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS s
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
+                 WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+               ))
+            )
+        END;
+      ")
 
-settings = json.load(open(settings_file))
-hooks = settings.get("hooks", {})
-stop_hooks = hooks.get("Stop", [])
-
-filtered = [h for h in stop_hooks
-            if not any(marker in hh.get("command", "") for hh in h.get("hooks", []))]
-
-if len(filtered) == len(stop_hooks):
-    print("No hook configured")
-else:
-    if filtered:
-        hooks["Stop"] = filtered
-    else:
-        hooks.pop("Stop", None)
-    if not hooks:
-        settings.pop("hooks", None)
-
-    with open(settings_file, "w") as f:
-        json.dump(settings, f, indent=2)
-        f.write("\n")
-    print(f"Hook disabled for {project} (claude-code)")
-PYEOF
+      if [ "$UPDATED" = "NO_HOOK" ]; then
+        echo "No hook configured"
+      else
+        echo "$UPDATED" > "$SETTINGS_FILE"
+        echo "Hook disabled for $PROJECT (claude-code)"
+      fi
       ;;
     codex)
       echo "Codex hook support not yet implemented"

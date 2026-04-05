@@ -20,25 +20,27 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 
-# Get unread messages
-UNREAD=$(sqlite3 -json "$DB" "SELECT id, from_agent, body, created_at FROM messages WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL ORDER BY created_at ASC;")
+# Get unread messages — escape newlines/tabs in body to keep one record per line
+UNREAD=$(sqlite3 "$DB" "
+  SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+  FROM messages WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL
+  ORDER BY created_at ASC;
+")
 
-if [ "$UNREAD" = "[]" ] || [ -z "$UNREAD" ]; then
+if [ -z "$UNREAD" ]; then
   if [ "$QUIET" = true ]; then exit 0; fi
   echo "No new messages."
   exit 0
 fi
 
 # Display
-echo "$UNREAD" | python3 -c '
-import json, sys
-msgs = json.load(sys.stdin)
-print(f"{len(msgs)} new message(s):")
-print()
-for m in msgs:
-    print(f"  [{m["created_at"]}] {m["from_agent"]}: {m["body"]}")
-print()
-'
+COUNT=$(echo "$UNREAD" | wc -l | tr -d ' ')
+echo "$COUNT new message(s):"
+echo ""
+while IFS=$'\x1f' read -r from body ts; do
+  echo "  [$ts] $from: $body"
+done <<< "$UNREAD"
+echo ""
 
 # Mark as read (non-fatal — may fail in sandboxed environments)
 sqlite3 "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true

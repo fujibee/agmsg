@@ -28,21 +28,10 @@ EOF
 fi
 
 # --- Add agent ---
-python3 -c "
-import json
-
-config_path = '$TEAM_CONFIG'
-with open(config_path) as f:
-    config = json.load(f)
-
-config['agents']['$AGENT_ID'] = {
-    'type': '$AGENT_TYPE',
-    'project': '$PROJECT_PATH'
-}
-
-with open(config_path, 'w') as f:
-    json.dump(config, f, indent=2, ensure_ascii=False)
-    f.write('\n')
-"
+AGENT_OBJ="{\"type\":\"$AGENT_TYPE\",\"project\":\"$PROJECT_PATH\"}"
+UPDATED=$(sqlite3 :memory: \
+  ".param set :json '$(sed "s/'/''/g" "$TEAM_CONFIG")'" \
+  "SELECT json_set(:json, '$.agents.$AGENT_ID', json('$AGENT_OBJ'));")
+echo "$UPDATED" > "$TEAM_CONFIG"
 
 echo "Joined team $TEAM as $AGENT_ID"

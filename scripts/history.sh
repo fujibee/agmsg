@@ -16,22 +16,24 @@ if [ ! -f "$DB" ]; then
 fi
 
 if [ -n "$AGENT" ]; then
-  QUERY="SELECT id, from_agent, to_agent, body, created_at, CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END as status FROM messages WHERE team='$TEAM' AND (from_agent='$AGENT' OR to_agent='$AGENT') ORDER BY created_at DESC LIMIT $LIMIT;"
+  WHERE="WHERE team='$TEAM' AND (from_agent='$AGENT' OR to_agent='$AGENT')"
 else
-  QUERY="SELECT id, from_agent, to_agent, body, created_at, CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END as status FROM messages WHERE team='$TEAM' ORDER BY created_at DESC LIMIT $LIMIT;"
+  WHERE="WHERE team='$TEAM'"
 fi
 
-RESULT=$(sqlite3 -json "$DB" "$QUERY")
+# Escape newlines/tabs in body, use unit separator between fields
+RESULT=$(sqlite3 "$DB" "
+  SELECT from_agent || char(31) || to_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at || char(31) || CASE WHEN read_at IS NULL THEN '●' ELSE '○' END
+  FROM messages $WHERE ORDER BY created_at DESC LIMIT $LIMIT;
+")
 
-if [ "$RESULT" = "[]" ] || [ -z "$RESULT" ]; then
+if [ -z "$RESULT" ]; then
   echo "No message history."
   exit 0
 fi
 
-echo "$RESULT" | python3 -c '
-import json, sys
-msgs = json.load(sys.stdin)
-for m in reversed(msgs):
-    status = "●" if m["status"] == "unread" else "○"
-    print(f"  {status} [{m["created_at"]}] {m["from_agent"]} → {m["to_agent"]}: {m["body"]}")
-'
+# Reverse order (oldest first) and display
+REVERSED=$(echo "$RESULT" | tail -r 2>/dev/null || echo "$RESULT" | tac 2>/dev/null || echo "$RESULT" | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}')
+while IFS=$'\x1f' read -r from to body ts status; do
+  echo "  $status [$ts] $from → $to: $body"
+done <<< "$REVERSED"

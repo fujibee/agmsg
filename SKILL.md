@@ -59,4 +59,4 @@ Do NOT manually edit config files. Always use join.sh.
 - **Teams**: `~/.agents/skills/__SKILL_NAME__/teams/<name>/config.json`
 - **Concurrency**: WAL allows multiple readers + 1 writer without conflicts
 - **No daemon**: Direct DB access via `sqlite3` CLI
-- **Dependencies**: bash, sqlite3, python3 (for JSON formatting only)
+- **Dependencies**: bash, sqlite3 (no python3 required)

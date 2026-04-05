@@ -48,6 +48,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- Check dependencies ---
+if ! command -v sqlite3 &>/dev/null; then
+  echo "Error: sqlite3 is required but not found." >&2
+  echo "  macOS: included by default" >&2
+  echo "  Linux: sudo apt install sqlite3  (or equivalent)" >&2
+  exit 1
+fi
+
 # --- Banner ---
 echo ""
 echo "  agmsg — Agent Messaging"
@@ -146,42 +154,32 @@ if [ -f "$CODEX_CONFIG" ]; then
   else
     cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
     echo "  ~ backed up $CODEX_CONFIG → $CODEX_CONFIG.bak"
-    python3 -c "
-import re
 
-config_path = '$CODEX_CONFIG'
-new_paths = $(python3 -c "import json; print(json.dumps([$(printf '"%s",' "${missing[@]}" | sed 's/,$//')]))")
+    # Build entries string: "path1", "path2"
+    entries=$(printf ', "%s"' "${missing[@]}")
+    entries="${entries:2}"  # remove leading ", "
 
-with open(config_path) as f:
-    content = f.read()
-
-entries = ', '.join('\"' + p + '\"' for p in new_paths)
-
-match = re.search(r'writable_roots\s*=\s*\[([^\]]*)\]', content)
-if match:
-    # Append to existing writable_roots
-    existing = match.group(1).rstrip()
-    if existing:
-        new_entry = existing + ', ' + entries
-    else:
-        new_entry = entries
-    content = content[:match.start(1)] + new_entry + content[match.end(1):]
-elif re.search(r'^\[sandbox_workspace_write\]\s*$', content, re.MULTILINE):
-    # [sandbox_workspace_write] section exists but no writable_roots — add under it
-    content = re.sub(
-        r'(\[sandbox_workspace_write\]\s*\n)',
-        r'\1writable_roots = [' + entries + ']\n',
-        content,
-        count=1
-    )
-else:
-    # No [sandbox_workspace_write] section at all
-    content += '\n[sandbox_workspace_write]\nwritable_roots = [' + entries + ']\n'
-
-with open(config_path, 'w') as f:
-    f.write(content)
-" 2>/dev/null && echo "  + added Codex writable_roots for db/ and teams/" \
-             || echo "  ! failed to configure Codex sandbox (update ~/.codex/config.toml manually)"
+    if grep -q 'writable_roots' "$CODEX_CONFIG" 2>/dev/null; then
+      # Append to existing writable_roots (handles multiline arrays)
+      awk -v new_entries="$entries" '
+        /writable_roots/ { in_roots=1 }
+        in_roots && /\]/ {
+          sub(/\]/, ", " new_entries "]")
+          in_roots=0
+        }
+        { print }
+      ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    elif grep -q '^\[sandbox_workspace_write\]' "$CODEX_CONFIG" 2>/dev/null; then
+      # Section exists but no writable_roots
+      awk -v entries="$entries" '
+        { print }
+        /^\[sandbox_workspace_write\]/ { print "writable_roots = [" entries "]" }
+      ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    else
+      # No section at all
+      printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$CODEX_CONFIG"
+    fi
+    echo "  + added Codex writable_roots for db/ and teams/"
   fi
 fi
 

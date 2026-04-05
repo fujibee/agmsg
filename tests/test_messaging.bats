@@ -63,6 +63,25 @@ teardown() {
   [[ "$output" =~ "ping" ]]
 }
 
+@test "inbox: handles multiline message body" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "line1
+line2
+line3"
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "1 new message" ]]
+  [[ "$output" =~ "alice" ]]
+}
+
+@test "history: handles multiline message body" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "multi
+line"
+  run bash "$SCRIPTS/history.sh" testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "alice" ]]
+  [[ "$output" =~ "bob" ]]
+}
+
 # --- history.sh ---
 
 @test "history: shows message history" {

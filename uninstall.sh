@@ -73,14 +73,11 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   for config in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config" ] || continue
 
-    projects=$(python3 -c "
-import json
-with open('$config') as f:
-    cfg = json.load(f)
-for name, info in cfg.get('agents', {}).items():
-    if info.get('type') == 'claude-code' and 'project' in info:
-        print(info['project'])
-" 2>/dev/null || true)
+    projects=$(sqlite3 -separator '	' :memory: \
+      ".param set :json '$(sed "s/'/''/g" "$config")'" \
+      "SELECT json_extract(value, '$.project') FROM json_each(json_extract(:json, '$.agents'))
+       WHERE json_extract(value, '$.type') = 'claude-code'
+         AND json_extract(value, '$.project') IS NOT NULL;" 2>/dev/null || true)
 
     while IFS= read -r project; do
       [ -n "$project" ] || continue
@@ -98,39 +95,53 @@ for name, info in cfg.get('agents', {}).items():
         done
       fi
 
-      # Remove PostToolUse hook from settings.json
-      settings_file="$project/.claude/settings.json"
-      if [ -f "$settings_file" ] && grep -q "scripts/inbox.sh" "$settings_file" 2>/dev/null; then
-        python3 -c "
-import json
-
-with open('$settings_file') as f:
-    settings = json.load(f)
-
-hooks = settings.get('hooks', {})
-post_hooks = hooks.get('PostToolUse', [])
-
-filtered = [
-    h for h in post_hooks
-    if not any(
-        'scripts/inbox.sh' in hook.get('command', '')
-        for hook in h.get('hooks', [])
-    )
-]
-
-if len(filtered) != len(post_hooks):
-    hooks['PostToolUse'] = filtered
-    if not filtered:
-        del hooks['PostToolUse']
-    if not hooks:
-        del settings['hooks']
-    with open('$settings_file', 'w') as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-        f.write('\n')
-    print('  - removed PostToolUse hook from $settings_file')
-" 2>/dev/null || true
-        REMOVED=true
-      fi
+      # Remove only agmsg hook entries from settings files (preserve other hooks)
+      SKILL_NAME="$(basename "$SKILL_DIR")"
+      for settings_file in "$project/.claude/settings.json" "$project/.claude/settings.local.json"; do
+        if [ -f "$settings_file" ] && grep -q "$SKILL_NAME" "$settings_file" 2>/dev/null; then
+          SETTINGS_ESC=$(sed "s/'/''/g" "$settings_file")
+          UPDATED=$(sqlite3 :memory: "
+            WITH hook_types(ht) AS (VALUES ('Stop'), ('PostToolUse'))
+            SELECT COALESCE(
+              (SELECT result FROM (
+                SELECT '$SETTINGS_ESC' AS result
+              ) WHERE NOT EXISTS (
+                SELECT 1 FROM hook_types, json_each(json_extract('$SETTINGS_ESC', '\$.hooks.' || ht)) AS e,
+                  json_each(json_extract(e.value, '\$.hooks')) AS h
+                WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+              )),
+              (SELECT CASE
+                WHEN (SELECT count(*) FROM json_each(json_extract(filtered, '\$.hooks'))
+                      WHERE json_array_length(value) > 0 OR json_type(value) != 'array') = 0
+                THEN json_remove(filtered, '\$.hooks')
+                ELSE filtered
+              END
+              FROM (
+                SELECT json_set(json_set('$SETTINGS_ESC',
+                  '\$.hooks.Stop',
+                  COALESCE((SELECT json_group_array(json(e.value))
+                    FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.Stop')) AS e
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM json_each(json_extract(e.value, '\$.hooks')) AS h
+                      WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                    )), json('[]'))),
+                  '\$.hooks.PostToolUse',
+                  COALESCE((SELECT json_group_array(json(e.value))
+                    FROM json_each(json_extract('$SETTINGS_ESC', '\$.hooks.PostToolUse')) AS e
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM json_each(json_extract(e.value, '\$.hooks')) AS h
+                      WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+                    )), json('[]'))) AS filtered
+              ))
+            );
+          " 2>/dev/null) || true
+          if [ -n "$UPDATED" ] && [ "$UPDATED" != "$SETTINGS_ESC" ]; then
+            echo "$UPDATED" > "$settings_file"
+            echo "  - removed agmsg hook from $settings_file"
+            REMOVED=true
+          fi
+        fi
+      done
     done <<< "$projects"
   done
 done
@@ -180,34 +191,46 @@ if [ -f "$CODEX_CONFIG" ]; then
 
   if [ "$needs_cleanup" = true ]; then
     cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-    python3 -c "
-import re
+    # Build pattern of skill dirs to remove
+    skill_pattern=$(printf '|%s' "${SKILL_DIRS[@]}")
+    skill_pattern="${skill_pattern:1}"  # remove leading |
 
-config_path = '$CODEX_CONFIG'
-skill_dirs = [$(printf '"%s",' "${SKILL_DIRS[@]}" | sed 's/,$//')]
-
-with open(config_path) as f:
-    content = f.read()
-
-match = re.search(r'writable_roots\s*=\s*\[([^\]]*)\]', content)
-if match:
-    entries = match.group(1)
-    # Parse existing entries
-    paths = re.findall(r'\"([^\"]+)\"', entries)
-    # Filter out paths belonging to removed skill dirs
-    filtered = [p for p in paths if not any(p.startswith(sd) for sd in skill_dirs)]
-    if filtered:
-        new_val = ', '.join('\"' + p + '\"' for p in filtered)
-        content = content[:match.start(1)] + new_val + content[match.end(1):]
-    else:
-        # Remove entire writable_roots line and empty [sandbox_workspace_write] section
-        content = re.sub(r'\n?writable_roots\s*=\s*\[[^\]]*\]\n?', '\n', content)
-        content = re.sub(r'\n\[sandbox_workspace_write\]\s*\n(?=\n|\[|$)', '\n', content)
-
-    with open(config_path, 'w') as f:
-        f.write(content)
-    print('  - cleaned Codex writable_roots (backup: config.toml.bak)')
-" 2>/dev/null || true
+    # Remove matching entries from writable_roots (handles multiline arrays)
+    awk -v pattern="$skill_pattern" '
+      /writable_roots/ { in_roots=1; buf="" }
+      in_roots { buf = buf $0 "\n" }
+      in_roots && /\]/ {
+        # Remove entries matching skill dirs
+        n = split(pattern, pats, "|")
+        for (i = 1; i <= n; i++) {
+          gsub("\"" pats[i] "[^\"]*\"[, ]*", "", buf)
+        }
+        # Clean up trailing/leading commas
+        gsub(/,[ \t]*\]/, "]", buf)
+        gsub(/\[[ \t]*,/, "[", buf)
+        gsub(/,[ \t]*,/, ",", buf)
+        # Check if empty
+        if (buf ~ /writable_roots[^[]*\[\s*\]/) {
+          in_roots=0; next
+        }
+        printf "%s", buf
+        in_roots=0; next
+      }
+      !in_roots { print }
+    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    # Remove empty [sandbox_workspace_write] section
+    awk '
+      /^\[sandbox_workspace_write\]/ {
+        header=$0
+        if (getline nextline <= 0) next
+        if (nextline ~ /^\[/ || nextline == "") { print nextline; next }
+        print header
+        print nextline
+        next
+      }
+      { print }
+    ' "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+    echo "  - cleaned Codex writable_roots (backup: config.toml.bak)"
   fi
 fi
 
