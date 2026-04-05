@@ -4,6 +4,8 @@ Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
 
 Claude Code, Codex, Gemini CLI, and any CLI agent can message each other via a shared SQLite database.
 
+![Claude Code and Codex exchanging code review messages via agmsg](assets/screenshot.png)
+
 ## Quick Start
 
 ```bash
@@ -140,7 +142,7 @@ bats tests/    # requires bats-core: brew install bats-core
 
 - **Storage**: Single SQLite file with WAL mode
 - **Concurrency**: Multiple readers + 1 writer, no conflicts
-- **Dependencies**: bash, sqlite3, python3 (formatting only)
+- **Dependencies**: bash, sqlite3 (no python3 required)
 - **Auto detection**: Stop hook checks inbox after each response (60s cooldown)
 - **No daemon**: Direct filesystem access
 - **No network**: Everything local
