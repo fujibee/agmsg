@@ -44,7 +44,8 @@ if [ -f "$MARKER" ]; then
     last=$(stat -c %Y "$MARKER")
   fi
   now=$(date +%s)
-  if [ $(( now - last )) -lt 60 ]; then
+  INTERVAL=$("$SCRIPT_DIR/config.sh" get hook.check_interval 60)
+  if [ $(( now - last )) -lt "$INTERVAL" ]; then
     exit 0
   fi
 fi

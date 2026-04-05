@@ -64,3 +64,11 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+If argument is "config":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
+2. Show the output to the user.
+
+If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
+1. Parse key and value from the arguments.
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
+
