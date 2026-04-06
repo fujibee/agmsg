@@ -54,20 +54,34 @@ fi
 
 touch "$MARKER"
 
-# Check inbox for all teams, collect output
+# Check for unread messages and mark as read
+DB="$SKILL_DIR/db/messages.db"
+if [ ! -f "$DB" ]; then exit 0; fi
+
 OUTPUT=""
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
-  RESULT=$(bash "$SCRIPT_DIR/inbox.sh" "$team" "$AGENT" --quiet 2>&1) || true
+  RESULT=$(sqlite3 "$DB" "
+    SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+    FROM messages WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL
+    ORDER BY created_at ASC;
+  ")
   if [ -n "$RESULT" ]; then
-    OUTPUT+="$RESULT"$'\n'
+    COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
+    OUTPUT+="$COUNT new message(s) in $team:"$'\n'
+    while IFS=$'\x1f' read -r from body ts; do
+      OUTPUT+="  [$ts] $from: $body"$'\n'
+    done <<< "$RESULT"
+    OUTPUT+=$'\n'
+    # Mark as read
+    sqlite3 "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
   fi
 done
 
 # Exit 0 + JSON block decision = shown to model without "error" label
 if [ -n "$OUTPUT" ]; then
-  # Escape for JSON: backslash, double-quote, newlines, tabs
-  ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/\\n$//')
+  # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
+  ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
   cat <<ENDJSON
 {
   "decision": "block",
