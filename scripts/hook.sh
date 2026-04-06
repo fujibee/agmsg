@@ -28,11 +28,9 @@ resolve_hooks_file() {
 
   case "$type" in
     claude-code)
-      mkdir -p "$project/.claude"
       echo "$project/.claude/settings.local.json"
       ;;
     codex)
-      mkdir -p "$project/.codex"
       echo "$project/.codex/hooks.json"
       ;;
     *)
@@ -142,11 +140,16 @@ enable_codex_hooks_feature() {
   local codex_config="$HOME/.codex/config.toml"
   [ -f "$codex_config" ] || return 0
 
-  if grep -q 'codex_hooks' "$codex_config" 2>/dev/null; then
+  # Check if already enabled (exact match, not comments)
+  if grep -q '^codex_hooks *= *true' "$codex_config" 2>/dev/null; then
     return 0
   fi
 
-  if grep -q '^\[features\]' "$codex_config" 2>/dev/null; then
+  # Replace existing codex_hooks = false, or add new entry
+  if grep -q '^codex_hooks' "$codex_config" 2>/dev/null; then
+    sed -i.tmp 's/^codex_hooks *= *.*/codex_hooks = true/' "$codex_config"
+    rm -f "$codex_config.tmp"
+  elif grep -q '^\[features\]' "$codex_config" 2>/dev/null; then
     awk '
       { print }
       /^\[features\]/ { print "codex_hooks = true" }
@@ -165,6 +168,8 @@ do_on() {
   local HOOKS_FILE
   HOOKS_FILE=$(resolve_hooks_file "$TYPE" "$PROJECT") || exit 1
   local CHECK_CMD="'$SKILL_DIR/scripts/check-inbox.sh' '$TYPE' '$PROJECT'"
+
+  mkdir -p "$(dirname "$HOOKS_FILE")"
 
   local UPDATED
   UPDATED=$(add_hook "$HOOKS_FILE" "$CHECK_CMD")
