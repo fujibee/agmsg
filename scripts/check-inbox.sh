@@ -48,7 +48,14 @@ if [ -f "$MARKER" ]; then
   # Fallback to default if non-numeric
   case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=60 ;; esac
   if [ $(( now - last )) -lt "$INTERVAL" ]; then
-    [ "$TYPE" = "codex" ] && echo "agmsg: check skipped (cooldown)"
+    if [ "$TYPE" = "codex" ]; then
+      cat <<'ENDJSON'
+{
+  "continue": true,
+  "systemMessage": "agmsg: check skipped (cooldown)"
+}
+ENDJSON
+    fi
     exit 0
   fi
 fi
@@ -81,7 +88,14 @@ done
 
 # No new messages
 if [ -z "$OUTPUT" ]; then
-  [ "$TYPE" = "codex" ] && echo "agmsg: no new messages"
+  if [ "$TYPE" = "codex" ]; then
+    cat <<'ENDJSON'
+{
+  "continue": true,
+  "systemMessage": "agmsg: no new messages"
+}
+ENDJSON
+  fi
   exit 0
 fi
 
