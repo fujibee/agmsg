@@ -57,10 +57,18 @@ print(len(d['hooks']['Stop']))
   rm -rf "$spaced"
 }
 
-@test "hook on: codex exits with error" {
+@test "hook on: codex creates hooks.json" {
   run bash "$SCRIPTS/hook.sh" on codex "$TEST_PROJECT"
-  [ "$status" -eq 1 ]
-  [[ "$output" =~ "not yet implemented" ]]
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_PROJECT/.codex/hooks.json" ]
+  [[ "$output" =~ "Hook enabled" ]]
+}
+
+@test "hook off: codex removes hook" {
+  bash "$SCRIPTS/hook.sh" on codex "$TEST_PROJECT"
+  run bash "$SCRIPTS/hook.sh" off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Hook disabled" ]]
 }
 
 # --- hook.sh off ---

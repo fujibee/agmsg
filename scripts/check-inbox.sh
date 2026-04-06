@@ -48,6 +48,14 @@ if [ -f "$MARKER" ]; then
   # Fallback to default if non-numeric
   case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=60 ;; esac
   if [ $(( now - last )) -lt "$INTERVAL" ]; then
+    if [ "$TYPE" = "codex" ]; then
+      cat <<'ENDJSON'
+{
+  "continue": true,
+  "systemMessage": "agmsg: check skipped (cooldown)"
+}
+ENDJSON
+    fi
     exit 0
   fi
 fi
@@ -78,7 +86,20 @@ for team in "${TEAM_LIST[@]}"; do
   fi
 done
 
-# Exit 0 + JSON block decision = shown to model without "error" label
+# No new messages
+if [ -z "$OUTPUT" ]; then
+  if [ "$TYPE" = "codex" ]; then
+    cat <<'ENDJSON'
+{
+  "continue": true,
+  "systemMessage": "agmsg: no new messages"
+}
+ENDJSON
+  fi
+  exit 0
+fi
+
+# New messages found
 if [ -n "$OUTPUT" ]; then
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
   ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
