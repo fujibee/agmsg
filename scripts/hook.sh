@@ -78,6 +78,7 @@ do_on() {
       ")
       echo "$UPDATED" > "$SETTINGS_FILE"
       echo "Hook enabled for $PROJECT (claude-code)"
+      echo "Restart your agent to activate the hook."
       ;;
     codex)
       echo "Codex hook support not yet implemented"
@@ -145,6 +146,7 @@ do_off() {
       else
         echo "$UPDATED" > "$SETTINGS_FILE"
         echo "Hook disabled for $PROJECT (claude-code)"
+        echo "Restart your agent to deactivate the hook."
       fi
       ;;
     codex)
