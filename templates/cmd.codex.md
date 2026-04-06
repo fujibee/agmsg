@@ -41,7 +41,12 @@ Three possible outputs:
   > - `$__SKILL_NAME__ team` — list team members
   > - `$__SKILL_NAME__ history` — message history
 
-  5. Then check inbox for the newly joined team.
+  5. **REQUIRED — Do NOT skip this step.** Ask the user: "Enable auto message checking? When enabled, incoming messages are automatically detected after each response. You can turn it on/off anytime with `$__SKILL_NAME__ hook on/off`."
+     - **Wait for the user's answer before proceeding.**
+     - If yes: run `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on codex "$(pwd)"`
+     - If no: skip
+
+  6. Then check inbox for the newly joined team.
 
 ## Execute
 
@@ -72,3 +77,11 @@ If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
 1. Parse key and value from the arguments.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
 
+
+If argument is "hook on":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on codex "$(pwd)"`
+2. Tell the user: "Auto message checking enabled."
+
+If argument is "hook off":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off codex "$(pwd)"`
+2. Tell the user: "Auto message checking disabled."
