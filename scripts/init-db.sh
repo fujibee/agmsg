@@ -4,12 +4,8 @@ set -euo pipefail
 DB_DIR="$(cd "$(dirname "$0")/../db" && pwd)"
 DB="$DB_DIR/messages.db"
 
-if [ -f "$DB" ]; then
-  echo "DB already exists: $DB"
-  exit 0
-fi
-
-sqlite3 "$DB" <<'SQL'
+if [ ! -f "$DB" ]; then
+  sqlite3 "$DB" <<'SQL'
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE messages (
@@ -25,5 +21,5 @@ CREATE TABLE messages (
 CREATE INDEX idx_unread ON messages(team, to_agent, read_at) WHERE read_at IS NULL;
 CREATE INDEX idx_history ON messages(team, created_at DESC);
 SQL
-
-echo "DB initialized: $DB"
+  echo "DB initialized: $DB"
+fi
