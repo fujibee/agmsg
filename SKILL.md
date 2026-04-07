@@ -14,8 +14,7 @@ description: Cross-agent messaging via SQLite. Send messages between Claude Code
 ```bash
 ~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" <type>
 # type: claude-code, codex, gemini
-# Returns: agent=<name> teams=<t1,t2,...> type=<type> project=<path>
-# Empty output means not in any team yet.
+# Returns: agent=... / multiple=true ... / suggest=true ... / not_joined=true ...
 ```
 
 ### Step 2a: If not in a team — join one
@@ -47,6 +46,9 @@ Do NOT manually edit config files. Always use join.sh.
 
 # Leave a team
 ~/.agents/skills/__SKILL_NAME__/scripts/leave.sh <team> <agent_id>
+
+# Clear registrations for the current project/type
+~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id]
 
 # Enable/disable auto message checking (hook)
 ~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on <type> "$(pwd)"
