@@ -32,6 +32,16 @@ teardown() {
   [[ "$output" =~ "2 member" ]]
 }
 
+@test "join: re-join with same name adds registration instead of duplicate agent" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
+  run bash "$SCRIPTS/team.sh" myteam
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "alice" ]]
+  [[ "$output" =~ "1 member" ]]
+  [[ "$output" =~ "+1 more" ]]
+}
+
 # --- leave.sh ---
 
 @test "leave: removes agent from team" {
@@ -94,4 +104,44 @@ teardown() {
   bash "$SCRIPTS/join.sh" team1 alice claude-code /tmp/other
   run bash "$SCRIPTS/whoami.sh" /tmp/nothere claude-code
   [[ "$output" =~ "available_teams=team1" ]]
+}
+
+@test "whoami: finds re-joined agent in another project registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-b claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "agent=alice" ]]
+  [[ "$output" =~ "teams=myteam" ]]
+}
+
+@test "whoami: suggests same-type agents registered elsewhere when no exact match" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-b claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "suggest=true" ]]
+  [[ "$output" =~ "agents=alice" ]]
+  [[ "$output" =~ "available_teams=myteam" ]]
+}
+
+# --- reset.sh ---
+
+@test "reset: removes only current project registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
+  run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code alice
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "removed 1 registration" ]]
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-a claude-code
+  [[ "$output" =~ "suggest=true" ]]
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-b claude-code
+  [[ "$output" =~ "agent=alice" ]]
+}
+
+@test "reset: removes agent when last registration is cleared" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code alice
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "removed 1 registration" ]]
+  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
 }

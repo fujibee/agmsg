@@ -10,7 +10,7 @@ If you already know your AGENT and TEAMS from a previous `/__SKILL_NAME__` call 
 
 Otherwise, run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" claude-code`
 
-Three possible outputs:
+Four possible outputs:
 
 **A) Single identity:**
 `agent=<name> teams=<t1,t2,...> type=claude-code project=<path>`
@@ -46,6 +46,16 @@ Three possible outputs:
      - If no: skip
 
   6. Then check inbox for the newly joined team.
+
+**D) Suggestions for reuse:**
+`suggest=true agents=<n1,n2,...> teams=<t1,t2,...> type=claude-code project=<path> available_teams=<t1,t2,...>`
+→ No exact registration exists for this project, but there are same-type agent names registered elsewhere.
+
+  1. Show the suggested agent names to the user.
+  2. Ask whether to reuse one of those names or choose a new one.
+  3. Ask for the team name to join (existing or new).
+  4. Run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> claude-code "$(pwd)"`
+  5. Then continue with the normal post-join flow above.
 
 ## Execute
 
@@ -83,3 +93,7 @@ If argument is "config":
 If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
 1. Parse key and value from the arguments.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
+
+If argument is "reset":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code`
+2. Tell the user the result.
