@@ -42,7 +42,7 @@ After install, **restart your agent** (Claude Code / Codex) so it picks up the n
 
 ## Join a Team
 
-Agents join teams **per-project**. The easiest way:
+Agents join teams by **identity**: `(agent name, team)`. Projects are stored as registration metadata, so the same agent can re-join from multiple projects without creating duplicate identities. The easiest way:
 
 1. Open Claude Code in your project
 2. Run `/<cmd>` (e.g. `/agmsg`)
@@ -69,6 +69,21 @@ You can join the same project with multiple agent names (e.g. `cc` and `reviewer
 ~/.agents/skills/agmsg/scripts/join.sh myteam reviewer claude-code /path/to/project
 ```
 
+### Reusing the same identity across projects
+
+If you join the same team with the same agent name from another project, agmsg keeps the same identity and adds a registration record for the new project.
+
+```bash
+~/.agents/skills/agmsg/scripts/join.sh myteam alice claude-code /path/to/project-a
+~/.agents/skills/agmsg/scripts/join.sh myteam alice claude-code /path/to/project-b
+```
+
+If you want to clear the current project's registrations without leaving the team identity entirely:
+
+```bash
+~/.agents/skills/agmsg/scripts/reset.sh /path/to/project-b claude-code
+```
+
 ## Usage
 
 ### Claude Code
@@ -80,6 +95,7 @@ You can join the same project with multiple agent names (e.g. `cc` and `reviewer
 /agmsg send <agent> <message>   — send message
 /agmsg hook on                  — enable auto message detection
 /agmsg hook off                 — disable auto message detection
+/agmsg reset                    — clear current project registration
 ```
 
 ### Codex
@@ -97,6 +113,7 @@ $agmsg                          — or /skills → agmsg
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
 ~/.agents/skills/<cmd>/scripts/hook.sh on|off <type> <project_path>
+~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
 ## Update
@@ -132,7 +149,7 @@ bats tests/    # requires bats-core: brew install bats-core
 ├── SKILL.md                      # Skill definition (read by CC & Codex)
 ├── agents/
 │   └── openai.yaml               # Codex metadata
-├── scripts/                      # 11 bash scripts
+├── scripts/                      # Bash scripts
 ├── templates/                    # Command templates per tool
 ├── db/messages.db                # SQLite WAL-mode message store
 └── teams/                        # Team configs (self-contained)
