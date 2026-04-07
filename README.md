@@ -147,6 +147,10 @@ bats tests/    # requires bats-core: brew install bats-core
 - **No daemon**: Direct filesystem access
 - **No network**: Everything local
 
+## Contributing
+
+See [Design & Architecture](docs/design.md) for developer documentation — identity model, data storage, hook system, and script responsibilities.
+
 ## License
 
 MIT
