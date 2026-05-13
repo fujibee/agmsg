@@ -47,6 +47,9 @@ Do NOT manually edit config files. Always use join.sh.
 # Leave a team
 ~/.agents/skills/__SKILL_NAME__/scripts/leave.sh <team> <agent_id>
 
+# Rename a team (moves dir, updates config + messages)
+~/.agents/skills/__SKILL_NAME__/scripts/rename-team.sh <old_team> <new_team>
+
 # Clear registrations for the current project/type
 ~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id]
 

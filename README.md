@@ -60,6 +60,12 @@ To leave a team:
 ~/.agents/skills/agmsg/scripts/leave.sh myteam alice
 ```
 
+To rename a team (moves the team dir, updates `config.json`, migrates messages):
+
+```bash
+~/.agents/skills/agmsg/scripts/rename-team.sh oldteam newteam
+```
+
 ### Multiple identities
 
 You can join the same project with multiple agent names (e.g. `cc` and `reviewer`). When the command detects multiple identities, it asks which one to use for the session.
