@@ -145,3 +145,58 @@ teardown() {
   [[ "$output" =~ "removed 1 registration" ]]
   [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
 }
+
+# --- rename-team.sh ---
+
+@test "rename-team: renames the team dir and updates config.json name" {
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Renamed team oldteam → newteam" ]]
+  [ ! -d "$TEST_SKILL_DIR/teams/oldteam" ]
+  [ -f "$TEST_SKILL_DIR/teams/newteam/config.json" ]
+  run sqlite3 :memory: "SELECT json_extract(readfile('$TEST_SKILL_DIR/teams/newteam/config.json'), '\$.name');"
+  [ "$output" = "newteam" ]
+}
+
+@test "rename-team: preserves agents in the team" {
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" oldteam bob   codex       /tmp/proj-b
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  run bash "$SCRIPTS/team.sh" newteam
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "alice" ]]
+  [[ "$output" =~ "bob" ]]
+  [[ "$output" =~ "2 member" ]]
+}
+
+@test "rename-team: migrates messages to the new team name" {
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" oldteam bob   claude-code /tmp/proj-b
+  bash "$SCRIPTS/send.sh" oldteam alice bob "hello"
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  run bash "$SCRIPTS/inbox.sh" newteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "hello" ]]
+}
+
+@test "rename-team: fails when old team is missing" {
+  run bash "$SCRIPTS/rename-team.sh" nope newname
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Team not found: nope" ]]
+}
+
+@test "rename-team: fails when new team already exists" {
+  bash "$SCRIPTS/join.sh" team-a alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" team-b bob   claude-code /tmp/proj-b
+  run bash "$SCRIPTS/rename-team.sh" team-a team-b
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Team already exists: team-b" ]]
+}
+
+@test "rename-team: fails when old and new are identical" {
+  bash "$SCRIPTS/join.sh" sameteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/rename-team.sh" sameteam sameteam
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "same" ]]
+}
