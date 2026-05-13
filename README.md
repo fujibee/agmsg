@@ -66,6 +66,16 @@ To rename a team (moves the team dir, updates `config.json`, migrates messages):
 ~/.agents/skills/agmsg/scripts/rename-team.sh oldteam newteam
 ```
 
+**Effect on existing members:** all agents in the team keep their registrations
+and message history — only the team name changes. However, any session that has
+already cached the team name (e.g. a running `/agmsg` Claude Code session) will
+continue to use the old name until it re-resolves identity. After a rename,
+each member should re-run `whoami` from their project to pick up the new name:
+
+```bash
+~/.agents/skills/agmsg/scripts/whoami.sh "$(pwd)" claude-code
+```
+
 ### Multiple identities
 
 You can join the same project with multiple agent names (e.g. `cc` and `reviewer`). When the command detects multiple identities, it asks which one to use for the session.

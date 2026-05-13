@@ -50,3 +50,9 @@ if [ -f "$DB" ]; then
 fi
 
 echo "Renamed team $OLD_TEAM → $NEW_TEAM"
+echo
+echo "Note: existing members in other projects/sessions still see the old"
+echo "team name cached. Each member should re-run whoami in their project"
+echo "to pick up the new name:"
+echo
+echo "  ~/.agents/skills/<skill>/scripts/whoami.sh \"\$(pwd)\" <type>"
