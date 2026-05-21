@@ -131,9 +131,15 @@ create_default_config() {
 # agmsg configuration
 # https://agmsg.cc/
 
-hook:
-  # Seconds between inbox checks (Stop hook cooldown)
-  check_interval: 60
+delivery:
+  # How incoming messages reach this agent: monitor | turn | both | off
+  mode: monitor
+  monitor:
+    # watch.sh SQLite poll interval, seconds
+    poll_interval: 5
+  turn:
+    # Stop hook cooldown, seconds. Legacy alias: hook.check_interval
+    check_interval: 60
 YAML
 }
 
