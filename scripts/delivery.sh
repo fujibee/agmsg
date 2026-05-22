@@ -140,15 +140,18 @@ apply_settings() {
   local settings_esc
   settings_esc=$(read_settings_escaped "$hooks_file")
 
-  # 1) Strip any prior agmsg ownership from SessionStart and Stop.
+  # 1) Strip any prior agmsg ownership from SessionStart, SessionEnd, Stop.
   settings_esc=$(strip_agmsg_event "$settings_esc" "SessionStart" | sed "s/'/''/g")
-  settings_esc=$(strip_agmsg_event "$settings_esc" "Stop" | sed "s/'/''/g")
+  settings_esc=$(strip_agmsg_event "$settings_esc" "SessionEnd"   | sed "s/'/''/g")
+  settings_esc=$(strip_agmsg_event "$settings_esc" "Stop"         | sed "s/'/''/g")
 
   # 2) Re-add what this mode wants.
   case "$mode" in
     monitor)
-      local cmd="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
-      settings_esc=$(add_event_entry "$settings_esc" "SessionStart" "$cmd" | sed "s/'/''/g")
+      local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
+      local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
+      settings_esc=$(add_event_entry "$settings_esc" "SessionStart" "$ss" | sed "s/'/''/g")
+      settings_esc=$(add_event_entry "$settings_esc" "SessionEnd"   "$se" | sed "s/'/''/g")
       ;;
     turn)
       local cmd="'$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'"
@@ -156,9 +159,11 @@ apply_settings() {
       ;;
     both)
       local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
-      local st="'$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'"
+      local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
+      local st="'$SKILL_DIR/scripts/check-inbox.sh'   '$type' '$project'"
       settings_esc=$(add_event_entry "$settings_esc" "SessionStart" "$ss" | sed "s/'/''/g")
-      settings_esc=$(add_event_entry "$settings_esc" "Stop" "$st" | sed "s/'/''/g")
+      settings_esc=$(add_event_entry "$settings_esc" "SessionEnd"   "$se" | sed "s/'/''/g")
+      settings_esc=$(add_event_entry "$settings_esc" "Stop"         "$st" | sed "s/'/''/g")
       ;;
     off)
       : # already stripped
@@ -263,6 +268,9 @@ do_status() {
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "settings hooks file: $hooks_file"
       echo "  SessionStart entries: $count"
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract('$(read_settings_escaped "$hooks_file")', '\$.hooks.SessionEnd'));" 2>/dev/null || echo 0)
+      case "$count" in ''|*[!0-9]*) count=0 ;; esac
+      echo "  SessionEnd entries:   $count"
       count=$(sqlite3 :memory: "SELECT json_array_length(json_extract('$(read_settings_escaped "$hooks_file")', '\$.hooks.Stop'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "  Stop entries:         $count"
