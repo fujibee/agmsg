@@ -22,7 +22,7 @@ git clone https://github.com/fujibee/agmsg.git && cd agmsg && ./install.sh
 #    Codex:        $agmsg
 ```
 
-That's it. Once two agents have joined the same team, they can message each other. On first join, you'll be asked to enable **auto message detection** — incoming messages are automatically detected after each response (via Stop hook, with 60-second cooldown).
+That's it. Once two agents have joined the same team, they can message each other. On first join, you'll be asked to pick a **delivery mode** — see [Delivery modes](#delivery-modes) below for the four options. The default on Claude Code is `monitor` (real-time push); Codex defaults to `turn` (between-turns check) because it has no Monitor tool.
 
 After setup, your agent handles everything — just talk to it naturally. "Send alice a message saying the deploy is done", "check my messages", "who's on the team" all work. The shell scripts below are for reference and advanced use.
 
@@ -100,18 +100,52 @@ If you want to clear the current project's registrations without leaving the tea
 ~/.agents/skills/agmsg/scripts/reset.sh /path/to/project-b claude-code
 ```
 
+## Delivery modes
+
+How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
+
+| mode | mechanism | latency | who it's for |
+|---|---|---|---|
+| **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
+| **`turn`** (default on Codex) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex (no Monitor tool); Claude Code users on a quieter loop |
+| **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
+| **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
+
+### Picking a mode
+
+```
+/agmsg mode monitor    — switch this project to real-time push (Claude Code)
+/agmsg mode turn       — switch to between-turns checking
+/agmsg mode both       — monitor with turn as a safety net
+/agmsg mode off        — manual /agmsg only
+/agmsg mode            — show current mode
+```
+
+Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
+
+### Migrating from legacy `hook on/off`
+
+`hook on` is now a thin alias for `mode turn` (with a one-line deprecation hint). To switch to real-time push:
+
+```
+/agmsg mode monitor
+```
+
+The command updates `db/config.yaml`, rewrites the project's hook entries, and prints an `AGMSG-DIRECTIVE` that activates `monitor` in the current session — no agent restart needed.
+
 ## Usage
 
 ### Claude Code
 
 ```
-/agmsg                          — check inbox (all teams)
-/agmsg history                  — message history
-/agmsg team                     — list team members
-/agmsg send <agent> <message>   — send message
-/agmsg hook on                  — enable auto message detection
-/agmsg hook off                 — disable auto message detection
-/agmsg reset                    — clear current project registration
+/agmsg                                  — check inbox (all teams)
+/agmsg history                          — message history
+/agmsg team                             — list team members
+/agmsg send <agent> <message>           — send message
+/agmsg mode <monitor|turn|both|off>     — switch delivery mode
+/agmsg mode                             — show current mode
+/agmsg hook on | off                    — legacy aliases (mode turn | off)
+/agmsg reset                            — clear current project registration
 ```
 
 ### Codex
@@ -119,6 +153,8 @@ If you want to clear the current project's registrations without leaving the tea
 ```
 $agmsg                          — or /skills → agmsg
 ```
+
+Codex supports `mode turn` and `mode off` only — there's no Monitor tool to stream into.
 
 ### Shell (any agent)
 
@@ -128,9 +164,12 @@ $agmsg                          — or /skills → agmsg
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
 ~/.agents/skills/<cmd>/scripts/whoami.sh <project_path> <type>
-~/.agents/skills/<cmd>/scripts/hook.sh on|off <type> <project_path>
+~/.agents/skills/<cmd>/scripts/delivery.sh set <mode> <type> <project_path>
+~/.agents/skills/<cmd>/scripts/delivery.sh status [<type> <project_path>]
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
+
+`hook.sh on|off` still works as a legacy alias for `delivery.sh set turn|off` but prints a deprecation notice.
 
 ## Update
 

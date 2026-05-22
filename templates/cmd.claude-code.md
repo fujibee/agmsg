@@ -39,6 +39,7 @@ Four possible outputs:
   > - `/__SKILL_NAME__ send <agent> <message>` — send a message
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
+  > - `/__SKILL_NAME__ mode <monitor|turn|both|off>` — switch delivery mode
 
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
 
@@ -99,13 +100,22 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
-If argument is "hook on":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on claude-code "$(pwd)"`
-2. Tell the user: "Auto message checking enabled."
+If argument is "mode" (no further args):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`
+2. Show the output to the user.
 
-If argument is "hook off":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off claude-code "$(pwd)"`
-2. Tell the user: "Auto message checking disabled."
+If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
+1. Parse the mode (one of `monitor`, `turn`, `both`, `off`).
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> claude-code "$(pwd)"`
+3. Read the `AGMSG-DIRECTIVE` block in the command output and follow it (invoke Monitor or TaskStop as instructed).
+
+If argument is "hook on" (legacy alias):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn claude-code "$(pwd)"`
+2. Tell the user: "Delivery mode set to 'turn' (legacy hook on behavior). Consider using /__SKILL_NAME__ mode monitor for real-time push."
+
+If argument is "hook off" (legacy alias):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off claude-code "$(pwd)"`
+2. Tell the user: "Delivery mode set to 'off'."
 
 If argument is "config":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`

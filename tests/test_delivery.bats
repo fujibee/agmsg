@@ -407,3 +407,19 @@ JSON
   [ -f "$TEST_SKILL_DIR/run/watch.live-session.pid" ]
   kill "$alive_pid" 2>/dev/null || true
 }
+
+# --- hook.sh deprecation notice ---
+
+@test "hook.sh on prints a deprecation notice on stderr" {
+  run bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # Combined stderr+stdout is captured by `run` — assert the notice appears.
+  [[ "$output" =~ "deprecated" ]]
+}
+
+@test "hook.sh off prints a deprecation notice on stderr" {
+  bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "deprecated" ]]
+}
