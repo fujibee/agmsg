@@ -102,13 +102,21 @@ If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
 
 
-If argument is "hook on":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on codex "$(pwd)"`
-2. Tell the user: "Auto message checking enabled."
+If argument is "mode" (no further args):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status codex "$(pwd)"`
+2. Show the output to the user.
 
-If argument is "hook off":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off codex "$(pwd)"`
-2. Tell the user: "Auto message checking disabled."
+If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
+1. Parse the mode. Codex supports only `turn` and `off` — reject `monitor` and `both` with: "Codex has no Monitor tool; only `turn` or `off` modes are supported."
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
+
+If argument is "hook on" (legacy alias):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`
+2. Tell the user: "Delivery mode set to 'turn' (legacy hook on behavior)."
+
+If argument is "hook off" (legacy alias):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off codex "$(pwd)"`
+2. Tell the user: "Delivery mode set to 'off'."
 
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex`
