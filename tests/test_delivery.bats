@@ -358,3 +358,52 @@ has_session_end() {
 @test "session-end.sh exits 0 when input has no session_id" {
   echo '{}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
 }
+
+# --- CLAUDE_CODE_SESSION_ID baking ---
+
+@test "delivery set monitor: bakes CLAUDE_CODE_SESSION_ID into the directive" {
+  CLAUDE_CODE_SESSION_ID="real-uuid-1234" run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "real-uuid-1234" ]]
+  ! [[ "$output" =~ "\\\$AGMSG_SESSION_ID" ]]
+  ! [[ "$output" =~ "\\\$CLAUDE_CODE_SESSION_ID" ]]
+}
+
+@test "delivery set monitor: falls back to a generated id when env is unset" {
+  # Ensure env var is unset
+  unset CLAUDE_CODE_SESSION_ID
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  # No placeholder leaked
+  ! [[ "$output" =~ "\\\$AGMSG_SESSION_ID" ]]
+}
+
+# --- session-start.sh: stale watcher pidfile cleanup ---
+
+@test "session-start.sh removes watch.<sid>.pid files whose pid is dead" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  echo "999999" > "$TEST_SKILL_DIR/run/watch.dead-session.pid"  # bogus pid
+  : > "$TEST_SKILL_DIR/run/watch.empty-pid.pid"                  # empty pid
+  echo '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.dead-session.pid" ]
+  [ ! -f "$TEST_SKILL_DIR/run/watch.empty-pid.pid" ]
+}
+
+@test "session-start.sh leaves alive watcher pidfiles alone" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 &
+  local alive_pid=$!
+  echo "$alive_pid" > "$TEST_SKILL_DIR/run/watch.live-session.pid"
+  echo '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.live-session.pid" ]
+  kill "$alive_pid" 2>/dev/null || true
+}
