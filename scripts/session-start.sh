@@ -86,6 +86,20 @@ for f in "$RUN_DIR"/cc-instance.*; do
   kill -0 "$pid" 2>/dev/null || rm -f "$f"
 done
 
+# Same defensive pass for stale watcher pidfiles. A pidfile whose recorded
+# pid is dead (or empty) means a watcher exited without running its EXIT
+# trap — usually an edge case like SIGKILL or a synthesized session_id
+# that SessionEnd's lookup couldn't match.
+for f in "$RUN_DIR"/watch.*.pid; do
+  [ -f "$f" ] || continue
+  pid=$(cat "$f" 2>/dev/null || true)
+  if [ -z "$pid" ]; then
+    rm -f "$f"
+    continue
+  fi
+  kill -0 "$pid" 2>/dev/null || rm -f "$f"
+done
+
 # --- Dedup against the previous watcher in this CC instance. ---
 if [ -n "$CC_PID" ]; then
   STATE="$RUN_DIR/cc-instance.$CC_PID"

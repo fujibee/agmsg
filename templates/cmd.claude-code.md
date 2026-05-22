@@ -40,10 +40,31 @@ Four possible outputs:
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
 
-  5. **REQUIRED — Do NOT skip this step.** Ask the user: "Enable auto message checking? When enabled, incoming messages are automatically detected after each response. You can turn it on/off anytime with `/__SKILL_NAME__ hook on/off`."
-     - **Wait for the user's answer before proceeding.**
-     - If yes: run `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on claude-code "$(pwd)"`
-     - If no: skip
+  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
+
+     ```
+     Choose delivery mode for incoming messages:
+
+       1) monitor — Real-time push (~5s latency)
+                     SessionStart hook + Monitor tool streams events.
+                     Recommended.
+
+       2) turn    — Check inbox at the end of each assistant turn
+                     Stop hook pulls after each response.
+
+       3) both    — monitor primary, turn as fallback
+                     Redundant safety net.
+
+       4) off     — No automatic delivery
+                     Manual /__SKILL_NAME__ only.
+
+     [1]:
+     ```
+
+     - **Wait for the user's answer before proceeding.** Empty input means `1` (monitor).
+     - Map the chosen number to a mode and run:
+       `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> claude-code "$(pwd)"`
+     - Read the `AGMSG-DIRECTIVE` block printed by `delivery.sh` and follow it (invoke Monitor or TaskStop as instructed).
 
   6. Then check inbox for the newly joined team.
 

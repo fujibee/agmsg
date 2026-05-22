@@ -41,10 +41,24 @@ Four possible outputs:
   > - `$__SKILL_NAME__ team` — list team members
   > - `$__SKILL_NAME__ history` — message history
 
-  5. **REQUIRED — Do NOT skip this step.** Ask the user: "Enable auto message checking? When enabled, incoming messages are automatically detected after each response. You can turn it on/off anytime with `$__SKILL_NAME__ hook on/off`."
-     - **Wait for the user's answer before proceeding.**
-     - If yes: run `~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on codex "$(pwd)"`
-     - If no: skip
+  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
+
+     ```
+     Choose delivery mode for incoming messages:
+
+       1) turn — Check inbox at the end of each assistant turn
+                  Stop hook pulls after each response.
+
+       2) off  — No automatic delivery
+                  Manual $__SKILL_NAME__ only.
+
+     [1]:
+     ```
+
+     - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
+     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
+       `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
+     - Codex has no Monitor tool, so `monitor` and `both` modes are not offered here.
 
   6. Then check inbox for the newly joined team.
 

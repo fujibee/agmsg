@@ -184,16 +184,29 @@ emit_monitor_directive() {
   local type="$1"
   local project="$2"
   local watch="$SKILL_DIR/scripts/watch.sh"
+
+  # Claude Code exports CLAUDE_CODE_SESSION_ID for every subprocess of the
+  # session. Bake it directly into the command so the agent never has to
+  # invent a value — that lets SessionEnd find and clean the matching
+  # pidfile reliably. Fall back to a generated id when the env var isn't
+  # present (older CC, non-CC runtimes).
+  local session_id="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ -z "$session_id" ]; then
+    if command -v uuidgen >/dev/null 2>&1; then
+      session_id="agmsg-$(uuidgen | tr 'A-Z' 'a-z')"
+    else
+      session_id="agmsg-$(date +%s)-$$"
+    fi
+  fi
+
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
-  command: $watch \$AGMSG_SESSION_ID $project $type
+  command: $watch $session_id $project $type
   description: agmsg inbox stream
   persistent: true
 
-Substitute \$AGMSG_SESSION_ID with the current session_id when known
-(passed by the SessionStart hook in production; in interactive use, any
-unique string per session works — the pidfile uses it as a key).
+Pass the command above verbatim — the session_id is already filled in.
 EOF
 }
 
