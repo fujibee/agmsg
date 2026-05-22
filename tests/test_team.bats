@@ -200,3 +200,19 @@ teardown() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "same" ]]
 }
+
+@test "join: rejects unknown agent type" {
+  run bash "$SCRIPTS/join.sh" myteam alice claude /tmp/proj
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Unknown agent type" ]]
+}
+
+@test "join: accepts claude-code" {
+  run bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  [ "$status" -eq 0 ]
+}
+
+@test "join: accepts codex" {
+  run bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj
+  [ "$status" -eq 0 ]
+}
