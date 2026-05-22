@@ -281,3 +281,80 @@ JSON
   echo '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/cc-instance.$dead_pid" ]
 }
+
+# --- SessionEnd hook integration ---
+
+has_session_end() {
+  [ -f "$1" ] && grep -q "session-end.sh" "$1"
+}
+
+@test "delivery set monitor: installs SessionEnd alongside SessionStart" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  has_session_start "$(settings_file)"
+  has_session_end   "$(settings_file)"
+  ! has_check_inbox "$(settings_file)"
+}
+
+@test "delivery set both: installs SessionStart, SessionEnd, Stop" {
+  bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
+  has_session_start "$(settings_file)"
+  has_session_end   "$(settings_file)"
+  has_check_inbox   "$(settings_file)"
+}
+
+@test "delivery set turn: no SessionEnd installed" {
+  bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+  ! has_session_end "$(settings_file)"
+}
+
+@test "delivery set off: removes SessionEnd along with other entries" {
+  bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set off  claude-code "$TEST_PROJECT"
+  ! has_session_end "$(settings_file)"
+}
+
+@test "delivery: monitor is idempotent for SessionEnd entry" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  local n
+  n=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.hooks.SessionEnd'));")
+  [ "$n" = "1" ]
+}
+
+# --- session-end.sh behavior ---
+
+@test "session-end.sh kills the watcher matching session_id and removes pidfile" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 &
+  local target_pid=$!
+  echo "$target_pid" > "$TEST_SKILL_DIR/run/watch.sess-A.pid"
+  echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
+  sleep 1
+  ! kill -0 "$target_pid" 2>/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.sess-A.pid" ]
+}
+
+@test "session-end.sh leaves other sessions' watchers alone" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 &
+  local other_pid=$!
+  echo "$other_pid" > "$TEST_SKILL_DIR/run/watch.sess-B.pid"
+  echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
+  kill -0 "$other_pid" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.sess-B.pid" ]
+  kill "$other_pid" 2>/dev/null || true
+}
+
+@test "session-end.sh removes cc-instance file that points to this session" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  echo "sess-A" > "$TEST_SKILL_DIR/run/cc-instance.12345"
+  echo "sess-B" > "$TEST_SKILL_DIR/run/cc-instance.67890"
+  echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
+  [ ! -f "$TEST_SKILL_DIR/run/cc-instance.12345" ]
+  [ -f "$TEST_SKILL_DIR/run/cc-instance.67890" ]
+}
+
+@test "session-end.sh exits 0 when input has no session_id" {
+  echo '{}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
+}
