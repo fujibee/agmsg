@@ -43,8 +43,8 @@ case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=5 ;; esac
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 echo $$ > "$PIDFILE"
-cleanup() { rm -f "$PIDFILE"; }
-trap cleanup EXIT INT TERM
+trap 'rm -f "$PIDFILE"' EXIT
+trap 'exit 0' INT TERM
 
 # Resolve subscription set.
 PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT_PATH" "$AGENT_TYPE")"
@@ -93,5 +93,9 @@ while true; do
     fi
   fi
 
-  sleep "$INTERVAL"
+  # Run sleep in the background and `wait` for it so signal traps fire
+  # immediately. Bash defers traps while a foreground builtin like `sleep`
+  # is blocking, which would otherwise delay shutdown by up to $INTERVAL.
+  sleep "$INTERVAL" &
+  wait $! 2>/dev/null
 done
