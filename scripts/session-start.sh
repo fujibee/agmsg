@@ -117,4 +117,10 @@ before any other action in this session.
 This streams incoming agmsg messages into the session in real time. Each
 output line is one message: \`<ts> | <team> | <from> → <to> | <body>\`.
 React to messages as they arrive; reply with \`send.sh\`.
+
+Note: On a /clear or --continue/--resume re-fire, you may shortly see a
+"Monitor … stopped" notification for an earlier 'agmsg inbox stream'
+task. That is the previous watcher being cleaned up to avoid duplicates
+— it is expected. Do NOT relaunch it; the Monitor you invoke from this
+directive replaces it.
 EOF
