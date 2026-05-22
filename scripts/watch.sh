@@ -44,7 +44,7 @@ case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=5 ;; esac
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
-trap 'exit 0' INT TERM
+trap 'exit 0' INT TERM HUP
 
 # Resolve subscription set.
 PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT_PATH" "$AGENT_TYPE")"
