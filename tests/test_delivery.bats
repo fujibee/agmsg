@@ -438,3 +438,35 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" =~ "deprecated" ]]
 }
+
+# --- emit_monitor_directive idempotency ---
+
+@test "emit monitor directive: skips when a live watcher already exists for this session" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  # Spawn a live process and pretend it's our watcher for this session_id.
+  sleep 30 &
+  local live_pid=$!
+  CLAUDE_CODE_SESSION_ID="live-test-sid"
+  export CLAUDE_CODE_SESSION_ID
+  echo "$live_pid" > "$TEST_SKILL_DIR/run/watch.$CLAUDE_CODE_SESSION_ID.pid"
+
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "already streaming" ]]
+  ! [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+
+  kill "$live_pid" 2>/dev/null || true
+  unset CLAUDE_CODE_SESSION_ID
+}
+
+@test "emit monitor directive: emits when no live watcher exists for this session" {
+  CLAUDE_CODE_SESSION_ID="fresh-sid-no-watcher"
+  export CLAUDE_CODE_SESSION_ID
+
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [[ "$output" =~ "fresh-sid-no-watcher" ]]
+
+  unset CLAUDE_CODE_SESSION_ID
+}

@@ -199,6 +199,23 @@ emit_monitor_directive() {
     fi
   fi
 
+  # Skip the directive when this CC session already has a live watcher —
+  # invoking Monitor again would just spawn a duplicate and orphan the
+  # previous watcher process.
+  local pidfile="$RUN_DIR/watch.$session_id.pid"
+  if [ -f "$pidfile" ]; then
+    local existing
+    existing=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+      cat <<EOF
+
+A watch.sh is already streaming into this session (pid $existing). No
+action needed — the existing watcher is the active one.
+EOF
+      return 0
+    fi
+  fi
+
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
