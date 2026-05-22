@@ -16,6 +16,22 @@ if echo "$INPUT" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' 2>/
   exit 0
 fi
 
+# Defer to the monitor watcher when one is alive for this session.
+# Avoids double-delivery when delivery.mode = both. session_id is sent in
+# the hook input JSON for Stop events.
+SESSION_ID=$(printf '%s' "$INPUT" \
+  | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  | head -1)
+if [ -n "$SESSION_ID" ]; then
+  PIDFILE="$SKILL_DIR/run/watch.$SESSION_ID.pid"
+  if [ -f "$PIDFILE" ]; then
+    WATCH_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [ -n "$WATCH_PID" ] && kill -0 "$WATCH_PID" 2>/dev/null; then
+      exit 0
+    fi
+  fi
+fi
+
 # Identify agent and teams
 WHOAMI=$("$SCRIPT_DIR/whoami.sh" "$PROJECT" "$TYPE")
 if echo "$WHOAMI" | grep -q "not_joined=true"; then
@@ -44,8 +60,10 @@ if [ -f "$MARKER" ]; then
     last=$(stat -c %Y "$MARKER")
   fi
   now=$(date +%s)
-  INTERVAL=$("$SCRIPT_DIR/config.sh" get hook.check_interval 60)
-  # Fallback to default if non-numeric
+  # Prefer the new delivery.turn.check_interval; fall back to legacy
+  # hook.check_interval for users who haven't migrated.
+  INTERVAL=$("$SCRIPT_DIR/config.sh" get delivery.turn.check_interval "")
+  [ -z "$INTERVAL" ] && INTERVAL=$("$SCRIPT_DIR/config.sh" get hook.check_interval 60)
   case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=60 ;; esac
   if [ $(( now - last )) -lt "$INTERVAL" ]; then
     if [ "$TYPE" = "codex" ]; then

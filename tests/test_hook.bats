@@ -18,7 +18,7 @@ teardown() {
   run bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [ -f "$TEST_PROJECT/.claude/settings.local.json" ]
-  [[ "$output" =~ "Hook enabled" ]]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
 }
 
 @test "hook on: settings contains Stop hook with check-inbox" {
@@ -61,14 +61,14 @@ print(len(d['hooks']['Stop']))
   run bash "$SCRIPTS/hook.sh" on codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [ -f "$TEST_PROJECT/.codex/hooks.json" ]
-  [[ "$output" =~ "Hook enabled" ]]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
 }
 
 @test "hook off: codex removes hook" {
   bash "$SCRIPTS/hook.sh" on codex "$TEST_PROJECT"
   run bash "$SCRIPTS/hook.sh" off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Hook disabled" ]]
+  [[ "$output" =~ "Delivery mode set to 'off'" ]]
 }
 
 # --- hook.sh off ---
@@ -77,7 +77,7 @@ print(len(d['hooks']['Stop']))
   bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT"
   run bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Hook disabled" ]]
+  [[ "$output" =~ "Delivery mode set to 'off'" ]]
   local content=$(cat "$TEST_PROJECT/.claude/settings.local.json")
   [[ ! "$content" =~ "Stop" ]]
 }
@@ -85,7 +85,7 @@ print(len(d['hooks']['Stop']))
 @test "hook off: reports no hook when not configured" {
   run bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "No hook configured" ]]
+  [[ "$output" =~ "Delivery mode set to 'off'" ]]
 }
 
 @test "hook off: preserves other settings" {
