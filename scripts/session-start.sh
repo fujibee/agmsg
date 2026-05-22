@@ -18,8 +18,11 @@ set -euo pipefail
 # instances of the same project get their own cc_pid, so they never step
 # on each other.
 #
-# Quietly exits 0 when delivery.mode is not monitor/both, when whoami says
-# the agent isn't joined to anything yet, etc.
+# Quietly exits 0 when whoami says the agent isn't joined to anything yet.
+# Mode is implicit: if this script is being invoked at all, it's because
+# `delivery.sh set monitor` (or `both`) installed it in the project's
+# settings.local.json — that fact alone is the source of truth for "should
+# we emit the directive?". No separate global mode value to consult.
 
 TYPE="${1:?Usage: session-start.sh <type> <project_path>}"
 PROJECT="${2:?Missing project_path}"
@@ -27,9 +30,6 @@ PROJECT="${2:?Missing project_path}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
-
-MODE=$("$SCRIPT_DIR/config.sh" get delivery.mode "off" 2>/dev/null || echo off)
-case "$MODE" in monitor|both) ;; *) exit 0 ;; esac
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)

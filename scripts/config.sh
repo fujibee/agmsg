@@ -130,10 +130,12 @@ create_default_config() {
   cat > "$CONFIG_FILE" <<'YAML'
 # agmsg configuration
 # https://agmsg.cc/
+#
+# Mode (monitor | turn | both | off) is per-project — derived from each
+# project's .claude/settings.local.json by `delivery.sh status`. There is
+# no global "mode" key. Only machine-wide tuning lives here.
 
 delivery:
-  # How incoming messages reach this agent: monitor | turn | both | off
-  mode: monitor
   monitor:
     # watch.sh SQLite poll interval, seconds
     poll_interval: 5

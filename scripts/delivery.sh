@@ -230,7 +230,6 @@ do_set() {
   esac
 
   apply_settings "$TYPE" "$PROJECT" "$MODE"
-  "$SCRIPT_DIR/config.sh" set delivery.mode "$MODE" >/dev/null
 
   echo "Delivery mode set to '$MODE' for $PROJECT ($TYPE)"
 
@@ -257,20 +256,35 @@ do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
 
-  local mode
-  mode=$("$SCRIPT_DIR/config.sh" get delivery.mode "" 2>/dev/null || true)
-  if [ -z "$mode" ]; then
-    # Legacy: if hook.check_interval exists from a prior hook.sh install,
-    # treat that as effective mode=turn for reporting.
-    local legacy
-    legacy=$("$SCRIPT_DIR/config.sh" get hook.check_interval "" 2>/dev/null || true)
-    if [ -n "$legacy" ]; then
-      mode="turn (legacy hook.check_interval=$legacy)"
-    else
-      mode="off (default)"
+  # Mode is derived from the project's settings.local.json — there's no
+  # global mode value. When called without <type> <project>, we can't infer
+  # a project-scoped mode, so we just skip the mode line and report the
+  # global watcher state below.
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
+    local hf
+    hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
+    local has_ss=0 has_st=0
+    if [ -f "$hf" ]; then
+      has_ss=$(sqlite3 :memory: "
+        SELECT EXISTS(
+          SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.SessionStart')) AS s,
+            json_each(json_extract(s.value, '\$.hooks')) AS h
+          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+        );" 2>/dev/null || echo 0)
+      has_st=$(sqlite3 :memory: "
+        SELECT EXISTS(
+          SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.Stop')) AS s,
+            json_each(json_extract(s.value, '\$.hooks')) AS h
+          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+        );" 2>/dev/null || echo 0)
     fi
+    local mode="off"
+    if [ "$has_ss" = "1" ] && [ "$has_st" = "1" ]; then mode="both"
+    elif [ "$has_ss" = "1" ]; then mode="monitor"
+    elif [ "$has_st" = "1" ]; then mode="turn"
+    fi
+    echo "mode: $mode"
   fi
-  echo "mode: $mode"
 
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     local hooks_file

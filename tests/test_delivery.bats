@@ -124,29 +124,44 @@ settings_file() {
   [ "$p" = "Bash" ]
 }
 
-# --- config is updated alongside ---
+# --- status derives mode from settings.local.json ---
 
-@test "delivery set: writes delivery.mode into config.yaml" {
-  bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
-  run bash "$SCRIPTS/config.sh" get delivery.mode
-  [ "$output" = "both" ]
+@test "delivery status: derives 'both' from settings with SessionStart + Stop" {
+  bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "mode: both" ]]
+}
+
+@test "delivery status: derives 'monitor' from settings with SessionStart only" {
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "delivery status: derives 'turn' from settings with Stop only" {
+  bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+}
+
+@test "delivery status: derives 'off' from settings with no agmsg hooks" {
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
 }
 
 # --- hook.sh backward compat ---
 
 @test "hook.sh on delegates to delivery set turn" {
-  bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/hook.sh" on claude-code "$TEST_PROJECT" 2>&1
   has_check_inbox "$(settings_file)"
-  run bash "$SCRIPTS/config.sh" get delivery.mode
-  [ "$output" = "turn" ]
+  ! has_session_start "$(settings_file)"
 }
 
 @test "hook.sh off delegates to delivery set off" {
-  bash "$SCRIPTS/hook.sh" on  claude-code "$TEST_PROJECT"
-  bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/hook.sh" on  claude-code "$TEST_PROJECT" 2>&1
+  bash "$SCRIPTS/hook.sh" off claude-code "$TEST_PROJECT" 2>&1
   ! has_check_inbox "$(settings_file)"
-  run bash "$SCRIPTS/config.sh" get delivery.mode
-  [ "$output" = "off" ]
+  ! has_session_start "$(settings_file)"
 }
 
 # --- rejects unknown mode ---
