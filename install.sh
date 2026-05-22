@@ -83,6 +83,11 @@ if [ "$UPDATE_ONLY" = true ]; then
   for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$tmpl" > "$SKILL_DIR/templates/$(basename "$tmpl")"
   done
+  # Refresh the Claude Code slash command file (was missed in earlier --update flows).
+  CC_COMMANDS_DIR="$HOME/.claude/commands"
+  if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.claude-code.md" > "$CC_COMMANDS_DIR/$SKILL_NAME.md"
+  fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
   echo "  + updated scripts, templates, and SKILL.md"
