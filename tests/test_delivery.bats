@@ -156,3 +156,62 @@ settings_file() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Unknown mode" ]]
 }
+
+# --- in-session directives ---
+
+@test "delivery set monitor: emits AGMSG-DIRECTIVE for Monitor invocation" {
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+  [[ "$output" =~ "watch.sh" ]]
+}
+
+@test "delivery set both: emits AGMSG-DIRECTIVE for Monitor invocation" {
+  run bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [[ "$output" =~ "watch.sh" ]]
+}
+
+@test "delivery set turn: emits AGMSG-DIRECTIVE to stop any running watcher" {
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [[ "$output" =~ "TaskStop" ]]
+}
+
+@test "delivery set off: emits AGMSG-DIRECTIVE to stop any running watcher" {
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [[ "$output" =~ "TaskStop" ]]
+}
+
+# --- stop subcommand ---
+
+@test "delivery stop: kills watchers and emits stop directive" {
+  # Spawn a real subprocess to act as the watcher; record its pid.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 &
+  local sleep_pid=$!
+  echo "$sleep_pid" > "$TEST_SKILL_DIR/run/watch.fake-sess.pid"
+  run bash "$SCRIPTS/delivery.sh" stop
+  [[ "$output" =~ "Killed 1 watch" ]]
+  [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+  [ ! -f "$TEST_SKILL_DIR/run/watch.fake-sess.pid" ]
+  # And the sleep process should be dead.
+  ! kill -0 "$sleep_pid" 2>/dev/null
+}
+
+# --- restart subcommand ---
+
+@test "delivery restart with args: emits both stop and start directives" {
+  run bash "$SCRIPTS/delivery.sh" restart claude-code "$TEST_PROJECT"
+  [[ "$output" =~ "Killed" ]]
+  [[ "$output" =~ "TaskStop" ]]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+}
+
+@test "delivery restart without args: emits only stop directive" {
+  run bash "$SCRIPTS/delivery.sh" restart
+  [[ "$output" =~ "TaskStop" ]]
+  [[ ! "$output" =~ "invoke the Monitor tool" ]]
+}

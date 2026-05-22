@@ -6,7 +6,8 @@ set -euo pipefail
 # Usage:
 #   delivery.sh set <mode> <type> <project_path>
 #   delivery.sh status [<type> <project_path>]
-#   delivery.sh restart
+#   delivery.sh stop
+#   delivery.sh restart [<project_path> <type>]
 #
 # Modes:
 #   monitor  — SessionStart hook → Claude Code Monitor tool → watch.sh stream
@@ -17,6 +18,12 @@ set -euo pipefail
 # settings.json injection is idempotent: each `set` call first strips any
 # existing agmsg-owned SessionStart/Stop entries, then re-adds whichever
 # the new mode requires. Re-running with the same mode is a no-op.
+#
+# For in-session activation, several actions print a final
+# "AGMSG-DIRECTIVE:" line that a running Claude Code agent reads from the
+# command output and acts on (invoke Monitor, TaskStop the watcher). This
+# closes the gap where, without the directive, only the *next* session
+# would pick up the mode change.
 
 ACTION="${1:?Usage: delivery.sh set|status|restart ...}"
 shift
@@ -168,6 +175,33 @@ apply_settings() {
   printf '%s' "$settings_esc" | sed "s/''/'/g" > "$hooks_file"
 }
 
+emit_monitor_directive() {
+  local type="$1"
+  local project="$2"
+  local watch="$SKILL_DIR/scripts/watch.sh"
+  cat <<EOF
+
+AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
+  command: $watch \$AGMSG_SESSION_ID $project $type
+  description: agmsg inbox stream
+  persistent: true
+
+Substitute \$AGMSG_SESSION_ID with the current session_id when known
+(passed by the SessionStart hook in production; in interactive use, any
+unique string per session works — the pidfile uses it as a key).
+EOF
+}
+
+emit_stop_directive() {
+  cat <<'EOF'
+
+AGMSG-DIRECTIVE: If an agmsg watch Monitor task is running in this session,
+find it with TaskList (description starts with "agmsg inbox stream") and
+stop it with TaskStop. Existing watch.sh processes have already been killed
+by this command.
+EOF
+}
+
 do_set() {
   local MODE="${1:?Usage: delivery.sh set <mode> <type> <project_path>}"
   local TYPE="${2:?Missing type}"
@@ -181,13 +215,23 @@ do_set() {
   "$SCRIPT_DIR/config.sh" set delivery.mode "$MODE" >/dev/null
 
   echo "Delivery mode set to '$MODE' for $PROJECT ($TYPE)"
+
   case "$MODE" in
     monitor|both)
-      echo "Restart your agent to activate the SessionStart hook." ;;
+      echo "Future sessions: SessionStart hook will auto-launch the watcher."
+      emit_monitor_directive "$TYPE" "$PROJECT"
+      ;;
     turn)
-      echo "Restart your agent to activate the Stop hook." ;;
+      echo "Future sessions: Stop hook will check inbox between turns."
+      # If a watcher is alive in this session, ask Claude to stop it.
+      kill_all_watchers >/dev/null 2>&1 || true
+      emit_stop_directive
+      ;;
     off)
-      echo "Restart your agent to deactivate hooks." ;;
+      echo "Future sessions: no automatic delivery."
+      kill_all_watchers >/dev/null 2>&1 || true
+      emit_stop_directive
+      ;;
   esac
 }
 
@@ -241,7 +285,7 @@ do_status() {
   fi
 }
 
-do_restart() {
+kill_all_watchers() {
   local killed=0
   if [ -d "$RUN_DIR" ]; then
     for f in "$RUN_DIR"/watch.*.pid; do
@@ -254,12 +298,39 @@ do_restart() {
       rm -f "$f"
     done
   fi
-  echo "Killed $killed watch process(es). Start a new Claude Code session to relaunch (Monitor cannot be re-armed from outside an active session)."
+  echo "$killed"
+}
+
+do_stop() {
+  local killed
+  killed=$(kill_all_watchers)
+  echo "Killed $killed watch process(es)."
+  emit_stop_directive
+}
+
+do_restart() {
+  local TYPE="${1:-}"
+  local PROJECT="${2:-}"
+  local killed
+  killed=$(kill_all_watchers)
+  echo "Killed $killed watch process(es)."
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
+    emit_stop_directive
+    emit_monitor_directive "$TYPE" "$PROJECT"
+  else
+    emit_stop_directive
+    cat <<'EOF'
+
+To relaunch in this session, pass <type> <project_path> as arguments:
+  delivery.sh restart claude-code /path/to/project
+EOF
+  fi
 }
 
 case "$ACTION" in
   set)     do_set "$@" ;;
   status)  do_status "$@" ;;
+  stop)    do_stop "$@" ;;
   restart) do_restart "$@" ;;
-  *)       echo "Unknown action: $ACTION (use set|status|restart)" >&2; exit 1 ;;
+  *)       echo "Unknown action: $ACTION (use set|status|stop|restart)" >&2; exit 1 ;;
 esac
