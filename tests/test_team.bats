@@ -216,3 +216,14 @@ teardown() {
   run bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj
   [ "$status" -eq 0 ]
 }
+
+@test "join: accepts gemini" {
+  run bash "$SCRIPTS/join.sh" myteam alice gemini /tmp/proj
+  [ "$status" -eq 0 ]
+}
+
+@test "join: accepts antigravity" {
+  run bash "$SCRIPTS/join.sh" myteam alice antigravity /tmp/proj
+  [ "$status" -eq 0 ]
+}
+
