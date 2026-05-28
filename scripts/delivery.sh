@@ -39,6 +39,7 @@ resolve_hooks_file() {
   case "$type" in
     claude-code) echo "$project/.claude/settings.local.json" ;;
     codex)       echo "$project/.codex/hooks.json" ;;
+    gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
@@ -128,10 +129,45 @@ prune_empty_hooks() {
   "
 }
 
+apply_settings_gemini() {
+  local type="$1"
+  local project="$2"
+  local mode="$3"
+  local rule_file
+  rule_file=$(resolve_hooks_file "$type" "$project")
+
+  # Remove existing rule file
+  rm -f "$rule_file"
+
+  case "$mode" in
+    turn|both)
+      mkdir -p "$(dirname "$rule_file")"
+      cat <<EOF > "$rule_file"
+# agmsg Integration Rule
+
+## PostToolUse
+After each tool call, automatically check the agmsg inbox for unread messages.
+- Command: '$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'
+EOF
+      ;;
+    monitor)
+      echo "Warning: 'monitor' mode is not fully supported for $type yet. Using turn-based hook." >&2
+      apply_settings_gemini "$type" "$project" "turn"
+      ;;
+    off)
+      ;;
+  esac
+}
+
 apply_settings() {
   local type="$1"
   local project="$2"
   local mode="$3"
+
+  if [ "$type" = "gemini" ] || [ "$type" = "antigravity" ]; then
+    apply_settings_gemini "$type" "$project" "$mode"
+    return
+  fi
 
   local hooks_file
   hooks_file=$(resolve_hooks_file "$type" "$project")
@@ -280,30 +316,38 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     local hf
     hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
-    local has_ss=0 has_st=0
-    if [ -f "$hf" ]; then
-      has_ss=$(sqlite3 :memory: "
-        SELECT EXISTS(
-          SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.SessionStart')) AS s,
-            json_each(json_extract(s.value, '\$.hooks')) AS h
-          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
-        );" 2>/dev/null || echo 0)
-      has_st=$(sqlite3 :memory: "
-        SELECT EXISTS(
-          SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.Stop')) AS s,
-            json_each(json_extract(s.value, '\$.hooks')) AS h
-          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
-        );" 2>/dev/null || echo 0)
+    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ]; then
+      local mode="off"
+      if [ -f "$hf" ]; then
+        mode="turn"
+      fi
+      echo "mode: $mode"
+    else
+      local has_ss=0 has_st=0
+      if [ -f "$hf" ]; then
+        has_ss=$(sqlite3 :memory: "
+          SELECT EXISTS(
+            SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.SessionStart')) AS s,
+              json_each(json_extract(s.value, '\$.hooks')) AS h
+            WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          );" 2>/dev/null || echo 0)
+        has_st=$(sqlite3 :memory: "
+          SELECT EXISTS(
+            SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.Stop')) AS s,
+              json_each(json_extract(s.value, '\$.hooks')) AS h
+            WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          );" 2>/dev/null || echo 0)
+      fi
+      local mode="off"
+      if [ "$has_ss" = "1" ] && [ "$has_st" = "1" ]; then mode="both"
+      elif [ "$has_ss" = "1" ]; then mode="monitor"
+      elif [ "$has_st" = "1" ]; then mode="turn"
+      fi
+      echo "mode: $mode"
     fi
-    local mode="off"
-    if [ "$has_ss" = "1" ] && [ "$has_st" = "1" ]; then mode="both"
-    elif [ "$has_ss" = "1" ]; then mode="monitor"
-    elif [ "$has_st" = "1" ]; then mode="turn"
-    fi
-    echo "mode: $mode"
   fi
 
-  if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ]; then
     local hooks_file
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then

@@ -491,6 +491,37 @@ JSON
   unset CLAUDE_CODE_SESSION_ID
 }
 
+# --- gemini agent tests ---
+
+@test "delivery set turn (gemini): installs rule file" {
+  run bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  grep -q "check-inbox.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+}
+
+@test "delivery set off (gemini): removes rule file" {
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set off gemini "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+}
+
+@test "delivery status (gemini): derives mode from rule file existence" {
+  run bash "$SCRIPTS/delivery.sh" status gemini "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
+
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" status gemini "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+}
+
+
+
+
+
 # --- watch.sh exclusive role filter ---
 
 @test "watch.sh restricts subscription to active_name when 4th arg is given" {
