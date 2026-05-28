@@ -40,7 +40,7 @@ resolve_hooks_file() {
     claude-code) echo "$project/.claude/settings.local.json" ;;
     codex)       echo "$project/.codex/hooks.json" ;;
     gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
-    opencode)           echo "$project/.opencode/hooks.json" ;;
+    opencode)           echo "$project/.agent/rules/agmsg.md" ;;
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
