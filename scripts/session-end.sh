@@ -36,7 +36,14 @@ PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
 if [ -f "$PIDFILE" ]; then
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
+    # Defensive: only kill if the pid's command line still looks like our
+    # watch.sh. Pids can be recycled — a stale pidfile could point at an
+    # unrelated process that took the same pid.
+    cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$cmd" in
+      *"$SKILL_DIR/scripts/watch.sh"*) kill "$pid" 2>/dev/null || true ;;
+      *) ;;
+    esac
   fi
   rm -f "$PIDFILE"
 fi

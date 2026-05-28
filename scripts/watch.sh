@@ -7,11 +7,14 @@ set -u
 # hook (`session-start.sh`), but also works standalone as `tail -f` for
 # inbox: any agent runtime that can read stdout can consume it.
 #
-# Usage: watch.sh <session_id> <project_path> <agent_type>
+# Usage: watch.sh <session_id> <project_path> <agent_type> [active_name]
 #
 # Behavior:
-#   - Resolves all (team, agent) pairs for (project_path, agent_type) via
-#     identities.sh. Subscribes to messages addressed to any of those pairs.
+#   - Resolves (team, agent) pairs for (project_path, agent_type) via
+#     identities.sh. By default, subscribes to messages addressed to any
+#     of those pairs.
+#   - When [active_name] is given, narrows the subscription to only pairs
+#     whose agent name matches — useful for `actas` exclusive role mode.
 #   - Sets the high-water mark to the current MAX(id) at startup so the
 #     stream begins with whatever arrives after launch — no replay of
 #     historical messages.
@@ -24,9 +27,10 @@ set -u
 #   - Writes a pidfile at ~/.agents/agmsg/run/watch.<session_id>.pid and
 #     removes it on EXIT / SIGTERM / SIGINT.
 
-SESSION_ID="${1:?Usage: watch.sh <session_id> <project_path> <agent_type>}"
+SESSION_ID="${1:?Usage: watch.sh <session_id> <project_path> <agent_type> [active_name]}"
 PROJECT_PATH="${2:?Missing project_path}"
 AGENT_TYPE="${3:?Missing agent_type}"
+ACTIVE_NAME="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -48,8 +52,15 @@ trap 'exit 0' INT TERM HUP
 
 # Resolve subscription set.
 PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT_PATH" "$AGENT_TYPE")"
+if [ -n "$ACTIVE_NAME" ]; then
+  PAIRS=$(printf '%s\n' "$PAIRS" | awk -v n="$ACTIVE_NAME" -F'\t' 'NF >= 2 && $2 == n')
+fi
 if [ -z "$PAIRS" ]; then
-  echo "agmsg watch: no joined teams for $PROJECT_PATH ($AGENT_TYPE); nothing to do"
+  if [ -n "$ACTIVE_NAME" ]; then
+    echo "agmsg watch: no registration for agent '$ACTIVE_NAME' in $PROJECT_PATH ($AGENT_TYPE); nothing to do"
+  else
+    echo "agmsg watch: no joined teams for $PROJECT_PATH ($AGENT_TYPE); nothing to do"
+  fi
   exit 0
 fi
 
