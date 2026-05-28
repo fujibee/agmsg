@@ -518,6 +518,33 @@ JSON
   [[ "$output" =~ "mode: turn" ]]
 }
 
+# --- opencode agent tests ---
+
+@test "delivery set turn (opencode): installs rule file" {
+  run bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  grep -q "check-inbox.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+}
+
+@test "delivery set off (opencode): removes rule file" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set off opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+}
+
+@test "delivery status (opencode): derives mode from rule file existence" {
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
+
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+}
+
 
 
 

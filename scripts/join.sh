@@ -7,7 +7,7 @@ set -euo pipefail
 
 TEAM="${1:?Usage: join.sh <team> <agent_id> <type> <project_path>}"
 AGENT_ID="${2:?Missing agent_id}"
-AGENT_TYPE="${3:?Missing type (claude-code | codex)}"
+AGENT_TYPE="${3:?Missing type (claude-code | codex | gemini | antigravity | opencode)}"
 PROJECT_PATH="${4:?Missing project_path}"
 
 # Reject unknown agent types — the rest of agmsg (delivery.sh,
@@ -15,8 +15,8 @@ PROJECT_PATH="${4:?Missing project_path}"
 # here. Allowing arbitrary strings silently mis-registers an agent and
 # makes monitor mode fail with a confusing "no joined teams" message.
 case "$AGENT_TYPE" in
-  claude-code|codex|gemini|antigravity) ;;
-  *) echo "Unknown agent type: '$AGENT_TYPE' (supported: claude-code, codex, gemini, antigravity)" >&2; exit 1 ;;
+  claude-code|codex|gemini|antigravity|opencode) ;;
+  *) echo "Unknown agent type: '$AGENT_TYPE' (supported: claude-code, codex, gemini, antigravity, opencode)" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

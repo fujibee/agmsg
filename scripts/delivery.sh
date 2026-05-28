@@ -40,6 +40,7 @@ resolve_hooks_file() {
     claude-code) echo "$project/.claude/settings.local.json" ;;
     codex)       echo "$project/.codex/hooks.json" ;;
     gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
+    opencode)           echo "$project/.opencode/hooks.json" ;;
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
@@ -164,7 +165,7 @@ apply_settings() {
   local project="$2"
   local mode="$3"
 
-  if [ "$type" = "gemini" ] || [ "$type" = "antigravity" ]; then
+  if [ "$type" = "gemini" ] || [ "$type" = "antigravity" ] || [ "$type" = "opencode" ]; then
     apply_settings_gemini "$type" "$project" "$mode"
     return
   fi
@@ -316,7 +317,7 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     local hf
     hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
-    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ]; then
+    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "opencode" ]; then
       local mode="off"
       if [ -f "$hf" ]; then
         mode="turn"
@@ -347,7 +348,7 @@ do_status() {
     fi
   fi
 
-  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ]; then
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "opencode" ]; then
     local hooks_file
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then
