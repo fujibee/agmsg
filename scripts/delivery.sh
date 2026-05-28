@@ -342,10 +342,18 @@ kill_all_watchers() {
   if [ -d "$RUN_DIR" ]; then
     for f in "$RUN_DIR"/watch.*.pid; do
       [ -f "$f" ] || continue
-      local pid
+      local pid cmd
       pid=$(cat "$f" 2>/dev/null || echo "")
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null && killed=$((killed + 1))
+        # Defensive: only kill if the pid's command line still looks like
+        # our watch.sh. Defends against pid recycling — a stale pidfile
+        # could point at an unrelated process that reused the pid.
+        cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
+        case "$cmd" in
+          *"$SKILL_DIR/scripts/watch.sh"*)
+            kill "$pid" 2>/dev/null && killed=$((killed + 1)) ;;
+          *) ;;  # not our watcher; leave it
+        esac
       fi
       rm -f "$f"
     done

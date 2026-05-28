@@ -203,17 +203,35 @@ settings_file() {
 # --- stop subcommand ---
 
 @test "delivery stop: kills watchers and emits stop directive" {
-  # Spawn a real subprocess to act as the watcher; record its pid.
-  mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 &
-  local sleep_pid=$!
-  echo "$sleep_pid" > "$TEST_SKILL_DIR/run/watch.fake-sess.pid"
+  # Spawn an actual watch.sh process so the safety check (argv contains
+  # watch.sh) passes.
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-test "$TEST_PROJECT" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 1 watch" ]]
   [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
-  [ ! -f "$TEST_SKILL_DIR/run/watch.fake-sess.pid" ]
-  # And the sleep process should be dead.
-  ! kill -0 "$sleep_pid" 2>/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
+  sleep 1
+  ! kill -0 "$watch_pid" 2>/dev/null
+}
+
+@test "delivery stop: skips pid whose command line is not watch.sh (pid recycling safety)" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 &
+  local unrelated_pid=$!
+  echo "$unrelated_pid" > "$TEST_SKILL_DIR/run/watch.stale-sess.pid"
+  run bash "$SCRIPTS/delivery.sh" stop
+  [[ "$output" =~ "Killed 0 watch" ]]
+  [ ! -f "$TEST_SKILL_DIR/run/watch.stale-sess.pid" ]
+  # The unrelated sleep process must still be alive.
+  kill -0 "$unrelated_pid" 2>/dev/null
+  kill "$unrelated_pid" 2>/dev/null || true
 }
 
 # --- restart subcommand ---
@@ -408,7 +426,7 @@ JSON
   [ ! -f "$TEST_SKILL_DIR/run/watch.empty-pid.pid" ]
 }
 
-@test "session-start.sh leaves alive watcher pidfiles alone" {
+@test "session-start.sh leaves alive watcher pidfiles alone (when bound to a live CC instance)" {
   mkdir -p "$TEST_SKILL_DIR/teams/myteam"
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
@@ -418,6 +436,8 @@ JSON
   sleep 30 &
   local alive_pid=$!
   echo "$alive_pid" > "$TEST_SKILL_DIR/run/watch.live-session.pid"
+  # Bind this watcher to a live CC instance (use $$ as a stand-in).
+  echo "live-session" > "$TEST_SKILL_DIR/run/cc-instance.$$"
   echo '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
   [ -f "$TEST_SKILL_DIR/run/watch.live-session.pid" ]
   kill "$alive_pid" 2>/dev/null || true
@@ -469,4 +489,140 @@ JSON
   [[ "$output" =~ "fresh-sid-no-watcher" ]]
 
   unset CLAUDE_CODE_SESSION_ID
+}
+
+# --- watch.sh exclusive role filter ---
+
+@test "watch.sh restricts subscription to active_name when 4th arg is given" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{
+  "name":"myteam",
+  "agents":{
+    "alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]},
+    "bob":  {"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}
+  }
+}
+JSON
+  # Insert two messages, one for each agent.
+  DB="$TEST_SKILL_DIR/db/messages.db"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'alice', 'for-alice');"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'bob', 'for-bob');"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code bob > /tmp/agmsg-as-bob 2>&1 &
+  local pid=$!
+  # High-water-mark = MAX(id) at startup, so prior messages aren't replayed.
+  # Insert NEW messages and wait for several poll iterations.
+  sleep 1
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'alice', 'new-for-alice');"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'bob', 'new-for-bob');"
+  sleep 3
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+
+  grep -q "new-for-bob"   /tmp/agmsg-as-bob
+  ! grep -q "new-for-alice" /tmp/agmsg-as-bob
+  rm -f /tmp/agmsg-as-bob
+}
+
+@test "watch.sh exits when active_name is not registered" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  run bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code nobody
+  [[ "$output" =~ "no registration for agent 'nobody'" ]]
+}
+
+# --- session-start.sh orphan watcher cleanup ---
+
+@test "session-start.sh kills orphan watchers whose owning CC instance is gone" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # Orphan: watcher referenced by a cc-instance.<dead-pid> file.
+  sleep 30 &
+  local orphan_pid=$!
+  echo "$orphan_pid" > "$TEST_SKILL_DIR/run/watch.orphan-sid.pid"
+  # Use a PID that's almost certainly not in use as the dead CC ancestor.
+  local dead_cc_pid=999999
+  echo "orphan-sid" > "$TEST_SKILL_DIR/run/cc-instance.$dead_cc_pid"
+
+  # Untracked watcher: no cc-instance points to it. Conservative semantics
+  # leave it alone (we have no evidence the CC is dead).
+  sleep 30 &
+  local untracked_pid=$!
+  echo "$untracked_pid" > "$TEST_SKILL_DIR/run/watch.untracked-sid.pid"
+
+  echo "{\"session_id\":\"current-sid\"}" \
+    | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+
+  ! kill -0 "$orphan_pid" 2>/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.orphan-sid.pid" ]
+  [ ! -f "$TEST_SKILL_DIR/run/cc-instance.$dead_cc_pid" ]
+  # Untracked watcher untouched
+  kill -0 "$untracked_pid" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.untracked-sid.pid" ]
+  kill "$untracked_pid" 2>/dev/null || true
+}
+
+@test "session-start.sh does NOT kill a watcher when its session_id is still live under a different CC pid" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # The session moved from one CC pid to another (claude --continue / resume).
+  # cc-instance.<dead> still references the same session_id as
+  # cc-instance.<live>. The watcher must NOT be killed.
+  sleep 30 &
+  local watcher_pid=$!
+  echo "$watcher_pid" > "$TEST_SKILL_DIR/run/watch.shared-sid.pid"
+  local dead_cc=999999
+  echo "shared-sid" > "$TEST_SKILL_DIR/run/cc-instance.$dead_cc"
+  echo "shared-sid" > "$TEST_SKILL_DIR/run/cc-instance.$$"
+
+  echo "{\"session_id\":\"x\"}" \
+    | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+
+  kill -0 "$watcher_pid" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.shared-sid.pid" ]
+  [ ! -f "$TEST_SKILL_DIR/run/cc-instance.$dead_cc" ]
+  kill "$watcher_pid" 2>/dev/null || true
+}
+
+@test "watch.sh subscription is static — newly joined identities don't appear in a running watcher" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  DB="$TEST_SKILL_DIR/db/messages.db"
+
+  # Watcher starts with only `alice` registered. Default subscription set
+  # is resolved at launch and not re-evaluated each poll.
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 &
+  local pid=$!
+  sleep 1
+
+  # Join `bob` to the same (project, type) after the watcher is running.
+  bash "$SCRIPTS/join.sh" myteam bob claude-code "$TEST_PROJECT"
+
+  # Insert messages for both. alice should arrive (alice was in the original
+  # subscription set); bob should NOT arrive (joined after launch).
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'sys', 'alice', 'for-alice-static');"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'sys', 'bob',   'for-bob-static');"
+
+  sleep 3
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+
+  grep -q "for-alice-static" /tmp/agmsg-static
+  ! grep -q "for-bob-static" /tmp/agmsg-static
+  rm -f /tmp/agmsg-static
 }
