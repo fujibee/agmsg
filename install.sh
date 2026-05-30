@@ -94,6 +94,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   echo "  + updated scripts, templates, and SKILL.md"
   echo "  ~ DB and team configs preserved"
   echo ""
+  echo "  ! Restart any running agent sessions to pick up the updated scripts."
+  echo "    In-flight watch.sh processes keep the old code until they restart."
+  echo ""
   echo "  ✓ Update complete"
   echo ""
   exit 0
