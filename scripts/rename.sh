@@ -10,8 +10,9 @@ OLD_NAME="${2:?Missing old agent name}"
 NEW_NAME="${3:?Missing new agent name}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
-DB="$SCRIPT_DIR/../db/messages.db"
+DB="$(agmsg_db_path)"
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
 if [ ! -f "$TEAM_CONFIG" ]; then

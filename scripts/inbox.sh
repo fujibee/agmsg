@@ -12,7 +12,9 @@ if [ "${3:-}" = "--quiet" ]; then
   QUIET=true
 fi
 
-DB="$(cd "$(dirname "$0")/../db" && pwd)/messages.db"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
+DB="$(agmsg_db_path)"
 
 if [ ! -f "$DB" ]; then
   if [ "$QUIET" = true ]; then exit 0; fi

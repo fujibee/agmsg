@@ -34,7 +34,8 @@ ACTIVE_NAME="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DB="$SKILL_DIR/db/messages.db"
+source "$SCRIPT_DIR/lib/storage.sh"
+DB="$(agmsg_db_path)"
 RUN_DIR="$SKILL_DIR/run"
 PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
 

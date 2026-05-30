@@ -226,6 +226,21 @@ DB and team configs are preserved. Only scripts and assets are updated.
 
 Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 
+## Configuration
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGMSG_STORAGE_PATH` | `<skill>/db` | Directory holding the SQLite message store (`messages.db`). Override to relocate the store — handy for tests, sandboxes, or running isolated instances. |
+
+The message store path resolves as **`AGMSG_STORAGE_PATH` (env) > built-in default**. (A config-file layer is planned to slot in between the two as part of the storage-driver work; the intended order is env > config > default.) The override is scoped to the SQLite store only — team configs under `teams/` are unaffected.
+
+```bash
+# Run against an isolated store
+AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob "hi"
+```
+
 ## Tests
 
 ```bash

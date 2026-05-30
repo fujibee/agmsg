@@ -5,8 +5,9 @@ setup_test_env() {
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
-  # Copy all scripts to isolated skill dir
+  # Copy all scripts to isolated skill dir (including the lib/ helpers they source)
   cp "$BATS_TEST_DIRNAME"/../scripts/*.sh "$TEST_SKILL_DIR/scripts/"
+  cp -R "$BATS_TEST_DIRNAME"/../scripts/lib "$TEST_SKILL_DIR/scripts/lib"
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
 
   # Initialize DB

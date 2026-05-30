@@ -8,7 +8,9 @@ TEAM="${1:?Usage: history.sh <team> [agent_id] [limit]}"
 AGENT="${2:-}"
 LIMIT="${3:-20}"
 
-DB="$(cd "$(dirname "$0")/../db" && pwd)/messages.db"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
+DB="$(agmsg_db_path)"
 
 if [ ! -f "$DB" ]; then
   echo "No messages (DB not initialized)"
