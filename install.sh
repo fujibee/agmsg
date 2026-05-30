@@ -80,6 +80,8 @@ if [ "$UPDATE_ONLY" = true ]; then
   echo "  Updating $SKILL_NAME..."
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
   cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
+  mkdir -p "$SKILL_DIR/scripts/lib"
+  cp "$SCRIPT_DIR/scripts/lib/"*.sh "$SKILL_DIR/scripts/lib/"
   for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$tmpl" > "$SKILL_DIR/templates/$(basename "$tmpl")"
   done
@@ -118,6 +120,8 @@ mkdir -p "$SKILL_DIR"/{scripts,templates,db,agents}
 # SKILL.md is generated from the Codex command template (Codex reads SKILL.md directly)
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
 cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
+mkdir -p "$SKILL_DIR/scripts/lib"
+cp "$SCRIPT_DIR/scripts/lib/"*.sh "$SKILL_DIR/scripts/lib/"
 
 # Replace placeholder in templates with actual skill name
 for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
