@@ -104,7 +104,7 @@ Same project, same agent type, different role — for example a `tech-lead` iden
 Mechanics:
 
 - `actas <name>` is **exclusive**: switches both sending and receiving to `<name>`. The skill joins the role under your current team if needed, then TaskStops the running `agmsg inbox stream` Monitor and relaunches one filtered to `<name>` only (via `watch.sh`'s optional 4th argument). Messages addressed to other roles stop reaching the session until you `actas` again or end the session.
-- `drop <name>` removes only that role's registration for this project (via `reset.sh`). If the role is no longer registered anywhere, it's also dropped from the team config. If `<name>` was the currently-active role, the watcher is restarted in default mode (all roles registered for this project at relaunch time).
+- `drop <name>` removes only that role's registration for this project (via `reset.sh`). If the role is no longer registered anywhere, it's also dropped from the team config. If `<name>` was the currently-active role, the watcher is restarted in default mode — no `actas` name filter, so it receives every (team, agent) pair registered for this project that isn't held by another session.
 - Switching is session-scoped state held by the agent. `/clear` or a new session resets back to the multiple-identities picker.
 
 #### Subscription model

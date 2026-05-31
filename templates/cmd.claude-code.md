@@ -129,7 +129,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62).
-3. If the session's active FROM was `<name>`, clear that state. Then TaskStop the existing agmsg Monitor task and invoke a fresh Monitor with the default (all-roles) subscription:
+3. If the session's active FROM was `<name>`, clear that state. Then TaskStop the existing agmsg Monitor task and invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
     - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`
     - description: `agmsg inbox stream`
     - persistent: true
