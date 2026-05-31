@@ -65,3 +65,33 @@ teardown() {
   [[ "$output" =~ "status=ok" ]]
   [[ "$output" =~ "team=demo" ]]
 }
+
+# Regression: re-invoking Monitor for the same session_id used to leave the
+# previous watch.sh running but invisible to every cleanup pathway (pidfile
+# got overwritten). watch.sh now self-cleans the previous holder of its
+# pidfile at startup. See #66.
+@test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
+  local sid="resue-sid-$$"
+
+  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
+  local first=$!
+  # Give the first watcher long enough to write the pidfile and enter its
+  # poll loop. The sleep is short — if it's flaky, raise to 0.5s.
+  sleep 0.3
+  [ -f "$SK/run/watch.$sid.pid" ]
+  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$first" ]
+
+  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
+  local second=$!
+  sleep 0.3
+  # New pid wrote the pidfile.
+  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$second" ]
+  # And the previous one was actually killed.
+  run kill -0 "$first"
+  [ "$status" -ne 0 ]
+
+  kill "$second" 2>/dev/null || true
+  wait 2>/dev/null || true
+}

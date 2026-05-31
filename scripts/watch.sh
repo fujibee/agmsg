@@ -49,8 +49,28 @@ fi
 case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=5 ;; esac
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
+
+# Sequential re-invocation of Monitor for this same session_id leaves the
+# previous watch.sh running but loses track of it (pidfile gets clobbered).
+# Stop the prior holder before claiming the slot. ps args check defends
+# against pid recycling — only touch processes whose cmdline still matches
+# our watch.sh. See #66.
+if [ -f "$PIDFILE" ]; then
+  prev_pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && kill -0 "$prev_pid" 2>/dev/null; then
+    prev_cmd=$(ps -o args= -p "$prev_pid" 2>/dev/null || true)
+    case "$prev_cmd" in
+      *"$SKILL_DIR/scripts/watch.sh"*) kill "$prev_pid" 2>/dev/null || true ;;
+    esac
+  fi
+fi
+
 echo $$ > "$PIDFILE"
-trap 'rm -f "$PIDFILE"' EXIT
+# EXIT only removes the pidfile if it still records our pid. A successor
+# watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
+# with its own pid before killing us; without this guard our EXIT trap
+# would erase the successor's record. See #66.
+trap '[ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"' EXIT
 trap 'exit 0' INT TERM HUP
 
 # Resolve subscription set.
