@@ -48,3 +48,20 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "via override" ]]
 }
+
+# Regression: actas-claim.sh used to source lib/actas-lock.sh without first
+# setting SKILL_DIR, which made `: "${SKILL_DIR:?...}"` fire and the script
+# die in any fresh-shell invocation. bats tests passed because test_helper
+# pre-exports SKILL_DIR. This guards against that whole class of bug for
+# any directly-invoked script — invoke via `env -i` so nothing from the
+# bats environment leaks into the child shell.
+@test "install: actas-claim runs in a fresh shell with no inherited env" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
+
+  run env -i PATH=/usr/bin:/bin:/usr/local/bin HOME="$FAKE_HOME" \
+    bash "$SK/scripts/actas-claim.sh" /tmp/install-projA claude-code alice fresh-sid-1
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "status=ok" ]]
+  [[ "$output" =~ "team=demo" ]]
+}
