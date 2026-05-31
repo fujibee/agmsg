@@ -103,18 +103,19 @@ Same project, same agent type, different role — for example a `tech-lead` iden
 
 Mechanics:
 
-- `actas <name>` is **exclusive**: switches both sending and receiving to `<name>`. The skill joins the role under your current team if needed, then TaskStops the running `agmsg inbox stream` Monitor and relaunches one filtered to `<name>` only (via `watch.sh`'s optional 4th argument). Messages addressed to other roles stop reaching the session until you `actas` again or end the session.
+- `actas <name>` is **exclusive across sessions**: switches both sending and receiving to `<name>`. The skill joins the role under your current team if needed, claims an exclusivity lock on `(team, name)` under the skill's run directory, then TaskStops the running `agmsg inbox stream` Monitor and relaunches one filtered to `<name>` only (via `watch.sh`'s optional 4th argument). Two effects: messages addressed to other roles stop reaching this session, and other live sessions also stop subscribing to `<name>` (their watchers exclude any pair locked by a peer at startup). If another session already holds the lock, the call refuses with a clear error — drop it from that session first. The lock is released by `drop`, by session end, or by garbage collection when the holding session is no longer alive.
 - `drop <name>` removes only that role's registration for this project (via `reset.sh`). If the role is no longer registered anywhere, it's also dropped from the team config. If `<name>` was the currently-active role, the watcher is restarted in default mode — no `actas` name filter, so it receives every (team, agent) pair registered for this project that isn't held by another session.
 - Switching is session-scoped state held by the agent. `/clear` or a new session resets back to the multiple-identities picker.
+- **Codex caveat**: Codex sessions don't expose a stable `session_id` to slash commands, so `$agmsg actas <name>` on Codex sets the send-side role and updates this session's receive filter (via `check-inbox.sh`'s lock-aware skip), but does **not** claim a peer-visible exclusivity lock. Other live sessions therefore won't see Codex's actas — they'll still subscribe to `<name>` until Codex drops or exits. Claude Code's `/agmsg actas` does claim the lock symmetrically.
 
 #### Subscription model
 
 agmsg follows a **one CC session = one active role** model. Each watcher subscribes to a *static* set of identities decided at launch:
 
-- **Without `actas`**: the watcher subscribes to whichever `(team, agent)` pairs were registered for this `(project, agent_type)` at the moment `watch.sh` started. The set is *not* re-resolved later. A role joined mid-session via `actas` from another CC does *not* start arriving in CCs that were launched before it.
-- **After `actas <name>`**: the watcher is relaunched filtered to `<name>` only. Other registered roles stop arriving in this CC even if they pre-existed.
+- **Without `actas`**: the watcher subscribes to whichever `(team, agent)` pairs were registered for this `(project, agent_type)` at the moment `watch.sh` started, *minus* any pair currently locked by another live session's `actas` claim. The set is *not* re-resolved later — a peer that claims a name after this watcher launched will start receiving exclusively, but this watcher won't notice the loss until it restarts. A role joined mid-session via `actas` from another CC does *not* start arriving in CCs that were launched before it.
+- **After `actas <name>`**: the watcher is relaunched filtered to `<name>` only, and the lock that filter implies prevents peer watchers from ever subscribing to `<name>` while this session is live.
 
-This is intentional: it keeps each CC bound to one role's inbox, so a `tech-lead` window stays clear of `biz-analyst` traffic and vice versa — even when both roles are registered under the same project. To pick up a role added after a CC launched (without switching to it exclusively), restart the CC or `/clear` so SessionStart re-launches `watch.sh` with the fresh identity list.
+This is intentional: it keeps each CC bound to one role's inbox, so a `tech-lead` window stays clear of `biz-analyst` traffic and vice versa, and the exclusivity holds across sessions on the same machine rather than per-session. To pick up a role added after a CC launched (without switching to it exclusively), restart the CC or `/clear` so SessionStart re-launches `watch.sh` with the fresh identity list — and with the up-to-date lock view.
 
 The send side mirrors this: every `send.sh` call from this CC uses the active role as the `from` agent, whether that's the implicit one (default) or the one set by the most recent `actas`.
 

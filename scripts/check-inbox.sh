@@ -10,6 +10,8 @@ PROJECT="${2:?Missing project_path}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/actas-lock.sh"
 
 # Prevent infinite loop: if stop hook is already active, exit silently
 INPUT=$(cat 2>/dev/null || true)
@@ -92,6 +94,16 @@ if [ ! -f "$DB" ]; then exit 0; fi
 OUTPUT=""
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
+  # Honor actas exclusivity locks. If (team, AGENT) is currently held by
+  # another live session, that session is the owner of that role's inbox —
+  # don't deliver here. Mirrors the per-pair filtering watch.sh does for
+  # CC sessions (#62), giving Stop-hook delivery (codex / claude-code
+  # turn-mode) the same exclusivity guarantee.
+  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
+  case "$state" in
+    other:*) continue ;;
+  esac
+
   RESULT=$(sqlite3 "$DB" "
     SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL

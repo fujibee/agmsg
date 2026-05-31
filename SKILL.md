@@ -52,12 +52,30 @@ Do NOT manually edit config files. Always use join.sh.
 # their cached team name in any running session.
 ~/.agents/skills/__SKILL_NAME__/scripts/rename-team.sh <old_team> <new_team>
 
-# Clear registrations for the current project/type
-~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id]
+# Clear registrations for the current project/type.
+# A trailing <session_id> additionally releases any actas exclusivity locks
+# this session held on <agent_id> so peers can pick them up immediately.
+~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id] [session_id]
 
-# Enable/disable auto message checking (hook)
-~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on <type> "$(pwd)"
-~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off <type> "$(pwd)"
+# Set delivery mode for this project. Replaces the legacy hook.sh on/off,
+# which is kept as a deprecated alias only.
+#   monitor — real-time push via SessionStart + Monitor tool (claude-code only)
+#   turn    — Stop-hook pulls at the end of each assistant turn
+#   both    — monitor primary, turn as fallback
+#   off     — no automatic delivery
+~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> <type> "$(pwd)"
+~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status <type> "$(pwd)"
+
+# Multiple roles per project (one CC = one active role).
+# `actas` claims an exclusivity lock for <name> across sessions and restarts
+# the Monitor filtered to <name> only; peer watchers stop subscribing to
+# <name> while this session holds the lock. `drop` releases the lock.
+~/.agents/skills/__SKILL_NAME__/scripts/actas-claim.sh "$(pwd)" <type> <name> "$session_id"
+~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> <name> "$session_id"
+
+# (Both of the above are normally driven by `/agmsg actas <name>` and
+#  `/agmsg drop <name>` slash commands, which also handle the Monitor
+#  TaskStop + relaunch dance described in the cmd template.)
 ```
 
 ## Architecture
