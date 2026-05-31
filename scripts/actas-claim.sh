@@ -29,6 +29,7 @@ NAME="${3:?Missing name}"
 SESSION_ID="${4:?Missing session_id}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 
