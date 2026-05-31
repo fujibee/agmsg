@@ -118,10 +118,14 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
     - `status=ok ...`: proceed to step 5.
     - `status=held team=<team> owner=<sid>`: another live session currently owns `<name>` in `<team>`. Tell the user: "Cannot actas as `<name>` — it is held by session `<sid>` in team `<team>`. Run `/__SKILL_NAME__ drop <name>` in that session first, then retry." Then abort — do NOT touch the running Monitor.
     - `status=not_registered`: shouldn't happen if step 3 ran; treat as an error.
-5. **Switch receive too — exclusive role mode.** Find the running agmsg Monitor task with TaskList (description begins with "agmsg inbox stream") and TaskStop it. Then invoke a fresh Monitor:
-    - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`
-    - description: `agmsg inbox stream (acting as <name>)`
-    - persistent: true
+5. **Switch receive too — exclusive role mode.**
+   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
+   b. **If a matching task is found**: TaskStop it.
+   c. **If no matching task is found** (typical when /__SKILL_NAME__ actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop entirely. There is no Monitor to stop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow.
+   d. Invoke a fresh Monitor regardless of whether step b or c applied:
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`
+      - description: `agmsg inbox stream (acting as <name>)`
+      - persistent: true
    The 4th argument to `watch.sh` restricts the subscription to messages addressed to `<name>` only — other roles' inbound messages stop reaching this session until another `actas` or session end.
 6. Set the session's active FROM to `<name>` — use `<name>` in every `send.sh` call for the rest of this session.
 7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from; receive restricted to `<name>` only."
@@ -129,10 +133,14 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62).
-3. If the session's active FROM was `<name>`, clear that state. Then TaskStop the existing agmsg Monitor task and invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
-    - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`
-    - description: `agmsg inbox stream`
-    - persistent: true
+3. If the session's active FROM was `<name>`, clear that state. Then:
+   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
+   b. **If a matching task is found**: TaskStop it.
+   c. **If no matching task is found**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
+   d. Invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`
+      - description: `agmsg inbox stream`
+      - persistent: true
 4. Tell the user: "Dropped role `<name>` from this project."
 
 If argument is "mode" (no further args):
