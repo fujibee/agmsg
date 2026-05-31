@@ -121,22 +121,36 @@ _actas_lock_try_claim() {
 #   1  — held by another live session. Stdout: "held:<other_sid>".
 actas_lock_claim() {
   local team="$1" agent="$2" sid="$3"
-  local attempts=0 result lock_path stale_tmp
+  local attempts=0 result lock_path reclaim_dir _owner
   lock_path="$(actas_lock_path "$team" "$agent")"
+  reclaim_dir="${lock_path}.reclaim.d"
   while [ "$attempts" -lt 3 ]; do
     result="$(_actas_lock_try_claim "$team" "$agent" "$sid")"
     case "$result" in
       ok) return 0 ;;
       stale)
-        # Atomically claim the stale slot via rename. Whichever caller wins
-        # the mv is the one allowed to retry — anyone else's mv fails (file
-        # already gone) and they'll loop into try_claim which then sees the
-        # winner's fresh lock. Without this guard, two concurrent callers
-        # could both observe stale, both call `rm`, and the second `rm`
-        # would erase the first's just-created live lock — a real exclusivity
-        # violation (#65 review, finding 1).
-        stale_tmp="${lock_path}.stale.$$.$attempts"
-        mv "$lock_path" "$stale_tmp" 2>/dev/null && rm -f "$stale_tmp"
+        # Stale removal needs a re-check-under-mutex. A naked rm (or even an
+        # atomic mv) reads-then-removes whatever sits at lock_path, with no
+        # guard that the contents are still the stale value we decided on
+        # earlier. So two concurrent callers can both see stale, A can
+        # successfully install a live lock, and B's later rm/mv would delete
+        # A's fresh lock — the original blocker from #65 review finding 1,
+        # and the same hazard the mv-only variant inherited.
+        #
+        # Per-lock mutex via `mkdir` (atomic on POSIX). Re-check inside it:
+        # only remove the lock if its current owner is still dead. If a peer
+        # snuck a live owner in between our stale decision and the mutex,
+        # leave it — the next try_claim observes it as held.
+        if mkdir "$reclaim_dir" 2>/dev/null; then
+          _owner="$(actas_lock_owner "$team" "$agent")"
+          if [ -z "$_owner" ] || ! actas_lock_sid_alive "$_owner"; then
+            rm -f "$lock_path"
+          fi
+          rmdir "$reclaim_dir" 2>/dev/null
+        fi
+        # If mkdir failed, another caller is mid-reclaim. Loop without
+        # touching anything; the next try_claim sees whichever state they
+        # end up in (live → held, or empty → we ln-claim).
         attempts=$((attempts + 1))
         continue
         ;;

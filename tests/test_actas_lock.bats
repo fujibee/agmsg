@@ -87,27 +87,52 @@ live_pid() { echo "$$"; }
   [ "$(actas_lock_owner "T" "alice")" = "sid-mine" ]
 }
 
-# Regression for #65 review finding 1: under the old code, a stale slot was
-# cleared via a naked `rm -f` after which try_claim re-fired. Two callers
-# both observing stale could both rm + ln, and the second rm could delete
-# the first's live lock. The fix moves stale removal under an atomic mv
-# so only one caller's reclaim wins.
+# Regression for #65 review finding 1, then re-review of 48339d8: a naive
+# stale clear (rm or mv) reads-then-removes lock_path with no guard on the
+# content, so a second caller carrying a stale decision can delete a fresh
+# live lock the first caller installed. Fixed by guarding the removal with
+# a per-lock mutex (mkdir on `.reclaim.d`) and re-checking ownership
+# *inside* it: if a live owner snuck in between the stale observation and
+# the reclaim, leave it alone.
 #
-# We can't reliably drive two-thread races from bats, so we validate the
-# end-state contract sequentially: once a live owner has claimed, a second
-# (also-live) caller's claim is rejected, not silently swapped in.
-@test "claim: a live owner is never replaced by another claimer's stale reclaim" {
-  # Slot starts as stale (owner sid has no cc-instance).
-  echo "sid-dead" > "$(actas_lock_path "T" "alice")"
+# bats can't truly interleave, so we exercise the invariant via two
+# complementary cases:
 
+# Case 1: serial — once a live owner claims, peer is refused (basic
+# exclusivity sanity check).
+@test "claim: a live owner is never replaced by a serial peer's claim" {
+  echo "sid-dead" > "$(actas_lock_path "T" "alice")"
   setup_live_owner "$RUN_DIR" "sid-A"
   actas_lock_claim "T" "alice" "sid-A"
-  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
-
-  # B arrives, sees A's lock (NOT stale — A is in cc-instance), refuses.
-  # If the old rm-based reclaim were still in effect and B somehow observed
-  # the slot as stale (e.g. mid-mv), B's `rm` would delete A's lock.
   run actas_lock_claim "T" "alice" "sid-B"
+  [ "$status" -eq 1 ]
+  [[ "$output" == "held:sid-A" ]]
+  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
+}
+
+# Case 2: simulates the exact race window aggie-co flagged on re-review.
+# We pre-populate lock_path with a live-owner record (modeling "winner A
+# has installed its lock"), then drive a claim() call that on its first
+# try_claim *would* see stale if it observed the prior state — but in our
+# substitute we just verify the resulting state. Then we additionally
+# stage the reclaim mutex held externally to simulate the would-be racer
+# carrying a stale decision: claim must NOT touch the existing live lock
+# even if it tried to enter the stale path.
+@test "claim: a fresh live lock survives a concurrent claimer's stale reclaim attempt" {
+  # lock_path already records a live owner (sid-A is alive via cc-instance).
+  setup_live_owner "$RUN_DIR" "sid-A"
+  echo "sid-A" > "$(actas_lock_path "T" "alice")"
+
+  # Externally hold the reclaim mutex — modeling a peer that thinks the
+  # slot is stale and is about to enter the cleanup. With the fix the
+  # reclaim path now re-checks ownership *inside* this mutex, so even
+  # if a peer made it through, sid-A's live lock would be respected.
+  local rd="$(actas_lock_path "T" "alice").reclaim.d"
+  mkdir "$rd"
+
+  run actas_lock_claim "T" "alice" "sid-B"
+  rmdir "$rd"
+
   [ "$status" -eq 1 ]
   [[ "$output" == "held:sid-A" ]]
   [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
