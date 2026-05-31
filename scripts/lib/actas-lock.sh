@@ -28,16 +28,28 @@
 
 _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
 
-# Sanitize a team or agent name for use in a filename. We're conservative:
-# anything outside [A-Za-z0-9._-] becomes "_". Long names are preserved.
-_actas_lock_sanitize() {
-  printf '%s' "$1" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/_/g'
+# Encode a team or agent name into a filesystem-safe form. Anything outside
+# [A-Za-z0-9._-] is percent-encoded byte-by-byte (UTF-8 safe, reversible).
+# An earlier underscore-replacement scheme was lossy: "foo bar" and "foo_bar"
+# collided on the same lock file, as did every Japanese team name (every
+# non-ASCII byte mapped to "_"). #65 review, finding 2.
+_actas_lock_encode() {
+  printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { for (n = 0; n < 256; n++) ord[sprintf("%c", n)] = n }
+    {
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c ~ /[A-Za-z0-9._\-]/) printf "%s", c
+        else printf "%%%02X", ord[c]
+      }
+    }
+  '
 }
 
 # Compute the lock file path for (team, agent).
 actas_lock_path() {
   local team="$1" agent="$2"
-  local t a; t="$(_actas_lock_sanitize "$team")"; a="$(_actas_lock_sanitize "$agent")"
+  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a"
 }
 
@@ -109,13 +121,22 @@ _actas_lock_try_claim() {
 #   1  — held by another live session. Stdout: "held:<other_sid>".
 actas_lock_claim() {
   local team="$1" agent="$2" sid="$3"
-  local attempts=0 result
+  local attempts=0 result lock_path stale_tmp
+  lock_path="$(actas_lock_path "$team" "$agent")"
   while [ "$attempts" -lt 3 ]; do
     result="$(_actas_lock_try_claim "$team" "$agent" "$sid")"
     case "$result" in
       ok) return 0 ;;
       stale)
-        rm -f "$(actas_lock_path "$team" "$agent")"
+        # Atomically claim the stale slot via rename. Whichever caller wins
+        # the mv is the one allowed to retry — anyone else's mv fails (file
+        # already gone) and they'll loop into try_claim which then sees the
+        # winner's fresh lock. Without this guard, two concurrent callers
+        # could both observe stale, both call `rm`, and the second `rm`
+        # would erase the first's just-created live lock — a real exclusivity
+        # violation (#65 review, finding 1).
+        stale_tmp="${lock_path}.stale.$$.$attempts"
+        mv "$lock_path" "$stale_tmp" 2>/dev/null && rm -f "$stale_tmp"
         attempts=$((attempts + 1))
         continue
         ;;

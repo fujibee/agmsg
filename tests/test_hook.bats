@@ -134,10 +134,7 @@ print(len(d['hooks']['Stop']))
   bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
   bash "$SCRIPTS/send.sh" testteam bob alice "should not be delivered here"
 
-  # Fake a peer session that owns alice in testteam. cc-instance pinned to
-  # the bats process pid so kill -0 reports it alive.
-  mkdir -p "$TEST_SKILL_DIR/run"
-  echo "peer-sid" > "$TEST_SKILL_DIR/run/cc-instance.$$"
+  setup_live_owner "$TEST_SKILL_DIR/run" "peer-sid"
   echo "peer-sid" > "$TEST_SKILL_DIR/run/actas.testteam__alice.session"
 
   run bash -c "echo '{\"session_id\":\"mine-sid\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
@@ -150,8 +147,7 @@ print(len(d['hooks']['Stop']))
   bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
   bash "$SCRIPTS/send.sh" testteam bob alice "I am the owner"
 
-  mkdir -p "$TEST_SKILL_DIR/run"
-  echo "mine-sid" > "$TEST_SKILL_DIR/run/cc-instance.$$"
+  setup_live_owner "$TEST_SKILL_DIR/run" "mine-sid"
   echo "mine-sid" > "$TEST_SKILL_DIR/run/actas.testteam__alice.session"
 
   run bash -c "echo '{\"session_id\":\"mine-sid\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"

@@ -5,6 +5,8 @@
 # gets validated. Catches packaging drift — e.g. a new scripts/lib/ helper that
 # the installer forgets to copy, which would make every command die at `source`.
 
+load test_helper  # for setup_live_owner
+
 setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"

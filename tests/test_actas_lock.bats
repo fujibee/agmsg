@@ -25,18 +25,33 @@ fake_cc_instance() {
 # inside command substitution.
 live_pid() { echo "$$"; }
 
-# --- path / sanitization ---
+# --- path encoding ---
 
-@test "actas_lock_path: sanitizes special chars in team/agent" {
+@test "actas_lock_path: percent-encodes special bytes in team/agent" {
   local p
   p=$(actas_lock_path "team/foo" "ag ent")
-  [[ "$p" == "$RUN_DIR/actas.team_foo__ag_ent.session" ]]
+  [[ "$p" == "$RUN_DIR/actas.team%2Ffoo__ag%20ent.session" ]]
 }
 
 @test "actas_lock_path: leaves safe chars alone" {
   local p
   p=$(actas_lock_path "team-A.1" "agent_B")
   [[ "$p" == "$RUN_DIR/actas.team-A.1__agent_B.session" ]]
+}
+
+# Regression for #65 review finding 2: the old underscore-replacement scheme
+# made "foo bar" and "foo_bar" map to the same lock file. With percent
+# encoding the two are unambiguous.
+@test "actas_lock_path: names that collided under the old scheme are now distinct" {
+  [ "$(actas_lock_path "foo bar" alice)" != "$(actas_lock_path "foo_bar" alice)" ]
+  [ "$(actas_lock_path "a/b"   alice)" != "$(actas_lock_path "a_b"     alice)" ]
+}
+
+@test "actas_lock_path: encodes non-ASCII (UTF-8) bytes" {
+  local p
+  p=$(actas_lock_path "チーム" alice)
+  # "チ" = E3 83 81, so the encoded prefix must contain that triple.
+  [[ "$p" == *"%E3%83%81%E3%83%BC%E3%83%A0"* ]]
 }
 
 # --- claim / state ---
@@ -70,6 +85,32 @@ live_pid() { echo "$$"; }
   run actas_lock_claim "T" "alice" "sid-mine"
   [ "$status" -eq 0 ]
   [ "$(actas_lock_owner "T" "alice")" = "sid-mine" ]
+}
+
+# Regression for #65 review finding 1: under the old code, a stale slot was
+# cleared via a naked `rm -f` after which try_claim re-fired. Two callers
+# both observing stale could both rm + ln, and the second rm could delete
+# the first's live lock. The fix moves stale removal under an atomic mv
+# so only one caller's reclaim wins.
+#
+# We can't reliably drive two-thread races from bats, so we validate the
+# end-state contract sequentially: once a live owner has claimed, a second
+# (also-live) caller's claim is rejected, not silently swapped in.
+@test "claim: a live owner is never replaced by another claimer's stale reclaim" {
+  # Slot starts as stale (owner sid has no cc-instance).
+  echo "sid-dead" > "$(actas_lock_path "T" "alice")"
+
+  setup_live_owner "$RUN_DIR" "sid-A"
+  actas_lock_claim "T" "alice" "sid-A"
+  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
+
+  # B arrives, sees A's lock (NOT stale — A is in cc-instance), refuses.
+  # If the old rm-based reclaim were still in effect and B somehow observed
+  # the slot as stale (e.g. mid-mv), B's `rm` would delete A's lock.
+  run actas_lock_claim "T" "alice" "sid-B"
+  [ "$status" -eq 1 ]
+  [[ "$output" == "held:sid-A" ]]
+  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
 }
 
 # --- liveness ---

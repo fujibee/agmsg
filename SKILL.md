@@ -67,9 +67,11 @@ Do NOT manually edit config files. Always use join.sh.
 ~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status <type> "$(pwd)"
 
 # Multiple roles per project (one CC = one active role).
-# `actas` claims an exclusivity lock for <name> across sessions and restarts
-# the Monitor filtered to <name> only; peer watchers stop subscribing to
-# <name> while this session holds the lock. `drop` releases the lock.
+# Claude Code: `actas` claims an exclusivity lock for <name> across sessions
+# and restarts the Monitor filtered to <name> only; peer watchers stop
+# subscribing to <name> while this session holds the lock. `drop` releases.
+# Codex: actas is send-side only (no stable session_id during slash commands
+# → no peer-visible lock). See README "Codex caveat" for details.
 ~/.agents/skills/__SKILL_NAME__/scripts/actas-claim.sh "$(pwd)" <type> <name> "$session_id"
 ~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> <name> "$session_id"
 
