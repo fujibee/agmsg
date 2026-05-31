@@ -22,6 +22,8 @@ PROJECT="${2:?Missing project_path}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/actas-lock.sh"
 
 INPUT=$(cat 2>/dev/null || true)
 SESSION_ID=""
@@ -56,5 +58,9 @@ for f in "$RUN_DIR"/cc-instance.*; do
   state=$(cat "$f" 2>/dev/null || true)
   [ "$state" = "$SESSION_ID" ] && rm -f "$f"
 done
+
+# Release any actas exclusivity locks owned by this session so peers can
+# reclaim those identities on their next watcher cycle. See #62.
+actas_lock_release_all "$SESSION_ID" 2>/dev/null || true
 
 exit 0
