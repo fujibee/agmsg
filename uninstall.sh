@@ -143,6 +143,23 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
         fi
       done
     done <<< "$projects"
+
+    # --- Copilot CLI project-scoped hook file cleanup ---
+    copilot_projects=$(sqlite3 -separator '	' :memory: \
+      ".param set :json '$(sed "s/'/''/g" "$config")'" \
+      "SELECT json_extract(value, '$.project') FROM json_each(json_extract(:json, '$.agents'))
+       WHERE json_extract(value, '$.type') = 'copilot'
+         AND json_extract(value, '$.project') IS NOT NULL;" 2>/dev/null || true)
+
+    while IFS= read -r project; do
+      [ -n "$project" ] || continue
+      copilot_hook="$project/.github/hooks/agmsg.json"
+      if [ -f "$copilot_hook" ] && grep -q "$(basename "$SKILL_DIR")" "$copilot_hook" 2>/dev/null; then
+        rm "$copilot_hook"
+        echo "  - removed agmsg Copilot hook from $project"
+        REMOVED=true
+      fi
+    done <<< "$copilot_projects"
   done
 done
 
@@ -153,6 +170,17 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   if [ -f "$CC_CMD" ]; then
     rm "$CC_CMD"
     echo "  - removed /$SKILL_NAME from ~/.claude/commands/"
+    REMOVED=true
+  fi
+done
+
+# --- 2b. Remove Copilot CLI skill ---
+for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+  SKILL_NAME="$(basename "$SKILL_DIR")"
+  COPILOT_SKILL="$HOME/.copilot/skills/$SKILL_NAME"
+  if [ -d "$COPILOT_SKILL" ]; then
+    rm -rf "$COPILOT_SKILL"
+    echo "  - removed /$SKILL_NAME skill from ~/.copilot/skills/"
     REMOVED=true
   fi
 done

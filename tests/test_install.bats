@@ -72,6 +72,38 @@ teardown() {
 # previous watch.sh running but invisible to every cleanup pathway (pidfile
 # got overwritten). watch.sh now self-cleans the previous holder of its
 # pidfile at startup. See #66.
+@test "install: drops a Copilot SKILL.md when ~/.copilot exists" {
+  mkdir -p "$FAKE_HOME/.copilot"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local copilot_skill="$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
+  [ -f "$copilot_skill" ]
+  # The Copilot SKILL.md must drive whoami with type=copilot, not codex,
+  # otherwise Copilot sessions get mis-identified.
+  grep -q "whoami.sh \"\$(pwd)\" copilot" "$copilot_skill"
+  ! grep -q "whoami.sh \"\$(pwd)\" codex" "$copilot_skill"
+  # Frontmatter has the substituted skill name.
+  grep -q "^name: agmsg" "$copilot_skill"
+}
+
+@test "install: skips Copilot skill when ~/.copilot is absent" {
+  # Make sure ~/.copilot isn't there
+  rm -rf "$FAKE_HOME/.copilot"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.copilot" ]
+}
+
+@test "install --update: refreshes the Copilot skill if it was previously installed" {
+  mkdir -p "$FAKE_HOME/.copilot"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local copilot_skill="$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
+  [ -f "$copilot_skill" ]
+  # Mutate the file so we can verify --update overwrites.
+  echo "tampered" > "$copilot_skill"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  ! grep -q "^tampered$" "$copilot_skill"
+  grep -q "whoami.sh \"\$(pwd)\" copilot" "$copilot_skill"
+}
+
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA

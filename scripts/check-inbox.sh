@@ -72,14 +72,16 @@ if [ -f "$MARKER" ]; then
   [ -z "$INTERVAL" ] && INTERVAL=$("$SCRIPT_DIR/config.sh" get hook.check_interval 60)
   case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=60 ;; esac
   if [ $(( now - last )) -lt "$INTERVAL" ]; then
-    if [ "$TYPE" = "codex" ]; then
-      cat <<'ENDJSON'
+    case "$TYPE" in
+      codex|copilot)
+        cat <<'ENDJSON'
 {
   "continue": true,
   "systemMessage": "agmsg: check skipped (cooldown)"
 }
 ENDJSON
-    fi
+        ;;
+    esac
     exit 0
   fi
 fi
@@ -129,14 +131,16 @@ done
 
 # No new messages
 if [ -z "$OUTPUT" ]; then
-  if [ "$TYPE" = "codex" ]; then
-    cat <<'ENDJSON'
+  case "$TYPE" in
+    codex|copilot)
+      cat <<'ENDJSON'
 {
   "continue": true,
   "systemMessage": "agmsg: no new messages"
 }
 ENDJSON
-  fi
+      ;;
+  esac
   exit 0
 fi
 

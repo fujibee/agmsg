@@ -8,7 +8,7 @@ set -euo pipefail
 # Not joined:      not_joined=true available_teams=<t1,t2,...> (or "none")
 #
 # Usage: whoami.sh <project_path> <type>
-#   type: claude-code, codex, gemini, etc.
+#   type: claude-code, codex, gemini, antigravity, copilot
 
 PROJECT_PATH="${1:?Usage: whoami.sh <project_path> <type>}"
 AGENT_TYPE="${2:?Usage: whoami.sh <project_path> <type>}"

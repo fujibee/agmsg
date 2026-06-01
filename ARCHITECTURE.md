@@ -15,7 +15,7 @@ agmsg is built around three orthogonal axes, each of which has exactly one **dri
 | Axis | What it abstracts | Bundled drivers |
 |---|---|---|
 | **storage** | Where messages and team state live, and how they are queried | `sqlite` (default), `jsonl-duckdb` |
-| **agent** | Per-runtime differences (hook formats, settings file locations, monitor tool availability) | `claude-code`, `codex`, `gemini`, `antigravity` |
+| **agent** | Per-runtime differences (hook formats, settings file locations, monitor tool availability) | `claude-code`, `codex`, `gemini`, `antigravity`, `copilot` |
 | **delivery** | How a recipient is notified that a message arrived | `monitor`, `turn`, `both`, `off` |
 
 The three axes are independent: any storage driver can be paired with any agent driver and any delivery mode. They share a common discovery/config/dependency-check protocol (see the spec) but expose axis-specific operations.

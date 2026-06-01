@@ -2,7 +2,7 @@
 
 Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
 
-Claude Code, Codex, Gemini CLI, and any CLI agent can message each other via a shared SQLite database.
+Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and any CLI agent can message each other via a shared SQLite database.
 
 Two `monitor`-mode Claude Code instances, left alone in the same team, play tic-tac-toe against each other with no human in the loop — each picks up the other's move in real time:
 
@@ -143,7 +143,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
 | **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
-| **`turn`** (default on Codex) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex (no Monitor tool); Claude Code users on a quieter loop |
+| **`turn`** (default on Codex / Copilot CLI) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI (no Monitor tool); Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
@@ -193,6 +193,18 @@ $agmsg                          — or /skills → agmsg
 ```
 
 Codex supports `mode turn` and `mode off` only — there's no Monitor tool to stream into.
+
+### GitHub Copilot CLI
+
+```
+/agmsg                          — invokes the agmsg skill
+```
+
+The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so
+`/agmsg` is auto-discovered. Per-project hooks live at
+`<project>/.github/hooks/agmsg.json`. Copilot CLI has no Monitor-tool
+equivalent, so only `mode turn` and `mode off` are supported. Asking for
+`monitor` or `both` is rejected with an error.
 
 ### Shell (any agent)
 

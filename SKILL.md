@@ -1,6 +1,6 @@
 ---
 name: agmsg
-description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
+description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
 ---
 
 # Agent Messaging
@@ -13,7 +13,7 @@ description: Cross-agent messaging via SQLite. Send messages between Claude Code
 
 ```bash
 ~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" <type>
-# type: claude-code, codex, gemini
+# type: claude-code, codex, gemini, antigravity, copilot
 # Returns: agent=... / multiple=true ... / suggest=true ... / not_joined=true ...
 ```
 

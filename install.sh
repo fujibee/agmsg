@@ -89,6 +89,13 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.claude-code.md" > "$CC_COMMANDS_DIR/$SKILL_NAME.md"
   fi
+  # Refresh the Copilot CLI skill (Copilot reads SKILL.md from its own skills
+  # dir; the shared ~/.agents/skills/<name>/SKILL.md is Codex-typed and would
+  # mis-identify the agent as codex when invoked from Copilot).
+  COPILOT_SKILL_DIR="$HOME/.copilot/skills/$SKILL_NAME"
+  if [ -d "$HOME/.copilot" ] && [ -f "$COPILOT_SKILL_DIR/SKILL.md" ]; then
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
+  fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
   echo "  + updated scripts, templates, and SKILL.md"
@@ -154,6 +161,17 @@ if [ -d "$HOME/.claude" ]; then
   echo "  + installed /$CMD_NAME command to ~/.claude/commands/"
 fi
 
+# --- Install Copilot CLI skill ---
+# Copilot loads SKILL.md from ~/.copilot/skills/<name>/. The shared
+# ~/.agents/skills/<name>/SKILL.md is Codex-typed (whoami ... codex) and
+# would mis-identify a Copilot session — keep the Copilot copy separate.
+COPILOT_SKILL_DIR="$HOME/.copilot/skills/$CMD_NAME"
+if [ -d "$HOME/.copilot" ]; then
+  mkdir -p "$COPILOT_SKILL_DIR"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
+  echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
+fi
+
 # --- Configure Codex sandbox (if Codex is installed) ---
 CODEX_CONFIG="$HOME/.codex/config.toml"
 if [ -f "$CODEX_CONFIG" ]; then
@@ -208,6 +226,7 @@ echo "    1. Restart your agent (Claude Code / Codex) to pick up the new skill"
 echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
+echo "       Copilot CLI:  /$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"

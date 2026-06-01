@@ -518,6 +518,86 @@ JSON
   [[ "$output" =~ "mode: turn" ]]
 }
 
+# --- copilot agent tests ---
+
+@test "delivery set turn (copilot): writes .github/hooks/agmsg.json with version + Stop entry" {
+  run bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  local hook_file="$TEST_PROJECT/.github/hooks/agmsg.json"
+  [ -f "$hook_file" ]
+  # JSON sanity: version=1, Stop entry references check-inbox.sh
+  local v
+  v=$(sqlite3 :memory: "SELECT json_extract(readfile('$hook_file'), '\$.version');")
+  [ "$v" = "1" ]
+  local cmd
+  cmd=$(sqlite3 :memory: "SELECT json_extract(readfile('$hook_file'), '\$.hooks.Stop[0].bash');")
+  [[ "$cmd" =~ "check-inbox.sh" ]]
+  [[ "$cmd" =~ "copilot" ]]
+}
+
+@test "delivery set off (copilot): removes the hook file" {
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+  run bash "$SCRIPTS/delivery.sh" set off copilot "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+}
+
+@test "delivery set monitor (copilot): rejected; no hook file written" {
+  run bash "$SCRIPTS/delivery.sh" set monitor copilot "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+  [ ! -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+}
+
+@test "delivery set both (copilot): rejected" {
+  run bash "$SCRIPTS/delivery.sh" set both copilot "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+}
+
+@test "delivery status (copilot): derives mode from hook file existence" {
+  run bash "$SCRIPTS/delivery.sh" status copilot "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
+
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" status copilot "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+}
+
+@test "delivery set turn (copilot): idempotent across repeats" {
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  local n
+  n=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$TEST_PROJECT/.github/hooks/agmsg.json'), '\$.hooks.Stop'));")
+  [ "$n" = "1" ]
+}
+
+@test "check-inbox (copilot): emits JSON cooldown message inside cooldown window" {
+  bash "$SCRIPTS/join.sh" testteam alice copilot "$TEST_PROJECT"
+  # Prime the cooldown marker
+  echo '{}' | bash "$SCRIPTS/check-inbox.sh" copilot "$TEST_PROJECT" >/dev/null
+  # Second call within cooldown: copilot should get JSON, not silence
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' copilot '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "agmsg: check skipped (cooldown)" ]]
+  [[ "$output" =~ "\"continue\"" ]]
+}
+
+@test "check-inbox (copilot): emits decision=block JSON when new messages arrive" {
+  bash "$SCRIPTS/join.sh" testteam alice copilot "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   copilot "$TEST_PROJECT"
+  # Push cooldown window into the past so the first invocation is not skipped.
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "ping copilot"
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' copilot '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "\"decision\": \"block\"" ]]
+  [[ "$output" =~ "ping copilot" ]]
+}
+
 
 
 
