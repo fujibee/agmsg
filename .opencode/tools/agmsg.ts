@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin"
 
-const SKILL_DIR = process.env.HOME + "/.agents/skills/agmsg"
+const SKILL_DIR = process.env.AGMSG_SKILL_DIR || process.env.HOME + "/.agents/skills/agmsg"
 const SKILL_NAME = "agmsg"
 
 function sh(script: string, ...args: string[]) {
