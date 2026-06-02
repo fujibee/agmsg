@@ -30,6 +30,8 @@ PROJECT="${2:?Missing project_path}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/actas-lock.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -138,6 +140,12 @@ for f in "$RUN_DIR"/watch.*.pid; do
   fi
   kill -0 "$pid" 2>/dev/null || rm -f "$f"
 done
+
+# Garbage-collect actas exclusivity locks whose owner session_id no longer
+# maps to a live cc-instance. Must run after the dead cc-instance cleanup
+# above, since the liveness check enumerates the remaining cc-instance.*
+# files. See #62.
+actas_lock_gc_stale >/dev/null 2>&1 || true
 
 
 # --- Dedup against the previous watcher in this CC instance. ---

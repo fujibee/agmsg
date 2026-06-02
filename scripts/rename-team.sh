@@ -17,8 +17,9 @@ if [ "$OLD_TEAM" = "$NEW_TEAM" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
-DB="$SCRIPT_DIR/../db/messages.db"
+DB="$(agmsg_db_path)"
 OLD_DIR="$TEAMS_DIR/$OLD_TEAM"
 NEW_DIR="$TEAMS_DIR/$NEW_TEAM"
 

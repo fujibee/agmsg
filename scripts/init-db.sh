@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB_DIR="$(cd "$(dirname "$0")/../db" && pwd)"
-DB="$DB_DIR/messages.db"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
+DB="$(agmsg_db_path)"
+DB_DIR="$(dirname "$DB")"
+mkdir -p "$DB_DIR"
 
 if [ ! -f "$DB" ]; then
   sqlite3 "$DB" <<'SQL'

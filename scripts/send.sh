@@ -8,10 +8,12 @@ FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
 BODY="${4:?Missing message body}"
 
-DB="$(cd "$(dirname "$0")/../db" && pwd)/messages.db"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/storage.sh"
+DB="$(agmsg_db_path)"
 
 if [ ! -f "$DB" ]; then
-  bash "$(dirname "$0")/init-db.sh"
+  bash "$SCRIPT_DIR/init-db.sh"
 fi
 
 sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$TEAM', '$FROM', '$TO', '$(echo "$BODY" | sed "s/'/''/g")');"

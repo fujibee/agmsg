@@ -9,22 +9,11 @@ description: Cross-agent messaging via SQLite. Send messages between Claude Code
 
 ## How to use
 
-### OpenCode
-
-OpenCode provides `agmsg_*` custom tools (from `.opencode/tools/agmsg.ts`) for messaging.
-Available tools: `agmsg_whoami`, `agmsg_join`, `agmsg_inbox`, `agmsg_send`, `agmsg_history`, `agmsg_team`, `agmsg_mode`.
-
-**First-time setup:** Call `agmsg_whoami` → if not joined, ask user for team/agent → `agmsg_join` → ask for delivery mode → `agmsg_mode`.
-
-**Daily use (no arguments):** Call `agmsg_inbox` for each team. Do NOT ask — just run it.
-
-### Claude Code / Codex / Gemini CLI
-
 ### Step 1: Check identity
 
 ```bash
 ~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" <type>
-# type: claude-code, codex, gemini, antigravity, opencode
+# type: claude-code, codex, gemini
 # Returns: agent=... / multiple=true ... / suggest=true ... / not_joined=true ...
 ```
 
@@ -63,21 +52,35 @@ Do NOT manually edit config files. Always use join.sh.
 # their cached team name in any running session.
 ~/.agents/skills/__SKILL_NAME__/scripts/rename-team.sh <old_team> <new_team>
 
-# Clear registrations for the current project/type
-~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id]
+# Clear registrations for the current project/type.
+# A trailing <session_id> additionally releases any actas exclusivity locks
+# this session held on <agent_id> so peers can pick them up immediately.
+~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> [agent_id] [session_id]
 
-# Enable/disable auto message checking (hook)
-~/.agents/skills/__SKILL_NAME__/scripts/hook.sh on <type> "$(pwd)"
-~/.agents/skills/__SKILL_NAME__/scripts/hook.sh off <type> "$(pwd)"
+# Set delivery mode for this project. Replaces the legacy hook.sh on/off,
+# which is kept as a deprecated alias only.
+#   monitor — real-time push via SessionStart + Monitor tool (claude-code only)
+#   turn    — Stop-hook pulls at the end of each assistant turn
+#   both    — monitor primary, turn as fallback
+#   off     — no automatic delivery
+~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> <type> "$(pwd)"
+~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status <type> "$(pwd)"
+
+# Multiple roles per project (one CC = one active role).
+# Claude Code: `actas` claims an exclusivity lock for <name> across sessions
+# and restarts the Monitor filtered to <name> only; peer watchers stop
+# subscribing to <name> while this session holds the lock. `drop` releases.
+# Codex: actas is send-side only (no stable session_id during slash commands
+# → no peer-visible lock). See README "Codex caveat" for details.
+~/.agents/skills/__SKILL_NAME__/scripts/actas-claim.sh "$(pwd)" <type> <name> "$session_id"
+~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" <type> <name> "$session_id"
+
+# (Both of the above are normally driven by `/agmsg actas <name>` and
+#  `/agmsg drop <name>` slash commands, which also handle the Monitor
+#  TaskStop + relaunch dance described in the cmd template.)
 ```
 
 ## Architecture
-
-### OpenCode integration
-The `.opencode/tools/agmsg.ts` file provides custom tools that wrap the agmsg shell scripts.
-Install by copying or symlinking to the project's `.opencode/tools/` directory, or globally to `~/.config/opencode/tools/`.
-
-### Storage
 
 - **Storage**: SQLite with WAL mode in `~/.agents/skills/__SKILL_NAME__/db/messages.db`
 - **Teams**: `~/.agents/skills/__SKILL_NAME__/teams/<name>/config.json`

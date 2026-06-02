@@ -79,7 +79,8 @@ if [ "$UPDATE_ONLY" = true ]; then
   SKILL_NAME="$(basename "$SKILL_DIR")"
   echo "  Updating $SKILL_NAME..."
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
-  cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
+  # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
+  cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
   for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$tmpl" > "$SKILL_DIR/templates/$(basename "$tmpl")"
   done
@@ -92,6 +93,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   chmod +x "$SKILL_DIR/scripts/"*.sh
   echo "  + updated scripts, templates, and SKILL.md"
   echo "  ~ DB and team configs preserved"
+  echo ""
+  echo "  ! Restart any running agent sessions to pick up the updated scripts."
+  echo "    In-flight watch.sh processes keep the old code until they restart."
   echo ""
   echo "  ✓ Update complete"
   echo ""
@@ -117,7 +121,8 @@ mkdir -p "$SKILL_DIR"/{scripts,templates,db,agents}
 
 # SKILL.md is generated from the Codex command template (Codex reads SKILL.md directly)
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.codex.md" > "$SKILL_DIR/SKILL.md"
-cp "$SCRIPT_DIR/scripts/"*.sh "$SKILL_DIR/scripts/"
+# Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
+cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
 
 # Replace placeholder in templates with actual skill name
 for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do

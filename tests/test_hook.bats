@@ -125,3 +125,32 @@ print(len(d['hooks']['Stop']))
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# Stop-hook delivery should respect actas exclusivity locks the same way
+# the Monitor-mode watcher does (#62). If a peer session owns (team, alice),
+# this session must not consume alice's inbox here — that would defeat the
+# whole exclusivity guarantee for codex / claude-code-turn delivery paths.
+@test "check-inbox: skips a team when (team, agent) is locked by another live session" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/send.sh" testteam bob alice "should not be delivered here"
+
+  setup_live_owner "$TEST_SKILL_DIR/run" "peer-sid"
+  echo "peer-sid" > "$TEST_SKILL_DIR/run/actas.testteam__alice.session"
+
+  run bash -c "echo '{\"session_id\":\"mine-sid\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  # The message should NOT surface — no "block decision" payload, no body.
+  [[ ! "$output" =~ "should not be delivered here" ]]
+}
+
+@test "check-inbox: still delivers when the lock is owned by this session" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/send.sh" testteam bob alice "I am the owner"
+
+  setup_live_owner "$TEST_SKILL_DIR/run" "mine-sid"
+  echo "mine-sid" > "$TEST_SKILL_DIR/run/actas.testteam__alice.session"
+
+  run bash -c "echo '{\"session_id\":\"mine-sid\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "I am the owner" ]]
+}

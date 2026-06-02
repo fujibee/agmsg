@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: reset.sh <project_path> <type> [agent_id]
+# Usage: reset.sh <project_path> <type> [agent_id] [session_id]
 #
 # Removes registrations for the given project/type across all teams.
 # If agent_id is omitted, it is resolved from whoami.sh for the current project/type.
+# If session_id is given, any actas exclusivity locks owned by that session_id
+# for the touched (team, agent_id) pairs are released too — this is how `drop`
+# returns the role to the pool so peer sessions can pick it up immediately
+# without waiting for stale-lock GC.
 
-PROJECT_PATH="${1:?Usage: reset.sh <project_path> <type> [agent_id]}"
-AGENT_TYPE="${2:?Usage: reset.sh <project_path> <type> [agent_id]}"
+PROJECT_PATH="${1:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]}"
+AGENT_TYPE="${2:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]}"
 TARGET_AGENT="${3:-}"
+SESSION_ID="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEAMS_DIR="$SCRIPT_DIR/../teams"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEAMS_DIR="$SKILL_DIR/teams"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/actas-lock.sh"
 
 if [ -z "$TARGET_AGENT" ]; then
   WHOAMI=$(bash "$SCRIPT_DIR/whoami.sh" "$PROJECT_PATH" "$AGENT_TYPE")
@@ -114,6 +122,12 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   REMOVED=$((REMOVED + MATCH_COUNT))
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
   echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
+
+  # Release the actas lock for this (team, agent) pair so peer sessions can
+  # claim it without waiting for owner-session-end / stale GC.
+  if [ -n "$SESSION_ID" ]; then
+    actas_lock_release "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID" 2>/dev/null || true
+  fi
 done
 
 if [ "$REMOVED" -eq 0 ]; then
