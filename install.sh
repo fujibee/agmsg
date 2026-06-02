@@ -89,11 +89,14 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.claude-code.md" > "$CC_COMMANDS_DIR/$SKILL_NAME.md"
   fi
-  # Refresh the Copilot CLI skill (Copilot reads SKILL.md from its own skills
-  # dir; the shared ~/.agents/skills/<name>/SKILL.md is Codex-typed and would
-  # mis-identify the agent as codex when invoked from Copilot).
+  # Refresh / install the Copilot CLI skill (Copilot reads SKILL.md from its
+  # own skills dir; the shared ~/.agents/skills/<name>/SKILL.md is
+  # Codex-typed and would mis-identify the agent as codex when invoked from
+  # Copilot). Same condition as the fresh-install path so users upgrading
+  # from a pre-Copilot release via --update also gain the skill.
   COPILOT_SKILL_DIR="$HOME/.copilot/skills/$SKILL_NAME"
-  if [ -d "$HOME/.copilot" ] && [ -f "$COPILOT_SKILL_DIR/SKILL.md" ]; then
+  if [ -d "$HOME/.copilot" ]; then
+    mkdir -p "$COPILOT_SKILL_DIR"
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true

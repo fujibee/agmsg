@@ -104,6 +104,22 @@ teardown() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$copilot_skill"
 }
 
+# Regression for a Copilot review finding: --update used to gate the Copilot
+# skill refresh on the SKILL.md already existing, which meant users who had
+# installed agmsg before the Copilot integration landed could never gain the
+# skill via the documented upgrade path. --update must install it for them.
+@test "install --update: installs Copilot skill for upgraders without prior skill" {
+  # First install without ~/.copilot, simulating a Copilot-less environment
+  # at the time the user originally installed agmsg.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.copilot/skills/agmsg" ]
+  # User then installs Copilot CLI and runs --update.
+  mkdir -p "$FAKE_HOME/.copilot"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
+}
+
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA

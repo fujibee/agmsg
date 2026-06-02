@@ -551,6 +551,28 @@ JSON
   [ ! -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
 }
 
+# Regression for a Copilot review finding: the unsupported-mode arms used to
+# `rm -f` the hook file before validating the mode, so fat-fingering
+# `mode monitor` on a project with a working `turn` config silently wiped
+# delivery. Validation must come first.
+@test "delivery set monitor (copilot): does NOT delete an existing turn hook" {
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT" >/dev/null
+  [ -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+  run bash "$SCRIPTS/delivery.sh" set monitor copilot "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+  local n
+  n=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$TEST_PROJECT/.github/hooks/agmsg.json'), '\$.hooks.Stop'));")
+  [ "$n" = "1" ]
+}
+
+@test "delivery set both (copilot): does NOT delete an existing turn hook" {
+  bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set both copilot "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_PROJECT/.github/hooks/agmsg.json" ]
+}
+
 @test "delivery set both (copilot): rejected" {
   run bash "$SCRIPTS/delivery.sh" set both copilot "$TEST_PROJECT"
   [ "$status" -ne 0 ]
