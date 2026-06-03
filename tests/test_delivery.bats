@@ -759,3 +759,102 @@ JSON
   ! grep -q "for-bob-static" /tmp/agmsg-static
   rm -f /tmp/agmsg-static
 }
+
+# --- set turn/off is project-scoped: must not kill other projects' watchers ---
+
+@test "delivery set turn: kills only the target project's watcher, leaves other projects'" {
+  local proj_a="$TEST_PROJECT"
+  local proj_b
+  proj_b="$(mktemp -d)"
+
+  mkdir -p "$TEST_SKILL_DIR/teams/team-a" "$TEST_SKILL_DIR/teams/team-b"
+  cat > "$TEST_SKILL_DIR/teams/team-a/config.json" <<JSON
+{"name":"team-a","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$proj_a"}]}}}
+JSON
+  cat > "$TEST_SKILL_DIR/teams/team-b/config.json" <<JSON
+{"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
+JSON
+
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-a "$proj_a" claude-code &
+  local pid_a=$!
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-b "$proj_b" claude-code &
+  local pid_b=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.sid-a.pid" ]
+  [ -f "$TEST_SKILL_DIR/run/watch.sid-b.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj_a"
+  [ "$status" -eq 0 ]
+  sleep 1
+
+  # Target project A: watcher killed, pidfile removed.
+  ! kill -0 "$pid_a" 2>/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.sid-a.pid" ]
+
+  # Other project B: watcher and its pidfile must survive.
+  kill -0 "$pid_b" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.sid-b.pid" ]
+
+  kill "$pid_b" 2>/dev/null || true
+  rm -rf "$proj_b"
+}
+
+@test "delivery set off: kills only the target project's watcher, leaves other projects'" {
+  local proj_a="$TEST_PROJECT"
+  local proj_b
+  proj_b="$(mktemp -d)"
+
+  mkdir -p "$TEST_SKILL_DIR/teams/team-a" "$TEST_SKILL_DIR/teams/team-b"
+  cat > "$TEST_SKILL_DIR/teams/team-a/config.json" <<JSON
+{"name":"team-a","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$proj_a"}]}}}
+JSON
+  cat > "$TEST_SKILL_DIR/teams/team-b/config.json" <<JSON
+{"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
+JSON
+
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-a "$proj_a" claude-code &
+  local pid_a=$!
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-b "$proj_b" claude-code &
+  local pid_b=$!
+  sleep 1
+
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$proj_a"
+  [ "$status" -eq 0 ]
+  sleep 1
+
+  ! kill -0 "$pid_a" 2>/dev/null
+  [ ! -f "$TEST_SKILL_DIR/run/watch.off-a.pid" ]
+  kill -0 "$pid_b" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/watch.off-b.pid" ]
+
+  kill "$pid_b" 2>/dev/null || true
+  rm -rf "$proj_b"
+}
+
+@test "delivery stop: remains global — kills watchers across all projects" {
+  local proj_a="$TEST_PROJECT"
+  local proj_b
+  proj_b="$(mktemp -d)"
+
+  mkdir -p "$TEST_SKILL_DIR/teams/team-a" "$TEST_SKILL_DIR/teams/team-b"
+  cat > "$TEST_SKILL_DIR/teams/team-a/config.json" <<JSON
+{"name":"team-a","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$proj_a"}]}}}
+JSON
+  cat > "$TEST_SKILL_DIR/teams/team-b/config.json" <<JSON
+{"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
+JSON
+
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-a "$proj_a" claude-code &
+  local pid_a=$!
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-b "$proj_b" claude-code &
+  local pid_b=$!
+  sleep 1
+
+  run bash "$SCRIPTS/delivery.sh" stop
+  [[ "$output" =~ "Killed 2 watch" ]]
+  sleep 1
+  ! kill -0 "$pid_a" 2>/dev/null
+  ! kill -0 "$pid_b" 2>/dev/null
+
+  rm -rf "$proj_b"
+}

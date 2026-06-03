@@ -350,13 +350,13 @@ do_set() {
       ;;
     turn)
       echo "Future sessions: Stop hook will check inbox between turns."
-      # If a watcher is alive in this session, ask Claude to stop it.
-      kill_all_watchers >/dev/null 2>&1 || true
+      # Stop only THIS project's watcher; other projects/sessions keep theirs.
+      kill_all_watchers "$PROJECT" >/dev/null 2>&1 || true
       emit_stop_directive
       ;;
     off)
       echo "Future sessions: no automatic delivery."
-      kill_all_watchers >/dev/null 2>&1 || true
+      kill_all_watchers "$PROJECT" >/dev/null 2>&1 || true
       emit_stop_directive
       ;;
   esac
@@ -439,6 +439,11 @@ do_status() {
 }
 
 kill_all_watchers() {
+  # With no argument, kills every running watch.sh (used by stop/restart).
+  # With a <project> argument, kills only watchers launched for that project
+  # path, so switching one project's delivery mode (set turn/off) never tears
+  # down another project's — or another concurrent session's — monitor.
+  local project="${1:-}"
   local killed=0
   if [ -d "$RUN_DIR" ]; then
     for f in "$RUN_DIR"/watch.*.pid; do
@@ -452,6 +457,15 @@ kill_all_watchers() {
         cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
         case "$cmd" in
           *"$SKILL_DIR/scripts/watch.sh"*)
+            # watch.sh argv is "watch.sh <session_id> <project> <type> [name]",
+            # so the project path is a space-delimited field. When scoped,
+            # skip (and preserve the pidfile of) watchers for other projects.
+            if [ -n "$project" ]; then
+              case " $cmd " in
+                *" $project "*) ;;
+                *) continue ;;
+              esac
+            fi
             kill "$pid" 2>/dev/null && killed=$((killed + 1)) ;;
           *) ;;  # not our watcher; leave it
         esac
