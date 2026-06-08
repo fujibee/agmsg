@@ -858,3 +858,29 @@ JSON
 
   rm -rf "$proj_b"
 }
+
+# --- Windows support: codex hooks emit commandWindows; other types do not ---
+
+@test "delivery set turn (codex): Stop entry carries commandWindows wrapping Git Bash" {
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.codex/hooks.json"
+  [ -f "$hook_file" ]
+  local cw
+  cw=$(sqlite3 :memory: "SELECT json_extract(readfile('$hook_file'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+  [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
+  [[ "$cw" == *"-lc"* ]]
+  [[ "$cw" == *"check-inbox.sh"* ]]
+}
+
+@test "delivery set turn (claude-code): Stop entry has NO commandWindows (regression guard)" {
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.claude/settings.local.json"
+  [ -f "$hook_file" ]
+  local cw
+  cw=$(sqlite3 :memory: "SELECT json_extract(readfile('$hook_file'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
+  [ -z "$cw" ]
+}
+
