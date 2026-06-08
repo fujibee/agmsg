@@ -21,6 +21,10 @@ Open an issue on [`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues). Inc
 4. Match the surrounding code style. Bash is the primary language; use `set -euo pipefail` at the top of every script.
 5. Update docs if the change is user-visible.
 
+## Releases
+
+See [`RELEASING.md`](RELEASING.md). The short version: bump [`VERSION`](VERSION), run `./scripts/release/sync-version.sh`, commit, tag `v$(cat VERSION)`, push. CI handles the rest.
+
 ## Architecture Decision Records
 
 agmsg uses ADRs ([Architecture Decision Records](https://adr.github.io/)) to capture significant design judgments. An ADR records the context, the decision, the alternatives considered, and the consequences.

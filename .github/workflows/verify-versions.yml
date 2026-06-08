@@ -1,0 +1,21 @@
+# Catch silent drift between VERSION and the files derived from it
+# (`.claude-plugin/plugin.json`, etc). If someone hand-edits plugin.json
+# without bumping VERSION — or bumps VERSION without re-running
+# `scripts/release/sync-version.sh` — this fails CI before a release tag
+# can be cut.
+
+name: verify-versions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure derived versions are in sync
+        run: bash scripts/release/sync-version.sh --check

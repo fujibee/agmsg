@@ -1,0 +1,88 @@
+# Release pipeline driven by the canonical VERSION file.
+#
+# Trigger: push of a tag matching v*.*.*  (e.g. v1.0.1, v1.2.3-beta.1).
+#
+# Steps:
+#   1. Guard: the tag matches VERSION, and every derived version is already
+#      in sync. The local flow is `sync-version.sh` before tagging, so a
+#      mismatch here means the human forgot to commit the bump.
+#   2. Publish to npm with provenance.
+#   3. Cut a GitHub Release.
+#
+# Required repository secret:
+#   NPM_TOKEN — npm automation token with publish rights on `agmsg`.
+#
+# Once a Trusted Publisher binding is set up on npmjs.com (see RELEASING.md),
+# NPM_TOKEN can be retired in favor of OIDC.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # for creating the GitHub Release
+  id-token: write  # for npm publish --provenance (OIDC attestation)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # The `production` environment gates the publish step behind a required
+    # reviewer (configured in repo Settings → Environments). A pushed tag
+    # won't ship to npm until a human approves the deployment.
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$version" != "$file_version" ]]; then
+            echo "::error::Tag ($version) does not match VERSION file ($file_version). Bump VERSION + run scripts/release/sync-version.sh before tagging." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version"
+
+      - name: Verify derived files are in sync
+        run: bash scripts/release/sync-version.sh --check
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          published=$(npm view "agmsg@$VERSION" version 2>/dev/null || true)
+          if [[ "$published" == "$VERSION" ]]; then
+            echo "agmsg@$VERSION already on npm — skipping publish"
+            exit 0
+          fi
+          # --provenance attaches a signed GitHub attestation linking the
+          # tarball to this workflow run. Tampered/leaked-token publishes
+          # outside CI will lack provenance and be detectable.
+          npm publish --access public --provenance
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists — skipping"
+            exit 0
+          fi
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes "Release $VERSION. See [commit history](../../commits/v$VERSION) for details."

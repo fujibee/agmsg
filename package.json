@@ -1,0 +1,42 @@
+{
+  "name": "agmsg",
+  "version": "1.0.0",
+  "description": "Cross-agent messaging via SQLite for CLI AI agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Antigravity, OpenCode). The npm package is a thin bootstrapper that fetches and runs the canonical bash installer at https://github.com/fujibee/agmsg.",
+  "bin": {
+    "agmsg": "./bin/agmsg.js"
+  },
+  "scripts": {
+    "test": "node bin/agmsg.js --version"
+  },
+  "homepage": "https://agmsg.cc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fujibee/agmsg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fujibee/agmsg/issues"
+  },
+  "author": "fujibee",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "copilot-cli",
+    "antigravity",
+    "opencode",
+    "messaging",
+    "multi-agent",
+    "agent-to-agent",
+    "sqlite",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
+}
