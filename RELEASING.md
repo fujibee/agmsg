@@ -5,9 +5,10 @@ repo root. The two files that also carry the version string — `package.json`
 (npm) and `.claude-plugin/plugin.json` (Claude Code plugin marketplace) — are
 derived from it via [`scripts/release/sync-version.sh`](scripts/release/sync-version.sh).
 
-The npm package `agmsg` is published directly from this repo. (Earlier
-releases came from a separate `fujibee/agmsg-npm` bootstrapper repo; that
-repo is now archived — see "History" below.)
+The npm package `agmsg` is published directly from this repo via npm's
+Trusted Publisher (OIDC) binding — there is no `NPM_TOKEN` to leak.
+(Earlier releases came from a separate `fujibee/agmsg-npm` bootstrapper
+repo; that repo is now archived — see "History" below.)
 
 ## Cutting a release
 
@@ -52,33 +53,38 @@ gh release create "v$(cat VERSION)" --title "v$(cat VERSION)" --notes "Release $
 
 ## Supply-chain guards
 
-The pipeline has several defenses against silent drift and malicious
-publish:
+The pipeline layers four defenses against silent drift and malicious publish:
 
-- [`verify-versions.yml`](.github/workflows/verify-versions.yml) runs on every
-  push and PR to `main`, executing `sync-version.sh --check`. A hand-edit of
-  `package.json` or `plugin.json` without a `VERSION` bump fails CI before
-  merge.
-- The release job runs in the `production` GitHub Environment. Configure a
-  required reviewer (Settings → Environments → production → required
-  reviewers); a pushed tag pauses at the publish step until a human approves.
-  A compromised tag-push alone cannot ship to npm.
-- `npm publish --provenance` attaches a GitHub-signed attestation to the
-  tarball. A publish that lacks provenance — including one made with a leaked
-  `NPM_TOKEN` outside this workflow — is distinguishable on npmjs.com.
-
-Deferred (require a manual npmjs.com setup):
-
-- Migrating to npm **Trusted Publishers** (OIDC) to retire `NPM_TOKEN`
-  entirely.
+- **npm Trusted Publisher (OIDC).** npmjs.com only accepts a publish from a
+  GitHub Actions run that proves (via OIDC) it was triggered from this repo,
+  this workflow file, and the `production` environment. There is no long-lived
+  `NPM_TOKEN` to steal. Package settings on npmjs.com are also set to
+  *require 2FA and disallow tokens*, so the only publish path is this workflow.
+- **`production` environment with required reviewer.** A pushed tag pauses at
+  the publish step until a maintainer approves the deployment. A compromised
+  tag-push alone cannot ship to npm.
+- **`--provenance` attestation.** Every published tarball is signed by GitHub
+  and linked back to this workflow run. A tarball without provenance — or with
+  provenance pointing elsewhere — is distinguishable on npmjs.com.
+- **`verify-versions.yml`.** Runs `sync-version.sh --check` on every push and
+  PR to `main`. A hand-edit of `package.json` or `plugin.json` without a
+  `VERSION` bump fails CI before merge.
 
 ## Repository secrets required by the workflow
 
-Set these in [Settings → Secrets and variables → Actions](https://github.com/fujibee/agmsg/settings/secrets/actions):
+None — auth to npm is via OIDC.
 
-| Name | Purpose |
+The Trusted Publisher binding on npmjs.com keys off three things that all
+must match:
+
+| Field | Value |
 | --- | --- |
-| `NPM_TOKEN` | npm automation token with publish rights on the `agmsg` package |
+| Repository | `fujibee/agmsg` |
+| Workflow filename | `release.yml` |
+| Environment | `production` |
+
+If any of these is renamed, update the npm Trusted Publisher settings in
+lockstep.
 
 ## Version constraints
 

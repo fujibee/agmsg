@@ -6,14 +6,12 @@
 #   1. Guard: the tag matches VERSION, and every derived version is already
 #      in sync. The local flow is `sync-version.sh` before tagging, so a
 #      mismatch here means the human forgot to commit the bump.
-#   2. Publish to npm with provenance.
+#   2. Publish to npm via Trusted Publisher (OIDC).
 #   3. Cut a GitHub Release.
 #
-# Required repository secret:
-#   NPM_TOKEN — npm automation token with publish rights on `agmsg`.
-#
-# Once a Trusted Publisher binding is set up on npmjs.com (see RELEASING.md),
-# NPM_TOKEN can be retired in favor of OIDC.
+# Auth: npm Trusted Publisher (OIDC). No NPM_TOKEN secret. The binding on
+# npmjs.com requires publishes from this repo, this workflow file, and the
+# `production` environment — all three must match.
 
 name: release
 
@@ -56,12 +54,16 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for Trusted Publisher OIDC
+        # npm CLI >= 11.5.1 picks up the GitHub OIDC token automatically and
+        # exchanges it with npmjs.com. Node 22's bundled npm (10.x) doesn't.
+        run: npm install -g npm@latest
 
       - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           published=$(npm view "agmsg@$VERSION" version 2>/dev/null || true)
@@ -70,8 +72,8 @@ jobs:
             exit 0
           fi
           # --provenance attaches a signed GitHub attestation linking the
-          # tarball to this workflow run. Tampered/leaked-token publishes
-          # outside CI will lack provenance and be detectable.
+          # tarball to this workflow run. No NODE_AUTH_TOKEN — auth comes
+          # from the Trusted Publisher OIDC exchange.
           npm publish --access public --provenance
 
       - name: Create GitHub Release
