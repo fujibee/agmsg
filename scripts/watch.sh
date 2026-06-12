@@ -55,13 +55,21 @@ mkdir -p "$RUN_DIR" 2>/dev/null || true
 # Stop the prior holder before claiming the slot. ps args check defends
 # against pid recycling — only touch processes whose cmdline still matches
 # our watch.sh. See #66.
+#
+# When ps is unavailable (e.g. Claude Code sandbox), fall back to kill -0
+# which confirms the pid is alive but cannot validate the cmdline.
 if [ -f "$PIDFILE" ]; then
   prev_pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && kill -0 "$prev_pid" 2>/dev/null; then
     prev_cmd=$(ps -o args= -p "$prev_pid" 2>/dev/null || true)
-    case "$prev_cmd" in
-      *"$SKILL_DIR/scripts/watch.sh"*) kill "$prev_pid" 2>/dev/null || true ;;
-    esac
+    if [ -n "$prev_cmd" ]; then
+      case "$prev_cmd" in
+        *"$SKILL_DIR/scripts/watch.sh"*) kill "$prev_pid" 2>/dev/null || true ;;
+      esac
+    else
+      # ps unavailable (sandboxed) — skip cmdline validation, rely on kill -0
+      kill "$prev_pid" 2>/dev/null || true
+    fi
   fi
 fi
 

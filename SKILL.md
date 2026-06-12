@@ -101,6 +101,26 @@ Do NOT manually edit config files. Always use join.sh.
 #  TaskStop + relaunch dance described in the cmd template.)
 ```
 
+## Sandbox compatibility (Claude Code)
+
+When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/agmsg/`. Add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+
+```json
+{
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "~/.agents/skills/agmsg/"
+      ]
+    }
+  }
+}
+```
+
+The allowlist merges across scopes and takes effect immediately — no restart needed. If agmsg was installed under a custom command name (e.g. `m`), adjust the path accordingly.
+
+**Note on `BASH_SOURCE`**: The sandboxed Bash tool runs commands via pipe/eval, so `BASH_SOURCE[0]` is empty inside sourced functions like `storage.sh`. This is handled internally — `watch.sh` resolves `SKILL_DIR` from `$0` (which works correctly when invoked as a command), and `storage.sh` falls back to that value. No user configuration needed.
+
 ## Architecture
 
 - **Storage**: SQLite with WAL mode in `~/.agents/skills/agmsg/db/messages.db`

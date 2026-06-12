@@ -265,6 +265,28 @@ The message store path resolves as **`AGMSG_STORAGE_PATH` (env) > built-in defau
 AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob "hi"
 ```
 
+### Sandbox compatibility (Claude Code)
+
+Claude Code's sandbox restricts filesystem writes to the project directory. In `monitor` mode, `watch.sh` runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/agmsg/`. If you have sandboxing enabled, add an allowlist entry to your settings:
+
+**`~/.claude/settings.json`** (user-level — applies to all projects):
+
+```json
+{
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "~/.agents/skills/agmsg/"
+      ]
+    }
+  }
+}
+```
+
+This can also go in project-level `.claude/settings.local.json` if you prefer per-project scope. The allowlist merges across all settings scopes and takes effect immediately — no restart needed.
+
+If you installed agmsg under a custom command name (e.g. `m`), adjust the path accordingly (`~/.agents/skills/m/`).
+
 ## Tests
 
 ```bash

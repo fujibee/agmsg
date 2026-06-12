@@ -7,7 +7,8 @@
 #
 # Resolution order:
 #   1. AGMSG_STORAGE_PATH — directory that holds messages.db (env override)
-#   2. built-in default   — <skill>/db
+#   2. SKILL_DIR env var  — set by callers before sourcing (sandbox fallback)
+#   3. BASH_SOURCE[0]     — derive from this file's own path (standard case)
 #
 # [seam] A config-file layer is expected to slot in between the env override
 # and the built-in default once the storage-driver work lands; the intended
@@ -22,8 +23,18 @@ agmsg_storage_dir() {
     return
   fi
   local lib_dir skill_dir
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  skill_dir="$(cd "$lib_dir/../.." && pwd)"
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    skill_dir="$(cd "$lib_dir/../.." && pwd)"
+  elif [ -n "${SKILL_DIR:-}" ]; then
+    # BASH_SOURCE empty — e.g. Claude Code sandbox runs Bash via pipe/eval
+    # so BASH_SOURCE is not populated. Fall back to SKILL_DIR which the
+    # calling script resolves from $0 (which IS populated correctly).
+    skill_dir="$SKILL_DIR"
+  else
+    echo "Error: cannot resolve storage dir (BASH_SOURCE and SKILL_DIR both empty)" >&2
+    return 1
+  fi
   printf '%s\n' "$skill_dir/db"
 }
 
