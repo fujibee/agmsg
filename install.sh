@@ -27,6 +27,40 @@ UPDATE_ONLY=false
 INTERACTIVE=true
 AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
 
+is_windows_host() {
+  if [ "${AGMSG_FORCE_WINDOWS:-}" = "1" ]; then
+    return 0
+  fi
+
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_windows_helpers() {
+  if ! is_windows_host; then
+    return 0
+  fi
+
+  mkdir -p "$AGENTS_DIR/bin"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/scripts/windows/agmsg.ps1" > "$AGENTS_DIR/$CMD_NAME.ps1"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/scripts/windows/agmsg-run.sh" > "$AGENTS_DIR/$CMD_NAME-run.sh"
+  cp "$SCRIPT_DIR/scripts/windows/sqlite3-shim.sh" "$AGENTS_DIR/bin/sqlite3"
+  chmod +x "$AGENTS_DIR/$CMD_NAME-run.sh" "$AGENTS_DIR/bin/sqlite3"
+
+  # Make the shim available to the rest of this installer run. The generated
+  # PowerShell runner also prepends this path for future manual invocations.
+  export PATH="$AGENTS_DIR/bin:$PATH"
+
+  echo "  + installed Windows helpers to ~/.agents/"
+  echo "    PowerShell shortcut: ~/.agents/$CMD_NAME.ps1"
+  echo "    Git Bash runner:     ~/.agents/$CMD_NAME-run.sh"
+  echo "    sqlite3 shim:        ~/.agents/bin/sqlite3"
+  echo "  ~ To enable the PowerShell shortcut, dot-source it from your profile:"
+  echo "    . \"\$HOME\\.agents\\$CMD_NAME.ps1\""
+}
+
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,6 +127,7 @@ if [ "$UPDATE_ONLY" = true ]; then
     exit 1
   fi
   SKILL_NAME="$(basename "$SKILL_DIR")"
+  CMD_NAME="$SKILL_NAME"
   echo "  Updating $SKILL_NAME..."
   if [ -z "$AGENT_TYPE" ]; then
     if grep -q "whoami.sh.*antigravity" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
@@ -132,6 +167,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
+  install_windows_helpers
   echo "  + updated scripts, templates, and SKILL.md"
   echo "  ~ DB and team configs preserved"
   echo ""
@@ -178,6 +214,7 @@ done
 
 cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
 chmod +x "$SKILL_DIR/scripts/"*.sh
+install_windows_helpers
 
 # Marker file for uninstall detection
 touch "$SKILL_DIR/.agmsg"

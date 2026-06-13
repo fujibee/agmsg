@@ -871,6 +871,7 @@ JSON
   [ -n "$cw" ]
   [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
   [[ "$cw" == *"-lc"* ]]
+  [[ "$cw" == *".agents/bin"* ]]
   [[ "$cw" == *"check-inbox.sh"* ]]
 }
 
@@ -984,4 +985,3 @@ JSON
   allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
   [ "$allow_len" = "600" ]
 }
-

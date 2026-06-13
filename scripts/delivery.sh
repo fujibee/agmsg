@@ -45,6 +45,14 @@ resolve_hooks_file() {
   esac
 }
 
+sql_readfile_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
+  fi
+  printf '%s' "$path" | sed "s/'/''/g"
+}
+
 # Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
 # entry is "agmsg-owned" when one of its inner hooks references a path under
 # our skill directory. Result is written back to <path> atomically.
@@ -58,10 +66,12 @@ resolve_hooks_file() {
 strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
+  local sql_path
+  sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
-    WITH src AS (SELECT readfile('$path') AS j)
+    WITH src AS (SELECT readfile('$sql_path') AS j)
     SELECT CASE
       WHEN json_extract(src.j, '\$.hooks.$event') IS NULL THEN
         src.j
@@ -92,11 +102,14 @@ strip_agmsg_event_file() {
 # Wrap a POSIX shell command so Codex's Windows runner executes it through Git
 # Bash. On native Windows, Codex runs each hook command via PowerShell, which
 # cannot execute a bare POSIX ".sh" path, so the hook exits non-zero. Codex hook
-# config supports a "commandWindows" key that takes precedence on Windows; the
-# "& '<bash.exe>' -lc \"...\"" form is what Codex itself emits for shell calls.
+# config supports a "commandWindows" key that takes precedence on Windows.
 windows_wrap() {
   local posix_cmd="$1"
-  printf "& 'C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' -lc \"%s\"" "$posix_cmd"
+  local agents_bin="$HOME/.agents/bin"
+  local bash_cmd="PATH='$agents_bin':\$PATH; $posix_cmd"
+  local bash_cmd_ps
+  bash_cmd_ps=$(printf '%s' "$bash_cmd" | sed "s/'/''/g")
+  printf "& 'C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' -lc '%s'" "$bash_cmd_ps"
 }
 
 # Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}
@@ -110,6 +123,8 @@ add_event_entry_file() {
   local event="$2"
   local cmd="$3"
   local hook_type="${4:-}"
+  local sql_path
+  sql_path=$(sql_readfile_path "$path")
 
   local hook_inner="\"type\":\"command\",\"command\":\"$cmd\""
   if [ "$hook_type" = "codex" ]; then
@@ -125,9 +140,9 @@ add_event_entry_file() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
     WITH base AS (
-      SELECT CASE WHEN json_extract(readfile('$path'), '\$.hooks') IS NULL
-                  THEN json_set(readfile('$path'), '\$.hooks', json('{}'))
-                  ELSE readfile('$path') END AS s
+      SELECT CASE WHEN json_extract(readfile('$sql_path'), '\$.hooks') IS NULL
+                  THEN json_set(readfile('$sql_path'), '\$.hooks', json('{}'))
+                  ELSE readfile('$sql_path') END AS s
     )
     SELECT CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
@@ -154,10 +169,12 @@ add_event_entry_file() {
 # rationale (#95).
 prune_empty_hooks_file() {
   local path="$1"
+  local sql_path
+  sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
-    WITH src AS (SELECT readfile('$path') AS j)
+    WITH src AS (SELECT readfile('$sql_path') AS j)
     SELECT CASE
       WHEN json_extract(src.j, '\$.hooks') IS NULL THEN src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks'))) = 0 THEN
@@ -431,15 +448,17 @@ do_status() {
     else
       local has_ss=0 has_st=0
       if [ -f "$hf" ]; then
+        local sql_hf
+        sql_hf=$(sql_readfile_path "$hf")
         has_ss=$(sqlite3 :memory: "
           SELECT EXISTS(
-            SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.SessionStart')) AS s,
+            SELECT 1 FROM json_each(json_extract(readfile('$sql_hf'), '\$.hooks.SessionStart')) AS s,
               json_each(json_extract(s.value, '\$.hooks')) AS h
             WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
           );" 2>/dev/null || echo 0)
         has_st=$(sqlite3 :memory: "
           SELECT EXISTS(
-            SELECT 1 FROM json_each(json_extract(readfile('$hf'), '\$.hooks.Stop')) AS s,
+            SELECT 1 FROM json_each(json_extract(readfile('$sql_hf'), '\$.hooks.Stop')) AS s,
               json_each(json_extract(s.value, '\$.hooks')) AS h
             WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
           );" 2>/dev/null || echo 0)
@@ -458,16 +477,18 @@ do_status() {
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then
       local count
+      local sql_hooks_file
+      sql_hooks_file=$(sql_readfile_path "$hooks_file")
       # readfile() rather than interpolating the file contents into argv —
       # for large settings (#95) the latter hits MAX_ARG_STRLEN on Linux.
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.SessionStart'));" 2>/dev/null || echo 0)
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$sql_hooks_file'), '\$.hooks.SessionStart'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "settings hooks file: $hooks_file"
       echo "  SessionStart entries: $count"
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.SessionEnd'));" 2>/dev/null || echo 0)
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$sql_hooks_file'), '\$.hooks.SessionEnd'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "  SessionEnd entries:   $count"
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.Stop'));" 2>/dev/null || echo 0)
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$sql_hooks_file'), '\$.hooks.Stop'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "  Stop entries:         $count"
     fi

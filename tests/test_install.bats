@@ -120,6 +120,49 @@ teardown() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
 }
 
+@test "install: Windows helpers are generated with the selected command name" {
+  AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
+
+  [ -f "$FAKE_HOME/.agents/msg.ps1" ]
+  [ -f "$FAKE_HOME/.agents/msg-run.sh" ]
+  [ -f "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ -x "$FAKE_HOME/.agents/msg-run.sh" ]
+  [ -x "$FAKE_HOME/.agents/bin/sqlite3" ]
+
+  grep -q "function msg" "$FAKE_HOME/.agents/msg.ps1"
+  grep -q '\$HOME/.agents/msg-run.sh' "$FAKE_HOME/.agents/msg.ps1"
+  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-msg}"' "$FAKE_HOME/.agents/msg-run.sh"
+  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg.ps1"
+  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg-run.sh"
+}
+
+@test "install --update: restores Windows helpers" {
+  AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  echo "tampered" > "$FAKE_HOME/.agents/agmsg-run.sh"
+
+  AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+
+  ! grep -q "^tampered$" "$FAKE_HOME/.agents/agmsg-run.sh"
+  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-agmsg}"' "$FAKE_HOME/.agents/agmsg-run.sh"
+}
+
+@test "windows runner: sends and receives messages through AGMSG environment values" {
+  AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" demo alice codex /tmp/agmsg-win-a
+  bash "$SK/scripts/join.sh" demo bob codex /tmp/agmsg-win-b
+
+  local msg="hello with spaces and 'quotes'"
+  HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=alice AGMSG_SUB=send AGMSG_TO=bob AGMSG_MSG="$msg" \
+    bash "$FAKE_HOME/.agents/agmsg-run.sh"
+
+  run env HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=bob AGMSG_SUB=inbox \
+    bash "$FAKE_HOME/.agents/agmsg-run.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "$msg" ]]
+  [[ "$output" != *"^_"* ]]
+  [ -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
+}
+
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
   # Simulate the post-plugin-install state: no ~/.agents/skills/agmsg yet, but
   # the plugin marketplace flow has populated the cache dir with a copy of the

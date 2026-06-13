@@ -185,6 +185,25 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   fi
 done
 
+# --- 2c. Remove native Windows helpers ---
+for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+  SKILL_NAME="$(basename "$SKILL_DIR")"
+  for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do
+    if [ -f "$helper" ]; then
+      rm "$helper"
+      echo "  - removed $helper"
+      REMOVED=true
+    fi
+  done
+done
+
+SQLITE_SHIM="$AGENTS_DIR/bin/sqlite3"
+if [ -f "$SQLITE_SHIM" ] && grep -q "sqlite3 compatibility shim for agmsg" "$SQLITE_SHIM" 2>/dev/null; then
+  rm "$SQLITE_SHIM"
+  echo "  - removed $SQLITE_SHIM"
+  REMOVED=true
+fi
+
 # --- 3. Remove skill directories ---
 for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   SKILL_NAME="$(basename "$SKILL_DIR")"
@@ -264,6 +283,7 @@ fi
 
 # --- 5. Clean up empty ~/.agents/ ---
 if [ -d "$AGENTS_DIR" ]; then
+  rmdir "$AGENTS_DIR/bin" 2>/dev/null || true
   rmdir "$AGENTS_DIR/skills" 2>/dev/null || true
   rmdir "$AGENTS_DIR" 2>/dev/null || true
 fi

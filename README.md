@@ -70,6 +70,32 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Antigravity) so it picks up the new skill.
 
+### Native Windows / PowerShell shortcut
+
+When `install.sh` runs under Git Bash on Windows, it also installs optional native helpers:
+
+- `~/.agents/agmsg.ps1` — a PowerShell function wrapper
+- `~/.agents/agmsg-run.sh` — the Git Bash runner used by that wrapper
+- `~/.agents/bin/sqlite3` — a compatibility shim for Windows `sqlite3.exe` output
+
+To enable the PowerShell command, dot-source the generated file from your PowerShell profile:
+
+```powershell
+. "$HOME\.agents\agmsg.ps1"
+```
+
+Then a PowerShell session can run:
+
+```powershell
+agmsg
+agmsg history
+agmsg team
+agmsg send alice "hello from PowerShell"
+agmsg mode turn
+```
+
+The installer prints the same profile line but does not modify your profile automatically.
+
 ## First run
 
 Open your project in your agent (Claude Code, Codex, Gemini CLI, etc.) and run:
