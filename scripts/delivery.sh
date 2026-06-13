@@ -59,7 +59,7 @@ strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
     WITH src AS (SELECT readfile('$path') AS j)
     SELECT CASE
@@ -122,7 +122,7 @@ add_event_entry_file() {
   entry_esc=$(printf '%s' "$entry" | sed "s/'/''/g")
 
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
     WITH base AS (
       SELECT CASE WHEN json_extract(readfile('$path'), '\$.hooks') IS NULL
@@ -155,7 +155,7 @@ add_event_entry_file() {
 prune_empty_hooks_file() {
   local path="$1"
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   if ! sqlite3 :memory: "
     WITH src AS (SELECT readfile('$path') AS j)
     SELECT CASE
@@ -275,7 +275,7 @@ apply_settings() {
   # Work on a temp copy so a partially-modified file never replaces the
   # original until the whole chain succeeds.
   local tmp_state
-  tmp_state=$(mktemp)
+  tmp_state=$(mktemp "${TMPDIR:-/tmp}/agmsg-state.XXXXXX")
   if [ -f "$hooks_file" ]; then
     cp "$hooks_file" "$tmp_state"
   else

@@ -64,7 +64,7 @@ for rel in "${DERIVED[@]}"; do
     rc=1
     continue
   fi
-  tmp=$(mktemp)
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg-ver.XXXXXX")
   jq --arg v "$VERSION" '.version = $v' "$path" > "$tmp"
   mv "$tmp" "$path"
   echo "  $rel: $current -> $VERSION"
