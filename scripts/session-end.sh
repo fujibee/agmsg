@@ -50,6 +50,10 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 
+# Drop the per-session stream watermark (see #107) — the session is ending, so
+# there is no restart to resume; a future session_id reuse should start fresh.
+rm -f "$RUN_DIR/watch.$SESSION_ID.watermark" 2>/dev/null || true
+
 # Clean cc-instance entries that still point at this session_id. The
 # enclosing CC process may itself be exiting (matcher=logout/etc.), in which
 # case its cc-instance.<pid> file would otherwise be left stale.

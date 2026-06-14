@@ -15,9 +15,12 @@ set -u
 #     of those pairs.
 #   - When [active_name] is given, narrows the subscription to only pairs
 #     whose agent name matches — useful for `actas` exclusive role mode.
-#   - Sets the high-water mark to the current MAX(id) at startup so the
-#     stream begins with whatever arrives after launch — no replay of
-#     historical messages.
+#   - A fresh session sets the high-water mark to the current MAX(id) at
+#     startup, so the stream begins with whatever arrives after launch — no
+#     replay of historical messages. The mark is persisted per session_id, so
+#     a restart of this session's watcher (actas/drop/clear/self-restart)
+#     resumes from the last delivered id and does not drop messages that
+#     arrived during the restart gap. See #107.
 #   - Polls the SQLite DB at AGMSG_WATCH_INTERVAL seconds (default 5, also
 #     overridable via the delivery.monitor.poll_interval config key).
 #   - Emits one line per new message:
@@ -160,12 +163,37 @@ while IFS=$'\t' read -r team agent; do
   WHERE_PAIRS="${WHERE_PAIRS:+$WHERE_PAIRS OR }$pair"
 done <<< "$PAIRS"
 
-# Get the starting watermark. Missing DB is OK — we'll just block until it appears.
-LAST=0
-if [ -f "$DB" ]; then
-  LAST="$(sqlite3 "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
+# Determine the starting watermark.
+#
+# The watermark is persisted per session_id so that a *restart* of this
+# session's watcher resumes from the last delivered id instead of jumping to
+# the current MAX(id). Monitor restarts are routine — `actas`/`drop` do
+# TaskStop + relaunch, `/clear`/resume re-fires the SessionStart directive, and
+# a killed watcher self-restarts — and the old "start from MAX(id)" behavior
+# silently dropped every message that landed in the gap between the previous
+# watcher stopping and the new one taking its mark. Resuming from the persisted
+# watermark closes that gap; staying strictly after the last delivered id
+# avoids re-streaming anything already seen. See #107.
+#
+# A *fresh* session (no persisted watermark) still starts from the current
+# MAX(id) — live push, no replay of history (the no-arg inbox check covers
+# historical unread, not this stream).
+WATERMARK_FILE="$RUN_DIR/watch.$SESSION_ID.watermark"
+persist_watermark() { printf '%s\n' "$LAST" > "$WATERMARK_FILE" 2>/dev/null || true; }
+
+LAST=""
+if [ -f "$WATERMARK_FILE" ]; then
+  LAST="$(cat "$WATERMARK_FILE" 2>/dev/null || true)"
+  case "$LAST" in ''|*[!0-9]*) LAST="" ;; esac
 fi
-case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
+if [ -z "$LAST" ]; then
+  LAST=0
+  if [ -f "$DB" ]; then
+    LAST="$(sqlite3 "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
+  fi
+  case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
+  persist_watermark
+fi
 
 while true; do
   if [ -f "$DB" ]; then
@@ -183,6 +211,8 @@ while true; do
         printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"
         LAST="$id"
       done <<< "$ROWS"
+      # Persist after each delivered batch so a restart resumes from here.
+      persist_watermark
     fi
   fi
 
