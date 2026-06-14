@@ -158,3 +158,69 @@ reg() {
   run bash "$SKILL_DIR/scripts/identities.sh" "$ROOT/sub" claude-code
   [[ "$output" =~ "carol" ]]
 }
+
+# --- watch.sh: actas/drop watcher must not die from a subdir (the High bug) ---
+
+@test "watch: actas watcher from a subdir does not exit with no-registration" {
+  reg T alice "$ROOT"
+  # Launch the actas watcher (ACTIVE_NAME=alice) from a subdir; without
+  # resolution it would see no registration and exit immediately.
+  bash "$SKILL_DIR/scripts/watch.sh" sid-w "$ROOT/sub/deep" claude-code alice \
+    >"$BATS_TEST_TMPDIR/w.out" 2>&1 &
+  local wpid=$!
+  sleep 1
+  # A resolving watcher is still alive in its poll loop; an unresolved one has
+  # already exited.
+  local alive=0
+  kill -0 "$wpid" 2>/dev/null && alive=1
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+
+  [ "$alive" -eq 1 ]
+  run cat "$BATS_TEST_TMPDIR/w.out"
+  [[ ! "$output" =~ "no registration" ]]
+}
+
+# --- git common-dir: sibling worktree recovery, and no-misfire guard ---
+
+setup_git_repo() {
+  # Echo a realpath'd base dir so git's symlink-resolved paths match what we
+  # register (mktemp on macOS lives under a /var -> /private symlink).
+  local base; base="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '%s' "$base"
+}
+
+@test "resolve: sibling git worktree resolves to the registered main checkout" {
+  command -v git >/dev/null 2>&1 || skip "git not available"
+  local base; base="$(setup_git_repo)"
+  local repo="$base/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$repo" worktree add -q "$base/repo-wt" >/dev/null 2>&1
+
+  reg T alice "$repo"   # registration on the main checkout
+
+  # repo-wt is a sibling of repo (not nested), so the ancestor walk misses and
+  # git-common-dir must recover the main checkout.
+  result="$(agmsg_resolve_project "$base/repo-wt" claude-code)"
+  [ "$result" = "$repo" ]
+  rm -rf "$base"
+}
+
+@test "resolve: nested worktree under a registered parent uses ancestor, not git-common-dir" {
+  command -v git >/dev/null 2>&1 || skip "git not available"
+  local base; base="$(setup_git_repo)"
+  mkdir -p "$base/parent/repo"
+  git -C "$base/parent/repo" init -q
+  git -C "$base/parent/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$base/parent/repo" worktree add -q "$base/parent/repo-wt" >/dev/null 2>&1
+
+  reg T alice "$base/parent"   # registration on the umbrella parent dir
+
+  # The git checkout ($base/parent/repo) is NOT registered, so git-common-dir
+  # must decline and the ancestor walk must win with the parent.
+  result="$(agmsg_resolve_project "$base/parent/repo-wt" claude-code)"
+  [ "$result" = "$base/parent" ]
+  rm -rf "$base"
+}

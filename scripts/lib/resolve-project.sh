@@ -139,6 +139,28 @@ agmsg_registered_projects() {
   done
 }
 
+# Echo the main-checkout root of <start>'s git repo, but only when it is a
+# registered project for <type>. This recovers a SIBLING git worktree back to
+# the registered main checkout — a case the ancestor walk cannot reach because
+# the worktree is not nested under the registered path. Validation against the
+# registry keeps it from misfiring when registration sits on an umbrella parent
+# dir (the git checkout itself is then unregistered, so we decline and let the
+# ancestor walk handle it). return 1 when git is absent or nothing matches.
+agmsg_gitcommon_project() {
+  local start="$1" type="$2" common main projects
+  command -v git >/dev/null 2>&1 || return 1
+  [ -d "$start" ] || return 1
+  common=$(cd "$start" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  # --git-common-dir may be relative to <start>; make it absolute.
+  case "$common" in /*) ;; *) common="$start/$common" ;; esac
+  main=$(cd "$(dirname "$common")" 2>/dev/null && pwd) || return 1
+  projects="$(agmsg_registered_projects "$type")"
+  [ -n "$projects" ] || return 1
+  printf '%s\n' "$projects" | grep -Fxq "$main" || return 1
+  printf '%s' "$main"
+}
+
 # Echo the nearest ancestor of <start> (inclusive) that is a registered project
 # for <type>. return 1 when none matches.
 agmsg_ancestor_project() {
@@ -159,21 +181,28 @@ agmsg_ancestor_project() {
 # Resolve the real project root for a slash-command invocation.
 # Usage: agmsg_resolve_project <pwd_path> <type>
 agmsg_resolve_project() {
-  local pwd_path="$1" type="$2" pid marker anc
+  local pwd_path="$1" type="$2" pid marker anc gitc
   # Explicit opt-out: caller passed a deliberate, possibly-unregistered path.
   if [ "${AGMSG_RESOLVE_PROJECT:-1}" = "0" ]; then
     printf '%s' "$pwd_path"; return 0
   fi
-  # 1) Per-process SessionStart marker (precise; cc + codex).
+  # 1) Per-process SessionStart marker (precise). Written only by session-start
+  #    (cc monitor/both); codex never installs it, so codex relies on 2)/3).
   if pid="$(agmsg_agent_pid "$type")" && [ -n "$pid" ]; then
     if marker="$(agmsg_read_project_marker "$pid" "$type")" && [ -n "$marker" ]; then
       printf '%s' "$marker"; return 0
     fi
   fi
-  # 2) Nearest registered ancestor of pwd (git-independent; covers codex).
+  # 2) Nearest registered ancestor of pwd (git-independent; covers nested
+  #    subdirs and worktrees that live under the registered project).
   if anc="$(agmsg_ancestor_project "$pwd_path" "$type")" && [ -n "$anc" ]; then
     printf '%s' "$anc"; return 0
   fi
-  # 3) Unchanged fallback.
+  # 3) Registered main checkout of pwd's git repo (recovers a SIBLING worktree
+  #    the ancestor walk cannot reach). Validated against the registry.
+  if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type")" && [ -n "$gitc" ]; then
+    printf '%s' "$gitc"; return 0
+  fi
+  # 4) Unchanged fallback.
   printf '%s' "$pwd_path"
 }

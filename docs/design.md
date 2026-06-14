@@ -97,22 +97,31 @@ Slash commands pass `"$(pwd)"` as the project key. When the user `cd`s into a
 subdirectory or git worktree of the project the session actually lives in, that
 pwd no longer matches the registered project — lookups miss and a phantom record
 gets minted for the subdir. `lib/resolve-project.sh` recovers the real root with
-two signals, neither needing a stable `session_id` (Codex doesn't expose one):
+three signals, none needing a stable `session_id` (Codex doesn't expose one):
 
 1. **Per-process marker.** At SessionStart, `proj.<agent_pid>.project` records
    the authoritative project (the hook's baked-in `$2`), keyed by the enclosing
    agent process PID. A slash command runs as a child of that same process, so
    it walks the ppid chain to the agent PID and reads the marker back. Trust is
    gated on the PID still being a live agent process (recycling guard); stale
-   markers are GC'd at SessionStart/SessionEnd.
+   markers are GC'd at SessionStart/SessionEnd. **Claude Code monitor/both
+   only** — Codex rejects monitor mode (no Monitor tool), so it never installs
+   `session-start.sh` and writes no marker; Codex relies on signals 2–3.
 2. **Ancestor walk.** Failing a marker, the nearest ancestor of pwd that is a
-   registered project for the type wins. Git-independent, so it also covers
-   worktrees, non-git trees, and Codex.
+   registered project for the type wins. Git-independent — covers nested
+   subdirs and worktrees that live *under* the registered project, on cc and
+   Codex alike.
+3. **Git common-dir.** Failing that, the registered main checkout of pwd's git
+   repo (via `git rev-parse --git-common-dir`), recovering a *sibling* worktree
+   the ancestor walk cannot reach. Validated against the registry, so it
+   declines when registration sits on an umbrella parent dir.
 
-Order: marker → ancestor → pwd (unchanged fallback). Resolution is applied by
-the agent-driven entry scripts (`whoami.sh`, `actas-claim.sh`, `join.sh`,
-`reset.sh`); direct shell invocations and `spawn.sh`'s explicit `--project` opt
-out via `AGMSG_RESOLVE_PROJECT=0`.
+Order: marker → ancestor → git-common-dir → pwd (unchanged fallback).
+Resolution is applied by the agent-driven entry points (`whoami.sh`,
+`actas-claim.sh`, `join.sh`, `reset.sh`, and `watch.sh` — whose subscription
+must track the same resolved project); direct shell invocations and
+`spawn.sh`'s explicit `--project` opt out via `AGMSG_RESOLVE_PROJECT=0`.
+`identities.sh` stays a pure lookup — its callers pass an already-resolved path.
 
 ## Scripts
 

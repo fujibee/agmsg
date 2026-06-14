@@ -37,6 +37,16 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+
+# Resolve the session's real project root (see #92). The actas/drop/ensure-
+# monitor flows relaunch this watcher with a raw "$(pwd)"; without resolution a
+# watcher started from a subdir/worktree finds no registration and exits, so
+# actas would switch the from-line yet silently kill the receive side. A
+# detached watcher (no agent process to walk to) degrades to the ancestor /
+# git-common-dir signals, which still recover the nested/worktree cases.
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 DB="$(agmsg_db_path)"
 RUN_DIR="$SKILL_DIR/run"
 PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
