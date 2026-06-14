@@ -224,7 +224,7 @@ fi
 if [ -z "$LAST" ]; then
   LAST=0
   if [ -f "$DB" ]; then
-    LAST="$(sqlite3 "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
+    LAST="$(agmsg_sqlite "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
   fi
   case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
   persist_watermark
@@ -250,7 +250,7 @@ fi
 
 while true; do
   if [ -f "$DB" ]; then
-    ROWS="$(sqlite3 -separator $'\x1f' "$DB" "
+    ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "
       SELECT id, created_at, team, from_agent, to_agent,
              replace(replace(body, char(13), ''), char(10), '\\n')
       FROM messages

@@ -8,7 +8,7 @@ DB_DIR="$(dirname "$DB")"
 mkdir -p "$DB_DIR"
 
 if [ ! -f "$DB" ]; then
-  sqlite3 "$DB" <<'SQL'
+  agmsg_sqlite "$DB" <<'SQL'
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE messages (

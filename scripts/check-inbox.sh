@@ -119,7 +119,7 @@ for team in "${TEAM_LIST[@]}"; do
     other:*) continue ;;
   esac
 
-  RESULT=$(sqlite3 "$DB" "
+  RESULT=$(agmsg_sqlite "$DB" "
     SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL
     ORDER BY created_at ASC;
@@ -132,7 +132,7 @@ for team in "${TEAM_LIST[@]}"; do
     done <<< "$RESULT"
     OUTPUT+=$'\n'
     # Mark as read
-    sqlite3 "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
+    agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
   fi
 done
 

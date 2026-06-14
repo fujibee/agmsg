@@ -23,7 +23,7 @@ if [ ! -f "$DB" ]; then
 fi
 
 # Get unread messages — escape newlines/tabs in body to keep one record per line
-UNREAD=$(sqlite3 "$DB" "
+UNREAD=$(agmsg_sqlite "$DB" "
   SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
   FROM messages WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL
   ORDER BY created_at ASC;
@@ -45,4 +45,4 @@ done <<< "$UNREAD"
 echo ""
 
 # Mark as read (non-fatal — may fail in sandboxed environments)
-sqlite3 "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
+agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true

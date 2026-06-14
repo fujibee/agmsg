@@ -16,6 +16,6 @@ if [ ! -f "$DB" ]; then
   bash "$SCRIPT_DIR/init-db.sh"
 fi
 
-sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$TEAM', '$FROM', '$TO', '$(echo "$BODY" | sed "s/'/''/g")');"
+agmsg_sqlite "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$TEAM', '$FROM', '$TO', '$(echo "$BODY" | sed "s/'/''/g")');"
 
 echo "Sent to $TO in team $TEAM"

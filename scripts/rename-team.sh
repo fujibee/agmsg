@@ -47,7 +47,7 @@ fi
 
 # --- Update messages in DB ---
 if [ -f "$DB" ]; then
-  sqlite3 "$DB" "UPDATE messages SET team='$NEW_TEAM' WHERE team='$OLD_TEAM';"
+  agmsg_sqlite "$DB" "UPDATE messages SET team='$NEW_TEAM' WHERE team='$OLD_TEAM';"
 fi
 
 echo "Renamed team $OLD_TEAM → $NEW_TEAM"

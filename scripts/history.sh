@@ -24,7 +24,7 @@ else
 fi
 
 # Escape newlines/tabs in body, use unit separator between fields
-RESULT=$(sqlite3 "$DB" "
+RESULT=$(agmsg_sqlite "$DB" "
   SELECT from_agent || char(31) || to_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at || char(31) || CASE WHEN read_at IS NULL THEN '●' ELSE '○' END
   FROM messages $WHERE ORDER BY created_at DESC LIMIT $LIMIT;
 ")

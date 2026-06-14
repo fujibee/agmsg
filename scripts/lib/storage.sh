@@ -42,3 +42,21 @@ agmsg_storage_dir() {
 agmsg_db_path() {
   printf '%s/messages.db\n' "$(agmsg_storage_dir)"
 }
+
+# Run sqlite3 against the message store with a busy_timeout, so a writer that
+# finds the DB locked WAITS for it instead of failing immediately with
+# SQLITE_BUSY. WAL (set at init) lets readers and a single writer coexist, but
+# concurrent writers still serialize; with the default busy_timeout=0 a leader
+# fanning a job out to N members would lose all but one write — and silently,
+# since the failed sends just exit non-zero. All DB-backed call sites go through
+# this wrapper. In-memory JSON parsing (`sqlite3 :memory:`) does not need it —
+# it has no file lock to contend for. Override the timeout via
+# $AGMSG_BUSY_TIMEOUT (milliseconds). See #114.
+#
+# Uses the `.timeout` dot-command rather than `PRAGMA busy_timeout=N`: the
+# PRAGMA returns its value as a row, which sqlite3 would print to stdout and
+# corrupt every SELECT's output (and the watch stream). `.timeout` sets the
+# same busy timeout silently.
+agmsg_sqlite() {
+  sqlite3 -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+}
