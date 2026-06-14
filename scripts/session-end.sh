@@ -24,6 +24,12 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+
+# Drop project markers (#92) whose agent process has exited. Liveness-based, so
+# a session that persists across /clear keeps its marker until the process dies.
+agmsg_marker_gc_stale 2>/dev/null || true
 
 INPUT=$(cat 2>/dev/null || true)
 SESSION_ID=""

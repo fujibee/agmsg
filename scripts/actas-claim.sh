@@ -32,6 +32,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+
+# Resolve the session's real project root (see #92) before any lookup, so an
+# actas issued from a subdir/worktree claims against the registered project
+# rather than missing it as not_registered.
+PROJECT="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
 
 # Find the team(s) this name is registered to for the given project/type.
 TEAMS=""

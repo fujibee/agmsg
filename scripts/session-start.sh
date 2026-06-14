@@ -32,6 +32,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -146,6 +148,16 @@ done
 # above, since the liveness check enumerates the remaining cc-instance.*
 # files. See #62.
 actas_lock_gc_stale >/dev/null 2>&1 || true
+
+# --- Record this session's real project root, keyed by the agent process. ---
+# Slash commands resolve the project from $(pwd), which breaks when the user
+# cd's into a subdir/worktree (see #92). Persist the authoritative project (our
+# $2, baked into the hook at delivery time) keyed by the enclosing agent PID so
+# actas/join/whoami can recover it without a stable session_id — the key that
+# makes this work for Codex too. Drop markers whose agent process has died.
+agmsg_marker_gc_stale 2>/dev/null || true
+AGENT_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
+[ -n "$AGENT_PID" ] && agmsg_write_project_marker "$AGENT_PID" "$PROJECT" 2>/dev/null || true
 
 
 # --- Dedup against the previous watcher in this CC instance. ---

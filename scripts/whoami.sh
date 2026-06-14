@@ -72,7 +72,14 @@ PROJECT_PATH="${1:?Usage: whoami.sh <project_path> [type]}"
 AGENT_TYPE="${2:-$(detect_cli_type)}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
+
+# Resolve the session's real project root from the passed pwd (see #92): a cd
+# into a subdir/worktree must not be treated as a fresh, unregistered project.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
 if [ ! -d "$TEAMS_DIR" ]; then
   echo "not_joined=true available_teams=none"

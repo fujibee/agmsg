@@ -20,6 +20,12 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SKILL_DIR/teams"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+
+# Resolve the session's real project root (see #92) so a drop issued from a
+# subdir/worktree clears the registration on the project the session lives in.
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
 if [ -z "$TARGET_AGENT" ]; then
   WHOAMI=$(bash "$SCRIPT_DIR/whoami.sh" "$PROJECT_PATH" "$AGENT_TYPE")

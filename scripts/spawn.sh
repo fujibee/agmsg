@@ -173,7 +173,10 @@ case "$STATE" in
 esac
 
 # --- Pre-join so the child's actas just claims (no interactive team prompt) ---
-"$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
+# PROJECT here is the explicit spawn target (--project / $PWD), which may not be
+# registered yet. Opt out of #92 pwd-resolution so join.sh registers exactly
+# this path rather than rewriting it to the spawning session's own project.
+AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
 
 # --- Build the boot script the new agent will run ---
 # Rather than embed a multiply-escaped command string into each platform's

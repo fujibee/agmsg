@@ -91,6 +91,29 @@ A marker file (`run/.lastcheck-<agent>`) tracks the last check time. Configurabl
 | New messages | `decision: "block"` | `decision: "block"` |
 | UI label | "Stop hook error:" ([#2](https://github.com/fujibee/agmsg/issues/2)) | "warning:" ([#2](https://github.com/fujibee/agmsg/issues/2)) |
 
+### Project resolution ([#92](https://github.com/fujibee/agmsg/issues/92))
+
+Slash commands pass `"$(pwd)"` as the project key. When the user `cd`s into a
+subdirectory or git worktree of the project the session actually lives in, that
+pwd no longer matches the registered project — lookups miss and a phantom record
+gets minted for the subdir. `lib/resolve-project.sh` recovers the real root with
+two signals, neither needing a stable `session_id` (Codex doesn't expose one):
+
+1. **Per-process marker.** At SessionStart, `proj.<agent_pid>.project` records
+   the authoritative project (the hook's baked-in `$2`), keyed by the enclosing
+   agent process PID. A slash command runs as a child of that same process, so
+   it walks the ppid chain to the agent PID and reads the marker back. Trust is
+   gated on the PID still being a live agent process (recycling guard); stale
+   markers are GC'd at SessionStart/SessionEnd.
+2. **Ancestor walk.** Failing a marker, the nearest ancestor of pwd that is a
+   registered project for the type wins. Git-independent, so it also covers
+   worktrees, non-git trees, and Codex.
+
+Order: marker → ancestor → pwd (unchanged fallback). Resolution is applied by
+the agent-driven entry scripts (`whoami.sh`, `actas-claim.sh`, `join.sh`,
+`reset.sh`); direct shell invocations and `spawn.sh`'s explicit `--project` opt
+out via `AGMSG_RESOLVE_PROJECT=0`.
+
 ## Scripts
 
 | Script | Purpose |
@@ -124,6 +147,7 @@ All scripts use only `bash` and `sqlite3`. No python3 dependency.
 │   └── config.yaml       # User configuration
 ├── run/                  # Hook/watcher runtime state
 │   ├── watch.<sid>.pid   # Monitor watcher pidfiles
+│   ├── proj.<pid>.project # Session's real project root, keyed by agent PID (#92)
 │   └── .lastcheck-*      # Cooldown markers
 └── teams/
     └── <team>/

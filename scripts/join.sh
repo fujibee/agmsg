@@ -20,7 +20,18 @@ case "$AGENT_TYPE" in
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
+
+# Resolve the session's real project root from the passed pwd (see #92), so an
+# agent-driven join from a subdir/worktree registers under the project the
+# session lives in instead of minting a phantom record for the subdir.
+# Callers passing an explicit, deliberate path (e.g. spawn.sh's --project, which
+# may not be registered yet) set AGMSG_RESOLVE_PROJECT=0 to keep their path.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
 # --- Ensure team config exists ---
