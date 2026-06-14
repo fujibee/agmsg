@@ -103,3 +103,18 @@ teardown() {
     "SELECT COUNT(*) FROM messages WHERE from_agent='leader';")
   [ "$n" -eq 10 ]
 }
+
+@test "send: concurrent fan-out to a FRESH (uninitialized) store all lands" {
+  # No init-db first — every send races to initialize an override store that
+  # doesn't exist yet. Without idempotent init + INSERT retry, the losers abort
+  # on "already exists" / "no such table" and drop. See #114.
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/freshstore"
+  local x
+  for x in 1 2 3 4 5 6 7 8 9 10; do
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" >/dev/null 2>&1 ) &
+  done
+  wait
+  local n
+  n=$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 10 ]
+}
