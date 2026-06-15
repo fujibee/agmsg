@@ -227,3 +227,33 @@ teardown() {
   ! grep -q 'rm -rf' "$stdout_capture"
   rm -f "$stdin_capture" "$stdout_capture"
 }
+
+@test "install: records a git-describe provenance VERSION and /version prints it" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  # install.sh runs from a git checkout here, so the recorded version is a
+  # `git describe` string (starts with the tag).
+  [ -f "$SK/VERSION" ]
+  run cat "$SK/VERSION"
+  [ -n "$output" ]
+  [[ "$output" == v* || "$output" =~ ^[0-9] ]]
+  # /version (version.sh) prints the same recorded value.
+  run bash "$SK/scripts/version.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(cat "$SK/VERSION")" ]
+}
+
+@test "install: --update refreshes the recorded VERSION" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  echo "stale-marker" > "$SK/VERSION"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  run cat "$SK/VERSION"
+  [ "$output" != "stale-marker" ]
+}
+
+@test "version.sh falls back gracefully when no VERSION was recorded" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  rm -f "$SK/VERSION"
+  run bash "$SK/scripts/version.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "unknown" ]]
+}

@@ -73,6 +73,11 @@ Do NOT manually edit config files. Always use join.sh.
 # their cached team name in any running session.
 ~/.agents/skills/agmsg/scripts/rename-team.sh <old_team> <new_team>
 
+# Show the installed version — the git-describe provenance string recorded at
+# install time (tag + commits-since + abbreviated commit, plus -dirty when
+# installed from a tree with uncommitted changes). See #117.
+~/.agents/skills/agmsg/scripts/version.sh
+
 # Clear registrations for the current project/type.
 # A trailing <session_id> additionally releases any actas exclusivity locks
 # this session held on <agent_id> so peers can pick them up immediately.
