@@ -32,9 +32,13 @@ The launcher searches for Git Bash in this order:
 If you installed the default `agmsg` command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1" -WhatIf
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1"
+pwsh -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1" -WhatIf
+pwsh -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1"
 ```
+
+Run the installer from the PowerShell host you use. Use `powershell` instead of
+`pwsh` if you use Windows PowerShell rather than PowerShell 7; each host has its
+own profile path.
 
 The installer adds or updates a marked block in your PowerShell profile:
 
@@ -48,15 +52,12 @@ If you installed agmsg under a custom command name, pass the matching launcher
 and function name:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$HOME\.agents\skills\m\scripts\windows\install-agmsg.ps1" -FunctionName m
+pwsh -ExecutionPolicy Bypass -File "$HOME\.agents\skills\m\scripts\windows\install-agmsg.ps1" -FunctionName m
 ```
 
-The Git Bash installer also writes `~/.agents/<cmd>.ps1`, which you can
-dot-source manually instead of editing your profile automatically:
-
-```powershell
-. "$HOME\.agents\agmsg.ps1"
-```
+The Git Bash installer does not write a top-level `~/.agents/<cmd>.ps1`
+shortcut. PowerShell integration is kept under the installed skill tree and is
+enabled by the marked profile block above.
 
 ## Usage
 

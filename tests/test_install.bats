@@ -52,7 +52,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Updating agmsg..." ]]
   [[ ! "$output" =~ "Updating agmsg.backup-keep" ]]
-  [ -f "$FAKE_HOME/.agents/agmsg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
   [ ! -f "$FAKE_HOME/.agents/agmsg.backup-keep.ps1" ]
   grep -q "backup sentinel" "$backup/SKILL.md"
 }
@@ -136,20 +136,15 @@ teardown() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
 }
 
-@test "install: Windows PowerShell shortcut delegates to the installed dispatcher only" {
+@test "install: Windows PowerShell launcher stays under the skill tree" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
 
-  [ -f "$FAKE_HOME/.agents/msg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/msg.ps1" ]
   [ ! -f "$FAKE_HOME/.agents/msg-run.sh" ]
   [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
   [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/agmsg.ps1" ]
   [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/install-agmsg.ps1" ]
   [ -f "$FAKE_HOME/.agents/skills/msg/scripts/dispatch.sh" ]
-
-  grep -q "function msg" "$FAKE_HOME/.agents/msg.ps1"
-  grep -Eq '(\.agents/skills/msg/scripts/windows/agmsg\.ps1|\.agents\\skills\\msg\\scripts\\windows\\agmsg\.ps1)' "$FAKE_HOME/.agents/msg.ps1"
-  ! grep -q 'msg-run.sh' "$FAKE_HOME/.agents/msg.ps1"
-  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg.ps1"
 }
 
 @test "install --update: removes legacy Windows runner and sqlite shim" {
@@ -164,13 +159,19 @@ exit 1
 SHIM
   chmod +x "$FAKE_HOME/.agents/bin/sqlite3"
   echo "/usr/bin/sqlite3" > "$FAKE_HOME/.agents/run/sqlite3-shim.cache"
+  cat > "$FAKE_HOME/.agents/agmsg.ps1" <<'PS1'
+# PowerShell shortcut for agmsg on native Windows.
+function agmsg {
+    & 'C:\Users\example\.agents\skills\agmsg\scripts\windows\agmsg.ps1' @args
+}
+PS1
 
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
 
+  [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
   [ ! -f "$FAKE_HOME/.agents/agmsg-run.sh" ]
   [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
   [ ! -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
-  grep -Eq '(\.agents/skills/agmsg/scripts/windows/agmsg\.ps1|\.agents\\skills\\agmsg\\scripts\\windows\\agmsg\.ps1)' "$FAKE_HOME/.agents/agmsg.ps1"
 }
 
 @test "install: Windows dispatcher is shipped with the skill scripts" {

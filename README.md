@@ -70,19 +70,18 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Antigravity) so it picks up the new skill.
 
-### Native Windows / PowerShell shortcut
+### Native Windows / PowerShell profile function
 
-When `install.sh` runs under Git Bash on Windows, it also installs an optional
-PowerShell shortcut:
-
-- `~/.agents/agmsg.ps1` — a PowerShell function that calls the installed
-  `scripts/windows/agmsg.ps1` launcher
-
-To enable the PowerShell command, dot-source the generated file from your PowerShell profile:
+When `install.sh` runs under Git Bash on Windows, it installs the PowerShell
+launcher under the skill tree. To enable an `agmsg` PowerShell command, add the
+profile function from the PowerShell host you use:
 
 ```powershell
-. "$HOME\.agents\agmsg.ps1"
+pwsh -ExecutionPolicy Bypass -File "$HOME\.agents\skills\agmsg\scripts\windows\install-agmsg.ps1"
 ```
+
+Use `powershell` instead of `pwsh` if you use Windows PowerShell rather than
+PowerShell 7; each host has its own profile path.
 
 Then a PowerShell session can run:
 

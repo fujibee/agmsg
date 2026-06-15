@@ -45,24 +45,16 @@ install_windows_helpers() {
 
   mkdir -p "$AGENTS_DIR"
 
-  local launcher="$SKILL_DIR/scripts/windows/agmsg.ps1"
+  local profile_installer="$SKILL_DIR/scripts/windows/install-agmsg.ps1"
   if command -v cygpath >/dev/null 2>&1; then
-    launcher=$(cygpath -w "$launcher" 2>/dev/null || printf '%s' "$launcher")
+    profile_installer=$(cygpath -w "$profile_installer" 2>/dev/null || printf '%s' "$profile_installer")
   fi
-  local launcher_escaped
-  launcher_escaped=$(printf '%s' "$launcher" | sed "s/'/''/g")
 
-  cat > "$AGENTS_DIR/$CMD_NAME.ps1" <<EOF
-# PowerShell shortcut for agmsg on native Windows.
-#
-# Dot-source this file from your PowerShell profile:
-#   . "\$HOME\\.agents\\$CMD_NAME.ps1"
-function $CMD_NAME {
-    & '$launcher_escaped' @args
-}
-EOF
-
-  # Clean up legacy helpers created by the earlier native-Windows approach.
+  # Clean up legacy helpers created by the earlier native-Windows approaches.
+  local ps_shortcut="$AGENTS_DIR/$CMD_NAME.ps1"
+  if [ -f "$ps_shortcut" ] && grep -q "PowerShell shortcut for agmsg on native Windows" "$ps_shortcut" 2>/dev/null; then
+    rm -f "$ps_shortcut"
+  fi
   rm -f "$AGENTS_DIR/$CMD_NAME-run.sh"
   local sqlite_shim="$AGENTS_DIR/bin/sqlite3"
   local removed_sqlite_shim=false
@@ -74,9 +66,9 @@ EOF
     rm -f "$AGENTS_DIR/run/sqlite3-shim.cache"
   fi
 
-  echo "  + installed Windows PowerShell shortcut to ~/.agents/$CMD_NAME.ps1"
-  echo "  ~ To enable the PowerShell shortcut, dot-source it from your profile:"
-  echo "    . \"\$HOME\\.agents\\$CMD_NAME.ps1\""
+  echo "  ~ To enable the PowerShell command, run this from the PowerShell host you use:"
+  echo "    pwsh -ExecutionPolicy Bypass -File \"$profile_installer\" -FunctionName $CMD_NAME"
+  echo "    # or use powershell.exe if you use Windows PowerShell instead of PowerShell 7"
 }
 
 # --- Parse args ---
