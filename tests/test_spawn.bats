@@ -164,8 +164,22 @@ teardown() {
 @test "spawn: errors when \$TMUX is set but tmux is not on PATH" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   # $TMUX set (we look like we're inside tmux) but a PATH that lacks the tmux
-  # binary — only the stub dir (claude/codex) plus system utilities.
-  run env TMUX="/tmp/fake,1,0" PATH="$STUB_BIN:/usr/bin:/bin" \
+  # binary. Mirror the system utilities into a dir that omits tmux, so the test
+  # holds on hosts where tmux IS installed (e.g. ubuntu-latest runners) — the
+  # point is exercising spawn's "tmux binary not on PATH" branch, not whether
+  # the host happens to ship tmux.
+  local notmux="$BATS_TEST_TMPDIR/notmux-bin"
+  mkdir -p "$notmux"
+  local d f b
+  for d in /usr/bin /bin; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      b=$(basename "$f")
+      [ "$b" = tmux ] && continue
+      [ -e "$notmux/$b" ] || ln -s "$f" "$notmux/$b" 2>/dev/null || true
+    done
+  done
+  run env TMUX="/tmp/fake,1,0" PATH="$STUB_BIN:$notmux" \
     bash "$SCRIPTS/spawn.sh" claude-code foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "tmux binary is not on PATH" ]]

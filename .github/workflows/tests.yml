@@ -42,10 +42,15 @@ jobs:
         if: runner.os == 'Linux'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
-      # Installs a modern bats-core on PATH without needing a writable global
-      # npm prefix (GitHub's ubuntu runner rejects `npm i -g` under /usr/local).
+      # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
+      # HOME-local npm prefix. This avoids both the ubuntu runner's EACCES on
+      # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
+      # bats-core action's default install paths hit.
       - name: Install bats
-        uses: bats-core/bats-action@4.0.0
+        run: |
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
         run: |
