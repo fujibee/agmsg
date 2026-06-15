@@ -6,21 +6,16 @@ name: tests
 # "only the changed tests", which would miss regressions in shared libs
 # (lib/*.sh) that fan out across many scripts.
 #
-# Docs-only changes are skipped via paths-ignore.
+# No paths-ignore: this workflow is a required status check on main, and a
+# required check that never reports (because a docs-only PR was filtered out)
+# leaves the PR stuck "pending" forever. Always running keeps every PR
+# mergeable — the cost is one cheap, free run on docs-only changes.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
 
 permissions:
   contents: read
