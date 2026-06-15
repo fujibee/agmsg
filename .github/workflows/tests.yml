@@ -1,0 +1,55 @@
+name: tests
+
+# Run the full Bats suite on every PR and on pushes to main. The suite is
+# fast (~2 min) and this repo is public, so GitHub-hosted runners are free —
+# running everything every time is simpler and safer than selectively running
+# "only the changed tests", which would miss regressions in shared libs
+# (lib/*.sh) that fan out across many scripts.
+#
+# Docs-only changes are skipped via paths-ignore.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+jobs:
+  bats:
+    name: bats (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
+      # to sed/stat/mktemp/ps etc. whose flags differ between them.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure sqlite3 is available (Linux)
+        if: runner.os == 'Linux'
+        run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
+
+      - name: Install bats
+        run: npm install -g bats
+
+      - name: Show tool versions
+        run: |
+          bash --version | head -1
+          sqlite3 --version
+          bats --version
+
+      - name: Run bats suite
+        run: bats --print-output-on-failure tests/
