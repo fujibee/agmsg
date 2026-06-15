@@ -42,8 +42,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
+      # Installs a modern bats-core on PATH without needing a writable global
+      # npm prefix (GitHub's ubuntu runner rejects `npm i -g` under /usr/local).
       - name: Install bats
-        run: npm install -g bats
+        uses: bats-core/bats-action@4.0.0
 
       - name: Show tool versions
         run: |
