@@ -41,6 +41,22 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "install: --update --cmd updates the named skill even when a backup skill exists" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"
+  mkdir -p "$backup/scripts" "$backup/templates" "$backup/db" "$backup/agents"
+  touch "$backup/.agmsg"
+  echo "backup sentinel" > "$backup/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Updating agmsg..." ]]
+  [[ ! "$output" =~ "Updating agmsg.backup-keep" ]]
+  [ -f "$FAKE_HOME/.agents/agmsg.ps1" ]
+  [ ! -f "$FAKE_HOME/.agents/agmsg.backup-keep.ps1" ]
+  grep -q "backup sentinel" "$backup/SKILL.md"
+}
+
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local store="$FAKE_HOME/override-store"
@@ -120,47 +136,51 @@ teardown() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
 }
 
-@test "install: Windows helpers are generated with the selected command name" {
+@test "install: Windows PowerShell shortcut delegates to the installed dispatcher only" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
 
   [ -f "$FAKE_HOME/.agents/msg.ps1" ]
-  [ -f "$FAKE_HOME/.agents/msg-run.sh" ]
-  [ -f "$FAKE_HOME/.agents/bin/sqlite3" ]
-  [ -x "$FAKE_HOME/.agents/msg-run.sh" ]
-  [ -x "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ ! -f "$FAKE_HOME/.agents/msg-run.sh" ]
+  [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/agmsg.ps1" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/windows/install-agmsg.ps1" ]
+  [ -f "$FAKE_HOME/.agents/skills/msg/scripts/dispatch.sh" ]
 
   grep -q "function msg" "$FAKE_HOME/.agents/msg.ps1"
-  grep -q '\$HOME/.agents/msg-run.sh' "$FAKE_HOME/.agents/msg.ps1"
-  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-msg}"' "$FAKE_HOME/.agents/msg-run.sh"
+  grep -Eq '(\.agents/skills/msg/scripts/windows/agmsg\.ps1|\.agents\\skills\\msg\\scripts\\windows\\agmsg\.ps1)' "$FAKE_HOME/.agents/msg.ps1"
+  ! grep -q 'msg-run.sh' "$FAKE_HOME/.agents/msg.ps1"
   ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg.ps1"
-  ! grep -q "__SKILL_NAME__" "$FAKE_HOME/.agents/msg-run.sh"
 }
 
-@test "install --update: restores Windows helpers" {
+@test "install --update: removes legacy Windows runner and sqlite shim" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  echo "tampered" > "$FAKE_HOME/.agents/agmsg-run.sh"
+  echo "legacy runner" > "$FAKE_HOME/.agents/agmsg-run.sh"
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  mkdir -p "$FAKE_HOME/.agents/run"
+  cat > "$FAKE_HOME/.agents/bin/sqlite3" <<'SHIM'
+#!/usr/bin/env bash
+# sqlite3 compatibility shim for agmsg on native Windows / Git Bash.
+exit 1
+SHIM
+  chmod +x "$FAKE_HOME/.agents/bin/sqlite3"
+  echo "/usr/bin/sqlite3" > "$FAKE_HOME/.agents/run/sqlite3-shim.cache"
 
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
 
-  ! grep -q "^tampered$" "$FAKE_HOME/.agents/agmsg-run.sh"
-  grep -q 'SKILL_NAME="${AGMSG_SKILL_NAME:-agmsg}"' "$FAKE_HOME/.agents/agmsg-run.sh"
+  [ ! -f "$FAKE_HOME/.agents/agmsg-run.sh" ]
+  [ ! -f "$FAKE_HOME/.agents/bin/sqlite3" ]
+  [ ! -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
+  grep -Eq '(\.agents/skills/agmsg/scripts/windows/agmsg\.ps1|\.agents\\skills\\agmsg\\scripts\\windows\\agmsg\.ps1)' "$FAKE_HOME/.agents/agmsg.ps1"
 }
 
-@test "windows runner: sends and receives messages through AGMSG environment values" {
+@test "install: Windows dispatcher is shipped with the skill scripts" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
-  bash "$SK/scripts/join.sh" demo alice codex /tmp/agmsg-win-a
-  bash "$SK/scripts/join.sh" demo bob codex /tmp/agmsg-win-b
 
-  local msg="hello with spaces and 'quotes'"
-  HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=alice AGMSG_SUB=send AGMSG_TO=bob AGMSG_MSG="$msg" \
-    bash "$FAKE_HOME/.agents/agmsg-run.sh"
-
-  run env HOME="$FAKE_HOME" AGMSG_TEAM=demo AGMSG_AGENT=bob AGMSG_SUB=inbox \
-    bash "$FAKE_HOME/.agents/agmsg-run.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "$msg" ]]
-  [[ "$output" != *"^_"* ]]
-  [ -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
+  [ -f "$SK/scripts/windows/agmsg.ps1" ]
+  [ -f "$SK/scripts/windows/install-agmsg.ps1" ]
+  [ -f "$SK/scripts/dispatch.sh" ]
+  [ ! -f "$SK/scripts/windows/agmsg-run.sh" ]
+  [ ! -f "$SK/scripts/windows/sqlite3-shim.sh" ]
 }
 
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {

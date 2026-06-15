@@ -870,8 +870,9 @@ JSON
   cw=$(sqlite3 :memory: "SELECT json_extract(readfile('$hook_file'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
   [ -n "$cw" ]
   [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
+  [[ "$cw" == *"GIT_BASH"* ]]
   [[ "$cw" == *"-lc"* ]]
-  [[ "$cw" == *".agents/bin"* ]]
+  [[ "$cw" != *".agents/bin"* ]]
   [[ "$cw" == *"check-inbox.sh"* ]]
 }
 

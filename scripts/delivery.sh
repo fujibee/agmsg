@@ -105,11 +105,9 @@ strip_agmsg_event_file() {
 # config supports a "commandWindows" key that takes precedence on Windows.
 windows_wrap() {
   local posix_cmd="$1"
-  local agents_bin="$HOME/.agents/bin"
-  local bash_cmd="PATH='$agents_bin':\$PATH; $posix_cmd"
   local bash_cmd_ps
-  bash_cmd_ps=$(printf '%s' "$bash_cmd" | sed "s/'/''/g")
-  printf "& 'C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' -lc '%s'" "$bash_cmd_ps"
+  bash_cmd_ps=$(printf '%s' "$posix_cmd" | sed "s/'/''/g")
+  printf "\$b=\$env:GIT_BASH; if (-not \$b) { \$b=\$env:AGMSG_BASH }; if (-not \$b) { \$b='C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' }; & \$b -lc '%s'" "$bash_cmd_ps"
 }
 
 # Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}

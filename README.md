@@ -72,11 +72,11 @@ After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Antigr
 
 ### Native Windows / PowerShell shortcut
 
-When `install.sh` runs under Git Bash on Windows, it also installs optional native helpers:
+When `install.sh` runs under Git Bash on Windows, it also installs an optional
+PowerShell shortcut:
 
-- `~/.agents/agmsg.ps1` — a PowerShell function wrapper
-- `~/.agents/agmsg-run.sh` — the Git Bash runner used by that wrapper
-- `~/.agents/bin/sqlite3` — a compatibility shim for Windows `sqlite3.exe` output
+- `~/.agents/agmsg.ps1` — a PowerShell function that calls the installed
+  `scripts/windows/agmsg.ps1` launcher
 
 To enable the PowerShell command, dot-source the generated file from your PowerShell profile:
 
@@ -94,7 +94,11 @@ agmsg send alice "hello from PowerShell"
 agmsg mode turn
 ```
 
-The installer prints the same profile line but does not modify your profile automatically.
+The PowerShell launcher delegates to the existing Bash scripts; it does not
+reimplement agmsg logic or read the SQLite database directly. Git Bash and
+`sqlite3` must both be available from the Windows environment. See
+[Windows PowerShell launcher](docs/windows.md) for details and an optional
+profile installer.
 
 ## First run
 

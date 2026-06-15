@@ -43,20 +43,38 @@ install_windows_helpers() {
     return 0
   fi
 
-  mkdir -p "$AGENTS_DIR/bin"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/scripts/windows/agmsg.ps1" > "$AGENTS_DIR/$CMD_NAME.ps1"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/scripts/windows/agmsg-run.sh" > "$AGENTS_DIR/$CMD_NAME-run.sh"
-  cp "$SCRIPT_DIR/scripts/windows/sqlite3-shim.sh" "$AGENTS_DIR/bin/sqlite3"
-  chmod +x "$AGENTS_DIR/$CMD_NAME-run.sh" "$AGENTS_DIR/bin/sqlite3"
+  mkdir -p "$AGENTS_DIR"
 
-  # Make the shim available to the rest of this installer run. The generated
-  # PowerShell runner also prepends this path for future manual invocations.
-  export PATH="$AGENTS_DIR/bin:$PATH"
+  local launcher="$SKILL_DIR/scripts/windows/agmsg.ps1"
+  if command -v cygpath >/dev/null 2>&1; then
+    launcher=$(cygpath -w "$launcher" 2>/dev/null || printf '%s' "$launcher")
+  fi
+  local launcher_escaped
+  launcher_escaped=$(printf '%s' "$launcher" | sed "s/'/''/g")
 
-  echo "  + installed Windows helpers to ~/.agents/"
-  echo "    PowerShell shortcut: ~/.agents/$CMD_NAME.ps1"
-  echo "    Git Bash runner:     ~/.agents/$CMD_NAME-run.sh"
-  echo "    sqlite3 shim:        ~/.agents/bin/sqlite3"
+  cat > "$AGENTS_DIR/$CMD_NAME.ps1" <<EOF
+# PowerShell shortcut for agmsg on native Windows.
+#
+# Dot-source this file from your PowerShell profile:
+#   . "\$HOME\\.agents\\$CMD_NAME.ps1"
+function $CMD_NAME {
+    & '$launcher_escaped' @args
+}
+EOF
+
+  # Clean up legacy helpers created by the earlier native-Windows approach.
+  rm -f "$AGENTS_DIR/$CMD_NAME-run.sh"
+  local sqlite_shim="$AGENTS_DIR/bin/sqlite3"
+  local removed_sqlite_shim=false
+  if [ -f "$sqlite_shim" ] && grep -q "sqlite3 compatibility shim for agmsg" "$sqlite_shim" 2>/dev/null; then
+    rm -f "$sqlite_shim"
+    removed_sqlite_shim=true
+  fi
+  if [ "$removed_sqlite_shim" = true ]; then
+    rm -f "$AGENTS_DIR/run/sqlite3-shim.cache"
+  fi
+
+  echo "  + installed Windows PowerShell shortcut to ~/.agents/$CMD_NAME.ps1"
   echo "  ~ To enable the PowerShell shortcut, dot-source it from your profile:"
   echo "    . \"\$HOME\\.agents\\$CMD_NAME.ps1\""
 }
@@ -114,14 +132,23 @@ echo ""
 
 # --- Update mode ---
 if [ "$UPDATE_ONLY" = true ]; then
-  # Find existing install
-  SKILL_DIR=""
-  for d in "$AGENTS_DIR"/skills/*/; do
-    if [ -f "${d}.agmsg" ]; then
-      SKILL_DIR="${d%/}"
-      break
+  # Find existing install. If --cmd was passed, update exactly that skill;
+  # otherwise preserve the historical "first installed agmsg skill" behavior.
+  if [ -n "$CMD_NAME" ]; then
+    SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
+    if [ ! -f "$SKILL_DIR/.agmsg" ]; then
+      echo "  ! Not installed: ~/.agents/skills/$CMD_NAME. Run ./install.sh --cmd $CMD_NAME first." >&2
+      exit 1
     fi
-  done
+  else
+    SKILL_DIR=""
+    for d in "$AGENTS_DIR"/skills/*/; do
+      if [ -f "${d}.agmsg" ]; then
+        SKILL_DIR="${d%/}"
+        break
+      fi
+    done
+  fi
   if [ -z "$SKILL_DIR" ]; then
     echo "  ! Not installed. Run ./install.sh first." >&2
     exit 1

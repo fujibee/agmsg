@@ -198,9 +198,18 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
 done
 
 SQLITE_SHIM="$AGENTS_DIR/bin/sqlite3"
+REMOVED_SQLITE_SHIM=false
 if [ -f "$SQLITE_SHIM" ] && grep -q "sqlite3 compatibility shim for agmsg" "$SQLITE_SHIM" 2>/dev/null; then
   rm "$SQLITE_SHIM"
   echo "  - removed $SQLITE_SHIM"
+  REMOVED=true
+  REMOVED_SQLITE_SHIM=true
+fi
+
+SQLITE_SHIM_CACHE="$AGENTS_DIR/run/sqlite3-shim.cache"
+if [ "$REMOVED_SQLITE_SHIM" = true ] && [ -f "$SQLITE_SHIM_CACHE" ]; then
+  rm "$SQLITE_SHIM_CACHE"
+  echo "  - removed $SQLITE_SHIM_CACHE"
   REMOVED=true
 fi
 
