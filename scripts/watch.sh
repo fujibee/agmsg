@@ -261,6 +261,31 @@ while true; do
     if [ -n "$ROWS" ]; then
       while IFS=$'\x1f' read -r id ts team from to body; do
         [ -z "$id" ] && continue
+        # Control message: a leader's `despawn` sends `ctrl:despawn` to this
+        # role. Tear ourselves down rather than printing it — drop the role
+        # (releases the lock + registration) then close our own tmux pane,
+        # which also ends the agent CLI sharing it. Deterministic teardown, no
+        # dependence on the agent LLM noticing the message. See #109.
+        if [ "$body" = "ctrl:despawn" ]; then
+          LAST="$id"; persist_watermark
+          # Only an EXCLUSIVE watcher dedicated to exactly this role tears
+          # itself down. A broad-subscription watcher (e.g. a leader whose
+          # default watcher subscribes to every project role, including the
+          # despawn target) must NOT act on it — its $TMUX_PANE is the leader's
+          # own pane, so killing it would take down the leader's session. The
+          # spawned member's watcher runs in actas mode (ACTIVE_NAME=$to) in its
+          # own pane; that's the one meant to respond. See #109.
+          if [ -z "$ACTIVE_NAME" ] || [ "$to" != "$ACTIVE_NAME" ]; then
+            continue
+          fi
+          "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
+          if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+            tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
+          else
+            echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
+          fi
+          exit 0
+        fi
         printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"
         LAST="$id"
       done <<< "$ROWS"

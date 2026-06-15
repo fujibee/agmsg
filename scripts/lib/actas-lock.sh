@@ -65,6 +65,17 @@ agmsg_ready_path() {
   printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
 }
 
+# Placement record path for a spawned (team, agent). `spawn` writes the
+# member's tmux target id + project + type here at launch time so that
+# `despawn --force` can tear the member down (kill its pane/window, drop its
+# registration) even when the member's own watcher is dead and can't respond
+# to a ctrl:despawn. Same encoding as the lock path. See #109.
+agmsg_spawn_path() {
+  local team="$1" agent="$2"
+  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  printf '%s/spawn.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
+}
+
 # Read the owner session_id of a lock file. Empty if no lock or unreadable.
 actas_lock_owner() {
   local lock; lock="$(actas_lock_path "$1" "$2")"

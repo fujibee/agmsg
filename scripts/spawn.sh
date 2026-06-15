@@ -249,16 +249,20 @@ launch_in_tmux() {
   # the boot script's filename (boot-XXXXXX). `automatic-rename off` keeps the
   # name from being clobbered once the boot script runs the CLI / drops to a
   # shell.
+  local target_id
   if [ "$TMUX_TARGET" = "window" ]; then
-    local win_id
-    win_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "$BOOT")"
-    tmux set-window-option -t "$win_id" automatic-rename off 2>/dev/null || true
+    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "$BOOT")"
+    tmux set-window-option -t "$target_id" automatic-rename off 2>/dev/null || true
   else
     local dir="-h"; [ "$SPLIT" = "v" ] && dir="-v"
-    local pane_id
-    pane_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "$BOOT")"
-    tmux select-pane -t "$pane_id" -T "$NAME" 2>/dev/null || true
+    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "$BOOT")"
+    tmux select-pane -t "$target_id" -T "$NAME" 2>/dev/null || true
   fi
+  # Record placement so `despawn --force` can tear this member down even if its
+  # watcher later can't respond to ctrl:despawn. tmux ids are self-describing:
+  # %N = pane (kill-pane), @N = window (kill-window). See #109.
+  printf '%s\t%s\t%s\n' "$target_id" "$PROJECT" "$AGENT_TYPE" \
+    > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
 }
 
 launch_macos_terminal() {
