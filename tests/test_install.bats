@@ -274,11 +274,14 @@ teardown() {
 @test "install: records a git-describe provenance VERSION and /version prints it" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   # install.sh runs from a git checkout here, so the recorded version is a
-  # `git describe` string (starts with the tag).
+  # `git describe` string: a tag (v1.2.3-N-gSHA) when tags are present, or — in
+  # a tag-less checkout like CI's shallow clone — the bare abbreviated commit
+  # from `--always` (any hex, e.g. a828563). Accept both; just not "unknown".
   [ -f "$SK/VERSION" ]
   run cat "$SK/VERSION"
   [ -n "$output" ]
-  [[ "$output" == v* || "$output" =~ ^[0-9] ]]
+  [[ "$output" =~ ^(v[0-9]|[0-9]+\.[0-9]+|[0-9a-f]{7}) ]]
+  [[ "$output" != unknown* ]]
   # /version (version.sh) prints the same recorded value.
   run bash "$SK/scripts/version.sh"
   [ "$status" -eq 0 ]
