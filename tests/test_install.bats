@@ -88,6 +88,19 @@ teardown() {
 # previous watch.sh running but invisible to every cleanup pathway (pidfile
 # got overwritten). watch.sh now self-cleans the previous holder of its
 # pidfile at startup. See #66.
+wait_for_pidfile_pid() {
+  local file="$1" expected="$2"
+  local i actual
+  for i in $(seq 1 30); do
+    if [ -f "$file" ]; then
+      actual="$(cat "$file")"
+      [ "$actual" = "$expected" ] && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "install: drops a Copilot SKILL.md when ~/.copilot exists" {
   mkdir -p "$FAKE_HOME/.copilot"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -225,17 +238,11 @@ PS1
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local first=$!
-  # Give the first watcher long enough to write the pidfile and enter its
-  # poll loop. The sleep is short — if it's flaky, raise to 0.5s.
-  sleep 0.3
-  [ -f "$SK/run/watch.$sid.pid" ]
-  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$first" ]
+  wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$first"
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local second=$!
-  sleep 0.3
-  # New pid wrote the pidfile.
-  [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$second" ]
+  wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$second"
   # And the previous one was actually killed.
   run kill -0 "$first"
   [ "$status" -ne 0 ]
