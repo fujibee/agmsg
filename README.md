@@ -196,6 +196,7 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg drop <name>                      — remove a role from this project
 /agmsg spawn <type> <name>              — launch a new agent (claude-code/codex) that takes <name>
 /agmsg hook on | off                    — legacy aliases (mode turn | off)
+/agmsg version                          — show the installed version (git-describe provenance)
 /agmsg reset                            — clear current project registration
 ```
 

@@ -139,6 +139,10 @@ If argument is "hook off" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off codex "$(pwd)"`
 2. Tell the user: "Delivery mode set to 'off'."
 
+If argument is "version":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/version.sh`
+2. Show the output — the installed version (git-describe provenance recorded at install time).
+
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex`
 2. Tell the user the result.

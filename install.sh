@@ -21,6 +21,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$HOME/.agents"
 
+# Resolve a provenance version for the source being installed, so an installed
+# copy is uniquely identifiable even between tagged releases (the canonical
+# VERSION only bumps at release). From a git checkout: `git describe` — tag +
+# commits-since + abbreviated commit, plus `-dirty` when the source tree had
+# uncommitted changes. Non-git (tarball via setup.sh/npx, no .git): fall back to
+# the canonical VERSION file. See #117.
+agmsg_source_version() {
+  local v
+  if v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 2>/dev/null)" \
+      && [ -n "$v" ]; then
+    printf '%s' "$v"
+  elif [ -f "$SCRIPT_DIR/VERSION" ]; then
+    tr -d '[:space:]' < "$SCRIPT_DIR/VERSION"
+  else
+    printf 'unknown'
+  fi
+}
+
 # --- Defaults ---
 CMD_NAME=""
 UPDATE_ONLY=false
@@ -168,7 +186,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
   install_windows_helpers
-  echo "  + updated scripts, templates, and SKILL.md"
+  INSTALLED_VERSION="$(agmsg_source_version)"
+  printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
+  echo "  + updated scripts, templates, and SKILL.md (version $INSTALLED_VERSION)"
   echo "  ~ DB and team configs preserved"
   echo ""
   echo "  ! Restart any running agent sessions to pick up the updated scripts."
@@ -218,6 +238,10 @@ install_windows_helpers
 
 # Marker file for uninstall detection
 touch "$SKILL_DIR/.agmsg"
+
+# Record the provenance version of the source we installed from (see #117).
+INSTALLED_VERSION="$(agmsg_source_version)"
+printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
 
 # Initialize DB
 if [ ! -f "$SKILL_DIR/db/messages.db" ]; then
@@ -296,7 +320,7 @@ fi
 
 # --- Done ---
 echo ""
-echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/"
+echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
 echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity) to pick up the new skill"
