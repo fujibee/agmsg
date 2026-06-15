@@ -28,8 +28,15 @@ AGENTS_DIR="$HOME/.agents"
 # uncommitted changes. Non-git (tarball via setup.sh/npx, no .git): fall back to
 # the canonical VERSION file. See #117.
 agmsg_source_version() {
-  local v
-  if v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 2>/dev/null)" \
+  local v top
+  # Only describe when SCRIPT_DIR is ITS OWN git checkout. `git describe`
+  # searches ancestors for a .git, so a non-git copy unpacked under some other
+  # git repo would otherwise record that PARENT repo's describe instead of
+  # agmsg's canonical VERSION. Requiring the toplevel to equal SCRIPT_DIR also
+  # works for agmsg's own worktrees (install.sh sits at the worktree root).
+  top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$top" ] && [ "$top" = "$SCRIPT_DIR" ] \
+      && v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 2>/dev/null)" \
       && [ -n "$v" ]; then
     printf '%s' "$v"
   elif [ -f "$SCRIPT_DIR/VERSION" ]; then
