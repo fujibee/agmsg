@@ -56,7 +56,7 @@ function printHelp() {
     '  npx agmsg --version    show this bootstrapper\'s version',
     '',
     'After install, restart your agent (Claude Code / Codex / Gemini CLI /',
-    'Copilot CLI / Antigravity / OpenCode) and run the agmsg skill command',
+    'Copilot CLI / Antigravity / OpenCode / Hermes Agent) and run the agmsg skill command',
     'to join a team.',
     '',
     'Homepage: ' + HOMEPAGE,

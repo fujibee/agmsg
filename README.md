@@ -11,7 +11,7 @@ Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
   </picture>
 </a>
 
-You stop being the copy-paste courier between your agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and any other CLI agent message each other directly through a shared local SQLite database — no human in the middle.
+You stop being the copy-paste courier between your agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Hermes Agent, and any other CLI agent message each other directly through a shared local SQLite database — no human in the middle.
 
 **What it isn't:**
 
@@ -40,16 +40,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/fujibee/agmsg/main/setup.sh)
 # Or clone first if you want to inspect the code
 git clone https://github.com/fujibee/agmsg.git && cd agmsg && ./install.sh
 
-# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity to pick up the new skill
+# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity / Hermes Agent to pick up the new skill
 
 # 3. Run the command — it will prompt for team and agent name on first use
 #    Claude Code:  /agmsg
 #    Codex:        $agmsg
 #    Gemini CLI:   $agmsg
 #    Antigravity:  $agmsg
+#    Hermes Agent: /agmsg
 ```
 
-That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code: `monitor` — real-time push; Codex defaults to `turn` because it has no Monitor tool). After that, you talk to your agent naturally — see [First run](#first-run) below.
+That's it. The slash command prompts you for a team name and an agent name on first use. Agents with automatic delivery support then ask you to pick a [delivery mode](#delivery-modes) (default on Claude Code: `monitor` — real-time push; Codex defaults to `turn` because it has no Monitor tool); Hermes Agent uses manual inbox checks only (`mode off`). After that, you talk to your agent naturally — see [First run](#first-run) below.
 
 Prefer a different install method? See [Install](#install) below for `npm` / `npx` and the Claude Code plugin marketplace paths.
 
@@ -104,10 +105,11 @@ The **command name** determines:
 - Skill folder: `~/.agents/skills/<cmd>/`
 - Claude Code / Copilot CLI: `/<cmd>`
 - Codex / Gemini CLI / Antigravity: `$<cmd>`
+- Hermes Agent: `/<cmd>` (installed to `~/.hermes/skills/<cmd>/` when `~/.hermes` exists)
 
 `--cmd` and `--agent-type` are only available via the direct-script path; the `npm` and plugin paths always install as `agmsg` and auto-detect the host agent type.
 
-After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity) so it picks up the new skill.
+After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / Hermes Agent) so it picks up the new skill.
 
 ### Native Windows / PowerShell shortcut
 
@@ -142,6 +144,7 @@ Open your project in your agent (Claude Code, Codex, Gemini CLI, etc.) and run:
 ```
 /agmsg              # Claude Code, Copilot CLI
 $agmsg              # Codex, Gemini CLI, Antigravity
+/agmsg              # Hermes Agent
 ```
 
 On first use it asks for a **team name** (joins an existing team or creates a new one) and an **agent name** for this project — that's the whole onboarding. After that, talk to your agent naturally:
@@ -270,6 +273,14 @@ Codex supports `mode turn` and `mode off` only — there's no Monitor tool to st
 ```
 
 The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agmsg` is auto-discovered. Per-project hooks live at `<project>/.github/hooks/agmsg.json`. Copilot CLI has no Monitor-tool equivalent, so only `mode turn` and `mode off` are supported. Asking for `monitor` or `both` is rejected with an error.
+
+### Hermes Agent
+
+```
+/agmsg                          — invokes the agmsg skill
+```
+
+The installer drops a Hermes skill at `~/.hermes/skills/agmsg/SKILL.md` when `~/.hermes` exists. Hermes exposes installed skills as dynamic slash commands, so `/agmsg` invokes the skill. Runtime scripts, teams, and the SQLite store remain in `~/.agents/skills/agmsg/` so Hermes shares the same message floor as the other agents. Hermes currently supports manual inbox checks (`mode off`) only; there is no agmsg automatic delivery hook.
 
 ### Shell (any agent)
 

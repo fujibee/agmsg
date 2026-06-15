@@ -50,7 +50,7 @@ agmsg_source_version() {
 CMD_NAME=""
 UPDATE_ONLY=false
 INTERACTIVE=true
-AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
+AGENT_TYPE=""  # claude-code, codex, gemini, antigravity, hermes — passed via --agent-type, or empty for auto/default
 
 is_windows_host() {
   if [ "${AGMSG_FORCE_WINDOWS:-}" = "1" ]; then
@@ -98,7 +98,8 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity"
+      echo "                    Hermes Agent: /<cmd>"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, hermes"
       echo "                    Selects which template becomes SKILL.md (matches the"
       echo "                    <type> arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
@@ -155,7 +156,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   CMD_NAME="$SKILL_NAME"
   echo "  Updating $SKILL_NAME..."
   if [ -z "$AGENT_TYPE" ]; then
-    if grep -q "whoami.sh.*antigravity" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
+    if grep -q "whoami.sh.*hermes" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
+      AGENT_TYPE="hermes"
+    elif grep -q "whoami.sh.*antigravity" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
       AGENT_TYPE="antigravity"
     elif grep -q "whoami.sh.*gemini" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
       AGENT_TYPE="gemini"
@@ -168,6 +171,8 @@ if [ "$UPDATE_ONLY" = true ]; then
     SKILL_TEMPLATE="cmd.gemini.md"
   elif [ "$AGENT_TYPE" = "antigravity" ]; then
     SKILL_TEMPLATE="cmd.antigravity.md"
+  elif [ "$AGENT_TYPE" = "hermes" ]; then
+    SKILL_TEMPLATE="cmd.hermes.md"
   fi
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -189,6 +194,11 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -d "$HOME/.copilot" ]; then
     mkdir -p "$COPILOT_SKILL_DIR"
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
+  fi
+  HERMES_SKILL_DIR="$HOME/.hermes/skills/$SKILL_NAME"
+  if [ -d "$HOME/.hermes" ]; then
+    mkdir -p "$HERMES_SKILL_DIR"
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.hermes.md" > "$HERMES_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
@@ -229,6 +239,8 @@ if [ "$AGENT_TYPE" = "gemini" ]; then
   SKILL_TEMPLATE="cmd.gemini.md"
 elif [ "$AGENT_TYPE" = "antigravity" ]; then
   SKILL_TEMPLATE="cmd.antigravity.md"
+elif [ "$AGENT_TYPE" = "hermes" ]; then
+  SKILL_TEMPLATE="cmd.hermes.md"
 fi
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -278,6 +290,17 @@ if [ -d "$HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR"
   sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
+fi
+
+# --- Install Hermes Agent skill ---
+# Hermes reads reusable skills from ~/.hermes/skills/<name>/SKILL.md. Keep the
+# runtime scripts and shared SQLite state in ~/.agents/skills/<name>/ so Hermes
+# talks to the same teams as Claude Code / Codex / Gemini / Copilot sessions.
+HERMES_SKILL_DIR="$HOME/.hermes/skills/$CMD_NAME"
+if [ -d "$HOME/.hermes" ]; then
+  mkdir -p "$HERMES_SKILL_DIR"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.hermes.md" > "$HERMES_SKILL_DIR/SKILL.md"
+  echo "  + installed $CMD_NAME skill to ~/.hermes/skills/"
 fi
 
 # --- Configure Codex sandbox (if Codex is installed) ---
@@ -330,13 +353,14 @@ echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity) to pick up the new skill"
+echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity / Hermes Agent) to pick up the new skill"
 echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
 echo "       Gemini CLI:   \$$CMD_NAME"
 echo "       Antigravity:  \$$CMD_NAME"
 echo "       Copilot CLI:  /$CMD_NAME"
+echo "       Hermes Agent: /$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"

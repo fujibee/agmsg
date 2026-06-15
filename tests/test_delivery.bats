@@ -989,3 +989,54 @@ JSON
   allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
   [ "$allow_len" = "600" ]
 }
+
+@test "delivery hermes: status is manual/off" {
+  run bash "$SCRIPTS/delivery.sh" status hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "mode: off" ]]
+}
+
+@test "delivery hermes: rejects automatic modes" {
+  local mode
+  for mode in turn monitor both; do
+    run bash "$SCRIPTS/delivery.sh" set "$mode" hermes "$TEST_PROJECT"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "not supported for hermes" ]]
+    [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+  done
+}
+
+@test "delivery hermes: rejects unknown mode" {
+  run bash "$SCRIPTS/delivery.sh" set bogus hermes "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Unknown mode" ]]
+  [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+}
+
+@test "delivery hermes: accepts off without writing hook config" {
+  run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'off'" ]]
+  [[ "$output" =~ "manual inbox checks only" ]]
+  [[ "$output" != *"AGMSG-DIRECTIVE"* ]]
+  [ ! -e "$TEST_PROJECT/.hermes/agmsg.json" ]
+}
+
+@test "delivery hermes: set off does not stop Claude Code watchers for the same project" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" set off hermes "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  run kill -0 "$watch_pid"
+  [ "$status" -eq 0 ]
+
+  kill "$watch_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
+}

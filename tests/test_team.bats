@@ -273,3 +273,8 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "join: accepts hermes" {
+  run bash "$SCRIPTS/join.sh" myteam alice hermes /tmp/proj
+  [ "$status" -eq 0 ]
+}
+

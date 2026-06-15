@@ -46,6 +46,7 @@ resolve_hooks_file() {
     codex)       echo "$project/.codex/hooks.json" ;;
     gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
     copilot)     echo "$project/.github/hooks/agmsg.json" ;;
+    hermes)      echo "$project/.hermes/agmsg.json" ;;
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
@@ -275,6 +276,23 @@ EOF
   esac
 }
 
+apply_settings_manual_only() {
+  local type="$1"
+  local mode="$2"
+
+  case "$mode" in
+    off) ;;
+    monitor|both|turn)
+      echo "Error: '$mode' mode is not supported for $type (no automatic delivery hook). Use 'off'." >&2
+      return 1
+      ;;
+    *)
+      echo "Unknown mode: $mode (use off)" >&2
+      return 1
+      ;;
+  esac
+}
+
 apply_settings() {
   local type="$1"
   local project="$2"
@@ -287,6 +305,11 @@ apply_settings() {
 
   if [ "$type" = "copilot" ]; then
     apply_settings_copilot "$type" "$project" "$mode"
+    return
+  fi
+
+  if [ "$type" = "hermes" ]; then
+    apply_settings_manual_only "$type" "$mode"
     return
   fi
 
@@ -433,6 +456,10 @@ do_set() {
       ;;
     off)
       echo "Future sessions: no automatic delivery."
+      if [ "$TYPE" = "hermes" ]; then
+        echo "Hermes has no agmsg automatic delivery hook; manual inbox checks only."
+        return
+      fi
       kill_all_watchers "$PROJECT" >/dev/null 2>&1 || true
       emit_stop_directive
       ;;
@@ -448,16 +475,19 @@ do_status() {
   # a project-scoped mode, so we just skip the mode line and report the
   # global watcher state below.
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
-    local hf
-    hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
-    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "copilot" ]; then
+    if [ "$TYPE" = "hermes" ]; then
+      echo "mode: off"
+    elif [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "copilot" ]; then
+      local hf
+      hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
       local mode="off"
       if [ -f "$hf" ]; then
         mode="turn"
       fi
       echo "mode: $mode"
     else
-      local has_ss=0 has_st=0
+      local hf has_ss=0 has_st=0
+      hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
       if [ -f "$hf" ]; then
         local sql_hf
         sql_hf=$(sql_readfile_path "$hf")
@@ -483,7 +513,7 @@ do_status() {
     fi
   fi
 
-  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "copilot" ]; then
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "copilot" ] && [ "$TYPE" != "hermes" ]; then
     local hooks_file
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then

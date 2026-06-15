@@ -96,6 +96,35 @@ teardown() {
   [ ! -d "$FAKE_HOME/.copilot" ]
 }
 
+@test "install: drops a Hermes skill when ~/.hermes exists" {
+  mkdir -p "$FAKE_HOME/.hermes"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+  [ -f "$hermes_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" hermes" "$hermes_skill"
+  grep -q "^name: agmsg" "$hermes_skill"
+  grep -q "~/.agents/skills/agmsg/scripts" "$hermes_skill"
+}
+
+@test "install: custom command name is substituted in Hermes skill" {
+  mkdir -p "$FAKE_HOME/.hermes"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
+  local hermes_skill="$FAKE_HOME/.hermes/skills/msg/SKILL.md"
+  [ -f "$hermes_skill" ]
+  grep -q "^name: msg" "$hermes_skill"
+  grep -q "~/.agents/skills/msg/scripts" "$hermes_skill"
+  grep -q "You can now use \`/msg\`" "$hermes_skill"
+  ! grep -q "__SKILL_NAME__" "$hermes_skill"
+}
+
+@test "install: --agent-type hermes makes shared SKILL.md Hermes-typed" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type hermes
+  grep -q "whoami.sh \"\$(pwd)\" hermes" "$SK/SKILL.md"
+  ! grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
+  ! grep -q "whoami.sh \"\$(pwd)\" gemini" "$SK/SKILL.md"
+  ! grep -q "whoami.sh \"\$(pwd)\" antigravity" "$SK/SKILL.md"
+}
+
 @test "install --update: refreshes the Copilot skill if it was previously installed" {
   mkdir -p "$FAKE_HOME/.copilot"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
@@ -106,6 +135,17 @@ teardown() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   ! grep -q "^tampered$" "$copilot_skill"
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$copilot_skill"
+}
+
+@test "install --update: refreshes the Hermes skill if it was previously installed" {
+  mkdir -p "$FAKE_HOME/.hermes"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+  [ -f "$hermes_skill" ]
+  echo "tampered" > "$hermes_skill"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  ! grep -q "^tampered$" "$hermes_skill"
+  grep -q "whoami.sh \"\$(pwd)\" hermes" "$hermes_skill"
 }
 
 # Regression for a Copilot review finding: --update used to gate the Copilot
@@ -167,6 +207,15 @@ teardown() {
   [ -f "$FAKE_HOME/.agents/run/sqlite3-shim.cache" ]
 }
 
+@test "install --update: installs Hermes skill for upgraders without prior skill" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.hermes/skills/agmsg" ]
+  mkdir -p "$FAKE_HOME/.hermes"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.hermes/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" hermes" "$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+}
+
 @test "plugin SKILL.md bootstrap: a fresh plugin install path can bootstrap ~/.agents/skills/agmsg" {
   # Simulate the post-plugin-install state: no ~/.agents/skills/agmsg yet, but
   # the plugin marketplace flow has populated the cache dir with a copy of the
@@ -209,14 +258,22 @@ teardown() {
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local first=$!
   # Give the first watcher long enough to write the pidfile and enter its
-  # poll loop. The sleep is short — if it's flaky, raise to 0.5s.
-  sleep 0.3
+  # poll loop. Poll instead of sleeping a fixed interval so this stays stable
+  # under full-suite load.
+  local i
+  for i in {1..20}; do
+    [ -f "$SK/run/watch.$sid.pid" ] && [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$first" ] && break
+    sleep 0.1
+  done
   [ -f "$SK/run/watch.$sid.pid" ]
   [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$first" ]
 
   bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
   local second=$!
-  sleep 0.3
+  for i in {1..20}; do
+    [ "$(cat "$SK/run/watch.$sid.pid" 2>/dev/null || echo 0)" -eq "$second" ] && break
+    sleep 0.1
+  done
   # New pid wrote the pidfile.
   [ "$(cat "$SK/run/watch.$sid.pid")" -eq "$second" ]
   # And the previous one was actually killed.
