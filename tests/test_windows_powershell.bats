@@ -11,6 +11,11 @@ powershell_bin() {
 }
 
 @test "windows powershell launcher smoke" {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) skip "native Windows PowerShell smoke" ;;
+  esac
+
   local ps
   ps="$(powershell_bin)" || skip "PowerShell is not available"
 
