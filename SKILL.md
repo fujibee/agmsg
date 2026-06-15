@@ -126,6 +126,21 @@ Do NOT manually edit config files. Always use join.sh.
 #                        prints status=timeout and exits 3). Codex skips the
 #                        wait (it has no Monitor).
 ~/.agents/skills/agmsg/scripts/spawn.sh <claude-code|codex> <name> [options]
+
+# Tear down a spawned member — the inverse of spawn.
+# Default (graceful): sends a `ctrl:despawn` control message to <name>; the
+# member's watcher drops its own role (releasing the actas lock + registration)
+# and closes its own tmux pane, ending the agent. Blocks until the lock releases
+# (--timeout, default 30s) then prints `status=ok`; on timeout prints
+# status=timeout and exits 3 (retry with --force). Only an exclusive watcher
+# dedicated to <name> acts on it — the despawning session is never torn down.
+# --force: skip the message and tear the member down from the placement recorded
+# at spawn time (kill its tmux pane/window, drop its registration) — for a dead
+# watcher or a codex member (no Monitor). A hand-started member with no placement
+# record can't be --forced.
+#   --force              tear down from the recorded placement, no message
+#   --timeout N          seconds to wait for graceful teardown (default 30)
+~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
 ## Sandbox compatibility (Claude Code)

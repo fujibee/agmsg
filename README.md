@@ -185,6 +185,21 @@ Options: `--project <path>` (default: current project), `--team <team>` (auto-re
 
 Only `claude-code` and `codex` are supported today. macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
+### Tear down a spawned agent (`despawn`)
+
+`despawn` is the inverse of `spawn` — it cleanly tears down a member you brought up.
+
+```
+/agmsg despawn reviewer          # graceful: the member drops its role and closes its own pane
+/agmsg despawn alice --force     # force: tear it down from here when its watcher can't respond
+```
+
+By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose watcher drops its own role (releasing the actas lock and registration) and closes its own tmux pane — ending the agent. It blocks until the role is released, up to `--timeout <secs>` (default 30), then prints `status=ok`. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
+
+`--force` skips the message and tears the member down from the placement recorded at spawn time: it kills the member's tmux pane/window and drops its registration. Use it when the member's watcher can't respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) can't be `--force`d; despawn says so and leaves it for you to close.
+
+Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
+
 ## Delivery modes
 
 How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
@@ -234,6 +249,7 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
 /agmsg drop <name>                      — remove a role from this project
 /agmsg spawn <type> <name>              — launch a new agent (claude-code/codex) that takes <name>
+/agmsg despawn <name> [--force]         — tear down a member you spawned (graceful, or --force)
 /agmsg hook on | off                    — legacy aliases (mode turn | off)
 /agmsg version                          — show the installed version (git-describe provenance)
 /agmsg reset                            — clear current project registration
