@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.4] - 2026-06-15
 
 ### Added
 - Record git-describe provenance version (/agmsg version) (#122)
@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the `monitor` mode and `delivery.sh set` work under Claude Code's sandboxed Bash tool (#106)
 - Persist per-session watermark so restarts don't drop messages (#107) (#111)
 - Resolve session's real project from subdir/worktree (#92) (#110)
+
+### Documentation
+- Show all four install paths (#90)
 
 ## [1.0.3] - 2026-06-11
 
@@ -49,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.0.4]: https://github.com/fujibee/agmsg/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/fujibee/agmsg/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/fujibee/agmsg/releases/tag/v1.0.2
 
