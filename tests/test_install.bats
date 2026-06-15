@@ -300,3 +300,23 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "unknown" ]]
 }
+
+@test "install: a non-git copy nested in a foreign git repo records canonical VERSION, not the parent's describe" {
+  # `git describe` searches ancestors for a .git. A non-git agmsg copy unpacked
+  # under some OTHER git repo must still record agmsg's canonical VERSION, not
+  # the parent repo's describe. See #117 review.
+  local parent="$BATS_TEST_TMPDIR/foreign"
+  mkdir -p "$parent"
+  git -C "$parent" init -q
+  git -C "$parent" -c user.email=t@e -c user.name=t commit -q --allow-empty -m init
+  git -C "$parent" tag v9.9.9
+  mkdir -p "$parent/agmsg-src"
+  cp -R "$REPO_ROOT/." "$parent/agmsg-src/"
+  rm -rf "$parent/agmsg-src/.git"   # non-git copy, nested under the foreign repo
+  local canonical; canonical="$(tr -d '[:space:]' < "$parent/agmsg-src/VERSION")"
+
+  HOME="$FAKE_HOME" bash "$parent/agmsg-src/install.sh" --cmd agmsg
+  run cat "$SK/VERSION"
+  [ "$output" = "$canonical" ]
+  [[ "$output" != v9.9.9* ]]
+}
