@@ -98,8 +98,8 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 3. If the session's active FROM was `<name>`, clear that state.
 4. Tell the user: "Dropped role `<name>` from this project."
 
-If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
-1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
+If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window", "spawn hermes reviewer"):
+1. Parse `<type>` (must be `claude-code`, `codex`, or `hermes`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--profile <profile>`, `--no-wait`, `--ready-timeout <secs>`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
 3. Show the script's output.
 

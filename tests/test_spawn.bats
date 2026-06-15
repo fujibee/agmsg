@@ -10,7 +10,7 @@ setup() {
   # a terminal. PATH is prepended so the stubs win.
   export STUB_BIN="$TEST_SKILL_DIR/stub-bin"
   mkdir -p "$STUB_BIN"
-  for bin in claude codex; do
+  for bin in claude codex hermes; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/$bin"
     chmod +x "$STUB_BIN/$bin"
   done
@@ -41,6 +41,7 @@ teardown() {
   run bash "$SCRIPTS/spawn.sh" gemini foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "not supported by spawn yet" ]]
+  [[ "$output" =~ "claude-code, codex, hermes" ]]
 }
 
 @test "spawn: rejects unknown agent type" {
@@ -143,6 +144,43 @@ teardown() {
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"alice"* ]]
   [[ "$output" == *"$PROJ"* ]]
+}
+
+@test "spawn: hermes uses the actas name as the default Hermes profile" {
+  bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipping readiness wait"* ]]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"hermes"* ]]
+  [[ "$output" == *"--profile"* ]]
+  [[ "$output" == *"reviewer"* ]]
+  [[ "$output" == *"chat"* ]]
+  [[ "$output" == *"-q"* ]]
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"--continue"* ]]
+}
+
+@test "spawn: hermes --profile overrides the default profile without changing actas" {
+  bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ" --profile orchestrator
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"--profile"* ]]
+  [[ "$output" == *"orchestrator"* ]]
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"reviewer"* ]]
+}
+
+@test "spawn: --profile is hermes-only" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --profile reviewer
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--profile is only supported for hermes"* ]]
 }
 
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {

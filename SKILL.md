@@ -110,7 +110,7 @@ Do NOT manually edit config files. Always use join.sh.
 # (when run inside tmux) or a new OS terminal, with `/agmsg actas <name>` as the
 # initial prompt. By default it BLOCKS until the new agent's watcher attaches
 # (prints `status=ready`), so a leader can send work right after spawn returns
-# without losing it to the agent's cold start. claude-code/codex only; macOS
+# without losing it to the agent's cold start. claude-code/codex/hermes only; macOS
 # primary, Linux/Windows best-effort. Non-tmux + no usable terminal (headless)
 # errors out.
 #   --project <path>     project to launch in (default: $PWD)
@@ -121,11 +121,12 @@ Do NOT manually edit config files. Always use join.sh.
 #                        script) for the non-tmux path; overrides $AGMSG_TERMINAL
 #                        / config spawn.terminal. macOS default uses `open -a`
 #                        (no Automation/TCC permission prompt).
+#   --profile <name>     Hermes profile to launch (Hermes only; default: <name>)
 #   --no-wait            don't block on readiness (fire-and-forget)
 #   --ready-timeout N    seconds to wait for readiness (default 90; on timeout
-#                        prints status=timeout and exits 3). Codex skips the
-#                        wait (it has no Monitor).
-~/.agents/skills/agmsg/scripts/spawn.sh <claude-code|codex> <name> [options]
+#                        prints status=timeout and exits 3). Codex and Hermes
+#                        skip the wait (they have no Monitor).
+~/.agents/skills/agmsg/scripts/spawn.sh <claude-code|codex|hermes> <name> [options]
 
 # Tear down a spawned member — the inverse of spawn.
 # Default (graceful): sends a `ctrl:despawn` control message to <name>; the

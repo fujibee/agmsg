@@ -15,7 +15,7 @@ set -euo pipefail
 # Usage:
 #   spawn.sh <agent-type> <name> [options]
 #
-#   <agent-type>   claude-code | codex   (only these two are supported today)
+#   <agent-type>   claude-code | codex | hermes
 #   <name>         actas identity for the spawned agent
 #
 # Options:
@@ -32,6 +32,7 @@ set -euo pipefail
 #                      generated boot script (an executable file the terminal
 #                      should run). Overrides $AGMSG_TERMINAL and config
 #                      `spawn.terminal`.
+#   --profile <name>   Hermes profile to launch (Hermes only; default: <name>)
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -39,10 +40,10 @@ set -euo pipefail
 #
 # Readiness: by default spawn blocks until the new agent's watcher attaches and
 # is receiving (it prints `status=ready ...`), so a leader can safely send work
-# right after spawn returns without racing the agent's cold start. Codex has no
-# Monitor, so the wait is skipped for codex.
+# right after spawn returns without racing the agent's cold start. Codex and
+# Hermes have no agmsg Monitor, so the wait is skipped for them.
 #
-# Scope note: claude-code/codex only; macOS is the primary target, Linux and
+# Scope note: claude-code/codex/hermes only; macOS is the primary target, Linux and
 # Windows are best-effort (no guarantee — please open an issue/PR if a given
 # terminal does not work). Headless environments (no tmux and no usable
 # terminal) error out, because the agent CLIs need an interactive terminal.
@@ -63,11 +64,11 @@ NAME="${2:-}"
 shift 2 || true
 
 case "$AGENT_TYPE" in
-  claude-code|codex) ;;
+  claude-code|codex|hermes) ;;
   gemini|antigravity|copilot)
-    die "agent type '$AGENT_TYPE' is not supported by spawn yet (supported: claude-code, codex)" ;;
+    die "agent type '$AGENT_TYPE' is not supported by spawn yet (supported: claude-code, codex, hermes)" ;;
   *)
-    die "unknown agent type '$AGENT_TYPE' (supported: claude-code, codex)" ;;
+    die "unknown agent type '$AGENT_TYPE' (supported: claude-code, codex, hermes)" ;;
 esac
 
 # --- Parse options ---
@@ -78,6 +79,7 @@ SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
+HERMES_PROFILE=""    # --profile override for spawned Hermes sessions
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -86,6 +88,7 @@ while [ $# -gt 0 ]; do
     --window)  TMUX_TARGET="window"; shift ;;
     --split)   SPLIT="${2:?--split needs h|v}"; shift 2 ;;
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
+    --profile) HERMES_PROFILE="${2:?--profile needs a profile name}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     *) die "unknown option: $1" ;;
@@ -94,6 +97,9 @@ done
 
 case "$SPLIT" in h|v) ;; *) die "--split must be 'h' or 'v'" ;; esac
 case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole number of seconds" ;; esac
+if [ -n "$HERMES_PROFILE" ] && [ "$AGENT_TYPE" != "hermes" ]; then
+  die "--profile is only supported for hermes spawns"
+fi
 
 # Resolve the terminal override for the non-tmux path:
 #   --terminal  >  $AGMSG_TERMINAL  >  config spawn.terminal
@@ -121,6 +127,7 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 case "$AGENT_TYPE" in
   claude-code) CLI_BIN="claude" ;;
   codex)       CLI_BIN="codex" ;;
+  hermes)      CLI_BIN="hermes" ;;
 esac
 command -v "$CLI_BIN" >/dev/null 2>&1 \
   || die "'$CLI_BIN' not found on PATH — install the ${AGENT_TYPE} CLI first"
@@ -212,6 +219,9 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # than a nonexistent `/agmsg actas <name>`.
 CMD_NAME="$(basename "$SKILL_DIR")"
 ACTAS_PROMPT="/${CMD_NAME} actas ${NAME}"
+if [ "$AGENT_TYPE" = "hermes" ] && [ -z "$HERMES_PROFILE" ]; then
+  HERMES_PROFILE="$NAME"
+fi
 
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
@@ -224,9 +234,15 @@ BOOT="$BOOT.command"
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
-  printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
-  echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
-  echo 'exec "${SHELL:-/bin/bash}" -i'
+  if [ "$AGENT_TYPE" = "hermes" ]; then
+    printf '%q --profile %q chat -q %q\n' "$CLI_BIN" "$HERMES_PROFILE" "$ACTAS_PROMPT"
+    echo 'rm -f "$0" 2>/dev/null'   # self-clean before the long-lived session replaces this shell
+    printf 'exec %q --profile %q --continue --cli chat\n' "$CLI_BIN" "$HERMES_PROFILE"
+  else
+    printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
+    echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
+    echo 'exec "${SHELL:-/bin/bash}" -i'
+  fi
 } > "$BOOT"
 chmod +x "$BOOT"
 
@@ -368,12 +384,12 @@ place_and_launch() {
 # receiving. Block until that appears so the leader doesn't send a job into the
 # cold-start window (before the watcher attaches) and lose it.
 #
-# Codex has no Monitor/watcher, so nothing would ever touch the sentinel —
-# skip the wait for codex (its receive is poll-based anyway).
+# Codex/Hermes have no Monitor/watcher, so nothing would ever touch the sentinel —
+# skip the wait for them (their receive is poll/manual-based anyway).
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
-if [ "$AGENT_TYPE" = "codex" ] && [ "$WAIT_READY" = "1" ]; then
+if { [ "$AGENT_TYPE" = "codex" ] || [ "$AGENT_TYPE" = "hermes" ]; } && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
-  echo "spawn: codex has no Monitor — skipping readiness wait (--no-wait implied)" >&2
+  echo "spawn: ${AGENT_TYPE} has no Monitor — skipping readiness wait (--no-wait implied)" >&2
 fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's
