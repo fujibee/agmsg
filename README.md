@@ -331,6 +331,63 @@ This can also go in project-level `.claude/settings.local.json` if you prefer pe
 
 If you installed agmsg under a custom command name (e.g. `m`), adjust the path accordingly (`~/.agents/skills/m/`).
 
+### Sandbox compatibility (Codex)
+
+Codex may run shell commands in a workspace-write sandbox. agmsg stores its
+SQLite database and team metadata under `~/.agents/skills/<cmd>/` by default,
+which is outside most project workspaces. If the sandbox cannot write there,
+commands that append or update state can fail with errors such as
+`sqlite3.OperationalError: unable to open database file`.
+
+This affects operations such as:
+
+- sending messages (`send.sh` writes to `db/messages.db`)
+- marking inbox rows as read (`inbox.sh` updates `read_at`)
+- joining, resetting, switching roles, or changing delivery mode (`teams/` and
+  config/state files may be updated)
+
+If you use Codex with filesystem sandboxing enabled, allow writes to the agmsg
+skill storage directory in your Codex config.
+
+Example `~/.codex/config.toml`:
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/agmsg/db",
+  "~/.agents/skills/agmsg/teams",
+]
+```
+
+If you installed agmsg under a custom command name, adjust the path accordingly:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/m/db",
+  "~/.agents/skills/m/teams",
+]
+```
+
+You can also allow the whole skill directory if your Codex setup supports that:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = [
+  "~/.agents/skills/agmsg",
+]
+```
+
+Codex only supports `mode turn` and `mode off`; it does not have Claude Code's
+Monitor tool. The sandbox allowlist is still required for writes performed by
+manual `$agmsg` commands and turn-end inbox checks.
+
+Some Codex runtimes or automations may inject a managed permission profile for a
+single run. In that case, the run-specific writable roots must also include the
+agmsg storage paths; the user-level config alone may not be enough.
+
 ## Tests
 
 ```bash
