@@ -12,21 +12,25 @@ repo; that repo is now archived — see "History" below.)
 
 ## Cutting a release
 
-Local steps:
+One command does everything:
 
 ```bash
-# 1. Bump VERSION (semver — must NOT include a leading "v").
-echo 1.0.1 > VERSION
-
-# 2. Sync derived files.
-./scripts/release/sync-version.sh
-
-# 3. Commit and tag.
-git add VERSION package.json .claude-plugin/plugin.json
-git commit -m "release: 1.0.1"
-git tag v1.0.1
-git push --follow-tags
+scripts/release/cut-release.sh 1.0.4   # semver, no leading "v"
 ```
+
+It bumps `VERSION`, syncs the derived files, regenerates `CHANGELOG.md` from
+Conventional Commits (via [git-cliff](https://git-cliff.org)), opens a
+`release: <version>` PR, auto-merges it once the required checks pass, then tags
+the merged commit and pushes the tag.
+
+**Why a PR and not a direct push:** `main` is a protected branch with required
+status checks, so the release commit must land through a PR — a direct push is
+rejected. Tags aren't protected, so the tag push is direct.
+
+**Prerequisite:** install git-cliff once — `brew install git-cliff` (or
+`cargo install git-cliff`, or grab a binary from the
+[releases](https://github.com/orhun/git-cliff/releases)). The changelog format
+is configured in [`cliff.toml`](cliff.toml).
 
 The tag push fires [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which:
@@ -35,20 +39,33 @@ which:
    (`sync-version.sh --check`).
 2. Waits for a reviewer to approve the `production` environment.
 3. Runs `npm publish --access public --provenance`.
-4. Creates a GitHub Release.
+4. Generates the release notes for the tag with git-cliff and creates a
+   GitHub Release from them.
 
-If the workflow fails on the sync check, you forgot step 2 locally — bump
-again, commit, delete and re-push the tag.
+### Manual steps (if you'd rather not use the script)
+
+```bash
+# On an up-to-date main, on a release branch:
+git switch -c release/v1.0.4
+echo 1.0.4 > VERSION
+./scripts/release/sync-version.sh
+git-cliff --tag v1.0.4 -o CHANGELOG.md
+git add VERSION package.json .claude-plugin/plugin.json CHANGELOG.md
+git commit -m "release: 1.0.4"
+git push -u origin release/v1.0.4
+gh pr create --fill && gh pr merge --squash --auto --delete-branch
+# After it merges:
+git switch main && git pull --ff-only
+git tag v1.0.4 && git push origin v1.0.4
+```
 
 ## Manual fallback (CI unavailable)
 
 ```bash
-./scripts/release/sync-version.sh
-git add VERSION package.json .claude-plugin/plugin.json && git commit -m "release: $(cat VERSION)"
-git tag "v$(cat VERSION)"
-git push --follow-tags
+# (after the release commit is on main via PR)
 npm publish --access public --provenance
-gh release create "v$(cat VERSION)" --title "v$(cat VERSION)" --notes "Release $(cat VERSION)."
+git-cliff --latest --strip header -o RELEASE_NOTES.md
+gh release create "v$(cat VERSION)" --title "v$(cat VERSION)" --notes-file RELEASE_NOTES.md
 ```
 
 ## Supply-chain guards

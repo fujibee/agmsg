@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history + tags so git-cliff can build release notes
 
       - name: Resolve version from tag
         id: ver
@@ -84,6 +86,18 @@ jobs:
           # from the Trusted Publisher OIDC exchange.
           npm publish --access public --provenance
 
+      # Build release notes for this tag from Conventional Commits, matching
+      # the CHANGELOG.md format. `--latest` emits only the newest release's
+      # section; `--strip header` drops the file preamble.
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4.8.0
+        id: cliff
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,6 +107,10 @@ jobs:
             echo "Release v$VERSION already exists — skipping"
             exit 0
           fi
+          # Fall back to a minimal note if git-cliff produced nothing.
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release $VERSION. See [commit history](../../commits/v$VERSION) for details." > RELEASE_NOTES.md
+          fi
           gh release create "v$VERSION" \
             --title "v$VERSION" \
-            --notes "Release $VERSION. See [commit history](../../commits/v$VERSION) for details."
+            --notes-file RELEASE_NOTES.md
