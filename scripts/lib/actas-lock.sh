@@ -26,6 +26,13 @@
 
 : "${SKILL_DIR:?actas-lock.sh requires SKILL_DIR}"
 
+# Owner tokens are per-process instance ids (see instance-id.sh), not bare
+# session_ids — this is what keeps parallel --continue/--resume sessions that
+# share a session_id from each appearing to own the other's locks (#93). The
+# liveness check (actas_lock_sid_alive) delegates to agmsg_instance_alive.
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/instance-id.sh"
+
 _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
 
 # Encode a team or agent name into a filesystem-safe form. Anything outside
@@ -72,26 +79,14 @@ actas_lock_owner() {
   head -1 "$lock" 2>/dev/null
 }
 
-# Return 0 if the given session_id is alive — that is, some live
-# cc-instance.<pid> currently contains it. Empty sid → not alive.
+# Return 0 if the given owner token is alive. The token is a per-process
+# instance id (composite "<sid>.<pid>" or bare "<sid>" fallback); liveness is
+# delegated to agmsg_instance_alive (composite → kill -0 the embedded pid; bare
+# → live cc-instance.<pid> scan, with upgrade compat). Kept as a thin wrapper
+# so existing callers (gc_stale, watch.sh subscription, session-start GC) need
+# no change. Empty token → not alive.
 actas_lock_sid_alive() {
-  local sid="$1"
-  [ -n "$sid" ] || return 1
-  local run; run="$(_actas_lock_dir)"
-  [ -d "$run" ] || return 1
-  # All loop variables are local — this function gets called from inside other
-  # loops (gc_stale, watch.sh subscription resolution), so leaking $f or $pid
-  # would corrupt the caller's iteration.
-  local f pid s
-  for f in "$run"/cc-instance.*; do
-    [ -f "$f" ] || continue
-    pid=${f##*.}
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || continue
-    s="$(cat "$f" 2>/dev/null || true)"
-    [ "$s" = "$sid" ] && return 0
-  done
-  return 1
+  agmsg_instance_alive "$1"
 }
 
 # Internal: attempt one atomic claim. Echoes "ok" on success, "held:<sid>"

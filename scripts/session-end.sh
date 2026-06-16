@@ -40,7 +40,17 @@ if [ -n "$INPUT" ]; then
 fi
 [ -z "$SESSION_ID" ] && exit 0
 
-PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
+# Re-derive the per-process instance id this session's watcher/locks are keyed
+# under (#93). The enclosing agent process is still alive during the hook, so
+# agmsg_instance_id normally resolves the same "<sid>.<pid>" that session-start
+# computed — cleaning ONLY this process's state, never a sibling --continue/
+# --resume process that shares the bare session_id. If the pid can't be
+# resolved we fall back to the bare session_id (and clean only the bare-keyed
+# artifacts); we deliberately do NOT glob-delete "<sid>.*", which would kill a
+# living sibling — those are left to session-start's liveness GC instead.
+INSTANCE_ID="$(agmsg_instance_id "$SESSION_ID" "$TYPE")"
+
+PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$PIDFILE" ]; then
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -58,19 +68,21 @@ fi
 
 # Drop the per-session stream watermark (see #107) — the session is ending, so
 # there is no restart to resume; a future session_id reuse should start fresh.
-rm -f "$RUN_DIR/watch.$SESSION_ID.watermark" 2>/dev/null || true
+rm -f "$RUN_DIR/watch.$INSTANCE_ID.watermark" 2>/dev/null || true
 
-# Clean cc-instance entries that still point at this session_id. The
-# enclosing CC process may itself be exiting (matcher=logout/etc.), in which
-# case its cc-instance.<pid> file would otherwise be left stale.
+# Clean the cc-instance entry that points at this instance id. The enclosing
+# CC process may itself be exiting (matcher=logout/etc.), in which case its
+# cc-instance.<pid> file would otherwise be left stale. A sibling process that
+# shares the bare session_id stores a different instance id, so it is untouched.
 for f in "$RUN_DIR"/cc-instance.*; do
   [ -f "$f" ] || continue
   state=$(cat "$f" 2>/dev/null || true)
-  [ "$state" = "$SESSION_ID" ] && rm -f "$f"
+  [ "$state" = "$INSTANCE_ID" ] && rm -f "$f"
 done
 
-# Release any actas exclusivity locks owned by this session so peers can
-# reclaim those identities on their next watcher cycle. See #62.
-actas_lock_release_all "$SESSION_ID" 2>/dev/null || true
+# Release any actas exclusivity locks owned by this instance so peers can
+# reclaim those identities on their next watcher cycle. Keyed by instance id so
+# a sibling resume process's locks are not released out from under it. See #62.
+actas_lock_release_all "$INSTANCE_ID" 2>/dev/null || true
 
 exit 0

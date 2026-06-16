@@ -11,6 +11,10 @@ setup() {
   export FAKE_HOME="$(mktemp -d)"
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   export SK="$FAKE_HOME/.agents/skills/agmsg"
+  # Pin bare instance-id keying (#93) so the watcher self-clean smoke test keys
+  # its pidfile on the raw session_id it passes — deterministic in CI and when
+  # the suite runs under an agent process.
+  export AGMSG_AGENT_PID=""
 }
 
 teardown() {

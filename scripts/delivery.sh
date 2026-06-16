@@ -32,6 +32,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL_NAME="$(basename "$SKILL_DIR")"
 RUN_DIR="$SKILL_DIR/run"
+# instance-id derivation (#93) for the in-session monitor directive below.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/instance-id.sh"
 
 resolve_hooks_file() {
   local type="$1"
@@ -357,6 +362,12 @@ emit_monitor_directive() {
       session_id="agmsg-$(date +%s)-$$"
     fi
   fi
+
+  # Key the watcher on the per-process instance id (#93) so parallel
+  # --continue/--resume sessions sharing a session_id stay isolated. Baking the
+  # composite into the directive matches SessionStart and makes the pidfile
+  # liveness check below see the real watcher (idempotent in watch.sh).
+  session_id="$(agmsg_normalize_instance_id "$session_id" "$type")"
 
   # Skip the directive when this CC session already has a live watcher —
   # invoking Monitor again would just spawn a duplicate and orphan the

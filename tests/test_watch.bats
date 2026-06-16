@@ -28,6 +28,20 @@ run_watcher_for() {
   wait "$pid" 2>/dev/null || true
 }
 
+# Compute the per-process instance id (#93) that watch.sh / session-end key on
+# for <sid>, the same way the scripts do. Resolves to a composite "<sid>.<pid>"
+# when an agent ancestor is present (e.g. running the suite under a Claude Code
+# session) and to the bare sid otherwise (e.g. CI) — so filename/owner
+# assertions hold in both environments instead of hardcoding the bare form.
+_iid() {
+  ( export SKILL_DIR="$TEST_SKILL_DIR"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/resolve-project.sh"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/instance-id.sh"
+    agmsg_normalize_instance_id "$1" claude-code 2>/dev/null )
+}
+
 @test "watch: restart delivers messages that arrived while the watcher was down" {
   local sid="sess-restart"
 
@@ -74,11 +88,12 @@ run_watcher_for() {
 
 @test "watch: persists a watermark file for the session" {
   run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
-  [ -f "$TEST_SKILL_DIR/run/watch.sess-wm.watermark" ]
+  [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
 }
 
 @test "session-end: removes the session watermark file" {
-  local wm="$TEST_SKILL_DIR/run/watch.sess-end.watermark"
+  # Key the watermark under the same instance id session-end will derive.
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid sess-end).watermark"
   mkdir -p "$TEST_SKILL_DIR/run"
   echo 5 > "$wm"
   printf '{"session_id":"sess-end"}' | bash "$SCRIPTS/session-end.sh" claude-code "$PROJ" >/dev/null 2>&1 || true
@@ -116,7 +131,8 @@ run_watcher_for() {
     >/dev/null 2>&1 &
   local w=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
-  [ "$(cat "$ready")" = "sess-own" ]
+  # watch.sh stamps the instance id (composite under an agent ancestor).
+  [ "$(cat "$ready")" = "$(_iid sess-own)" ]
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 }
@@ -154,4 +170,59 @@ run_watcher_for() {
   [ ! -f "$TEST_SKILL_DIR/run/ready.team__ghost" ]
   [ -f "$TEST_SKILL_DIR/run/watch.LIVESID.watermark" ]
   [ -f "$TEST_SKILL_DIR/run/ready.team__live" ]
+}
+
+# --- #93: parallel --continue/--resume sessions sharing a session_id ---
+
+# Poll up to ~3s for <pidfile> to record <want_pid>.
+_wait_pidfile() {
+  local pf="$1" want="$2" i
+  for i in $(seq 1 30); do
+    [ -f "$pf" ] && [ "$(cat "$pf" 2>/dev/null)" = "$want" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+@test "watch: two sessions sharing a session_id keep independent watchers (#93)" {
+  # Pre-composite instance ids (same sid prefix, different agent pid) — what
+  # session-start bakes into the directive for two parallel resume processes.
+  local pf1="$TEST_SKILL_DIR/run/watch.shared.1001.pid"
+  local pf2="$TEST_SKILL_DIR/run/watch.shared.1002.pid"
+
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.1001" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  local w1=$!
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.1002" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  local w2=$!
+
+  _wait_pidfile "$pf1" "$w1"
+  _wait_pidfile "$pf2" "$w2"
+
+  # Distinct pidfiles, and crucially neither watcher killed the other.
+  run kill -0 "$w1"; [ "$status" -eq 0 ]
+  run kill -0 "$w2"; [ "$status" -eq 0 ]
+  [ "$(cat "$pf1")" = "$w1" ]
+  [ "$(cat "$pf2")" = "$w2" ]
+
+  kill "$w1" "$w2" 2>/dev/null || true
+  wait "$w1" 2>/dev/null || true
+  wait "$w2" 2>/dev/null || true
+}
+
+@test "watch: relaunch with the SAME instance id replaces the previous watcher (#66 preserved)" {
+  local pf="$TEST_SKILL_DIR/run/watch.solo.2002.pid"
+
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "solo.2002" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  local w1=$!
+  _wait_pidfile "$pf" "$w1"
+
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "solo.2002" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  local w2=$!
+  # Successor claims the pidfile slot...
+  _wait_pidfile "$pf" "$w2"
+  # ...and the previous holder was killed.
+  run kill -0 "$w1"; [ "$status" -ne 0 ]
+
+  kill "$w2" 2>/dev/null || true
+  wait "$w2" 2>/dev/null || true
 }

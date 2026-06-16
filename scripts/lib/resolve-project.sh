@@ -65,8 +65,20 @@ agmsg_pid_is_agent() {
 # Walk the process tree from $$ upward, echoing the PID of the nearest ancestor
 # that looks like an agent process of <type>. Empty (return 1) when none is
 # found — e.g. a detached watcher or a plain human shell.
+#
+# Override hook: when AGMSG_AGENT_PID is set, it pins the resolved pid instead
+# of walking the tree — a non-empty value is echoed as-is, an empty value forces
+# the "no agent ancestor" path (so instance-id derivation falls back to the bare
+# session_id). This makes instance-id keying (#93) deterministic for the test
+# suite regardless of the ambient process tree, and is a usable escape hatch
+# when the ps-walk heuristic misfires for an unusual launch topology.
 agmsg_agent_pid() {
   local type="$1"
+  if [ -n "${AGMSG_AGENT_PID+set}" ]; then
+    [ -n "$AGMSG_AGENT_PID" ] || return 1
+    printf '%s' "$AGMSG_AGENT_PID"
+    return 0
+  fi
   local pid="$$" hops=0
   while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

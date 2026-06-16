@@ -53,32 +53,19 @@ fi
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 
 # --- Identify the enclosing Claude Code process. ---
-# Walk the parent chain looking for a process whose argv contains "claude".
-# Stop at PID 1 or after a bounded number of hops. Returns empty when no
-# match — in that case we skip the dedup step entirely.
-find_cc_pid() {
-  local pid="$$"
-  local hops=0
-  while [ "$pid" -gt 1 ] && [ "$hops" -lt 20 ]; do
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -z "$pid" ] && return 1
-    [ "$pid" = "0" ] && return 1
-    local cmd
-    cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    # Match the actual claude binary, not e.g. "/bin/zsh -c '...claude...'"
-    # by requiring the basename of the first token to be exactly "claude".
-    local first
-    first=$(printf '%s' "$cmd" | awk '{print $1}')
-    if [ "$(basename -- "${first:-}")" = "claude" ]; then
-      echo "$pid"
-      return 0
-    fi
-    hops=$((hops + 1))
-  done
-  return 1
-}
+# Reuse the shared agent-process resolver (#92) instead of a local ps-walk: it
+# checks both the `comm` name and argv[0] basename against the type's binaries,
+# which is more robust to wrapper/launch shapes than matching only "claude".
+# Empty when no agent ancestor is found (detached / sandboxed) — in that case
+# the instance id degrades to the bare session_id and the dedup step is skipped.
+CC_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 
-CC_PID=$(find_cc_pid 2>/dev/null || true)
+# Per-process instance id (see instance-id.sh): "<session_id>.<cc_pid>", or the
+# bare session_id when cc_pid is unresolved. This — not the bare session_id — is
+# what keys the watcher pidfile / watermark / actas owner, so parallel
+# --continue/--resume processes that share a session_id stay isolated (#93).
+# The cc-instance dedup record and the emitted watch.sh directive both use it.
+INSTANCE_ID="$(agmsg_instance_id_from_pid "$SESSION_ID" "$CC_PID")"
 
 # --- Cleanup of stale cc-instance files and their orphan watchers. ---
 # A cc-instance.<pid> whose CC pid is dead is left over from a previous CC.
@@ -181,8 +168,11 @@ done
 if [ -n "$CC_PID" ]; then
   STATE="$RUN_DIR/cc-instance.$CC_PID"
   if [ -f "$STATE" ]; then
+    # Records the previous instance id this CC attached to. Comparing/killing
+    # by instance id (not bare session_id) keeps the prev_pidfile lookup aligned
+    # with watch.sh's pidfile key.
     prev=$(cat "$STATE" 2>/dev/null || true)
-    if [ -n "$prev" ] && [ "$prev" != "$SESSION_ID" ]; then
+    if [ -n "$prev" ] && [ "$prev" != "$INSTANCE_ID" ]; then
       prev_pidfile="$RUN_DIR/watch.$prev.pid"
       if [ -f "$prev_pidfile" ]; then
         prev_pid=$(cat "$prev_pidfile" 2>/dev/null || true)
@@ -192,7 +182,7 @@ if [ -n "$CC_PID" ]; then
       fi
     fi
   fi
-  printf '%s\n' "$SESSION_ID" > "$STATE"
+  printf '%s\n' "$INSTANCE_ID" > "$STATE"
 fi
 
 WATCH="$SKILL_DIR/scripts/watch.sh"
@@ -201,7 +191,7 @@ cat <<EOF
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
-  command: $WATCH $SESSION_ID $PROJECT $TYPE
+  command: $WATCH $INSTANCE_ID $PROJECT $TYPE
   description: agmsg inbox stream
   persistent: true
 

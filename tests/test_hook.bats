@@ -4,6 +4,10 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93) so check-inbox's watcher-defer and actas
+  # owner checks key on the raw session_id these tests pass — deterministic in
+  # CI and when the suite runs under an agent process.
+  export AGMSG_AGENT_PID=""
   export TEST_PROJECT="$(mktemp -d)"
 }
 

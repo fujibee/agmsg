@@ -12,6 +12,11 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Pin bare instance-id keying (#93): owner tokens / pidfiles stay keyed on the
+  # raw session_id these tests pass, deterministic whether the suite runs under
+  # an agent process (composite) or in CI (bare). The composite path has
+  # dedicated coverage in test_instance_id.bats / test_watch.bats.
+  export AGMSG_AGENT_PID=""
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"
   mkdir -p "$RUN_DIR"

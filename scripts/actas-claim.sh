@@ -40,6 +40,12 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # rather than missing it as not_registered.
 PROJECT="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
 
+# Claim the lock under the per-process instance id (#93), the same token the
+# watcher (re)launched by this actas flow keys its pidfile on. The template
+# passes a bare $CLAUDE_CODE_SESSION_ID; normalize self-derives the composite so
+# a parallel --continue/--resume session can't appear to already own the role.
+SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$TYPE")"
+
 # Find the team(s) this name is registered to for the given project/type.
 TEAMS=""
 while IFS=$'\t' read -r team agent; do

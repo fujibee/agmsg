@@ -27,6 +27,15 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # subdir/worktree clears the registration on the project the session lives in.
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
+# A drop releases the actas lock keyed under this session's per-process instance
+# id (#93). The template passes a bare $CLAUDE_CODE_SESSION_ID; normalize to the
+# same composite the watcher/claim used so the release matches the real owner
+# token (and doesn't no-op against a bare key). Empty stays empty (lock release
+# is then skipped, as before).
+if [ -n "$SESSION_ID" ]; then
+  SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$AGENT_TYPE")"
+fi
+
 if [ -z "$TARGET_AGENT" ]; then
   WHOAMI=$(bash "$SCRIPT_DIR/whoami.sh" "$PROJECT_PATH" "$AGENT_TYPE")
   if echo "$WHOAMI" | grep -q '^agent='; then

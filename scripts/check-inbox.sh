@@ -12,6 +12,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"  # agmsg_agent_pid, for instance-id derivation
 
 # Hook runtimes that pass JSON do so on stdin. Interactive invocations such as
 # Gemini's PostToolUse command may inherit a terminal stdin instead; reading
@@ -33,6 +35,11 @@ SESSION_ID=$(printf '%s' "$INPUT" \
   | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   | head -1)
 if [ -n "$SESSION_ID" ]; then
+  # The monitor watcher keys its pidfile (and its actas owner, below) on the
+  # per-process instance id (#93), not the bare session_id. Normalize to the
+  # same token so this Stop-hook defers to a live watcher in `both` mode instead
+  # of double-delivering.
+  SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$TYPE")"
   PIDFILE="$SKILL_DIR/run/watch.$SESSION_ID.pid"
   if [ -f "$PIDFILE" ]; then
     WATCH_PID=$(cat "$PIDFILE" 2>/dev/null || true)

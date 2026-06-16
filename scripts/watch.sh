@@ -50,6 +50,17 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # detached watcher (no agent process to walk to) degrades to the ancestor /
 # git-common-dir signals, which still recover the nested/worktree cases.
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+
+# Disambiguate parallel --continue/--resume sessions that share a session_id
+# (#93). All per-process state below — pidfile, watermark, actas owner, ready
+# sentinel — keys on this per-process instance id rather than the bare
+# session_id, so two processes that share a session_id no longer collide on the
+# same pidfile and kill each other (#66 was a within-session dedup; here it must
+# not fire across sibling processes). Idempotent: the SessionStart directive
+# already passes a composite id (no re-derive); the command template's manual
+# monitor/actas/drop steps pass a bare session_id and we self-derive here.
+SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$AGENT_TYPE")"
+
 DB="$(agmsg_db_path)"
 RUN_DIR="$SKILL_DIR/run"
 PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
