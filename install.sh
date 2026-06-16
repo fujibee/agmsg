@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode"
       echo "                    Selects which template becomes SKILL.md (matches the"
       echo "                    <type> arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
@@ -168,6 +168,8 @@ if [ "$UPDATE_ONLY" = true ]; then
     SKILL_TEMPLATE="cmd.gemini.md"
   elif [ "$AGENT_TYPE" = "antigravity" ]; then
     SKILL_TEMPLATE="cmd.antigravity.md"
+  elif [ "$AGENT_TYPE" = "opencode" ]; then
+    SKILL_TEMPLATE="cmd.opencode.md"
   fi
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -229,6 +231,8 @@ if [ "$AGENT_TYPE" = "gemini" ]; then
   SKILL_TEMPLATE="cmd.gemini.md"
 elif [ "$AGENT_TYPE" = "antigravity" ]; then
   SKILL_TEMPLATE="cmd.antigravity.md"
+elif [ "$AGENT_TYPE" = "opencode" ]; then
+  SKILL_TEMPLATE="cmd.opencode.md"
 fi
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -330,13 +334,14 @@ echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity) to pick up the new skill"
+echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity / OpenCode) to pick up the new skill"
 echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
 echo "       Gemini CLI:   \$$CMD_NAME"
 echo "       Antigravity:  \$$CMD_NAME"
 echo "       Copilot CLI:  /$CMD_NAME"
+echo "       OpenCode:     \$$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"

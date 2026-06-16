@@ -15,8 +15,8 @@ PROJECT_PATH="${4:?Missing project_path}"
 # here. Allowing arbitrary strings silently mis-registers an agent and
 # makes monitor mode fail with a confusing "no joined teams" message.
 case "$AGENT_TYPE" in
-  claude-code|codex|gemini|antigravity|copilot) ;;
-  *) echo "Unknown agent type: '$AGENT_TYPE' (supported: claude-code, codex, gemini, antigravity, copilot)" >&2; exit 1 ;;
+  claude-code|codex|gemini|antigravity|copilot|opencode) ;;
+  *) echo "Unknown agent type: '$AGENT_TYPE' (supported: claude-code, codex, gemini, antigravity, copilot, opencode)" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

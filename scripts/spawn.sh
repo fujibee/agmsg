@@ -64,7 +64,7 @@ shift 2 || true
 
 case "$AGENT_TYPE" in
   claude-code|codex) ;;
-  gemini|antigravity|copilot)
+  gemini|antigravity|copilot|opencode)
     die "agent type '$AGENT_TYPE' is not supported by spawn yet (supported: claude-code, codex)" ;;
   *)
     die "unknown agent type '$AGENT_TYPE' (supported: claude-code, codex)" ;;

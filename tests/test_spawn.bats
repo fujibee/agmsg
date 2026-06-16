@@ -43,6 +43,12 @@ teardown() {
   [[ "$output" =~ "not supported by spawn yet" ]]
 }
 
+@test "spawn: rejects unsupported agent type (opencode)" {
+  run bash "$SCRIPTS/spawn.sh" opencode foo --project "$PROJ"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported by spawn yet" ]]
+}
+
 @test "spawn: rejects unknown agent type" {
   run bash "$SCRIPTS/spawn.sh" frobnicate foo --project "$PROJ"
   [ "$status" -ne 0 ]
