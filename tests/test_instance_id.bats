@@ -125,6 +125,28 @@ teardown() { teardown_test_env; }
   [[ "$output" == *"falling back to bare session_id"* ]]
 }
 
+# --- AGMSG_AGENT_PID override ---
+
+@test "override: a numeric AGMSG_AGENT_PID pins the resolved pid" {
+  AGMSG_AGENT_PID=4242 run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = "4242" ]
+  [ "$(AGMSG_AGENT_PID=4242 agmsg_instance_id sess claude-code)" = "sess.4242" ]
+}
+
+@test "override: an empty AGMSG_AGENT_PID forces the bare fallback" {
+  AGMSG_AGENT_PID="" run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [ "$(AGMSG_AGENT_PID="" agmsg_instance_id sess claude-code 2>/dev/null)" = "sess" ]
+}
+
+@test "override: a non-numeric AGMSG_AGENT_PID is ignored with a warning" {
+  AGMSG_AGENT_PID="abc" run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ignoring non-numeric AGMSG_AGENT_PID"* ]]
+}
+
 # --- actas distinctness: the #93 payoff ---
 
 # Two instance ids that share a session_id prefix but differ in pid must be

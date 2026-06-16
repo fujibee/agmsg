@@ -75,9 +75,13 @@ agmsg_pid_is_agent() {
 agmsg_agent_pid() {
   local type="$1"
   if [ -n "${AGMSG_AGENT_PID+set}" ]; then
-    [ -n "$AGMSG_AGENT_PID" ] || return 1
-    printf '%s' "$AGMSG_AGENT_PID"
-    return 0
+    case "$AGMSG_AGENT_PID" in
+      '')       return 1 ;;  # explicit empty → force the bare-sid fallback
+      *[!0-9]*)              # non-numeric → ignore, warn, fall back to bare
+        printf 'agmsg: ignoring non-numeric AGMSG_AGENT_PID=%s; using bare session_id\n' "$AGMSG_AGENT_PID" >&2
+        return 1 ;;
+      *) printf '%s' "$AGMSG_AGENT_PID"; return 0 ;;
+    esac
   fi
   local pid="$$" hops=0
   while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do
