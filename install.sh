@@ -192,6 +192,12 @@ if [ "$UPDATE_ONLY" = true ]; then
     mkdir -p "$COPILOT_SKILL_DIR"
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
   fi
+  # Refresh / install the OpenCode skill (same reasoning as Copilot above).
+  OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$SKILL_NAME"
+  if [ -d "$HOME/.config/opencode" ]; then
+    mkdir -p "$OPENCODE_SKILL_DIR"
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.opencode.md" > "$OPENCODE_SKILL_DIR/SKILL.md"
+  fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
   install_windows_helpers
@@ -282,6 +288,18 @@ if [ -d "$HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR"
   sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
+fi
+
+# --- Install OpenCode skill ---
+# OpenCode reads skills from ~/.config/opencode/skills/<name>/SKILL.md as its
+# global config path. The shared ~/.agents/skills/<name>/SKILL.md is
+# Codex-typed and would mis-identify an OpenCode session — keep the OpenCode
+# copy separate, same pattern as Copilot.
+OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$CMD_NAME"
+if [ -d "$HOME/.config/opencode" ]; then
+  mkdir -p "$OPENCODE_SKILL_DIR"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.opencode.md" > "$OPENCODE_SKILL_DIR/SKILL.md"
+  echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
 fi
 
 # --- Configure Codex sandbox (if Codex is installed) ---

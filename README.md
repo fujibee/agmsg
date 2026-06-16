@@ -99,7 +99,7 @@ cd agmsg
 ./install.sh              # Interactive (asks command name, default: agmsg)
 ./install.sh --cmd m      # Non-interactive with custom command name
 ./install.sh --agent-type gemini    # Install a Gemini-oriented SKILL.md
-./install.sh --agent-type opencode  # Install an OpenCode-oriented SKILL.md
+./install.sh --agent-type opencode  # OpenCode-only: sets shared skill to OpenCode template
 ```
 
 The **command name** determines:
@@ -279,7 +279,7 @@ The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agms
 $agmsg
 ```
 
-Install with `./install.sh --agent-type opencode`. OpenCode is supported for manual and turn/off delivery workflows. It currently supports `mode turn` and `mode off`; `monitor`, `both`, and `spawn opencode` are not supported.
+Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode is supported for manual and turn/off delivery workflows. It currently supports `mode turn` and `mode off`; `monitor`, `both`, and `spawn opencode` are not supported.
 
 This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
 

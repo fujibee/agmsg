@@ -6,15 +6,40 @@ OpenCode is supported for **manual and turn/off delivery workflows**.
 
 ## Install
 
+**Alongside Codex (typical setup):**
+
+```bash
+bash <(curl -fsSL https://agmsg.cc/install.sh)
+```
+
+When `~/.config/opencode/` already exists, the installer automatically places
+an OpenCode-typed `SKILL.md` at `~/.config/opencode/skills/agmsg/SKILL.md`
+without touching the shared `~/.agents/skills/agmsg/SKILL.md` (which stays
+Codex-typed). This is the recommended approach for mixed Codex + OpenCode teams.
+
+**OpenCode-only (no Codex):**
+
 ```bash
 bash <(curl -fsSL https://agmsg.cc/install.sh) --agent-type opencode
 ```
 
-Or from a local clone:
+`--agent-type opencode` overwrites the shared `~/.agents/skills/agmsg/SKILL.md`
+with the OpenCode template. Use this only when Codex is **not** installed; it
+will break Codex identification if both agents share the same `~/.agents/` path.
 
-```bash
-./install.sh --agent-type opencode
-```
+From a local clone, substitute `bash <(curl ...)` with `./install.sh`.
+
+The installer places an OpenCode-typed `SKILL.md` at
+`~/.config/opencode/skills/agmsg/SKILL.md`. This is the global skill path
+OpenCode reads and takes priority over the shared
+`~/.agents/skills/agmsg/SKILL.md` (which is Codex-typed). Without this,
+OpenCode would pick up the Codex template and identify itself as `codex`.
+
+OpenCode skill search order (first match wins):
+1. `.opencode/skills/<name>/SKILL.md` — project-local
+2. `~/.config/opencode/skills/<name>/SKILL.md` — global config ← installed here
+3. `~/.claude/skills/<name>/SKILL.md` — Claude-compatible fallback
+4. `~/.agents/skills/<name>/SKILL.md` — agent-compatible fallback (Codex-typed)
 
 ## Join a team
 
