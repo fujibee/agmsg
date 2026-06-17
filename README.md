@@ -178,10 +178,10 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 ```
 /agmsg spawn codex reviewer            # new codex agent, joins and becomes "reviewer"
 /agmsg spawn claude-code alice --window  # new claude-code agent in a fresh tmux window
-/agmsg spawn hermes reviewer           # new Hermes Agent session, launched as `hermes --profile reviewer`
+/agmsg spawn hermes reviewer           # new Hermes Agent session acting as "reviewer" (Hermes default profile)
 ```
 
-`spawn <type> <name>` pre-joins `<name>`, then launches the target CLI with the actas slash command (`/<your-command> actas <name>`, matching your install command name) as its initial prompt. If the current session is inside **tmux**, it opens in a new pane (or `--window` for a new window, `--split h|v` for the direction); otherwise it opens a new **OS terminal** window. For `hermes`, `<name>` is also used as the Hermes profile by default (`hermes --profile <name>`); pass `--hermes-profile <profile>` to launch a different profile while still acting as `<name>`.
+`spawn <type> <name>` pre-joins `<name>`, then launches the target CLI with the actas slash command (`/<your-command> actas <name>`, matching your install command name) as its initial prompt. If the current session is inside **tmux**, it opens in a new pane (or `--window` for a new window, `--split h|v` for the direction); otherwise it opens a new **OS terminal** window. For `hermes`, the new session takes the actas role `<name>` via the boot prompt and otherwise uses Hermes's **default profile**. To launch a specific Hermes profile instead, pass `--hermes-profile <profile>` — it must already exist (Hermes errors on an unknown profile rather than creating one; spawn checks this up front).
 
 By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex and Hermes skip the wait (they have no agmsg Monitor).
 
@@ -283,7 +283,7 @@ The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agms
 
 The installer drops a Hermes skill at `~/.hermes/skills/agmsg/SKILL.md` when `~/.hermes` exists. Hermes exposes installed skills as dynamic slash commands, so `/agmsg` invokes the skill. Runtime scripts, teams, and the SQLite store remain in `~/.agents/skills/agmsg/` so Hermes shares the same message floor as the other agents. Hermes currently supports manual inbox checks (`mode off`) only; there is no agmsg automatic delivery hook.
 
-Hermes also works with `spawn`: `/agmsg spawn hermes reviewer` opens a new Hermes session as `hermes --profile reviewer`, asks it to run `/agmsg actas reviewer`, then continues that profile's chat. Use `--hermes-profile <profile>` if the Hermes profile name should differ from the agmsg role name.
+Hermes also works with `spawn`: `/agmsg spawn hermes reviewer` opens a new Hermes session, asks it to run `/agmsg actas reviewer`, then continues the chat. By default it launches Hermes's own **default profile** (the `reviewer` role comes from the actas prompt, not from a Hermes profile). To pin a specific Hermes profile, pass `--hermes-profile <profile>` — it must already exist, since Hermes errors on an unknown profile instead of creating one (spawn validates this before launching).
 
 ### Shell (any agent)
 

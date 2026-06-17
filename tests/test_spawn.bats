@@ -146,7 +146,7 @@ teardown() {
   [[ "$output" == *"$PROJ"* ]]
 }
 
-@test "spawn: hermes uses the actas name as the default Hermes profile" {
+@test "spawn: hermes without --hermes-profile launches the default profile (no --profile flag)" {
   bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
   run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ"
   [ "$status" -eq 0 ]
@@ -155,15 +155,17 @@ teardown() {
   [ -f "$boot" ]
   run cat "$boot"
   [[ "$output" == *"hermes"* ]]
-  [[ "$output" == *"--profile"* ]]
-  [[ "$output" == *"reviewer"* ]]
+  # No profile named → Hermes uses its own default profile, so --profile is absent.
+  [[ "$output" != *"--profile"* ]]
   [[ "$output" == *"chat"* ]]
   [[ "$output" == *"-q"* ]]
+  # The actas identity is still <name>, applied via the boot prompt.
   [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"reviewer"* ]]
   [[ "$output" == *"--continue"* ]]
 }
 
-@test "spawn: hermes --hermes-profile overrides the default profile without changing actas" {
+@test "spawn: hermes --hermes-profile launches that profile while actas stays <name>" {
   bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
   run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ" --hermes-profile orchestrator
   [ "$status" -eq 0 ]
@@ -174,6 +176,20 @@ teardown() {
   [[ "$output" == *"orchestrator"* ]]
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"reviewer"* ]]
+}
+
+@test "spawn: hermes --hermes-profile rejects a profile that does not exist" {
+  bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
+  # Simulate Hermes refusing an unknown profile: the stub exits non-zero, just
+  # as `hermes --profile <missing> version` does against a real binary.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB_BIN/hermes"
+  chmod +x "$STUB_BIN/hermes"
+  run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ" --hermes-profile ghost
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not exist"* ]]
+  [[ "$output" == *"hermes profile create ghost"* ]]
+  # Nothing should have been launched.
+  [ ! -s "$CAPTURE" ]
 }
 
 @test "spawn: --hermes-profile is hermes-only" {

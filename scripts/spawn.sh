@@ -33,7 +33,11 @@ set -euo pipefail
 #                      should run). Overrides $AGMSG_TERMINAL and config
 #                      `spawn.terminal`.
 #   --hermes-profile <name>
-#                      Hermes profile to launch (Hermes only; default: <name>)
+#                      Hermes profile to launch (Hermes only). Must already
+#                      exist (Hermes errors on an unknown profile rather than
+#                      creating one). When omitted, Hermes uses its own default
+#                      profile; the actas <name> is applied via the boot prompt,
+#                      not as a Hermes profile.
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -133,6 +137,16 @@ esac
 command -v "$CLI_BIN" >/dev/null 2>&1 \
   || die "'$CLI_BIN' not found on PATH — install the ${AGENT_TYPE} CLI first"
 
+# Hermes errors out (rather than auto-creating) when launched with a --profile
+# that doesn't exist, which would kill the spawned session in a detached pane.
+# When a profile is named explicitly, verify it exists up front and fail here
+# with guidance. With no --hermes-profile we don't pass --profile at all (see
+# the boot script), so Hermes uses its own default profile — nothing to check.
+if [ "$AGENT_TYPE" = "hermes" ] && [ -n "$HERMES_PROFILE" ]; then
+  "$CLI_BIN" --profile "$HERMES_PROFILE" version >/dev/null 2>&1 \
+    || die "Hermes profile '$HERMES_PROFILE' does not exist — create it with 'hermes profile create $HERMES_PROFILE', or pass an existing profile via --hermes-profile"
+fi
+
 # --- Resolve the team to join <name> into ---
 # When --team is omitted, derive it from any team that already has an agent
 # registered for this project (any type). Zero or many → require --team.
@@ -220,9 +234,6 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # than a nonexistent `/agmsg actas <name>`.
 CMD_NAME="$(basename "$SKILL_DIR")"
 ACTAS_PROMPT="/${CMD_NAME} actas ${NAME}"
-if [ "$AGENT_TYPE" = "hermes" ] && [ -z "$HERMES_PROFILE" ]; then
-  HERMES_PROFILE="$NAME"
-fi
 
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
@@ -236,9 +247,17 @@ BOOT="$BOOT.command"
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
   if [ "$AGENT_TYPE" = "hermes" ]; then
-    printf '%q --profile %q chat -q %q\n' "$CLI_BIN" "$HERMES_PROFILE" "$ACTAS_PROMPT"
-    echo 'rm -f "$0" 2>/dev/null'   # self-clean before the long-lived session replaces this shell
-    printf 'exec %q --profile %q --continue --cli chat\n' "$CLI_BIN" "$HERMES_PROFILE"
+    # With an explicit (and validated) --hermes-profile, launch that Hermes
+    # profile; otherwise omit --profile so Hermes uses its own default profile.
+    if [ -n "$HERMES_PROFILE" ]; then
+      printf '%q --profile %q chat -q %q\n' "$CLI_BIN" "$HERMES_PROFILE" "$ACTAS_PROMPT"
+      echo 'rm -f "$0" 2>/dev/null'   # self-clean before the long-lived session replaces this shell
+      printf 'exec %q --profile %q --continue --cli chat\n' "$CLI_BIN" "$HERMES_PROFILE"
+    else
+      printf '%q chat -q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
+      echo 'rm -f "$0" 2>/dev/null'   # self-clean before the long-lived session replaces this shell
+      printf 'exec %q --continue --cli chat\n' "$CLI_BIN"
+    fi
   else
     printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
     echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits

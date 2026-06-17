@@ -122,7 +122,8 @@ Do NOT manually edit config files. Always use join.sh.
 #                        / config spawn.terminal. macOS default uses `open -a`
 #                        (no Automation/TCC permission prompt).
 #   --hermes-profile <name>
-#                        Hermes profile to launch (Hermes only; default: <name>)
+#                        existing Hermes profile to launch (Hermes only). When
+#                        omitted, Hermes uses its own default profile.
 #   --no-wait            don't block on readiness (fire-and-forget)
 #   --ready-timeout N    seconds to wait for readiness (default 90; on timeout
 #                        prints status=timeout and exits 3). Codex and Hermes
