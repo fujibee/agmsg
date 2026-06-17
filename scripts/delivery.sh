@@ -32,6 +32,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL_NAME="$(basename "$SKILL_DIR")"
 RUN_DIR="$SKILL_DIR/run"
+
+# Per-agent-type delivery drivers (#48). delivery.sh dispatches apply/status to
+# scripts/drivers/<type>.sh when one exists; otherwise it falls back to the
+# legacy in-file paths below. Shared class libs (e.g. _rulefile.sh) load once
+# here. WIP skeleton: only the rule-file class (gemini, antigravity) is wired
+# through the dispatcher so far — see scripts/drivers/README.md.
+DRIVERS_DIR="$SCRIPT_DIR/drivers"
+# shellcheck source=scripts/drivers/_rulefile.sh
+[ -f "$DRIVERS_DIR/_rulefile.sh" ] && . "$DRIVERS_DIR/_rulefile.sh"
+
+# True when a per-type driver exists. The type is guarded to a safe charset so
+# the sourced path can never escape DRIVERS_DIR.
+has_driver() {
+  case "$1" in
+    *[!a-z-]*|'') return 1 ;;
+    *) [ -f "$DRIVERS_DIR/$1.sh" ] ;;
+  esac
+}
 # instance-id derivation (#93) for the in-session monitor directive below.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/resolve-project.sh"
@@ -245,43 +263,21 @@ EOF
   fi
 }
 
-apply_settings_gemini() {
-  local type="$1"
-  local project="$2"
-  local mode="$3"
-  local rule_file
-  rule_file=$(resolve_hooks_file "$type" "$project")
-
-  # Remove existing rule file
-  rm -f "$rule_file"
-
-  case "$mode" in
-    turn|both)
-      mkdir -p "$(dirname "$rule_file")"
-      cat <<EOF > "$rule_file"
-# agmsg Integration Rule
-
-## PostToolUse
-After each tool call, automatically check the agmsg inbox for unread messages.
-- Command: '$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'
-EOF
-      ;;
-    monitor)
-      echo "Warning: 'monitor' mode is not fully supported for $type yet. Using turn-based hook." >&2
-      apply_settings_gemini "$type" "$project" "turn"
-      ;;
-    off)
-      ;;
-  esac
-}
+# NOTE(#48): the rule-file apply/status logic that used to live here as
+# apply_settings_gemini now lives in scripts/drivers/_rulefile.sh, reached via
+# the driver dispatch in apply_settings()/do_status() below.
 
 apply_settings() {
   local type="$1"
   local project="$2"
   local mode="$3"
 
-  if [ "$type" = "gemini" ] || [ "$type" = "antigravity" ]; then
-    apply_settings_gemini "$type" "$project" "$mode"
+  # Per-type driver (#48). Rule-file runtimes (gemini, antigravity) resolve here;
+  # copilot and the JSON settings path below are not yet extracted — TODO(#48).
+  if has_driver "$type"; then
+    # shellcheck source=/dev/null
+    . "$DRIVERS_DIR/$type.sh"
+    agmsg_driver_apply "$type" "$project" "$mode"
     return
   fi
 
@@ -450,7 +446,11 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     local hf
     hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
-    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "copilot" ]; then
+    if has_driver "$TYPE"; then
+      # shellcheck source=/dev/null
+      . "$DRIVERS_DIR/$TYPE.sh"
+      echo "mode: $(agmsg_driver_status "$TYPE" "$PROJECT")"
+    elif [ "$TYPE" = "copilot" ]; then
       local mode="off"
       if [ -f "$hf" ]; then
         mode="turn"
@@ -483,7 +483,7 @@ do_status() {
     fi
   fi
 
-  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "copilot" ]; then
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && ! has_driver "$TYPE" && [ "$TYPE" != "copilot" ]; then
     local hooks_file
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then
