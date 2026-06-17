@@ -42,6 +42,39 @@ _iid() {
     agmsg_normalize_instance_id "$1" claude-code 2>/dev/null )
 }
 
+_max_message_id() {
+  ( # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_sqlite "$(agmsg_db_path)" "SELECT COALESCE(MAX(id), 0) FROM messages;" )
+}
+
+_wait_for_file() {
+  local file="$1" i
+  for i in $(seq 1 100); do
+    [ -f "$file" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+_wait_for_missing() {
+  local file="$1" i
+  for i in $(seq 1 100); do
+    [ ! -e "$file" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+_wait_for_file_contains() {
+  local file="$1" needle="$2" i
+  for i in $(seq 1 100); do
+    [ -f "$file" ] && grep -q "$needle" "$file" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "watch: restart delivers messages that arrived while the watcher was down" {
   local sid="sess-restart"
 
@@ -89,6 +122,71 @@ _iid() {
 @test "watch: persists a watermark file for the session" {
   run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
   [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
+}
+
+@test "watch: closed consumer does not advance watermark past an undelivered row" {
+  local sid="sess-consumer-close"
+  local iid="$(_iid "$sid")"
+  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
+  local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
+  local first_out="$TEST_SKILL_DIR/first-delivery.log"
+
+  ( AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+      | head -n 1 > "$first_out" ) 2>/dev/null &
+  local pipeline=$!
+
+  _wait_for_file "$wm"
+  [ -f "$pf" ]
+  local w="$(cat "$pf")"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M1-before-consumer-close" >/dev/null
+  local first_id="$(_max_message_id)"
+  _wait_for_file_contains "$first_out" "M1-before-consumer-close"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M2-after-consumer-close" >/dev/null
+  local second_id="$(_max_message_id)"
+  _wait_for_missing "$pf" || {
+    kill "$w" "$pipeline" 2>/dev/null || true
+    wait "$pipeline" 2>/dev/null || true
+    false
+  }
+  wait "$pipeline" 2>/dev/null || true
+
+  [ "$first_id" != "$second_id" ]
+  [ "$(cat "$wm")" = "$first_id" ]
+
+  run_watcher_for "$sid" "$TEST_SKILL_DIR/redelivery.log" 2
+  grep -q "M2-after-consumer-close" "$TEST_SKILL_DIR/redelivery.log"
+  ! grep -q "M1-before-consumer-close" "$TEST_SKILL_DIR/redelivery.log"
+}
+
+@test "watch: closed stdout exits without advancing the watermark" {
+  local sid="sess-stdout-closed"
+  local iid="$(_iid "$sid")"
+  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
+  local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    1>&- 2>/dev/null &
+  local w=$!
+
+  _wait_for_file "$wm"
+  [ -f "$pf" ]
+  local initial="$(cat "$wm")"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-after-closed-stdout" >/dev/null
+
+  _wait_for_missing "$pf" || {
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    false
+  }
+  wait "$w" 2>/dev/null || true
+
+  [ "$(cat "$wm")" = "$initial" ]
+
+  run_watcher_for "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" 2
+  grep -q "M-after-closed-stdout" "$TEST_SKILL_DIR/closed-redelivery.log"
 }
 
 @test "session-end: removes the session watermark file" {

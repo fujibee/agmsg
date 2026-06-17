@@ -107,7 +107,9 @@ cleanup() {
   # watcher (Monitor re-invoked for the same session_id) overwrites $PIDFILE
   # with its own pid before killing us; without this guard our EXIT trap
   # would erase the successor's record. See #66.
-  [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"
+  local pidfile_pid=""
+  [ -f "$PIDFILE" ] && IFS= read -r pidfile_pid < "$PIDFILE" || true
+  [ "$pidfile_pid" = "$$" ] && rm -f "$PIDFILE"
   if [ -n "$READY_FILES" ]; then
     while IFS= read -r _rf; do
       [ -z "$_rf" ] && continue
@@ -115,7 +117,9 @@ cleanup() {
       # same (team, name) overwrites it with its own session_id before this one
       # exits; without this guard our EXIT could delete the live successor's
       # sentinel. Mirrors the pidfile guard above. See #108 review.
-      [ "$(cat "$_rf" 2>/dev/null)" = "$SESSION_ID" ] && rm -f "$_rf" 2>/dev/null || true
+      local _owner=""
+      [ -f "$_rf" ] && IFS= read -r _owner < "$_rf" || true
+      [ "$_owner" = "$SESSION_ID" ] && rm -f "$_rf" 2>/dev/null || true
     done <<< "$READY_FILES"
   fi
 }
@@ -297,11 +301,13 @@ while true; do
           fi
           exit 0
         fi
-        printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"
+        if ! printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"; then
+          cleanup
+          exit 0
+        fi
         LAST="$id"
+        persist_watermark
       done <<< "$ROWS"
-      # Persist after each delivered batch so a restart resumes from here.
-      persist_watermark
     fi
   fi
 
