@@ -7,6 +7,12 @@ set -euo pipefail
 TEAM="${1:?Usage: team.sh <team>}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Reject team names that would escape teams/ as a path segment (#140).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+agmsg_validate_team_name "$TEAM" || exit 1
+
 CONFIG="$SCRIPT_DIR/../teams/$TEAM/config.json"
 
 if [ ! -f "$CONFIG" ]; then

@@ -10,6 +10,12 @@ AGENT_ID="${2:?Missing agent_id}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
+
+# Reject team names that would escape teams/ as a path segment (#140).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+agmsg_validate_team_name "$TEAM" || exit 1
+
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
 if [ ! -f "$TEAM_CONFIG" ]; then

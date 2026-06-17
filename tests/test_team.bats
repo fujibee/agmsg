@@ -278,3 +278,72 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+
+# --- #140: team-name path traversal ---
+
+@test "join: rejects a team name with path traversal (../)" {
+  run bash "$SCRIPTS/join.sh" "../../escape-join" alice claude-code /tmp/proj
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+  # Nothing was created outside teams/.
+  [ ! -f "$(dirname "$TEST_SKILL_DIR")/escape-join/config.json" ]
+}
+
+@test "join: rejects '..' and '.' as team names" {
+  run bash "$SCRIPTS/join.sh" ".." alice claude-code /tmp/proj
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "not allowed" ]]
+  run bash "$SCRIPTS/join.sh" "." alice claude-code /tmp/proj
+  [ "$status" -eq 1 ]
+}
+
+@test "join: rejects a team name starting with '-'" {
+  run bash "$SCRIPTS/join.sh" "-rf" alice claude-code /tmp/proj
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "must not start with" ]]
+}
+
+@test "join: rejects an empty team name" {
+  run bash "$SCRIPTS/join.sh" "" alice claude-code /tmp/proj
+  [ "$status" -ne 0 ]
+}
+
+@test "team: rejects a traversal team name" {
+  run bash "$SCRIPTS/team.sh" "../../escape-team"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+}
+
+@test "leave: rejects a traversal team name" {
+  run bash "$SCRIPTS/leave.sh" "../../escape-leave" alice
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+}
+
+@test "rename: rejects a traversal team name" {
+  run bash "$SCRIPTS/rename.sh" "../../escape-rename" old new
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+}
+
+@test "rename-team: rejects traversal on the new name and does not move outside teams/" {
+  bash "$SCRIPTS/join.sh" srcteam bob claude-code /tmp/proj
+  run bash "$SCRIPTS/rename-team.sh" srcteam "../../escape-renamed"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+  [ ! -f "$(dirname "$TEST_SKILL_DIR")/escape-renamed/config.json" ]
+  # Source team is untouched.
+  [ -f "$TEST_SKILL_DIR/teams/srcteam/config.json" ]
+}
+
+@test "rename-team: rejects traversal on the old name" {
+  run bash "$SCRIPTS/rename-team.sh" "../../escape-old" newteam
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "path traversal" ]]
+}
+
+@test "join: still accepts a UTF-8 (Japanese) team name" {
+  run bash "$SCRIPTS/join.sh" "テストチーム" alice claude-code /tmp/proj
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/teams/テストチーム/config.json" ]
+}

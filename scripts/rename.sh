@@ -11,6 +11,10 @@ NEW_NAME="${3:?Missing new agent name}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
+# Reject team names that would escape teams/ as a path segment (#140).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+agmsg_validate_team_name "$TEAM" || exit 1
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 DB="$(agmsg_db_path)"
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
