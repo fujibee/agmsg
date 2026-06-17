@@ -116,7 +116,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 4. Tell the user: "Dropped role `<name>` from this project."
 
 If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window", "spawn hermes reviewer"):
-1. Parse `<type>` (must be `claude-code`, `codex`, or `hermes`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--profile <profile>`, `--no-wait`, `--ready-timeout <secs>`).
+1. Parse `<type>` (must be `claude-code`, `codex`, or `hermes`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--hermes-profile <profile>`, `--no-wait`, `--ready-timeout <secs>`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
    - spawn.sh pre-joins `<name>`, then opens a tmux pane/window (when this session is inside tmux) or a new OS terminal, and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt.
    - By default it BLOCKS until a spawned claude-code agent's watcher attaches (`status=ready`); `status=timeout` + exit 3 if not ready within `--ready-timeout` (default 90s). `--no-wait` for fire-and-forget. Spawning a codex or Hermes agent skips the wait (no Monitor).

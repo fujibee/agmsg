@@ -32,7 +32,8 @@ set -euo pipefail
 #                      generated boot script (an executable file the terminal
 #                      should run). Overrides $AGMSG_TERMINAL and config
 #                      `spawn.terminal`.
-#   --profile <name>   Hermes profile to launch (Hermes only; default: <name>)
+#   --hermes-profile <name>
+#                      Hermes profile to launch (Hermes only; default: <name>)
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -79,7 +80,7 @@ SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
-HERMES_PROFILE=""    # --profile override for spawned Hermes sessions
+HERMES_PROFILE=""    # --hermes-profile override for spawned Hermes sessions
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -88,7 +89,7 @@ while [ $# -gt 0 ]; do
     --window)  TMUX_TARGET="window"; shift ;;
     --split)   SPLIT="${2:?--split needs h|v}"; shift 2 ;;
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
-    --profile) HERMES_PROFILE="${2:?--profile needs a profile name}"; shift 2 ;;
+    --hermes-profile) HERMES_PROFILE="${2:?--hermes-profile needs a profile name}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     *) die "unknown option: $1" ;;
@@ -98,7 +99,7 @@ done
 case "$SPLIT" in h|v) ;; *) die "--split must be 'h' or 'v'" ;; esac
 case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole number of seconds" ;; esac
 if [ -n "$HERMES_PROFILE" ] && [ "$AGENT_TYPE" != "hermes" ]; then
-  die "--profile is only supported for hermes spawns"
+  die "--hermes-profile is only supported for hermes spawns"
 fi
 
 # Resolve the terminal override for the non-tmux path:

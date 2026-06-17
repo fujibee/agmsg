@@ -121,7 +121,8 @@ Do NOT manually edit config files. Always use join.sh.
 #                        script) for the non-tmux path; overrides $AGMSG_TERMINAL
 #                        / config spawn.terminal. macOS default uses `open -a`
 #                        (no Automation/TCC permission prompt).
-#   --profile <name>     Hermes profile to launch (Hermes only; default: <name>)
+#   --hermes-profile <name>
+#                        Hermes profile to launch (Hermes only; default: <name>)
 #   --no-wait            don't block on readiness (fire-and-forget)
 #   --ready-timeout N    seconds to wait for readiness (default 90; on timeout
 #                        prints status=timeout and exits 3). Codex and Hermes

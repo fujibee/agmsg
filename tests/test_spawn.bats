@@ -163,9 +163,9 @@ teardown() {
   [[ "$output" == *"--continue"* ]]
 }
 
-@test "spawn: hermes --profile overrides the default profile without changing actas" {
+@test "spawn: hermes --hermes-profile overrides the default profile without changing actas" {
   bash "$SCRIPTS/join.sh" myteam existing hermes "$PROJ"
-  run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ" --profile orchestrator
+  run bash "$SCRIPTS/spawn.sh" hermes reviewer --project "$PROJ" --hermes-profile orchestrator
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   [ -f "$boot" ]
@@ -176,11 +176,11 @@ teardown() {
   [[ "$output" == *"reviewer"* ]]
 }
 
-@test "spawn: --profile is hermes-only" {
+@test "spawn: --hermes-profile is hermes-only" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --profile reviewer
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --hermes-profile reviewer
   [ "$status" -ne 0 ]
-  [[ "$output" == *"--profile is only supported for hermes"* ]]
+  [[ "$output" == *"--hermes-profile is only supported for hermes"* ]]
 }
 
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {
