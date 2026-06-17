@@ -46,7 +46,8 @@ resolve_hooks_file() {
     codex)       echo "$project/.codex/hooks.json" ;;
     gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
     copilot)     echo "$project/.github/hooks/agmsg.json" ;;
-    hermes)      echo "$project/.hermes/agmsg.json" ;;
+    # hermes is manual-only (mode off): apply_settings and do_status short-circuit
+    # it before ever calling resolve_hooks_file, so it intentionally has no entry.
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
