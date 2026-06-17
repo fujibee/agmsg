@@ -55,3 +55,60 @@ jobs:
 
       - name: Run bats suite
         run: bats --print-output-on-failure tests/
+
+  # Windows coverage for the native helpers shipped in #103 (PowerShell wrapper,
+  # Git Bash runner, sqlite3 compatibility shim, cygpath normalization). The
+  # POSIX-assuming suite is not fully green on Windows yet, so this is staged
+  # (#125): a focused leg targeting the Windows-relevant tests, plus a full leg
+  # that is informational only (continue-on-error) to track how far the rest
+  # gets. Neither is a required check yet — promote the focused leg to required
+  # once it is reliably green. The required checks stay bats (ubuntu/macos).
+  bats-windows:
+    name: bats (windows-latest, ${{ matrix.leg }})
+    runs-on: windows-latest
+    # The full leg is best-effort: a failure there must not fail the workflow.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: Windows helpers
+            filter: "[Ww]indows"
+            experimental: false
+          - leg: full (experimental)
+            filter: ""
+            experimental: true
+    defaults:
+      run:
+        # bats is bash; on Windows runners `shell: bash` is Git Bash, the same
+        # environment native Windows users run agmsg under.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sqlite3
+        shell: pwsh
+        run: choco install sqlite -y --no-progress
+
+      - name: Put chocolatey shims on PATH (Git Bash form)
+        run: echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+
+      - name: Install bats
+        run: |
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          bash --version | head -1
+          sqlite3 --version || sqlite3.exe --version || echo "sqlite3 not found on PATH"
+          bats --version
+
+      - name: Run tests
+        run: |
+          if [ -n "${{ matrix.filter }}" ]; then
+            bats --print-output-on-failure --filter "${{ matrix.filter }}" tests/
+          else
+            bats --print-output-on-failure tests/
+          fi
