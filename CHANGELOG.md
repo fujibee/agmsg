@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-06-17
+
+### Added
+- Add thin Windows PowerShell launcher (#128)
+- Tear down spawned crew members (#109) (#129)
+
+### Fixed
+- Isolate parallel --continue/--resume sessions sharing a session_id (#132)
+
 ## [1.0.4] - 2026-06-15
 
 ### Added
@@ -52,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.0.5]: https://github.com/fujibee/agmsg/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fujibee/agmsg/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/fujibee/agmsg/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/fujibee/agmsg/releases/tag/v1.0.2

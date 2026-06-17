@@ -67,6 +67,7 @@ commit_parsers = [
   { message = "^revert", group = "<!-- 5 -->Reverted" },
   # Headline community PRs merged with non-conventional squash subjects:
   { message = "(?i)native windows", group = "<!-- 0 -->Added" },
+  { message = "(?i)powershell launcher", group = "<!-- 0 -->Added" },
   { message = "(?i)sandboxed bash tool", group = "<!-- 1 -->Fixed" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
