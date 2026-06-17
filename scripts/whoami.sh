@@ -83,7 +83,36 @@ TEAMS_DIR="$SCRIPT_DIR/../teams"
 # into a subdir/worktree must not be treated as a fresh, unregistered project.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+
+# Keep this entrypoint's pre-lookup project resolver on the same readfile()
+# path as the registry queries below. The sourced helper is shared with files
+# outside this fix's scope, so override only the scan it calls here.
+agmsg_registered_projects() {
+  local type="$1" teams_dir="$SKILL_DIR/teams" config_file cfg_sql type_sql
+  [ -d "$teams_dir" ] || return 0
+  type_sql=$(printf '%s' "$type" | sed "s/'/''/g")
+  for config_file in "$teams_dir"/*/config.json; do
+    [ -f "$config_file" ] || continue
+    cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+    sqlite3 :memory: "
+      WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+      cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+      agents AS (
+        SELECT CASE
+          WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
+          ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
+        END AS registrations
+        FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      )
+      SELECT DISTINCT json_extract(r.value, '\$.project')
+      FROM agents, json_each(agents.registrations) AS r
+      WHERE json_extract(r.value, '\$.type') = '$type_sql';
+    "
+  done
+}
+
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" 2>/dev/null || printf '%s' "$PROJECT_PATH")"
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 
 if [ ! -d "$TEAMS_DIR" ]; then
   echo "not_joined=true available_teams=none"
@@ -102,28 +131,35 @@ ALL_TEAMS=""
 
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
-  CONFIG_ESCAPED=$(sed "s/'/''/g" "$config_file")
-  TEAM_NAME=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
-    "SELECT json_extract(:json, '$.name');")
-  ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
+  cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+  TEAM_NAME=$(sqlite3 :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
+    SELECT json_extract(json, '\$.name') FROM cfg;
+  ")
+  if [ -n "$TEAM_NAME" ] && [ "$TEAM_NAME" != "null" ]; then
+    ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
+  fi
 
   while IFS='	' read -r agent_name; do
     [ -n "$agent_name" ] || continue
     SUGGESTED_MATCHES="${SUGGESTED_MATCHES:+$SUGGESTED_MATCHES
 }$TEAM_NAME	$agent_name"
-  done < <(sqlite3 -separator '	' :memory: ".param set :json '$CONFIG_ESCAPED'" "
-    WITH agents AS (
+  done < <(sqlite3 -separator '	' :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agents AS (
       SELECT
         key AS name,
         CASE
           WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
           ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
         END AS registrations
-      FROM json_each(json_extract(:json, '\$.agents'))
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
     )
     SELECT DISTINCT name
     FROM agents, json_each(agents.registrations) AS r
-    WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE';
+    WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL';
   ")
 done
 
