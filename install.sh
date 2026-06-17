@@ -108,7 +108,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode"
       echo "                    Selects which template becomes SKILL.md (matches the"
       echo "                    <type> arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
@@ -187,6 +187,8 @@ if [ "$UPDATE_ONLY" = true ]; then
     SKILL_TEMPLATE="cmd.gemini.md"
   elif [ "$AGENT_TYPE" = "antigravity" ]; then
     SKILL_TEMPLATE="cmd.antigravity.md"
+  elif [ "$AGENT_TYPE" = "opencode" ]; then
+    SKILL_TEMPLATE="cmd.opencode.md"
   fi
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -208,6 +210,12 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -d "$HOME/.copilot" ]; then
     mkdir -p "$COPILOT_SKILL_DIR"
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
+  fi
+  # Refresh / install the OpenCode skill (same reasoning as Copilot above).
+  OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$SKILL_NAME"
+  if [ -d "$HOME/.config/opencode" ]; then
+    mkdir -p "$OPENCODE_SKILL_DIR"
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/cmd.opencode.md" > "$OPENCODE_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   chmod +x "$SKILL_DIR/scripts/"*.sh
@@ -248,6 +256,8 @@ if [ "$AGENT_TYPE" = "gemini" ]; then
   SKILL_TEMPLATE="cmd.gemini.md"
 elif [ "$AGENT_TYPE" = "antigravity" ]; then
   SKILL_TEMPLATE="cmd.antigravity.md"
+elif [ "$AGENT_TYPE" = "opencode" ]; then
+  SKILL_TEMPLATE="cmd.opencode.md"
 fi
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
@@ -297,6 +307,18 @@ if [ -d "$HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR"
   sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.copilot.md" > "$COPILOT_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
+fi
+
+# --- Install OpenCode skill ---
+# OpenCode reads skills from ~/.config/opencode/skills/<name>/SKILL.md as its
+# global config path. The shared ~/.agents/skills/<name>/SKILL.md is
+# Codex-typed and would mis-identify an OpenCode session — keep the OpenCode
+# copy separate, same pattern as Copilot.
+OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$CMD_NAME"
+if [ -d "$HOME/.config/opencode" ]; then
+  mkdir -p "$OPENCODE_SKILL_DIR"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/cmd.opencode.md" > "$OPENCODE_SKILL_DIR/SKILL.md"
+  echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
 fi
 
 # --- Configure Codex sandbox (if Codex is installed) ---
@@ -349,13 +371,14 @@ echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity) to pick up the new skill"
+echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity / OpenCode) to pick up the new skill"
 echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
 echo "       Gemini CLI:   \$$CMD_NAME"
 echo "       Antigravity:  \$$CMD_NAME"
 echo "       Copilot CLI:  /$CMD_NAME"
+echo "       OpenCode:     \$$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"

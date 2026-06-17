@@ -153,6 +153,44 @@ wait_for_pidfile_pid() {
   grep -q "whoami.sh \"\$(pwd)\" copilot" "$FAKE_HOME/.copilot/skills/agmsg/SKILL.md"
 }
 
+@test "install: drops an OpenCode SKILL.md when ~/.config/opencode exists" {
+  mkdir -p "$FAKE_HOME/.config/opencode"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local opencode_skill="$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
+  [ -f "$opencode_skill" ]
+  # The OpenCode SKILL.md must drive whoami with type=opencode, not codex,
+  # otherwise OpenCode sessions get mis-identified.
+  grep -q "whoami.sh \"\$(pwd)\" opencode" "$opencode_skill"
+  ! grep -q "whoami.sh \"\$(pwd)\" codex" "$opencode_skill"
+  grep -q "^name: agmsg" "$opencode_skill"
+}
+
+@test "install: skips OpenCode skill when ~/.config/opencode is absent" {
+  rm -rf "$FAKE_HOME/.config/opencode"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.config/opencode/skills/agmsg" ]
+}
+
+@test "install --update: refreshes the OpenCode skill if it was previously installed" {
+  mkdir -p "$FAKE_HOME/.config/opencode"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local opencode_skill="$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
+  [ -f "$opencode_skill" ]
+  echo "tampered" > "$opencode_skill"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  ! grep -q "^tampered$" "$opencode_skill"
+  grep -q "whoami.sh \"\$(pwd)\" opencode" "$opencode_skill"
+}
+
+@test "install --update: installs OpenCode skill for upgraders without prior skill" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.config/opencode/skills/agmsg" ]
+  mkdir -p "$FAKE_HOME/.config/opencode"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" opencode" "$FAKE_HOME/.config/opencode/skills/agmsg/SKILL.md"
+}
+
 @test "install: Windows PowerShell launcher stays under the skill tree" {
   AGMSG_FORCE_WINDOWS=1 HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
 

@@ -990,3 +990,62 @@ JSON
   allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
   [ "$allow_len" = "600" ]
 }
+
+# --- opencode agent tests ---
+
+@test "opencode is accepted as an agent type (turn mode)" {
+  run bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+  grep -q "check-inbox.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+}
+
+@test "opencode supports off mode: removes rule file" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set off opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+}
+
+@test "opencode rejects monitor mode" {
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+  [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+}
+
+@test "opencode rejects both mode" {
+  run bash "$SCRIPTS/delivery.sh" set both opencode "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+  [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+}
+
+@test "opencode rejects monitor: does NOT delete an existing turn rule" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
+  [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+}
+
+@test "opencode supports turn and off modes: status derives mode from rule file existence" {
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
+
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+}
+
+@test "opencode set turn: idempotent across repeats" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
+  local count
+  count=$(grep -c "check-inbox.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md")
+  [ "$count" -eq 1 ]
+}

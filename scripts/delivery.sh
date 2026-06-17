@@ -46,6 +46,7 @@ resolve_hooks_file() {
     codex)       echo "$project/.codex/hooks.json" ;;
     gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
     copilot)     echo "$project/.github/hooks/agmsg.json" ;;
+    opencode)    echo "$project/.opencode/rules/agmsg.md" ;;
     *) echo "Unknown agent type: $type" >&2; return 1 ;;
   esac
 }
@@ -192,6 +193,39 @@ prune_empty_hooks_file() {
   mv "$tmp" "$path"
 }
 
+apply_settings_opencode() {
+  local type="$1"
+  local project="$2"
+  local mode="$3"
+  local rule_file
+  rule_file=$(resolve_hooks_file "$type" "$project")
+
+  case "$mode" in
+    turn|off) ;;
+    monitor|both)
+      echo "Error: '$mode' mode is not supported for $type (no Monitor-tool equivalent). Use 'turn' or 'off'." >&2
+      return 1
+      ;;
+    *)
+      echo "Unknown mode: $mode (use turn|off)" >&2
+      return 1
+      ;;
+  esac
+
+  rm -f "$rule_file"
+
+  if [ "$mode" = "turn" ]; then
+    mkdir -p "$(dirname "$rule_file")"
+    cat <<EOF > "$rule_file"
+# agmsg Integration Rule
+
+## PostToolUse
+After each tool call, automatically check the agmsg inbox for unread messages.
+- Command: '$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'
+EOF
+  fi
+}
+
 apply_settings_copilot() {
   local type="$1"
   local project="$2"
@@ -285,6 +319,11 @@ apply_settings() {
 
   if [ "$type" = "copilot" ]; then
     apply_settings_copilot "$type" "$project" "$mode"
+    return
+  fi
+
+  if [ "$type" = "opencode" ]; then
+    apply_settings_opencode "$type" "$project" "$mode"
     return
   fi
 
@@ -448,7 +487,7 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     local hf
     hf=$(resolve_hooks_file "$TYPE" "$PROJECT")
-    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "copilot" ]; then
+    if [ "$TYPE" = "gemini" ] || [ "$TYPE" = "antigravity" ] || [ "$TYPE" = "copilot" ] || [ "$TYPE" = "opencode" ]; then
       local mode="off"
       if [ -f "$hf" ]; then
         mode="turn"
@@ -481,7 +520,7 @@ do_status() {
     fi
   fi
 
-  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "copilot" ]; then
+  if [ -n "$TYPE" ] && [ -n "$PROJECT" ] && [ "$TYPE" != "gemini" ] && [ "$TYPE" != "antigravity" ] && [ "$TYPE" != "copilot" ] && [ "$TYPE" != "opencode" ]; then
     local hooks_file
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then

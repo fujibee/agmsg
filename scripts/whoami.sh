@@ -8,7 +8,7 @@ set -euo pipefail
 # Not joined:      not_joined=true available_teams=<t1,t2,...> (or "none")
 #
 # Usage: whoami.sh <project_path> [type]
-#   type: claude-code, codex, gemini, antigravity, copilot
+#   type: claude-code, codex, gemini, antigravity, copilot, opencode
 #   If type is omitted, auto-detect from env vars and process tree.
 
 # Auto-detect CLI type from environment variables and process tree
@@ -55,6 +55,10 @@ detect_cli_type() {
         ;;
       claude|claude-code|claude-*)
         echo "claude-code"
+        return 0
+        ;;
+      opencode|opencode-*)
+        echo "opencode"
         return 0
         ;;
     esac

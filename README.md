@@ -40,13 +40,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/fujibee/agmsg/main/setup.sh)
 # Or clone first if you want to inspect the code
 git clone https://github.com/fujibee/agmsg.git && cd agmsg && ./install.sh
 
-# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity to pick up the new skill
+# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity / OpenCode to pick up the new skill
 
 # 3. Run the command — it will prompt for team and agent name on first use
 #    Claude Code:  /agmsg
 #    Codex:        $agmsg
 #    Gemini CLI:   $agmsg
 #    Antigravity:  $agmsg
+#    OpenCode:     $agmsg
 ```
 
 That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code: `monitor` — real-time push; Codex defaults to `turn` because it has no Monitor tool). After that, you talk to your agent naturally — see [First run](#first-run) below.
@@ -97,7 +98,8 @@ git clone https://github.com/fujibee/agmsg.git
 cd agmsg
 ./install.sh              # Interactive (asks command name, default: agmsg)
 ./install.sh --cmd m      # Non-interactive with custom command name
-./install.sh --agent-type gemini  # Install a Gemini-oriented SKILL.md
+./install.sh --agent-type gemini    # Install a Gemini-oriented SKILL.md
+./install.sh --agent-type opencode  # OpenCode-only: sets shared skill to OpenCode template
 ```
 
 The **command name** determines:
@@ -107,7 +109,7 @@ The **command name** determines:
 
 `--cmd` and `--agent-type` are only available via the direct-script path; the `npm` and plugin paths always install as `agmsg` and auto-detect the host agent type.
 
-After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity) so it picks up the new skill.
+After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode) so it picks up the new skill.
 
 ### Native Windows / PowerShell profile function
 
@@ -210,7 +212,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
 | **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
-| **`turn`** (default on Codex / Copilot CLI) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI (no Monitor tool); Claude Code users on a quieter loop |
+| **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
@@ -273,6 +275,18 @@ Codex supports `mode turn` and `mode off` only — there's no Monitor tool to st
 ```
 
 The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agmsg` is auto-discovered. Per-project hooks live at `<project>/.github/hooks/agmsg.json`. Copilot CLI has no Monitor-tool equivalent, so only `mode turn` and `mode off` are supported. Asking for `monitor` or `both` is rejected with an error.
+
+### OpenCode
+
+```
+$agmsg
+```
+
+Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode is supported for manual and turn/off delivery workflows. It currently supports `mode turn` and `mode off`; `monitor`, `both`, and `spawn opencode` are not supported.
+
+This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
+
+See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 ### Shell (any agent)
 

@@ -273,3 +273,8 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "join: accepts opencode" {
+  run bash "$SCRIPTS/join.sh" myteam alice opencode /tmp/proj
+  [ "$status" -eq 0 ]
+}
+

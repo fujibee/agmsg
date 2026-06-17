@@ -39,6 +39,7 @@ _agmsg_agent_binaries() {
     gemini)      echo "gemini" ;;
     antigravity) echo "antigravity" ;;
     copilot)     echo "copilot" ;;
+    opencode)    echo "opencode" ;;
     *)           echo "claude codex gemini" ;;
   esac
 }
