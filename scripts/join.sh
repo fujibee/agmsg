@@ -55,15 +55,22 @@ EOF
 fi
 
 # --- Add or extend agent registrations ---
-CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
-REGISTRATION="{\"type\":\"$AGENT_TYPE\",\"project\":\"$PROJECT_PATH\"}"
+CONFIG_SQL=$(printf '%s' "$TEAM_CONFIG" | sed "s/'/''/g")
+AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
+PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")
+REGISTRATION=$(sqlite3 :memory: "SELECT json_object('type', '$AGENT_TYPE_SQL', 'project', '$PROJECT_SQL');")
 REGISTRATION_ESCAPED=$(printf '%s' "$REGISTRATION" | sed "s/'/''/g")
 
-EXISTING=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-  "SELECT json_extract(:json, '$.agents.$AGENT_ID');")
+EXISTING=$(agmsg_sqlite_mem "
+  WITH cfg AS (SELECT CAST(readfile('$CONFIG_SQL') AS TEXT) AS json)
+  SELECT value
+  FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+  WHERE key = '$AGENT_ID_SQL';
+")
 
 if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
-  AGENT_OBJ="{\"registrations\":[${REGISTRATION}]}"
+  AGENT_OBJ=$(sqlite3 :memory: "SELECT json_object('registrations', json_array(json('$REGISTRATION_ESCAPED')));")
 else
   EXISTING_ESCAPED=$(printf '%s' "$EXISTING" | sed "s/'/''/g")
   NORMALIZED=$(agmsg_sqlite_mem "
@@ -86,8 +93,8 @@ else
     SELECT EXISTS(
       SELECT 1
       FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
-      WHERE json_extract(value, '\$.type') = '$AGENT_TYPE'
-        AND json_extract(value, '\$.project') = '$PROJECT_PATH'
+      WHERE json_extract(value, '\$.type') = '$AGENT_TYPE_SQL'
+        AND json_extract(value, '\$.project') = '$PROJECT_SQL'
     );
   ")
 
@@ -104,9 +111,21 @@ else
   fi
 fi
 
+AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")
 UPDATED=$(agmsg_sqlite_mem \
-  ".param set :json '$CONFIG_ESCAPED'" \
-  "SELECT json_set(:json, '$.agents.$AGENT_ID', json('$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")'));")
+  "WITH cfg AS (SELECT CAST(readfile('$CONFIG_SQL') AS TEXT) AS json)
+  SELECT json_set(
+    cfg.json,
+    '\$.agents',
+    json_patch(
+      CASE
+        WHEN json_type(json_extract(cfg.json, '\$.agents')) = 'object' THEN json_extract(cfg.json, '\$.agents')
+        ELSE json('{}')
+      END,
+      json_object('$AGENT_ID_SQL', json('$AGENT_OBJ_ESCAPED'))
+    )
+  )
+  FROM cfg;")
 echo "$UPDATED" > "$TEAM_CONFIG"
 
 echo "Joined team $TEAM as $AGENT_ID"

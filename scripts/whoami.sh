@@ -86,6 +86,7 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 
 if [ ! -d "$TEAMS_DIR" ]; then
   echo "not_joined=true available_teams=none"
@@ -104,28 +105,35 @@ ALL_TEAMS=""
 
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
-  CONFIG_ESCAPED=$(sed "s/'/''/g" "$config_file")
-  TEAM_NAME=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-    "SELECT json_extract(:json, '$.name');")
-  ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
+  cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+  TEAM_NAME=$(agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
+    SELECT json_extract(json, '\$.name') FROM cfg;
+  ")
+  if [ -n "$TEAM_NAME" ] && [ "$TEAM_NAME" != "null" ]; then
+    ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
+  fi
 
   while IFS='	' read -r agent_name; do
     [ -n "$agent_name" ] || continue
     SUGGESTED_MATCHES="${SUGGESTED_MATCHES:+$SUGGESTED_MATCHES
 }$TEAM_NAME	$agent_name"
-  done < <(sqlite3 -separator '	' :memory: ".param set :json '$CONFIG_ESCAPED'" "
-    WITH agents AS (
+  done < <(sqlite3 -separator '	' :memory: "
+    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
+    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
+    agents AS (
       SELECT
         key AS name,
         CASE
           WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
           ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
         END AS registrations
-      FROM json_each(json_extract(:json, '\$.agents'))
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
     )
     SELECT DISTINCT name
     FROM agents, json_each(agents.registrations) AS r
-    WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE';
+    WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL';
   " | tr -d '\r')
 done
 
