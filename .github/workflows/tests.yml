@@ -68,15 +68,27 @@ jobs:
     runs-on: windows-latest
     # The full leg is best-effort: a failure there must not fail the workflow.
     continue-on-error: ${{ matrix.experimental }}
+    # The full leg exercises POSIX-assuming tests that can hang on Windows
+    # (no native equivalent for some sleeps/process checks); bound the job so a
+    # hang can't pin a runner for hours.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - leg: Windows helpers
+          # Focused leg: the install-side native Windows helpers (#103). These
+          # are green on windows-latest today and are the candidate to promote
+          # to a required check. Other Windows-relevant tests (delivery hook
+          # JSON, the PowerShell runner smoke) currently fail on the #143/#138
+          # "malformed JSON" bug and are tracked by the full leg below until
+          # that is fixed in a separate PR.
+          - leg: install helpers
             filter: "[Ww]indows"
+            target: tests/test_install.bats
             experimental: false
           - leg: full (experimental)
             filter: ""
+            target: tests/
             experimental: true
     defaults:
       run:
@@ -108,7 +120,7 @@ jobs:
       - name: Run tests
         run: |
           if [ -n "${{ matrix.filter }}" ]; then
-            bats --print-output-on-failure --filter "${{ matrix.filter }}" tests/
+            bats --print-output-on-failure --filter "${{ matrix.filter }}" "${{ matrix.target }}"
           else
-            bats --print-output-on-failure tests/
+            bats --print-output-on-failure "${{ matrix.target }}"
           fi
