@@ -70,8 +70,10 @@ jobs:
     continue-on-error: ${{ matrix.experimental }}
     # The full leg exercises POSIX-assuming tests that can hang on Windows
     # (no native equivalent for some sleeps/process checks); bound the job so a
-    # hang can't pin a runner for hours.
-    timeout-minutes: 20
+    # hang can't pin a runner. The malformed-JSON failures this surfaces appear
+    # early, so 12 min is enough to capture the useful map of what's broken
+    # while keeping the per-PR cost down (the leg is continue-on-error anyway).
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
