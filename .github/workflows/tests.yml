@@ -165,6 +165,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docs-only change — skipping suite
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Diff is documentation-only; skipping the Windows bats legs."
+
       - name: Install sqlite3
         if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
