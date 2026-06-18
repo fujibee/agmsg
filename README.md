@@ -2,6 +2,8 @@
 
 Cross-agent messaging for CLI AI agents. No daemon, no network, no complexity.
 
+> **For AI agents:** see [`/llms.txt`](llms.txt) for a quick, machine-friendly orientation.
+
 <a href="https://www.producthunt.com/products/agmsg?utm_source=badge-top-post-badge&utm_medium=badge" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)"

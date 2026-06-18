@@ -1,0 +1,77 @@
+# agmsg
+
+> Cross-agent messaging for CLI AI agents. Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Antigravity, and OpenCode message each other directly through a shared local SQLite database — no daemon, no network, no MCP. Just `bash` + `sqlite3`.
+
+## Quick Start
+
+```bash
+# 1. Install (one-liner; needs bash + sqlite3)
+bash <(curl -fsSL https://raw.githubusercontent.com/fujibee/agmsg/main/setup.sh)
+
+# 2. Restart your agent so it picks up the new skill
+
+# 3. Invoke the command — it prompts for a team name, an agent name,
+#    and a delivery mode on first use:
+#      Claude Code / Copilot CLI:        /agmsg
+#      Codex / Gemini CLI / Antigravity: $agmsg
+```
+
+Everyday commands (same across agents; shown here as the Claude Code `/agmsg` form):
+
+```
+/agmsg                      # check inbox
+/agmsg send <agent> <msg>   # send a message to a teammate
+/agmsg team                 # list team members
+/agmsg history              # replay message history
+/agmsg mode <monitor|turn|both|off>   # switch delivery mode
+/agmsg spawn <type> <name>  # launch a new peer agent in its own terminal
+```
+
+Alternate installs: `npx agmsg` (or `npm i -g agmsg && agmsg install`), or the Claude Code
+plugin marketplace (`/plugin marketplace add fujibee/agmsg`). All paths land at
+`~/.agents/skills/agmsg/`. See [README.md](README.md) for details.
+
+## Key concepts
+
+- **team** — a named group of agents that can message each other.
+- **agent** — a sender/receiver identity within a team (a single session can hold
+  multiple roles via `actas`).
+- **delivery mode** — how incoming messages reach a recipient: `monitor` (real-time
+  push, default on Claude Code), `turn` (pull at end of each turn, default on Codex),
+  `both`, or `off`.
+- **3-axis driver model** — `storage` (sqlite default), `agent` (per-runtime hook
+  differences), and `delivery` are orthogonal, each with one active swappable driver.
+- **AGMSG-DIRECTIVE** — a machine-readable line agmsg emits to ask the host agent to
+  take an action (e.g. start its Monitor tool, install a missing dependency).
+
+## Read first
+
+- [README.md](README.md): install, first run, delivery modes, per-agent usage, FAQ.
+
+## Docs
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): the 3-axis driver model, storage shape, vocabulary.
+- [docs/design.md](docs/design.md): design rationale and internal shape.
+- [docs/actas.md](docs/actas.md): multiple roles per project, exclusivity locks.
+- [docs/teams.md](docs/teams.md): team registry and membership model.
+- [docs/spec/driver-interface.md](docs/spec/driver-interface.md): the formal driver contract.
+- [docs/adr/](docs/adr/): architecture decision records (the "why").
+- [docs/windows.md](docs/windows.md): native Windows / Git Bash / PowerShell notes.
+- [docs/opencode.md](docs/opencode.md): OpenCode-specific integration.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to propose changes.
+
+## Key source files
+
+agmsg is bash, not a compiled package. Top-level `scripts/*.sh` files are the
+directly-invokable commands; `scripts/drivers/<axis>/` holds axis drivers and
+`scripts/lib/` holds shared helpers.
+
+- [scripts/send.sh](scripts/send.sh): append a message (the write path).
+- [scripts/inbox.sh](scripts/inbox.sh): read unread messages for an agent.
+- [scripts/watch.sh](scripts/watch.sh): stream incoming messages (monitor mode).
+- [scripts/join.sh](scripts/join.sh): join or create a team.
+- [scripts/whoami.sh](scripts/whoami.sh): resolve this project's agent identity.
+- [scripts/delivery.sh](scripts/delivery.sh): get/set the delivery mode.
+- [scripts/spawn.sh](scripts/spawn.sh) / [scripts/despawn.sh](scripts/despawn.sh): launch / tear down a peer agent.
+- [scripts/history.sh](scripts/history.sh): replay a room's history.
+- [SKILL.md](SKILL.md): the agent-facing skill definition (full command reference).
