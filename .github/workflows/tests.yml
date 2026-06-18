@@ -6,10 +6,21 @@ name: tests
 # "only the changed tests", which would miss regressions in shared libs
 # (lib/*.sh) that fan out across many scripts.
 #
-# No paths-ignore: this workflow is a required status check on main, and a
-# required check that never reports (because a docs-only PR was filtered out)
-# leaves the PR stuck "pending" forever. Always running keeps every PR
-# mergeable — the cost is one cheap, free run on docs-only changes.
+# Docs-only skip (without the paths-ignore trap):
+# `bats (ubuntu-latest)` and `bats (macos-latest)` are REQUIRED status checks
+# on main. A naive `paths-ignore` would mean those checks never report on a
+# docs-only PR, leaving it stuck "pending" forever and unmergeable. So instead
+# the `bats` jobs ALWAYS run and ALWAYS complete green — a `changes` job
+# decides whether the diff is docs-only, and only the heavy steps (install +
+# run) are skipped when it is. The required context is therefore always
+# reported; on docs-only PRs it just reports green in seconds without running
+# the suite.
+#
+# What counts as "docs-only": the docs tree (`docs/**`), `llms.txt` /
+# `llms-full.txt`, and the top-level prose docs (README, CHANGELOG, etc).
+# SKILL.md is deliberately EXCLUDED — the suite asserts on it
+# (tests/test_install.bats checks it has no unsubstituted placeholder), so a
+# SKILL.md change must run the suite. Anything not on the allowlist runs it too.
 
 on:
   push:
@@ -21,8 +32,53 @@ permissions:
   contents: read
 
 jobs:
+  # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
+  # run the full suite (docs_only=false) — main must stay fully verified.
+  changes:
+    name: detect docs-only
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need base + head history to diff the PR range
+      - id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "Event is '$EVENT' (not pull_request) — running the full suite."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed"
+          docs_only=true
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*) ;;
+              llms.txt|llms-full.txt) ;;
+              README.md|CHANGELOG.md|CONTRIBUTING.md|PRIVACY.md|ARCHITECTURE.md|RELEASING.md|LICENSE) ;;
+              # NOTE: SKILL.md is intentionally not here — the suite tests it.
+              *) docs_only=false ;;
+            esac
+          done <<< "$changed"
+          echo "Result: docs_only=$docs_only"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   bats:
     name: bats (${{ matrix.os }})
+    needs: changes
+    # Run even if `changes` somehow failed/was skipped — fail open to the full
+    # suite rather than leaving this REQUIRED check unreported (which would
+    # block the PR). When changes failed, docs_only is empty → heavy steps run.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
@@ -33,8 +89,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docs-only change — skipping suite
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+
       - name: Ensure sqlite3 is available (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true'
         run: sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # Install a modern bats-core (the suite uses BATS_TEST_TMPDIR) into a
@@ -42,18 +102,21 @@ jobs:
       # `npm i -g` under /usr/local and the macOS SIP block on /usr/lib that the
       # bats-core action's default install paths hit.
       - name: Install bats
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash --version | head -1
           sqlite3 --version
           bats --version
 
       - name: Run bats suite
+        if: needs.changes.outputs.docs_only != 'true'
         run: bats --print-output-on-failure tests/
 
   # Windows coverage for the native helpers shipped in #103 (PowerShell wrapper,
@@ -65,6 +128,8 @@ jobs:
   # once it is reliably green. The required checks stay bats (ubuntu/macos).
   bats-windows:
     name: bats (windows-latest, ${{ matrix.leg }})
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     # The full leg is best-effort: a failure there must not fail the workflow.
     continue-on-error: ${{ matrix.experimental }}
@@ -101,25 +166,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install sqlite3
+        if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
         run: choco install sqlite -y --no-progress
 
       - name: Put chocolatey shims on PATH (Git Bash form)
+        if: needs.changes.outputs.docs_only != 'true'
         run: echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
 
       - name: Install bats
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash --version | head -1
           sqlite3 --version || sqlite3.exe --version || echo "sqlite3 not found on PATH"
           bats --version
 
       - name: Run tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           if [ -n "${{ matrix.filter }}" ]; then
             bats --print-output-on-failure --filter "${{ matrix.filter }}" "${{ matrix.target }}"
