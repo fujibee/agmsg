@@ -193,6 +193,9 @@ if [ "$UPDATE_ONLY" = true ]; then
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+  # Ship the agent-type manifests so the type registry resolves types post-install.
+  mkdir -p "$SKILL_DIR/types"
+  cp -R "$SCRIPT_DIR/types/." "$SKILL_DIR/types/"
   for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$tmpl" > "$SKILL_DIR/templates/$(basename "$tmpl")"
   done
@@ -248,7 +251,7 @@ SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 
 # --- Install skill ---
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
-mkdir -p "$SKILL_DIR"/{scripts,templates,db,agents}
+mkdir -p "$SKILL_DIR"/{scripts,templates,types,db,agents}
 
 # SKILL.md is generated from the agent-specific command template.
 SKILL_TEMPLATE="cmd.codex.md"
@@ -262,6 +265,8 @@ fi
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$SCRIPT_DIR/templates/$SKILL_TEMPLATE" > "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/) ship without enumerating files.
 cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+# Ship the agent-type manifests so the type registry resolves types post-install.
+cp -R "$SCRIPT_DIR/types/." "$SKILL_DIR/types/"
 
 # Replace placeholder in templates with actual skill name
 for tmpl in "$SCRIPT_DIR/templates/"cmd.*.md; do

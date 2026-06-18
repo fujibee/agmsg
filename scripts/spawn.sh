@@ -15,7 +15,8 @@ set -euo pipefail
 # Usage:
 #   spawn.sh <agent-type> <name> [options]
 #
-#   <agent-type>   claude-code | codex   (only these two are supported today)
+#   <agent-type>   any registered type whose manifest is spawnable: a `cli=`
+#                  binary (direct-CLI launch) or a `spawn=` node launcher
 #   <name>         actas identity for the spawned agent
 #
 # Options:
@@ -42,7 +43,8 @@ set -euo pipefail
 # right after spawn returns without racing the agent's cold start. Codex has no
 # Monitor, so the wait is skipped for codex.
 #
-# Scope note: claude-code/codex only; macOS is the primary target, Linux and
+# Scope note: spawnable types are those whose manifest declares `spawnable=yes`;
+# macOS is the primary target, Linux and
 # Windows are best-effort (no guarantee — please open an issue/PR if a given
 # terminal does not work). Headless environments (no tmux and no usable
 # terminal) error out, because the agent CLIs need an interactive terminal.
@@ -52,6 +54,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 TEAMS_DIR="$SKILL_DIR/teams"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/type-registry.sh"
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -62,13 +66,40 @@ NAME="${2:-}"
 [ -n "$NAME" ] || die "Usage: spawn.sh <agent-type> <name> [options]"
 shift 2 || true
 
-case "$AGENT_TYPE" in
-  claude-code|codex) ;;
-  gemini|antigravity|copilot|opencode)
-    die "agent type '$AGENT_TYPE' is not supported by spawn yet (supported: claude-code, codex)" ;;
-  *)
-    die "unknown agent type '$AGENT_TYPE' (supported: claude-code, codex)" ;;
-esac
+# A type may be a spawn ALIAS owned by another type (which lists this name in its
+# own `aliases=` key); redirect via the registry's reverse lookup. Lets an
+# external add-on own e.g. the `codex` spawn name without editing a built-in.
+if alias="$(agmsg_type_alias_for "$AGENT_TYPE")" && [ -n "$alias" ]; then
+  AGENT_TYPE="$alias"
+fi
+
+# A type is spawnable iff its manifest declares `spawnable=yes` (direct-CLI) OR a
+# `spawn=` node launcher. The error lists the computed spawnable set from the
+# registry — no type name is hardcoded here.
+spawnable_types() {
+  local t
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    # `if` (not `&& printf`) so a non-spawnable last type does not leave the loop
+    # — and thus the function — with a non-zero status, which `set -e`+pipefail
+    # would turn into a silent exit at the `SUPPORTED_LIST=$(...)` assignment.
+    if [ "$(agmsg_type_get "$t" spawnable)" = "yes" ] || [ -n "$(agmsg_type_get "$t" spawn)" ]; then
+      printf '%s\n' "$t"
+    fi
+  done <<EOF
+$(agmsg_known_types | sort -u)
+EOF
+  return 0
+}
+SUPPORTED_LIST="$(spawnable_types | paste -sd, - | sed 's/,/, /g')"
+if ! agmsg_is_known_type "$AGENT_TYPE"; then
+  die "unknown agent type '$AGENT_TYPE' (supported: ${SUPPORTED_LIST})"
+elif [ "$(agmsg_type_get "$AGENT_TYPE" spawnable)" != "yes" ] && [ -z "$(agmsg_type_get "$AGENT_TYPE" spawn)" ]; then
+  # Gate must match spawnable_types(): spawnable iff `spawnable=yes` OR a `spawn=`
+  # node launcher. (Honouring only spawnable=yes here would reject a node-launcher
+  # add-on while still listing it in SUPPORTED_LIST.)
+  die "agent type '$AGENT_TYPE' is not supported by spawn yet (supported: ${SUPPORTED_LIST})"
+fi
 
 # --- Parse options ---
 PROJECT="$PWD"
@@ -117,13 +148,31 @@ if [ ! -d "$PROJECT" ]; then
 fi
 PROJECT="$(cd "$PROJECT" && pwd)"
 
-# --- Resolve the target CLI and make sure it is installed ---
-case "$AGENT_TYPE" in
-  claude-code) CLI_BIN="claude" ;;
-  codex)       CLI_BIN="codex" ;;
-esac
-command -v "$CLI_BIN" >/dev/null 2>&1 \
-  || die "'$CLI_BIN' not found on PATH — install the ${AGENT_TYPE} CLI first"
+# --- Resolve the launch method from the manifest ---
+# A non-empty `spawn=` launcher means this type runs via a Node launcher (e.g. an
+# external add-on); otherwise it is a direct-CLI launch. The `cli=` binary is
+# REQUIRED for direct-CLI types and OPTIONAL for node launchers (which resolve
+# their own runtime). No per-type case — all data-driven from the manifest.
+SPAWN_LAUNCHER="$(agmsg_type_get "$AGENT_TYPE" spawn)"
+CLI_BIN="$(agmsg_type_get "$AGENT_TYPE" cli)"
+CLI_PATH=""
+if [ -n "$CLI_BIN" ]; then
+  command -v "$CLI_BIN" >/dev/null 2>&1 \
+    || die "'$CLI_BIN' not found on PATH — install the ${AGENT_TYPE} CLI first"
+  CLI_PATH="$(command -v "$CLI_BIN")"
+elif [ -z "$SPAWN_LAUNCHER" ]; then
+  die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
+fi
+# Resolve the node launcher path from the manifest (not hardcoded), if any.
+SPAWN_AGENT=""
+if [ -n "$SPAWN_LAUNCHER" ]; then
+  NODE_BIN="${AGMSG_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+  [ -n "$NODE_BIN" ] || die "'node' not found on PATH — spawning '$AGENT_TYPE' requires Node.js"
+  type_dir="$(agmsg_type_dir "$AGENT_TYPE")" \
+    || die "agent type '$AGENT_TYPE' is not registered (no types/$AGENT_TYPE/type.conf)"
+  SPAWN_AGENT="$type_dir/$SPAWN_LAUNCHER"
+  [ -f "$SPAWN_AGENT" ] || die "spawn launcher not found for '$AGENT_TYPE': $SPAWN_AGENT"
+fi
 
 # --- Resolve the team to join <name> into ---
 # When --team is omitted, derive it from any team that already has an agent
@@ -224,7 +273,18 @@ BOOT="$BOOT.command"
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
-  printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
+  if [ -n "$SPAWN_AGENT" ]; then
+    # Node-launcher path: pass the universal agmsg context + the actas prompt.
+    # Type-specific config is the launcher's own default/env, so core stays
+    # generic and names no add-on.
+    printf '%q %q \\\n' "$NODE_BIN" "$SPAWN_AGENT"
+    printf '  --name %q \\\n' "$NAME"
+    printf '  --team %q \\\n' "$TEAM"
+    printf '  --project %q \\\n' "$PROJECT"
+    printf '  --initial-input %q\n' "$ACTAS_PROMPT"
+  else
+    printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
+  fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
 } > "$BOOT"
@@ -368,12 +428,12 @@ place_and_launch() {
 # receiving. Block until that appears so the leader doesn't send a job into the
 # cold-start window (before the watcher attaches) and lose it.
 #
-# Codex has no Monitor/watcher, so nothing would ever touch the sentinel —
-# skip the wait for codex (its receive is poll-based anyway).
+# Types without a Monitor (manifest `monitor=no`) never touch the readiness
+# sentinel, so skip the wait for them (their receive is poll-based anyway).
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
-if [ "$AGENT_TYPE" = "codex" ] && [ "$WAIT_READY" = "1" ]; then
+if [ "$(agmsg_type_get "$AGENT_TYPE" monitor)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
-  echo "spawn: codex has no Monitor — skipping readiness wait (--no-wait implied)" >&2
+  echo "spawn: '$AGENT_TYPE' has no Monitor — skipping readiness wait (--no-wait implied)" >&2
 fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's

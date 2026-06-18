@@ -37,18 +37,27 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/instance-id.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/type-registry.sh"
 
+# The per-project delivery hooks file is the type's manifest `hooks_file=`
+# (project-relative), not a hardcoded per-type case. The hook FORMAT written into
+# it is still type-specific (apply_settings_* below).
 resolve_hooks_file() {
   local type="$1"
   local project="$2"
-  case "$type" in
-    claude-code) echo "$project/.claude/settings.local.json" ;;
-    codex)       echo "$project/.codex/hooks.json" ;;
-    gemini|antigravity) echo "$project/.agent/rules/agmsg.md" ;;
-    copilot)     echo "$project/.github/hooks/agmsg.json" ;;
-    opencode)    echo "$project/.opencode/rules/agmsg.md" ;;
-    *) echo "Unknown agent type: $type" >&2; return 1 ;;
+  local rel
+  rel="$(agmsg_type_get "$type" hooks_file)"
+  if [ -z "$rel" ]; then
+    echo "Unknown agent type: $type" >&2
+    return 1
+  fi
+  # hooks_file is project-relative; reject absolute paths or traversal so a
+  # manifest can't redirect writes outside the project.
+  case "$rel" in
+    /*|*..*) echo "Invalid hooks_file for $type: $rel" >&2; return 1 ;;
   esac
+  echo "$project/$rel"
 }
 
 sql_readfile_path() {

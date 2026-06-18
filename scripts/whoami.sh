@@ -11,57 +11,66 @@ set -euo pipefail
 #   type: claude-code, codex, gemini, antigravity, copilot, opencode
 #   If type is omitted, auto-detect from env vars and process tree.
 
-# Auto-detect CLI type from environment variables and process tree
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/type-registry.sh"
+
+# Auto-detect CLI type from environment variables and the process tree, driven by
+# the per-type manifests' `detect=` (env-var names) and `detect_proc=` (process
+# name globs) keys — no hardcoded type list lives here.
 detect_cli_type() {
-  # 1. Check environment variables. Order matters: prefer the env vars that
-  # the runtime *itself* exports for its own session over the env vars users
-  # commonly set globally for unrelated reasons. CLAUDE_CODE_SESSION_ID and
-  # CODEX_SANDBOX / CODEX_THREAD_ID are set by their runtimes only. The
-  # GEMINI_API_KEY family is also routinely set by users of the Gemini API
-  # SDK without the Gemini CLI being involved, so it goes last.
-  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-    echo "claude-code"
-    return 0
-  fi
+  # `detect=` / `detect_proc=` tokens are split with `read -ra` (IFS word-split,
+  # NO pathname expansion) rather than an unquoted `for x in $list` — a file in
+  # the caller's cwd matching a pattern like `claude-*` must not glob-eat the
+  # pattern. (Plain `set -f` can't be used here: agmsg_known_types discovers types
+  # via a `*/` glob that must keep working.)
 
-  if [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
-    echo "codex"
-    return 0
-  fi
+  # 1. Environment variables. Sorted registry order preserves the historical
+  # precedence: a runtime's own session vars (CLAUDE_CODE_SESSION_ID, CODEX_*) are
+  # checked before the GEMINI_* family, which users also set for the SDK without
+  # the CLI. `detect=explicit` (and types with no detect=) are never auto-detected.
+  local _t _v _detect _toks
+  while IFS= read -r _t; do
+    [ -n "$_t" ] || continue
+    _detect="$(agmsg_type_get "$_t" detect)"
+    if [ -z "$_detect" ] || [ "$_detect" = "explicit" ]; then
+      continue
+    fi
+    read -ra _toks <<<"$_detect"
+    for _v in "${_toks[@]}"; do
+      if [ -n "${!_v:-}" ]; then
+        echo "$_t"
+        return 0
+      fi
+    done
+  done <<EOF
+$(agmsg_known_types | sort -u)
+EOF
 
-  if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_GEMINI_CLI:-}" ]; then
-    echo "gemini"
-    return 0
-  fi
-
-  # 2. Fall back to process tree detection
-  local pid=$$
-  local max_depth=10
-  local depth=0
-
+  # 2. Process-tree detection via each type's `detect_proc=` name globs. Walk up
+  # from this process; at each ancestor the first type whose glob matches wins
+  # (the globs are disjoint, so order within a level is irrelevant).
+  local pid=$$ max_depth=10 depth=0 proc_name _pats _pat
   while [ $depth -lt $max_depth ] && [ "$pid" != "1" ] && [ -n "$pid" ]; do
-    # Get process name
-    local proc_name
     proc_name=$(ps -p "$pid" -o comm= 2>/dev/null | xargs basename 2>/dev/null || true)
-
-    case "$proc_name" in
-      codex|codex-*)
-        echo "codex"
-        return 0
-        ;;
-      gemini|gemini-*)
-        echo "gemini"
-        return 0
-        ;;
-      claude|claude-code|claude-*)
-        echo "claude-code"
-        return 0
-        ;;
-      opencode|opencode-*)
-        echo "opencode"
-        return 0
-        ;;
-    esac
+    if [ -n "$proc_name" ]; then
+      while IFS= read -r _t; do
+        [ -n "$_t" ] || continue
+        _pats="$(agmsg_type_get "$_t" detect_proc)"
+        [ -n "$_pats" ] || continue
+        read -ra _toks <<<"$_pats"
+        for _pat in "${_toks[@]}"; do
+          # $_pat is intentionally an UNQUOTED glob pattern matched against the
+          # process name; read -ra already kept it out of pathname expansion.
+          # shellcheck disable=SC2254
+          case "$proc_name" in
+            $_pat) echo "$_t"; return 0 ;;
+          esac
+        done
+      done <<EOF
+$(agmsg_known_types | sort -u)
+EOF
+    fi
 
     # Move to parent process
     pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
@@ -75,7 +84,7 @@ detect_cli_type() {
 PROJECT_PATH="${1:?Usage: whoami.sh <project_path> [type]}"
 AGENT_TYPE="${2:-$(detect_cli_type)}"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# SCRIPT_DIR is already resolved above (before sourcing the type registry).
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 
