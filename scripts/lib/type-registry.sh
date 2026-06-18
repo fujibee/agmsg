@@ -108,27 +108,3 @@ agmsg_type_has() {
   done
   return 1
 }
-
-# Reverse spawn-alias lookup: echo the registered type that CLAIMS <name> as a
-# spawn alias — i.e. lists <name> in its OWN manifest's `aliases=` key — or
-# nothing. This lets a type (e.g. an external add-on) own the alias in its own
-# manifest instead of editing another type's manifest, so the alias ships and is
-# removed with that type. Deterministic: first match in sorted type order wins; a
-# stderr warning is emitted if more than one type claims <name>.
-agmsg_type_alias_for() {
-  local want="$1" t found="" extra=""
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    if agmsg_type_has "$t" aliases "$want"; then
-      if [ -z "$found" ]; then found="$t"; else extra="$extra $t"; fi
-    fi
-  done <<EOF
-$(agmsg_known_types | sort -u)
-EOF
-  if [ -n "$extra" ]; then
-    printf 'agmsg: multiple types claim spawn alias %s (%s%s); using %s\n' \
-      "$want" "$found" "$extra" "$found" >&2
-  fi
-  [ -n "$found" ] && printf '%s\n' "$found"
-  return 0
-}

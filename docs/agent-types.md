@@ -23,7 +23,6 @@ cannot execute code. Multi-value keys are whitespace-separated.
 | `cli` | spawnable types | the launch binary |
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
-| `aliases` | — | spawn names this type OWNS (reverse lookup): a bare name listed here resolves to this type as its spawn target |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
 | `monitor` | — | `yes` if the type exposes a Monitor tool; `spawn` skips the readiness wait when `no` |
 
@@ -70,15 +69,6 @@ All type-specific configuration (which binary, which model, which transport, env
 vars) is the launcher's **own default / environment** — agmsg core never names any
 add-on. This is what lets a node-launcher type ship entirely outside the agmsg tree
 (under `${AGMSG_HOME:-$HOME/.config/agmsg}/types`) with no built-in edits.
-
-A type can also **own another type's spawn name** by listing it in its `aliases=`
-key. The lookup is a **reverse** one: `agmsg_type_alias_for <name>` returns the
-registered type that lists `<name>` in its own `aliases=`. This is how an external
-add-on such as `codex-app-server` plugs in as the spawn target for the bare
-`codex` name — it claims `aliases=codex` in *its own* manifest, so spawning `codex`
-dispatches to the add-on's launcher **without editing the built-in `codex`
-manifest**. The alias ships and is removed with the add-on, and a stderr warning is
-emitted if more than one type claims the same name.
 
 ## Adding a type
 

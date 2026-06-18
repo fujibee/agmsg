@@ -66,13 +66,6 @@ NAME="${2:-}"
 [ -n "$NAME" ] || die "Usage: spawn.sh <agent-type> <name> [options]"
 shift 2 || true
 
-# A type may be a spawn ALIAS owned by another type (which lists this name in its
-# own `aliases=` key); redirect via the registry's reverse lookup. Lets an
-# external add-on own e.g. the `codex` spawn name without editing a built-in.
-if alias="$(agmsg_type_alias_for "$AGENT_TYPE")" && [ -n "$alias" ]; then
-  AGENT_TYPE="$alias"
-fi
-
 # A type is spawnable iff its manifest declares `spawnable=yes` (direct-CLI) OR a
 # `spawn=` node launcher. The error lists the computed spawnable set from the
 # registry — no type name is hardcoded here.

@@ -16,23 +16,17 @@ load test_helper
 setup() { setup_test_env; }
 teardown() { teardown_test_env; }
 
-# Write two fixture types into TEST_SKILL_DIR/types so the suite exercises the
-# node-launcher (spawn=) + alias mechanism generically, with no dependency on any
-# real external add-on:
-#   - "nodetype": a node-launcher type. Its manifest sets spawn= to a .mjs and
-#     OWNS the spawn name "aliassrc" via aliases=. A stub launcher file sits
-#     beside the manifest.
-#   - "aliassrc": a bare type whose spawn name is reverse-claimed by nodetype.
+# Write a node-launcher fixture type into TEST_SKILL_DIR/types so the suite
+# exercises the spawn= (Node launcher) mechanism generically, with no dependency
+# on any real external add-on:
+#   - "nodetype": a node-launcher type whose manifest sets spawn= to a .mjs, with
+#     a stub launcher file beside the manifest.
 write_node_launcher_fixtures() {
   local nd="$TEST_SKILL_DIR/types/nodetype"
   mkdir -p "$nd"
-  printf 'name=nodetype\ntemplate=cmd.nodetype.md\nspawn=nodetype-launcher.mjs\naliases=aliassrc\n' \
+  printf 'name=nodetype\ntemplate=cmd.nodetype.md\nspawn=nodetype-launcher.mjs\n' \
     > "$nd/type.conf"
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
-
-  local as="$TEST_SKILL_DIR/types/aliassrc"
-  mkdir -p "$as"
-  printf 'name=aliassrc\n' > "$as/type.conf"
 }
 
 @test "type-registry: known_types lists the six built-ins" {
@@ -189,13 +183,6 @@ write_node_launcher_fixtures() {
   echo "$output" | tr ',' '\n' | grep -qx nodetype
   echo "$output" | tr ',' '\n' | grep -qx claude-code
   echo "$output" | tr ',' '\n' | grep -qx codex
-}
-
-@test "type-registry: alias reverse-resolves aliassrc to its owning type nodetype" {
-  write_node_launcher_fixtures
-  run env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_alias_for aliassrc"
-  [ "$status" -eq 0 ]
-  [ "$output" = "nodetype" ]
 }
 
 @test "spawn: a spawn= node-launcher type clears the spawnable gate" {
