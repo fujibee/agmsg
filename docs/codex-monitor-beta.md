@@ -167,6 +167,93 @@ flowchart TD
   ended --> watch
 ```
 
+## Worker Guardrails
+
+> ⚠️ **Never poll agmsg by launching a full Codex/Claude session on a short
+> interval.** Use a shell-only gate first and start the heavy agent only when
+> there is actually something to handle.
+
+### Case study: empty-poll OOM (#163)
+
+A user wired an autonomous worker as a `cron` job (`FREQ=MINUTELY;INTERVAL=3`)
+that launched a **full Codex session every 3 minutes** to check the agmsg inbox,
+git state, GitHub issues, and so on. The approval/away-window had already
+expired, so almost every tick returned `No new messages.` — yet each tick still
+spun up a complete Codex session with a long prompt and project context.
+
+About 60 Codex sessions were created in under three hours. Codex Desktop keeps a
+transcript / trace / tool-output / local log DB per session, so the no-op runs
+accumulated: `~/.codex/logs_2.sqlite` grew to ~2.2 GB (plus ~1.1 GB WAL), Codex
+memory climbed to ~158 GB, and macOS hit a Low-Memory / jetsam state that forced
+a hard restart.
+
+This is **not** an agmsg transport or SQLite bug. The root cause is the worker
+shape: a short-interval scheduler that runs a heavyweight agent as the poller,
+with no cheap no-op path, so empty inboxes still pay the full cost — and Codex
+Desktop's per-session UI/log accumulation amplifies it.
+
+### Gate with `watch-once.sh`, launch the agent only on a hit
+
+agmsg already ships the cheap gate this needs. `watch-once.sh` is a shell-only,
+one-shot inbox oracle — no agent, no Codex turn. It is the same primitive the
+Codex monitor bridge uses (see [Bridge Mechanics](#bridge-mechanics)) to avoid
+starting a turn on an empty inbox.
+
+```text
+exit 0  unread inbound exists   (prints: status=pending count=<n> max_id=<id>)
+exit 2  nothing pending          (prints: status=timeout)
+exit 1  configuration / runtime error
+```
+
+Two-stage worker — the shell gate decides whether the expensive agent runs:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+SKILL=~/.agents/skills/agmsg/scripts
+PROJECT="/path/to/project"
+
+# 1. Cheap shell-only check. --timeout 0 makes it a single poll, then exit.
+if "$SKILL/watch-once.sh" "$PROJECT" codex --name myagent --timeout 0; then
+  # 2. Unread exists — only now pay for a full Codex/Claude session.
+  codex exec "Handle the new agmsg messages for this project."
+fi
+# exit 2 (nothing pending) falls through and the worker ends cheaply.
+```
+
+### Defense in depth
+
+For an unattended worker, layer these on top of the gate:
+
+- **Single-flight lock per `(team, agent)`** so overlapping ticks don't stack
+  concurrent agents:
+  ```bash
+  exec 9>"/tmp/agmsg-worker.myteam.myagent.lock"
+  flock -n 9 || exit 0   # another tick is still running; skip this one
+  ```
+- **Approval / away-window expiry check before launch.** If the worker is only
+  authorized for a window, verify it hasn't expired *before* starting the agent,
+  and disable the worker (or exit) once it has — don't leave it `ACTIVE` past its
+  window.
+- **Exponential backoff on repeated no-ops.** After N consecutive empty gates,
+  widen the interval so an idle worker stops hammering.
+- **Max-run cap.** Bound total runs (e.g. `COUNT` for `cron`) and prefer
+  intervals measured in minutes, not seconds.
+- **Codex Desktop note.** Codex Desktop retains transcript / tool-output / trace
+  per session and a local log DB (`~/.codex/logs_*.sqlite`). Even short no-op
+  sessions accumulate there, so a high-frequency spawner is far heavier than the
+  per-run wall-clock suggests. The shell gate above avoids creating those
+  sessions at all on empty ticks.
+
+### Emergency stop (runaway worker)
+
+1. Make the worker inactive / unschedule the `cron` job so it stops spawning.
+2. Back off delivery: `delivery.sh set turn codex "$PROJECT"` (or `off`) to stop
+   monitor-driven launches.
+3. Kill stale monitors / spawned sessions and any orphaned bridge
+   (`mode off` tears the bridge down; see #149).
+4. Inspect Codex Desktop log-DB bloat: `~/.codex/logs_*.sqlite` and its WAL.
+
 ## Related Details
 
 - [Delivery modes](../README.md#delivery-modes)
