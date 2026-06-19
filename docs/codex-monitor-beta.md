@@ -214,7 +214,9 @@ SKILL=~/.agents/skills/agmsg/scripts
 PROJECT="/path/to/project"
 
 # 1. Cheap shell-only check. --timeout 0 makes it a single poll, then exit.
-if "$SKILL/watch-once.sh" "$PROJECT" codex --name myagent --timeout 0; then
+#    --team/--name scope the gate to one identity (matches the single-flight
+#    key below, and disambiguates when the same agent name exists in two teams).
+if "$SKILL/watch-once.sh" "$PROJECT" codex --team myteam --name myagent --timeout 0; then
   # 2. Unread exists — only now pay for a full Codex/Claude session.
   codex exec "Handle the new agmsg messages for this project."
 fi
