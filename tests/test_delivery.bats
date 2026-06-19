@@ -84,6 +84,25 @@ settings_file() {
   [ "$n" = "1" ]
 }
 
+@test "delivery set monitor: settings file contains no CR bytes" {
+  # Regression for the Windows CRLF-accumulation bug: `delivery.sh set
+  # monitor` runs strip×3 + add through the read-modify-write loop. On
+  # native Windows the sqlite3 CLI's text-mode stdout turned each `\n`
+  # into `\r\n`, so each round doubled the `\r` count of the readfile()
+  # output and the fourth call rejected the result as malformed JSON
+  # (cause B in #101). Switching the write side to writefile() bypasses
+  # the CLI's stdout, so the output now contains no CR bytes on any
+  # platform. This passes on Linux/macOS too (they never produced CRs),
+  # which is the point — the assertion holds wherever the test runs.
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  local cr_count
+  cr_count=$(tr -cd '\r' < "$(settings_file)" | wc -c | tr -d ' ')
+  [ "$cr_count" = "0" ]
+  local valid
+  valid=$(sqlite3 :memory: "SELECT json_valid(readfile('$(settings_file)'));")
+  [ "$valid" = "1" ]
+}
+
 @test "delivery set both: idempotent across repeats" {
   bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
   bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"

@@ -69,6 +69,18 @@ sql_readfile_path() {
 # the per-arg MAX_ARG_STRLEN cap (131072 bytes) once the settings file
 # crosses ~21 KB, so `delivery.sh set` failed with E2BIG (see #95). Using
 # readfile() keeps the file off the argv entirely.
+#
+# Writes the result via writefile() rather than shell stdout redirection
+# (`> "$tmp"`). On native Windows the sqlite3 CLI opens stdout in text
+# mode, so every `\n` is translated to `\r\n` on the way out. When the
+# value being written is the file's own readfile() bytes — which already
+# contain `\r\n` after the first write — each round-trip doubles the
+# `\r` count. `delivery.sh set monitor` invokes this chain four times
+# (strip SessionStart, SessionEnd, Stop; then add), so by the fourth
+# call the file holds enough trailing `\r` and literal `^M` bytes that
+# json_extract() rejects it as malformed JSON. writefile() writes bytes
+# directly to disk and is unaffected by the CLI's text-mode stdout (see
+# cause B in #101).
 strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
@@ -76,9 +88,11 @@ strip_agmsg_event_file() {
   sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
+  local tmp_path
+  tmp_path=$(sql_readfile_path "$tmp")
   if ! sqlite3 :memory: "
     WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT CASE
+    SELECT writefile('$tmp_path', CASE
       WHEN json_extract(src.j, '\$.hooks.$event') IS NULL THEN
         src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
@@ -96,9 +110,9 @@ strip_agmsg_event_file() {
              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
            ))
         )
-    END
+    END)
     FROM src;
-  " > "$tmp"; then
+  " >/dev/null; then
     rm -f "$tmp"
     return 1
   fi
@@ -142,13 +156,15 @@ add_event_entry_file() {
 
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
+  local tmp_path
+  tmp_path=$(sql_readfile_path "$tmp")
   if ! sqlite3 :memory: "
     WITH base AS (
       SELECT CASE WHEN json_extract(readfile('$sql_path'), '\$.hooks') IS NULL
                   THEN json_set(readfile('$sql_path'), '\$.hooks', json('{}'))
                   ELSE readfile('$sql_path') END AS s
     )
-    SELECT CASE
+    SELECT writefile('$tmp_path', CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
         json_set(s, '\$.hooks.$event', json_array(json('$entry_esc')))
       ELSE
@@ -159,9 +175,9 @@ add_event_entry_file() {
              SELECT '$entry_esc'
            ) v)
         )
-    END
+    END)
     FROM base;
-  " > "$tmp"; then
+  " >/dev/null; then
     rm -f "$tmp"
     return 1
   fi
@@ -177,16 +193,18 @@ prune_empty_hooks_file() {
   sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
+  local tmp_path
+  tmp_path=$(sql_readfile_path "$tmp")
   if ! sqlite3 :memory: "
     WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT CASE
+    SELECT writefile('$tmp_path', CASE
       WHEN json_extract(src.j, '\$.hooks') IS NULL THEN src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks'))) = 0 THEN
         json_remove(src.j, '\$.hooks')
       ELSE src.j
-    END
+    END)
     FROM src;
-  " > "$tmp"; then
+  " >/dev/null; then
     rm -f "$tmp"
     return 1
   fi
