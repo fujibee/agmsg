@@ -83,9 +83,17 @@ strip_agmsg_event_file() {
   # using caret notation ("^M"), corrupting the JSON so the next read fails
   # with "malformed JSON" (#143/#138, same root cause as #102). writefile()
   # emits the bytes verbatim. See also strip's readfile() (#95).
-  if ! sqlite3 :memory: "
-    WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT writefile('$tmp_sql', coalesce(CASE
+  # Validate writefile()'s result, not just sqlite3's exit code. writefile()
+  # returns the byte count written and yields NULL on a failed write (e.g. an
+  # unwritable tmp dir) — but sqlite3 still exits 0, so an exit-code-only check
+  # would mv an empty/partial tmp over the original. Compare the bytes written
+  # to the content's byte length (CAST AS BLOB so multibyte content isn't
+  # miscounted by character-based length()); anything but an exact match fails.
+  # Guard contributed in #162 (kevinsj15).
+  local wrote
+  wrote=$(sqlite3 :memory: "
+    WITH src AS (SELECT readfile('$sql_path') AS j),
+    out AS (SELECT coalesce(CASE
       WHEN json_extract(src.j, '\$.hooks.$event') IS NULL THEN
         src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
@@ -103,12 +111,10 @@ strip_agmsg_event_file() {
              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
            ))
         )
-    END, ''))
-    FROM src;
-  " >/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
+    END, '') AS blob FROM src)
+    SELECT writefile('$tmp_sql', blob) = length(CAST(blob AS BLOB)) FROM out;
+  ") || { rm -f "$tmp"; return 1; }
+  [ "$wrote" = "1" ] || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$path"
 }
 
@@ -152,13 +158,16 @@ add_event_entry_file() {
   tmp_sql=$(sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file for why
   # (strict sqlite3 caret-escapes control bytes in CLI output, #143/#102).
-  if ! sqlite3 :memory: "
+  # Validate writefile()'s byte count vs the content length — see
+  # strip_agmsg_event_file for why the exit code alone is insufficient (#162).
+  local wrote
+  wrote=$(sqlite3 :memory: "
     WITH base AS (
       SELECT CASE WHEN json_extract(readfile('$sql_path'), '\$.hooks') IS NULL
                   THEN json_set(readfile('$sql_path'), '\$.hooks', json('{}'))
                   ELSE readfile('$sql_path') END AS s
-    )
-    SELECT writefile('$tmp_sql', CASE
+    ),
+    out AS (SELECT CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
         json_set(s, '\$.hooks.$event', json_array(json('$entry_esc')))
       ELSE
@@ -169,12 +178,10 @@ add_event_entry_file() {
              SELECT '$entry_esc'
            ) v)
         )
-    END)
-    FROM base;
-  " >/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
+    END AS blob FROM base)
+    SELECT writefile('$tmp_sql', blob) = length(CAST(blob AS BLOB)) FROM out;
+  ") || { rm -f "$tmp"; return 1; }
+  [ "$wrote" = "1" ] || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$path"
 }
 
@@ -189,19 +196,20 @@ prune_empty_hooks_file() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   tmp_sql=$(sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file (#143/#102).
-  if ! sqlite3 :memory: "
-    WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT writefile('$tmp_sql', coalesce(CASE
+  # Validate writefile()'s byte count vs the content length — see
+  # strip_agmsg_event_file for why the exit code alone is insufficient (#162).
+  local wrote
+  wrote=$(sqlite3 :memory: "
+    WITH src AS (SELECT readfile('$sql_path') AS j),
+    out AS (SELECT coalesce(CASE
       WHEN json_extract(src.j, '\$.hooks') IS NULL THEN src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks'))) = 0 THEN
         json_remove(src.j, '\$.hooks')
       ELSE src.j
-    END, ''))
-    FROM src;
-  " >/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
+    END, '') AS blob FROM src)
+    SELECT writefile('$tmp_sql', blob) = length(CAST(blob AS BLOB)) FROM out;
+  ") || { rm -f "$tmp"; return 1; }
+  [ "$wrote" = "1" ] || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$path"
 }
 

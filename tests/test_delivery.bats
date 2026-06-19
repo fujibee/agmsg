@@ -128,6 +128,25 @@ settings_file() {
   [ "$p" = "Bash" ]
 }
 
+@test "delivery set monitor: round-trips multibyte (UTF-8) settings without a short-write reject" {
+  # The writefile() guard compares bytes written to the content's BYTE length
+  # (CAST AS BLOB). A character-length comparison would mismatch on multibyte
+  # content and wrongly reject the write, so set monitor would fail. Seed an
+  # unrelated multibyte value and confirm the write succeeds and survives.
+  mkdir -p "$TEST_PROJECT/.claude"
+  printf '%s\n' '{"note":"日本語のメモ — ünïcödé ✓","permissions":{"allow":["Bash"]}}' > "$(settings_file)"
+
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+
+  # Still valid JSON, the multibyte value survived byte-for-byte, hook landed.
+  local valid
+  valid=$(sqlite3 :memory: "SELECT json_valid(readfile('$(settings_file)'));")
+  [ "$valid" = "1" ]
+  grep -q "日本語のメモ" "$(settings_file)"
+  grep -q "session-start.sh" "$(settings_file)"
+}
+
 # --- status derives mode from settings.local.json ---
 
 @test "delivery status: derives 'both' from settings with SessionStart + Stop" {
