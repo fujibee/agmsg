@@ -495,6 +495,49 @@ JSON
   unset CLAUDE_CODE_SESSION_ID
 }
 
+@test "session-start.sh for codex matches rollout cwd via a symlinked project path (#160)" {
+  # agmsg opens the project through a symlink (linkproj), but Codex records the
+  # canonical/physical cwd (realproj) in session_meta. A raw string compare
+  # misses the rollout, so the thread never resolves and the bridge never
+  # starts. With physical-path canonicalization the two reconcile.
+  local realproj="$TEST_PROJECT/realproj"
+  local linkproj="$TEST_PROJECT/linkproj"
+  mkdir -p "$realproj"
+  ln -s "$realproj" "$linkproj"
+  local phys
+  phys=$(cd "$realproj" && pwd -P)
+
+  bash "$SCRIPTS/join.sh" team alice codex "$linkproj" >/dev/null
+
+  # Stage a Codex rollout whose session_meta records the PHYSICAL cwd.
+  local sdir="$HOME/.codex/sessions/2026/06/19"
+  mkdir -p "$sdir"
+  printf '{"type":"session_meta","payload":{"id":"thread-sym","cwd":"%s"}}\n' "$phys" \
+    > "$sdir/rollout-test.jsonl"
+
+  local fake="$TEST_SKILL_DIR/fake-codex-bridge"
+  local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  cat >"$fake" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
+EOF
+  chmod +x "$fake"
+
+  # No CODEX_THREAD_ID -> forces the rollout-scan fallback that does the compare.
+  AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
+  AGMSG_CODEX_BRIDGE_CMD="$fake" \
+  AGMSG_TEST_LOG="$log" \
+    bash "$SCRIPTS/session-start.sh" codex "$linkproj" >/dev/null
+
+  for _ in {1..20}; do
+    [ -f "$log" ] && break
+    sleep 0.1
+  done
+
+  [ -f "$log" ]
+  grep -q -- "--thread thread-sym" "$log"
+}
+
 # --- gemini agent tests ---
 
 @test "delivery set turn (gemini): installs rule file" {

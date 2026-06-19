@@ -52,7 +52,14 @@ agmsg_resolve_codex_thread() {
   fi
   local sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 0
-  local waited=0 f first esc cwd tid
+  # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
+  # path (e.g. a workspace under a symlinked home) while Codex records the
+  # canonical cwd in session_meta. A raw string compare then misses every
+  # rollout, so the thread is never resolved and the bridge never starts. See
+  # #160. Canonicalize the project once; canonicalize each rollout cwd per row.
+  local project_phys
+  project_phys=$(agmsg_canonical_path "$project")
+  local waited=0 f first esc cwd cwd_phys tid
   while :; do
     while IFS= read -r f; do
       [ -f "$f" ] || continue
@@ -60,7 +67,8 @@ agmsg_resolve_codex_thread() {
       case "$first" in *'"session_meta"'*) ;; *) continue ;; esac
       esc=$(printf '%s' "$first" | sed "s/'/''/g")
       cwd=$(sqlite3 ":memory:" "SELECT COALESCE(json_extract('$esc','\$.payload.cwd'),'')" 2>/dev/null)
-      [ "$cwd" = "$project" ] || continue
+      cwd_phys=$(agmsg_canonical_path "$cwd")
+      [ "$cwd_phys" = "$project_phys" ] || continue
       tid=$(sqlite3 ":memory:" "SELECT COALESCE(json_extract('$esc','\$.payload.id'),'')" 2>/dev/null)
       if [ -n "$tid" ]; then
         printf '%s' "$tid"

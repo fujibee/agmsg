@@ -31,6 +31,22 @@
 
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
+# Canonicalize a directory path by resolving symlinks to its physical location.
+# Portable on purpose: `cd && pwd -P` works on macOS bash 3.2 (no GNU realpath)
+# and Linux alike. Falls back to the input unchanged when the path doesn't
+# exist or isn't a directory, so non-existent inputs still compare as their
+# literal value. The `cd` runs in a command-substitution subshell, so the
+# caller's working directory is never affected. See #160.
+agmsg_canonical_path() {
+  local p="$1" phys
+  [ -n "$p" ] || { printf '%s' "$p"; return 0; }
+  if phys=$(cd "$p" 2>/dev/null && pwd -P); then
+    printf '%s' "$phys"
+  else
+    printf '%s' "$p"
+  fi
+}
+
 # Map an agent type to the binary basename(s) its process may carry.
 _agmsg_agent_binaries() {
   case "$1" in
