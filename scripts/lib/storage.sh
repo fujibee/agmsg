@@ -57,6 +57,26 @@ agmsg_db_path() {
 # PRAGMA returns its value as a row, which sqlite3 would print to stdout and
 # corrupt every SELECT's output (and the watch stream). `.timeout` sets the
 # same busy timeout silently.
+# sqlite3 >= 3.50 renders control bytes in CLI output using caret notation —
+# the char(31) record separator becomes the two literal chars "^_", and a CR
+# becomes "^M". That breaks the `IFS=$'\x1f' read` field splitting in
+# inbox/check-inbox/history and the monitor watch stream (#102), the same
+# sqlite3 >= 3.50 escaping behaviour behind #143. `-escape off` restores the
+# raw bytes. Older sqlite3 (< 3.50) doesn't know the option (and emits raw bytes
+# anyway), so probe once and only pass the flag when the build accepts it.
+_AGMSG_ESCAPE_FLAG=
+_AGMSG_ESCAPE_PROBED=
+_agmsg_escape_flag() {
+  if [ -z "$_AGMSG_ESCAPE_PROBED" ]; then
+    _AGMSG_ESCAPE_PROBED=1
+    if sqlite3 -escape off :memory: "SELECT 1;" >/dev/null 2>&1; then
+      _AGMSG_ESCAPE_FLAG="-escape off"
+    fi
+  fi
+  printf '%s' "$_AGMSG_ESCAPE_FLAG"
+}
+
 agmsg_sqlite() {
-  sqlite3 -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+  # shellcheck disable=SC2046  # intentional split: "-escape off" → two args, or none
+  sqlite3 $(_agmsg_escape_flag) -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
 }
