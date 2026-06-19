@@ -523,11 +523,14 @@ printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
 EOF
   chmod +x "$fake"
 
-  # No CODEX_THREAD_ID -> forces the rollout-scan fallback that does the compare.
+  # env -u CODEX_THREAD_ID forces the rollout-scan fallback that does the
+  # compare — without it, a CODEX_THREAD_ID inherited from the parent env (e.g.
+  # running the suite inside a Codex session) short-circuits the resolver and
+  # this test never exercises the path it's meant to cover.
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
   AGMSG_TEST_LOG="$log" \
-    bash "$SCRIPTS/session-start.sh" codex "$linkproj" >/dev/null
+    env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$linkproj" >/dev/null
 
   for _ in {1..20}; do
     [ -f "$log" ] && break

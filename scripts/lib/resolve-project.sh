@@ -40,7 +40,7 @@ _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 agmsg_canonical_path() {
   local p="$1" phys
   [ -n "$p" ] || { printf '%s' "$p"; return 0; }
-  if phys=$(cd "$p" 2>/dev/null && pwd -P); then
+  if phys=$(cd -- "$p" 2>/dev/null && pwd -P); then
     printf '%s' "$phys"
   else
     printf '%s' "$p"
