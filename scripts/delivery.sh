@@ -59,6 +59,15 @@ sql_readfile_path() {
   printf '%s' "$path" | sed "s/'/''/g"
 }
 
+# `sqlite3 ... > "$tmp"` cannot be used to round-trip the settings JSON on
+# Windows: the CLI emits stdout in text mode, so embedded LFs become CR LF
+# and any bare CR in the value is rendered as the literal two-character
+# sequence "^M". After three strip+mv cycles the on-disk file is no longer
+# valid JSON and the 4th sqlite3 call fails with
+# "Error in 2nd command line argument: malformed JSON" (#161). Each
+# rewrite below therefore uses writefile() — it emits the raw blob exactly
+# as the SQL produced it, with no text translation, on every platform.
+
 # Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
 # entry is "agmsg-owned" when one of its inner hooks references a path under
 # our skill directory. Result is written back to <path> atomically.
@@ -76,9 +85,16 @@ strip_agmsg_event_file() {
   sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  if ! sqlite3 :memory: "
+  local sql_tmp
+  sql_tmp=$(sql_readfile_path "$tmp")
+  # writefile() returns the byte count actually written. We treat a NULL or
+  # non-positive return as failure so a sqlite3 error doesn't leave a
+  # half-written file in place of the original. See the rationale comment
+  # above sql_readfile_path() for why stdout redirect is unusable on Windows.
+  local n
+  n=$(sqlite3 :memory: "
     WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT CASE
+    SELECT writefile('$sql_tmp', CASE
       WHEN json_extract(src.j, '\$.hooks.$event') IS NULL THEN
         src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
@@ -96,12 +112,10 @@ strip_agmsg_event_file() {
              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
            ))
         )
-    END
+    END)
     FROM src;
-  " > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  ") || { rm -f "$tmp"; return 1; }
+  case "$n" in ''|0|-*|*[!0-9-]*) rm -f "$tmp"; return 1 ;; esac
   mv "$tmp" "$path"
 }
 
@@ -142,13 +156,16 @@ add_event_entry_file() {
 
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  if ! sqlite3 :memory: "
+  local sql_tmp
+  sql_tmp=$(sql_readfile_path "$tmp")
+  local n
+  n=$(sqlite3 :memory: "
     WITH base AS (
       SELECT CASE WHEN json_extract(readfile('$sql_path'), '\$.hooks') IS NULL
                   THEN json_set(readfile('$sql_path'), '\$.hooks', json('{}'))
                   ELSE readfile('$sql_path') END AS s
     )
-    SELECT CASE
+    SELECT writefile('$sql_tmp', CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
         json_set(s, '\$.hooks.$event', json_array(json('$entry_esc')))
       ELSE
@@ -159,12 +176,10 @@ add_event_entry_file() {
              SELECT '$entry_esc'
            ) v)
         )
-    END
+    END)
     FROM base;
-  " > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  ") || { rm -f "$tmp"; return 1; }
+  case "$n" in ''|0|-*|*[!0-9-]*) rm -f "$tmp"; return 1 ;; esac
   mv "$tmp" "$path"
 }
 
@@ -177,19 +192,20 @@ prune_empty_hooks_file() {
   sql_path=$(sql_readfile_path "$path")
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  if ! sqlite3 :memory: "
+  local sql_tmp
+  sql_tmp=$(sql_readfile_path "$tmp")
+  local n
+  n=$(sqlite3 :memory: "
     WITH src AS (SELECT readfile('$sql_path') AS j)
-    SELECT CASE
+    SELECT writefile('$sql_tmp', CASE
       WHEN json_extract(src.j, '\$.hooks') IS NULL THEN src.j
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks'))) = 0 THEN
         json_remove(src.j, '\$.hooks')
       ELSE src.j
-    END
+    END)
     FROM src;
-  " > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
+  ") || { rm -f "$tmp"; return 1; }
+  case "$n" in ''|0|-*|*[!0-9-]*) rm -f "$tmp"; return 1 ;; esac
   mv "$tmp" "$path"
 }
 
