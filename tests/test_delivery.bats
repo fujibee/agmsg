@@ -961,12 +961,27 @@ JSON
 # commandWindows. The "command" value's own embedded " and ' went in raw, so any
 # project path containing them produced "Error: stepping, malformed JSON" and no
 # hook file — for BOTH claude-code and codex (#134 Bug 1, reporter #138). These
-# are build-agnostic: they reproduce on macOS/Linux, not just native Windows.
+# reproduce on macOS/Linux independent of the sqlite build.
+#
+# Note: these cover the cross-platform JSON-escaping defect only. Native-Windows
+# delivery has a separate, still-open failure (empty commandWindows / invalid
+# JSON even for plain paths — sqlite3.exe / CRLF, #130); see the windows-latest
+# experimental leg. Not addressed here.
 
 # SQL string-literal escape so a tricky path is safe inside our own probe query.
 sql_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
 
+# The quote/backslash path cases below use " and \ in directory names, which are
+# not legal filename characters on NTFS — they can't even be created under Git
+# Bash on Windows. Skip there; the required ubuntu/macos legs cover them.
+skip_if_no_special_fs() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) skip "\" and \\ are not legal filename chars on NTFS" ;;
+  esac
+}
+
 @test "delivery set turn: project path with quotes yields valid JSON (claude-code) (#134)" {
+  skip_if_no_special_fs
   local proj="$TEST_PROJECT/o'brien \"x\""
   mkdir -p "$proj"
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj"
@@ -982,6 +997,7 @@ sql_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
 }
 
 @test "delivery set turn: project path with quotes yields valid JSON + commandWindows (codex) (#134)" {
+  skip_if_no_special_fs
   local proj="$TEST_PROJECT/o'brien \"x\""
   mkdir -p "$proj"
   run bash "$SCRIPTS/delivery.sh" set turn codex "$proj"
@@ -1001,6 +1017,7 @@ sql_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
   # json_object must JSON-escape a literal backslash in the raw command value
   # (a hand-built "command":"..." left it raw). Backslashes are the norm in
   # Windows-shaped inputs, so verify the byte survives the round-trip.
+  skip_if_no_special_fs
   local proj="$TEST_PROJECT/a\\b"
   mkdir -p "$proj"
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj"
