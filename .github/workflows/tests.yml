@@ -143,15 +143,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Focused leg: the install-side native Windows helpers (#103). These
-          # are green on windows-latest today and are the candidate to promote
-          # to a required check. Other Windows-relevant tests (delivery hook
-          # JSON, the PowerShell runner smoke) currently fail on the #143/#138
-          # "malformed JSON" bug and are tracked by the full leg below until
-          # that is fixed in a separate PR.
-          - leg: install helpers
+          # Required-candidate leg: every Windows-tagged test across the suite
+          # (the install-side native helpers #103, the PowerShell runner smoke,
+          # and the delivery hook-JSON Windows cases). These pass on
+          # windows-latest today, so this leg is promoted to a required check —
+          # it ratchets native Windows behaviour so it can't silently regress.
+          # The broad POSIX-assuming suite is exercised by the informational
+          # `full (experimental)` leg below (continue-on-error) until the
+          # remaining Windows bugs (actas liveness #134, codex-bridge spawn
+          # EFTYPE, delivery path/sqlite round-trip) are fixed and their tests
+          # can move into this required leg.
+          - leg: windows tests
             filter: "[Ww]indows"
-            target: tests/test_install.bats
+            target: tests/
             experimental: false
           - leg: full (experimental)
             filter: ""
