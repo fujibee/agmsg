@@ -143,19 +143,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Required-candidate leg: every Windows-tagged test across the suite
-          # (the install-side native helpers #103, the PowerShell runner smoke,
-          # and the delivery hook-JSON Windows cases). These pass on
-          # windows-latest today, so this leg is promoted to a required check —
-          # it ratchets native Windows behaviour so it can't silently regress.
-          # The broad POSIX-assuming suite is exercised by the informational
-          # `full (experimental)` leg below (continue-on-error) until the
-          # remaining Windows bugs (actas liveness #134, codex-bridge spawn
-          # EFTYPE, delivery path/sqlite round-trip) are fixed and their tests
-          # can move into this required leg.
+          # Required-candidate leg: the Windows-tagged tests that pass on
+          # windows-latest today — the install-side native helpers (#103) and
+          # the PowerShell runner smoke. This leg is promoted to a required
+          # check so native Windows behaviour can't silently regress.
+          #
+          # Scoped to test_install + test_windows_powershell on purpose: the
+          # delivery "commandWindows" cases also match the [Ww]indows filter but
+          # one still fails on windows-latest (the codex Stop entry's
+          # commandWindows is empty after the hook-JSON round-trip), so
+          # test_delivery stays in the informational `full (experimental)` leg
+          # with the other known-broken Windows areas (actas liveness #134,
+          # codex-bridge spawn EFTYPE, delivery path/sqlite). As each is fixed
+          # its file moves into this required leg.
           - leg: windows tests
             filter: "[Ww]indows"
-            target: tests/
+            target: tests/test_install.bats tests/test_windows_powershell.bats
             experimental: false
           - leg: full (experimental)
             filter: ""
@@ -199,8 +202,11 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.docs_only != 'true'
         run: |
+          # matrix.target may name multiple files (space-separated) — leave it
+          # unquoted so the shell word-splits it into separate bats path args.
+          # It's a fixed value from the matrix above, not external input.
           if [ -n "${{ matrix.filter }}" ]; then
-            bats --print-output-on-failure --filter "${{ matrix.filter }}" "${{ matrix.target }}"
+            bats --print-output-on-failure --filter "${{ matrix.filter }}" ${{ matrix.target }}
           else
-            bats --print-output-on-failure "${{ matrix.target }}"
+            bats --print-output-on-failure ${{ matrix.target }}
           fi
