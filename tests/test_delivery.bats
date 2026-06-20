@@ -955,6 +955,78 @@ JSON
   [ -z "$cw" ]
 }
 
+# --- Hook JSON escaping: build entries via json_object, not by hand (#134) ---
+#
+# The pre-fix code hand-assembled the entry JSON and only escaped the codex
+# commandWindows. The "command" value's own embedded " and ' went in raw, so any
+# project path containing them produced "Error: stepping, malformed JSON" and no
+# hook file — for BOTH claude-code and codex (#134 Bug 1, reporter #138). These
+# are build-agnostic: they reproduce on macOS/Linux, not just native Windows.
+
+# SQL string-literal escape so a tricky path is safe inside our own probe query.
+sql_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+@test "delivery set turn: project path with quotes yields valid JSON (claude-code) (#134)" {
+  local proj="$TEST_PROJECT/o'brien \"x\""
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj"
+  [ "$status" -eq 0 ]
+  local hf="$proj/.claude/settings.local.json"
+  [ -f "$hf" ]
+  local hfq; hfq=$(sql_lit "$hf")
+  [ "$(sqlite3 :memory: "SELECT json_valid(readfile('$hfq'));")" = "1" ]
+  local cmd
+  cmd=$(sqlite3 :memory: "SELECT json_extract(readfile('$hfq'), '\$.hooks.Stop[0].hooks[0].command');")
+  [[ "$cmd" == *"check-inbox.sh"* ]]
+  [[ "$cmd" == *"o'brien \"x\""* ]]
+}
+
+@test "delivery set turn: project path with quotes yields valid JSON + commandWindows (codex) (#134)" {
+  local proj="$TEST_PROJECT/o'brien \"x\""
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$proj"
+  [ "$status" -eq 0 ]
+  local hf="$proj/.codex/hooks.json"
+  [ -f "$hf" ]
+  local hfq; hfq=$(sql_lit "$hf")
+  [ "$(sqlite3 :memory: "SELECT json_valid(readfile('$hfq'));")" = "1" ]
+  local cw
+  cw=$(sqlite3 :memory: "SELECT json_extract(readfile('$hfq'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+  [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
+  [[ "$cw" == *"check-inbox.sh"* ]]
+}
+
+@test "delivery set turn: project path with a backslash round-trips intact (#134)" {
+  # json_object must JSON-escape a literal backslash in the raw command value
+  # (a hand-built "command":"..." left it raw). Backslashes are the norm in
+  # Windows-shaped inputs, so verify the byte survives the round-trip.
+  local proj="$TEST_PROJECT/a\\b"
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$proj"
+  [ "$status" -eq 0 ]
+  local hf="$proj/.claude/settings.local.json"
+  local hfq; hfq=$(sql_lit "$hf")
+  [ "$(sqlite3 :memory: "SELECT json_valid(readfile('$hfq'));")" = "1" ]
+  local cmd
+  cmd=$(sqlite3 :memory: "SELECT json_extract(readfile('$hfq'), '\$.hooks.Stop[0].hooks[0].command');")
+  [[ "$cmd" == *'a\b'* ]]
+}
+
+@test "delivery set monitor: existing settings with single-quoted hook commands stays valid JSON (#134)" {
+  # The reporter's trigger: settings.local.json already holds hook commands
+  # containing single quotes. Pre-fix, re-adding our entries produced malformed
+  # JSON. Post-fix the round-trip stays valid and preserves the prior hook.
+  mkdir -p "$TEST_PROJECT/.claude"
+  cat > "$(settings_file)" <<'JSON'
+{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash -lc 'echo it'\''s mine'"}]}]}}
+JSON
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_valid(readfile('$(settings_file)'));")" = "1" ]
+  has_session_start "$(settings_file)"
+}
+
 # --- Large settings.local.json: must not trip Linux MAX_ARG_STRLEN (#95) ---
 #
 # Reporter's actual settings was 32,357 bytes. The pre-fix code embedded the

@@ -143,15 +143,23 @@ add_event_entry_file() {
   local sql_path
   sql_path=$(sql_readfile_path "$path")
 
-  local hook_inner="\"type\":\"command\",\"command\":\"$cmd\""
+  # Build the entry with SQLite's own json_object()/json_array() so SQLite does
+  # every JSON-level escape. Raw values go in as ordinary SQL string literals
+  # (single quotes doubled) — the only escaping this layer needs. Hand-building
+  # the JSON string instead (and only escaping the codex commandWindows) left
+  # the "command" value's embedded " and ' unescaped, producing "malformed
+  # JSON" on tricky project paths and on native Windows sqlite builds (#134).
+  local cmd_lit
+  cmd_lit=$(printf '%s' "$cmd" | sed "s/'/''/g")
+  local hook_obj="json_object('type','command','command','$cmd_lit'"
   if [ "$hook_type" = "codex" ]; then
-    local cw; cw=$(windows_wrap "$cmd")
-    cw="${cw//\\/\\\\}"; cw="${cw//\"/\\\"}"
-    hook_inner="$hook_inner,\"commandWindows\":\"$cw\""
+    local cw cw_lit
+    cw=$(windows_wrap "$cmd")
+    cw_lit=$(printf '%s' "$cw" | sed "s/'/''/g")
+    hook_obj="$hook_obj,'commandWindows','$cw_lit'"
   fi
-  local entry="{\"matcher\":\"\",\"hooks\":[{$hook_inner}]}"
-  local entry_esc
-  entry_esc=$(printf '%s' "$entry" | sed "s/'/''/g")
+  hook_obj="$hook_obj)"
+  local entry_sql="json_object('matcher','','hooks',json_array($hook_obj))"
 
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
@@ -169,13 +177,13 @@ add_event_entry_file() {
     ),
     out AS (SELECT CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
-        json_set(s, '\$.hooks.$event', json_array(json('$entry_esc')))
+        json_set(s, '\$.hooks.$event', json_array($entry_sql))
       ELSE
         json_set(s, '\$.hooks.$event',
           (SELECT json_group_array(json(v.value)) FROM (
              SELECT value FROM json_each(json_extract(s, '\$.hooks.$event'))
              UNION ALL
-             SELECT '$entry_esc'
+             SELECT $entry_sql
            ) v)
         )
     END AS blob FROM base)
