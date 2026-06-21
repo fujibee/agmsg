@@ -36,6 +36,8 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/node.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hash.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -107,7 +109,7 @@ if [ "$TYPE" = "codex" ]; then
     fi
   fi
   if [ -z "$app_server" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | shasum | awk '{print $1}')
+    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
     socket_path="$RUN_DIR/codex-app-server.$project_hash.sock"
     if [ -S "$socket_path" ] || [ "${AGMSG_TEST_ASSUME_CODEX_SOCKET:-}" = "$socket_path" ]; then
       app_server="unix://$socket_path"
@@ -122,7 +124,7 @@ if [ "$TYPE" = "codex" ]; then
   [ -n "$team" ] && [ -n "$name" ] || exit 0
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | shasum | awk '{print $1}')
+    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
     request_file="$RUN_DIR/codex-bridge-request.$project_hash"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true

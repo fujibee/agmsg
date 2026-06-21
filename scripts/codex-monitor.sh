@@ -10,6 +10,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# shellcheck source=lib/hash.sh
+source "$SCRIPT_DIR/lib/hash.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -69,7 +71,7 @@ case "$CODEX_COMMAND" in
 esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
-PROJECT_HASH="$(printf '%s' "$PROJECT" | shasum | awk '{print $1}')"
+PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 SERVER_LOG="$RUN_DIR/codex-app-server.$PROJECT_HASH.log"
 SERVER_PID="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
 PORT_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.port"

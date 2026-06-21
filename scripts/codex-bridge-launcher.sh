@@ -18,7 +18,9 @@ PARENT_PID="${4:?Missing parent_pid}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
-PROJECT_HASH="$(printf '%s' "$PROJECT" | shasum | awk '{print $1}')"
+# shellcheck source=lib/hash.sh
+source "$SCRIPT_DIR/lib/hash.sh"
+PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 
 # shellcheck source=lib/node.sh
