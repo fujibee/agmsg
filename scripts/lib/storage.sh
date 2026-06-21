@@ -92,3 +92,17 @@ agmsg_sqlite() {
 agmsg_sqlite_mem() {
   sqlite3 :memory: "$@" | tr -d '\r'
 }
+
+# Turn a filesystem path into a form sqlite3's readfile() can open, then escape
+# it as a SQL string literal. On Windows, sqlite3.exe is a native binary that
+# can't open a Git Bash path like /d/a/agmsg/x.json — readfile() returns NULL
+# and the surrounding json parse silently yields no rows. cygpath -w converts to
+# the native D:\a\agmsg\x.json form first. No-op off Windows (cygpath absent).
+# Mirrors delivery.sh's sql_readfile_path for the registry readfile() sites.
+agmsg_sql_readfile_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
+  fi
+  printf '%s' "$path" | sed "s/'/''/g"
+}

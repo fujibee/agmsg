@@ -55,7 +55,7 @@ EOF
 fi
 
 # --- Add or extend agent registrations ---
-CONFIG_SQL=$(printf '%s' "$TEAM_CONFIG" | sed "s/'/''/g")
+CONFIG_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
 AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")

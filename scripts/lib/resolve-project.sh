@@ -29,6 +29,13 @@
 
 : "${SKILL_DIR:?resolve-project.sh requires SKILL_DIR}"
 
+# agmsg_registered_projects() below reads team configs via readfile() and needs
+# agmsg_sql_readfile_path(). Not every caller that sources resolve-project.sh
+# also sources storage.sh (e.g. actas-claim.sh), so pull it in here. Re-sourcing
+# where the caller already has it just redefines the helpers — harmless.
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/storage.sh"
+
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
 # Canonicalize a directory path by resolving symlinks to its physical location.
@@ -161,7 +168,7 @@ agmsg_registered_projects() {
   type_sql=$(printf '%s' "$type" | sed "s/'/''/g")
   for config_file in "$teams_dir"/*/config.json; do
     [ -f "$config_file" ] || continue
-    cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+    cfg_sql=$(agmsg_sql_readfile_path "$config_file")
     sqlite3 :memory: "
       WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
       cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),

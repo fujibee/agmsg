@@ -27,7 +27,7 @@ source "$SCRIPT_DIR/lib/storage.sh"
 
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
-  cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+  cfg_sql=$(agmsg_sql_readfile_path "$config_file")
   TEAM_NAME=$(agmsg_sqlite_mem "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
