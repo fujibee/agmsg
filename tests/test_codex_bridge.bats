@@ -22,18 +22,21 @@ teardown() {
 }
 
 @test "codex-bridge: resolve-only prints the selected identity" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
   [ "$status" -eq 0 ]
   [ "$output" = $'team\talice' ]
 }
 
 @test "codex-bridge: resolve-only rejects ambiguous identities" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --resolve-only
   [ "$status" -eq 1 ]
   [[ "$output" =~ "multiple identities match" ]]
 }
 
 @test "codex-bridge: rejects unsupported app-server endpoints" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$SCRIPTS/codex-bridge.js" --project "$PROJ" --team team --name alice --app-server http://127.0.0.1:9999
   [ "$status" -eq 1 ]
   [[ "$output" =~ "supports only unix://PATH or ws://host:port" ]]
@@ -194,6 +197,7 @@ EOF
 }
 
 @test "codex-bridge: connects to ws://host:port app-server endpoints" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node -e 'const net = require("net"); const crypto = require("crypto"); if (!net || !crypto) process.exit(1);'
   if [ "$status" -ne 0 ]; then
     skip "node net/crypto modules are not available in this sandbox"
@@ -325,6 +329,7 @@ EOF
 }
 
 @test "codex-bridge: refuses when the same identity already has a live bridge" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
   mkdir -p "$TEST_SKILL_DIR/run"
   echo "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
 

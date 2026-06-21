@@ -201,7 +201,7 @@ teardown() {
   [[ "$output" =~ "Renamed team oldteam → newteam" ]]
   [ ! -d "$TEST_SKILL_DIR/teams/oldteam" ]
   [ -f "$TEST_SKILL_DIR/teams/newteam/config.json" ]
-  run sqlite3 :memory: "SELECT json_extract(readfile('$TEST_SKILL_DIR/teams/newteam/config.json'), '\$.name');"
+  run sqlite_mem "SELECT json_extract(readfile('$TEST_SKILL_DIR/teams/newteam/config.json'), '\$.name');"
   [ "$output" = "newteam" ]
 }
 
