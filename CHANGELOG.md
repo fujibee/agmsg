@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-06-21
+
+### Added
+- Codex monitor bridge (beta) — app-server bridge + re-arm + fresh-session launch (#41) (#148)
+- Add OpenCode as a supported agent type (#136)
+
+### Fixed
+- Pin install to the bootstrapper's version, not main (#173)
+- Engage the monitor bridge on codex 0.141 (ws transport + loaded-thread discovery) (#174)
+- Escape hook command values via json_object (#175)
+- Stop orphaned watch.sh from advancing the shared watermark past undelivered messages (#145)
+- Resolve Codex thread by physical path so symlinked project paths match (#160) (#164)
+- Validate writefile() byte count, not just sqlite3 exit code (#166)
+- Pass sqlite3 -escape off so the char(31) separator stays raw (#165)
+- Write hook files with writefile() to avoid sqlite3 caret-escaping (#158)
+- Validate team names to prevent teams/ path traversal (#147)
+
+### Documentation
+- Worker guardrails + empty-poll OOM case study (#163) (#167)
+- Add llms.txt for AI-agent orientation (#155)
+
 ## [1.0.5] - 2026-06-17
 
 ### Added
@@ -61,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.0.6]: https://github.com/fujibee/agmsg/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fujibee/agmsg/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fujibee/agmsg/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/fujibee/agmsg/compare/v1.0.2...v1.0.3

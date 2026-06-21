@@ -1,7 +1,7 @@
 {
   "name": "agmsg",
   "description": "Cross-agent messaging via SQLite. Send messages between CLI AI agents. No daemon, no network.",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "author": {
     "name": "fujibee"
   },
