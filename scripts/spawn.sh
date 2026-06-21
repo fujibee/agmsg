@@ -52,6 +52,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 TEAMS_DIR="$SKILL_DIR/teams"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -140,10 +142,10 @@ resolve_team() {
   for config_file in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config_file" ] || continue
     cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
-    team_name=$(sqlite3 :memory: \
+    team_name=$(agmsg_sqlite_mem \
       "SELECT json_extract(CAST(readfile('$cfg_sql') AS TEXT), '\$.name');")
     # Does any agent in this team have a registration for PROJECT (any type)?
-    count_for_project=$(sqlite3 :memory: "
+    count_for_project=$(agmsg_sqlite_mem "
       WITH cfg AS (SELECT CAST(readfile('$cfg_sql') AS TEXT) AS json),
       agents AS (
         SELECT

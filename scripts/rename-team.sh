@@ -46,7 +46,7 @@ mv "$OLD_DIR" "$NEW_DIR"
 NEW_CONFIG="$NEW_DIR/config.json"
 if [ -f "$NEW_CONFIG" ]; then
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$NEW_CONFIG")
-  UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
     "SELECT json_set(:json, '\$.name', '$NEW_TEAM');")
   echo "$UPDATED" > "$NEW_CONFIG"
 fi

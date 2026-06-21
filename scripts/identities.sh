@@ -18,13 +18,15 @@ AGENT_TYPE="${2:?Missing agent_type}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 
 [ -d "$TEAMS_DIR" ] || exit 0
 
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$config_file")
-  TEAM_NAME=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  TEAM_NAME=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
     "SELECT json_extract(:json, '\$.name');")
   [ -z "$TEAM_NAME" ] && continue
   [ "$TEAM_NAME" = "null" ] && continue
@@ -44,5 +46,5 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     WHERE json_extract(r.value, '\$.project') = '$PROJECT_PATH'
       AND json_extract(r.value, '\$.type') = '$AGENT_TYPE'
     ORDER BY team, name;
-  "
+  " | tr -d '\r'
 done

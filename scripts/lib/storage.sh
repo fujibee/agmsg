@@ -80,3 +80,15 @@ agmsg_sqlite() {
   # shellcheck disable=SC2046  # intentional split: "-escape off" → two args, or none
   sqlite3 $(_agmsg_escape_flag) -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
 }
+
+# In-memory sqlite for JSON parsing / scalar lookups whose stdout is captured in
+# a command substitution ($(...)). On Windows, sqlite3.exe writes stdout in text
+# mode and turns every \n into \r\n; command substitution strips the trailing \n
+# but keeps the \r, so a captured "1" becomes "1\r" and string / integer
+# comparisons silently fail — hooks don't get written, counts misparse, etc.
+# (#130). Strip the CR; it is never a meaningful byte in a JSON or scalar result.
+# No busy_timeout (a :memory: db has no file lock) and no escape flag (these
+# call sites parse JSON/scalars, not the control-byte message stream).
+agmsg_sqlite_mem() {
+  sqlite3 :memory: "$@" | tr -d '\r'
+}

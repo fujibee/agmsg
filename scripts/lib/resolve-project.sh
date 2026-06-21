@@ -168,7 +168,7 @@ agmsg_registered_projects() {
       SELECT DISTINCT json_extract(r.value, '\$.project')
       FROM agents, json_each(agents.registrations) AS r
       WHERE json_extract(r.value, '\$.type') = '$type';
-    "
+    " | tr -d '\r'
   done
 }
 

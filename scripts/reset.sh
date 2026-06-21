@@ -22,6 +22,8 @@ TEAMS_DIR="$SKILL_DIR/teams"
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
@@ -63,14 +65,14 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   TEAM_NAME="$(basename "$TEAM_DIR")"
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
-  AGENT_JSON=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  AGENT_JSON=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
     "SELECT json_extract(:json, '$.agents.$TARGET_AGENT');")
   if [ -z "$AGENT_JSON" ] || [ "$AGENT_JSON" = "null" ]; then
     continue
   fi
 
   AGENT_ESCAPED=$(printf '%s' "$AGENT_JSON" | sed "s/'/''/g")
-  NORMALIZED=$(sqlite3 :memory: "
+  NORMALIZED=$(agmsg_sqlite_mem "
     WITH agent(a) AS (SELECT '$AGENT_ESCAPED')
     SELECT CASE
       WHEN json_type(json_extract(a, '\$.registrations')) = 'array' THEN a
@@ -86,7 +88,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   ")
   NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | sed "s/'/''/g")
 
-  MATCH_COUNT=$(sqlite3 :memory: "
+  MATCH_COUNT=$(agmsg_sqlite_mem "
     SELECT count(*)
     FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
     WHERE json_extract(value, '\$.type') = '$AGENT_TYPE'
@@ -96,7 +98,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     continue
   fi
 
-  FILTERED=$(sqlite3 :memory: "
+  FILTERED=$(agmsg_sqlite_mem "
     SELECT json_object(
       'registrations',
       COALESCE((
@@ -110,19 +112,19 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     );
   ")
   FILTERED_ESCAPED=$(printf '%s' "$FILTERED" | sed "s/'/''/g")
-  REMAINING=$(sqlite3 :memory: "
+  REMAINING=$(agmsg_sqlite_mem "
     SELECT json_array_length(json_extract('$FILTERED_ESCAPED', '\$.registrations'));
   ")
 
   if [ "$REMAINING" -eq 0 ]; then
-    UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+    UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
       "SELECT json_remove(:json, '$.agents.$TARGET_AGENT');")
   else
-    UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+    UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
       "SELECT json_set(:json, '$.agents.$TARGET_AGENT', json('$FILTERED_ESCAPED'));")
   fi
 
-  AGENT_COUNT=$(sqlite3 :memory: "
+  AGENT_COUNT=$(agmsg_sqlite_mem "
     SELECT count(*)
     FROM json_each(json_extract('$(printf '%s' "$UPDATED" | sed "s/'/''/g")', '\$.agents'));
   ")

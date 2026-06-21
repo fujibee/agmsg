@@ -14,6 +14,8 @@ TEAMS_DIR="$SCRIPT_DIR/../teams"
 # Reject team names that would escape teams/ as a path segment (#140).
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
@@ -26,7 +28,7 @@ fi
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check if agent exists
-EXISTS=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+EXISTS=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
   "SELECT json_extract(:json, '$.agents.$AGENT_ID');")
 if [ -z "$EXISTS" ] || [ "$EXISTS" = "null" ]; then
   echo "Agent $AGENT_ID not in team $TEAM"
@@ -34,11 +36,11 @@ if [ -z "$EXISTS" ] || [ "$EXISTS" = "null" ]; then
 fi
 
 # Remove agent
-UPDATED=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
   "SELECT json_remove(:json, '$.agents.$AGENT_ID');")
 
 # Check if agents is now empty
-AGENT_COUNT=$(sqlite3 :memory: \
+AGENT_COUNT=$(agmsg_sqlite_mem \
   "SELECT count(*) FROM json_each(json_extract('$(echo "$UPDATED" | sed "s/'/''/g")', '$.agents'));")
 
 if [ "$AGENT_COUNT" -eq 0 ]; then

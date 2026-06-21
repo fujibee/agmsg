@@ -83,6 +83,8 @@ TEAMS_DIR="$SCRIPT_DIR/../teams"
 # into a subdir/worktree must not be treated as a fresh, unregistered project.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
 if [ ! -d "$TEAMS_DIR" ]; then
@@ -103,7 +105,7 @@ ALL_TEAMS=""
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$config_file")
-  TEAM_NAME=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+  TEAM_NAME=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
     "SELECT json_extract(:json, '$.name');")
   ALL_TEAMS="${ALL_TEAMS:+$ALL_TEAMS,}$TEAM_NAME"
 
@@ -124,7 +126,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     SELECT DISTINCT name
     FROM agents, json_each(agents.registrations) AS r
     WHERE json_extract(r.value, '\$.type') = '$AGENT_TYPE';
-  ")
+  " | tr -d '\r')
 done
 
 if [ -z "$EXACT_MATCHES" ] && [ -z "$SUGGESTED_MATCHES" ]; then

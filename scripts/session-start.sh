@@ -38,6 +38,8 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/node.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/hash.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -70,10 +72,10 @@ agmsg_resolve_codex_thread() {
       first=$(head -1 "$f" 2>/dev/null)
       case "$first" in *'"session_meta"'*) ;; *) continue ;; esac
       esc=$(printf '%s' "$first" | sed "s/'/''/g")
-      cwd=$(sqlite3 ":memory:" "SELECT COALESCE(json_extract('$esc','\$.payload.cwd'),'')" 2>/dev/null)
+      cwd=$(agmsg_sqlite_mem "SELECT COALESCE(json_extract('$esc','\$.payload.cwd'),'')" 2>/dev/null)
       cwd_phys=$(agmsg_canonical_path "$cwd")
       [ "$cwd_phys" = "$project_phys" ] || continue
-      tid=$(sqlite3 ":memory:" "SELECT COALESCE(json_extract('$esc','\$.payload.id'),'')" 2>/dev/null)
+      tid=$(agmsg_sqlite_mem "SELECT COALESCE(json_extract('$esc','\$.payload.id'),'')" 2>/dev/null)
       if [ -n "$tid" ]; then
         printf '%s' "$tid"
         return 0

@@ -35,6 +35,8 @@ agmsg_validate_team_name "$TEAM" || exit 1
 # may not be registered yet) set AGMSG_RESOLVE_PROJECT=0 to keep their path.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/storage.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
@@ -57,14 +59,14 @@ CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 REGISTRATION="{\"type\":\"$AGENT_TYPE\",\"project\":\"$PROJECT_PATH\"}"
 REGISTRATION_ESCAPED=$(printf '%s' "$REGISTRATION" | sed "s/'/''/g")
 
-EXISTING=$(sqlite3 :memory: ".param set :json '$CONFIG_ESCAPED'" \
+EXISTING=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
   "SELECT json_extract(:json, '$.agents.$AGENT_ID');")
 
 if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
   AGENT_OBJ="{\"registrations\":[${REGISTRATION}]}"
 else
   EXISTING_ESCAPED=$(printf '%s' "$EXISTING" | sed "s/'/''/g")
-  NORMALIZED=$(sqlite3 :memory: "
+  NORMALIZED=$(agmsg_sqlite_mem "
     WITH agent(a) AS (SELECT '$EXISTING_ESCAPED')
     SELECT CASE
       WHEN json_type(json_extract(a, '\$.registrations')) = 'array' THEN a
@@ -80,7 +82,7 @@ else
   ")
   NORMALIZED_ESCAPED=$(printf '%s' "$NORMALIZED" | sed "s/'/''/g")
 
-  HAS_REGISTRATION=$(sqlite3 :memory: "
+  HAS_REGISTRATION=$(agmsg_sqlite_mem "
     SELECT EXISTS(
       SELECT 1
       FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
@@ -92,7 +94,7 @@ else
   if [ "$HAS_REGISTRATION" = "1" ]; then
     AGENT_OBJ="$NORMALIZED"
   else
-    AGENT_OBJ=$(sqlite3 :memory: "
+    AGENT_OBJ=$(agmsg_sqlite_mem "
       SELECT json_set(
         '$NORMALIZED_ESCAPED',
         '\$.registrations[' || json_array_length(json_extract('$NORMALIZED_ESCAPED', '\$.registrations')) || ']',
@@ -102,7 +104,7 @@ else
   fi
 fi
 
-UPDATED=$(sqlite3 :memory: \
+UPDATED=$(agmsg_sqlite_mem \
   ".param set :json '$CONFIG_ESCAPED'" \
   "SELECT json_set(:json, '$.agents.$AGENT_ID', json('$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")'));")
 echo "$UPDATED" > "$TEAM_CONFIG"

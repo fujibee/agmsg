@@ -31,6 +31,8 @@ while IFS='	' read -r name types project registrations; do
     echo "  $name ($types) — $project"
   fi
   COUNT=$((COUNT + 1))
+# tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
+# the `registrations` field "N\r" and trip the integer test in the loop (#130).
 done < <(sqlite3 -separator '	' :memory: \
   ".param set :json '$(sed "s/'/''/g" "$CONFIG")'" \
   "WITH agents AS (
@@ -53,7 +55,7 @@ done < <(sqlite3 -separator '	' :memory: \
      ), '?'),
      json_array_length(registrations)
    FROM agents, json_each(agents.registrations) AS r
-   GROUP BY name, registrations;")
+   GROUP BY name, registrations;" | tr -d '\r')
 
 echo ""
 echo "$COUNT member(s)"
