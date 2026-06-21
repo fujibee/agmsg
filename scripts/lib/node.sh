@@ -6,11 +6,12 @@
 # non-interactive context — e.g. a spawn boot script — therefore cannot find it
 # via the `#!/usr/bin/env node` shebang, and Codex monitor silently never starts.
 #
-# Search order: active PATH (honours a loaded version manager) → an explicit
-# AGMSG_NODE override → common version-manager / system locations (newest nvm/fnm
-# version first). Falls back to bare "node" so the behaviour is never worse than
-# relying on PATH today (the caller still fails the same way, with the existing
-# delivery.sh preflight warning). See #170.
+# Search order: an explicit override (AGMSG_NODE, then AGMSG_CODEX_NODE for
+# back-compat) → active PATH (honours a loaded version manager) → common
+# version-manager / system locations (newest nvm/fnm version first). Falls back to
+# bare "node" so the behaviour is never worse than relying on PATH today (the
+# caller still fails the same way, with the existing delivery.sh preflight
+# warning). See #170.
 agmsg_resolve_node() {
   # An explicit override is authoritative — return it verbatim, even if it does
   # not exist, so the caller's preflight surfaces a misconfigured value rather
