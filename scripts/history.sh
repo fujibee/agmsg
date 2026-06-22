@@ -12,15 +12,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 DB="$(agmsg_db_path)"
 
+case "$LIMIT" in
+  ''|*[!0-9]*)
+    echo "Invalid limit: $LIMIT (must be a non-negative integer)" >&2
+    exit 1
+    ;;
+esac
+
 if [ ! -f "$DB" ]; then
   echo "No messages (DB not initialized)"
   exit 0
 fi
 
+TEAM_SQL=$(agmsg_sql_literal "$TEAM")
 if [ -n "$AGENT" ]; then
-  WHERE="WHERE team='$TEAM' AND (from_agent='$AGENT' OR to_agent='$AGENT')"
+  AGENT_SQL=$(agmsg_sql_literal "$AGENT")
+  WHERE="WHERE team=$TEAM_SQL AND (from_agent=$AGENT_SQL OR to_agent=$AGENT_SQL)"
 else
-  WHERE="WHERE team='$TEAM'"
+  WHERE="WHERE team=$TEAM_SQL"
 fi
 
 # Escape newlines/tabs in body, use unit separator between fields

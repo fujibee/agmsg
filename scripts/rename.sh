@@ -50,8 +50,11 @@ echo "$UPDATED" > "$TEAM_CONFIG"
 
 # --- Update messages in DB ---
 if [ -f "$DB" ]; then
-  agmsg_sqlite "$DB" "UPDATE messages SET from_agent='$NEW_NAME' WHERE team='$TEAM' AND from_agent='$OLD_NAME';"
-  agmsg_sqlite "$DB" "UPDATE messages SET to_agent='$NEW_NAME' WHERE team='$TEAM' AND to_agent='$OLD_NAME';"
+  TEAM_SQL=$(agmsg_sql_literal "$TEAM")
+  OLD_NAME_SQL=$(agmsg_sql_literal "$OLD_NAME")
+  NEW_NAME_SQL=$(agmsg_sql_literal "$NEW_NAME")
+  agmsg_sqlite "$DB" "UPDATE messages SET from_agent=$NEW_NAME_SQL WHERE team=$TEAM_SQL AND from_agent=$OLD_NAME_SQL;"
+  agmsg_sqlite "$DB" "UPDATE messages SET to_agent=$NEW_NAME_SQL WHERE team=$TEAM_SQL AND to_agent=$OLD_NAME_SQL;"
 fi
 
 echo "Renamed $OLD_NAME → $NEW_NAME in team $TEAM"

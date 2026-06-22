@@ -200,16 +200,14 @@ if [ -z "$PAIRS" ]; then
 fi
 
 # Build the SQL WHERE clause. Each pair contributes:
-#   (team='<team>' AND to_agent='<agent>')
-# joined by OR. Single quotes inside team/agent names are doubled for SQL.
-sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
-
+#   (team=<literal> AND to_agent=<literal>)
+# joined by OR.
 WHERE_PAIRS=""
 while IFS=$'\t' read -r team agent; do
   [ -z "$team" ] && continue
-  t_esc=$(sql_escape "$team")
-  a_esc=$(sql_escape "$agent")
-  pair="(team='$t_esc' AND to_agent='$a_esc')"
+  t_sql=$(agmsg_sql_literal "$team")
+  a_sql=$(agmsg_sql_literal "$agent")
+  pair="(team=$t_sql AND to_agent=$a_sql)"
   WHERE_PAIRS="${WHERE_PAIRS:+$WHERE_PAIRS OR }$pair"
 done <<< "$PAIRS"
 

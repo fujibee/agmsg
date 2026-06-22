@@ -3,10 +3,10 @@
 #
 # Required caller-set variables:
 #   SKILL_DIR  agmsg skill root
+# Required sourced helpers:
+#   lib/storage.sh  for agmsg_sql_literal
 
 : "${SKILL_DIR:?subscription.sh requires SKILL_DIR}"
-
-agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 # Resolve the (team, agent) rows this process should receive for.
 #
@@ -75,12 +75,12 @@ agmsg_subscription_pairs() {
 # Build a SQL predicate for a tab-separated pair list.
 agmsg_subscription_where() {
   local pairs="$1"
-  local where="" team agent t_esc a_esc pair
+  local where="" team agent t_sql a_sql pair
   while IFS=$'\t' read -r team agent; do
     [ -z "$team" ] && continue
-    t_esc=$(agmsg_sql_escape "$team")
-    a_esc=$(agmsg_sql_escape "$agent")
-    pair="(team='$t_esc' AND to_agent='$a_esc')"
+    t_sql=$(agmsg_sql_literal "$team")
+    a_sql=$(agmsg_sql_literal "$agent")
+    pair="(team=$t_sql AND to_agent=$a_sql)"
     where="${where:+$where OR }$pair"
   done <<< "$pairs"
   printf '%s' "$where"

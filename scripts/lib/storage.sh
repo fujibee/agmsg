@@ -93,6 +93,18 @@ agmsg_sqlite_mem() {
   sqlite3 :memory: "$@" | tr -d '\r'
 }
 
+# Escape a shell value for use inside a SQLite single-quoted string literal.
+# Bash cannot carry NUL bytes, so single-quote doubling is the full literal
+# escaping needed for the text values agmsg passes through the sqlite3 CLI.
+agmsg_sql_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Echo a complete SQLite string literal, including the surrounding quotes.
+agmsg_sql_literal() {
+  printf "'%s'" "$(agmsg_sql_escape "$1")"
+}
+
 # Turn a filesystem path into a form sqlite3's readfile() can open, then escape
 # it as a SQL string literal. On Windows, sqlite3.exe is a native binary that
 # can't open a Git Bash path like /d/a/agmsg/x.json — readfile() returns NULL
