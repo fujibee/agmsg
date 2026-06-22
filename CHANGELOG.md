@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-22
+
+### Added
+- Add Cursor agent type (#189)
+- Add Hermes Agent as a beta agent type
+- Axis-generic driver discovery + external-plugin opt-in
+- Drop the aliases= auto-redirect; explicit type selection only
+- Pluggable agent-type registry
+
+### Fixed
+- Warn to re-register delivery hooks on --update (#190)
+- Re-point an existing Codex monitor shim on --update
+- Follow init-db move to internal/ in the Windows PowerShell smoke
+- Readfile() config binding for single-quote-safe registry (#185)
+- Strip CR from sqlite3 output so Windows Git Bash works (#180)
+- Git Bash compatibility for the Codex bridge (#179)
+- Cut-release.sh stops at the PR (no auto-merge / auto-publish) (#177)
+
+### Changed
+- Drop the Windows PowerShell launcher in favor of Git Bash
+- Relocate types/ under scripts/drivers/types/
+- Consolidate mode support into delivery_modes manifest
+- Data-drive Windows hook wrapping via manifest
+- Status as a Template Method plug
+- Fold the codex runtime into types/codex/
+- Move enable/disable side effects into type plugs
+- Wire SKILL templates to type-dir manifests
+- Extract codex bridge handoff into a type plug
+- Drive Stop-hook status output from manifest stop_output=
+- Per-type delivery as a Template Method plug
+- Extract hook JSON primitives into lib/hooks-json.sh
+- Move init-db to internal/, dispatch to windows/, drop hook.sh
+- Move the codex subsystem into scripts/codex/
+
+### Documentation
+- Add supported-agents logo strip
+- List hermes in the --agent-type help (co1 nit)
+- Add docs/plugins.md + README section + plugins/ drop-in dir
+- Refresh manifest table + paths for the 1.1.0 layout
+- Lead Quick Start with npx, the zero-clone install path
+
 ## [1.0.6] - 2026-06-21
 
 ### Added
@@ -82,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.0]: https://github.com/fujibee/agmsg/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/fujibee/agmsg/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fujibee/agmsg/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fujibee/agmsg/compare/v1.0.3...v1.0.4
