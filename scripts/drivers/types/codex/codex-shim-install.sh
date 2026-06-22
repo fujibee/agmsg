@@ -7,14 +7,16 @@ TARGET="$AGENTS_BIN/codex"
 
 usage() {
   cat <<EOF
-Usage: codex-shim-install.sh [install|remove|status]
+Usage: codex-shim-install.sh [function|install|remove|status]
 
-Installs an optional agmsg Codex shim at:
+Prints the recommended shell function for agmsg Codex monitor mode.
+With no subcommand, prints the function.
+
+The optional global PATH shim can still be installed at:
   $TARGET
 
-Put ~/.agents/bin before the real Codex binary on PATH. The shim only routes
-interactive Codex launches through agmsg's monitor bridge when the current
-project is in Codex monitor mode.
+The function and PATH shim both route only interactive Codex launches through
+agmsg's monitor bridge when the current project is in Codex monitor mode.
 EOF
 }
 
@@ -26,10 +28,18 @@ shell_quote() {
   printf '%q' "$1"
 }
 
-cmd="${1:-install}"
+cmd="${1:-function}"
 case "$cmd" in
   -h|--help)
     usage
+    ;;
+  function|print-function|shell-function)
+    cat <<EOF
+# agmsg Codex monitor beta: put this in your interactive shell profile.
+codex() {
+  $(shell_quote "$SCRIPT_DIR/codex-shim.sh") "\$@"
+}
+EOF
     ;;
   install)
     mkdir -p "$AGENTS_BIN"
@@ -56,7 +66,7 @@ case "$cmd" in
       case ":$PATH:" in
         *":$AGENTS_BIN:"*) ;;
         *)
-          echo "note: add $AGENTS_BIN before the real Codex binary on PATH"
+          echo "note: this optional global shim needs $AGENTS_BIN before the real Codex binary on PATH"
           ;;
       esac
     fi

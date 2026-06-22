@@ -4,13 +4,12 @@ Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
 approximates the same experience by launching Codex through an app-server bridge.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
-> Enabling monitor mode installs a shim at `~/.agents/bin/codex` and asks you to
-> put `~/.agents/bin` **first on your PATH**, so `codex` then resolves to the shim
-> instead of the real binary. In monitor-mode projects the shim re-routes
-> interactive launches through an app-server bridge; everywhere else it passes
-> straight through. **Only enable this if you understand PATH precedence and are
-> comfortable with the `codex` command being intercepted.** It also depends on
-> Codex app-server behavior and may break as Codex changes. Known rough edges:
+> Enabling monitor mode prints a shell function that makes `codex` route through
+> agmsg's monitor shim in your interactive shell. In monitor-mode projects the
+> shim re-routes interactive launches through an app-server bridge; everywhere
+> else it passes straight through. **Only enable this if you are comfortable with
+> the `codex` command being intercepted in that shell.** It also depends on Codex
+> app-server behavior and may break as Codex changes. Known rough edges:
 > enabling monitor takes effect only after you **restart Codex and send your
 > first message** — the SessionStart hook fires on the first turn, not the
 > moment Codex opens, so the bridge is absent until you interact once; an
@@ -30,9 +29,8 @@ Enable monitor mode in a project:
 The command:
 
 1. Enables agmsg's Codex SessionStart/SessionEnd hooks for the project.
-2. Installs a Codex shim at `~/.agents/bin/codex` when it is safe to do so.
-3. Prints PATH instructions if `~/.agents/bin` is not before the real Codex
-   binary.
+2. Prints a shell function that routes interactive `codex` launches through the
+   monitor shim.
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -45,11 +43,12 @@ The Codex sandbox must allow writes to the installed skill's runtime state:
 `install.sh` and `install.sh --update` add these writable roots to
 `~/.codex/config.toml` when that file exists.
 
-If the command says `~/.agents/bin` is not on PATH, add this to your shell
-profile:
+Add the printed function to your shell profile. It looks like:
 
 ```bash
-export PATH="$HOME/.agents/bin:$PATH"
+codex() {
+  ~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-shim.sh "$@"
+}
 ```
 
 Restart the shell, then launch Codex normally:
@@ -58,13 +57,25 @@ Restart the shell, then launch Codex normally:
 codex
 ```
 
-In monitor-mode projects, the shim routes interactive Codex launches through
+In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
-## Fallback
+## Optional PATH Shim
+
+If you prefer the previous global PATH shim setup, install it explicitly:
+
+```bash
+~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-shim-install.sh install
+```
+
+Then put `~/.agents/bin` before the real Codex binary on PATH:
+
+```bash
+export PATH="$HOME/.agents/bin:$PATH"
+```
 
 If `~/.agents/bin/codex` already exists and is not the agmsg shim, agmsg leaves
-it untouched. You can either move that command aside and run `mode monitor`
+it untouched. You can either move that command aside and run the install command
 again, or launch monitor sessions explicitly:
 
 ```bash
@@ -79,7 +90,8 @@ For custom command names, replace `agmsg` with the installed skill name:
 
 ## What The Shim Does
 
-The shim only wraps interactive Codex TUI launches:
+The shell function and optional PATH shim only wrap interactive Codex TUI
+launches:
 
 ```bash
 codex
@@ -139,7 +151,7 @@ and the bridge stops instead of looping.
 
 ```mermaid
 flowchart TD
-  user["User runs codex"] --> shim["~/.agents/bin/codex shim"]
+  user["User runs codex"] --> shim["codex shell function or ~/.agents/bin/codex shim"]
   shim --> mode{"Project delivery mode?"}
   mode -- "not monitor / codex exec / --version" --> real["real codex"]
   mode -- "monitor (interactive)" --> monitor["codex-monitor.sh"]

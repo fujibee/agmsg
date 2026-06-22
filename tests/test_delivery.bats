@@ -1438,18 +1438,17 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "delivery set monitor (codex): installs SessionStart and Codex shim" {
+@test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Codex monitor shim installed"* ]]
+  [[ "$output" == *"Codex monitor beta is enabled"* ]]
+  [[ "$output" == *"codex() {"* ]]
+  [[ "$output" == *"codex-shim.sh"* ]]
   [[ "$output" == *"launch with codex"* ]]
-  # HOME is sandboxed, so ~/.agents/bin is not on PATH → the loud PATH warning fires.
-  [[ "$output" == *"WARNING: ~/.agents/bin is NOT on your PATH"* ]]
-  [[ "$output" == *"export PATH=\"\$HOME/.agents/bin:\$PATH\""* ]]
+  [[ "$output" == *"Optional global PATH shim is still available"* ]]
   [[ "$output" == *"For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"* ]]
   [[ "$output" != *"Monitor tool"* ]]
-  [ -x "$HOME/.agents/bin/codex" ]
-  grep -q "Optional Codex entrypoint shim for agmsg monitor mode" "$HOME/.agents/bin/codex"
+  [ ! -e "$HOME/.agents/bin/codex" ]
   local hook_file="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hook_file" ]
   grep -q "session-start.sh" "$hook_file"
@@ -1644,7 +1643,7 @@ EOF
   [[ "$output" == *"monitor delivery will NOT start"* ]]
 }
 
-@test "delivery set off (codex): stops the bridge, cleans run files, notes the shared shim" {
+@test "delivery set off (codex): stops the bridge, cleans run files, notes shell profile cleanup" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   # Stand in for a live bridge with a real process we can check kill -0 against.
