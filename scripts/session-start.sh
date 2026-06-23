@@ -211,12 +211,17 @@ if [ -n "$CC_PID" ]; then
 fi
 
 WATCH="$SKILL_DIR/scripts/watch.sh"
+# Shell-quote each argv so the host can paste the command into Monitor and run
+# it verbatim. A plain '...' wrap breaks on paths with an apostrophe
+# (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
+# safely for shell re-execution (#188).
+WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
 
 cat <<EOF
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
-  command: '$WATCH' '$INSTANCE_ID' '$PROJECT' '$TYPE'
+  command: $WATCH_COMMAND
   description: agmsg inbox stream
   persistent: true
 

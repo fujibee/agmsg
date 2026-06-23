@@ -196,26 +196,39 @@ settings_file() {
   [[ "$output" =~ "watch.sh" ]]
 }
 
-@test "delivery set monitor: directive quotes args so a space-in-path survives (#188)" {
-  # The host pastes the emitted command into Monitor and runs it as a shell
-  # command; without quoting, a project path with whitespace (iCloud Drive)
-  # word-splits and watch.sh resolves the wrong project. AGMSG_RESOLVE_PROJECT=0
-  # keeps the raw path so the assertion is deterministic.
-  local sp="$TEST_PROJECT/Mobile Documents/proj with space"
+# The host pastes the emitted command into Monitor and runs it as a shell
+# command; if the argv isn't shell-quoted, a project path with whitespace
+# (iCloud Drive) or an apostrophe (/Users/o'brien/...) is mis-parsed and watch.sh
+# resolves the wrong project. These re-parse the emitted line the way the host
+# shell would and assert the project survives as one argv element. The path
+# carries BOTH a space and an apostrophe (the case a plain '...' wrap breaks on).
+# AGMSG_RESOLVE_PROJECT=0 keeps the raw path so the round-trip is deterministic.
+
+@test "delivery set monitor: directive argv round-trips through a shell (#188)" {
+  local sp="$TEST_PROJECT/Mobile Documents/o'brien proj"
   mkdir -p "$sp"
   run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$sp"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"'$sp'"* ]]
+  local cmdline
+  cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
+  [ -n "$cmdline" ]
+  eval "set -- $cmdline"
+  [ "$3" = "$sp" ]
+  [ "$4" = "claude-code" ]
 }
 
-@test "session-start: Monitor directive quotes args so a space-in-path survives (#188)" {
-  local sp="$TEST_PROJECT/Mobile Documents/proj with space"
+@test "session-start: Monitor directive argv round-trips through a shell (#188)" {
+  local sp="$TEST_PROJECT/Mobile Documents/o'brien proj"
   mkdir -p "$sp"
   env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$sp" >/dev/null
   run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$sp" </dev/null
   [ "$status" -eq 0 ]
   [[ "$output" =~ "invoke the Monitor tool" ]]
-  [[ "$output" == *"'$sp'"* ]]
+  local cmdline
+  cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
+  [ -n "$cmdline" ]
+  eval "set -- $cmdline"
+  [ "$3" = "$sp" ]
 }
 
 @test "delivery set turn: emits AGMSG-DIRECTIVE to stop any running watcher" {

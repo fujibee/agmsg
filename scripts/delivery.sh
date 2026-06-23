@@ -266,10 +266,15 @@ EOF
     fi
   fi
 
+  # Shell-quote each argv (printf %q) so a paste-and-run host shell keeps paths
+  # with spaces or apostrophes intact; a plain '...' wrap breaks on /o'brien/...
+  # (#188).
+  local watch_command
+  watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type")"
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
-  command: '$watch' '$session_id' '$project' '$type'
+  command: $watch_command
   description: agmsg inbox stream
   persistent: true
 
