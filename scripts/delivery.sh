@@ -269,7 +269,7 @@ EOF
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
-  command: $watch $session_id $project $type
+  command: '$watch' '$session_id' '$project' '$type'
   description: agmsg inbox stream
   persistent: true
 

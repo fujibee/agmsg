@@ -196,6 +196,28 @@ settings_file() {
   [[ "$output" =~ "watch.sh" ]]
 }
 
+@test "delivery set monitor: directive quotes args so a space-in-path survives (#188)" {
+  # The host pastes the emitted command into Monitor and runs it as a shell
+  # command; without quoting, a project path with whitespace (iCloud Drive)
+  # word-splits and watch.sh resolves the wrong project. AGMSG_RESOLVE_PROJECT=0
+  # keeps the raw path so the assertion is deterministic.
+  local sp="$TEST_PROJECT/Mobile Documents/proj with space"
+  mkdir -p "$sp"
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/delivery.sh" set monitor claude-code "$sp"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"'$sp'"* ]]
+}
+
+@test "session-start: Monitor directive quotes args so a space-in-path survives (#188)" {
+  local sp="$TEST_PROJECT/Mobile Documents/proj with space"
+  mkdir -p "$sp"
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$sp" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$sp" </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+  [[ "$output" == *"'$sp'"* ]]
+}
+
 @test "delivery set turn: emits AGMSG-DIRECTIVE to stop any running watcher" {
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
   [[ "$output" =~ "AGMSG-DIRECTIVE" ]]

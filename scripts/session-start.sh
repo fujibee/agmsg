@@ -216,7 +216,7 @@ cat <<EOF
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
-  command: $WATCH $INSTANCE_ID $PROJECT $TYPE
+  command: '$WATCH' '$INSTANCE_ID' '$PROJECT' '$TYPE'
   description: agmsg inbox stream
   persistent: true
 
