@@ -37,6 +37,10 @@ set -euo pipefail
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
 #                      (default 90; on timeout, prints status=timeout, exit 3)
+#   --model <id>       launch the agent on a specific model. The id is passed
+#                      through to the CLI unchecked (the CLI rejects unknown
+#                      ids); the flag spelling comes from the type's manifest
+#                      `model_arg=`. Refused for a type with no model_arg.
 #
 # Readiness: by default spawn blocks until the new agent's watcher attaches and
 # is receiving (it prints `status=ready ...`), so a leader can safely send work
@@ -104,6 +108,7 @@ SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
+MODEL_ID=""          # --model: pass-through model id for the launched CLI
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -114,6 +119,7 @@ while [ $# -gt 0 ]; do
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
+    --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -157,6 +163,16 @@ if [ -n "$CLI_BIN" ]; then
   CLI_PATH="$(command -v "$CLI_BIN")"
 elif [ -z "$SPAWN_LAUNCHER" ]; then
   die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
+fi
+
+# --model is pass-through: the model id is handed to the CLI unchecked (the CLI
+# rejects an unknown id), so agmsg never has to track each vendor's model list.
+# The flag SPELLING differs per CLI, so it comes from the manifest `model_arg=`
+# (e.g. claude-code/grok-build use --model, codex uses -m). A type with no
+# model_arg has no known flag, so --model is refused rather than guessed.
+MODEL_ARG="$(agmsg_type_get "$AGENT_TYPE" model_arg)"
+if [ -n "$MODEL_ID" ] && [ -z "$MODEL_ARG" ]; then
+  die "agent type '$AGENT_TYPE' does not support --model (no model_arg in its manifest)"
 fi
 # Resolve the node launcher path from the manifest (not hardcoded), if any.
 SPAWN_AGENT=""
@@ -278,7 +294,12 @@ BOOT="$BOOT.command"
     printf '  --project %q \\\n' "$PROJECT"
     printf '  --initial-input %q\n' "$ACTAS_PROMPT"
   else
-    printf '%q %q\n' "$CLI_BIN" "$ACTAS_PROMPT"
+    # Direct-CLI launch: `<cli> [<model_arg> <model_id>] "/<cmd> actas <name>"`.
+    # model_arg is the manifest flag spelling (not %q-quoted — a bare flag like
+    # --model or -m); the model id is quoted.
+    printf '%q' "$CLI_BIN"
+    [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
+    printf ' %q\n' "$ACTAS_PROMPT"
   fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'

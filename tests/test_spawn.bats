@@ -10,7 +10,7 @@ setup() {
   # a terminal. PATH is prepended so the stubs win.
   export STUB_BIN="$TEST_SKILL_DIR/stub-bin"
   mkdir -p "$STUB_BIN"
-  for bin in claude codex grok; do
+  for bin in claude codex grok hermes; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/$bin"
     chmod +x "$STUB_BIN/$bin"
   done
@@ -165,6 +165,51 @@ teardown() {
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"alice"* ]]
   [[ "$output" != *"--trust"* ]]
+}
+
+# --- --model (#135): per-type model flag, pass-through id ---
+
+@test "spawn --model: claude-code launch includes its --model flag + id" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --model claude-opus-4-8 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --model claude-opus-4-8"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn --model: codex launch uses its -m model flag" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" --model gpt-5 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"codex -m gpt-5"* ]]
+}
+
+@test "spawn --model: grok-build launch uses its --model flag" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" --model grok-build --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"grok --model grok-build"* ]]
+}
+
+@test "spawn --model: refused for a type with no model_arg in its manifest" {
+  run bash "$SCRIPTS/spawn.sh" hermes foo --project "$PROJ" --model whatever --no-wait
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "does not support --model" ]]
+}
+
+@test "spawn: no --model leaves the launch flag-free" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"--model"* ]]
 }
 
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {
