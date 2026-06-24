@@ -359,3 +359,44 @@ teardown() {
   [[ "$output" != *"status=timeout"* ]]
   [[ "$output" != *"status=ready"* ]]
 }
+
+# --- initial prompt (--prompt) ---
+# spawn folds an optional initial task into the agent's first prompt: the boot
+# prompt becomes the actas slash command followed (newline-separated) by the
+# task, so the new agent claims its identity AND starts the task in one turn —
+# the only way to hand a one-shot goal to a no-Monitor peer (codex). These tests
+# assert on the generated boot script the terminal template is handed (captured
+# via record.sh), the same way the actas-prompt tests above do.
+
+@test "spawn: --prompt requires a task (missing arg errors)" {
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --prompt
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--prompt needs a task"* ]]
+}
+
+@test "spawn: --prompt \"\" is treated as no task (no-op, not an error)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  # An explicit empty string must NOT abort the spawn — it degrades to a plain
+  # spawn (so a scripted `--prompt "$VAR"` with an empty VAR still works).
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --prompt ""
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"alice"* ]]
+  # No task appended → no newline-join → boot prompt unchanged.
+  [[ "$output" != *'\n'* ]]
+}
+
+@test "spawn: --prompt folds the initial task into the boot prompt (codex)" {
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --prompt "REVIEW_THE_DIFF"
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"reviewer"* ]]
+  [[ "$output" == *"REVIEW_THE_DIFF"* ]]
+}

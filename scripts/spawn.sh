@@ -27,6 +27,7 @@ set -euo pipefail
 #                      its identity AND acts on the task in its first turn —
 #                      handy for a codex peer (no Monitor), where a message
 #                      sent after spawn would never reach the idle session.
+#                      An empty string (`--prompt ""`) means no task.
 #   --project <path>   project to launch in (default: $PWD)
 #   --team <team>      team to join <name> into (default: auto-resolved from
 #                      the project's existing registrations; required when the
@@ -110,6 +111,8 @@ fi
 # --- Parse options ---
 PROJECT="$PWD"
 PROMPT=""            # --prompt: optional initial task appended to the actas prompt
+                     # (empty string = no task, so the `[ -n "$PROMPT" ]` guard
+                     #  below leaves the boot prompt unchanged)
 TEAM=""
 TMUX_TARGET="pane"   # pane | window
 SPLIT="h"            # h | v
@@ -120,7 +123,11 @@ MODEL_ID=""          # --model: pass-through model id for the launched CLI
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --prompt)  PROMPT="${2:?--prompt needs a task}"; shift 2 ;;
+    # `${2?...}` (not `:?`) errors only when the arg is MISSING; an explicit
+    # empty string (`--prompt ""`) is allowed through and treated as "no task"
+    # by the `[ -n "$PROMPT" ]` guard, so a scripted `--prompt "$VAR"` with an
+    # empty VAR degrades to a plain spawn instead of aborting.
+    --prompt)  PROMPT="${2?--prompt needs a task}"; shift 2 ;;
     --project) PROJECT="${2:?--project needs a path}"; shift 2 ;;
     --team)    TEAM="${2:?--team needs a name}"; shift 2 ;;
     --window)  TMUX_TARGET="window"; shift ;;

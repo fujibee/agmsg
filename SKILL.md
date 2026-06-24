@@ -124,6 +124,12 @@ Do NOT manually edit config files. Always use join.sh.
 #   --ready-timeout N    seconds to wait for readiness (default 90; on timeout
 #                        prints status=timeout and exits 3). Codex skips the
 #                        wait (it has no Monitor).
+#   --prompt <text>      hand the new agent an initial task: the boot prompt
+#                        becomes the actas command followed (newline-separated)
+#                        by <text>, so it claims its identity AND starts the task
+#                        in its first turn. The only way to give a one-shot goal
+#                        to a codex peer (no Monitor → a post-spawn send to its
+#                        idle session is never noticed).
 ~/.agents/skills/agmsg/scripts/spawn.sh <claude-code|codex> <name> [options]
 
 # Tear down a spawned member — the inverse of spawn.
