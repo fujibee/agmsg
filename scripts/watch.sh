@@ -264,6 +264,18 @@ if [ -n "$ACTIVE_NAME" ]; then
 fi
 
 while true; do
+  # Liveness guard (#67): exit promptly once the originating agent session is
+  # gone. A plain pipe gives no portable way to notice a *downstream* consumer
+  # that closed silently — printf '' raises no EPIPE, and macOS buffers a final
+  # write into an already-dead reader — so a quiet watcher whose session died
+  # would otherwise spin forever (the macOS-runner 33-min stall; #210's job
+  # timeout only caps the symptom). `kill -0` on the agent pid embedded in the
+  # composite instance id is portable (Git Bash falls back to tasklist; see
+  # _agmsg_pid_alive). Gated on a composite id only: a bare id (degraded, no
+  # resolved agent pid) keeps the prior behavior and is not liveness-gated.
+  if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
+    exit 0
+  fi
   if [ -f "$DB" ]; then
     ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "
       SELECT id, created_at, team, from_agent, to_agent,
