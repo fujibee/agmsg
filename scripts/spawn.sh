@@ -20,6 +20,12 @@ set -euo pipefail
 #   <name>         actas identity for the spawned agent
 #
 # Options:
+#   --prompt <text>    an initial task for the spawned agent. When given, the
+#                      boot prompt becomes the actas slash command followed
+#                      (newline-separated) by <text>, so the new agent claims
+#                      its identity AND acts on the task in its first turn —
+#                      handy for a codex peer (no Monitor), where a message
+#                      sent after spawn would never reach the idle session.
 #   --project <path>   project to launch in (default: $PWD)
 #   --team <team>      team to join <name> into (default: auto-resolved from
 #                      the project's existing registrations; required when the
@@ -102,6 +108,7 @@ fi
 
 # --- Parse options ---
 PROJECT="$PWD"
+PROMPT=""            # --prompt: optional initial task appended to the actas prompt
 TEAM=""
 TMUX_TARGET="pane"   # pane | window
 SPLIT="h"            # h | v
@@ -112,6 +119,7 @@ MODEL_ID=""          # --model: pass-through model id for the launched CLI
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --prompt)  PROMPT="${2:?--prompt needs a task}"; shift 2 ;;
     --project) PROJECT="${2:?--project needs a path}"; shift 2 ;;
     --team)    TEAM="${2:?--team needs a name}"; shift 2 ;;
     --window)  TMUX_TARGET="window"; shift ;;
@@ -270,8 +278,17 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # have customized at install time (install.sh --cmd). Derive it from the skill
 # dir basename so a custom install (e.g. `/m`) spawns `/m actas <name>` rather
 # than a nonexistent `/agmsg actas <name>`.
+#
+# When --prompt is given, append the task newline-separated so the agent claims
+# its identity AND acts on the task in the same first turn. This is the only way
+# to hand a one-shot goal to a codex peer, which has no Monitor and so never
+# notices a message sent after it goes idle (see docs/codex-monitor-beta.md).
 CMD_NAME="$(basename "$SKILL_DIR")"
 ACTAS_PROMPT="/${CMD_NAME} actas ${NAME}"
+if [ -n "$PROMPT" ]; then
+  ACTAS_PROMPT="${ACTAS_PROMPT}
+${PROMPT}"
+fi
 
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true

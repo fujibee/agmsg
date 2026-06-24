@@ -180,13 +180,16 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 ```
 /agmsg spawn codex reviewer            # new codex agent, joins and becomes "reviewer"
 /agmsg spawn claude-code alice --window  # new claude-code agent in a fresh tmux window
+/agmsg spawn codex reviewer --prompt "review the diff on this branch"  # joins AND starts the task
 ```
 
 `spawn <type> <name>` pre-joins `<name>`, then launches the target CLI with the actas slash command (`/<your-command> actas <name>`, matching your install command name) as its initial prompt. If the current session is inside **tmux**, it opens in a new pane (or `--window` for a new window, `--split h|v` for the direction); otherwise it opens a new **OS terminal** window.
 
+Pass `--prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the only way to give a one-shot goal to a **codex** peer, which has no Monitor and so never notices a message you `send` after it goes idle.
+
 By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex skips the wait (it has no Monitor).
 
-Options: `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
+Options: `--prompt <text>` (initial task; see above), `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
 
 Only `claude-code` and `codex` are supported today. macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
