@@ -47,7 +47,8 @@ Four possible outputs:
      Choose delivery mode for incoming messages:
 
        1) turn — Check inbox at the end of each assistant turn
-                  Stop hook pulls after each response.
+                  A .grok/rules/agmsg.md rule has you self-check inbox.sh
+                  each turn (Grok hooks can't push, so delivery is self-poll).
 
        2) off  — No automatic delivery
                   Manual /__SKILL_NAME__ only.

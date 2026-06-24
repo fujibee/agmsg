@@ -10,7 +10,7 @@ setup() {
   # a terminal. PATH is prepended so the stubs win.
   export STUB_BIN="$TEST_SKILL_DIR/stub-bin"
   mkdir -p "$STUB_BIN"
-  for bin in claude codex; do
+  for bin in claude codex grok; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/$bin"
     chmod +x "$STUB_BIN/$bin"
   done
@@ -149,6 +149,22 @@ teardown() {
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"alice"* ]]
   [[ "$output" == *"$PROJ"* ]]
+}
+
+@test "spawn: grok-build launches the plain grok CLI with the actas prompt" {
+  # grok-build is spawnable and monitor=no, so spawn skips the readiness wait.
+  # Delivery is a rule file (no hook), so no folder-trust flag is needed —
+  # the launch is the bare `grok "/<cmd> actas <name>"`, like claude-code.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"grok"* ]]
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"alice"* ]]
+  [[ "$output" != *"--trust"* ]]
 }
 
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {

@@ -1497,49 +1497,49 @@ JSON
   wait 2>/dev/null || true
 }
 
-# --- grok-build (turn|off via a dedicated .grok/hooks/agmsg.json) ---
-# Schema confirmed against a real Grok Build install (xAI local docs
-# ~/.grok/docs/user-guide/10-hooks.md): nested Claude shape
-# { "hooks": { "Stop": [ { "hooks": [ { "type":"command", "command":<abs>,
-# "timeout":N } ] } ] } }, no top-level "version".
+# --- grok-build (turn|off via a markdown rule file .grok/rules/agmsg.md) ---
+# Grok passive hooks can't inject (stdout is discarded), so grok delivers via the
+# rule-file self-poll model (like gemini/opencode): a .grok/rules/agmsg.md that
+# tells the agent to poll inbox.sh each turn. turn => rule present, off => absent.
 
-@test "delivery set turn (grok-build): writes .grok/hooks/agmsg.json with nested Stop entry" {
+@test "delivery set turn (grok-build): writes .grok/rules/agmsg.md self-poll rule" {
   run bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Delivery mode set to 'turn'" ]]
-  local hook_file="$TEST_PROJECT/.grok/hooks/agmsg.json"
-  [ -f "$hook_file" ]
-  local cmd typ
-  cmd=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].command');")
-  typ=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].type');")
-  [ "$typ" = "command" ]
-  [[ "$cmd" =~ "check-inbox.sh" ]]
-  [[ "$cmd" =~ "grok-build" ]]
+  local rule_file="$TEST_PROJECT/.grok/rules/agmsg.md"
+  [ -f "$rule_file" ]
+  # The rule points at inbox.sh (clean display + same-call mark = loss-safe),
+  # not the hook-only check-inbox.sh, and references this type + project.
+  run cat "$rule_file"
+  [[ "$output" == *"inbox.sh"* ]]
+  [[ "$output" != *"check-inbox.sh"* ]]
+  [[ "$output" == *"grok-build"* ]]
+  [[ "$output" == *"$TEST_PROJECT"* ]]
 }
 
-@test "delivery set off (grok-build): removes the hook file" {
+@test "delivery set off (grok-build): removes the rule file" {
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
-  [ -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  [ -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
   run bash "$SCRIPTS/delivery.sh" set off grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [ ! -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  [ ! -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
 }
 
-@test "delivery set monitor (grok-build): rejected; no hook file written" {
+@test "delivery set monitor (grok-build): rejected; no rule file written" {
   run bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  [ ! -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
 }
 
-@test "delivery set both (grok-build): does NOT delete an existing turn hook" {
+@test "delivery set both (grok-build): rejected; does NOT delete an existing turn rule" {
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" set both grok-build "$TEST_PROJECT"
   [ "$status" -ne 0 ]
-  [ -f "$TEST_PROJECT/.grok/hooks/agmsg.json" ]
+  [ -f "$TEST_PROJECT/.grok/rules/agmsg.md" ]
 }
 
-@test "delivery status (grok-build): derives mode from hook file existence" {
+@test "delivery status (grok-build): derives mode from rule file existence" {
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [[ "$output" =~ "mode: off" ]]
 
