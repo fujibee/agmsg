@@ -33,6 +33,12 @@ Options:
   --interval <sec>        watch-once poll interval (default: 2).
   --max-wakes <n>         Stop after n wakeups, useful for tests.
   --stale-wake-limit <n>  Stop after n repeated unchanged wakeups (default: 1).
+  --connect-timeout-ms <ms>
+                          Max wait for direct app-server connect/upgrade (default: 10000).
+  --request-timeout-ms <ms>
+                          Max wait for each app-server request (default: 30000).
+  --watch-failure-limit <n>
+                          Stop after n consecutive watch-once failures; 0 disables (default: 3).
   --app-server <url>      Connect through an existing app-server endpoint.
                           Supports unix://PATH or ws://host:port over WebSocket.
   --thread <id|current|loaded>
@@ -59,6 +65,9 @@ function parseArgs(argv) {
     interval: Number(process.env.AGMSG_WATCH_ONCE_INTERVAL || 2),
     maxWakes: 0,
     staleWakeLimit: Number(process.env.AGMSG_CODEX_BRIDGE_STALE_WAKE_LIMIT || 1),
+    connectTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_CONNECT_TIMEOUT_MS || 10000),
+    requestTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_REQUEST_TIMEOUT_MS || 30000),
+    watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
   };
@@ -85,6 +94,12 @@ function parseArgs(argv) {
       opts.maxWakes = Number(argv[++i]);
     } else if (arg === "--stale-wake-limit") {
       opts.staleWakeLimit = Number(argv[++i]);
+    } else if (arg === "--connect-timeout-ms") {
+      opts.connectTimeoutMs = Number(argv[++i]);
+    } else if (arg === "--request-timeout-ms") {
+      opts.requestTimeoutMs = Number(argv[++i]);
+    } else if (arg === "--watch-failure-limit") {
+      opts.watchFailureLimit = Number(argv[++i]);
     } else if (arg === "--turn-timeout") {
       opts.turnTimeout = Number(argv[++i]);
     } else if (arg === "--app-server") {
@@ -107,6 +122,15 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.maxWakes) || opts.maxWakes < 0) die("--max-wakes must be a non-negative number");
   if (!Number.isFinite(opts.staleWakeLimit) || opts.staleWakeLimit < 0) {
     die("--stale-wake-limit must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.connectTimeoutMs) || opts.connectTimeoutMs < 0) {
+    die("--connect-timeout-ms must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.requestTimeoutMs) || opts.requestTimeoutMs < 0) {
+    die("--request-timeout-ms must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.watchFailureLimit) || opts.watchFailureLimit < 0) {
+    die("--watch-failure-limit must be a non-negative number");
   }
   if (!Number.isFinite(opts.turnTimeout) || opts.turnTimeout < 0) {
     die("--turn-timeout must be a non-negative number");
@@ -165,9 +189,10 @@ function resolveIdentity(opts) {
 }
 
 class AppServerClient {
-  constructor(command, cwd) {
+  constructor(command, cwd, opts = {}) {
     this.command = command;
     this.cwd = cwd;
+    this.requestTimeoutMs = opts.requestTimeoutMs || 0;
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
@@ -231,7 +256,7 @@ class AppServerClient {
     }
 
     if (message.method && this.handlers.has(message.method)) {
-      this.handlers.get(message.method)(message.params || {});
+      this.dispatch(message.method, message.params || {});
     }
   }
 
@@ -239,11 +264,35 @@ class AppServerClient {
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer = null;
+      const clear = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+      const pending = {
+        resolve: (value) => {
+          clear();
+          resolve(value);
+        },
+        reject: (error) => {
+          clear();
+          reject(error);
+        },
+      };
+      if (this.requestTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          reject(new Error(`app-server request '${method}' timed out after ${this.requestTimeoutMs}ms`));
+        }, this.requestTimeoutMs);
+        if (timer.unref) timer.unref();
+      }
+      this.pending.set(id, pending);
       this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
         if (error) {
           this.pending.delete(id);
-          reject(error);
+          pending.reject(error);
         }
       });
     });
@@ -251,6 +300,16 @@ class AppServerClient {
 
   notify(method, params = {}) {
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+  }
+
+  dispatch(method, params) {
+    try {
+      Promise.resolve(this.handlers.get(method)(params)).catch((error) => {
+        console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
+      });
+    } catch (error) {
+      console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
+    }
   }
 
   stop() {
@@ -266,9 +325,11 @@ class AppServerClient {
 // `--app-server ws://host:port` (codex 0.141+ accepts only ws:// for `--remote`,
 // see #170).
 class WebSocketAppServerClient {
-  constructor(connectOptions, label) {
+  constructor(connectOptions, label, opts = {}) {
     this.connectOptions = connectOptions;
     this.label = label || "app-server";
+    this.connectTimeoutMs = opts.connectTimeoutMs || 0;
+    this.requestTimeoutMs = opts.requestTimeoutMs || 0;
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
@@ -282,11 +343,38 @@ class WebSocketAppServerClient {
 
   start() {
     this.startPromise = new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
       const key = crypto.randomBytes(16).toString("base64");
       this.expectedAccept = crypto
         .createHash("sha1")
         .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
         .digest("base64");
+
+      if (this.connectTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          const error = new Error(
+            `app-server websocket handshake timed out after ${this.connectTimeoutMs}ms (${this.label})`,
+          );
+          this.rejectAll(error);
+          finish(error);
+          this.stop();
+        }, this.connectTimeoutMs);
+        if (timer.unref) timer.unref();
+      }
 
       this.socket = net.createConnection(this.connectOptions);
       this.socket.on("connect", () => {
@@ -303,13 +391,15 @@ class WebSocketAppServerClient {
           ].join("\r\n"),
         );
       });
-      this.socket.on("data", (chunk) => this.handleData(chunk, resolve, reject));
+      this.socket.on("data", (chunk) => this.handleData(chunk, () => finish(), finish));
       this.socket.on("error", (error) => {
         this.rejectAll(error);
-        reject(error);
+        finish(error);
       });
       this.socket.on("close", () => {
-        this.rejectAll(new Error(`app-server connection closed (${this.label})`));
+        const error = new Error(`app-server connection closed (${this.label})`);
+        this.rejectAll(error);
+        if (!this.handshakeComplete) finish(error);
       });
     });
   }
@@ -430,7 +520,7 @@ class WebSocketAppServerClient {
       return;
     }
     if (message.method && this.handlers.has(message.method)) {
-      this.handlers.get(message.method)(message.params || {});
+      this.dispatch(message.method, message.params || {});
     }
   }
 
@@ -438,11 +528,35 @@ class WebSocketAppServerClient {
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer = null;
+      const clear = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+      const pending = {
+        resolve: (value) => {
+          clear();
+          resolve(value);
+        },
+        reject: (error) => {
+          clear();
+          reject(error);
+        },
+      };
+      if (this.requestTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          reject(new Error(`app-server request '${method}' timed out after ${this.requestTimeoutMs}ms`));
+        }, this.requestTimeoutMs);
+        if (timer.unref) timer.unref();
+      }
+      this.pending.set(id, pending);
       this.sendJson(payload, (error) => {
         if (error) {
           this.pending.delete(id);
-          reject(error);
+          pending.reject(error);
         }
       });
     });
@@ -450,6 +564,16 @@ class WebSocketAppServerClient {
 
   notify(method, params = {}) {
     this.sendJson({ jsonrpc: "2.0", method, params });
+  }
+
+  dispatch(method, params) {
+    try {
+      Promise.resolve(this.handlers.get(method)(params)).catch((error) => {
+        console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
+      });
+    } catch (error) {
+      console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
+    }
   }
 
   sendJson(value, callback = () => {}) {
@@ -514,6 +638,8 @@ class CodexBridge {
     this.wakeCount = 0;
     this.lastWakeMaxId = 0;
     this.staleWakeCount = 0;
+    this.watchFailureCount = 0;
+    this.watchRearmTimer = null;
     this.inlineInboxText = "";
     this.stopping = false;
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
@@ -525,22 +651,37 @@ class CodexBridge {
     this.ensureSingleInstance();
     this.writeMeta();
     this.installSignals();
-    this.client.on("process/exited", (params) => this.onProcessExited(params));
-    this.client.on("error", (params) => this.onServerError(params));
-    this.client.on("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params));
-    this.client.on("thread/status/changed", (params) => this.onThreadStatus(params));
-    this.client.on("turn/started", () => {
+    this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
+    this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
+    this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
+    this.client.on("thread/status/changed", this.clientHandler("thread/status/changed", (params) => this.onThreadStatus(params)));
+    this.client.on("turn/started", this.clientHandler("turn/started", () => {
       this.turnActive = true;
       this.threadIdle = false;
-    });
-    this.client.on("turn/completed", (params) => this.onTurnCompleted(params));
-    this.client.on("turn/failed", () => this.onTurnCompleted());
+    }));
+    this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
+    this.client.on("turn/failed", this.clientHandler("turn/failed", () => this.onTurnCompleted()));
 
     this.client.start();
     await this.client.ready?.();
     await this.initialize();
     await this.ensureThread();
     await this.armWatch();
+  }
+
+  clientHandler(method, handler) {
+    return (params) => {
+      try {
+        Promise.resolve(handler(params)).catch((error) => this.failClientHandler(method, error));
+      } catch (error) {
+        this.failClientHandler(method, error);
+      }
+    };
+  }
+
+  failClientHandler(method, error) {
+    console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
+    this.shutdown().finally(() => process.exit(1));
   }
 
   writeMeta() {
@@ -640,6 +781,7 @@ class CodexBridge {
   }
 
   async armWatch() {
+    this.clearWatchRearmTimer();
     if (this.stopping || this.watchHandle) return;
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
@@ -656,13 +798,18 @@ class CodexBridge {
       "--interval",
       String(this.opts.interval),
     ];
-    await this.client.request("process/spawn", {
-      command,
-      processHandle: handle,
-      cwd: this.opts.project,
-      outputBytesCap: 8192,
-      timeoutMs: (this.opts.timeout + this.opts.interval + 10) * 1000,
-    });
+    try {
+      await this.client.request("process/spawn", {
+        command,
+        processHandle: handle,
+        cwd: this.opts.project,
+        outputBytesCap: 8192,
+        timeoutMs: (this.opts.timeout + this.opts.interval + 10) * 1000,
+      });
+    } catch (error) {
+      if (this.watchHandle === handle) this.watchHandle = null;
+      throw error;
+    }
     console.error(`codex-bridge: armed ${this.identity.team}/${this.identity.name}`);
   }
 
@@ -671,6 +818,7 @@ class CodexBridge {
     this.watchHandle = null;
 
     if (params.exitCode === 0) {
+      this.watchFailureCount = 0;
       const maxId = parseMaxId(params.stdout);
       if (this.isStaleWake(maxId)) {
         await this.shutdown();
@@ -684,13 +832,36 @@ class CodexBridge {
     }
 
     if (params.exitCode === 2) {
+      this.watchFailureCount = 0;
       await this.armWatch();
       return;
     }
 
+    this.watchFailureCount += 1;
     const detail = [params.stderr, params.stdout].filter(Boolean).join("\n").trim();
     console.error(`codex-bridge: watch-once failed with exit ${params.exitCode}${detail ? `: ${detail}` : ""}`);
-    setTimeout(() => this.armWatch().catch((error) => console.error(`codex-bridge: re-arm failed: ${error.message}`)), 5000);
+    if (this.opts.watchFailureLimit > 0 && this.watchFailureCount >= this.opts.watchFailureLimit) {
+      console.error(
+        `codex-bridge: stopping after ${this.watchFailureCount} consecutive watch-once failure(s)`,
+      );
+      await this.shutdown();
+      process.exit(1);
+    }
+    this.scheduleWatchRearm();
+  }
+
+  scheduleWatchRearm() {
+    if (this.stopping || this.watchHandle || this.watchRearmTimer) return;
+    this.watchRearmTimer = setTimeout(() => {
+      this.watchRearmTimer = null;
+      this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
+    }, 5000);
+  }
+
+  clearWatchRearmTimer() {
+    if (!this.watchRearmTimer) return;
+    clearTimeout(this.watchRearmTimer);
+    this.watchRearmTimer = null;
   }
 
   onThreadStatus(params) {
@@ -856,6 +1027,7 @@ class CodexBridge {
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
+    this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
       try {
@@ -970,13 +1142,13 @@ function createAppServerClient(opts) {
     const rawSocketPath = opts.appServer.slice("unix://".length);
     if (!rawSocketPath) die("--app-server unix:// requires a socket path");
     const socketPath = path.isAbsolute(rawSocketPath) ? rawSocketPath : path.resolve(process.cwd(), rawSocketPath);
-    return new WebSocketAppServerClient({ path: socketPath }, `unix://${socketPath}`);
+    return new WebSocketAppServerClient({ path: socketPath }, `unix://${socketPath}`, opts);
   }
   if (opts.appServer && opts.appServer.startsWith("ws://")) {
     const target = parseWsTarget(opts.appServer);
-    return new WebSocketAppServerClient(target, opts.appServer);
+    return new WebSocketAppServerClient(target, opts.appServer, opts);
   }
-  return new AppServerClient(appServerCommand(opts), opts.project);
+  return new AppServerClient(appServerCommand(opts), opts.project, opts);
 }
 
 function readVersion() {
