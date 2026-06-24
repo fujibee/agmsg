@@ -14,6 +14,7 @@ set -euo pipefail
 #
 # Usage:
 #   spawn.sh <agent-type> <name> [options]
+#   spawn.sh <agent-type> <name> --prompt "<initial task>" [options]
 #
 #   <agent-type>   any registered type whose manifest is spawnable: a `cli=`
 #                  binary (direct-CLI launch) or a `spawn=` node launcher

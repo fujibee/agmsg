@@ -228,6 +228,38 @@ teardown() {
   rm -rf "$custom"
 }
 
+@test "spawn: --prompt appends an initial task to the actas prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait \
+    --prompt "review the diff"
+  [ "$status" -eq 0 ]
+
+  # The boot script still carries the actas slash command, and now ALSO the
+  # task text, so the spawned agent claims its identity AND acts on the task in
+  # its first turn. (printf %q escapes spaces, so assert on tokens.)
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" == *"alice"* ]]
+  [[ "$output" == *"review"* ]]
+  [[ "$output" == *"diff"* ]]
+}
+
+@test "spawn: without --prompt the boot script carries no extra task text" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # Guards the byte-identical claim: with no --prompt, only the actas command
+  # is passed — no task text leaks into the boot script.
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"actas"* ]]
+  [[ "$output" != *"review the diff"* ]]
+}
+
 @test "spawn: errors when \$TMUX is set but tmux is not on PATH" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   # $TMUX set (we look like we're inside tmux) but a PATH that lacks the tmux
