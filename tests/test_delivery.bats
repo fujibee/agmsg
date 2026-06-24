@@ -293,6 +293,48 @@ JSON
   [[ ! "$output" =~ "invoke the Monitor tool" ]]
 }
 
+# --- watcher teardown is (project, type)-scoped (#218) ---
+# claude-code is the only type that runs a watch.sh watcher. Before scoping,
+# `set turn <any other type>` ran `kill_all_watchers "$PROJECT"` (project only)
+# and tore down the project's claude-code monitor — collateral that killed
+# unrelated agents' monitors on a shared machine.
+
+@test "delivery set turn (other type): does NOT kill the project's claude-code watcher (#218)" {
+  skip_on_windows "watcher process mgmt under Git Bash (#182)"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  # A live claude-code watcher for this project.
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess "$TEST_PROJECT" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.cc-sess.pid" ]
+  # Switching a DIFFERENT type's delivery in the SAME project must not touch it.
+  run bash "$SCRIPTS/delivery.sh" set turn copilot "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/watch.cc-sess.pid" ]
+  kill -0 "$watch_pid" 2>/dev/null
+  kill "$watch_pid" 2>/dev/null || true
+}
+
+@test "delivery set off (claude-code): DOES kill the project's claude-code watcher (type matches)" {
+  skip_on_windows "watcher process mgmt under Git Bash (#182)"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess2 "$TEST_PROJECT" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
+  sleep 1
+  ! kill -0 "$watch_pid" 2>/dev/null
+}
+
 # --- watch.sh signal handling ---
 
 @test "watch.sh exits promptly on SIGTERM and cleans its pidfile" {
