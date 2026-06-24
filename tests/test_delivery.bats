@@ -335,6 +335,34 @@ JSON
   ! kill -0 "$watch_pid" 2>/dev/null
 }
 
+@test "delivery (project, type) scoping holds for a project path with spaces (#218)" {
+  skip_on_windows "watcher process mgmt under Git Bash (#182)"
+  # The argv match is the literal "<project> <type>" string, so a space in the
+  # project path is matched verbatim — no false negatives (target preserved/
+  # killed correctly) and no false positives across the space boundary.
+  local sp="$TEST_PROJECT/with space proj"
+  mkdir -p "$sp"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$sp"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sp-sess "$sp" claude-code &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
+  # Another type's set turn in the SAME space-containing project: must NOT kill it.
+  run bash "$SCRIPTS/delivery.sh" set turn copilot "$sp"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
+  kill -0 "$watch_pid" 2>/dev/null
+  # claude-code off for the SAME space-containing project: must kill it (right target).
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$sp"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
+  sleep 1
+  ! kill -0 "$watch_pid" 2>/dev/null
+}
+
 # --- watch.sh signal handling ---
 
 @test "watch.sh exits promptly on SIGTERM and cleans its pidfile" {
