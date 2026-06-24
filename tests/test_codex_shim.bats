@@ -97,6 +97,40 @@ teardown() {
   [ ! -e "$HOME/.agents/bin/codex" ]
 }
 
+@test "codex shim function: existing agmsg PATH wrapper is skipped when resolving real codex" {
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  bash "$TYPES/codex/codex-shim-install.sh" install >/dev/null
+  [ -x "$HOME/.agents/bin/codex" ]
+
+  local real_bin="$TEST_PROJECT/real-bin"
+  mkdir -p "$real_bin"
+  cp "$FAKE_CODEX" "$real_bin/codex"
+  chmod +x "$real_bin/codex"
+
+  PATH="$HOME/.agents/bin:$real_bin:$PATH" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash -c 'eval "$("$TYPES/codex/codex-shim-install.sh" function)"; cd "$TEST_PROJECT"; codex resume --last'
+
+  [ "$status" -eq 0 ]
+  grep -Fq "monitor real=$real_bin/codex <--project> <$TEST_PROJECT> <--codex-command> <resume> <--> <--last>" "$CALL_LOG"
+  ! grep -Fq "monitor real=$HOME/.agents/bin/codex" "$CALL_LOG"
+}
+
+@test "codex shim function: non-agmsg PATH codex remains eligible as real codex" {
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME/.agents/bin"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  cp "$FAKE_CODEX" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  PATH="$HOME/.agents/bin:$PATH" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    run bash -c 'eval "$("$TYPES/codex/codex-shim-install.sh" function)"; cd "$TEST_PROJECT"; codex resume --last'
+
+  [ "$status" -eq 0 ]
+  grep -Fq "monitor real=$HOME/.agents/bin/codex <--project> <$TEST_PROJECT> <--codex-command> <resume> <--> <--last>" "$CALL_LOG"
+}
+
 @test "codex shim install: installed bin wrapper still finds skill scripts" {
   export HOME="$TEST_PROJECT/home"
   mkdir -p "$HOME"

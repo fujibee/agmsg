@@ -14,6 +14,10 @@ else
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 fi
 
+is_agmsg_wrapper() {
+  [ -f "$1" ] && grep -q "Optional Codex entrypoint shim for agmsg monitor mode" "$1" 2>/dev/null
+}
+
 resolve_real_codex() {
   if [ -n "${AGMSG_REAL_CODEX:-}" ]; then
     printf '%s\n' "$AGMSG_REAL_CODEX"
@@ -35,7 +39,9 @@ resolve_real_codex() {
       candidate_dir="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd || true)"
       [ -n "$candidate_dir" ] || continue
       candidate_path="$candidate_dir/$(basename "$candidate")"
-      if [ "$candidate_path" != "$self_path" ] && [ "$candidate_path" != "$shim_target" ]; then
+      if [ "$candidate_path" != "$self_path" ] \
+        && [ "$candidate_path" != "$shim_target" ] \
+        && ! is_agmsg_wrapper "$candidate_path"; then
         printf '%s\n' "$candidate_path"
         return 0
       fi
