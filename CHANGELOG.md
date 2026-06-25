@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-25
+
+### Added
+- Add --model to launch a spawned agent on a chosen model (#220)
+- Add grok-build agent type (xAI Grok Build CLI) (#216)
+
+### Fixed
+- Scope watcher teardown to (project, type), not project (#219)
+- Exit on originating-session death so a quiet watcher can't hang (#67, #388) (#215)
+- Quote Monitor command args so space-in-path survives (#188) (#200)
+- Use tasklist for native pid liveness in agmsg_instance_alive (#134)
+
 ## [1.1.0] - 2026-06-22
 
 ### Added
@@ -123,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.1]: https://github.com/fujibee/agmsg/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/fujibee/agmsg/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/fujibee/agmsg/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fujibee/agmsg/compare/v1.0.4...v1.0.5
