@@ -43,6 +43,10 @@ teardown() {
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
+  # A fan-out of background joins spawning sqlite3.exe per call is slow and
+  # timing-sensitive on the Windows runner (the experimental full leg); the lock
+  # itself is exercised on Linux/macOS where the contention is reliable.
+  skip_on_windows "concurrency fan-out is too slow/timing-sensitive on the Windows runner"
   # The registry config.json was read-modify-written with no serialization, so
   # concurrent joins clobbered each other and silently dropped agents. Launch a
   # fan-out of joins at once; every one must survive. This fails (count < N+1) if
