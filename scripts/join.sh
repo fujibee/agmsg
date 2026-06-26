@@ -54,13 +54,9 @@ agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
 
 # --- Ensure team config exists ---
 if [ ! -f "$TEAM_CONFIG" ]; then
-  cat > "$TEAM_CONFIG" <<EOF
-{
-  "name": "$TEAM",
-  "agents": {},
-  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+  INITIAL_CONFIG=$(printf '{\n  "name": "%s",\n  "agents": {},\n  "created_at": "%s"\n}' \
+    "$TEAM" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  agmsg_write_atomic "$TEAM_CONFIG" "$INITIAL_CONFIG"
   echo "Created team: $TEAM"
 fi
 

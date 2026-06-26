@@ -45,11 +45,16 @@ agmsg_lock_acquire() {
   done
   AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:+$AGMSG_HELD_LOCKS
 }$lock"
-  # Idempotent: re-arming the same handler each acquire is harmless. It releases
-  # every held lock, so a crash mid-write (with one or two locks held) leaves no
-  # stale lock. NOTE: this installs an EXIT/INT/TERM trap; no current registry
-  # writer sets its own, but a future caller that does must chain this in.
-  trap 'agmsg_lock_release' EXIT INT TERM
+  # Idempotent: re-arming the same handlers each acquire is harmless. They release
+  # every held lock, so a crash with one or two locks held leaves no stale lock.
+  # EXIT releases only. INT/TERM release AND exit, so a signal arriving between
+  # commands in a critical section can't release the lock and then let the script
+  # continue into an unprotected config move/write (matters for 2-lock
+  # rename-team). NOTE: no current registry writer sets its own trap; a future
+  # caller that does must chain these in.
+  trap 'agmsg_lock_release' EXIT
+  trap 'agmsg_lock_release; exit 130' INT
+  trap 'agmsg_lock_release; exit 143' TERM
 }
 
 # agmsg_lock_release
