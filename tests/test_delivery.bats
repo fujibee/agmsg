@@ -1471,6 +1471,7 @@ EOF
 
   sleep 60 &
   local bpid=$!
+  # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
   trap "kill $bpid 2>/dev/null || true" EXIT
   printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
   cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
@@ -1573,6 +1574,7 @@ EOF
 
   sleep 60 &
   local bpid=$!
+  # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
   trap "kill $bpid 2>/dev/null || true" EXIT
   printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
   cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
