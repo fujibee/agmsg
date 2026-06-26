@@ -69,6 +69,7 @@ live_pid() { echo "$$"; }
 }
 
 @test "claim: refuses when held by a live other session" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   fake_cc_instance "$(live_pid)" "sid-other"
   echo "sid-other" > "$(actas_lock_path "T" "alice")"
 
@@ -101,6 +102,7 @@ live_pid() { echo "$$"; }
 # Case 1: serial — once a live owner claims, peer is refused (basic
 # exclusivity sanity check).
 @test "claim: a live owner is never replaced by a serial peer's claim" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   echo "sid-dead" > "$(actas_lock_path "T" "alice")"
   setup_live_owner "$RUN_DIR" "sid-A"
   actas_lock_claim "T" "alice" "sid-A"
@@ -119,6 +121,7 @@ live_pid() { echo "$$"; }
 # carrying a stale decision: claim must NOT touch the existing live lock
 # even if it tried to enter the stale path.
 @test "claim: a fresh live lock survives a concurrent claimer's stale reclaim attempt" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   # lock_path already records a live owner (sid-A is alive via cc-instance).
   setup_live_owner "$RUN_DIR" "sid-A"
   echo "sid-A" > "$(actas_lock_path "T" "alice")"
@@ -145,13 +148,14 @@ live_pid() { echo "$$"; }
   [ "$status" -ne 0 ]
 }
 
-@test "sid_alive: pid alive + cc-instance content matches → alive" {
+@test "sid_alive: pid alive + cc-instance content matches -> alive" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   fake_cc_instance "$(live_pid)" "sid-A"
   run actas_lock_sid_alive "sid-A"
   [ "$status" -eq 0 ]
 }
 
-@test "sid_alive: pid dead → not alive" {
+@test "sid_alive: pid dead -> not alive" {
   fake_cc_instance "99999" "sid-A"  # very unlikely live pid
   run actas_lock_sid_alive "sid-A"
   [ "$status" -ne 0 ]
@@ -188,6 +192,7 @@ live_pid() { echo "$$"; }
 # --- gc_stale ---
 
 @test "gc_stale: removes locks whose owner is dead, returns count" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   echo "sid-dead-1" > "$(actas_lock_path "T1" "alice")"
   echo "sid-dead-2" > "$(actas_lock_path "T2" "bob")"
   fake_cc_instance "$(live_pid)" "sid-live"
@@ -202,6 +207,7 @@ live_pid() { echo "$$"; }
 }
 
 @test "gc_stale: noop when no stale locks" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   fake_cc_instance "$(live_pid)" "sid-live"
   echo "sid-live" > "$(actas_lock_path "T" "alice")"
 
@@ -226,6 +232,7 @@ live_pid() { echo "$$"; }
 }
 
 @test "state: other:<sid> when held by a live different session" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   fake_cc_instance "$(live_pid)" "sid-other"
   echo "sid-other" > "$(actas_lock_path "T" "alice")"
   run actas_lock_state "T" "alice" "sid-me"

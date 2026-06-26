@@ -66,6 +66,7 @@ teardown() { teardown_test_env; }
 # --- agmsg_instance_alive ---
 
 @test "instance_alive: composite with a live pid is alive" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
   agmsg_instance_alive "sess.$$"
 }
 
@@ -74,11 +75,13 @@ teardown() { teardown_test_env; }
 }
 
 @test "instance_alive: bare sid with a live cc-instance is alive" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
   echo "barex" > "$RUN_DIR/cc-instance.$$"
   agmsg_instance_alive "barex"
 }
 
 @test "instance_alive: bare sid is alive when cc-instance was upgraded to composite (compat)" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
   # A pre-upgrade lock holds a bare sid while cc-instance already stores the
   # composite "<sid>.<pid>" — must not be stale'd out.
   echo "barey.$$" > "$RUN_DIR/cc-instance.$$"
@@ -151,7 +154,8 @@ teardown() { teardown_test_env; }
 
 # Two instance ids that share a session_id prefix but differ in pid must be
 # treated as distinct owners — the collision that broke the actas lock is gone.
-@test "actas: same session_id, different pid → distinct live owners (#93)" {
+@test "actas: same session_id, different pid -> distinct live owners (#93)" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
   sleep 60 & local pa=$!
   sleep 60 & local pb=$!
   local ta="sess.$pa" tb="sess.$pb"

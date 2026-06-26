@@ -191,6 +191,7 @@ setup_git_repo() {
 }
 
 @test "resolve: sibling git worktree resolves to the registered main checkout" {
+  skip_on_windows "git worktree path normalization under Git Bash (#182)"
   command -v git >/dev/null 2>&1 || skip "git not available"
   local base; base="$(setup_git_repo)"
   local repo="$base/repo"

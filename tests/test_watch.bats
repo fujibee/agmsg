@@ -81,6 +81,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: restart delivers messages that arrived while the watcher was down" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-restart"
 
   # First watcher: fresh session, takes its mark at MAX(id)=0, then streams M1.
@@ -107,6 +108,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: a fresh session starts from now and does not replay history" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   # Pre-existing message before any watcher for this session ever runs.
   bash "$SCRIPTS/send.sh" team bob alice "M0-history" >/dev/null
 
@@ -125,11 +127,13 @@ _wait_for_file_contains() {
 }
 
 @test "watch: persists a watermark file for the session" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
   [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
 }
 
 @test "watch: exits within one interval when its session dies, without advancing the watermark past an undelivered row (#67)" {
+  skip_on_windows "watcher session liveness under Git Bash (#182)"
   # REWRITTEN from "closed consumer does not advance watermark...". The old test
   # asserted that a closed *downstream* consumer (`watch.sh | head -n 1`) made
   # the watcher stop and not advance the watermark. That contract is unachievable
@@ -181,6 +185,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: closed stdout exits without advancing the watermark" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-stdout-closed"
   local iid="$(_iid "$sid")"
   local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
@@ -219,6 +224,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: actas-mode watcher creates a ready sentinel and removes it on exit" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-ready" "$PROJ" claude-code alice \
     >/dev/null 2>&1 &
@@ -244,6 +250,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: ready sentinel records the owner session_id" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-own" "$PROJ" claude-code alice \
     >/dev/null 2>&1 &
@@ -271,6 +278,7 @@ _wait_for_file_contains() {
 }
 
 @test "session-start: GCs stale watermark/ready but keeps live ones" {
+  skip_on_windows "watcher live-owner liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   # Stale (owner has no live cc-instance).
@@ -303,6 +311,7 @@ _wait_pidfile() {
 }
 
 @test "watch: two sessions sharing a session_id keep independent watchers (#93)" {
+  skip_on_windows "watcher process mgmt under Git Bash (#182)"
   # Pre-composite instance ids (same sid prefix, different agent pid) — what
   # session-start bakes into the directive for two parallel resume processes.
   # The embedded pids must be live: the liveness guard (#67) exits a watcher
@@ -335,6 +344,7 @@ _wait_pidfile() {
 }
 
 @test "watch: relaunch with the SAME instance id replaces the previous watcher (#66 preserved)" {
+  skip_on_windows "watcher process mgmt under Git Bash (#182)"
   # The composite instance id's pid must belong to a LIVE process: the watcher's
   # liveness guard (#67) exits any watcher whose embedded session pid is dead, so
   # a fabricated dead pid (the old "solo.2002") would self-exit before the
