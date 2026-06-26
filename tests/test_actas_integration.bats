@@ -55,6 +55,7 @@ fake_session() {
 }
 
 @test "actas-claim: status=held when role is held by another live session" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
   fake_register T alice
   fake_session "sid-owner" >/dev/null     # this test process is the "live owner"
   echo "sid-owner" > "$(actas_lock_path T alice)"
@@ -135,6 +136,7 @@ fake_session() {
 # Run watch.sh briefly and inspect its stderr for the exclusion message.
 
 @test "watch: excludes pairs held by another live session (stderr message)" {
+  skip_on_windows "actas watcher liveness under Git Bash (#182)"
   fake_register T alice
   fake_register T bob
   fake_session "sid-other" >/dev/null
@@ -156,6 +158,7 @@ fake_session() {
 }
 
 @test "watch: with active_name held by other session, exits with held error" {
+  skip_on_windows "actas watcher liveness under Git Bash (#182)"
   fake_register T alice
   fake_session "sid-other" >/dev/null
   echo "sid-other" > "$(actas_lock_path T alice)"
@@ -169,6 +172,7 @@ fake_session() {
 }
 
 @test "watch: with active_name on a free pair, claims and continues" {
+  skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
 
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-me" /tmp/p1 claude-code alice \
