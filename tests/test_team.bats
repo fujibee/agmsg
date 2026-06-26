@@ -42,6 +42,26 @@ teardown() {
   [[ "$output" =~ "+1 more" ]]
 }
 
+@test "join: concurrent joins to the same team do not lose registrations (#141)" {
+  # The registry config.json was read-modify-written with no serialization, so
+  # concurrent joins clobbered each other and silently dropped agents. Launch a
+  # fan-out of joins at once; every one must survive. This fails (count < N+1) if
+  # the per-team lock regresses.
+  local n=12
+  bash "$SCRIPTS/join.sh" race seed claude-code /tmp/seed
+  local pids=() i
+  for i in $(seq 1 "$n"); do
+    bash "$SCRIPTS/join.sh" race "agent$i" claude-code "/tmp/p$i" >/dev/null 2>&1 &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i"; done
+
+  local cfg="$TEST_SKILL_DIR/teams/race/config.json"
+  run sqlite_mem "SELECT count(*) FROM json_each(json_extract(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.agents'));"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq $((n + 1)) ]
+}
+
 # --- leave.sh ---
 
 @test "leave: removes agent from team" {

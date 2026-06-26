@@ -24,6 +24,8 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/registry-lock.sh"
 
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
@@ -63,11 +65,16 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   [ -f "$TEAM_CONFIG" ] || continue
   TEAM_DIR="$(dirname "$TEAM_CONFIG")"
   TEAM_NAME="$(basename "$TEAM_DIR")"
+
+  # Serialize this team's read-modify-write so a concurrent join/leave/rename on
+  # the same team can't be clobbered (#141). Per team, released before moving on.
+  agmsg_lock_acquire "$TEAM_DIR" || continue
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
   AGENT_JSON=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
     "SELECT json_extract(:json, '$.agents.$TARGET_AGENT');")
   if [ -z "$AGENT_JSON" ] || [ "$AGENT_JSON" = "null" ]; then
+    agmsg_lock_release
     continue
   fi
 
@@ -95,6 +102,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
       AND json_extract(value, '\$.project') = '$PROJECT_PATH';
   ")
   if [ "$MATCH_COUNT" -eq 0 ]; then
+    agmsg_lock_release
     continue
   fi
 
@@ -131,9 +139,11 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
 
   if [ "$AGENT_COUNT" -eq 0 ]; then
     rm -f "$TEAM_CONFIG"
+    agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true
   else
-    echo "$UPDATED" > "$TEAM_CONFIG"
+    agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
+    agmsg_lock_release
   fi
 
   REMOVED=$((REMOVED + MATCH_COUNT))

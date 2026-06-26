@@ -16,6 +16,8 @@ TEAMS_DIR="$SCRIPT_DIR/../teams"
 source "$SCRIPT_DIR/lib/validate.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/registry-lock.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
@@ -25,6 +27,10 @@ if [ ! -f "$TEAM_CONFIG" ]; then
   exit 1
 fi
 
+# Serialize the read-modify-write so a concurrent join/leave/reset on this team
+# can't be clobbered (#141). The team dir exists (checked above); read the config
+# under the lock.
+agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check if agent exists
@@ -45,9 +51,11 @@ AGENT_COUNT=$(agmsg_sqlite_mem \
 
 if [ "$AGENT_COUNT" -eq 0 ]; then
   rm -f "$TEAM_CONFIG"
+  agmsg_lock_release
   rmdir "$TEAMS_DIR/$TEAM" 2>/dev/null || true
   echo "Left team $TEAM (team removed — no members left)"
 else
-  echo "$UPDATED" > "$TEAM_CONFIG"
+  agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
+  agmsg_lock_release
   echo "Left team $TEAM"
 fi
