@@ -60,6 +60,7 @@ fi
 
 REMOVED=0
 TOUCHED_TEAMS=0
+LOCK_FAILED=0
 
 for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   [ -f "$TEAM_CONFIG" ] || continue
@@ -68,7 +69,13 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
 
   # Serialize this team's read-modify-write so a concurrent join/leave/rename on
   # the same team can't be clobbered (#141). Per team, released before moving on.
-  agmsg_lock_acquire "$TEAM_DIR" || continue
+  # A lock timeout is NOT silently skipped: flag it and fail at the end, so a
+  # `drop`/reset never reports success while leaving a team unprocessed.
+  if ! agmsg_lock_acquire "$TEAM_DIR"; then
+    echo "Warning: could not lock $TEAM_NAME, skipped" >&2
+    LOCK_FAILED=1
+    continue
+  fi
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
   AGENT_JSON=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
@@ -161,4 +168,11 @@ if [ "$REMOVED" -eq 0 ]; then
   echo "No registrations removed."
 else
   echo "Reset complete: removed $REMOVED registration(s) across $TOUCHED_TEAMS team(s)"
+fi
+
+# A team we couldn't lock was left unprocessed — surface that as a failure rather
+# than reporting partial success.
+if [ "$LOCK_FAILED" -ne 0 ]; then
+  echo "Reset incomplete: one or more teams could not be locked." >&2
+  exit 1
 fi

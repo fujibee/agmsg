@@ -62,6 +62,11 @@ teardown() {
   [ "$output" -eq $((n + 1)) ]
 }
 
+@test "join: releases its lock (no .config.lock left behind)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  [ ! -e "$TEST_SKILL_DIR/teams/myteam/.config.lock" ]
+}
+
 # --- leave.sh ---
 
 @test "leave: removes agent from team" {
@@ -292,6 +297,19 @@ teardown() {
   run bash "$SCRIPTS/rename-team.sh" team-a team-b
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Team already exists: team-b" ]]
+}
+
+@test "rename-team: an inert empty target dir does not block the rename" {
+  # The target is reserved by holding teams/<new>/.config.lock, so an existing
+  # but config-less dir (e.g. left by an aborted rename) must not count as a team.
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj
+  mkdir -p "$TEST_SKILL_DIR/teams/newteam"
+  run bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SKILL_DIR/teams/newteam/config.json" ]
+  [ ! -e "$TEST_SKILL_DIR/teams/newteam/.config.lock" ]
+  run bash "$SCRIPTS/team.sh" newteam
+  [[ "$output" =~ "alice" ]]
 }
 
 @test "rename-team: fails when old and new are identical" {
