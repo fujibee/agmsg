@@ -155,6 +155,7 @@ agmsg_delivery_apply_default() {
 #   agmsg_delivery_on_enable  — side effects when enabling monitor/both (default: none)
 #   agmsg_delivery_on_disable — side effects when turning delivery off  (default: none)
 #   agmsg_delivery_stop_directive — in-session watcher-stop directive (default: Claude TaskStop)
+#   agmsg_delivery_runtime_status — runtime liveness summary (default: watch.sh pidfiles)
 # A plug that wants the default apply can delegate to agmsg_delivery_apply_default.
 agmsg_delivery_apply() { agmsg_delivery_apply_default "$@"; }
 agmsg_delivery_on_enable() { :; }
@@ -217,6 +218,24 @@ agmsg_delivery_status_default() {
   fi
 }
 agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
+
+agmsg_delivery_runtime_status_default() {
+  if [ -d "$RUN_DIR" ]; then
+    local alive=0 dead=0
+    for f in "$RUN_DIR"/watch.*.pid; do
+      [ -f "$f" ] || continue
+      local pid
+      pid=$(cat "$f" 2>/dev/null || echo "")
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        alive=$((alive + 1))
+      else
+        dead=$((dead + 1))
+      fi
+    done
+    echo "watch processes: $alive alive, $dead stale pidfiles"
+  fi
+}
+agmsg_delivery_runtime_status() { agmsg_delivery_runtime_status_default "$@"; }
 
 # Source the type's delivery plug (if present) so its overrides take effect.
 # One type is handled per invocation, so the global overrides never go stale.
@@ -434,20 +453,7 @@ do_status() {
     agmsg_delivery_status "$TYPE" "$PROJECT"
   fi
 
-  if [ -d "$RUN_DIR" ]; then
-    local alive=0 dead=0
-    for f in "$RUN_DIR"/watch.*.pid; do
-      [ -f "$f" ] || continue
-      local pid
-      pid=$(cat "$f" 2>/dev/null || echo "")
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        alive=$((alive + 1))
-      else
-        dead=$((dead + 1))
-      fi
-    done
-    echo "watch processes: $alive alive, $dead stale pidfiles"
-  fi
+  agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
 }
 
 kill_all_watchers() {

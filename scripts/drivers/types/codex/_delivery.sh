@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # codex delivery plug.
 #
-# codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it only
-# adds enable/disable side effects: install the monitor shim on enable, stop the
-# bridge on disable. Sourced into delivery.sh's context, so SKILL_DIR,
-# agmsg_resolve_node, CODEX_MONITOR_DOC_URL and stop_codex_bridge are in scope.
+# codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
+# enable/disable side effects and replaces the runtime status summary with
+# Codex bridge liveness. Sourced into delivery.sh's context, so SKILL_DIR,
+# SCRIPT_DIR, RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL and
+# stop_codex_bridge are in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
 agmsg_delivery_on_enable() {
@@ -52,4 +53,65 @@ agmsg_delivery_on_disable() {
   echo "  If no other project uses monitor mode, remove it and restore your PATH:"
   echo "    $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh remove"
   echo "    # then drop ~/.agents/bin from PATH if you added it for monitor"
+}
+
+agmsg_delivery_runtime_status() {
+  local type="$1" project="$2"
+  local pairs found=0
+  pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
+
+  if [ -z "$pairs" ]; then
+    echo "Codex bridge: no identities registered for this project"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r team name _rest; do
+    if [ -z "$team" ] || [ -z "$name" ]; then
+      continue
+    fi
+    found=1
+
+    local base pidfile metafile pid meta_pid meta_project meta_type meta_ok
+    base="$RUN_DIR/codex-bridge.$team.$name"
+    pidfile="$base.pid"
+    metafile="$base.meta"
+
+    if [ ! -f "$pidfile" ]; then
+      echo "Codex bridge: $team/$name not running"
+      continue
+    fi
+
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -z "$pid" ]; then
+      echo "Codex bridge: $team/$name stale pidfile (empty pid)"
+      continue
+    fi
+
+    if [ ! -f "$metafile" ]; then
+      echo "Codex bridge: $team/$name stale pidfile (missing metadata)"
+      continue
+    fi
+
+    meta_ok=1
+    meta_pid=$(awk -F= '/^pid=/{sub(/^pid=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    meta_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    meta_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    [ -n "$meta_pid" ] && [ "$meta_pid" != "$pid" ] && meta_ok=0
+    [ -n "$meta_project" ] && [ "$meta_project" != "$project" ] && meta_ok=0
+    [ -n "$meta_type" ] && [ "$meta_type" != "$type" ] && meta_ok=0
+    if [ "$meta_ok" -ne 1 ]; then
+      echo "Codex bridge: $team/$name stale pidfile (metadata mismatch)"
+      continue
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Codex bridge: $team/$name alive (pid $pid)"
+    else
+      echo "Codex bridge: $team/$name stale pidfile (pid $pid not running)"
+    fi
+  done <<< "$pairs"
+
+  if [ "$found" -eq 0 ]; then
+    echo "Codex bridge: no identities registered for this project"
+  fi
 }

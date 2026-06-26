@@ -161,6 +161,15 @@ settings_file() {
   [[ "$output" =~ "mode: monitor" ]]
 }
 
+@test "delivery status: claude-code still reports the watch process summary" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"watch processes:"* ]]
+}
+
 @test "delivery status: derives 'turn' from settings with Stop only" {
   bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
@@ -1454,6 +1463,145 @@ EOF
   [[ "$output" == *"not supported for codex"* ]]
 }
 
+@test "delivery status (codex): live bridge reports alive and suppresses watch count" {
+  skip_on_windows "codex bridge status liveness under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  sleep 60 &
+  local bpid=$!
+  trap "kill $bpid 2>/dev/null || true" EXIT
+  printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+  printf '%s\n' 99999999 > "$TEST_SKILL_DIR/run/watch.fake.pid"
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+
+  kill "$bpid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (codex): stale bridge pidfile is reported as stale" {
+  skip_on_windows "codex bridge status liveness under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do
+    dead_pid=$((dead_pid + 1))
+  done
+  printf '%s\n' "$dead_pid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$dead_pid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (pid $dead_pid not running)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+}
+
+@test "delivery status (codex): bridge metadata mismatch is reported as stale" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$$
+project=$TEST_PROJECT-other
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (metadata mismatch)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+}
+
+@test "delivery status (codex): missing bridge metadata is reported as stale" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (missing metadata)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+}
+
+@test "delivery status (codex): identity with no bridge reports not running" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice not running"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+}
+
+@test "delivery status (codex): multiple identities are enumerated independently" {
+  skip_on_windows "codex bridge status liveness under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  sleep 60 &
+  local bpid=$!
+  trap "kill $bpid 2>/dev/null || true" EXIT
+  printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+  [[ "$output" == *"Codex bridge: team/bob not running"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+
+  kill "$bpid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (codex): monitor mode with no identities is explicit" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: no identities registered for this project"* ]]
+  [[ "$output" != *"watch processes:"* ]]
+}
 
 @test "session-start.sh for codex resolves thread id from rollout when CODEX_THREAD_ID is unset" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
