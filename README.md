@@ -1,7 +1,6 @@
 # agmsg
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fujibee/agmsg/tests.yml?branch=main&label=CI&logo=github)](https://github.com/fujibee/agmsg/actions/workflows/tests.yml)
-[![npm](https://img.shields.io/npm/v/agmsg?logo=npm&color=cb3837)](https://www.npmjs.com/package/agmsg)
 [![release](https://img.shields.io/github/v/release/fujibee/agmsg?label=release)](https://github.com/fujibee/agmsg/releases/latest)
 [![license](https://img.shields.io/github/license/fujibee/agmsg)](LICENSE)
 

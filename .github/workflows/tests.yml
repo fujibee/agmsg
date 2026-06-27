@@ -126,23 +126,23 @@ jobs:
 
   # Windows coverage for the native helpers shipped in #103 (Git Bash runner,
   # sqlite3 compatibility shim, cygpath normalization). The POSIX-assuming suite
-  # is not fully green on Windows yet, so this is staged
-  # (#125): a focused leg targeting the Windows-relevant tests, plus a full leg
-  # that is informational only (continue-on-error) to track how far the rest
-  # gets. Neither is a required check yet — promote the focused leg to required
-  # once it is reliably green. The required checks stay bats (ubuntu/macos).
+  # is not fully green on Windows yet, so this is staged (#125): a single focused
+  # leg targeting the Windows-relevant install tests. Not a required check yet —
+  # promote it to required once it is reliably green. The required checks stay
+  # bats (ubuntu/macos).
+  #
+  # The old informational "full" leg (the whole suite, continue-on-error) was
+  # removed: it ran POSIX-assuming tests that hang on Windows and hit the job
+  # timeout. A timed-out job reports "cancelled", and continue-on-error does NOT
+  # absorb a cancellation (only a failure), so it turned the whole tests run red.
+  # Windows-relevant tests get fixed in separate PRs and folded into this leg.
   bats-windows:
     name: bats (windows-latest, ${{ matrix.leg }})
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: windows-latest
-    # The full leg is best-effort: a failure there must not fail the workflow.
-    continue-on-error: ${{ matrix.experimental }}
-    # The full leg exercises POSIX-assuming tests that can hang on Windows
-    # (no native equivalent for some sleeps/process checks); bound the job so a
-    # hang can't pin a runner. The malformed-JSON failures this surfaces appear
-    # early, so 12 min is enough to capture the useful map of what's broken
-    # while keeping the per-PR cost down (the leg is continue-on-error anyway).
+    # Bound the job so an unexpected hang can't pin a runner. The focused leg is
+    # fast and green today; this is just a safety net.
     timeout-minutes: 12
     strategy:
       fail-fast: false
@@ -150,16 +150,10 @@ jobs:
         include:
           # Focused leg: the install-side native Windows helpers (#103). These
           # are green on windows-latest today and are the candidate to promote
-          # to a required check. Other Windows-relevant tests stay in the
-          # informational full leg until they are fixed in separate PRs.
+          # to a required check.
           - leg: install helpers
             filter: "[Ww]indows"
             target: tests/test_install.bats
-            experimental: false
-          - leg: full (experimental)
-            filter: ""
-            target: tests/
-            experimental: true
     defaults:
       run:
         # bats is bash; on Windows runners `shell: bash` is Git Bash, the same
