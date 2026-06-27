@@ -18,13 +18,13 @@ function parseConf(file) {
 
 // Proto-only display metadata (type.conf has no name/blurb yet).
 const META = {
-  "claude-code": { label: "Claude Code", logo: "/logos/claude.svg", blurb: "Anthropic's agentic coding CLI." },
-  codex:         { label: "Codex",        logo: "/logos/codex.svg", blurb: "OpenAI's terminal coding agent." },
+  "claude-code": { label: "Claude Code", logo: "/logos/claude.svg", blurb: "Anthropic's agentic coding CLI.", mono: true },
+  codex:         { label: "Codex",        logo: "/logos/codex.svg", blurb: "OpenAI's terminal coding agent.", mono: true },
   gemini:        { label: "Gemini CLI",   logo: "/logos/gemini.svg", blurb: "Google's CLI coding agent." },
   copilot:       { label: "Copilot CLI",  logo: "/logos/copilot.svg", blurb: "GitHub Copilot in the shell." },
   cursor:        { label: "Cursor Agent", logo: null, blurb: "Cursor's headless CLI agent." },
-  opencode:      { label: "OpenCode",     logo: "/logos/opencode.svg", blurb: "Open-source coding agent." },
-  "grok-build":  { label: "Grok Build",   logo: null, blurb: "xAI's build/coding agent." },
+  opencode:      { label: "OpenCode",     logo: "/logos/opencode.svg", blurb: "Open-source coding agent.", mono: true },
+  "grok-build":  { label: "Grok Build",   logo: "/logos/grok.svg", blurb: "xAI's build/coding agent.", mono: true },
   hermes:        { label: "Hermes",       logo: "/logos/hermes.png", blurb: "Lightweight relay agent." },
   antigravity:   { label: "Antigravity",  logo: "/logos/antigravity.png", blurb: "Agentic coding environment." },
 };
@@ -40,6 +40,7 @@ const agents = fs.readdirSync(typesDir)
       name,
       label: meta.label,
       logo: meta.logo,
+      mono: meta.mono || false,
       blurb: meta.blurb,
       spawnable: c.spawnable === "yes",
       monitor: c.monitor === "yes",
@@ -120,9 +121,9 @@ try {
     <div class="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-bg"></div>
     <div class="relative mx-auto max-w-6xl px-6 py-24 md:py-28">
       <div class="fade-up mx-auto max-w-3xl text-center">
-        <span class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber">
+        <a href="https://www.producthunt.com/products/agmsg" target="_blank" rel="noopener" class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber transition hover:bg-amber/20">
           ★ Product Hunt #5 Product of the Day
-        </span>
+        </a>
         <h1 class="mt-6 text-[2.6rem] font-extrabold leading-[1.08] tracking-tight md:text-[3.5rem]">
           You stop being the<br /><span class="text-accent">copy-paste courier</span><br />between your agents.
         </h1>
@@ -133,6 +134,10 @@ try {
         <div class="mx-auto mt-8 flex max-w-lg items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-left font-mono text-sm">
           <span class="select-none text-muted">$</span>
           <code class="text-fg">npx agmsg</code>
+          <button id="copy-install" type="button" data-copy="npx agmsg" aria-label="Copy install command" class="ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg">
+            <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          </button>
         </div>
 
         <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -149,7 +154,7 @@ try {
           <p class="text-xs uppercase tracking-widest text-muted">Works across</p>
           <div class="mt-4 flex flex-wrap items-center justify-center gap-x-7 gap-y-4 opacity-90">
             {agents.filter((a) => a.logo).map((a) => (
-              <img src={a.logo} alt={a.label} title={a.label} class="h-7 w-auto grayscale transition hover:grayscale-0" />
+              <img src={a.logo} alt={a.label} title={a.label} class:list={["h-7 w-auto transition", a.mono && "invert"]} />
             ))}
           </div>
         </div>
@@ -178,7 +183,7 @@ try {
         <div class="card flex flex-col rounded-2xl border border-border bg-surface p-6">
           <div class="flex items-center gap-3">
             {a.logo
-              ? <img src={a.logo} alt={a.label} class="h-9 w-9 object-contain" />
+              ? <img src={a.logo} alt={a.label} class:list={["h-9 w-9 object-contain", a.mono && "invert"]} />
               : <span class="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-bg font-mono text-sm text-muted">{a.label.slice(0,2)}</span>}
             <div>
               <h3 class="font-semibold leading-tight">{a.label}</h3>
@@ -221,7 +226,6 @@ try {
               <p class="mt-4 flex-1 text-sm text-muted">{s.desc}</p>
               <div class="mt-5 flex items-center gap-4 text-xs text-muted">
                 <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full" style={`background:${s.langColor}`}></span>{s.lang}</span>
-                <span class="flex items-center gap-1">★ {s.stars}</span>
               </div>
             </div>
           </a>
@@ -244,7 +248,7 @@ try {
         <h3 class="mt-4 text-lg font-semibold">You're the copy-paste courier</h3>
         <div class="mt-6 flex items-center justify-between gap-2">
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7" /></div>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
             <span class="text-xs text-muted">Claude Code</span>
           </div>
           <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
@@ -256,7 +260,7 @@ try {
           </div>
           <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7" /></div>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
             <span class="text-xs text-muted">Codex</span>
           </div>
         </div>
@@ -269,7 +273,7 @@ try {
         <h3 class="mt-4 text-lg font-semibold">Agents message each other directly</h3>
         <div class="mt-6 flex items-center justify-between gap-2">
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7" /></div>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
             <span class="text-xs text-muted">Claude Code</span>
           </div>
           <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -279,7 +283,7 @@ try {
           </div>
           <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7" /></div>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
             <span class="text-xs text-muted">Codex</span>
           </div>
         </div>
@@ -310,6 +314,19 @@ try {
         document.querySelectorAll(".js-stars").forEach((el) => { el.textContent = s; });
       })
       .catch(() => {});
+
+    // Copy the install command.
+    const copyBtn = document.getElementById("copy-install");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(copyBtn.dataset.copy);
+          const c = copyBtn.querySelector(".copy-icon"), k = copyBtn.querySelector(".check-icon");
+          c.classList.add("hidden"); k.classList.remove("hidden");
+          setTimeout(() => { k.classList.add("hidden"); c.classList.remove("hidden"); }, 1500);
+        } catch (_) {}
+      });
+    }
   </script>
 </body>
 </html>
