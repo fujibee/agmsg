@@ -219,6 +219,24 @@ if [ -n "$CC_PID" ]; then
   printf '%s\n' "$INSTANCE_ID" > "$STATE"
 fi
 
+# --- Skip directive when a watcher is already alive for this instance. ---
+# /compact re-fires SessionStart within the same CC process and session_id, so
+# INSTANCE_ID is identical to the already-running watcher's.  Without this
+# guard the agent spawns a second Monitor whose watch.sh kills the incumbent,
+# the old Monitor task emits "stream ended", and the agent loops trying to
+# restart.  Mirrors emit_monitor_directive in delivery.sh.
+WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
+if [ -f "$WATCHER_PIDFILE" ]; then
+  existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
+  if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+    cat <<EOF
+AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
+No action needed — the existing watcher is the active one.
+EOF
+    exit 0
+  fi
+fi
+
 WATCH="$SKILL_DIR/scripts/watch.sh"
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe

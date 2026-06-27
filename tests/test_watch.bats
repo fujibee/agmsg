@@ -270,6 +270,41 @@ _wait_for_file_contains() {
   [ "$(cat "$ready")" = "sess-new" ]
 }
 
+@test "session-start: skips directive when watcher already alive (compact dedup)" {
+  skip_on_windows "#134"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # Start a watcher so a pidfile exists with a live pid.
+  AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" "sess1" "$PROJ" claude-code \
+    >/dev/null 2>&1 &
+  local wpid=$!
+
+  # Resolve the instance id session-start.sh will compute for "sess1".
+  local iid
+  iid=$(_iid "sess1")
+  local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
+  _wait_for_file "$pf"
+
+  # Record cc-instance so the dedup path sees "same instance".
+  echo "$iid" > "$TEST_SKILL_DIR/run/cc-instance.$$"
+
+  # Fire session-start with the same session_id (simulates /compact re-fire).
+  local out
+  out=$(printf '{"session_id":"sess1"}' \
+    | bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" 2>/dev/null || true)
+
+  # The directive must NOT tell the agent to invoke Monitor.
+  [[ "$out" == *"already streaming"* ]]
+  [[ "$out" != *"invoke the Monitor tool"* ]]
+
+  # The original watcher must still be alive.
+  kill -0 "$wpid" 2>/dev/null
+
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+}
+
 @test "session-start: GCs stale watermark/ready but keeps live ones" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
