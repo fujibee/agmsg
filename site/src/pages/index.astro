@@ -145,59 +145,121 @@ const ogImage = `${siteUrl}/og.png`;
   <section class="dot-grid relative overflow-hidden border-b border-border/60">
     <div class="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-bg"></div>
     <div class="relative mx-auto max-w-6xl px-6 py-24 md:py-28">
-      <div class="fade-up mx-auto max-w-3xl text-center">
-        <a href="https://www.producthunt.com/products/agmsg" target="_blank" rel="noopener" class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber transition hover:bg-amber/20">
-          ★ Product Hunt #5 Product of the Day
-        </a>
-        <h1 class="mt-6 text-[2.6rem] font-extrabold leading-[1.08] tracking-tight md:text-[3.5rem]">
-          You stop being the<br /><span class="text-accent">copy-paste courier</span><br />between your agents.
-        </h1>
-        <p class="mx-auto mt-6 max-w-xl text-lg text-muted">
-          Claude Code, Codex, Gemini, Copilot and more message each other over a shared local SQLite file. No daemon, no network.
-        </p>
-
-        <div class="mx-auto mt-8 flex max-w-lg items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-left font-mono text-sm">
-          <span class="select-none text-muted">$</span>
-          <code class="text-fg">npx agmsg</code>
-          <button id="copy-install" type="button" data-copy="npx agmsg" aria-label="Copy install command" class="ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg">
-            <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-          </button>
-        </div>
-
-        <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <a href="#agents" class="cta rounded-xl bg-accent px-6 py-3 font-semibold text-bg">Get started</a>
-          <a href="https://github.com/fujibee/agmsg" class="cta flex items-center gap-2.5 rounded-xl border border-border bg-surface px-6 py-3 font-medium text-fg hover:border-accent/50">
-            <svg viewBox="0 0 24 24" class="h-5 w-5 fill-current" aria-hidden="true"><path d={githubPath}></path></svg>
-            <span>Star on GitHub</span>
-            <span class="js-stars font-mono text-sm text-muted">{starFallback}</span>
+      <div class="grid items-center gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+        <!-- LEFT: copy -->
+        <div class="fade-up min-w-0">
+          <a href="https://www.producthunt.com/products/agmsg" target="_blank" rel="noopener" class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber transition hover:bg-amber/20">
+            ★ Product Hunt #5 Product of the Day
           </a>
+          <h1 class="mt-6 text-[2.4rem] font-extrabold leading-[1.08] tracking-tight md:text-[2.9rem]">
+            You stop being the <br class="hidden lg:block" /><span class="text-accent">copy-paste courier</span> <br class="hidden lg:block" />between your agents.
+          </h1>
+          <p class="mt-6 max-w-xl text-lg text-muted">
+            Claude Code, Codex, Gemini, Copilot and more message each other over a shared local SQLite file. No daemon, no network.
+          </p>
+
+          <div class="mt-8 flex max-w-md items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 font-mono text-sm">
+            <span class="select-none text-muted">$</span>
+            <code class="text-fg">npx agmsg</code>
+            <button id="copy-install" type="button" data-copy="npx agmsg" aria-label="Copy install command" class="ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg">
+              <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            </button>
+          </div>
+
+          <div class="mt-8 flex flex-wrap items-center gap-3">
+            <a href="#agents" class="cta rounded-xl bg-accent px-6 py-3 font-semibold text-bg">Get started</a>
+            <a href="https://github.com/fujibee/agmsg" class="cta flex items-center gap-2.5 rounded-xl border border-border bg-surface px-6 py-3 font-medium text-fg hover:border-accent/50">
+              <svg viewBox="0 0 24 24" class="h-5 w-5 fill-current" aria-hidden="true"><path d={githubPath}></path></svg>
+              <span>Star on GitHub</span>
+              <span class="js-stars font-mono text-sm text-muted">{starFallback}</span>
+            </a>
+          </div>
         </div>
 
-        <!-- supported agents strip -->
-        <div class="mt-12">
-          <p class="text-xs uppercase tracking-widest text-muted">Works across</p>
-          <div class="mt-4 flex flex-wrap items-center justify-center gap-x-7 gap-y-4 opacity-90">
-            {agents.filter((a) => a.logo).map((a) => (
-              <img src={a.logo} alt={a.label} title={a.label} class:list={["h-7 w-auto transition", a.mono && "invert"]} />
-            ))}
-          </div>
+        <!-- RIGHT: demo -->
+        <div class="fade-up min-w-0 overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl lg:max-w-[30rem] lg:justify-self-end">
+          <img src="/agmsg-demo.gif" alt="agmsg demo" class="w-full" />
         </div>
       </div>
 
-      <!-- demo -->
-      <div class="fade-up mx-auto mt-16 max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl">
-        <div class="flex items-center gap-1.5 border-b border-border px-4 py-2.5">
-          <span class="h-3 w-3 rounded-full bg-[#ff5f56]"></span>
-          <span class="h-3 w-3 rounded-full bg-[#ffbd2e]"></span>
-          <span class="h-3 w-3 rounded-full bg-[#27c93f]"></span>
+      <!-- supported agents strip (full width, left-aligned) -->
+      <div class="fade-up mt-16">
+        <p class="text-xs uppercase tracking-widest text-muted">Works across</p>
+        <div class="mt-4 flex flex-wrap items-center gap-x-7 gap-y-4 opacity-90">
+          {agents.filter((a) => a.logo).map((a) => (
+            <img src={a.logo} alt={a.label} title={a.label} class:list={["h-7 w-auto transition", a.mono && "invert"]} />
+          ))}
         </div>
-        <img src="/agmsg-demo.gif" alt="agmsg demo" class="w-full" />
       </div>
     </div>
   </section>
 
-  <!-- 2. Agent Types gallery (Bento) -->
+  <!-- 2. How it works — before / after (above Agent types: explain value first) -->
+  <section id="how" class="border-b border-border/60">
+    <div class="mx-auto max-w-6xl px-6 py-20 md:py-24">
+      <div class="max-w-2xl">
+        <h2 class="text-3xl font-bold tracking-tight md:text-4xl">Stop relaying. Let them talk.</h2>
+        <p class="mt-3 text-muted">You've been the message bus between your agents. agmsg makes them talk directly — over a shared local SQLite file.</p>
+      </div>
+
+      <div class="mt-12 grid gap-5 lg:grid-cols-2">
+        <!-- BEFORE -->
+        <div class="rounded-2xl border border-border bg-surface/40 p-8">
+          <span class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber">Before</span>
+          <h3 class="mt-4 text-lg font-semibold">You're the copy-paste courier</h3>
+          <div class="mt-6 flex items-center justify-between gap-2">
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
+              <span class="text-xs text-muted">Claude Code</span>
+            </div>
+            <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-amber/40 bg-amber/10 text-amber">
+                <svg viewBox="0 0 24 24" class="h-6 w-6 fill-current" aria-hidden="true"><path d="M12 12a5 5 0 100-10 5 5 0 000 10zm0 2c-5 0-9 2.5-9 6v2h18v-2c0-3.5-4-6-9-6z"/></svg>
+              </div>
+              <span class="text-xs text-amber">you (paste)</span>
+            </div>
+            <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
+              <span class="text-xs text-muted">Codex</span>
+            </div>
+          </div>
+          <p class="mt-6 text-sm text-muted">Manual, slow, lossy. Every message routes through you — you're the bottleneck.</p>
+        </div>
+
+        <!-- AFTER -->
+        <div class="card rounded-2xl border border-accent/40 bg-accent/5 p-8">
+          <span class="inline-flex items-center gap-2 rounded-full border border-accent/40 bg-accent/15 px-3 py-1 text-xs font-medium text-accent">With agmsg</span>
+          <h3 class="mt-4 text-lg font-semibold">Agents message each other directly</h3>
+          <div class="mt-6 flex items-center justify-between gap-2">
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
+              <span class="text-xs text-muted">Claude Code</span>
+            </div>
+            <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 items-center justify-center rounded-xl border border-accent/50 bg-bg px-3 font-mono text-xs text-accent">agmsg · sqlite</div>
+              <span class="text-xs text-accent">shared log</span>
+            </div>
+            <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="flex flex-col items-center gap-2">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
+              <span class="text-xs text-muted">Codex</span>
+            </div>
+          </div>
+          <div class="mt-6 flex flex-wrap gap-2">
+            <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">no daemon</span>
+            <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">no network</span>
+            <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">real-time</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. Agent Types gallery (Bento) -->
   <section id="agents" class="mx-auto max-w-6xl px-6 py-20 md:py-24">
     <div class="max-w-2xl">
       <h2 class="text-3xl font-bold tracking-tight md:text-4xl">Agent types</h2>
@@ -255,68 +317,6 @@ const ogImage = `${siteUrl}/og.png`;
             </div>
           </a>
         ))}
-      </div>
-    </div>
-  </section>
-
-  <!-- 4. How it works — before / after -->
-  <section id="how" class="mx-auto max-w-6xl px-6 py-20 md:py-24">
-    <div class="max-w-2xl">
-      <h2 class="text-3xl font-bold tracking-tight md:text-4xl">Stop relaying. Let them talk.</h2>
-      <p class="mt-3 text-muted">You've been the message bus between your agents. agmsg makes them talk directly — over a shared local SQLite file.</p>
-    </div>
-
-    <div class="mt-12 grid gap-5 lg:grid-cols-2">
-      <!-- BEFORE -->
-      <div class="rounded-2xl border border-border bg-surface/40 p-8">
-        <span class="inline-flex items-center gap-2 rounded-full border border-amber/40 bg-amber/10 px-3 py-1 text-xs font-medium text-amber">Before</span>
-        <h3 class="mt-4 text-lg font-semibold">You're the copy-paste courier</h3>
-        <div class="mt-6 flex items-center justify-between gap-2">
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
-            <span class="text-xs text-muted">Claude Code</span>
-          </div>
-          <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-amber/40 bg-amber/10 text-amber">
-              <svg viewBox="0 0 24 24" class="h-6 w-6 fill-current" aria-hidden="true"><path d="M12 12a5 5 0 100-10 5 5 0 000 10zm0 2c-5 0-9 2.5-9 6v2h18v-2c0-3.5-4-6-9-6z"/></svg>
-            </div>
-            <span class="text-xs text-amber">you (paste)</span>
-          </div>
-          <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
-            <span class="text-xs text-muted">Codex</span>
-          </div>
-        </div>
-        <p class="mt-6 text-sm text-muted">Manual, slow, lossy. Every message routes through you — you're the bottleneck.</p>
-      </div>
-
-      <!-- AFTER -->
-      <div class="card rounded-2xl border border-accent/40 bg-accent/5 p-8">
-        <span class="inline-flex items-center gap-2 rounded-full border border-accent/40 bg-accent/15 px-3 py-1 text-xs font-medium text-accent">With agmsg</span>
-        <h3 class="mt-4 text-lg font-semibold">Agents message each other directly</h3>
-        <div class="mt-6 flex items-center justify-between gap-2">
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7 invert" /></div>
-            <span class="text-xs text-muted">Claude Code</span>
-          </div>
-          <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 items-center justify-center rounded-xl border border-accent/50 bg-bg px-3 font-mono text-xs text-accent">agmsg · sqlite</div>
-            <span class="text-xs text-accent">shared log</span>
-          </div>
-          <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7 invert" /></div>
-            <span class="text-xs text-muted">Codex</span>
-          </div>
-        </div>
-        <div class="mt-6 flex flex-wrap gap-2">
-          <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">no daemon</span>
-          <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">no network</span>
-          <span class="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 font-mono text-xs text-accent">real-time</span>
-        </div>
       </div>
     </div>
   </section>
