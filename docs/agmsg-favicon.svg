@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Favicon variant: tighter crop, no bubble tail, centered "ag" so it
-       stays legible at 16/32px. Header still uses the speech-bubble logo. -->
-  <rect x="2" y="2" width="60" height="60" rx="12" fill="#1C2E52"/>
-  <text x="32" y="32" font-family="system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
-        font-size="38" font-weight="800" letter-spacing="-2"
-        fill="#FFFFFF" text-anchor="middle" dominant-baseline="central">ag</text>
-</svg>

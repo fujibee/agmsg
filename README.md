@@ -519,6 +519,24 @@ Full discovery order, the trust model, and authoring guidance:
 - **Derivative projects**: `agmsg-shogi`, `agmsg-go`, `agmsg-mcp` (community-built)
 - **External contributors**: [@MiuraKatsu](https://github.com/MiuraKatsu) (Gemini support + whoami auto-detect), [@roundrop](https://github.com/roundrop) (Copilot CLI support), [@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP) (native Windows / Git Bash), [@kenshin-yamada](https://github.com/kenshin-yamada) (watcher scoping fix), [@utenadev](https://github.com/utenadev) (OpenCode contribution), [@lucianlamp](https://github.com/lucianlamp) (native Windows PowerShell helpers), [@tatsuya6502](https://github.com/tatsuya6502) (sandboxed Bash tool support)
 
+## Project site (agmsg.cc)
+
+[agmsg.cc](https://agmsg.cc) is an Astro project under [`site/`](site/).
+
+- **Source of truth:** `site/` (Astro + Tailwind). The built output is **not** committed — CI builds it.
+- **Local preview:**
+  ```bash
+  cd site
+  npm install
+  npm run dev        # http://localhost:4321, live reload
+  # or, to serve the production build:
+  npm run build && npm run preview
+  ```
+- **Publish:** pushing to `main` with changes under `site/` runs [`.github/workflows/pages.yml`](.github/workflows/pages.yml), which builds the site and deploys it to GitHub Pages. The custom domain is set by `site/public/CNAME`.
+- The agent-types gallery is generated at build time from `scripts/drivers/types/*/type.conf`, so adding an agent type surfaces it on the site automatically.
+
+`docs/` is developer documentation (markdown, ADRs, spec) read on GitHub — it is **not** the published site.
+
 ## Contributing
 
 See [Design & Architecture](docs/design.md) for developer documentation — identity model, data storage, hook system, and script responsibilities.
