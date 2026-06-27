@@ -65,6 +65,20 @@ const statusColor = {
   bridge: "text-amber border-amber/40 bg-amber/10",
   "rule-file": "text-muted border-border bg-white/5",
 };
+
+// GitHub star count: baked at build time as the fallback, refreshed client-side
+// on load (see the inline script). Format e.g. 900 -> "900", 1200 -> "1.2k".
+function fmtStars(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
+}
+let starFallback = "900";
+try {
+  const r = await fetch("https://api.github.com/repos/fujibee/agmsg");
+  if (r.ok) {
+    const j = await r.json();
+    if (typeof j.stargazers_count === "number") starFallback = fmtStars(j.stargazers_count);
+  }
+} catch (_) { /* offline build: keep the static fallback */ }
 ---
 
 <!DOCTYPE html>
@@ -96,7 +110,7 @@ const statusColor = {
       <a href="https://github.com/fujibee/agmsg" class="flex items-center gap-2 rounded-lg border border-border bg-surface px-3.5 py-1.5 text-sm font-medium hover:border-accent/50">
         <svg viewBox="0 0 24 24" class="h-4 w-4 fill-current" aria-hidden="true"><path d={githubPath}></path></svg>
         <span>GitHub</span>
-        <span class="ml-1 border-l border-border pl-2 font-mono text-xs text-muted">★ 1.2k</span>
+        <span class="ml-1 border-l border-border pl-2 font-mono text-xs text-muted">★ <span class="js-stars">{starFallback}</span></span>
       </a>
     </nav>
   </header>
@@ -118,7 +132,7 @@ const statusColor = {
 
         <div class="mx-auto mt-8 flex max-w-lg items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-left font-mono text-sm">
           <span class="select-none text-muted">$</span>
-          <code class="text-fg">curl -fsSL agmsg.cc/install | bash</code>
+          <code class="text-fg">npx agmsg</code>
         </div>
 
         <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -126,7 +140,7 @@ const statusColor = {
           <a href="https://github.com/fujibee/agmsg" class="cta flex items-center gap-2.5 rounded-xl border border-border bg-surface px-6 py-3 font-medium text-fg hover:border-accent/50">
             <svg viewBox="0 0 24 24" class="h-5 w-5 fill-current" aria-hidden="true"><path d={githubPath}></path></svg>
             <span>Star on GitHub</span>
-            <span class="font-mono text-sm text-muted">1.2k</span>
+            <span class="js-stars font-mono text-sm text-muted">{starFallback}</span>
           </a>
         </div>
 
@@ -230,8 +244,8 @@ const statusColor = {
         <h3 class="mt-4 text-lg font-semibold">You're the copy-paste courier</h3>
         <div class="mt-6 flex items-center justify-between gap-2">
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg font-mono text-xs text-muted">A</div>
-            <span class="text-xs text-muted">agent</span>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7" /></div>
+            <span class="text-xs text-muted">Claude Code</span>
           </div>
           <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
           <div class="flex flex-col items-center gap-2">
@@ -242,8 +256,8 @@ const statusColor = {
           </div>
           <svg class="h-5 flex-1 text-amber/60" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h96" stroke="currentColor" stroke-width="2" stroke-dasharray="5 5" stroke-linecap="round"/></svg>
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg font-mono text-xs text-muted">B</div>
-            <span class="text-xs text-muted">agent</span>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7" /></div>
+            <span class="text-xs text-muted">Codex</span>
           </div>
         </div>
         <p class="mt-6 text-sm text-muted">Manual, slow, lossy. Every message routes through you — you're the bottleneck.</p>
@@ -255,8 +269,8 @@ const statusColor = {
         <h3 class="mt-4 text-lg font-semibold">Agents message each other directly</h3>
         <div class="mt-6 flex items-center justify-between gap-2">
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg font-mono text-xs text-fg">A</div>
-            <span class="text-xs text-muted">agent</span>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/claude.svg" alt="Claude Code" class="h-7 w-7" /></div>
+            <span class="text-xs text-muted">Claude Code</span>
           </div>
           <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <div class="flex flex-col items-center gap-2">
@@ -265,8 +279,8 @@ const statusColor = {
           </div>
           <svg class="h-5 flex-1 text-accent" viewBox="0 0 100 20" fill="none" preserveAspectRatio="none"><path d="M2 10h90m0 0l-7-6m7 6l-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <div class="flex flex-col items-center gap-2">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg font-mono text-xs text-fg">B</div>
-            <span class="text-xs text-muted">agent</span>
+            <div class="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-bg p-2"><img src="/logos/codex.svg" alt="Codex" class="h-7 w-7" /></div>
+            <span class="text-xs text-muted">Codex</span>
           </div>
         </div>
         <div class="mt-6 flex flex-wrap gap-2">
@@ -284,5 +298,18 @@ const statusColor = {
       <span class="font-mono">agmsg.cc</span>
     </div>
   </footer>
+
+  <!-- Live GitHub star count (refreshes the build-time fallback). -->
+  <script is:inline>
+    fetch("https://api.github.com/repos/fujibee/agmsg")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || typeof d.stargazers_count !== "number") return;
+        const n = d.stargazers_count;
+        const s = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
+        document.querySelectorAll(".js-stars").forEach((el) => { el.textContent = s; });
+      })
+      .catch(() => {});
+  </script>
 </body>
 </html>
