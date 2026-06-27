@@ -26,7 +26,7 @@ teardown() {
 # Returns once the watcher has been stopped.
 run_watcher_for() {
   local sid="$1" out="$2" secs="$3"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local pid=$!
   sleep "$secs"
   kill "$pid" 2>/dev/null || true
@@ -86,7 +86,7 @@ _wait_for_file_contains() {
 
   # First watcher: fresh session, takes its mark at MAX(id)=0, then streams M1.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
-    >"$TEST_SKILL_DIR/out1.log" 2>/dev/null &
+    >"$TEST_SKILL_DIR/out1.log" 2>/dev/null 3>&- &
   local w1=$!
   sleep 1.5
   bash "$SCRIPTS/send.sh" team bob alice "M1-before-stop" >/dev/null
@@ -113,7 +113,7 @@ _wait_for_file_contains() {
   bash "$SCRIPTS/send.sh" team bob alice "M0-history" >/dev/null
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-fresh" "$PROJ" claude-code \
-    >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null &
+    >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null 3>&- &
   local w=$!
   sleep 1.5
   bash "$SCRIPTS/send.sh" team bob alice "M-live" >/dev/null
@@ -155,7 +155,7 @@ _wait_for_file_contains() {
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
   local out="$TEST_SKILL_DIR/liveness-delivery.log"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>/dev/null &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
   # Wait for the watermark file, not just the pidfile: the pidfile is written
   # early (before the subscription is resolved and LAST is seeded), so sending a
@@ -192,7 +192,7 @@ _wait_for_file_contains() {
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
-    1>&- 2>/dev/null &
+    1>&- 2>/dev/null 3>&- &
   local w=$!
 
   _wait_for_file "$wm"
@@ -227,7 +227,7 @@ _wait_for_file_contains() {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-ready" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local w=$!
   # Wait for the watcher to attach and signal readiness.
   local i
@@ -253,7 +253,7 @@ _wait_for_file_contains() {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-own" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local w=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # watch.sh stamps the instance id (composite under an agent ancestor).
@@ -265,7 +265,7 @@ _wait_for_file_contains() {
 @test "watch: cleanup leaves a sentinel that a successor session re-owned" {
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-old" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local w=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # A successor watcher overwrites the sentinel with its own id.
@@ -382,7 +382,7 @@ _wait_pidfile() {
   [ -f "$DB" ]                # init-db.sh created it in setup_test_env
   chmod 000 "$DB"
   local out="$BATS_TEST_TMPDIR/hc.out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local pid=$!
   sleep 2                     # > one poll interval; a spinning watcher would re-emit
   kill "$pid" 2>/dev/null || true   # no-op if the healthcheck already exited
@@ -397,7 +397,7 @@ _wait_pidfile() {
 # an id and start, not die with a "Usage" error (which left the monitor down).
 @test "watch: empty session_id gets a generated fallback instead of a Usage error (#236)" {
   local out="$BATS_TEST_TMPDIR/empty-sid.out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 3>&- &
   local pid=$!
   # A fallback id means a watch.agmsg-*.pid appears under run/ as the watcher arms.
   local i started=0

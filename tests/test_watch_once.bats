@@ -51,7 +51,7 @@ teardown() {
 
 @test "watch-once: detects a message that arrives after it starts" {
   bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 5 --interval 1 \
-    >"$TEST_SKILL_DIR/watch-once.out" 2>"$TEST_SKILL_DIR/watch-once.err" &
+    >"$TEST_SKILL_DIR/watch-once.out" 2>"$TEST_SKILL_DIR/watch-once.err" 3>&- &
   local pid=$!
   sleep 1
   bash "$SCRIPTS/send.sh" team bob alice "arrived later" >/dev/null
