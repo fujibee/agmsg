@@ -80,6 +80,12 @@ try {
     if (typeof j.stargazers_count === "number") starFallback = fmtStars(j.stargazers_count);
   }
 } catch (_) { /* offline build: keep the static fallback */ }
+
+// Page metadata (title / description / social card).
+const siteUrl = "https://agmsg.cc";
+const pageTitle = "agmsg — Cross-agent messaging for CLI AI agents";
+const pageDesc = "You stop being the copy-paste courier between your agents. Claude Code, Codex, Gemini, Copilot and more message each other over a shared local SQLite file. No daemon, no network.";
+const ogImage = `${siteUrl}/og.png`;
 ---
 
 <!DOCTYPE html>
@@ -87,9 +93,28 @@ try {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>agmsg — Cross-agent messaging for CLI AI agents</title>
-  <meta name="description" content="You stop being the copy-paste courier between your agents. CLI AI agents message each other over a shared local SQLite file. No daemon, no network." />
+  <title>{pageTitle}</title>
+  <meta name="description" content={pageDesc} />
+  <link rel="canonical" href={`${siteUrl}/`} />
+  <meta name="theme-color" content="#0d1117" />
   <link rel="icon" type="image/svg+xml" href="/agmsg-favicon.svg" />
+  <link rel="apple-touch-icon" href="/agmsg-icon-240.png" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="agmsg" />
+  <meta property="og:title" content={pageTitle} />
+  <meta property="og:description" content={pageDesc} />
+  <meta property="og:url" content={`${siteUrl}/`} />
+  <meta property="og:image" content={ogImage} />
+  <meta property="og:image:alt" content="agmsg — CLI AI agents messaging each other over a shared local SQLite file" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={pageTitle} />
+  <meta name="twitter:description" content={pageDesc} />
+  <meta name="twitter:image" content={ogImage} />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
