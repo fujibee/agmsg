@@ -14,20 +14,20 @@ set -euo pipefail
 #
 # Usage:
 #   spawn.sh <agent-type> <name> [options]
-#   spawn.sh <agent-type> <name> --prompt "<initial task>" [options]
+#   spawn.sh <agent-type> <name> --boot-prompt "<initial task>" [options]
 #
 #   <agent-type>   any registered type whose manifest is spawnable: a `cli=`
 #                  binary (direct-CLI launch) or a `spawn=` node launcher
 #   <name>         actas identity for the spawned agent
 #
 # Options:
-#   --prompt <text>    an initial task for the spawned agent. When given, the
+#   --boot-prompt <text>    an initial task for the spawned agent. When given, the
 #                      boot prompt becomes the actas slash command followed
 #                      (newline-separated) by <text>, so the new agent claims
 #                      its identity AND acts on the task in its first turn —
 #                      handy for a codex peer (no Monitor), where a message
 #                      sent after spawn would never reach the idle session.
-#                      An empty string (`--prompt ""`) means no task.
+#                      An empty string (`--boot-prompt ""`) means no task.
 #   --project <path>   project to launch in (default: $PWD)
 #   --team <team>      team to join <name> into (default: auto-resolved from
 #                      the project's existing registrations; required when the
@@ -110,7 +110,7 @@ fi
 
 # --- Parse options ---
 PROJECT="$PWD"
-PROMPT=""            # --prompt: optional initial task appended to the actas prompt
+PROMPT=""            # --boot-prompt: optional initial task appended to the actas prompt
                      # (empty string = no task, so the `[ -n "$PROMPT" ]` guard
                      #  below leaves the boot prompt unchanged)
 TEAM=""
@@ -124,10 +124,10 @@ MODEL_ID=""          # --model: pass-through model id for the launched CLI
 while [ $# -gt 0 ]; do
   case "$1" in
     # `${2?...}` (not `:?`) errors only when the arg is MISSING; an explicit
-    # empty string (`--prompt ""`) is allowed through and treated as "no task"
-    # by the `[ -n "$PROMPT" ]` guard, so a scripted `--prompt "$VAR"` with an
+    # empty string (`--boot-prompt ""`) is allowed through and treated as "no task"
+    # by the `[ -n "$PROMPT" ]` guard, so a scripted `--boot-prompt "$VAR"` with an
     # empty VAR degrades to a plain spawn instead of aborting.
-    --prompt)  PROMPT="${2?--prompt needs a task}"; shift 2 ;;
+    --boot-prompt)  PROMPT="${2?--boot-prompt needs a task}"; shift 2 ;;
     --project) PROJECT="${2:?--project needs a path}"; shift 2 ;;
     --team)    TEAM="${2:?--team needs a name}"; shift 2 ;;
     --window)  TMUX_TARGET="window"; shift ;;
@@ -287,7 +287,7 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # dir basename so a custom install (e.g. `/m`) spawns `/m actas <name>` rather
 # than a nonexistent `/agmsg actas <name>`.
 #
-# When --prompt is given, append the task newline-separated so the agent claims
+# When --boot-prompt is given, append the task newline-separated so the agent claims
 # its identity AND acts on the task in the same first turn. This is the only way
 # to hand a one-shot goal to a codex peer, which has no Monitor and so never
 # notices a message sent after it goes idle (see docs/codex-monitor-beta.md).

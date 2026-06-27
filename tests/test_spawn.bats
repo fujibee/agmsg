@@ -228,10 +228,10 @@ teardown() {
   rm -rf "$custom"
 }
 
-@test "spawn: --prompt appends an initial task to the actas prompt" {
+@test "spawn: --boot-prompt appends an initial task to the actas prompt" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait \
-    --prompt "review the diff"
+    --boot-prompt "review the diff"
   [ "$status" -eq 0 ]
 
   # The boot script still carries the actas slash command, and now ALSO the
@@ -246,12 +246,12 @@ teardown() {
   [[ "$output" == *"diff"* ]]
 }
 
-@test "spawn: without --prompt the boot script carries no extra task text" {
+@test "spawn: without --boot-prompt the boot script carries no extra task text" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
 
-  # Guards the byte-identical claim: with no --prompt, only the actas command
+  # Guards the byte-identical claim: with no --boot-prompt, only the actas command
   # is passed — no task text leaks into the boot script.
   boot="$(cat "$CAPTURE")"
   [ -f "$boot" ]
@@ -360,7 +360,7 @@ teardown() {
   [[ "$output" != *"status=ready"* ]]
 }
 
-# --- initial prompt (--prompt) ---
+# --- initial prompt (--boot-prompt) ---
 # spawn folds an optional initial task into the agent's first prompt: the boot
 # prompt becomes the actas slash command followed (newline-separated) by the
 # task, so the new agent claims its identity AND starts the task in one turn —
@@ -368,17 +368,17 @@ teardown() {
 # assert on the generated boot script the terminal template is handed (captured
 # via record.sh), the same way the actas-prompt tests above do.
 
-@test "spawn: --prompt requires a task (missing arg errors)" {
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --prompt
+@test "spawn: --boot-prompt requires a task (missing arg errors)" {
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --boot-prompt
   [ "$status" -ne 0 ]
-  [[ "$output" == *"--prompt needs a task"* ]]
+  [[ "$output" == *"--boot-prompt needs a task"* ]]
 }
 
-@test "spawn: --prompt \"\" is treated as no task (no-op, not an error)" {
+@test "spawn: --boot-prompt \"\" is treated as no task (no-op, not an error)" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   # An explicit empty string must NOT abort the spawn — it degrades to a plain
-  # spawn (so a scripted `--prompt "$VAR"` with an empty VAR still works).
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --prompt ""
+  # spawn (so a scripted `--boot-prompt "$VAR"` with an empty VAR still works).
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --boot-prompt ""
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
@@ -388,10 +388,10 @@ teardown() {
   [[ "$output" != *'\n'* ]]
 }
 
-@test "spawn: --prompt folds the initial task into the boot prompt (codex)" {
+@test "spawn: --boot-prompt folds the initial task into the boot prompt (codex)" {
   bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
   run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
-    --prompt "REVIEW_THE_DIFF"
+    --boot-prompt "REVIEW_THE_DIFF"
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   [ -f "$boot" ]

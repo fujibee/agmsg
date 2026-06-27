@@ -25,7 +25,7 @@ Everyday commands (same across agents; shown here as the Claude Code `/agmsg` fo
 /agmsg history              # replay message history
 /agmsg mode <monitor|turn|both|off>   # switch delivery mode
 /agmsg spawn <type> <name>  # launch a new peer agent in its own terminal
-/agmsg spawn <type> <name> --prompt "<task>"   # ...and start it on <task> in its first turn
+/agmsg spawn <type> <name> --boot-prompt "<task>"   # ...and start it on <task> in its first turn
 ```
 
 Alternate installs: `npx agmsg` (or `npm i -g agmsg && agmsg install`), or the Claude Code
