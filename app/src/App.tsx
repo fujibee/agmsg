@@ -229,47 +229,46 @@ export default function App() {
 
   return (
     <div className="app" onClick={() => setNewMenu(false)}>
-      <header className="topbar">
-        <span className="brand">agmsg</span>
-        <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-          <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
-            ＋ New ▾
-          </button>
-          {newMenu && (
-            <div className="new-menu">
-              <button
-                onClick={() => {
-                  setNewMenu(false);
-                  setModal({ kind: "team", firstRun: false });
-                }}
-              >
-                Team…
-              </button>
-              <button
-                disabled={!team}
-                onClick={() => {
-                  setNewMenu(false);
-                  setModal({ kind: "agent" });
-                }}
-              >
-                Agent…
-              </button>
-            </div>
-          )}
-        </div>
-        <select value={team} onChange={(e) => setTeam(e.target.value)}>
-          {teams.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        <span className="spacer" />
-        <span className="hint">team-embedded terminals · universal stdin-inject delivery</span>
-      </header>
-
       <div className="body">
         <aside className="sidebar">
+          <div className="sidebar-head">
+            <div className="brand-row">
+              <img className="logo" src="/agmsg-icon.png" alt="agmsg" />
+              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
+              <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
+                ＋ New ▾
+              </button>
+              {newMenu && (
+                <div className="new-menu">
+                  <button
+                    onClick={() => {
+                      setNewMenu(false);
+                      setModal({ kind: "team", firstRun: false });
+                    }}
+                  >
+                    Team…
+                  </button>
+                  <button
+                    disabled={!team}
+                    onClick={() => {
+                      setNewMenu(false);
+                      setModal({ kind: "agent" });
+                    }}
+                  >
+                    Agent…
+                  </button>
+                </div>
+              )}
+              </div>
+            </div>
+            <select value={team} onChange={(e) => setTeam(e.target.value)}>
+              {teams.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="sidebar-title">Members</div>
           <ul className="members">
             {others.map((m) => (

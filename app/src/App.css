@@ -229,6 +229,41 @@ body,
   border-right: 1px solid var(--border);
   overflow-y: auto;
 }
+/* Sidebar header: brand + New + team selector (moved out of a top bar). */
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.brand-row .logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  display: block;
+}
+.brand-row .new-wrap {
+  margin-left: auto;
+}
+.sidebar-head .brand {
+  font-size: 15px;
+}
+.sidebar-head select {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
 .sidebar-title {
   padding: 10px 12px;
   font-size: 11px;
