@@ -58,6 +58,27 @@ body,
   font-size: 12px;
 }
 
+/* Flat dropdowns — drop the native macOS spinner for a custom chevron. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 28px 6px 10px;
+  font: inherit;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+select:hover,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* + New menu */
 .new-wrap {
   position: relative;
@@ -140,14 +161,16 @@ body,
   color: var(--muted);
   margin-bottom: 12px;
 }
-.modal input,
-.modal select {
+.modal input {
   background: var(--panel-2);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 7px 9px;
   font: inherit;
+}
+.modal select {
+  width: 100%;
 }
 .path-row {
   display: flex;
@@ -215,6 +238,54 @@ body,
   color: var(--accent);
 }
 
+/* Draggable dividers: a generous grab area, but only a hairline is drawn
+   until hover (then the full strip lights up in the accent color). */
+.divider-v,
+.divider-h {
+  position: relative;
+  background: transparent;
+  flex: 0 0 6px;
+}
+.divider-v {
+  cursor: col-resize;
+}
+.divider-h {
+  height: 6px;
+  cursor: row-resize;
+}
+.divider-v::before,
+.divider-h::before {
+  content: "";
+  position: absolute;
+  background: var(--border);
+}
+.divider-v::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+.divider-h::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+.divider-v:hover::before {
+  left: 0;
+  width: 100%;
+  transform: none;
+  background: var(--accent);
+}
+.divider-h:hover::before {
+  top: 0;
+  height: 100%;
+  transform: none;
+  background: var(--accent);
+}
+
 /* Body split */
 .body {
   flex: 1;
@@ -225,8 +296,8 @@ body,
 /* Sidebar */
 .sidebar {
   width: 200px;
+  flex-shrink: 0;
   background: var(--panel);
-  border-right: 1px solid var(--border);
   overflow-y: auto;
 }
 /* Sidebar header: brand + New + team selector (moved out of a top bar). */
@@ -258,11 +329,6 @@ body,
 }
 .sidebar-head select {
   width: 100%;
-  background: var(--panel-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
 }
 .sidebar-title {
   padding: 10px 12px;
@@ -414,10 +480,10 @@ body,
 /* App-user chat (you ↔ others), sits above the composer */
 .appuser-chat {
   height: 160px;
+  flex-shrink: 0;
   overflow-y: auto;
   padding: 8px 12px;
   background: var(--panel-2);
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -466,18 +532,20 @@ body,
 }
 .composer .as {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
+  white-space: nowrap;
 }
-.composer select,
+.composer .as b {
+  color: var(--fg);
+  font-weight: 600;
+}
 .composer input {
+  flex: 1;
   background: var(--panel-2);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
-}
-.composer input {
-  flex: 1;
 }
 .composer button {
   background: var(--accent);

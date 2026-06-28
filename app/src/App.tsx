@@ -58,6 +58,8 @@ export default function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
+  const [sidebarWidth, setSidebarWidth] = useState(200);
+  const [chatHeight, setChatHeight] = useState(160);
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -227,10 +229,54 @@ export default function App() {
     return typeof picked === "string" ? picked : null;
   }, []);
 
+  // Draggable dividers: track the drag on document so it continues over the
+  // terminal canvas, and clamp so a pane can't be dragged away entirely.
+  const startSidebarDrag = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = sidebarWidth;
+      const onMove = (ev: MouseEvent) =>
+        setSidebarWidth(Math.max(140, Math.min(520, startW + ev.clientX - startX)));
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [sidebarWidth],
+  );
+
+  const startChatDrag = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = chatHeight;
+      const onMove = (ev: MouseEvent) =>
+        setChatHeight(Math.max(72, Math.min(560, startH + startY - ev.clientY)));
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+    },
+    [chatHeight],
+  );
+
   return (
     <div className="app" onClick={() => setNewMenu(false)}>
       <div className="body">
-        <aside className="sidebar">
+        <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-head">
             <div className="brand-row">
               <img className="logo" src="/agmsg-icon.png" alt="agmsg" />
@@ -283,6 +329,8 @@ export default function App() {
           </ul>
         </aside>
 
+        <div className="divider-v" onMouseDown={startSidebarDrag} />
+
         <main className="main">
           <nav className="tabs">
             <button
@@ -327,8 +375,10 @@ export default function App() {
             ))}
           </section>
 
+          <div className="divider-h" onMouseDown={startChatDrag} />
+
           {/* App-user chat: the human's own send/receive thread + composer. */}
-          <div className="appuser-chat" ref={chatRef}>
+          <div className="appuser-chat" ref={chatRef} style={{ height: chatHeight }}>
             {myThread.map((m) => (
               <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
                 <span className="chat-time">{m.created_at.slice(11, 19)}</span>
@@ -355,14 +405,7 @@ export default function App() {
             {appUser ? (
               <>
                 <span className="as">
-                  as {appUser}
-                  <button
-                    className="rename"
-                    title="rename app-user"
-                    onClick={() => setModal({ kind: "rename", current: appUser })}
-                  >
-                    ✎
-                  </button>
+                  as <b>{appUser}</b>
                 </span>
                 <select value={target} onChange={(e) => setTarget(e.target.value)}>
                   <option value="">to…</option>
