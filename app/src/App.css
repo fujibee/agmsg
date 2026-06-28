@@ -362,6 +362,14 @@ body,
 
 .pane-host {
   padding: 4px;
+  z-index: 1;
+}
+/* Inactive terminal panes stay laid out (keep their size + re-fit on window
+   resize) but are invisible — unlike display:none, which would freeze their
+   size and break them until the next manual resize. */
+.pane-host.inactive {
+  visibility: hidden;
+  z-index: 0;
 }
 .term-pane {
   width: 100%;

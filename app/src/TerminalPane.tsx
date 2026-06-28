@@ -38,10 +38,31 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(ref.current!);
-    fit.fit();
+
+    // Fit to the container's CURRENT size and tell the PTY — but only when the
+    // pane is actually laid out. A pane that mounts while its tab is inactive
+    // (or before first layout) has 0 size; fitting then would size the terminal
+    // to ~1 column. We keep xterm's 80x24 default until a real size arrives,
+    // and a ResizeObserver re-fits when the pane gets/changes its size (initial
+    // layout, tab switch from display:none, window resize).
+    let lastRows = 0;
+    let lastCols = 0;
+    const fitNow = () => {
+      const el = ref.current;
+      if (!el || el.offsetWidth === 0 || el.offsetHeight === 0) return;
+      try {
+        fit.fit();
+      } catch {
+        return;
+      }
+      if (term.rows !== lastRows || term.cols !== lastCols) {
+        lastRows = term.rows;
+        lastCols = term.cols;
+        void invoke("pty_resize", { id, rows: term.rows, cols: term.cols });
+      }
+    };
 
     const unlisteners: Array<() => void> = [];
-
     (async () => {
       // Register listeners BEFORE spawning so no early output is missed.
       unlisteners.push(
@@ -56,18 +77,18 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
       );
       if (disposed) return;
       term.onData((data) => void invoke("pty_write", { id, data }));
+      fitNow(); // size the PTY to the pane if it's already laid out
       await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols });
     })();
 
-    const onResize = () => {
-      fit.fit();
-      void invoke("pty_resize", { id, rows: term.rows, cols: term.cols });
-    };
-    window.addEventListener("resize", onResize);
+    // Re-fit whenever the pane's box changes — covers initial layout, switching
+    // back to this tab (display:none -> block), and window resizes.
+    const ro = new ResizeObserver(() => fitNow());
+    if (ref.current) ro.observe(ref.current);
 
     return () => {
       disposed = true;
-      window.removeEventListener("resize", onResize);
+      ro.disconnect();
       unlisteners.forEach((u) => u());
       void invoke("pty_kill", { id });
       term.dispose();

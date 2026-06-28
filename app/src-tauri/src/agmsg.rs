@@ -150,6 +150,18 @@ pub fn agmsg_send(team: String, from: String, to: String, body: String) -> Resul
     run_script("send.sh", &[&team, &from, &to, &body]).map(|_| ())
 }
 
+/// The installed agmsg slash-command name (basename of the skill dir). Used to
+/// build the `/<cmd> actas <name>` boot prompt, exactly as spawn.sh derives it,
+/// so a custom install (e.g. `/m`) still boots the right command.
+#[tauri::command]
+pub fn agmsg_command_name() -> String {
+    agmsg_base()
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agmsg")
+        .to_string()
+}
+
 /// Default project dir for a freshly-added agent: <HOME>/agmsg-agents/<name>.
 #[tauri::command]
 pub fn agmsg_default_project(name: String) -> Result<String, String> {

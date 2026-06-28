@@ -20,7 +20,16 @@ type Message = {
   body: string;
   created_at: string;
 };
-type Pane = { id: string; label: string; cmd: string; args: string[]; cwd?: string };
+type Pane = {
+  id: string;
+  label: string;
+  cmd: string;
+  args: string[];
+  cwd?: string;
+  /** Booted with `/agmsg actas <name>` → it runs its own agmsg monitor, so the
+   *  app must NOT also inject (that would double-deliver). */
+  native: boolean;
+};
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
@@ -48,6 +57,7 @@ export default function App() {
   const [draft, setDraft] = useState<string>("");
   const [modal, setModal] = useState<Modal>(null);
   const [newMenu, setNewMenu] = useState(false);
+  const [cmdName, setCmdName] = useState("agmsg");
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -55,7 +65,10 @@ export default function App() {
   panesRef.current = panes;
 
   // The app user = the member registered with the agmsg-app type (one per team).
-  const appUser = members.find((m) => m.types.includes(APP_USER_TYPE))?.name ?? "";
+  const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
+  const appUser = appUserMember?.name ?? "";
+  // The team's project dir (the app-user's) — new agents default into the same place.
+  const teamProject = appUserMember?.project ?? "";
   // Everyone else is a spawnable/messageable agent.
   const others = members.filter((m) => !m.types.includes(APP_USER_TYPE));
   // The app user's own send/receive thread.
@@ -71,6 +84,11 @@ export default function App() {
     const m = await invoke<Member[]>("agmsg_members", { team: t });
     setMembers(m);
     return m;
+  }, []);
+
+  // The agmsg slash-command name, for the `/<cmd> actas <name>` boot prompt.
+  useEffect(() => {
+    invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
   // First load: teams. If there are none, the first-run flow opens New Team.
@@ -103,7 +121,9 @@ export default function App() {
     const p = listen<Message>("agmsg-message", (e) => {
       if (e.payload.team !== team) return;
       setMessages((prev) => [...prev, e.payload]);
-      const pane = panesRef.current.find((pn) => pn.label === e.payload.to);
+      // Only inject into NON-native panes; a native (actas-booted) agent runs
+      // its own agmsg monitor and would otherwise receive the message twice.
+      const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
       if (pane) void invoke("pty_inject", { id: pane.id, text: e.payload.body });
     });
     return () => void p.then((u) => u());
@@ -116,13 +136,28 @@ export default function App() {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
   }, [myThread.length]);
 
-  const spawnMember = useCallback((m: Member) => {
-    const type = m.types.find((t) => SPAWN_CMD[t]);
-    const cmd = type ? SPAWN_CMD[type] : "bash";
-    const id = `${m.name}-${seq.current++}`;
-    setPanes((prev) => [...prev, { id, label: m.name, cmd, args: [], cwd: m.project || undefined }]);
-    setActive(id);
-  }, []);
+  const spawnMember = useCallback(
+    (m: Member) => {
+      const type = m.types.find((t) => SPAWN_CMD[t]);
+      const id = `${m.name}-${seq.current++}`;
+      // Mirror agmsg spawn.sh: launch the CLI with `/<cmd> actas <name>` as its
+      // first prompt so the agent comes up as the real member (its own monitor
+      // + can send as itself). Unknown types fall back to a bare shell.
+      const pane: Pane = type
+        ? {
+            id,
+            label: m.name,
+            cmd: SPAWN_CMD[type],
+            args: [`/${cmdName} actas ${m.name}`],
+            cwd: m.project || undefined,
+            native: true,
+          }
+        : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
+      setPanes((prev) => [...prev, pane]);
+      setActive(id);
+    },
+    [cmdName],
+  );
 
   const closePane = useCallback((id: string) => {
     setPanes((prev) => prev.filter((p) => p.id !== id));
@@ -283,8 +318,11 @@ export default function App() {
               {messages.length === 0 && <div className="empty">No messages yet.</div>}
             </div>
 
+            {/* Inactive panes use visibility:hidden (not display:none) so they
+                keep their dimensions and re-fit with the window — no jarring
+                reflow when you switch back to them. */}
             {panes.map((p) => (
-              <div key={p.id} className="pane-host" hidden={active !== p.id}>
+              <div key={p.id} className={active === p.id ? "pane-host" : "pane-host inactive"}>
                 <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
               </div>
             ))}
@@ -364,7 +402,12 @@ export default function App() {
         <AppUserModal onAdd={onAddAppUser} onClose={() => setModal(null)} browseDir={browseDir} />
       )}
       {modal?.kind === "agent" && (
-        <AgentModal onAdd={onAddAgent} onClose={() => setModal(null)} browseDir={browseDir} />
+        <AgentModal
+          onAdd={onAddAgent}
+          onClose={() => setModal(null)}
+          browseDir={browseDir}
+          defaultProject={teamProject}
+        />
       )}
       {modal?.kind === "rename" && (
         <RenameModal current={modal.current} onRename={onRename} onClose={() => setModal(null)} />

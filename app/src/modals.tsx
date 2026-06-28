@@ -22,21 +22,26 @@ function Modal(props: {
   );
 }
 
-/** Hook: keep `project` defaulted to <HOME>/agmsg-agents/<name> until edited. */
-function useDefaultProject(name: string) {
-  const [project, setProject] = useState("");
+/**
+ * Hook for the project-dir field. If `override` is given (e.g. the team's own
+ * project dir, carried over so agents default into the same place), it wins and
+ * the field stays put. Otherwise the field defaults to <HOME>/agmsg-agents/<name>
+ * and tracks the name until the user edits it.
+ */
+function useDefaultProject(name: string, override?: string) {
+  const [project, setProject] = useState(override ?? "");
   const [edited, setEdited] = useState(false);
   useEffect(() => {
-    if (edited) return;
+    if (edited || override) return;
     const n = name.trim();
     if (!n) {
       setProject("");
       return;
     }
     invoke<string>("agmsg_default_project", { name: n })
-      .then((p) => setProject((cur) => (edited ? cur : p)))
+      .then((p) => setProject((cur) => (edited || override ? cur : p)))
       .catch(() => {});
-  }, [name, edited]);
+  }, [name, edited, override]);
   return { project, setProject, markEdited: () => setEdited(true) };
 }
 
@@ -195,10 +200,12 @@ export function AgentModal(props: {
   onAdd: (name: string, type: string, project: string) => Promise<void>;
   onClose: () => void;
   browseDir: BrowseDir;
+  /** The team's project dir — agents default into the same place. */
+  defaultProject?: string;
 }) {
   const [type, setType] = useState(AGENT_TYPES[0]);
   const [name, setName] = useState("");
-  const { project, setProject, markEdited } = useDefaultProject(name);
+  const { project, setProject, markEdited } = useDefaultProject(name, props.defaultProject);
   const [err, setErr] = useState("");
   const submit = async () => {
     if (!name.trim()) return;
