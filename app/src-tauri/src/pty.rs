@@ -24,6 +24,9 @@ struct PtySession {
     writer: Box<dyn Write + Send>,
     /// Last time the child produced output — basis for quiescence detection.
     last_output: Arc<Mutex<Instant>>,
+    /// Child process id, so closing a pane can actually terminate the agent
+    /// (and let its SessionEnd hook release the agmsg actas lock).
+    pid: Option<u32>,
 }
 
 /// All live sessions, keyed by a frontend-chosen id (e.g. "claude-1").
@@ -78,6 +81,7 @@ pub fn pty_spawn(
 
     let mut child = pair.slave.spawn_command(builder).map_err(|e| e.to_string())?;
     drop(pair.slave);
+    let pid = child.process_id();
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -111,7 +115,7 @@ pub fn pty_spawn(
         .sessions
         .lock()
         .unwrap()
-        .insert(id, PtySession { master: pair.master, writer, last_output });
+        .insert(id, PtySession { master: pair.master, writer, last_output, pid });
     Ok(())
 }
 
@@ -139,10 +143,24 @@ pub fn pty_resize(
         .map_err(|e| e.to_string())
 }
 
-/// Drop a session (the child is killed when the master writer/handles close).
+/// Close a pane: actually terminate the agent so it exits — its SessionEnd hook
+/// then releases the agmsg actas lock (and even if the hook doesn't run, a dead
+/// owner makes the lock stale and reclaimable, so the role can be re-spawned).
+/// SIGHUP first (like closing a terminal, so a well-behaved CLI runs its
+/// shutdown hooks), then SIGKILL after a grace period if it's still alive. The
+/// reader thread reaps the child and emits pty-exit when it goes.
 #[tauri::command]
 pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
-    manager.sessions.lock().unwrap().remove(&id);
+    let pid = manager.sessions.lock().unwrap().remove(&id).and_then(|s| s.pid);
+    if let Some(pid) = pid {
+        let pid_s = pid.to_string();
+        let _ = std::process::Command::new("kill").arg("-HUP").arg(&pid_s).status();
+        // Fallback: force-kill if it hasn't exited after a grace period.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(4));
+            let _ = std::process::Command::new("kill").arg("-KILL").arg(&pid_s).status();
+        });
+    }
     Ok(())
 }
 
