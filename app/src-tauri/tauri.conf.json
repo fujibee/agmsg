@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "agmsg-app",
+  "productName": "agmsg app",
   "version": "0.1.0",
   "identifier": "cc.agmsg.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "agmsg-app",
+        "title": "agmsg app",
         "width": 800,
         "height": 600
       }
