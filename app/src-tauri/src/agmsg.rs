@@ -45,6 +45,8 @@ pub struct Member {
     pub name: String,
     /// Agent types registered under this name (claude-code, codex, ...).
     pub types: Vec<String>,
+    /// First registration's project dir (used as the cwd when spawning a pane).
+    pub project: String,
 }
 
 /// List team names (directories under teams/ that have a config.json).
@@ -73,9 +75,8 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
     let mut members = Vec::new();
     if let Some(agents) = cfg.get("agents").and_then(|a| a.as_object()) {
         for (name, info) in agents {
-            let mut types: Vec<String> = info
-                .get("registrations")
-                .and_then(|r| r.as_array())
+            let regs = info.get("registrations").and_then(|r| r.as_array());
+            let mut types: Vec<String> = regs
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|r| r.get("type").and_then(|t| t.as_str()).map(String::from))
@@ -84,7 +85,13 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
                 .unwrap_or_default();
             types.sort();
             types.dedup();
-            members.push(Member { name: name.clone(), types });
+            let project = regs
+                .and_then(|arr| arr.first())
+                .and_then(|r| r.get("project"))
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            members.push(Member { name: name.clone(), types, project });
         }
     }
     members.sort_by(|a, b| a.name.cmp(&b.name));
@@ -119,25 +126,55 @@ pub fn agmsg_messages(team: String, limit: Option<u32>) -> Result<Vec<Message>, 
     Ok(out)
 }
 
-/// Send a message AS the app user via agmsg's own send.sh (the one sanctioned
-/// write path — we never insert into the DB ourselves). `from` is the app-user
-/// identity; it must already be a member of `team`.
-#[tauri::command]
-pub fn agmsg_send(team: String, from: String, to: String, body: String) -> Result<(), String> {
-    let script = agmsg_base().join("scripts/send.sh");
+/// Run an agmsg script (scripts/<name>) with args. All registry mutations go
+/// through agmsg's own scripts — the app never writes the DB or team config
+/// itself. Returns stdout on success, stderr on failure.
+fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
+    let script = agmsg_base().join("scripts").join(name);
     let output = std::process::Command::new("bash")
         .arg(script)
-        .arg(&team)
-        .arg(&from)
-        .arg(&to)
-        .arg(&body)
+        .args(args)
         .output()
         .map_err(|e| e.to_string())?;
     if output.status.success() {
-        Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).into_owned())
     }
+}
+
+/// Send a message AS the app user via agmsg's own send.sh. `from` is the
+/// app-user identity; it must already be a member of `team`.
+#[tauri::command]
+pub fn agmsg_send(team: String, from: String, to: String, body: String) -> Result<(), String> {
+    run_script("send.sh", &[&team, &from, &to, &body]).map(|_| ())
+}
+
+/// Default project dir for a freshly-added agent: <HOME>/agmsg-agents/<name>.
+#[tauri::command]
+pub fn agmsg_default_project(name: String) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    Ok(format!("{home}/agmsg-agents/{name}"))
+}
+
+/// Add an agent to a team (also used to add the app-user with type `agmsg-app`).
+/// Creates the team and the project dir if needed. Spawning the agent's PTY pane
+/// is a separate step.
+#[tauri::command]
+pub fn agmsg_join(
+    team: String,
+    name: String,
+    agent_type: String,
+    project: String,
+) -> Result<(), String> {
+    std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
+    run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ())
+}
+
+/// Rename a member in a team (updates team config + rewrites message history).
+#[tauri::command]
+pub fn agmsg_rename(team: String, old_name: String, new_name: String) -> Result<(), String> {
+    run_script("rename.sh", &[&team, &old_name, &new_name]).map(|_| ())
 }
 
 /// Poll the DB for new rows and emit each as an `agmsg-message` event so the

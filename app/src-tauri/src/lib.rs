@@ -7,6 +7,7 @@ use pty::PtyManager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::default())
         .setup(|app| {
             // Start the agmsg DB watcher so the team room updates live.
@@ -23,6 +24,9 @@ pub fn run() {
             agmsg::agmsg_members,
             agmsg::agmsg_messages,
             agmsg::agmsg_send,
+            agmsg::agmsg_join,
+            agmsg::agmsg_rename,
+            agmsg::agmsg_default_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
