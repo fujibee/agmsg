@@ -153,6 +153,24 @@ teardown() {
   [[ "$output" =~ "not_joined=true" ]]
 }
 
+@test "whoami: includes suggested identity when not joined" {
+  run bash "$SCRIPTS/whoami.sh" /tmp/unknown claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "not_joined=true" ]]
+  [[ "$output" =~ "suggested_team=unknown" ]]
+  [[ "$output" =~ "suggested_agent=claude" ]]
+}
+
+@test "whoami: suggests repo-prefixed team for worktrees layout" {
+  local project="/tmp/worktrees/inetoagave/devtools"
+  mkdir -p "$project"
+  run bash "$SCRIPTS/whoami.sh" "$project" codex
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "not_joined=true" ]]
+  [[ "$output" =~ "suggested_team=inetoagave-devtools" ]]
+  [[ "$output" =~ "suggested_agent=codex" ]]
+}
+
 @test "whoami: returns multiple when multiple identities" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   bash "$SCRIPTS/join.sh" myteam reviewer claude-code /tmp/proj
@@ -185,6 +203,8 @@ teardown() {
   [[ "$output" =~ "suggest=true" ]]
   [[ "$output" =~ "agents=alice" ]]
   [[ "$output" =~ "available_teams=myteam" ]]
+  [[ "$output" =~ "suggested_team=proj-b" ]]
+  [[ "$output" =~ "suggested_agent=claude" ]]
 }
 
 @test "whoami: auto-detects claude-code from CLAUDE_CODE_SESSION_ID env" {
@@ -218,7 +238,7 @@ teardown() {
 
 @test "whoami: defaults to claude-code when no env vars set" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
-  run bash "$SCRIPTS/whoami.sh" /tmp/proj
+  run env -i PATH="$PATH" AGMSG_DETECT_PROC=0 bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
   [[ "$output" =~ "type=claude-code" ]]

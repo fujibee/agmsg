@@ -4,8 +4,8 @@ set -euo pipefail
 # Show agent identity in id(1) style.
 # Single match:    agent=<name> teams=<t1,t2,...> type=<type> project=<path>
 # Multiple match:  multiple=true agents=<n1,n2,...> teams=<t1,t2,...> type=<type> project=<path>
-# Suggestions:     suggest=true agents=<n1,n2,...> teams=<t1,t2,...> type=<type> project=<path> available_teams=<...>
-# Not joined:      not_joined=true available_teams=<t1,t2,...> (or "none")
+# Suggestions:     suggest=true agents=<n1,n2,...> teams=<t1,t2,...> type=<type> project=<path> available_teams=<...> suggested_team=<team> suggested_agent=<agent>
+# Not joined:      not_joined=true available_teams=<t1,t2,...> suggested_team=<team> suggested_agent=<agent> (or "none")
 #
 # Usage: whoami.sh <project_path> [type]
 #   type: claude-code, codex, gemini, antigravity, copilot, opencode
@@ -16,6 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/compat.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/identity-suggest.sh"
 
 # Auto-detect CLI type from environment variables and the process tree, driven by
 # the per-type manifests' `detect=` (env-var names) and `detect_proc=` (process
@@ -51,7 +53,13 @@ EOF
 
   # 2. Process-tree detection via each type's `detect_proc=` name globs. Walk up
   # from this process; at each ancestor the first type whose glob matches wins
-  # (the globs are disjoint, so order within a level is irrelevant).
+  # (the globs are disjoint, so order within a level is irrelevant). Set
+  # AGMSG_DETECT_PROC=0 to skip this heuristic when a wrapper process would
+  # otherwise make detection ambiguous.
+  if [ "${AGMSG_DETECT_PROC:-1}" = "0" ]; then
+    echo "claude-code"
+    return 0
+  fi
   local pid=$$ max_depth=10 depth=0 proc_name _pats _pat
   while [ $depth -lt $max_depth ] && [ "$pid" != "1" ] && [ -n "$pid" ]; do
     proc_name=$(compat_get_comm "$pid" 2>/dev/null || true)
@@ -98,9 +106,11 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
+SUGGESTED_TEAM="$(agmsg_suggested_team "$PROJECT_PATH")"
+SUGGESTED_AGENT="$(agmsg_suggested_agent "$AGENT_TYPE")"
 
 if [ ! -d "$TEAMS_DIR" ]; then
-  echo "not_joined=true available_teams=none"
+  echo "not_joined=true available_teams=none suggested_team=$SUGGESTED_TEAM suggested_agent=$SUGGESTED_AGENT"
   exit 0
 fi
 
@@ -149,7 +159,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
 done
 
 if [ -z "$EXACT_MATCHES" ] && [ -z "$SUGGESTED_MATCHES" ]; then
-  echo "not_joined=true available_teams=${ALL_TEAMS:-none}"
+  echo "not_joined=true available_teams=${ALL_TEAMS:-none} suggested_team=$SUGGESTED_TEAM suggested_agent=$SUGGESTED_AGENT"
   exit 0
 fi
 
@@ -157,7 +167,7 @@ if [ -z "$EXACT_MATCHES" ]; then
   # SUGGESTED_MATCHES is "team\tagent" per line; preserve that order.
   AGENT_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f2 | awk '!seen[$0]++' | paste -sd, -)
   TEAM_NAMES=$(echo "$SUGGESTED_MATCHES" | cut -f1 | awk '!seen[$0]++' | paste -sd, -)
-  echo "suggest=true agents=$AGENT_NAMES teams=$TEAM_NAMES type=$AGENT_TYPE project=$PROJECT_PATH available_teams=${ALL_TEAMS:-none}"
+  echo "suggest=true agents=$AGENT_NAMES teams=$TEAM_NAMES type=$AGENT_TYPE project=$PROJECT_PATH available_teams=${ALL_TEAMS:-none} suggested_team=$SUGGESTED_TEAM suggested_agent=$SUGGESTED_AGENT"
   exit 0
 fi
 
