@@ -1,0 +1,294 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #11151f;
+  --panel-2: #161b27;
+  --border: #232a3a;
+  --fg: #c5c8c6;
+  --muted: #6b7280;
+  --accent: #7aa2f7;
+  --green: #9ece6a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+.topbar select {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.spacer {
+  flex: 1;
+}
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Body split */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 200px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.sidebar-title {
+  padding: 10px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+.members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.member {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+.member:hover {
+  background: var(--panel-2);
+  border-left-color: var(--accent);
+}
+.member-name {
+  font-weight: 600;
+}
+.member-types {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Main */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+}
+.tab.active {
+  color: var(--fg);
+  background: var(--bg);
+}
+.tab button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 6px 8px;
+  font: inherit;
+}
+.tab-close {
+  opacity: 0.6;
+  padding-left: 0 !important;
+}
+.tab-close:hover {
+  opacity: 1;
+  color: #f7768e;
+}
+
+/* Stage */
+.stage {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  background: var(--bg);
+}
+.room,
+.pane-host {
+  position: absolute;
+  inset: 0;
+}
+.room {
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 12px;
+}
+.msg {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  white-space: pre-wrap;
+}
+.msg-time {
+  color: var(--muted);
+}
+.msg-from {
+  color: var(--accent);
+  font-weight: 600;
+}
+.msg-arrow {
+  color: var(--muted);
+}
+.msg-to {
+  color: var(--green);
+}
+.msg-body {
+  flex: 1;
+  word-break: break-word;
+}
+.empty {
+  color: var(--muted);
+  padding: 20px;
+}
+
+.pane-host {
+  padding: 4px;
+}
+.term-pane {
+  width: 100%;
+  height: 100%;
+}
+
+/* App-user chat (you ↔ others), sits above the composer */
+.appuser-chat {
+  height: 160px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  max-width: 80%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  word-break: break-word;
+}
+.chat-line.out {
+  align-self: flex-end;
+  background: #1f3a5f;
+}
+.chat-line.in {
+  align-self: flex-start;
+  background: #1a2436;
+}
+.chat-time {
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-peer {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chat-line.in .chat-peer {
+  color: var(--green);
+}
+.chat-body {
+  white-space: pre-wrap;
+}
+
+/* Composer */
+.composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+.composer .as {
+  color: var(--muted);
+  font-size: 12px;
+}
+.composer select,
+.composer input {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.composer input {
+  flex: 1;
+}
+.composer button {
+  background: var(--accent);
+  color: #0b0e14;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.composer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
