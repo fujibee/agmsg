@@ -125,9 +125,8 @@ const ogImage = `${siteUrl}/og.png`;
   <!-- Nav -->
   <header class="sticky top-0 z-30 border-b border-border/70 bg-bg/80 backdrop-blur">
     <nav class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-      <a href="#" class="flex items-center gap-2 font-bold tracking-tight">
-        <img src="/brand/logo-mark.png" alt="" class="h-7 w-7" />
-        <span class="text-lg">agmsg</span>
+      <a href="#" class="flex items-center">
+        <img src="/brand/logo-full-dark.png" alt="agmsg" class="h-8 w-auto" />
       </a>
       <div class="hidden items-center gap-7 text-sm text-muted md:flex">
         <a class="hover:text-fg" href="#how">How it works</a>
@@ -284,7 +283,7 @@ const ogImage = `${siteUrl}/og.png`;
           <div class="mt-5 flex flex-wrap gap-1.5">
             {a.spawnable && <span class="rounded-md border border-border bg-bg px-2 py-0.5 font-mono text-[11px] text-fg">spawnable</span>}
             {a.monitor && <span class="rounded-md border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[11px] text-accent">monitor</span>}
-            {a.modes.map((m) => (
+            {a.modes.filter((m) => m !== "monitor").map((m) => (
               <span class="rounded-md border border-border bg-bg px-2 py-0.5 font-mono text-[11px] text-muted">{m}</span>
             ))}
           </div>
