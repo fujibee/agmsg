@@ -298,7 +298,8 @@ select:focus {
   width: 200px;
   flex-shrink: 0;
   background: var(--panel);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 /* Sidebar header: brand + New + team selector (moved out of a top bar). */
 .sidebar-head {
@@ -306,7 +307,8 @@ select:focus {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  padding: 12px;
+  /* Top padding clears the overlaid macOS traffic lights. */
+  padding: 34px 12px 12px;
   border-bottom: 1px solid var(--border);
 }
 .brand-row {
@@ -340,7 +342,9 @@ select:focus {
 .members {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 4px 6px;
+  flex: 1;
+  overflow-y: auto;
 }
 .member {
   width: 100%;
@@ -348,22 +352,53 @@ select:focus {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   background: none;
   border: none;
-  border-left: 2px solid transparent;
+  border-radius: 8px;
   color: var(--fg);
   cursor: pointer;
   text-align: left;
 }
 .member:hover {
   background: var(--panel-2);
-  border-left-color: var(--accent);
 }
 .member-name {
   font-weight: 600;
 }
 .member-types {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Sidebar footer: the current app-user identity (account-style, like the refs). */
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-user .avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent), #5566c4);
+}
+.su-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.su-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.su-team {
   font-size: 11px;
   color: var(--muted);
 }
@@ -379,8 +414,10 @@ select:focus {
 /* Tabs */
 .tabs {
   display: flex;
+  align-items: flex-end;
   gap: 2px;
-  padding: 6px 8px 0;
+  /* A little top room so the tabs sit just under the window's top edge. */
+  padding: 10px 8px 0;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
@@ -521,14 +558,19 @@ select:focus {
   white-space: pre-wrap;
 }
 
-/* Composer */
+/* Composer — one rounded card holding identity, target, input and send. */
 .composer {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
+  margin: 8px 12px 12px;
+  padding: 5px 5px 5px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.composer:focus-within {
+  border-color: var(--accent);
 }
 .composer .as {
   color: var(--muted);
@@ -541,18 +583,29 @@ select:focus {
 }
 .composer input {
   flex: 1;
-  background: var(--panel-2);
+  background: transparent;
   color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border: none;
+  outline: none;
+  padding: 7px 4px;
+  font: inherit;
+}
+/* The target dropdown blends into the card until hovered/focused. */
+.composer select {
+  background-color: transparent;
+  border-color: transparent;
+}
+.composer select:hover,
+.composer select:focus {
+  background-color: var(--panel);
+  border-color: var(--border);
 }
 .composer button {
   background: var(--accent);
   color: #0b0e14;
   border: none;
-  border-radius: 6px;
-  padding: 6px 14px;
+  border-radius: 8px;
+  padding: 8px 16px;
   font-weight: 600;
   cursor: pointer;
 }

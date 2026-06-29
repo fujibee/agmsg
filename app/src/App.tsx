@@ -277,7 +277,7 @@ export default function App() {
     <div className="app" onClick={() => setNewMenu(false)}>
       <div className="body">
         <aside className="sidebar" style={{ width: sidebarWidth }}>
-          <div className="sidebar-head">
+          <div className="sidebar-head" data-tauri-drag-region>
             <div className="brand-row">
               <img className="logo" src="/agmsg-icon.png" alt="agmsg" />
               <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
@@ -327,18 +327,26 @@ export default function App() {
             ))}
             {others.length === 0 && <li className="empty">No agents yet. Use ＋ New → Agent.</li>}
           </ul>
+          {appUser && (
+            <div className="sidebar-user" title={`app-user in ${team}`}>
+              <span className="avatar" />
+              <div className="su-meta">
+                <span className="su-name">{appUser}</span>
+                <span className="su-team">{team}</span>
+              </div>
+            </div>
+          )}
         </aside>
 
         <div className="divider-v" onMouseDown={startSidebarDrag} />
 
         <main className="main">
-          <nav className="tabs">
-            <button
-              className={active === "room" ? "tab active" : "tab"}
-              onClick={() => setActive("room")}
-            >
-              # team room
-            </button>
+          <nav className="tabs" data-tauri-drag-region>
+            <span className={active === "room" ? "tab active" : "tab"}>
+              <button className="tab-label" onClick={() => setActive("room")}>
+                # team room
+              </button>
+            </span>
             {panes.map((p) => (
               <span key={p.id} className={active === p.id ? "tab active" : "tab"}>
                 <button className="tab-label" onClick={() => setActive(p.id)}>
