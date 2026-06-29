@@ -241,13 +241,13 @@ export default function App() {
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
+        document.body.classList.remove("resizing-col");
       };
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
+      // Force the resize cursor everywhere for the whole drag, so it doesn't
+      // flip back to the terminal's text cursor as the pointer passes over it.
+      document.body.classList.add("resizing-col");
     },
     [sidebarWidth],
   );
@@ -262,13 +262,11 @@ export default function App() {
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
+        document.body.classList.remove("resizing-row");
       };
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
-      document.body.style.cursor = "row-resize";
-      document.body.style.userSelect = "none";
+      document.body.classList.add("resizing-row");
     },
     [chatHeight],
   );
@@ -279,7 +277,7 @@ export default function App() {
         <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-head" data-tauri-drag-region>
             <div className="brand-row">
-              <img className="logo" src="/agmsg-icon.png" alt="agmsg" />
+              <img className="logo" src="/agmsg-logo.png" alt="agmsg" />
               <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
               <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
                 ＋ New ▾

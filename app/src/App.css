@@ -238,6 +238,21 @@ select:focus {
   color: var(--accent);
 }
 
+/* While dragging a divider, force the resize cursor over the whole window
+   (including the terminal, which would otherwise show its own text cursor). */
+body.resizing-col,
+body.resizing-col * {
+  cursor: col-resize !important;
+}
+body.resizing-row,
+body.resizing-row * {
+  cursor: row-resize !important;
+}
+body.resizing-col,
+body.resizing-row {
+  user-select: none;
+}
+
 /* Draggable dividers: a generous grab area, but only a hairline is drawn
    until hover (then the full strip lights up in the accent color). */
 .divider-v,
@@ -318,9 +333,8 @@ select:focus {
   width: 100%;
 }
 .brand-row .logo {
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
+  height: 26px;
+  width: auto;
   display: block;
 }
 .brand-row .new-wrap {
