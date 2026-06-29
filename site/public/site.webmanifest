@@ -1,0 +1,11 @@
+{
+  "name": "agmsg",
+  "short_name": "agmsg",
+  "icons": [
+    { "src": "/brand/android-chrome-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/brand/apple-touch-icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ],
+  "theme_color": "#0d1117",
+  "background_color": "#0d1117",
+  "display": "standalone"
+}
