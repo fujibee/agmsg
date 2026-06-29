@@ -283,7 +283,7 @@ const ogImage = `${siteUrl}/og.png`;
           <div class="mt-5 flex flex-wrap gap-1.5">
             {a.spawnable && <span class="rounded-md border border-border bg-bg px-2 py-0.5 font-mono text-[11px] text-fg">spawnable</span>}
             {a.monitor && <span class="rounded-md border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[11px] text-accent">monitor</span>}
-            {a.modes.filter((m) => m !== "monitor").map((m) => (
+            {a.modes.filter((m) => !(m === "monitor" && a.monitor)).map((m) => (
               <span class="rounded-md border border-border bg-bg px-2 py-0.5 font-mono text-[11px] text-muted">{m}</span>
             ))}
           </div>
