@@ -58,7 +58,7 @@ Four possible outputs:
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
      - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> gemini "$(pwd)"`
-     - Codex has no Monitor tool, so `monitor` and `both` modes are not offered here.
+     - Gemini has no Monitor tool, so `monitor` and `both` modes are not offered here.
 
   6. Then check inbox for the newly joined team.
 
@@ -107,7 +107,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" gemini` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> gemini "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Codex has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Gemini has no Monitor tool, so receive still covers all of your registered roles in this project.)"
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
@@ -120,7 +120,7 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
-1. Parse the mode. Codex supports only `turn` and `off` — reject `monitor` and `both` with: "Codex has no Monitor tool; only `turn` or `off` modes are supported."
+1. Parse the mode. Gemini supports only `turn` and `off` — reject `monitor` and `both` with: "Gemini has no Monitor tool; only `turn` or `off` modes are supported."
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> gemini "$(pwd)"`
 
 If argument is "hook on" (legacy alias):
