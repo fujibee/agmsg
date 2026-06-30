@@ -79,6 +79,40 @@ SH
   [[ "$output" =~ "hi via override" ]]
 }
 
+# --- append-only read-state events (transition: dual-write with read_at) ---
+
+@test "storage: reading appends message_read events and dual-writes read_at" {
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  bash "$SCRIPTS/send.sh" testteam alice bob "msg one"
+  bash "$SCRIPTS/send.sh" testteam alice bob "msg two"
+  local db="$AGMSG_STORAGE_PATH/messages.db"
+
+  # read-state log starts empty
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events;")" -eq 0 ]
+
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  # dual-write: read_at set AND an append-only message_read event per message
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE read_at IS NOT NULL;")" -eq 2 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_read' AND team='testteam' AND agent='bob';")" -eq 2 ]
+
+  # re-reading is a no-op: no duplicate read-state events
+  bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events;")" -eq 2 ]
+}
+
+@test "storage: message content is never written to the events table (read-state only)" {
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  bash "$SCRIPTS/send.sh" testteam alice bob "secret body"
+  bash "$SCRIPTS/inbox.sh" testteam bob >/dev/null
+  local db="$AGMSG_STORAGE_PATH/messages.db"
+
+  # events holds ONLY read-state rows — no other event types, no body column.
+  # (Guards against the storage-axis regression of moving content into events.)
+  [ -z "$(sqlite3 "$db" "SELECT type FROM events WHERE type<>'message_read';")" ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE body='secret body';")" -eq 1 ]
+}
+
 @test "storage: stop-hook delivery works when the default db dir is absent but the override is populated" {
   local store="$BATS_TEST_TMPDIR/store"
   local project="/tmp/agmsg-storage-test-proj"

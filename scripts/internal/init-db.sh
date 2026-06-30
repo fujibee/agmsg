@@ -35,4 +35,22 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_unread ON messages(team, to_agent, read_at) WHERE read_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_history ON messages(team, created_at DESC);
+
+-- Append-only read-state log. The message CONTENT stays in `messages` (never
+-- moved); this table records ONLY read-state as append-only `message_read`
+-- events (who read which message id, when). During the transition `read_at` is
+-- still dual-written on `messages` for backward compatibility; once consumers
+-- read read-state from here, `read_at` becomes obsolete and `messages` is
+-- append-only. NOTE: content is never written here (that was the storage-axis
+-- mistake that broke message delivery).
+CREATE TABLE IF NOT EXISTS events (
+  seq    INTEGER PRIMARY KEY AUTOINCREMENT,
+  type   TEXT NOT NULL,                 -- 'message_read'
+  team   TEXT NOT NULL,
+  agent  TEXT NOT NULL,                 -- who read it
+  msg_id INTEGER NOT NULL,              -- messages.id that was read
+  at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_read ON events(type, team, agent, msg_id);
 SQL

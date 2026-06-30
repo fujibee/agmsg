@@ -44,5 +44,15 @@ while IFS=$'\x1f' read -r from body ts; do
 done <<< "$UNREAD"
 echo ""
 
-# Mark as read (non-fatal — may fail in sandboxed environments)
-agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
+# Mark as read (non-fatal — may fail in sandboxed environments).
+# Dual-write: append message_read events (append-only read-state log) for the
+# messages being read, AND keep updating read_at for backward compatibility.
+# The events INSERT must run BEFORE the UPDATE so `read_at IS NULL` still
+# selects the just-read set.
+agmsg_sqlite "$DB" "
+INSERT INTO events (type, team, agent, msg_id)
+  SELECT 'message_read', team, to_agent, id FROM messages
+  WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;
+UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+  WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;
+" 2>/dev/null || true
