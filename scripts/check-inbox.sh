@@ -117,9 +117,13 @@ touch "$MARKER"
 DB="$(agmsg_db_path)"
 if [ ! -f "$DB" ]; then exit 0; fi
 
+_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+AGENT_SQL="$(_agmsg_sqlesc "$AGENT")"
+
 OUTPUT=""
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
+  team_sql="$(_agmsg_sqlesc "$team")"
   # Honor actas exclusivity locks. If (team, AGENT) is currently held by
   # another live session, that session is the owner of that role's inbox —
   # don't deliver here. Mirrors the per-pair filtering watch.sh does for
@@ -138,7 +142,7 @@ for team in "${TEAM_LIST[@]}"; do
 
   RESULT=$(agmsg_sqlite "$DB" "
     SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
-    FROM messages WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL
+    FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
     ORDER BY created_at ASC;
   ")
   if [ -n "$RESULT" ]; then
@@ -149,7 +153,7 @@ for team in "${TEAM_LIST[@]}"; do
     done <<< "$RESULT"
     OUTPUT+=$'\n'
     # Mark as read
-    agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
+    agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL;" 2>/dev/null || true
   fi
 done
 

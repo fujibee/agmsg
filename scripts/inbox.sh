@@ -22,10 +22,14 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 
+_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+TEAM_SQL="$(_agmsg_sqlesc "$TEAM")"
+AGENT_SQL="$(_agmsg_sqlesc "$AGENT")"
+
 # Get unread messages — escape newlines/tabs in body to keep one record per line
 UNREAD=$(agmsg_sqlite "$DB" "
   SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
-  FROM messages WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL
+  FROM messages WHERE team='$TEAM_SQL' AND to_agent='$AGENT_SQL' AND read_at IS NULL
   ORDER BY created_at ASC;
 ")
 
@@ -45,4 +49,4 @@ done <<< "$UNREAD"
 echo ""
 
 # Mark as read (non-fatal — may fail in sandboxed environments)
-agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL;" 2>/dev/null || true
+agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM_SQL' AND to_agent='$AGENT_SQL' AND read_at IS NULL;" 2>/dev/null || true

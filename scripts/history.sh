@@ -7,6 +7,11 @@ set -euo pipefail
 TEAM="${1:?Usage: history.sh <team> [agent_id] [limit]}"
 AGENT="${2:-}"
 LIMIT="${3:-20}"
+# A non-numeric limit would otherwise be interpolated straight into the SQL
+# text below (e.g. "1; DELETE FROM messages; --"); reject it rather than
+# passing it through, mirroring the interval-validation idiom used elsewhere
+# (config.sh, watch.sh).
+case "$LIMIT" in ''|*[!0-9]*) LIMIT=20 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
@@ -17,10 +22,12 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 
+_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
+
 if [ -n "$AGENT" ]; then
-  WHERE="WHERE team='$TEAM' AND (from_agent='$AGENT' OR to_agent='$AGENT')"
+  WHERE="WHERE team='$(_agmsg_sqlesc "$TEAM")' AND (from_agent='$(_agmsg_sqlesc "$AGENT")' OR to_agent='$(_agmsg_sqlesc "$AGENT")')"
 else
-  WHERE="WHERE team='$TEAM'"
+  WHERE="WHERE team='$(_agmsg_sqlesc "$TEAM")'"
 fi
 
 # Escape newlines/tabs in body, use unit separator between fields

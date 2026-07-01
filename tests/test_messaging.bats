@@ -73,6 +73,31 @@ line3"
   [[ "$output" =~ "alice" ]]
 }
 
+@test "inbox: a crafted agent arg cannot inject SQL to delete other messages (#87)" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "keepme"
+  run bash "$SCRIPTS/inbox.sh" testteam "bob' AND read_at IS NULL; DELETE FROM messages; --"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "keepme" ]]
+}
+
+@test "inbox: an agent name containing a quote still receives its own messages (#87)" {
+  bash "$SCRIPTS/join.sh" testteam "o'brien" claude-code /tmp/project-c
+  bash "$SCRIPTS/send.sh" testteam alice "o'brien" "for quote"
+  run bash "$SCRIPTS/inbox.sh" testteam "o'brien"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "for quote" ]]
+}
+
+@test "check-inbox: a team name containing a quote still delivers without a SQL error (#87)" {
+  local project; project="$(mktemp -d)"
+  bash "$SCRIPTS/join.sh" "te'am" carol claude-code "$project"
+  bash "$SCRIPTS/send.sh" "te'am" alice carol "quoted team delivery"
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "quoted team delivery" ]]
+}
+
 @test "history: handles multiline message body" {
   bash "$SCRIPTS/send.sh" testteam alice bob "multi
 line"
@@ -116,4 +141,22 @@ line"
   run bash "$SCRIPTS/history.sh" testteam
   [ "$status" -eq 0 ]
   [[ "$output" =~ "No message history" ]]
+}
+
+@test "history: a non-numeric limit falls back to the default instead of injecting SQL (#87)" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "msg1"
+  bash "$SCRIPTS/send.sh" testteam alice bob "msg2"
+  run bash "$SCRIPTS/history.sh" testteam bob "1; DELETE FROM messages; --"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/history.sh" testteam
+  [[ "$output" =~ "msg1" ]]
+  [[ "$output" =~ "msg2" ]]
+}
+
+@test "history: a team/agent name containing a quote does not break the query (#87)" {
+  bash "$SCRIPTS/join.sh" testteam "o'brien" claude-code /tmp/project-c
+  bash "$SCRIPTS/send.sh" testteam alice "o'brien" "for quote"
+  run bash "$SCRIPTS/history.sh" testteam "o'brien"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "for quote" ]]
 }
