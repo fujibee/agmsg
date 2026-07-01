@@ -71,8 +71,15 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "codex-bridge: toPosixPath normalizes backslashes without a drive letter" {
-  run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath(String.raw`relative\path\without\drive`) !== "relative/path/without/drive") process.exit(1);' "$TYPES/codex/codex-bridge.js"
+@test "codex-bridge: toPosixPath maps UNC paths to POSIX paths" {
+  run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath(String.raw`\\host\share\proj`) !== "//host/share/proj") process.exit(1);' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: toPosixPath preserves a literal backslash in a POSIX path" {
+  # On POSIX hosts a backslash is a valid filename character; a driveless path
+  # must be returned byte-for-byte so a genuine registration is not mangled.
+  run node -e 'const { toPosixPath } = require(process.argv[1]); const p = String.raw`/tmp/proj\withslash`; if (toPosixPath(p) !== p) process.exit(1);' "$TYPES/codex/codex-bridge.js"
   [ "$status" -eq 0 ]
 }
 

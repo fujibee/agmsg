@@ -58,12 +58,20 @@ function die(message) {
   process.exit(1);
 }
 
+// Convert a native Windows path into the MSYS/Git-Bash POSIX form that agmsg
+// registration data is keyed by (Git Bash stores e.g. `/c/Users/me/proj`).
+// A drive-letter path `C:\...`/`C:/...` becomes `/c/...` and its backslashes
+// become forward slashes; a UNC path `\\host\share` becomes `//host/share`.
+// Only inputs carrying a Windows drive-letter or UNC prefix are rewritten, so
+// an already-POSIX path is returned byte-for-byte unchanged - including a POSIX
+// path that legitimately contains a backslash in a filename, which must not be
+// mangled on macOS/Linux.
 function toPosixPath(p) {
   if (typeof p !== "string" || p.length === 0) return p;
-  const normalized = p.replace(/\\/g, "/");
-  const match = /^([A-Za-z]):\//.exec(normalized);
-  if (!match) return normalized;
-  return `/${match[1].toLowerCase()}${normalized.slice(2)}`;
+  if (/^\\\\/.test(p)) return p.replace(/\\/g, "/"); // UNC: \\host\share -> //host/share
+  const match = /^([A-Za-z]):[\\/]/.exec(p);
+  if (!match) return p; // already POSIX (no drive letter): leave exactly as-is
+  return `/${match[1].toLowerCase()}${p.slice(2).replace(/\\/g, "/")}`;
 }
 
 function parseArgs(argv) {
@@ -813,7 +821,10 @@ class CodexBridge {
     const command = [
       BASH_BIN,
       path.join(SCRIPT_DIR, "watch-once.sh"),
-      this.opts.project,
+      // watch-once.sh resolves the subscription set through the same exact
+      // project-key lookup as identities.sh, so it needs the POSIX form of the
+      // project path. The spawn cwd below stays native for the app-server.
+      toPosixPath(this.opts.project),
       this.opts.type,
       "--team",
       this.identity.team,
