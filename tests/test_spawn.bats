@@ -212,6 +212,95 @@ teardown() {
   [[ "$output" != *"--model"* ]]
 }
 
+# --- spawn options (#273): per-type extra CLI args from a YAML file ---
+
+@test "spawn: injects spawn-options flags from AGMSG_SPAWN_OPTIONS_FILE" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+  --dangerously-skip-permissions: true
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --permission-mode acceptEdits --dangerously-skip-permissions"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: spawn-options flags land after --model, before the actas prompt" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --model claude-opus-4-8 --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --model claude-opus-4-8 --permission-mode acceptEdits"* ]]
+}
+
+@test "spawn: a false spawn-options value suppresses that flag" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+claude-code:
+  --dangerously-skip-permissions: false
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"--dangerously-skip-permissions"* ]]
+}
+
+@test "spawn: only the spawned type's section applies, not another type's" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local opts="$TEST_SKILL_DIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+codex:
+  --sandbox: workspace-write
+YAML
+  run env AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"--sandbox"* ]]
+}
+
+@test "spawn: no spawn-options file leaves the launch unchanged" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env AGMSG_SPAWN_OPTIONS_FILE="$TEST_SKILL_DIR/no-such-file.yaml" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude"*"actas"* ]]
+}
+
+@test "spawn: falls back to ~/.agmsg/config/spawn_options.yaml when the env var is unset" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$HOME/.agmsg/config"
+  cat > "$HOME/.agmsg/config/spawn_options.yaml" <<'YAML'
+claude-code:
+  --permission-mode: acceptEdits
+YAML
+  unset AGMSG_SPAWN_OPTIONS_FILE
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"--permission-mode acceptEdits"* ]]
+}
+
 @test "spawn: actas prompt uses the install command name (not hardcoded agmsg)" {
   # Rename the skill dir to a custom command name and re-point SCRIPTS so the
   # script resolves SKILL_DIR basename = the custom name.
