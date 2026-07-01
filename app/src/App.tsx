@@ -39,12 +39,8 @@ type Modal =
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
-// Which interactive CLI to spawn for a given agmsg agent type.
-export const SPAWN_CMD: Record<string, string> = {
-  "claude-code": "claude",
-  codex: "codex",
-  gemini: "gemini",
-};
+// A spawnable agent type discovered from agmsg's type registry.
+export type AgentType = { name: string; cli: string };
 
 export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
@@ -58,6 +54,7 @@ export default function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
+  const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
   // Team-room member filter: names the user has UN-checked (default: all shown).
@@ -124,6 +121,13 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // Spawnable agent types + their CLIs, discovered from agmsg's type registry.
+  useEffect(() => {
+    invoke<AgentType[]>("agmsg_spawnable_types").then(setSpawnTypes).catch(() => {});
+  }, []);
+  // type name -> CLI binary, for resolving a member's spawn command.
+  const cliFor = new Map(spawnTypes.map((t) => [t.name, t.cli]));
+
   // First load: teams. If there are none, the first-run flow opens New Team.
   useEffect(() => {
     loadTeams()
@@ -179,16 +183,17 @@ export default function App() {
         setActive(existing.id);
         return;
       }
-      const type = m.types.find((t) => SPAWN_CMD[t]);
+      const type = m.types.find((t) => cliFor.has(t));
+      const cli = type ? cliFor.get(type)! : undefined;
       const id = `${m.name}-${seq.current++}`;
       // Mirror agmsg spawn.sh: launch the CLI with `/<cmd> actas <name>` as its
       // first prompt so the agent comes up as the real member (its own monitor
-      // + can send as itself). Unknown types fall back to a bare shell.
-      const pane: Pane = type
+      // + can send as itself). Types with no spawnable CLI fall back to a shell.
+      const pane: Pane = cli
         ? {
             id,
             label: m.name,
-            cmd: SPAWN_CMD[type],
+            cmd: cli,
             args: [`/${cmdName} actas ${m.name}`],
             cwd: m.project || undefined,
             native: true,
@@ -197,7 +202,7 @@ export default function App() {
       setPanes((prev) => [...prev, pane]);
       setActive(id);
     },
-    [cmdName],
+    [cmdName, cliFor],
   );
 
   const closePane = useCallback((id: string) => {
@@ -530,6 +535,7 @@ export default function App() {
           onClose={() => setModal(null)}
           browseDir={browseDir}
           defaultProject={teamProject}
+          types={spawnTypes.map((t) => t.name)}
         />
       )}
       {modal?.kind === "rename" && (

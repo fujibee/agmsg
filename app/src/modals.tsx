@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-// Agent types selectable when adding an agent (each maps to a spawnable CLI).
-const AGENT_TYPES = ["claude-code", "codex", "gemini"];
-
 type BrowseDir = (current: string) => Promise<string | null>;
 
 /** Modal chrome: dimmed backdrop + centered card. */
@@ -202,8 +199,13 @@ export function AgentModal(props: {
   browseDir: BrowseDir;
   /** The team's project dir — agents default into the same place. */
   defaultProject?: string;
+  /** Spawnable agent types, from agmsg's registry. */
+  types: string[];
 }) {
-  const [type, setType] = useState(AGENT_TYPES[0]);
+  const [type, setType] = useState(props.types[0] ?? "");
+  useEffect(() => {
+    if (!type && props.types[0]) setType(props.types[0]);
+  }, [props.types, type]);
   const [name, setName] = useState("");
   const { project, setProject, markEdited } = useDefaultProject(name, props.defaultProject);
   const [err, setErr] = useState("");
@@ -226,7 +228,7 @@ export function AgentModal(props: {
         <label>
           Type
           <select value={type} onChange={(e) => setType(e.target.value)}>
-            {AGENT_TYPES.map((t) => (
+            {props.types.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>

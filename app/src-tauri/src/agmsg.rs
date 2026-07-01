@@ -49,6 +49,66 @@ pub struct Member {
     pub project: String,
 }
 
+/// A spawnable agent type, read from its type.conf manifest.
+#[derive(Clone, Serialize)]
+pub struct AgentType {
+    /// The type name (directory under scripts/drivers/types/), e.g. "claude-code".
+    pub name: String,
+    /// The CLI binary to launch (manifest `cli=`), e.g. "claude".
+    pub cli: String,
+}
+
+/// Read one key from a type.conf manifest (read-only key=value data, never
+/// sourced). Returns the trimmed value, or None if absent.
+fn manifest_get(path: &std::path::Path, key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                return Some(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// List the agent types the app can spawn: those whose manifest declares
+/// `spawnable=yes` and a `cli=` binary. Read straight from agmsg's type
+/// registry (scripts/drivers/types/*/type.conf) so the app never hardcodes the
+/// list — a newly installed type shows up automatically.
+#[tauri::command]
+pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
+    let dir = agmsg_base().join("scripts/drivers/types");
+    let mut types = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let conf = entry.path().join("type.conf");
+        if !conf.is_file() {
+            continue;
+        }
+        if manifest_get(&conf, "spawnable").as_deref() != Some("yes") {
+            continue;
+        }
+        let cli = match manifest_get(&conf, "cli") {
+            Some(c) if !c.is_empty() => c,
+            _ => continue,
+        };
+        let name = manifest_get(&conf, "name")
+            .filter(|s| !s.is_empty())
+            .or_else(|| entry.file_name().to_str().map(String::from))
+            .unwrap_or_default();
+        if !name.is_empty() {
+            types.push(AgentType { name, cli });
+        }
+    }
+    types.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(types)
+}
+
 /// List team names (directories under teams/ that have a config.json).
 #[tauri::command]
 pub fn agmsg_teams() -> Result<Vec<String>, String> {

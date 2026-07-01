@@ -86,6 +86,7 @@ pub fn run() {
             agmsg::agmsg_rename,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
+            agmsg::agmsg_spawnable_types,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
