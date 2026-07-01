@@ -8,9 +8,9 @@ TEAM="${1:?Usage: history.sh <team> [agent_id] [limit]}"
 AGENT="${2:-}"
 LIMIT="${3:-20}"
 # A non-numeric limit would otherwise be interpolated straight into the SQL
-# text below (e.g. "1; DELETE FROM messages; --"); reject it rather than
-# passing it through, mirroring the interval-validation idiom used elsewhere
-# (config.sh, watch.sh).
+# text below (e.g. "1; DELETE FROM messages; --"); fall back to the default
+# rather than passing it through, mirroring the interval-validation idiom
+# used elsewhere (config.sh, watch.sh).
 case "$LIMIT" in ''|*[!0-9]*) LIMIT=20 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
