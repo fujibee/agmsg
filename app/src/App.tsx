@@ -172,6 +172,13 @@ export default function App() {
 
   const spawnMember = useCallback(
     (m: Member) => {
+      // Don't spawn a second pane for a member that's already running — just
+      // focus the existing one (one live agent per identity).
+      const existing = panesRef.current.find((p) => p.label === m.name);
+      if (existing) {
+        setActive(existing.id);
+        return;
+      }
       const type = m.types.find((t) => SPAWN_CMD[t]);
       const id = `${m.name}-${seq.current++}`;
       // Mirror agmsg spawn.sh: launch the CLI with `/<cmd> actas <name>` as its
@@ -368,8 +375,19 @@ export default function App() {
                     onClick={(e) => e.stopPropagation()}
                   />
                 )}
-                <button className="member" onClick={() => spawnMember(m)} title="spawn in a PTY pane">
-                  <span className="member-name">{m.name}</span>
+                <button
+                  className="member"
+                  onClick={() => spawnMember(m)}
+                  title={
+                    panes.some((p) => p.label === m.name)
+                      ? "already running — click to focus"
+                      : "spawn in a PTY pane"
+                  }
+                >
+                  <span className="member-name">
+                    {m.name}
+                    {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
+                  </span>
                   <span className="member-types">{m.types.join(", ") || "—"}</span>
                 </button>
               </li>

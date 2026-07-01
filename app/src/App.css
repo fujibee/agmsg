@@ -411,6 +411,16 @@ body.resizing-row {
 .member-name {
   font-weight: 600;
 }
+/* Green dot marks a member that already has a live pane. */
+.running-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  vertical-align: middle;
+}
 .member-types {
   font-size: 11px;
   color: var(--muted);
