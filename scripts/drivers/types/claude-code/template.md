@@ -93,6 +93,15 @@ Four possible outputs:
 - description: `agmsg inbox stream`
 - persistent: true
 
+Important: `delivery.sh status` showing `mode: monitor` means monitor delivery is configured for the project; it does not prove the current Claude Code runtime has started Monitor. Treat monitor startup as successful only when all of these are true:
+
+1. `ToolSearch select:Monitor` finds Claude Code's generic `Monitor` tool.
+2. You start `Monitor(agmsg inbox stream)` with the command above or the command printed in the `AGMSG-DIRECTIVE`.
+3. The Claude Code footer shows `1 monitor`.
+4. The transcript later shows `Monitor event: "agmsg inbox stream"` for delivered messages.
+
+Do not use Bash/background/nohup or a shell task as a substitute for Monitor. If the footer shows `1 shell`, that is a failed realtime monitor launch even if `watch.sh` is running. Azure Monitor, MCP monitor, or other monitor-branded tools are also not valid. If the generic Monitor tool is unavailable, tell the user that realtime monitor delivery cannot be started in this Claude Code runtime and use `turn` delivery or manual inbox checks as fallback; those fallbacks are not realtime monitor delivery.
+
 Then continue with the user's subcommand. This catches the case where the user invokes `/__SKILL_NAME__` as the first prompt before the SessionStart-hook directive has been acted on.
 
 **Sandbox compatibility.** When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/__SKILL_NAME__/`. If monitor mode fails with write/permission errors there, add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
@@ -179,7 +188,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`
-2. Show the output to the user.
+2. Show the output to the user. If it says `mode: monitor`, explicitly say this is only configuration status; runtime success still requires Claude Code's generic `Monitor(agmsg inbox stream)` task, footer `1 monitor`, and transcript `Monitor event: "agmsg inbox stream"`.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
 1. Parse the mode (one of `monitor`, `turn`, `both`, `off`).

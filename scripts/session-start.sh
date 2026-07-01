@@ -256,6 +256,19 @@ This streams incoming agmsg messages into the session in real time. Each
 output line is one message: \`<ts> | <team> | <from> → <to> | <body>\`.
 React to messages as they arrive; reply with \`send.sh\`.
 
+Use Claude Code's generic Monitor tool only. First confirm ToolSearch
+select:Monitor finds that generic tool; Azure Monitor, MCP monitor, or other
+monitor-branded tools are not valid for agmsg delivery. Do not start watch.sh
+with Bash/background/nohup or a shell task. Success is:
+
+  - Monitor(agmsg inbox stream) starts
+  - the footer shows "1 monitor" (not "1 shell")
+  - the transcript later contains Monitor event: "agmsg inbox stream"
+
+If the generic Monitor tool is unavailable, do not treat a background shell
+watcher as success. Switch to turn delivery or run manual inbox checks instead;
+those fallbacks are not real-time monitor delivery.
+
 Note: On a /clear or --continue/--resume re-fire, you may shortly see a
 "Monitor … stopped" notification for an earlier 'agmsg inbox stream'
 task. That is the previous watcher being cleaned up to avoid duplicates

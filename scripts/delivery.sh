@@ -15,6 +15,10 @@ set -euo pipefail
 #   both     — monitor primary; turn as per-session safety net
 #   off      — no automatic delivery
 #
+# `status` reports configured delivery hooks. For Claude Code, `mode: monitor`
+# means the project is configured for monitor delivery; runtime success still
+# requires Claude Code to start its generic Monitor tool for `agmsg inbox stream`.
+#
 # settings.json injection is idempotent: each `set` call first strips any
 # existing agmsg-owned SessionStart/Stop entries, then re-adds whichever
 # the new mode requires. Re-running with the same mode is a no-op.
@@ -307,6 +311,12 @@ AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
   persistent: true
 
 Pass the command above verbatim — the session_id is already filled in.
+Use Claude Code's generic Monitor tool only. Do not start this command with
+Bash/background/nohup or a shell task; a footer that shows "1 shell" is not
+real-time Monitor delivery. Success is "1 monitor" in the footer and transcript
+events named Monitor event: "agmsg inbox stream". If ToolSearch cannot find
+the generic Monitor tool, use turn/manual inbox as a fallback; that is not
+real-time monitor delivery.
 EOF
 }
 
@@ -451,6 +461,17 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     agmsg_delivery_load_plug "$TYPE"
     agmsg_delivery_status "$TYPE" "$PROJECT"
+    case "$TYPE" in
+      claude-code)
+        cat <<'EOF'
+note: status reports configured hooks only. For real-time delivery, Claude Code
+must also have a generic Monitor task named "agmsg inbox stream" running in the
+current session. Verify ToolSearch select:Monitor, footer "1 monitor", and
+transcript Monitor event: "agmsg inbox stream"; footer "1 shell" means the
+watcher was started as a shell/background task, not Monitor delivery.
+EOF
+        ;;
+    esac
   fi
 
   agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
