@@ -76,6 +76,16 @@ export default function App() {
   // The app user's own send/receive thread.
   const myThread = messages.filter((m) => m.from === appUser || m.to === appUser);
 
+  // Cozy grouping: collapse runs of consecutive messages with the same from→to
+  // into one header + stacked bodies (Slack/Discord style), so short bursts stay
+  // light while long messages still line up.
+  const groups: { key: number; from: string; to: string; items: Message[] }[] = [];
+  for (const m of messages) {
+    const last = groups[groups.length - 1];
+    if (last && last.from === m.from && last.to === m.to) last.items.push(m);
+    else groups.push({ key: m.id, from: m.from, to: m.to, items: [m] });
+  }
+
   const loadTeams = useCallback(async () => {
     const t = await invoke<string[]>("agmsg_teams");
     setTeams(t);
@@ -359,13 +369,19 @@ export default function App() {
 
           <section className="stage">
             <div className="room" hidden={active !== "room"} ref={feedRef}>
-              {messages.map((m) => (
-                <div className="msg" key={m.id}>
-                  <span className="msg-time">{m.created_at.slice(11, 19)}</span>
-                  <span className="msg-from">{m.from}</span>
-                  <span className="msg-arrow">→</span>
-                  <span className="msg-to">{m.to}</span>
-                  <span className="msg-body">{m.body}</span>
+              {groups.map((g) => (
+                <div className="grp" key={g.key}>
+                  <div className="grp-head">
+                    <b className="mf">{g.from}</b>
+                    <span className="arrow">→</span>
+                    <b className="mt">{g.to}</b>
+                    <span className="grp-time">{g.items[0].created_at.slice(11, 19)}</span>
+                  </div>
+                  {g.items.map((m) => (
+                    <div className="grp-body" key={m.id}>
+                      {m.body}
+                    </div>
+                  ))}
                 </div>
               ))}
               {messages.length === 0 && <div className="empty">No messages yet.</div>}

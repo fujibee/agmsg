@@ -484,29 +484,40 @@ body.resizing-row {
   font-family: Menlo, Monaco, "Courier New", monospace;
   font-size: 12px;
 }
-.msg {
-  display: flex;
-  gap: 8px;
-  padding: 2px 0;
-  white-space: pre-wrap;
-}
-.msg-time {
-  color: var(--muted);
-}
-.msg-from {
+/* Shared name coloring for both layouts. */
+.mf {
   color: var(--accent);
   font-weight: 600;
 }
-.msg-arrow {
+.mt {
+  color: var(--green);
+  font-weight: 600;
+}
+.arrow {
   color: var(--muted);
 }
-.msg-to {
-  color: var(--green);
+
+/* Team room: a from→to · time header once per run of same-pair messages, with
+   bodies stacked beneath (Slack/Discord style grouping). */
+.grp {
+  padding: 6px 0;
 }
-.msg-body {
-  flex: 1;
+.grp-head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+.grp-time {
+  color: var(--muted);
+  font-size: 11px;
+}
+.grp-body {
+  padding-left: 2px;
   word-break: break-word;
+  white-space: pre-wrap;
 }
+
 .empty {
   color: var(--muted);
   padding: 20px;
