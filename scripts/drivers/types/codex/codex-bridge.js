@@ -772,19 +772,28 @@ class CodexBridge {
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
     }
     if (this.threadId) {
-      const response = await this.client.request("thread/resume", {
-        threadId: this.threadId,
-        cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
-        excludeTurns: true,
-      });
-      if (!response.thread || response.thread.id !== this.threadId) {
-        die("thread/resume did not return the requested thread id");
+      try {
+        const response = await this.client.request("thread/resume", {
+          threadId: this.threadId,
+          cwd: this.opts.project,
+          runtimeWorkspaceRoots: [this.opts.project],
+          excludeTurns: true,
+        });
+        if (!response.thread || response.thread.id !== this.threadId) {
+          die("thread/resume did not return the requested thread id");
+        }
+        const type = response.thread.status && response.thread.status.type;
+        this.threadIdle = type !== "active";
+        this.turnActive = type === "active";
+        console.error(`codex-bridge: resumed thread ${this.threadId}`);
+      } catch (err) {
+        // Codex 0.142+ の --remote セッションでは rollout が作成されないため
+        // thread/resume が失敗する。turn/start は threadId だけで動作するので
+        // デフォルト状態 (idle) で続行する。
+        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        this.threadIdle = true;
+        this.turnActive = false;
       }
-      const type = response.thread.status && response.thread.status.type;
-      this.threadIdle = type !== "active";
-      this.turnActive = type === "active";
-      console.error(`codex-bridge: resumed thread ${this.threadId}`);
       return;
     }
     const response = await this.client.request("thread/start", {
