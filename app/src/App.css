@@ -174,6 +174,7 @@ select:focus {
 }
 .submenu {
   display: none;
+  flex-direction: column;
   position: absolute;
   left: 100%;
   top: -1px;
@@ -185,7 +186,7 @@ select:focus {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 .submenu-trigger:hover .submenu {
-  display: block;
+  display: flex;
 }
 .submenu-empty {
   display: block;
