@@ -56,6 +56,12 @@ pub struct AgentType {
     pub name: String,
     /// The CLI binary to launch (manifest `cli=`), e.g. "claude".
     pub cli: String,
+    /// Extra CLI argv tokens for this type from agmsg's spawn-options file
+    /// (see scripts/lib/spawn-options.sh), e.g. ["--permission-mode",
+    /// "acceptEdits"]. Spliced before the actas boot prompt, same relative
+    /// position `agmsg spawn` uses, so a pane spawned from the app gets the
+    /// same extra flags a CLI-driven spawn would.
+    pub options: Vec<String>,
 }
 
 /// Read one key from a type.conf manifest (read-only key=value data, never
@@ -74,6 +80,58 @@ fn manifest_get(path: &std::path::Path, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve the spawn-options file: $AGMSG_SPAWN_OPTIONS_FILE, else
+/// ~/.agmsg/config/spawn_options.yaml (same resolution as
+/// scripts/lib/spawn-options.sh:agmsg_spawn_options_file).
+fn spawn_options_file() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("AGMSG_SPAWN_OPTIONS_FILE") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".agmsg/config/spawn_options.yaml")
+}
+
+/// Extra CLI argv tokens for `agent_type` from the spawn-options YAML: a flat
+/// "type:" header followed by 2-space-indented "key: value" lines (same
+/// minimal dialect as agmsg's config.yaml — no nesting, no quoting). Mirrors
+/// scripts/lib/spawn-options.sh:agmsg_spawn_options_tokens exactly: `false`
+/// suppresses the flag, `true` emits the key alone, anything else emits
+/// `key` then `value` as two tokens. A missing file/section is a no-op.
+fn spawn_options_tokens(agent_type: &str) -> Vec<String> {
+    let raw = match std::fs::read_to_string(spawn_options_file()) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let header = format!("{agent_type}:");
+    let mut tokens = Vec::new();
+    let mut in_section = false;
+    for line in raw.lines() {
+        if !line.starts_with(' ') && !line.starts_with('#') && !line.trim().is_empty() {
+            in_section = line.starts_with(&header);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(body) = line.strip_prefix("  ") else { continue };
+        if body.starts_with(' ') {
+            continue; // deeper nesting isn't part of this flat dialect
+        }
+        let Some((key, rest)) = body.split_once(':') else { continue };
+        let val = rest.split('#').next().unwrap_or("").trim();
+        if val == "false" {
+            continue;
+        }
+        tokens.push(key.trim().to_string());
+        if !val.is_empty() && val != "true" {
+            tokens.push(val.to_string());
+        }
+    }
+    tokens
 }
 
 /// List the agent types the app can spawn: those whose manifest declares
@@ -102,7 +160,8 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
             .or_else(|| entry.file_name().to_str().map(String::from))
             .unwrap_or_default();
         if !name.is_empty() {
-            types.push(AgentType { name, cli });
+            let options = spawn_options_tokens(&name);
+            types.push(AgentType { name, cli, options });
         }
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));

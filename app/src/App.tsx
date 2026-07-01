@@ -50,7 +50,7 @@ type Modal =
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
 // A spawnable agent type discovered from agmsg's type registry.
-export type AgentType = { name: string; cli: string };
+export type AgentType = { name: string; cli: string; options: string[] };
 
 export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
@@ -162,12 +162,11 @@ export default function App() {
     return () => void p.then((u) => u());
   }, []);
 
-  // Spawnable agent types + their CLIs, discovered from agmsg's type registry.
+  // Spawnable agent types (for the Add-agent type picker). spawnMember
+  // re-fetches this itself right before spawning — see there for why.
   useEffect(() => {
     invoke<AgentType[]>("agmsg_spawnable_types").then(setSpawnTypes).catch(() => {});
   }, []);
-  // type name -> CLI binary, for resolving a member's spawn command.
-  const cliFor = new Map(spawnTypes.map((t) => [t.name, t.cli]));
 
   // First load: teams. If there are none, the first-run flow opens New Team.
   useEffect(() => {
@@ -232,7 +231,7 @@ export default function App() {
   }, []);
 
   const spawnMember = useCallback(
-    (m: Member) => {
+    async (m: Member) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -241,18 +240,30 @@ export default function App() {
         if (w) setActive(w.id);
         return;
       }
-      const type = m.types.find((t) => cliFor.has(t));
-      const cli = type ? cliFor.get(type)! : undefined;
+      // Re-read spawnable types fresh (not the state loaded at app start) so
+      // a spawn-options file created/edited after launch takes effect right
+      // away instead of needing an app restart.
+      const types = await invoke<AgentType[]>("agmsg_spawnable_types").catch(() => spawnTypes);
+      const freshCliFor = new Map(types.map((t) => [t.name, t.cli]));
+      const freshOptionsFor = new Map(types.map((t) => [t.name, t.options]));
+      setSpawnTypes(types);
+
+      const type = m.types.find((t) => freshCliFor.has(t));
+      const cli = type ? freshCliFor.get(type)! : undefined;
+      const options = type ? (freshOptionsFor.get(type) ?? []) : [];
       const id = `${m.name}-${seq.current++}`;
-      // Mirror agmsg spawn.sh: launch the CLI with `/<cmd> actas <name>` as its
-      // first prompt so the agent comes up as the real member (its own monitor
-      // + can send as itself). Types with no spawnable CLI fall back to a shell.
+      // Mirror agmsg spawn.sh: launch the CLI with any per-type spawn-options
+      // flags, then `/<cmd> actas <name>` as the final arg — same relative
+      // order spawn.sh splices them in — so the agent comes up as the real
+      // member (its own monitor + can send as itself) with the same extra
+      // flags `agmsg spawn` would give it. Types with no spawnable CLI fall
+      // back to a shell.
       const pane: Pane = cli
         ? {
             id,
             label: m.name,
             cmd: cli,
-            args: [`/${cmdName} actas ${m.name}`],
+            args: [...options, `/${cmdName} actas ${m.name}`],
             cwd: m.project || undefined,
             native: true,
           }
@@ -262,7 +273,7 @@ export default function App() {
       setWindows((prev) => [...prev, { id: winId, paneIds: [id] }]);
       setActive(winId);
     },
-    [cmdName, cliFor],
+    [cmdName, spawnTypes],
   );
 
   // Close one pane (from its header's × or the context menu). If it was the
@@ -498,6 +509,11 @@ export default function App() {
                     onClick={() => {
                       setNewMenu(false);
                       setModal({ kind: "agent" });
+                      // Refresh in case spawn-options.yaml or a new type
+                      // manifest showed up since app start.
+                      invoke<AgentType[]>("agmsg_spawnable_types")
+                        .then(setSpawnTypes)
+                        .catch(() => {});
                     }}
                   >
                     Agent…
