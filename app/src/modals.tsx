@@ -321,3 +321,33 @@ export function RenameModal(props: {
     </Modal>
   );
 }
+
+export function ConfirmModal(props: {
+  title: string;
+  body: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal title={props.title} onClose={props.onClose}>
+      <p className="modal-note">{props.body}</p>
+      <div className="modal-actions">
+        <button type="button" onClick={props.onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className={props.danger ? "primary danger" : "primary"}
+          onClick={() => {
+            props.onConfirm();
+            props.onClose();
+          }}
+        >
+          {props.confirmLabel ?? "Confirm"}
+        </button>
+      </div>
+    </Modal>
+  );
+}

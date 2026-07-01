@@ -6,6 +6,7 @@ import { TerminalPane } from "./TerminalPane";
 import {
   AgentModal,
   AppUserModal,
+  ConfirmModal,
   NewTeamModal,
   RenameModal,
 } from "./modals";
@@ -35,6 +36,7 @@ type Modal =
   | { kind: "agent" }
   | { kind: "appuser" }
   | { kind: "rename"; current: string }
+  | { kind: "leave"; name: string }
   | null;
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
@@ -59,6 +61,10 @@ export default function App() {
   const [chatHeight, setChatHeight] = useState(160);
   // Team-room member filter: names the user has UN-checked (default: all shown).
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
+  // Right-click context menu over a member row: { member, x, y } while open.
+  const [memberMenu, setMemberMenu] = useState<{ member: Member; x: number; y: number } | null>(
+    null,
+  );
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -268,6 +274,20 @@ export default function App() {
     [team, loadMembers],
   );
 
+  const onLeave = useCallback(
+    async (name: string) => {
+      const pane = panesRef.current.find((p) => p.label === name);
+      if (pane) {
+        await invoke("pty_kill", { id: pane.id });
+        setPanes((prev) => prev.filter((p) => p.id !== pane.id));
+        setActive((a) => (a === pane.id ? "room" : a));
+      }
+      await invoke("agmsg_leave", { team, name });
+      await loadMembers(team);
+    },
+    [team, loadMembers],
+  );
+
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
     const picked = await openDialog({ directory: true, defaultPath: current || undefined });
     return typeof picked === "string" ? picked : null;
@@ -316,7 +336,13 @@ export default function App() {
   );
 
   return (
-    <div className="app" onClick={() => setNewMenu(false)}>
+    <div
+      className="app"
+      onClick={() => {
+        setNewMenu(false);
+        setMemberMenu(null);
+      }}
+    >
       <div className="body">
         <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-head" data-tauri-drag-region>
@@ -369,7 +395,15 @@ export default function App() {
           </div>
           <ul className="members">
             {others.map((m) => (
-              <li key={m.name} className="member-row">
+              <li
+                key={m.name}
+                className="member-row"
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                }}
+              >
                 {active === "room" && (
                   <input
                     type="checkbox"
@@ -540,6 +574,50 @@ export default function App() {
       )}
       {modal?.kind === "rename" && (
         <RenameModal current={modal.current} onRename={onRename} onClose={() => setModal(null)} />
+      )}
+      {modal?.kind === "leave" && (
+        <ConfirmModal
+          title={`Remove ${modal.name}?`}
+          body={`This removes ${modal.name} from ${team} and closes its pane if it's running. This can't be undone from here.`}
+          confirmLabel="Leave"
+          danger
+          onConfirm={() => onLeave(modal.name)}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {memberMenu && (
+        <div
+          className="ctx-menu"
+          style={{ left: memberMenu.x, top: memberMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              spawnMember(memberMenu.member);
+              setMemberMenu(null);
+            }}
+          >
+            Spawn
+          </button>
+          <button
+            onClick={() => {
+              setModal({ kind: "rename", current: memberMenu.member.name });
+              setMemberMenu(null);
+            }}
+          >
+            Rename…
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              setModal({ kind: "leave", name: memberMenu.member.name });
+              setMemberMenu(null);
+            }}
+          >
+            Leave
+          </button>
+        </div>
       )}
     </div>
   );

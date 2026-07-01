@@ -249,6 +249,12 @@ pub fn agmsg_rename(team: String, old_name: String, new_name: String) -> Result<
     run_script("rename.sh", &[&team, &old_name, &new_name]).map(|_| ())
 }
 
+/// Remove a member from a team (leave.sh; removes the team if it becomes empty).
+#[tauri::command]
+pub fn agmsg_leave(team: String, name: String) -> Result<(), String> {
+    run_script("leave.sh", &[&team, &name]).map(|_| ())
+}
+
 /// Poll the DB for new rows and emit each as an `agmsg-message` event so the
 /// team room updates live (and so spawned panes can be fed via stdin-inject).
 pub fn start_watcher(app: AppHandle) {

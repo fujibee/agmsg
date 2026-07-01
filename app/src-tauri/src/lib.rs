@@ -84,6 +84,7 @@ pub fn run() {
             agmsg::agmsg_send,
             agmsg::agmsg_join,
             agmsg::agmsg_rename,
+            agmsg::agmsg_leave,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
             agmsg::agmsg_spawnable_types,

@@ -124,6 +124,35 @@ select:focus {
   cursor: default;
 }
 
+/* Right-click context menu (member row: Spawn / Rename / Leave). */
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.ctx-menu button {
+  background: none;
+  border: none;
+  color: var(--fg);
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ctx-menu button:hover {
+  background: var(--bg);
+}
+.ctx-menu button.danger {
+  color: #f7768e;
+}
+
 /* Modals */
 .modal-backdrop {
   position: fixed;
@@ -211,6 +240,9 @@ select:focus {
   color: #0b0e14;
   border: none;
   font-weight: 600;
+}
+.modal-actions button.primary.danger {
+  background: #f7768e;
 }
 .modal-actions button:disabled {
   opacity: 0.4;
