@@ -31,6 +31,14 @@ type Pane = {
    *  app must NOT also inject (that would double-deliver). */
   native: boolean;
 };
+// A tab. Holds one or more panes, rendered as equal-width side-by-side
+// columns — a flat split for now, ahead of tmux-style nested layouts later.
+type Window = {
+  id: string;
+  paneIds: string[];
+  /** User-set tab name (Rename); falls back to the joined pane labels. */
+  customLabel?: string;
+};
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
@@ -50,6 +58,7 @@ export default function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
+  const [windows, setWindows] = useState<Window[]>([]);
   const [active, setActive] = useState<string>("room");
   const [target, setTarget] = useState<string>("");
   const [draft, setDraft] = useState<string>("");
@@ -59,17 +68,37 @@ export default function App() {
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
+  // Toggled from the native "View > Show User Chat" menu item.
+  const [showUserChat, setShowUserChat] = useState(true);
   // Team-room member filter: names the user has UN-checked (default: all shown).
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   // Right-click context menu over a member row: { member, x, y } while open.
   const [memberMenu, setMemberMenu] = useState<{ member: Member; x: number; y: number } | null>(
     null,
   );
+  // Right-click context menu over a pane's header: { paneId, windowId, x, y }.
+  const [paneMenu, setPaneMenu] = useState<{
+    paneId: string;
+    windowId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  // Right-click context menu over a tab: { windowId, x, y }.
+  const [windowMenu, setWindowMenu] = useState<{ windowId: string; x: number; y: number } | null>(
+    null,
+  );
+  // Which tab is currently showing an inline rename input, and its draft text.
+  const [renamingWindowId, setRenamingWindowId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameDraftRef = useRef("");
+  renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<Pane[]>([]);
   panesRef.current = panes;
+  const windowsRef = useRef<Window[]>([]);
+  windowsRef.current = windows;
 
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
@@ -127,6 +156,12 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // Native "View > Show User Chat" menu checkbox toggles the chat/composer panel.
+  useEffect(() => {
+    const p = listen<boolean>("toggle-user-chat", (e) => setShowUserChat(e.payload));
+    return () => void p.then((u) => u());
+  }, []);
+
   // Spawnable agent types + their CLIs, discovered from agmsg's type registry.
   useEffect(() => {
     invoke<AgentType[]>("agmsg_spawnable_types").then(setSpawnTypes).catch(() => {});
@@ -180,13 +215,30 @@ export default function App() {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
   }, [myThread.length]);
 
+  // Remove a pane from whichever window holds it. If that empties the window,
+  // drop the window too and fall back to the team room if it was active.
+  const detachPane = useCallback((paneId: string) => {
+    const owner = windowsRef.current.find((w) => w.paneIds.includes(paneId));
+    if (!owner) return;
+    const remaining = owner.paneIds.filter((id) => id !== paneId);
+    setWindows((prev) =>
+      prev
+        .map((w) => (w.id === owner.id ? { ...w, paneIds: remaining } : w))
+        .filter((w) => w.paneIds.length > 0),
+    );
+    if (remaining.length === 0) {
+      setActive((a) => (a === owner.id ? "room" : a));
+    }
+  }, []);
+
   const spawnMember = useCallback(
     (m: Member) => {
       // Don't spawn a second pane for a member that's already running — just
-      // focus the existing one (one live agent per identity).
+      // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
       if (existing) {
-        setActive(existing.id);
+        const w = windowsRef.current.find((win) => win.paneIds.includes(existing.id));
+        if (w) setActive(w.id);
         return;
       }
       const type = m.types.find((t) => cliFor.has(t));
@@ -205,15 +257,92 @@ export default function App() {
             native: true,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
+      const winId = `w-${seq.current++}`;
       setPanes((prev) => [...prev, pane]);
-      setActive(id);
+      setWindows((prev) => [...prev, { id: winId, paneIds: [id] }]);
+      setActive(winId);
     },
     [cmdName, cliFor],
   );
 
-  const closePane = useCallback((id: string) => {
-    setPanes((prev) => prev.filter((p) => p.id !== id));
-    setActive((a) => (a === id ? "room" : a));
+  // Close one pane (from its header's × or the context menu). If it was the
+  // last pane in its window, the window/tab disappears too.
+  const closeWindowPane = useCallback(
+    (paneId: string) => {
+      void invoke("pty_kill", { id: paneId });
+      setPanes((prev) => prev.filter((p) => p.id !== paneId));
+      detachPane(paneId);
+    },
+    [detachPane],
+  );
+
+  // Close a whole tab: kill every pane it holds.
+  const closeWindow = useCallback((windowId: string) => {
+    const w = windowsRef.current.find((x) => x.id === windowId);
+    if (!w) return;
+    for (const pid of w.paneIds) void invoke("pty_kill", { id: pid });
+    setPanes((prev) => prev.filter((p) => !w.paneIds.includes(p.id)));
+    setWindows((prev) => prev.filter((x) => x.id !== windowId));
+    setActive((a) => (a === windowId ? "room" : a));
+  }, []);
+
+  // Move a pane into another tab, adding it to that tab's side-by-side split
+  // (uncapped — N panes in a tab render as N equal columns). The pane's own
+  // DOM node never unmounts (see the stage render below), so this is a pure
+  // reassignment — the running process and its scrollback are untouched, same
+  // as a tmux pane move.
+  const movePaneToWindow = useCallback(
+    (paneId: string, targetWindowId: string) => {
+      const target = windowsRef.current.find((w) => w.id === targetWindowId);
+      if (!target || target.paneIds.includes(paneId)) return;
+      detachPane(paneId);
+      setWindows((prev) =>
+        prev.map((w) => (w.id === targetWindowId ? { ...w, paneIds: [...w.paneIds, paneId] } : w)),
+      );
+      setActive(targetWindowId);
+    },
+    [detachPane],
+  );
+
+  // Move a pane out into its own new tab (splits it off if it was sharing a
+  // window). Also just a reassignment — no respawn.
+  const moveToNewWindow = useCallback(
+    (paneId: string) => {
+      detachPane(paneId);
+      const winId = `w-${seq.current++}`;
+      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId] }]);
+      setActive(winId);
+    },
+    [detachPane],
+  );
+
+  // A tab's label: the user's custom name if set, else its panes' names joined.
+  const windowLabel = useCallback(
+    (w: Window) =>
+      w.customLabel ??
+      w.paneIds
+        .map((pid) => panes.find((p) => p.id === pid)?.label)
+        .filter(Boolean)
+        .join(" · "),
+    [panes],
+  );
+
+  const startRenameWindow = useCallback(
+    (windowId: string) => {
+      const w = windowsRef.current.find((x) => x.id === windowId);
+      if (!w) return;
+      setRenameDraft(windowLabel(w));
+      setRenamingWindowId(windowId);
+    },
+    [windowLabel],
+  );
+
+  const commitRenameWindow = useCallback((windowId: string) => {
+    setWindows((prev) => {
+      const trimmed = renameDraftRef.current.trim();
+      return prev.map((w) => (w.id === windowId ? { ...w, customLabel: trimmed || undefined } : w));
+    });
+    setRenamingWindowId(null);
   }, []);
 
   const send = useCallback(async () => {
@@ -280,12 +409,12 @@ export default function App() {
       if (pane) {
         await invoke("pty_kill", { id: pane.id });
         setPanes((prev) => prev.filter((p) => p.id !== pane.id));
-        setActive((a) => (a === pane.id ? "room" : a));
+        detachPane(pane.id);
       }
       await invoke("agmsg_leave", { team, name });
       await loadMembers(team);
     },
-    [team, loadMembers],
+    [team, loadMembers, detachPane],
   );
 
   const browseDir = useCallback(async (current: string): Promise<string | null> => {
@@ -341,6 +470,8 @@ export default function App() {
       onClick={() => {
         setNewMenu(false);
         setMemberMenu(null);
+        setPaneMenu(null);
+        setWindowMenu(null);
       }}
     >
       <div className="body">
@@ -453,12 +584,35 @@ export default function App() {
                 # team room
               </button>
             </span>
-            {panes.map((p) => (
-              <span key={p.id} className={active === p.id ? "tab active" : "tab"}>
-                <button className="tab-label" onClick={() => setActive(p.id)}>
-                  ▸ {p.label}
-                </button>
-                <button className="tab-close" onClick={() => closePane(p.id)}>
+            {windows.map((w) => (
+              <span
+                key={w.id}
+                className={active === w.id ? "tab active" : "tab"}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setWindowMenu({ windowId: w.id, x: e.clientX, y: e.clientY });
+                }}
+              >
+                {renamingWindowId === w.id ? (
+                  <input
+                    className="tab-rename-input"
+                    autoFocus
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onBlur={() => commitRenameWindow(w.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRenameWindow(w.id);
+                      if (e.key === "Escape") setRenamingWindowId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <button className="tab-label" onClick={() => setActive(w.id)}>
+                    ▸ {windowLabel(w)}
+                  </button>
+                )}
+                <button className="tab-close" onClick={() => closeWindow(w.id)}>
                   ×
                 </button>
               </span>
@@ -485,20 +639,60 @@ export default function App() {
               {messages.length === 0 && <div className="empty">No messages yet.</div>}
             </div>
 
-            {/* Inactive panes use visibility:hidden (not display:none) so they
-                keep their dimensions and re-fit with the window — no jarring
-                reflow when you switch back to them. */}
-            {panes.map((p) => (
-              <div key={p.id} className={active === p.id ? "pane-host" : "pane-host inactive"}>
-                <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
-              </div>
-            ))}
+            {/* Every pane is a permanent, flat child of .stage — its window only
+                decides WHERE it's positioned (left/width %), never whether it's
+                mounted. That keeps each pane's DOM node (and TerminalPane's
+                xterm + PTY listeners) alive across a Move-to, so the running
+                process and its scrollback survive the move — the same
+                left/right pane split tmux gives you, not a respawn.
+                Inactive-window panes go visibility:hidden but stay laid out,
+                so a resize doesn't leave them stale for next time. */}
+            {panes.map((p) => {
+              const win = windows.find((w) => w.paneIds.includes(p.id));
+              if (!win) return null;
+              const idx = win.paneIds.indexOf(p.id);
+              const count = win.paneIds.length;
+              const widthPct = 100 / count;
+              const isActiveWindow = active === win.id;
+              return (
+                <div
+                  key={p.id}
+                  className={isActiveWindow ? "pane-cell" : "pane-cell inactive"}
+                  style={{ left: `${idx * widthPct}%`, width: `${widthPct}%` }}
+                >
+                  <div
+                    className="pane-header"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setPaneMenu({ paneId: p.id, windowId: win.id, x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    <span className="pane-header-label">{p.label}</span>
+                    <button
+                      className="pane-header-close"
+                      onClick={() => closeWindowPane(p.id)}
+                      title="close pane"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
+                </div>
+              );
+            })}
           </section>
 
-          <div className="divider-h" onMouseDown={startChatDrag} />
+          {showUserChat && <div className="divider-h" onMouseDown={startChatDrag} />}
 
-          {/* App-user chat: the human's own send/receive thread + composer. */}
-          <div className="appuser-chat" ref={chatRef} style={{ height: chatHeight }}>
+          {/* App-user chat: the human's own send/receive thread + composer.
+              Hidden via View > Show User Chat (native menu checkbox). */}
+          <div
+            className="appuser-chat"
+            ref={chatRef}
+            style={{ height: chatHeight }}
+            hidden={!showUserChat}
+          >
             {myThread.map((m) => (
               <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
                 <span className="chat-time">{m.created_at.slice(11, 19)}</span>
@@ -521,7 +715,7 @@ export default function App() {
             )}
           </div>
 
-          <footer className="composer">
+          <footer className="composer" hidden={!showUserChat}>
             {appUser ? (
               <>
                 <span className="as">
@@ -616,6 +810,80 @@ export default function App() {
             }}
           >
             Leave
+          </button>
+        </div>
+      )}
+
+      {paneMenu &&
+        (() => {
+          const sourceWindow = windows.find((w) => w.id === paneMenu.windowId);
+          const otherWindows = windows.filter((w) => w.id !== paneMenu.windowId);
+          // Only offer "split off into a new tab" when this pane is currently
+          // sharing its window — if it's already alone, a new tab would be a no-op.
+          const canSplitOff = (sourceWindow?.paneIds.length ?? 1) > 1;
+          return (
+            <div
+              className="ctx-menu"
+              style={{ left: paneMenu.x, top: paneMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => {
+                  closeWindowPane(paneMenu.paneId);
+                  setPaneMenu(null);
+                }}
+              >
+                Close
+              </button>
+              <div className="submenu-trigger">
+                <span className="submenu-label">Move to ▸</span>
+                <div className="submenu">
+                  {canSplitOff && (
+                    <button
+                      onClick={() => {
+                        moveToNewWindow(paneMenu.paneId);
+                        setPaneMenu(null);
+                      }}
+                    >
+                      New tab
+                    </button>
+                  )}
+                  {otherWindows.length === 0 && !canSplitOff && (
+                    <span className="submenu-empty">No other tabs</span>
+                  )}
+                  {otherWindows.map((w) => {
+                    const label = windowLabel(w);
+                    return (
+                      <button
+                        key={w.id}
+                        onClick={() => {
+                          movePaneToWindow(paneMenu.paneId, w.id);
+                          setPaneMenu(null);
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+      {windowMenu && (
+        <div
+          className="ctx-menu"
+          style={{ left: windowMenu.x, top: windowMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              startRenameWindow(windowMenu.windowId);
+              setWindowMenu(null);
+            }}
+          >
+            Rename…
           </button>
         </div>
       )}
