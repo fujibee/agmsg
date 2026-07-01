@@ -206,3 +206,42 @@ write_node_launcher_fixtures() {
   ! echo "$output" | grep -q "is not supported by spawn yet"
   ! echo "$output" | grep -q "unknown agent type"
 }
+
+@test "spawn: the node-launcher path also splices spawn-options tokens (before --initial-input) (#273)" {
+  write_node_launcher_fixtures
+  local proj="$BATS_TEST_TMPDIR/nodeproj"
+  mkdir -p "$proj"
+  bash "$SCRIPTS/join.sh" nodeteam existing claude-code "$proj"
+
+  local stub_bin="$BATS_TEST_TMPDIR/stub-bin"
+  mkdir -p "$stub_bin"
+  local capture="$BATS_TEST_TMPDIR/launch-capture.txt"
+  cat > "$stub_bin/record.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$capture"
+EOF
+  chmod +x "$stub_bin/record.sh"
+
+  local opts="$BATS_TEST_TMPDIR/spawn_options.yaml"
+  cat > "$opts" <<'YAML'
+nodetype:
+  --extra-flag: extra-value
+YAML
+
+  run env -u TMUX AGMSG_TERMINAL="$stub_bin/record.sh {cmd}" \
+    AGMSG_SPAWN_OPTIONS_FILE="$opts" \
+    bash "$SCRIPTS/spawn.sh" nodetype nodeagent --project "$proj" --no-wait
+  [ "$status" -eq 0 ]
+  local boot; boot="$(cat "$capture")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"nodetype-launcher.mjs"* ]]
+  [[ "$output" == *"--extra-flag"* ]]
+  [[ "$output" == *"extra-value"* ]]
+  # spawn-options tokens land before --initial-input, matching the direct-CLI
+  # path's "before the actas prompt" placement.
+  local before_flag after_flag before_input
+  before_flag=$(grep -n -- "--extra-flag" "$boot" | head -1 | cut -d: -f1)
+  before_input=$(grep -n -- "--initial-input" "$boot" | head -1 | cut -d: -f1)
+  [ "$before_flag" -lt "$before_input" ]
+}
