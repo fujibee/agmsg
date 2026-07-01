@@ -64,7 +64,7 @@ write_node_launcher_fixtures() {
   [ "$status" -ne 0 ]
 }
 
-@test "type-registry: spawnable set is exactly claude-code, codex, grok-build and hermes" {
+@test "type-registry: spawnable set is exactly all nine built-ins (#277)" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'
      while IFS= read -r t; do
@@ -72,7 +72,7 @@ write_node_launcher_fixtures() {
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "claude-code,codex,grok-build,hermes" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,hermes,opencode" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
