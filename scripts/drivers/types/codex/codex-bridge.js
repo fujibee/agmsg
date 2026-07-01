@@ -909,12 +909,28 @@ class CodexBridge {
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
     }
     if (this.threadId) {
-      const response = await this.client.request("thread/resume", {
-        threadId: this.threadId,
-        cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
-        excludeTurns: true,
-      });
+      let response;
+      try {
+        response = await this.client.request("thread/resume", {
+          threadId: this.threadId,
+          cwd: this.opts.project,
+          runtimeWorkspaceRoots: [this.opts.project],
+          excludeTurns: true,
+        });
+      } catch (err) {
+        // Codex 0.142+'s --remote sessions may not create a rollout, which
+        // makes the thread/resume request itself fail outright. turn/start
+        // only needs threadId, so keep the bridge alive by falling back to
+        // the idle state instead of dying. This catch covers only the
+        // request -- the "did not return the requested thread id" check
+        // below is a distinct failure (a resume that succeeded but returned
+        // the wrong thread) and should still die() as before, not be
+        // silently swallowed by this fallback.
+        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        this.threadIdle = true;
+        this.turnActive = false;
+        return;
+      }
       if (!response.thread || response.thread.id !== this.threadId) {
         die("thread/resume did not return the requested thread id");
       }
