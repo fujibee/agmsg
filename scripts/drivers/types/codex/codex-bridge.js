@@ -58,6 +58,14 @@ function die(message) {
   process.exit(1);
 }
 
+function toPosixPath(p) {
+  if (typeof p !== "string" || p.length === 0) return p;
+  const normalized = p.replace(/\\/g, "/");
+  const match = /^([A-Za-z]):\//.exec(normalized);
+  if (!match) return normalized;
+  return `/${match[1].toLowerCase()}${normalized.slice(2)}`;
+}
+
 function parseArgs(argv) {
   const opts = {
     type: "codex",
@@ -156,7 +164,7 @@ function runScript(script, args) {
 }
 
 function resolveIdentity(opts) {
-  const result = runScript("identities.sh", [opts.project, opts.type]);
+  const result = runScript("identities.sh", [toPosixPath(opts.project), opts.type]);
   if (result.status !== 0) {
     die(`identity resolution failed: ${(result.stderr || result.stdout).trim()}`);
   }
@@ -1209,4 +1217,8 @@ async function main() {
   await bridge.run();
 }
 
-main().catch((error) => die(error.message));
+if (require.main === module) {
+  main().catch((error) => die(error.message));
+}
+
+module.exports = { toPosixPath };

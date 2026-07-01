@@ -61,6 +61,21 @@ EOF
   [[ "$output" =~ "Beta Codex app-server bridge" ]]
 }
 
+@test "codex-bridge: toPosixPath maps Windows drive paths to POSIX paths" {
+  run node -e 'const { toPosixPath } = require(process.argv[1]); const expected = "/c/Users/me/OneDrive/codex-work"; if (toPosixPath(String.raw`C:\Users\me\OneDrive\codex-work`) !== expected) process.exit(1); if (toPosixPath("C:/Users/me/OneDrive/codex-work") !== expected) process.exit(1);' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: toPosixPath leaves POSIX paths unchanged" {
+  run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath("/c/Users/me/OneDrive/codex-work") !== "/c/Users/me/OneDrive/codex-work") process.exit(1); if (toPosixPath("/home/me/x") !== "/home/me/x") process.exit(1);' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: toPosixPath normalizes backslashes without a drive letter" {
+  run node -e 'const { toPosixPath } = require(process.argv[1]); if (toPosixPath(String.raw`relative\path\without\drive`) !== "relative/path/without/drive") process.exit(1);' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
 @test "codex-bridge: resolve-only prints the selected identity" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
