@@ -60,6 +60,8 @@ export default function App() {
   const [cmdName, setCmdName] = useState("agmsg");
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
+  // Team-room member filter: names the user has UN-checked (default: all shown).
+  const [deselected, setDeselected] = useState<Set<string>>(new Set());
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -76,15 +78,34 @@ export default function App() {
   // The app user's own send/receive thread.
   const myThread = messages.filter((m) => m.from === appUser || m.to === appUser);
 
+  // Team-room member filter: keep a message when either party is a checked
+  // member. Names not in the roster (e.g. the app-user) ride on their counterpart.
+  const otherNames = new Set(others.map((m) => m.name));
+  const roomMessages = messages.filter(
+    (m) =>
+      (otherNames.has(m.from) && !deselected.has(m.from)) ||
+      (otherNames.has(m.to) && !deselected.has(m.to)),
+  );
+
   // Cozy grouping: collapse runs of consecutive messages with the same from→to
   // into one header + stacked bodies (Slack/Discord style), so short bursts stay
   // light while long messages still line up.
   const groups: { key: number; from: string; to: string; items: Message[] }[] = [];
-  for (const m of messages) {
+  for (const m of roomMessages) {
     const last = groups[groups.length - 1];
     if (last && last.from === m.from && last.to === m.to) last.items.push(m);
     else groups.push({ key: m.id, from: m.from, to: m.to, items: [m] });
   }
+
+  const toggleMember = (name: string) =>
+    setDeselected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const selectAllMembers = () => setDeselected(new Set());
+  const selectNoMembers = () => setDeselected(new Set(others.map((m) => m.name)));
 
   const loadTeams = useCallback(async () => {
     const t = await invoke<string[]>("agmsg_teams");
@@ -116,6 +137,7 @@ export default function App() {
   // On team change: load members + history. Prompt to add an app-user if missing.
   useEffect(() => {
     if (!team) return;
+    setDeselected(new Set()); // reset the room filter when switching teams
     invoke<Message[]>("agmsg_messages", { team, limit: 200 })
       .then(setMessages)
       .catch(console.error);
@@ -323,10 +345,29 @@ export default function App() {
               ))}
             </select>
           </div>
-          <div className="sidebar-title">Members</div>
+          <div className="sidebar-title">
+            <span>Members</span>
+            {active === "room" && others.length > 0 && (
+              <span className="filter-actions">
+                <button onClick={selectAllMembers}>all</button>
+                <span>·</span>
+                <button onClick={selectNoMembers}>none</button>
+              </span>
+            )}
+          </div>
           <ul className="members">
             {others.map((m) => (
-              <li key={m.name}>
+              <li key={m.name} className="member-row">
+                {active === "room" && (
+                  <input
+                    type="checkbox"
+                    className="member-check"
+                    title="show in team room"
+                    checked={!deselected.has(m.name)}
+                    onChange={() => toggleMember(m.name)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                )}
                 <button className="member" onClick={() => spawnMember(m)} title="spawn in a PTY pane">
                   <span className="member-name">{m.name}</span>
                   <span className="member-types">{m.types.join(", ") || "—"}</span>
