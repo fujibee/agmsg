@@ -240,10 +240,30 @@ export default function App() {
       // Only inject into NON-native panes; a native (actas-booted) agent runs
       // its own agmsg monitor and would otherwise receive the message twice.
       const pane = panesRef.current.find((pn) => pn.label === e.payload.to && !pn.native);
-      if (pane) void invoke("pty_inject", { id: pane.id, text: e.payload.body });
+      if (pane) {
+        // Inject a kickoff notice, not the raw message body verbatim. The
+        // real agmsg Monitor (watch.sh) never types a message's contents
+        // into an agent — it hands over a structured "<from> → <to> | <body>"
+        // event and lets the agent decide what to do, typically by checking
+        // its own inbox. Typing the raw body instead loses who it's from
+        // and — worse — feeds arbitrary user text straight into a TUI's
+        // input box, where line breaks/long text/special characters can
+        // break the keystroke replay (that's what caused the "types but
+        // doesn't submit" bug this replaces).
+        //
+        // A one-line preview of the body IS included (flattened + capped) —
+        // knowing at a glance what the message is about, not just that one
+        // arrived, is worth the small re-introduction of body content; the
+        // flattening/cap keeps it out of "arbitrary text breaks the TUI"
+        // territory since it can no longer contain newlines or run long.
+        const flat = e.payload.body.replace(/\s+/g, " ").trim();
+        const preview = flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
+        const kickoff = `[agmsg] ${e.payload.from}: "${preview}" — run /${cmdName} to check it.`;
+        void invoke("pty_inject", { id: pane.id, text: kickoff });
+      }
     });
     return () => void p.then((u) => u());
-  }, [team]);
+  }, [team, cmdName]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
   // loaded message and prepend it, restoring the scroll position afterward
