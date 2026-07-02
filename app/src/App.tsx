@@ -70,6 +70,11 @@ type Modal =
 export const APP_USER_TYPE = "agmsg-app";
 // Team-room history page size — the initial load, and each scroll-up "load more".
 const ROOM_PAGE_SIZE = 30;
+// Persists which team was selected across restarts. Window/pane state is
+// deliberately NOT persisted (yet) — just landing on the same team is
+// enough for now; panes always start fresh each launch anyway (they're
+// live PTYs, not something a restart could restore even if we tried).
+const LAST_TEAM_KEY = "agmsg-app-last-team";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
@@ -281,7 +286,11 @@ export default function App() {
     loadTeams()
       .then((loadedTeams) => {
         if (loadedTeams.length === 0) setModal({ kind: "team", firstRun: true });
-        else setTeam((cur) => cur || loadedTeams[0]);
+        else {
+          const lastTeam = localStorage.getItem(LAST_TEAM_KEY);
+          const fallback = lastTeam && loadedTeams.includes(lastTeam) ? lastTeam : loadedTeams[0];
+          setTeam((cur) => cur || fallback);
+        }
       })
       .catch((err) => {
         console.error(err);
@@ -297,6 +306,11 @@ export default function App() {
   // pane, still technically "active" for one frame, would flash visible.
   useLayoutEffect(() => {
     if (team) setActive("room");
+  }, [team]);
+
+  // Remember the selected team across restarts (see LAST_TEAM_KEY above).
+  useEffect(() => {
+    if (team) localStorage.setItem(LAST_TEAM_KEY, team);
   }, [team]);
 
   // On team change: load members + the most recent history page. Prompt to

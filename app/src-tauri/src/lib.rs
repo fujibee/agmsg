@@ -30,6 +30,32 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.5;
 const ZOOM_MAX: f64 = 3.0;
 
+/// Where the zoom level survives a restart — the only bit of window state
+/// persisted so far (see App.tsx's LAST_TEAM_KEY for the equivalent on the
+/// frontend side, which owns everything else). A flat `{"zoom": 1.2}` file
+/// rather than reaching for a config crate — one f64, not worth it yet.
+fn zoom_config_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|dir| dir.join("zoom.json"))
+}
+
+fn load_zoom(app: &AppHandle) -> f64 {
+    (|| -> Option<f64> {
+        let raw = std::fs::read_to_string(zoom_config_path(app)?).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        json.get("zoom")?.as_f64()
+    })()
+    .unwrap_or(1.0)
+    .clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+fn save_zoom(app: &AppHandle, zoom: f64) {
+    let Some(path) = zoom_config_path(app) else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, serde_json::json!({ "zoom": zoom }).to_string());
+}
+
 /// Build the application menu in `lang`. macOS derives the default menu's
 /// About/Hide/Quit labels from the crate name (which can't contain a space),
 /// so we define them explicitly to read "agmsg app" and give About the real
@@ -249,6 +275,7 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_zoom(*zoom);
                 }
+                save_zoom(app, *zoom);
             } else if id == CHECK_UPDATES_ID {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -258,6 +285,14 @@ pub fn run() {
         })
         .manage(PtyManager::default())
         .setup(|app| {
+            // Restore the zoom level saved on the last quit/change — .manage()
+            // above only had 1.0 to work with (no AppHandle yet to read the
+            // config file at that point).
+            let zoom = load_zoom(app.handle());
+            *app.state::<ZoomLevel>().0.lock().unwrap() = zoom;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_zoom(zoom);
+            }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
             // Quiet startup check — only surfaces a dialog when an update is
