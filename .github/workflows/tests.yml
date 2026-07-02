@@ -16,9 +16,10 @@ name: tests
 # reported; on docs-only PRs it just reports green in seconds without running
 # the suite.
 #
-# What counts as "docs-only": the docs tree (`docs/**`), `llms.txt` /
-# `llms-full.txt`, and the top-level prose docs (README, CHANGELOG, etc).
-# SKILL.md is deliberately EXCLUDED — the suite asserts on it
+# What counts as "docs-only": the docs tree (`docs/**`), the marketing site
+# (`site/**` — a standalone Astro app with no bearing on the bash suite),
+# `llms.txt` / `llms-full.txt`, and the top-level prose docs (README,
+# CHANGELOG, etc). SKILL.md is deliberately EXCLUDED — the suite asserts on it
 # (tests/test_install.bats checks it has no unsubstituted placeholder), so a
 # SKILL.md change must run the suite. Anything not on the allowlist runs it too.
 
@@ -63,6 +64,7 @@ jobs:
             [ -z "$f" ] && continue
             case "$f" in
               docs/*) ;;
+              site/*) ;;
               llms.txt|llms-full.txt) ;;
               README.md|CHANGELOG.md|CONTRIBUTING.md|PRIVACY.md|ARCHITECTURE.md|RELEASING.md|LICENSE) ;;
               # NOTE: SKILL.md is intentionally not here — the suite tests it.
