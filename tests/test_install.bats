@@ -481,6 +481,16 @@ PY
   grep -q "~/.agents/skills/agmsg/scripts" "$hermes_skill"
 }
 
+@test "install: Hermes skill no longer advertises 'spawn hermes' as a valid example (#279)" {
+  mkdir -p "$FAKE_HOME/.hermes"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local hermes_skill="$FAKE_HOME/.hermes/skills/agmsg/SKILL.md"
+  [ -f "$hermes_skill" ]
+  ! grep -q "spawn hermes reviewer" "$hermes_skill"
+  ! grep -q 'must be `claude-code`, `codex`, or `hermes`' "$hermes_skill"
+  grep -q "hermes.*is not spawnable\|hermes.*not spawnable" "$hermes_skill"
+}
+
 @test "install: custom command name is substituted in Hermes skill" {
   mkdir -p "$FAKE_HOME/.hermes"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd msg
