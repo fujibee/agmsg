@@ -654,7 +654,7 @@ export default function App() {
             </select>
           </div>
           <div className="sidebar-title">
-            <span>Members</span>
+            <span>Agents</span>
             {active === "room" && others.length > 0 && (
               <span className="filter-actions">
                 <button onClick={selectAllMembers}>all</button>
