@@ -21,6 +21,8 @@ shift 2
 
 ACTIVE_NAME=""
 TEAM_FILTER=""
+OWNER_ID=""
+CLAIM_MODE=""
 TIMEOUT="${AGMSG_WATCH_ONCE_TIMEOUT:-300}"
 INTERVAL="${AGMSG_WATCH_ONCE_INTERVAL:-}"
 
@@ -28,10 +30,12 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --name) ACTIVE_NAME="${2:?--name needs an agent name}"; shift 2 ;;
     --team) TEAM_FILTER="${2:?--team needs a team name}"; shift 2 ;;
+    --owner) OWNER_ID="${2:?--owner needs an owner id}"; shift 2 ;;
+    --claim) CLAIM_MODE="claim"; shift ;;
     --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
     --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
     -h|--help)
-      echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--timeout <sec>] [--interval <sec>]"
+      echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--owner <id>] [--claim] [--timeout <sec>] [--interval <sec>]"
       exit 0
       ;;
     *) echo "watch-once: unknown option: $1" >&2; exit 1 ;;
@@ -58,7 +62,7 @@ source "$SCRIPT_DIR/../../../lib/subscription.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 DB="$(agmsg_db_path)"
 
-PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "" "$ACTIVE_NAME")" || exit 1
+PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "$OWNER_ID" "$ACTIVE_NAME" "$CLAIM_MODE")" || exit 1
 if [ -n "$TEAM_FILTER" ]; then
   PAIRS=$(printf '%s\n' "$PAIRS" | awk -v t="$TEAM_FILTER" -F'\t' 'NF >= 2 && $1 == t')
 fi
