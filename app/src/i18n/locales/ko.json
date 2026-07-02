@@ -3,7 +3,8 @@
     "cancel": "취소",
     "browse": "찾아보기…",
     "nameLabel": "이름",
-    "projectDirLabel": "프로젝트 디렉터리"
+    "projectDirLabel": "프로젝트 디렉터리",
+    "close": "닫기"
   },
   "startupError": {
     "loadTeamsFailed": "agmsg 팀을 불러올 수 없습니다: {{error}}. ~/.agents/skills/agmsg 경로에 agmsg가 설치되어 있나요?",
@@ -101,6 +102,9 @@
     },
     "confirm": {
       "defaultLabel": "확인"
+    },
+    "settings": {
+      "title": "설정"
     }
   },
   "ctxMenu": {
@@ -127,5 +131,8 @@
   },
   "language": {
     "label": "언어"
+  },
+  "settings": {
+    "title": "설정"
   }
 }

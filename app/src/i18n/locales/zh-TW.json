@@ -3,7 +3,8 @@
     "cancel": "取消",
     "browse": "瀏覽…",
     "nameLabel": "名稱",
-    "projectDirLabel": "專案目錄"
+    "projectDirLabel": "專案目錄",
+    "close": "關閉"
   },
   "startupError": {
     "loadTeamsFailed": "無法載入 agmsg 團隊：{{error}}。agmsg 是否已安裝於 ~/.agents/skills/agmsg？",
@@ -101,6 +102,9 @@
     },
     "confirm": {
       "defaultLabel": "確認"
+    },
+    "settings": {
+      "title": "設定"
     }
   },
   "ctxMenu": {
@@ -127,5 +131,8 @@
   },
   "language": {
     "label": "語言"
+  },
+  "settings": {
+    "title": "設定"
   }
 }

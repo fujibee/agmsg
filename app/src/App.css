@@ -539,6 +539,22 @@ body.resizing-row {
   flex-shrink: 0;
   background: linear-gradient(135deg, var(--accent), #5566c4);
 }
+.settings-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+.settings-btn:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
 .su-meta {
   display: flex;
   flex-direction: column;

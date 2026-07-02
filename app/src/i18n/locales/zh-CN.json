@@ -3,7 +3,8 @@
     "cancel": "取消",
     "browse": "浏览…",
     "nameLabel": "名称",
-    "projectDirLabel": "项目目录"
+    "projectDirLabel": "项目目录",
+    "close": "关闭"
   },
   "startupError": {
     "loadTeamsFailed": "无法加载 agmsg 团队：{{error}}。是否已在 ~/.agents/skills/agmsg 安装 agmsg？",
@@ -101,6 +102,9 @@
     },
     "confirm": {
       "defaultLabel": "确认"
+    },
+    "settings": {
+      "title": "设置"
     }
   },
   "ctxMenu": {
@@ -127,5 +131,8 @@
   },
   "language": {
     "label": "语言"
+  },
+  "settings": {
+    "title": "设置"
   }
 }

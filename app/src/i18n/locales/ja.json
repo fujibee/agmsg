@@ -3,7 +3,8 @@
     "cancel": "キャンセル",
     "browse": "参照…",
     "nameLabel": "名前",
-    "projectDirLabel": "プロジェクトディレクトリ"
+    "projectDirLabel": "プロジェクトディレクトリ",
+    "close": "閉じる"
   },
   "startupError": {
     "loadTeamsFailed": "agmsgのチームを読み込めませんでした: {{error}}。agmsgは ~/.agents/skills/agmsg にインストールされていますか?",
@@ -101,6 +102,9 @@
     },
     "confirm": {
       "defaultLabel": "確認"
+    },
+    "settings": {
+      "title": "設定"
     }
   },
   "ctxMenu": {
@@ -127,5 +131,8 @@
   },
   "language": {
     "label": "言語"
+  },
+  "settings": {
+    "title": "設定"
   }
 }

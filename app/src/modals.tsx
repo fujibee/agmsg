@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { SUPPORTED_LANGUAGES } from "./i18n";
 
 type BrowseDir = (current: string) => Promise<string | null>;
 
@@ -357,6 +358,35 @@ export function ConfirmModal(props: {
           }}
         >
           {props.confirmLabel ?? t("modal.confirm.defaultLabel")}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// The only setting today is language, so this is a single dropdown rather
+// than a full preferences panel — expand into sections here as more
+// settings show up instead of adding separate modals per setting.
+export function SettingsModal(props: { onClose: () => void }) {
+  const { t, i18n } = useTranslation();
+  return (
+    <Modal title={t("modal.settings.title")} onClose={props.onClose}>
+      <label>
+        {t("language.label")}
+        <select
+          value={i18n.resolvedLanguage}
+          onChange={(e) => void i18n.changeLanguage(e.target.value)}
+        >
+          {Object.entries(SUPPORTED_LANGUAGES).map(([code, label]) => (
+            <option key={code} value={code}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="modal-actions">
+        <button type="button" className="primary" onClick={props.onClose}>
+          {t("common.close")}
         </button>
       </div>
     </Modal>

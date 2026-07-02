@@ -4,13 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { TerminalPane } from "./TerminalPane";
-import { LanguageSwitcher } from "./LanguageSwitcher";
 import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
   NewTeamModal,
   RenameModal,
+  SettingsModal,
 } from "./modals";
 import "./App.css";
 
@@ -49,6 +49,7 @@ type Modal =
   | { kind: "appuser" }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
+  | { kind: "settings" }
   | null;
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
@@ -674,7 +675,6 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <LanguageSwitcher />
           </div>
           <div className="sidebar-title">
             <span>{t("sidebar.title")}</span>
@@ -737,6 +737,16 @@ export default function App() {
                 <span className="su-name">{appUser}</span>
                 <span className="su-team">{team}</span>
               </div>
+              <button
+                className="settings-btn"
+                title={t("settings.title")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setModal({ kind: "settings" });
+                }}
+              >
+                ⚙
+              </button>
             </div>
           )}
         </aside>
@@ -968,6 +978,7 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
+      {modal?.kind === "settings" && <SettingsModal onClose={() => setModal(null)} />}
 
       {memberMenu &&
         (() => {

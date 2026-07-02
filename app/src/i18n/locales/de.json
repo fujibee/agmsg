@@ -3,7 +3,8 @@
     "cancel": "Abbrechen",
     "browse": "Durchsuchen…",
     "nameLabel": "Name",
-    "projectDirLabel": "Projektverzeichnis"
+    "projectDirLabel": "Projektverzeichnis",
+    "close": "Schließen"
   },
   "startupError": {
     "loadTeamsFailed": "agmsg-Teams konnten nicht geladen werden: {{error}}. Ist agmsg unter ~/.agents/skills/agmsg installiert?",
@@ -101,6 +102,9 @@
     },
     "confirm": {
       "defaultLabel": "Bestätigen"
+    },
+    "settings": {
+      "title": "Einstellungen"
     }
   },
   "ctxMenu": {
@@ -127,5 +131,8 @@
   },
   "language": {
     "label": "Sprache"
+  },
+  "settings": {
+    "title": "Einstellungen"
   }
 }

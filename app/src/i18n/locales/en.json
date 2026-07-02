@@ -1,9 +1,13 @@
 {
   "common": {
     "cancel": "Cancel",
+    "close": "Close",
     "browse": "Browse…",
     "nameLabel": "Name",
     "projectDirLabel": "Project dir"
+  },
+  "settings": {
+    "title": "Settings"
   },
   "startupError": {
     "loadTeamsFailed": "Couldn't load agmsg teams: {{error}}. Is agmsg installed at ~/.agents/skills/agmsg?",
@@ -101,6 +105,9 @@
     },
     "confirm": {
       "defaultLabel": "Confirm"
+    },
+    "settings": {
+      "title": "Settings"
     }
   },
   "ctxMenu": {
