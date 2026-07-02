@@ -15,13 +15,16 @@ set -euo pipefail
 
 PROJECT_PATH="${1:?Usage: identities.sh <project_path> <agent_type>}"
 AGENT_TYPE="${2:?Missing agent_type}"
-PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # resolve-project.sh requires SKILL_DIR
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 # shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 
 [ -d "$TEAMS_DIR" ] || exit 0
 
@@ -51,7 +54,7 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
     )
     SELECT DISTINCT '$TEAM_SQL' AS team, name
     FROM agents, json_each(agents.registrations) AS r
-    WHERE json_extract(r.value, '\$.project') = '$PROJECT_SQL'
+    WHERE json_extract(r.value, '\$.project') IN ($PROJECT_SQL_IN)
       AND json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL'
     ORDER BY team, name;
   " | tr -d '\r'
