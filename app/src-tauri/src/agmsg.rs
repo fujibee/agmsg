@@ -192,12 +192,17 @@ struct ApiMember {
 }
 
 /// Wire shape of `api.sh get teams <team> messages` — matches the
-/// `message_sent` event schema ADR 0003 (design/storage-axis) defines for
-/// the future `storage_history`, so this struct (and the `at` rename) is
-/// what will need to keep working once that lands, not what needs to change.
+/// `message_sent` event schema the (in-progress, unmerged as of this
+/// writing) storage-axis design defines for a future `storage_history`, so
+/// this struct (and the `at` rename) is what will need to keep working once
+/// that lands, not what needs to change. `id` is a JSON *string* on the
+/// wire — api.sh CASTs it, since the driver interface treats every message
+/// id as opaque (a legacy sqlite int today, potentially a UUIDv7 or
+/// Redis-stream-id tomorrow) — parsed back to `i64` below for `Message`,
+/// which is a Tauri-IPC-only contract with the frontend, not agmsg's.
 #[derive(Deserialize)]
 struct ApiMessage {
-    id: i64,
+    id: String,
     team: String,
     from: String,
     to: String,
@@ -206,16 +211,22 @@ struct ApiMessage {
     created_at: String,
 }
 
+/// Wire shape of `api.sh get teams` — one `{"name": "..."}` object per line.
+#[derive(Deserialize)]
+struct ApiTeam {
+    name: String,
+}
+
 /// List team names. Shells out to api.sh rather than reading teams/
 /// directly — see scripts/api.sh's own header for why this exists
-/// (storage abstraction / non-bash consumers) and docs/adr/0003 on
-/// design/storage-axis for why the team registry itself stays file-based
-/// there (out of scope for that axis) rather than becoming a driver.
+/// (storage abstraction / non-bash consumers); the team registry itself
+/// stays file-based behind api.sh (out of scope for the storage axis)
+/// rather than becoming a driver.
 #[tauri::command]
 pub fn agmsg_teams() -> Result<Vec<String>, String> {
     let raw = run_script("api.sh", &["get", "teams"])?;
     let mut teams: Vec<String> =
-        raw.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
+        parse_jsonl::<ApiTeam>(&raw).into_iter().map(|t| t.name).collect();
     teams.sort();
     Ok(teams)
 }
@@ -260,14 +271,14 @@ pub fn agmsg_messages(
     let raw = run_script("api.sh", &args)?;
     Ok(parse_jsonl::<ApiMessage>(&raw)
         .into_iter()
-        .map(|m| Message {
-            id: m.id,
+        .filter_map(|m| Some(Message {
+            id: m.id.parse().ok()?,
             team: m.team,
             from: m.from,
             to: m.to,
             body: m.body,
             created_at: m.created_at,
-        })
+        }))
         .collect())
 }
 
