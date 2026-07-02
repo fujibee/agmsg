@@ -196,6 +196,7 @@ export default function App() {
     !imeComposingRef.current &&
     Date.now() - imeEndedAtRef.current > 150;
   const chatRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLInputElement>(null);
   const panesRef = useRef<Pane[]>([]);
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
@@ -1001,12 +1002,17 @@ export default function App() {
           {showUserChat && <div className="divider-h" onMouseDown={startChatDrag} />}
 
           {/* App-user chat: the human's own send/receive thread + composer.
-              Hidden via View > Show User Chat (native menu checkbox). */}
+              Hidden via View > Show User Chat (native menu checkbox). Clicking
+              the history jumps focus to the composer input below — the
+              history itself has nothing to focus (nothing to type into), so
+              without this the border-on-focus feedback here was invisible in
+              normal use. */}
           <div
             className="appuser-chat"
             ref={chatRef}
             style={{ height: chatHeight }}
             hidden={!showUserChat}
+            onClick={() => composerInputRef.current?.focus()}
           >
             {myThread.map((m) => (
               <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
@@ -1047,6 +1053,7 @@ export default function App() {
                   ))}
                 </select>
                 <input
+                  ref={composerInputRef}
                   value={draft}
                   placeholder={t("composer.messagePlaceholder")}
                   onChange={(e) => setDraft(e.target.value)}
