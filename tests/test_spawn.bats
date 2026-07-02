@@ -208,7 +208,13 @@ teardown() {
 }
 
 @test "spawn --model: refused for a type with no model_arg in its manifest" {
-  run bash "$SCRIPTS/spawn.sh" hermes foo --project "$PROJ" --model whatever --no-wait
+  # No real built-in is spawnable without a model_arg (#279 dropped hermes'
+  # spawnable=yes, its only remaining example) — fixture a minimal one,
+  # reusing the already-stubbed `claude` binary as its cli=.
+  local nd="$TEST_SKILL_DIR/scripts/drivers/types/nomodeltype"
+  mkdir -p "$nd"
+  printf 'name=nomodeltype\ntemplate=template.md\ncli=claude\nspawnable=yes\n' > "$nd/type.conf"
+  run bash "$SCRIPTS/spawn.sh" nomodeltype foo --project "$PROJ" --model whatever --no-wait
   [ "$status" -ne 0 ]
   [[ "$output" =~ "does not support --model" ]]
 }
