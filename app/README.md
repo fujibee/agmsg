@@ -5,16 +5,20 @@ GUI that spawns agents in real PTYs and delivers agmsg messages to ANY interacti
 CLI agent by injecting them into the agent's stdin at its idle prompt — no per-agent
 bridge, hook, or monitor tool.
 
-> Status: **Phase 0 (PoC)**. Local, unsigned. Validates the risky tech, not the full spec.
+> Status: past Phase 0 — daily-driven, macOS-signed and notarized, auto-updating.
+> Windows code signing and an automated release pipeline are still pending; until
+> those land, builds are cut locally and installed by hand.
 
 ## Strategic core — universal stdin-inject delivery
 
 The app **owns** each spawned agent's pseudo-terminal. When a new agmsg message
-arrives for that agent, the app waits until the agent is at an idle/ready prompt
-(silence debounce + optional ready-prompt match, so it never injects mid-generation)
-and then writes the message into the agent's stdin. The agent reacts as if a human
-typed it. Because this happens at the PTY layer it is agent-agnostic — proven on both
-`claude` and a `python3` REPL with the same code (see `poc-inject/`).
+arrives for a spawned pane, the app injects a short kickoff notice
+(`[agmsg] <from>: "<preview>" — run /<cmd> to check it.`) into the agent's stdin
+immediately — no idle-wait heuristics — followed by a deliberate ~300ms gap before
+Enter (agents like Codex misread text+Enter written back-to-back as a paste and
+swallow the Enter). The agent reacts as if a human typed it. Because this happens
+at the PTY layer it is agent-agnostic — proven on both `claude` and a `python3` REPL
+with the same code (see `poc-inject/`, the original Phase 0 proof).
 
 ## Stack
 
@@ -54,15 +58,29 @@ DB and team config from there). `claude` must be on `PATH` to spawn Claude Code 
 1. Pick a team (top bar). The left list shows its members; the default tab is the
    view-only **team room**.
 2. Click a member to spawn it in a PTY pane (a new tab).
-3. From the bottom composer, send a message to that member as `app-user`. When the
-   pane is idle, the app injects the message into the agent's stdin and it responds.
+3. From the bottom composer, send a message to that member as `app-user`. The app
+   injects a kickoff notice into the agent's stdin right away and it responds.
 
-## Phase 0 scope
+## Releasing (macOS)
 
-- (a) xterm.js pane spawning `claude` via PTY — done.
-- (b) read agmsg DB → live team-room feed — done.
-- (c) idle-detect stdin-inject delivery — done (proven end-to-end via the real
-  agmsg path; see `poc-inject/`).
+```sh
+cd app
+pnpm build:notarize   # sources APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from
+                       # the worktree-root .env (never committed) and runs
+                       # `tauri build`, which signs and notarizes automatically
+                       # once macOS.signingIdentity is set in tauri.conf.json
+```
 
-Deferred to later phases: pane/tab rearrange, multi-window, agmsg self-install,
-code-signing/distribution, settings.
+Auto-update is wired up via `tauri-plugin-updater`, checked silently on launch and
+on-demand via **agmsg app → Check for Updates…**. The updater endpoint points at
+`fujibee/agmsg`'s GitHub Releases (`latest.json`); the private signing key lives in
+the worktree-root `.secrets/` (never committed) and isn't yet wired into a CI
+release job, so cutting a release still means building and uploading by hand.
+
+## Known gaps
+
+- Windows code signing (Azure Artifact Signing account is provisioned; not yet
+  wired into the build).
+- No CI pipeline builds/publishes the app — `.github/workflows/release.yml` is the
+  agmsg CLI's npm release and doesn't touch `app/`.
+- No automated tests for the Tauri app itself.

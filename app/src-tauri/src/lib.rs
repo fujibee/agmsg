@@ -35,12 +35,16 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         Some(&format!("About {name}")),
         Some(AboutMetadataBuilder::new().name(Some(name.to_string())).icon(icon).build()),
     )?;
+    let check_updates =
+        MenuItem::with_id(app, CHECK_UPDATES_ID, "Check for Updates…", true, None::<&str>)?;
     let app_menu = Submenu::with_items(
         app,
         name,
         true,
         &[
             &about,
+            &PredefinedMenuItem::separator(app)?,
+            &check_updates,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -99,12 +103,81 @@ const USER_CHAT_MENU_ID: &str = "toggle_user_chat";
 const ZOOM_IN_ID: &str = "zoom_in";
 const ZOOM_OUT_ID: &str = "zoom_out";
 const ZOOM_RESET_ID: &str = "zoom_reset";
+const CHECK_UPDATES_ID: &str = "check_updates";
+
+/// Check the updater endpoint and, if a newer build is available, confirm
+/// with the user before downloading, installing, and restarting. When
+/// `user_initiated` is true (menu click) we also report "up to date" /
+/// errors; a silent startup check stays quiet unless there's an update.
+async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            if user_initiated {
+                app.dialog()
+                    .message(format!("Update check failed: {e}"))
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+            }
+            return;
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            let proceed = app
+                .dialog()
+                .message(format!("agmsg app {version} is available. Install and restart now?"))
+                .title("Update Available")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Install & Restart".into(),
+                    "Later".into(),
+                ))
+                .blocking_show();
+            if !proceed {
+                return;
+            }
+            if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                app.dialog()
+                    .message(format!("Update failed: {e}"))
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                return;
+            }
+            app.restart();
+        }
+        Ok(None) => {
+            if user_initiated {
+                app.dialog()
+                    .message("You're on the latest version.")
+                    .title("No Updates")
+                    .kind(MessageDialogKind::Info)
+                    .blocking_show();
+            }
+        }
+        Err(e) => {
+            if user_initiated {
+                app.dialog()
+                    .message(format!("Update check failed: {e}"))
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+            }
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .menu(|app| make_menu(app))
         .manage(UserChatVisible(AtomicBool::new(true)))
         .manage(ZoomLevel(Mutex::new(1.0)))
@@ -133,12 +206,23 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_zoom(*zoom);
                 }
+            } else if id == CHECK_UPDATES_ID {
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    check_for_updates(&app_handle, true).await;
+                });
             }
         })
         .manage(PtyManager::default())
         .setup(|app| {
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
+            // Quiet startup check — only surfaces a dialog when an update is
+            // actually available (see check_for_updates's user_initiated flag).
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                check_for_updates(&app_handle, false).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
