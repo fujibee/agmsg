@@ -755,6 +755,19 @@ body.resizing-row {
   border-bottom: none;
   border-radius: 6px 6px 0 0;
 }
+/* Which pane has focus is otherwise only obvious from the terminal cursor —
+   easy to lose track of once a tab has more than one pane (tile/horizontal
+   layouts). :focus-within needs no JS: it tracks the xterm textarea's real
+   DOM focus automatically. The header brightens (--panel, L 9.4% -> --panel-2,
+   L 12.0%, +2.5pt) on top of the accent border below — only the focused
+   pane's header changes, so it reads by contrast against its neighbors. */
+.pane-cell:focus-within .pane-header {
+  background: var(--panel-2);
+}
+.pane-cell:focus-within .pane-header,
+.pane-cell:focus-within .term-pane {
+  border-color: var(--accent);
+}
 .pane-header-label {
   flex: 1;
   min-width: 0;
@@ -870,9 +883,17 @@ body.resizing-row {
   overflow-y: auto;
   padding: 8px 12px;
   background: var(--panel-2);
+  border: 1px solid transparent;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+/* Matches .composer's own :focus-within border below — the "Add one" link
+   is this panel's only focusable child, but the same accent treatment on
+   focus keeps the whole user-chat area (list + composer) reading as one
+   consistent pane, same as a PTY pane's header+terminal. */
+.appuser-chat:focus-within {
+  border-color: var(--accent);
 }
 /* `hidden` alone loses to our `display: flex` (author styles beat the UA
    stylesheet's [hidden] rule), so spell it out for the panels View > Show
