@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "設定"
+  },
+  "nativeMenu": {
+    "about": "{{name}} について",
+    "checkForUpdates": "アップデートを確認…",
+    "hide": "{{name}} を隠す",
+    "hideOthers": "ほかを隠す",
+    "showAll": "すべてを表示",
+    "quit": "{{name}} を終了",
+    "editMenu": "編集",
+    "undo": "取り消す",
+    "redo": "やり直す",
+    "cut": "カット",
+    "copy": "コピー",
+    "paste": "ペースト",
+    "selectAll": "すべてを選択",
+    "viewMenu": "表示",
+    "showUserChat": "自分のチャットを表示",
+    "zoomIn": "拡大",
+    "zoomOut": "縮小",
+    "actualSize": "実際のサイズ",
+    "windowMenu": "ウインドウ",
+    "minimize": "しまう",
+    "closeWindow": "ウインドウを閉じる"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "アップデートの確認に失敗しました: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} が利用可能です。インストールして再起動しますか？",
+    "updateAvailableTitle": "アップデートあり",
+    "installAndRestart": "インストールして再起動",
+    "later": "あとで",
+    "updateFailed": "アップデートに失敗しました: {{error}}",
+    "upToDate": "最新バージョンです。",
+    "noUpdatesTitle": "アップデートなし"
   }
 }

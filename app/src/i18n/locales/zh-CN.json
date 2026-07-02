@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "设置"
+  },
+  "nativeMenu": {
+    "about": "关于 {{name}}",
+    "checkForUpdates": "检查更新…",
+    "hide": "隐藏 {{name}}",
+    "hideOthers": "隐藏其他",
+    "showAll": "全部显示",
+    "quit": "退出 {{name}}",
+    "editMenu": "编辑",
+    "undo": "撤销",
+    "redo": "重做",
+    "cut": "剪切",
+    "copy": "拷贝",
+    "paste": "粘贴",
+    "selectAll": "全选",
+    "viewMenu": "显示",
+    "showUserChat": "显示我的聊天",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "actualSize": "实际大小",
+    "windowMenu": "窗口",
+    "minimize": "最小化",
+    "closeWindow": "关闭窗口"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "检查更新失败：{{error}}",
+    "updateAvailableBody": "{{name}} {{version}} 可用。是否立即安装并重启？",
+    "updateAvailableTitle": "有可用更新",
+    "installAndRestart": "安装并重启",
+    "later": "以后再说",
+    "updateFailed": "更新失败：{{error}}",
+    "upToDate": "当前已是最新版本。",
+    "noUpdatesTitle": "没有可用更新"
   }
 }

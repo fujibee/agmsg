@@ -134,5 +134,38 @@
   },
   "language": {
     "label": "Language"
+  },
+  "nativeMenu": {
+    "about": "About {{name}}",
+    "checkForUpdates": "Check for Updates…",
+    "hide": "Hide {{name}}",
+    "hideOthers": "Hide Others",
+    "showAll": "Show All",
+    "quit": "Quit {{name}}",
+    "editMenu": "Edit",
+    "undo": "Undo",
+    "redo": "Redo",
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "selectAll": "Select All",
+    "viewMenu": "View",
+    "showUserChat": "Show User Chat",
+    "zoomIn": "Zoom In",
+    "zoomOut": "Zoom Out",
+    "actualSize": "Actual Size",
+    "windowMenu": "Window",
+    "minimize": "Minimize",
+    "closeWindow": "Close Window"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "Update check failed: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} is available. Install and restart now?",
+    "updateAvailableTitle": "Update Available",
+    "installAndRestart": "Install & Restart",
+    "later": "Later",
+    "updateFailed": "Update failed: {{error}}",
+    "upToDate": "You're on the latest version.",
+    "noUpdatesTitle": "No Updates"
   }
 }

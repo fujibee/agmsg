@@ -1,6 +1,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
+import { invoke } from "@tauri-apps/api/core";
 
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
@@ -29,6 +30,15 @@ export const SUPPORTED_LANGUAGES = {
 
 export type LanguageCode = keyof typeof SUPPORTED_LANGUAGES;
 
+// The native menu (About/Edit/View/Window, update-check dialogs) lives in
+// Rust, outside react-i18next's reach — push the resolved language there so
+// it doesn't silently stay on the OS locale while the rest of the UI
+// follows this switcher. Best-effort: fails harmlessly outside Tauri (e.g.
+// `vite build` / non-Tauri contexts) or before the Rust side is up yet.
+function syncMenuLanguage(lang: string) {
+  void invoke("set_menu_language", { lang }).catch(() => {});
+}
+
 void i18n
   .use(LanguageDetector)
   .use(initReactI18next)
@@ -54,6 +64,9 @@ void i18n
       lookupLocalStorage: "agmsg-app-language",
     },
     interpolation: { escapeValue: false }, // React already escapes
-  });
+  })
+  .then(() => syncMenuLanguage(i18n.resolvedLanguage ?? "en"));
+
+i18n.on("languageChanged", (lang) => syncMenuLanguage(lang));
 
 export default i18n;

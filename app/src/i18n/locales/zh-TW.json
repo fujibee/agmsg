@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "設定"
+  },
+  "nativeMenu": {
+    "about": "關於 {{name}}",
+    "checkForUpdates": "檢查更新…",
+    "hide": "隱藏 {{name}}",
+    "hideOthers": "隱藏其他",
+    "showAll": "顯示全部",
+    "quit": "結束 {{name}}",
+    "editMenu": "編輯",
+    "undo": "還原",
+    "redo": "重做",
+    "cut": "剪下",
+    "copy": "拷貝",
+    "paste": "貼上",
+    "selectAll": "全選",
+    "viewMenu": "顯示",
+    "showUserChat": "顯示我的聊天",
+    "zoomIn": "放大",
+    "zoomOut": "縮小",
+    "actualSize": "實際大小",
+    "windowMenu": "視窗",
+    "minimize": "縮到最小",
+    "closeWindow": "關閉視窗"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "檢查更新失敗：{{error}}",
+    "updateAvailableBody": "{{name}} {{version}} 已可使用。要立即安裝並重新啟動嗎？",
+    "updateAvailableTitle": "有可用更新",
+    "installAndRestart": "安裝並重新啟動",
+    "later": "稍後再說",
+    "updateFailed": "更新失敗：{{error}}",
+    "upToDate": "目前已是最新版本。",
+    "noUpdatesTitle": "沒有可用更新"
   }
 }

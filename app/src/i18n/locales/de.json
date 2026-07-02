@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "Einstellungen"
+  },
+  "nativeMenu": {
+    "about": "Über {{name}}",
+    "checkForUpdates": "Nach Updates suchen…",
+    "hide": "{{name}} ausblenden",
+    "hideOthers": "Andere ausblenden",
+    "showAll": "Alle einblenden",
+    "quit": "{{name}} beenden",
+    "editMenu": "Bearbeiten",
+    "undo": "Widerrufen",
+    "redo": "Wiederholen",
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einsetzen",
+    "selectAll": "Alles auswählen",
+    "viewMenu": "Darstellung",
+    "showUserChat": "Meinen Chat anzeigen",
+    "zoomIn": "Vergrößern",
+    "zoomOut": "Verkleinern",
+    "actualSize": "Originalgröße",
+    "windowMenu": "Fenster",
+    "minimize": "Im Dock ablegen",
+    "closeWindow": "Fenster schließen"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "Aktualisierungsprüfung fehlgeschlagen: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} ist verfügbar. Jetzt installieren und neu starten?",
+    "updateAvailableTitle": "Update verfügbar",
+    "installAndRestart": "Installieren und neu starten",
+    "later": "Später",
+    "updateFailed": "Aktualisierung fehlgeschlagen: {{error}}",
+    "upToDate": "Sie verwenden die neueste Version.",
+    "noUpdatesTitle": "Keine Updates"
   }
 }

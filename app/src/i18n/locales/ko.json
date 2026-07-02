@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "설정"
+  },
+  "nativeMenu": {
+    "about": "{{name}} 정보",
+    "checkForUpdates": "업데이트 확인…",
+    "hide": "{{name}} 가리기",
+    "hideOthers": "기타 가리기",
+    "showAll": "모두 보기",
+    "quit": "{{name}} 종료",
+    "editMenu": "편집",
+    "undo": "실행 취소",
+    "redo": "다시 실행",
+    "cut": "잘라내기",
+    "copy": "복사",
+    "paste": "붙여넣기",
+    "selectAll": "모두 선택",
+    "viewMenu": "보기",
+    "showUserChat": "내 채팅 표시",
+    "zoomIn": "확대",
+    "zoomOut": "축소",
+    "actualSize": "실제 크기",
+    "windowMenu": "윈도우",
+    "minimize": "최소화",
+    "closeWindow": "윈도우 닫기"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "업데이트 확인 실패: {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} 버전을 사용할 수 있습니다. 지금 설치하고 재시작할까요?",
+    "updateAvailableTitle": "업데이트 있음",
+    "installAndRestart": "설치 후 재시작",
+    "later": "나중에",
+    "updateFailed": "업데이트 실패: {{error}}",
+    "upToDate": "최신 버전입니다.",
+    "noUpdatesTitle": "업데이트 없음"
   }
 }

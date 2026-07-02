@@ -134,5 +134,38 @@
   },
   "settings": {
     "title": "Paramètres"
+  },
+  "nativeMenu": {
+    "about": "À propos de {{name}}",
+    "checkForUpdates": "Rechercher des mises à jour…",
+    "hide": "Masquer {{name}}",
+    "hideOthers": "Masquer les autres",
+    "showAll": "Tout afficher",
+    "quit": "Quitter {{name}}",
+    "editMenu": "Édition",
+    "undo": "Annuler",
+    "redo": "Rétablir",
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "selectAll": "Tout sélectionner",
+    "viewMenu": "Présentation",
+    "showUserChat": "Afficher mon chat",
+    "zoomIn": "Zoom avant",
+    "zoomOut": "Zoom arrière",
+    "actualSize": "Taille réelle",
+    "windowMenu": "Fenêtre",
+    "minimize": "Réduire",
+    "closeWindow": "Fermer la fenêtre"
+  },
+  "nativeDialog": {
+    "updateCheckFailed": "Échec de la vérification des mises à jour : {{error}}",
+    "updateAvailableBody": "{{name}} {{version}} est disponible. Installer et redémarrer maintenant ?",
+    "updateAvailableTitle": "Mise à jour disponible",
+    "installAndRestart": "Installer et redémarrer",
+    "later": "Plus tard",
+    "updateFailed": "Échec de la mise à jour : {{error}}",
+    "upToDate": "Vous avez la dernière version.",
+    "noUpdatesTitle": "Aucune mise à jour"
   }
 }

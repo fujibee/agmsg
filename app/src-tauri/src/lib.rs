@@ -1,4 +1,5 @@
 mod agmsg;
+mod menu_i18n;
 mod pty;
 
 use pty::PtyManager;
@@ -6,6 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Wry};
+
+/// The native menu's current language (BCP-47 code, e.g. "ja", "zh-CN") —
+/// the frontend pushes its i18next language here via `set_menu_language` on
+/// startup and on every change, since React's i18n can't reach this
+/// Rust-owned window chrome. Defaults to "en" until that first call arrives.
+struct MenuLanguage(Mutex<String>);
 
 /// Explicit toggle state for View > Show User Chat. We don't rely on
 /// CheckMenuItem flipping its own checked state on click (that's an
@@ -23,20 +30,24 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.5;
 const ZOOM_MAX: f64 = 3.0;
 
-/// Build the application menu. macOS derives the default menu's About/Hide/Quit
-/// labels from the crate name (which can't contain a space), so we define them
-/// explicitly to read "agmsg app" and give About the real app icon. The Edit
-/// menu's Copy/Paste are also needed for the embedded terminals.
-fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+/// Build the application menu in `lang`. macOS derives the default menu's
+/// About/Hide/Quit labels from the crate name (which can't contain a space),
+/// so we define them explicitly to read "agmsg app" and give About the real
+/// app icon. The Edit menu's Copy/Paste are also needed for the embedded
+/// terminals. All labels come from menu_i18n::t so the whole native menu
+/// tracks the app's language selector rather than the OS locale.
+fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let name = "agmsg app";
+    let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
+    let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")).ok();
     let about = PredefinedMenuItem::about(
         app,
-        Some(&format!("About {name}")),
+        Some(&m_name("about")),
         Some(AboutMetadataBuilder::new().name(Some(name.to_string())).icon(icon).build()),
     )?;
     let check_updates =
-        MenuItem::with_id(app, CHECK_UPDATES_ID, "Check for Updates…", true, None::<&str>)?;
+        MenuItem::with_id(app, CHECK_UPDATES_ID, m("checkForUpdates"), true, None::<&str>)?;
     let app_menu = Submenu::with_items(
         app,
         name,
@@ -48,25 +59,25 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, Some(&format!("Hide {name}")))?,
-            &PredefinedMenuItem::hide_others(app, None)?,
-            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::hide(app, Some(&m_name("hide")))?,
+            &PredefinedMenuItem::hide_others(app, Some(&m("hideOthers")))?,
+            &PredefinedMenuItem::show_all(app, Some(&m("showAll")))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, Some(&format!("Quit {name}")))?,
+            &PredefinedMenuItem::quit(app, Some(&m_name("quit")))?,
         ],
     )?;
     let edit_menu = Submenu::with_items(
         app,
-        "Edit",
+        m("editMenu"),
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::undo(app, Some(&m("undo")))?,
+            &PredefinedMenuItem::redo(app, Some(&m("redo")))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::cut(app, None)?,
-            &PredefinedMenuItem::copy(app, None)?,
-            &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
+            &PredefinedMenuItem::cut(app, Some(&m("cut")))?,
+            &PredefinedMenuItem::copy(app, Some(&m("copy")))?,
+            &PredefinedMenuItem::paste(app, Some(&m("paste")))?,
+            &PredefinedMenuItem::select_all(app, Some(&m("selectAll")))?,
         ],
     )?;
     // "Show User Chat" toggles the app-user send/receive panel (chat +
@@ -76,24 +87,24 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // Cmd+-, Cmd+0) — see the ZoomLevel handler in run() for the logic.
     let view_menu = Submenu::with_items(
         app,
-        "View",
+        m("viewMenu"),
         true,
         &[
-            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, "Show User Chat", true, true, None::<&str>)?,
+            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?,
-            &MenuItem::with_id(app, ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?,
-            &MenuItem::with_id(app, ZOOM_RESET_ID, "Actual Size", true, Some("CmdOrCtrl+0"))?,
+            &MenuItem::with_id(app, ZOOM_IN_ID, m("zoomIn"), true, Some("CmdOrCtrl+="))?,
+            &MenuItem::with_id(app, ZOOM_OUT_ID, m("zoomOut"), true, Some("CmdOrCtrl+-"))?,
+            &MenuItem::with_id(app, ZOOM_RESET_ID, m("actualSize"), true, Some("CmdOrCtrl+0"))?,
         ],
     )?;
     let window_menu = Submenu::with_items(
         app,
-        "Window",
+        m("windowMenu"),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::minimize(app, Some(&m("minimize")))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::close_window(app, Some(&m("closeWindow")))?,
         ],
     )?;
     Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
@@ -113,12 +124,15 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
 
+    let lang = app.state::<MenuLanguage>().0.lock().unwrap().clone();
+    let d = |key: &str, vars: &[(&str, &str)]| menu_i18n::t(&lang, "nativeDialog", key, vars);
+
     let updater = match app.updater() {
         Ok(u) => u,
         Err(e) => {
             if user_initiated {
                 app.dialog()
-                    .message(format!("Update check failed: {e}"))
+                    .message(d("updateCheckFailed", &[("error", &e.to_string())]))
                     .kind(MessageDialogKind::Error)
                     .blocking_show();
             }
@@ -131,12 +145,12 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
             let version = update.version.clone();
             let proceed = app
                 .dialog()
-                .message(format!("agmsg app {version} is available. Install and restart now?"))
-                .title("Update Available")
+                .message(d("updateAvailableBody", &[("name", "agmsg app"), ("version", &version)]))
+                .title(d("updateAvailableTitle", &[]))
                 .kind(MessageDialogKind::Info)
                 .buttons(MessageDialogButtons::OkCancelCustom(
-                    "Install & Restart".into(),
-                    "Later".into(),
+                    d("installAndRestart", &[]),
+                    d("later", &[]),
                 ))
                 .blocking_show();
             if !proceed {
@@ -144,7 +158,7 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
             }
             if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
                 app.dialog()
-                    .message(format!("Update failed: {e}"))
+                    .message(d("updateFailed", &[("error", &e.to_string())]))
                     .kind(MessageDialogKind::Error)
                     .blocking_show();
                 return;
@@ -154,8 +168,8 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
         Ok(None) => {
             if user_initiated {
                 app.dialog()
-                    .message("You're on the latest version.")
-                    .title("No Updates")
+                    .message(d("upToDate", &[]))
+                    .title(d("noUpdatesTitle", &[]))
                     .kind(MessageDialogKind::Info)
                     .blocking_show();
             }
@@ -163,12 +177,25 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
         Err(e) => {
             if user_initiated {
                 app.dialog()
-                    .message(format!("Update check failed: {e}"))
+                    .message(d("updateCheckFailed", &[("error", &e.to_string())]))
                     .kind(MessageDialogKind::Error)
                     .blocking_show();
             }
         }
     }
+}
+
+/// Called by the frontend (on i18next init, and on every language change)
+/// to keep the native menu and update-check dialogs in the app's chosen
+/// language rather than the OS locale. Rebuilds the whole menu — Tauri has
+/// no per-item relabel API, and this only runs on an explicit language
+/// switch, not per-frame, so rebuilding is cheap enough.
+#[tauri::command]
+fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
+    *app.state::<MenuLanguage>().0.lock().unwrap() = lang.clone();
+    let menu = make_menu(&app, &lang).map_err(|e| e.to_string())?;
+    app.set_menu(menu).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -189,9 +216,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .menu(|app| make_menu(app))
+        // Built in English first — the frontend doesn't get a chance to
+        // report its actual language until after the webview loads and
+        // i18next resolves it, so set_menu_language rebuilds this shortly
+        // after startup with the real choice.
+        .menu(|app| make_menu(app, "en"))
         .manage(UserChatVisible(AtomicBool::new(true)))
         .manage(ZoomLevel(Mutex::new(1.0)))
+        .manage(MenuLanguage(Mutex::new("en".to_string())))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
             if id == USER_CHAT_MENU_ID {
@@ -253,6 +285,7 @@ pub fn run() {
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
             agmsg::agmsg_spawnable_types,
+            set_menu_language,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
