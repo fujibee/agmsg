@@ -21,10 +21,12 @@ name: app release
 #     MACOS_CERTIFICATE_PASSWORD     .p12 export password
 #     APPLE_SIGNING_IDENTITY         "Developer ID Application: Koichi Fujikawa (A6GJF6MMFV)"
 #     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
-#   Windows codesign (Azure Trusted Signing, OIDC federated — no client
-#   secret. Account: agmsg-artifact-signing, East US, endpoint
-#   https://eus.codesigning.azure.net/, Public Trust certificate profile.
-#   App registration: agmsg-github-actions, federated for the main branch):
+#   Windows codesign (azure/artifact-signing-action, OIDC federated via
+#   azure/login — no client secret. Account: agmsg-artifact-signing, East US,
+#   endpoint https://eus.codesigning.azure.net/, Public Trust certificate
+#   profile — profile's exact resource name still unconfirmed, so the signing
+#   step below is `if: false` until it is. App registration:
+#   agmsg-github-actions, federated for the main branch):
 #     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
 #   Auto-updater artifact signing (keypair already generated locally, see
 #   app/scripts/build-notarize.sh):
@@ -142,16 +144,28 @@ jobs:
 
       - name: Azure login (OIDC)
         if: ${{ secrets.AZURE_CLIENT_ID != '' }}
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # TODO: sign the .msi/.exe with Azure Trusted Signing (account
-      # agmsg-artifact-signing, endpoint https://eus.codesigning.azure.net/,
-      # Public Trust certificate profile) — exact action name/inputs pending
-      # research; see the header comment.
+      # certificate-profile-name is the Public Trust profile's resource name
+      # within agmsg-artifact-signing — not yet confirmed (see header
+      # comment), so this step is left disabled (`if: false`) until it is.
+      - name: Sign Windows binaries (Azure Trusted Signing)
+        if: false # TODO: flip once certificate-profile-name is confirmed
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: agmsg-artifact-signing
+          certificate-profile-name: TODO-confirm-profile-name
+          files-folder: ${{ github.workspace }}/app/src-tauri/target/release/bundle
+          files-folder-filter: exe,msi
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - uses: actions/upload-artifact@v4
         with:
