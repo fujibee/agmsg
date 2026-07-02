@@ -174,6 +174,17 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin registered (required on macOS) — a
+        // second launch focuses the existing window instead of opening a
+        // new one, so quitting/relaunching from the Dock or a second
+        // double-click doesn't spawn duplicate instances each with their
+        // own PTYs and agmsg DB watcher.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+                let _ = window.unminimize();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
