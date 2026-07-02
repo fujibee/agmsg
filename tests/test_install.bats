@@ -61,6 +61,27 @@ teardown() {
   grep -q "backup sentinel" "$backup/SKILL.md"
 }
 
+@test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {
+  # actas/drop used to invoke a fresh Monitor unconditionally, ignoring
+  # mode=off/turn (#280) — this is prompt-instruction text, not executable
+  # code, so a content assertion is the regression coverage available: both
+  # sections must carry the same delivery-mode gate the normal entry flow
+  # already has (line ~90 in the template). The Claude Code command file is
+  # only installed when ~/.claude exists (install.sh), separate from the
+  # shared codex-typed $SK/SKILL.md.
+  mkdir -p "$FAKE_HOME/.claude"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local cmd_file="$FAKE_HOME/.claude/commands/agmsg.md"
+  [ -f "$cmd_file" ]
+  local actas_block drop_block
+  actas_block="$(sed -n '/If argument starts with "actas"/,/If argument starts with "drop"/p' "$cmd_file")"
+  drop_block="$(sed -n '/If argument starts with "drop"/,/If argument starts with "spawn"/p' "$cmd_file")"
+  [[ "$actas_block" == *"delivery mode is"*"monitor"*"both"* ]]
+  [[ "$actas_block" == *"delivery.sh status"* ]]
+  [[ "$drop_block" == *"delivery mode is"*"monitor"*"both"* ]]
+  [[ "$drop_block" == *"delivery.sh status"* ]]
+}
+
 @test "install: --update warns to re-register delivery hooks (#133)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
