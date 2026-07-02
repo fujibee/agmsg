@@ -876,11 +876,14 @@ body.resizing-row {
 .chat-time {
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .chat-peer {
   color: var(--accent);
   font-size: 11px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .chat-line.in .chat-peer {
   color: var(--green);
