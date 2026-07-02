@@ -3,15 +3,26 @@
 // The app OWNS each spawned agent's pseudo-terminal: it spawns the agent in a
 // real PTY (so full TUIs render), streams output to the webview (xterm.js),
 // forwards keystrokes back, and — the strategic bit — can INJECT an agmsg
-// message into the agent's stdin once the agent is at an idle/ready prompt.
-// That injection is agent-agnostic: it works for any interactive CLI because it
-// operates at the PTY layer, not via a per-agent bridge. Proven in poc-inject/.
+// message straight into the agent's stdin. That injection is agent-agnostic:
+// it works for any interactive CLI because it operates at the PTY layer, not
+// via a per-agent bridge. Proven in poc-inject/.
+//
+// pty_inject used to wait for the PTY to go quiet before writing, on the
+// theory that writing mid-generation could corrupt an in-flight response.
+// Real-world testing (see conversation history) showed the opposite problem
+// dominates: claude Code's multi-session launcher UI redraws a spinner
+// nonstop even when otherwise idle, so the quiet-period never arrived and
+// injection always hit the forced-timeout path — mid-spin, where the
+// trailing Enter wasn't reliably registered as "submit". Every agent type
+// tested handles a fresh task line as a new queued item regardless of
+// whatever else is in flight, so there's nothing to wait for: inject writes
+// immediately.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
@@ -22,8 +33,6 @@ use tauri::{AppHandle, Emitter, State};
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    /// Last time the child produced output — basis for quiescence detection.
-    last_output: Arc<Mutex<Instant>>,
     /// Child process id, so closing a pane can actually terminate the agent
     /// (and let its SessionEnd hook release the agmsg actas lock).
     pid: Option<u32>,
@@ -85,20 +94,17 @@ pub fn pty_spawn(
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let last_output = Arc::new(Mutex::new(Instant::now()));
 
-    // Reader thread: stream output to the webview + track quiescence.
+    // Reader thread: stream output to the webview.
     {
         let app = app.clone();
         let id = id.clone();
-        let last_output = Arc::clone(&last_output);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        *last_output.lock().unwrap() = Instant::now();
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                         let _ = app.emit("pty-output", OutputEvent { id: id.clone(), b64 });
                     }
@@ -111,11 +117,7 @@ pub fn pty_spawn(
         });
     }
 
-    manager
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(id, PtySession { master: pair.master, writer, last_output, pid });
+    manager.sessions.lock().unwrap().insert(id, PtySession { master: pair.master, writer, pid });
     Ok(())
 }
 
@@ -164,42 +166,32 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
     Ok(())
 }
 
-/// Inject `text` (then Enter) into the agent's stdin once it has been quiet for
-/// `quiet_ms` — the universal, agent-agnostic agmsg delivery. Non-blocking:
-/// waits for quiescence on a background thread so the UI stays responsive.
+/// Inject `text` (then Enter) into the agent's stdin — the universal,
+/// agent-agnostic agmsg delivery. No idle wait before writing the text; see
+/// the module doc comment for why waiting for quiescence was worse than not
+/// waiting. The text and Enter are NOT written back-to-back, though: real-
+/// machine testing showed codex's TUI reads a same-burst text+Enter as a
+/// paste (the trailing newline is swallowed as pasted content rather than
+/// submitting), so the Enter is held back a beat after the text — long
+/// enough that the agent's input parser has processed the text as typed
+/// input first. Runs on a background thread so the ~300ms gap doesn't block
+/// the Tauri command handler.
 #[tauri::command]
-pub fn pty_inject(
-    manager: State<'_, PtyManager>,
-    id: String,
-    text: String,
-    quiet_ms: Option<u64>,
-    max_wait_ms: Option<u64>,
-) -> Result<(), String> {
-    let quiet = Duration::from_millis(quiet_ms.unwrap_or(1500));
-    let max_wait = Duration::from_millis(max_wait_ms.unwrap_or(20_000));
-
-    // Share what the background thread needs; don't hold the lock while waiting.
-    let last_output = {
-        let sessions = manager.sessions.lock().unwrap();
-        let s = sessions.get(&id).ok_or("no such pty session")?;
-        Arc::clone(&s.last_output)
-    };
+pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> Result<(), String> {
+    // Fail fast, synchronously, if the pane is already gone.
+    if !manager.sessions.lock().unwrap().contains_key(&id) {
+        return Err("no such pty session".to_string());
+    }
     let sessions = Arc::clone(&manager.sessions);
-
     thread::spawn(move || {
-        let started = Instant::now();
-        loop {
-            let idle = last_output.lock().unwrap().elapsed() >= quiet;
-            let give_up = started.elapsed() >= max_wait;
-            if idle || give_up {
-                if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-                    let _ = s.writer.write_all(text.as_bytes());
-                    let _ = s.writer.write_all(b"\r");
-                    let _ = s.writer.flush();
-                }
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
+        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
+            let _ = s.writer.write_all(text.as_bytes());
+            let _ = s.writer.flush();
+        }
+        thread::sleep(Duration::from_millis(300));
+        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
+            let _ = s.writer.write_all(b"\r");
+            let _ = s.writer.flush();
         }
     });
     Ok(())
