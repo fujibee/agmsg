@@ -14,7 +14,7 @@ env-var overrides are narrow and single-purpose: `AGMSG_STORAGE_PATH` (the
 directory holding `messages.db` only) and `AGMSG_SPAWN_OPTIONS_FILE` (one
 YAML file's path only, #273).
 
-The official desktop app (Tauri, `worktrees/desktop-app`) changes the
+The official desktop app (Tauri-based) changes the
 picture: it is meant to work **standalone**, with agmsg core bundled inside
 the app bundle as a read-only sidecar, so a user who only wants the app never
 touches `install.sh`. Bundled scripts can't write into the signed app bundle,
