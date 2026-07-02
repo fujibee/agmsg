@@ -529,6 +529,16 @@ Full discovery order, the trust model, and authoring guidance:
 [docs/plugins.md](docs/plugins.md) (design rationale in
 [ADR 0002](docs/adr/0002-driver-discovery-and-plugin-opt-in.md)).
 
+## Building on agmsg
+
+Writing something *outside* agmsg's own scripts that reads or drives agmsg —
+a GUI app, a bot, a derivative project (`agmsg-shogi`, `agmsg-go`,
+`agmsg-mcp`, …)? Read data via `scripts/api.sh` (JSON out, no need to touch
+`messages.db` or `teams/*/config.json` directly — those are internal and free
+to change), and write through the existing scripts (`send.sh`, `join.sh`,
+…) rather than the database. Full guidance:
+[docs/building-on-agmsg.md](docs/building-on-agmsg.md).
+
 ## Community
 
 - **Product Hunt**: #5 Product of the Day, [2026-06-09 launch](https://www.producthunt.com/products/agmsg) — 219 upvotes, 39 comments
