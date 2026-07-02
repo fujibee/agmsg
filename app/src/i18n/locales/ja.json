@@ -48,7 +48,8 @@
       "app": "アプリモニター — agmsgメッセージはこのペインの標準入力に注入されます"
     },
     "closeTitle": "ペインを閉じる",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "クリックしてから、このタブ内の別のペインをクリックすると位置を入れ替えます"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "他のタブはありません"
     },
     "window": {
-      "rename": "名前を変更…"
+      "rename": "名前を変更…",
+      "layout": "レイアウト ▸",
+      "layoutVertical": "縦",
+      "layoutHorizontal": "横",
+      "layoutTile": "タイル"
     }
   },
   "terminal": {

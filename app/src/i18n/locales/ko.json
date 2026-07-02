@@ -48,7 +48,8 @@
       "app": "앱 모니터 — agmsg 메시지가 이 창의 표준 입력(stdin)으로 주입됩니다"
     },
     "closeTitle": "창 닫기",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "클릭한 다음 이 탭의 다른 패널을 클릭하면 위치가 바뀝니다"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "다른 탭 없음"
     },
     "window": {
-      "rename": "이름 변경…"
+      "rename": "이름 변경…",
+      "layout": "레이아웃 ▸",
+      "layoutVertical": "세로",
+      "layoutHorizontal": "가로",
+      "layoutTile": "타일"
     }
   },
   "terminal": {

@@ -48,7 +48,8 @@
       "app": "Monitor de la app — los mensajes de agmsg se inyectan en el stdin de este panel"
     },
     "closeTitle": "cerrar panel",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "Haz clic y luego haz clic en otro panel de esta pestaña para intercambiar posiciones"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "No hay otras pestañas"
     },
     "window": {
-      "rename": "Renombrar…"
+      "rename": "Renombrar…",
+      "layout": "Diseño ▸",
+      "layoutVertical": "Vertical",
+      "layoutHorizontal": "Horizontal",
+      "layoutTile": "Mosaico"
     }
   },
   "terminal": {

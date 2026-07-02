@@ -35,8 +35,8 @@ type Pane = {
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
 };
-// A tab. Holds one or more panes, rendered as equal-width side-by-side
-// columns — a flat split for now, ahead of tmux-style nested layouts later.
+// A tab. Holds one or more panes, arranged per its `layout` (see paneRect) —
+// a flat split for now, ahead of tmux-style nested layouts later.
 type Window = {
   id: string;
   paneIds: string[];
@@ -48,7 +48,13 @@ type Window = {
    *  it doesn't. Windows for other teams stay mounted (PTYs alive) but
    *  hidden until that team is selected again. */
   team: string;
+  /** How this tab's panes are arranged. "vertical" (default, what plain
+   *  spawn produces): side-by-side full-height columns. "horizontal":
+   *  stacked full-width rows. "tile": a grid, row count/sizes from
+   *  tileRowSizes — see its comment for the rule. */
+  layout: PaneLayout;
 };
+type PaneLayout = "vertical" | "horizontal" | "tile";
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
@@ -64,6 +70,47 @@ export const APP_USER_TYPE = "agmsg-app";
 const ROOM_PAGE_SIZE = 30;
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
+
+// Row sizes for the "tile" layout, front-loading the extra pane(s) onto the
+// earlier (top) rows: n=1→[1], 2→[2], 3→[2,1], 4→[2,2], 5→[3,2], 6→[3,3],
+// 7→[4,3], 8→[4,4], 9→[3,3,3]. Row count caps at 4 columns/row (using 2 rows
+// once that's exceeded) and never drops below 2 rows once n≥3 — a single
+// row of 3+ reads as "vertical" layout, not a tile grid.
+function tileRowSizes(n: number): number[] {
+  const rows = n <= 2 ? 1 : Math.max(2, Math.ceil(n / 4));
+  const base = Math.floor(n / rows);
+  const extra = n % rows;
+  return Array.from({ length: rows }, (_, i) => base + (i < extra ? 1 : 0));
+}
+
+type PaneRect = { left: number; top: number; width: number; height: number };
+
+// A pane's position/size (all percentages of the tab's stage area) for
+// `layout`, given its index among `count` panes in the same window.
+function paneRect(layout: PaneLayout, idx: number, count: number): PaneRect {
+  if (layout === "horizontal") {
+    return { left: 0, width: 100, top: (idx * 100) / count, height: 100 / count };
+  }
+  if (layout === "tile") {
+    const rowSizes = tileRowSizes(count);
+    let seen = 0;
+    for (let row = 0; row < rowSizes.length; row++) {
+      const rowSize = rowSizes[row];
+      if (idx < seen + rowSize) {
+        const col = idx - seen;
+        return {
+          left: (col * 100) / rowSize,
+          width: 100 / rowSize,
+          top: (row * 100) / rowSizes.length,
+          height: 100 / rowSizes.length,
+        };
+      }
+      seen += rowSize;
+    }
+  }
+  // "vertical" (default): side-by-side full-height columns.
+  return { left: (idx * 100) / count, width: 100 / count, top: 0, height: 100 };
+}
 
 export default function App() {
   const { t } = useTranslation();
@@ -111,6 +158,12 @@ export default function App() {
   const [windowMenu, setWindowMenu] = useState<{ windowId: string; x: number; y: number } | null>(
     null,
   );
+  // Manual layout control ahead of real drag-and-drop: click one pane's name
+  // to "pick it up" (its id goes here), then click another pane's name in
+  // the same window to swap their positions. Click the same name again to
+  // cancel. Cheap enough for now — a real reorder should be drag-and-drop,
+  // but this already lets a layout be arranged by hand.
+  const [swapSource, setSwapSource] = useState<string | null>(null);
   // Which tab is currently showing an inline rename input, and its draft text.
   const [renamingWindowId, setRenamingWindowId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -425,7 +478,7 @@ export default function App() {
         setActive(targetWindowId);
       } else {
         const winId = `w-${seq.current++}`;
-        setWindows((prev) => [...prev, { id: winId, paneIds: [id], team }]);
+        setWindows((prev) => [...prev, { id: winId, paneIds: [id], team, layout: "vertical" }]);
         setActive(winId);
       }
     },
@@ -477,11 +530,32 @@ export default function App() {
     (paneId: string) => {
       detachPane(paneId);
       const winId = `w-${seq.current++}`;
-      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId], team }]);
+      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId], team, layout: "vertical" }]);
       setActive(winId);
     },
     [detachPane, team],
   );
+
+  // Swap two panes' positions within the same window (paneRect derives
+  // position purely from index in paneIds, so this is all a layout swap
+  // needs — no DOM remount, same as every other pane move in this file).
+  const swapPanesInWindow = useCallback((windowId: string, paneA: string, paneB: string) => {
+    setWindows((prev) =>
+      prev.map((w) => {
+        if (w.id !== windowId) return w;
+        const ids = [...w.paneIds];
+        const i = ids.indexOf(paneA);
+        const j = ids.indexOf(paneB);
+        if (i === -1 || j === -1) return w;
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+        return { ...w, paneIds: ids };
+      }),
+    );
+  }, []);
+
+  const setWindowLayout = useCallback((windowId: string, layout: PaneLayout) => {
+    setWindows((prev) => prev.map((w) => (w.id === windowId ? { ...w, layout } : w)));
+  }, []);
 
   // A tab's label: the user's custom name if set, else its panes' names joined.
   const windowLabel = useCallback(
@@ -850,25 +924,31 @@ export default function App() {
             </div>
 
             {/* Every pane is a permanent, flat child of .stage — its window only
-                decides WHERE it's positioned (left/width %), never whether it's
-                mounted. That keeps each pane's DOM node (and TerminalPane's
-                xterm + PTY listeners) alive across a Move-to, so the running
-                process and its scrollback survive the move — the same
-                left/right pane split tmux gives you, not a respawn.
-                Inactive-window panes go visibility:hidden but stay laid out,
-                so a resize doesn't leave them stale for next time. */}
+                decides WHERE it's positioned (paneRect, from its layout),
+                never whether it's mounted. That keeps each pane's DOM node
+                (and TerminalPane's xterm + PTY listeners) alive across a
+                Move-to or a layout change, so the running process and its
+                scrollback survive — the same pane split tmux gives you, not
+                a respawn. Inactive-window panes go visibility:hidden but
+                stay laid out, so a resize doesn't leave them stale for next
+                time. */}
             {panes.map((p) => {
               const win = windows.find((w) => w.paneIds.includes(p.id));
               if (!win) return null;
               const idx = win.paneIds.indexOf(p.id);
               const count = win.paneIds.length;
-              const widthPct = 100 / count;
+              const rect = paneRect(win.layout, idx, count);
               const isActiveWindow = active === win.id;
               return (
                 <div
                   key={p.id}
                   className={isActiveWindow ? "pane-cell" : "pane-cell inactive"}
-                  style={{ left: `${idx * widthPct}%`, width: `${widthPct}%` }}
+                  style={{
+                    left: `${rect.left}%`,
+                    top: `${rect.top}%`,
+                    width: `${rect.width}%`,
+                    height: `${rect.height}%`,
+                  }}
                 >
                   <div
                     className="pane-header"
@@ -878,7 +958,25 @@ export default function App() {
                       setPaneMenu({ paneId: p.id, windowId: win.id, x: e.clientX, y: e.clientY });
                     }}
                   >
-                    <span className="pane-header-label">{p.label}</span>
+                    <button
+                      className={
+                        swapSource === p.id ? "pane-header-label swap-armed" : "pane-header-label"
+                      }
+                      title={t("pane.swapTitle")}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (swapSource === p.id) {
+                          setSwapSource(null);
+                        } else if (swapSource && win.paneIds.includes(swapSource)) {
+                          swapPanesInWindow(win.id, swapSource, p.id);
+                          setSwapSource(null);
+                        } else {
+                          setSwapSource(p.id);
+                        }
+                      }}
+                    >
+                      {p.label}
+                    </button>
                     <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
                       <span className="monitor-tip">
                         {p.native
@@ -1126,22 +1224,44 @@ export default function App() {
           );
         })()}
 
-      {windowMenu && (
-        <div
-          className="ctx-menu"
-          style={{ left: windowMenu.x, top: windowMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => {
-              startRenameWindow(windowMenu.windowId);
-              setWindowMenu(null);
-            }}
-          >
-            {t("ctxMenu.window.rename")}
-          </button>
-        </div>
-      )}
+      {windowMenu &&
+        (() => {
+          const win = windows.find((w) => w.id === windowMenu.windowId);
+          const layouts: PaneLayout[] = ["vertical", "horizontal", "tile"];
+          return (
+            <div
+              className="ctx-menu"
+              style={{ left: windowMenu.x, top: windowMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => {
+                  startRenameWindow(windowMenu.windowId);
+                  setWindowMenu(null);
+                }}
+              >
+                {t("ctxMenu.window.rename")}
+              </button>
+              <div className="submenu-trigger">
+                <span className="submenu-label">{t("ctxMenu.window.layout")}</span>
+                <div className="submenu">
+                  {layouts.map((l) => (
+                    <button
+                      key={l}
+                      className={win?.layout === l ? "active" : undefined}
+                      onClick={() => {
+                        setWindowLayout(windowMenu.windowId, l);
+                        setWindowMenu(null);
+                      }}
+                    >
+                      {t(`ctxMenu.window.layout${l.charAt(0).toUpperCase()}${l.slice(1)}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }

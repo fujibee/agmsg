@@ -48,7 +48,8 @@
       "app": "应用监控 — agmsg 消息将注入此面板的标准输入"
     },
     "closeTitle": "关闭面板",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "点击后再点击此标签页中的另一个面板即可交换位置"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "没有其他标签页"
     },
     "window": {
-      "rename": "重命名…"
+      "rename": "重命名…",
+      "layout": "布局 ▸",
+      "layoutVertical": "纵向",
+      "layoutHorizontal": "横向",
+      "layoutTile": "平铺"
     }
   },
   "terminal": {

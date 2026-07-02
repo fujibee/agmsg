@@ -48,7 +48,8 @@
       "app": "Moniteur de l'app — les messages agmsg sont injectés dans l'entrée standard de ce panneau"
     },
     "closeTitle": "fermer le panneau",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "Cliquez, puis cliquez sur un autre panneau de cet onglet pour échanger les positions"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "Aucun autre onglet"
     },
     "window": {
-      "rename": "Renommer…"
+      "rename": "Renommer…",
+      "layout": "Disposition ▸",
+      "layoutVertical": "Vertical",
+      "layoutHorizontal": "Horizontal",
+      "layoutTile": "Mosaïque"
     }
   },
   "terminal": {

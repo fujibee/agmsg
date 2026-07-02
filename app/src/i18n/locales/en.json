@@ -51,7 +51,8 @@
       "app": "App monitor — agmsg messages are injected into this pane's stdin"
     },
     "closeTitle": "close pane",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "Click, then click another pane in this tab to swap positions"
   },
   "chat": {
     "peer": {
@@ -125,7 +126,11 @@
       "noOtherTabs": "No other tabs"
     },
     "window": {
-      "rename": "Rename…"
+      "rename": "Rename…",
+      "layout": "Layout ▸",
+      "layoutVertical": "Vertical",
+      "layoutHorizontal": "Horizontal",
+      "layoutTile": "Tile"
     }
   },
   "terminal": {

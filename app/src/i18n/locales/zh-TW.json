@@ -48,7 +48,8 @@
       "app": "App 監控 — agmsg 訊息會注入至此面板的標準輸入（stdin）"
     },
     "closeTitle": "關閉面板",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "點擊後再點擊此分頁中的另一個面板即可交換位置"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "沒有其他分頁"
     },
     "window": {
-      "rename": "重新命名…"
+      "rename": "重新命名…",
+      "layout": "版面配置 ▸",
+      "layoutVertical": "縱向",
+      "layoutHorizontal": "橫向",
+      "layoutTile": "平鋪"
     }
   },
   "terminal": {

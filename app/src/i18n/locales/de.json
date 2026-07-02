@@ -48,7 +48,8 @@
       "app": "App-Monitor — agmsg-Nachrichten werden in die Standardeingabe (stdin) dieses Bereichs eingespeist"
     },
     "closeTitle": "Bereich schließen",
-    "closeGlyph": "×"
+    "closeGlyph": "×",
+    "swapTitle": "Klicken, dann auf ein anderes Panel in diesem Tab klicken, um die Positionen zu tauschen"
   },
   "chat": {
     "peer": {
@@ -122,7 +123,11 @@
       "noOtherTabs": "Keine weiteren Tabs"
     },
     "window": {
-      "rename": "Umbenennen…"
+      "rename": "Umbenennen…",
+      "layout": "Layout ▸",
+      "layoutVertical": "Vertikal",
+      "layoutHorizontal": "Horizontal",
+      "layoutTile": "Kacheln"
     }
   },
   "terminal": {
