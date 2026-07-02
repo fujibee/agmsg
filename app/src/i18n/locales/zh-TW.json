@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "取消",
+    "browse": "瀏覽…",
+    "nameLabel": "名稱",
+    "projectDirLabel": "專案目錄"
+  },
+  "startupError": {
+    "loadTeamsFailed": "無法載入 agmsg 團隊：{{error}}。agmsg 是否已安裝於 ~/.agents/skills/agmsg？",
+    "dismiss": "關閉"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ 新增 ▾",
+      "team": "團隊…",
+      "agent": "代理…"
+    },
+    "title": "代理",
+    "filter": {
+      "all": "全部",
+      "none": "無"
+    },
+    "member": {
+      "checkboxTitle": "在團隊聊天室中顯示",
+      "titleRunning": "已在執行中 — 點選以切換至該面板",
+      "titleSpawn": "在 PTY 面板中啟動",
+      "noTypes": "—",
+      "emptyState": "尚無代理。請使用「＋ 新增 → 代理」新增。"
+    },
+    "user": {
+      "title": "{{team}} 的 app-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# 團隊聊天室",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "載入更多…",
+    "arrow": "→",
+    "emptyState": "尚無訊息。"
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "自行監控 — 此類型會自行傳遞 agmsg 訊息",
+      "app": "App 監控 — agmsg 訊息會注入至此面板的標準輸入（stdin）"
+    },
+    "closeTitle": "關閉面板",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "您（以 {{appUser}} 身分）發送的訊息會顯示於此。",
+      "noUser": "此團隊尚無 app-user。",
+      "addOne": "新增一個"
+    }
+  },
+  "composer": {
+    "asPrefix": "以",
+    "targetPlaceholder": "傳送給…",
+    "messagePlaceholder": "訊息",
+    "sendButton": "傳送",
+    "noAppUser": "沒有 app-user — 請新增一個以傳送/接收訊息",
+    "sendFailedAlert": "傳送失敗：{{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "移除 {{name}}？",
+      "body": "這會將 {{name}} 從 {{team}} 中移除，並關閉其執行中的面板（若有）。此操作無法復原。",
+      "confirmLabel": "離開"
+    },
+    "newTeam": {
+      "titleFirstRun": "歡迎使用 — 建立您的第一個團隊",
+      "title": "新增團隊",
+      "note": "建立團隊，並將您新增為該團隊的 app-user（底部聊天框的擁有者）。",
+      "teamNameLabel": "團隊名稱",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "您的名稱（app-user）",
+      "create": "建立"
+    },
+    "appUser": {
+      "title": "新增 app-user（您）",
+      "note": "app-user 是您在此團隊中的身分 — 底部聊天框的擁有者。每個團隊僅限一位。",
+      "add": "新增"
+    },
+    "agent": {
+      "title": "新增代理",
+      "typeLabel": "類型",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "新增並啟動"
+    },
+    "rename": {
+      "title": "重新命名 {{current}}",
+      "newNameLabel": "新名稱",
+      "confirmButton": "重新命名"
+    },
+    "confirm": {
+      "defaultLabel": "確認"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "啟動至 ▸",
+      "spawnNewTab": "新分頁",
+      "existingTabsDivider": "— 現有分頁 —",
+      "rename": "重新命名…",
+      "leave": "離開"
+    },
+    "pane": {
+      "close": "關閉",
+      "moveTo": "移動至 ▸",
+      "moveNewTab": "新分頁",
+      "noOtherTabs": "沒有其他分頁"
+    },
+    "window": {
+      "rename": "重新命名…"
+    }
+  },
+  "terminal": {
+    "processExited": "[處理程序已結束]",
+    "failedToStart": "啟動「{{cmd}}」失敗：{{error}}"
+  },
+  "language": {
+    "label": "語言"
+  }
+}

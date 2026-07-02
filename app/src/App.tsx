@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { TerminalPane } from "./TerminalPane";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 import {
   AgentModal,
   AppUserModal,
@@ -57,6 +59,7 @@ const ROOM_PAGE_SIZE = 30;
 export type AgentType = { name: string; cli: string; options: string[] };
 
 export default function App() {
+  const { t } = useTranslation();
   // Set when a startup call that the whole app depends on (loading teams)
   // fails outright — most commonly agmsg isn't installed at
   // ~/.agents/skills/agmsg. Without this the app would just render an empty
@@ -213,17 +216,15 @@ export default function App() {
   // unexplained empty shell.
   useEffect(() => {
     loadTeams()
-      .then((t) => {
-        if (t.length === 0) setModal({ kind: "team", firstRun: true });
-        else setTeam((cur) => cur || t[0]);
+      .then((loadedTeams) => {
+        if (loadedTeams.length === 0) setModal({ kind: "team", firstRun: true });
+        else setTeam((cur) => cur || loadedTeams[0]);
       })
       .catch((err) => {
         console.error(err);
-        setStartupError(
-          `Couldn't load agmsg teams: ${String(err)}. Is agmsg installed at ~/.agents/skills/agmsg?`,
-        );
+        setStartupError(t("startupError.loadTeamsFailed", { error: String(err) }));
       });
-  }, [loadTeams]);
+  }, [loadTeams, t]);
 
   // On team change: load members + the most recent history page. Prompt to
   // add an app-user if missing.
@@ -500,9 +501,9 @@ export default function App() {
       await invoke("agmsg_send", { team, from: appUser, to: target, body: draft });
       setDraft("");
     } catch (err) {
-      alert(`send failed: ${err}`);
+      alert(t("composer.sendFailedAlert", { error: String(err) }));
     }
-  }, [draft, target, team, appUser]);
+  }, [draft, target, team, appUser, t]);
 
   // --- modal handlers (all writes go through agmsg scripts via the backend) ---
 
@@ -626,17 +627,17 @@ export default function App() {
       {startupError && (
         <div className="startup-error-banner">
           <span>{startupError}</span>
-          <button onClick={() => setStartupError(null)}>Dismiss</button>
+          <button onClick={() => setStartupError(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       <div className="body">
         <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-head" data-tauri-drag-region>
             <div className="brand-row">
-              <img className="logo" src="/agmsg-logo.png" alt="agmsg" />
+              <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
               <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
               <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
-                ＋ New ▾
+                {t("sidebar.newMenu.trigger")}
               </button>
               {newMenu && (
                 <div className="new-menu">
@@ -646,7 +647,7 @@ export default function App() {
                       setModal({ kind: "team", firstRun: false });
                     }}
                   >
-                    Team…
+                    {t("sidebar.newMenu.team")}
                   </button>
                   <button
                     disabled={!team}
@@ -660,27 +661,28 @@ export default function App() {
                         .catch(() => {});
                     }}
                   >
-                    Agent…
+                    {t("sidebar.newMenu.agent")}
                   </button>
                 </div>
               )}
               </div>
             </div>
             <select value={team} onChange={(e) => setTeam(e.target.value)}>
-              {teams.map((t) => (
-                <option key={t} value={t}>
-                  {t}
+              {teams.map((teamName) => (
+                <option key={teamName} value={teamName}>
+                  {teamName}
                 </option>
               ))}
             </select>
+            <LanguageSwitcher />
           </div>
           <div className="sidebar-title">
-            <span>Agents</span>
+            <span>{t("sidebar.title")}</span>
             {active === "room" && others.length > 0 && (
               <span className="filter-actions">
-                <button onClick={selectAllMembers}>all</button>
+                <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
                 <span>·</span>
-                <button onClick={selectNoMembers}>none</button>
+                <button onClick={selectNoMembers}>{t("sidebar.filter.none")}</button>
               </span>
             )}
           </div>
@@ -699,7 +701,7 @@ export default function App() {
                   <input
                     type="checkbox"
                     className="member-check"
-                    title="show in team room"
+                    title={t("sidebar.member.checkboxTitle")}
                     checked={!deselected.has(m.name)}
                     onChange={() => toggleMember(m.name)}
                     onClick={(e) => e.stopPropagation()}
@@ -710,22 +712,26 @@ export default function App() {
                   onClick={() => spawnMember(m)}
                   title={
                     panes.some((p) => p.label === m.name)
-                      ? "already running — click to focus"
-                      : "spawn in a PTY pane"
+                      ? t("sidebar.member.titleRunning")
+                      : t("sidebar.member.titleSpawn")
                   }
                 >
                   <span className="member-name">
                     {m.name}
                     {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
                   </span>
-                  <span className="member-types">{m.types.join(", ") || "—"}</span>
+                  <span className="member-types">
+                    {m.types.join(", ") || t("sidebar.member.noTypes")}
+                  </span>
                 </button>
               </li>
             ))}
-            {others.length === 0 && <li className="empty">No agents yet. Use ＋ New → Agent.</li>}
+            {others.length === 0 && (
+              <li className="empty">{t("sidebar.member.emptyState")}</li>
+            )}
           </ul>
           {appUser && (
-            <div className="sidebar-user" title={`app-user in ${team}`}>
+            <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
               <span className="avatar" />
               <div className="su-meta">
                 <span className="su-name">{appUser}</span>
@@ -741,7 +747,7 @@ export default function App() {
           <nav className="tabs" data-tauri-drag-region>
             <span className={active === "room" ? "tab active" : "tab"}>
               <button className="tab-label" onClick={() => setActive("room")}>
-                # team room
+                {t("tabs.roomLabel")}
               </button>
             </span>
             {windows.map((w) => (
@@ -793,7 +799,7 @@ export default function App() {
                 if (e.currentTarget.scrollTop < 60) void loadOlderMessages();
               }}
             >
-              {loadingHistory && <div className="room-loading">Loading more…</div>}
+              {loadingHistory && <div className="room-loading">{t("room.loadingMore")}</div>}
               {groups.map((g) => (
                 <div className="grp" key={g.key}>
                   <div className="grp-head">
@@ -809,7 +815,7 @@ export default function App() {
                   ))}
                 </div>
               ))}
-              {messages.length === 0 && <div className="empty">No messages yet.</div>}
+              {messages.length === 0 && <div className="empty">{t("room.emptyState")}</div>}
             </div>
 
             {/* Every pane is a permanent, flat child of .stage — its window only
@@ -845,14 +851,14 @@ export default function App() {
                     <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
                       <span className="monitor-tip">
                         {p.native
-                          ? "Self-monitoring — this type delivers agmsg messages on its own"
-                          : "App monitor — agmsg messages are injected into this pane's stdin"}
+                          ? t("pane.monitorTip.native")
+                          : t("pane.monitorTip.app")}
                       </span>
                     </span>
                     <button
                       className="pane-header-close"
                       onClick={() => closeWindowPane(p.id)}
-                      title="close pane"
+                      title={t("pane.closeTitle")}
                     >
                       ×
                     </button>
@@ -877,19 +883,21 @@ export default function App() {
               <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
                 <span className="chat-time">{m.created_at.slice(11, 19)}</span>
                 <span className="chat-peer">
-                  {m.from === appUser ? `→ ${m.to}` : `${m.from} →`}
+                  {m.from === appUser
+                    ? t("chat.peer.to", { to: m.to })
+                    : t("chat.peer.from", { from: m.from })}
                 </span>
                 <span className="chat-body">{m.body}</span>
               </div>
             ))}
             {appUser && myThread.length === 0 && (
-              <div className="empty">Your messages (as {appUser}) appear here.</div>
+              <div className="empty">{t("chat.emptyState.withUser", { appUser })}</div>
             )}
             {!appUser && team && (
               <div className="empty">
-                No app-user for this team.{" "}
+                {t("chat.emptyState.noUser")}
                 <button className="link" onClick={() => setModal({ kind: "appuser" })}>
-                  Add one
+                  {t("chat.emptyState.addOne")}
                 </button>
               </div>
             )}
@@ -899,10 +907,10 @@ export default function App() {
             {appUser ? (
               <>
                 <span className="as">
-                  as <b>{appUser}</b>
+                  {t("composer.asPrefix")} <b>{appUser}</b>
                 </span>
                 <select value={target} onChange={(e) => setTarget(e.target.value)}>
-                  <option value="">to…</option>
+                  <option value="">{t("composer.targetPlaceholder")}</option>
                   {others.map((m) => (
                     <option key={m.name} value={m.name}>
                       {m.name}
@@ -911,17 +919,17 @@ export default function App() {
                 </select>
                 <input
                   value={draft}
-                  placeholder="message"
+                  placeholder={t("composer.messagePlaceholder")}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => isSubmitEnter(e) && send()}
                   {...imeCompositionProps}
                 />
                 <button onClick={send} disabled={!draft.trim() || !target}>
-                  send
+                  {t("composer.sendButton")}
                 </button>
               </>
             ) : (
-              <span className="as">no app-user — add one to send/receive</span>
+              <span className="as">{t("composer.noAppUser")}</span>
             )}
           </footer>
         </main>
@@ -952,9 +960,9 @@ export default function App() {
       )}
       {modal?.kind === "leave" && (
         <ConfirmModal
-          title={`Remove ${modal.name}?`}
-          body={`This removes ${modal.name} from ${team} and closes its pane if it's running. This can't be undone from here.`}
-          confirmLabel="Leave"
+          title={t("modal.leave.title", { name: modal.name })}
+          body={t("modal.leave.body", { name: modal.name, team })}
+          confirmLabel={t("modal.leave.confirmLabel")}
           danger
           onConfirm={() => onLeave(modal.name)}
           onClose={() => setModal(null)}
@@ -975,7 +983,7 @@ export default function App() {
             >
               {!isRunning && (
                 <div className="submenu-trigger">
-                  <span className="submenu-label">Spawn to ▸</span>
+                  <span className="submenu-label">{t("ctxMenu.member.spawnTo")}</span>
                   <div className="submenu">
                     <button
                       onClick={() => {
@@ -983,9 +991,11 @@ export default function App() {
                         setMemberMenu(null);
                       }}
                     >
-                      New tab
+                      {t("ctxMenu.member.spawnNewTab")}
                     </button>
-                    {windows.length > 0 && <span className="submenu-empty">— existing tabs —</span>}
+                    {windows.length > 0 && (
+                      <span className="submenu-empty">{t("ctxMenu.member.existingTabsDivider")}</span>
+                    )}
                     {windows.map((w) => (
                       <button
                         key={w.id}
@@ -1006,7 +1016,7 @@ export default function App() {
                   setMemberMenu(null);
                 }}
               >
-                Rename…
+                {t("ctxMenu.member.rename")}
               </button>
               <button
                 className="danger"
@@ -1015,7 +1025,7 @@ export default function App() {
                   setMemberMenu(null);
                 }}
               >
-                Leave
+                {t("ctxMenu.member.leave")}
               </button>
             </div>
           );
@@ -1040,10 +1050,10 @@ export default function App() {
                   setPaneMenu(null);
                 }}
               >
-                Close
+                {t("ctxMenu.pane.close")}
               </button>
               <div className="submenu-trigger">
-                <span className="submenu-label">Move to ▸</span>
+                <span className="submenu-label">{t("ctxMenu.pane.moveTo")}</span>
                 <div className="submenu">
                   {canSplitOff && (
                     <button
@@ -1052,11 +1062,11 @@ export default function App() {
                         setPaneMenu(null);
                       }}
                     >
-                      New tab
+                      {t("ctxMenu.pane.moveNewTab")}
                     </button>
                   )}
                   {otherWindows.length === 0 && !canSplitOff && (
-                    <span className="submenu-empty">No other tabs</span>
+                    <span className="submenu-empty">{t("ctxMenu.pane.noOtherTabs")}</span>
                   )}
                   {otherWindows.map((w) => {
                     const label = windowLabel(w);
@@ -1090,7 +1100,7 @@ export default function App() {
               setWindowMenu(null);
             }}
           >
-            Rename…
+            {t("ctxMenu.window.rename")}
           </button>
         </div>
       )}

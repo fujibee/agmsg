@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
 type BrowseDir = (current: string) => Promise<string | null>;
@@ -48,6 +49,7 @@ export function NewTeamModal(props: {
   onClose?: () => void;
   browseDir: BrowseDir;
 }) {
+  const { t } = useTranslation();
   const [team, setTeam] = useState("");
   const [appUser, setAppUser] = useState("you");
   const { project, setProject, markEdited } = useDefaultProject(appUser);
@@ -63,12 +65,10 @@ export function NewTeamModal(props: {
   };
   return (
     <Modal
-      title={props.firstRun ? "Welcome — create your first team" : "New team"}
+      title={props.firstRun ? t("modal.newTeam.titleFirstRun") : t("modal.newTeam.title")}
       onClose={props.onClose}
     >
-      <p className="modal-note">
-        Creates the team and adds you as its app-user (the bottom chat box owner).
-      </p>
+      <p className="modal-note">{t("modal.newTeam.note")}</p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -76,15 +76,20 @@ export function NewTeamModal(props: {
         }}
       >
         <label>
-          Team name
-          <input autoFocus value={team} onChange={(e) => setTeam(e.target.value)} placeholder="my-team" />
+          {t("modal.newTeam.teamNameLabel")}
+          <input
+            autoFocus
+            value={team}
+            onChange={(e) => setTeam(e.target.value)}
+            placeholder={t("modal.newTeam.teamNamePlaceholder")}
+          />
         </label>
         <label>
-          Your name (app-user)
+          {t("modal.newTeam.appUserLabel")}
           <input value={appUser} onChange={(e) => setAppUser(e.target.value)} />
         </label>
         <label>
-          Project dir
+          {t("common.projectDirLabel")}
           <span className="path-row">
             <input
               value={project}
@@ -103,7 +108,7 @@ export function NewTeamModal(props: {
                 }
               }}
             >
-              Browse…
+              {t("common.browse")}
             </button>
           </span>
         </label>
@@ -111,11 +116,11 @@ export function NewTeamModal(props: {
         <div className="modal-actions">
           {props.onClose && (
             <button type="button" onClick={props.onClose}>
-              Cancel
+              {t("common.cancel")}
             </button>
           )}
           <button type="submit" className="primary" disabled={!ready}>
-            Create
+            {t("modal.newTeam.create")}
           </button>
         </div>
       </form>
@@ -128,6 +133,7 @@ export function AppUserModal(props: {
   onClose: () => void;
   browseDir: BrowseDir;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState("you");
   const { project, setProject, markEdited } = useDefaultProject(name);
   const [err, setErr] = useState("");
@@ -140,11 +146,8 @@ export function AppUserModal(props: {
     }
   };
   return (
-    <Modal title="Add app-user (you)" onClose={props.onClose}>
-      <p className="modal-note">
-        The app-user is your identity in this team — the owner of the bottom chat box.
-        One per team.
-      </p>
+    <Modal title={t("modal.appUser.title")} onClose={props.onClose}>
+      <p className="modal-note">{t("modal.appUser.note")}</p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -152,11 +155,11 @@ export function AppUserModal(props: {
         }}
       >
         <label>
-          Name
+          {t("common.nameLabel")}
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <label>
-          Project dir
+          {t("common.projectDirLabel")}
           <span className="path-row">
             <input
               value={project}
@@ -175,17 +178,17 @@ export function AppUserModal(props: {
                 }
               }}
             >
-              Browse…
+              {t("common.browse")}
             </button>
           </span>
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
           <button type="button" onClick={props.onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="submit" className="primary" disabled={!name.trim()}>
-            Add
+            {t("modal.appUser.add")}
           </button>
         </div>
       </form>
@@ -202,6 +205,7 @@ export function AgentModal(props: {
   /** Spawnable agent types, from agmsg's registry. */
   types: string[];
 }) {
+  const { t } = useTranslation();
   const [type, setType] = useState(props.types[0] ?? "");
   useEffect(() => {
     if (!type && props.types[0]) setType(props.types[0]);
@@ -218,7 +222,7 @@ export function AgentModal(props: {
     }
   };
   return (
-    <Modal title="Add agent" onClose={props.onClose}>
+    <Modal title={t("modal.agent.title")} onClose={props.onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -226,21 +230,26 @@ export function AgentModal(props: {
         }}
       >
         <label>
-          Type
+          {t("modal.agent.typeLabel")}
           <select value={type} onChange={(e) => setType(e.target.value)}>
-            {props.types.map((t) => (
-              <option key={t} value={t}>
-                {t}
+            {props.types.map((typeName) => (
+              <option key={typeName} value={typeName}>
+                {typeName}
               </option>
             ))}
           </select>
         </label>
         <label>
-          Name
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="alice" />
+          {t("common.nameLabel")}
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={t("modal.agent.namePlaceholder")}
+          />
         </label>
         <label>
-          Project dir
+          {t("common.projectDirLabel")}
           <span className="path-row">
             <input
               value={project}
@@ -259,17 +268,17 @@ export function AgentModal(props: {
                 }
               }}
             >
-              Browse…
+              {t("common.browse")}
             </button>
           </span>
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
           <button type="button" onClick={props.onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="submit" className="primary" disabled={!name.trim()}>
-            Add &amp; spawn
+            {t("modal.agent.addAndSpawn")}
           </button>
         </div>
       </form>
@@ -282,6 +291,7 @@ export function RenameModal(props: {
   onRename: (current: string, next: string) => Promise<void>;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const [next, setNext] = useState(props.current);
   const [err, setErr] = useState("");
   const submit = async () => {
@@ -293,7 +303,7 @@ export function RenameModal(props: {
     }
   };
   return (
-    <Modal title={`Rename ${props.current}`} onClose={props.onClose}>
+    <Modal title={t("modal.rename.title", { current: props.current })} onClose={props.onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -301,20 +311,20 @@ export function RenameModal(props: {
         }}
       >
         <label>
-          New name
+          {t("modal.rename.newNameLabel")}
           <input autoFocus value={next} onChange={(e) => setNext(e.target.value)} />
         </label>
         {err && <div className="modal-err">{err}</div>}
         <div className="modal-actions">
           <button type="button" onClick={props.onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
             className="primary"
             disabled={!next.trim() || next.trim() === props.current}
           >
-            Rename
+            {t("modal.rename.confirmButton")}
           </button>
         </div>
       </form>
@@ -330,12 +340,13 @@ export function ConfirmModal(props: {
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Modal title={props.title} onClose={props.onClose}>
       <p className="modal-note">{props.body}</p>
       <div className="modal-actions">
         <button type="button" onClick={props.onClose}>
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -345,7 +356,7 @@ export function ConfirmModal(props: {
             props.onClose();
           }}
         >
-          {props.confirmLabel ?? "Confirm"}
+          {props.confirmLabel ?? t("modal.confirm.defaultLabel")}
         </button>
       </div>
     </Modal>

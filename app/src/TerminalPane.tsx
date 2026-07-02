@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -26,6 +27,7 @@ function b64ToBytes(b64: string): Uint8Array {
  */
 export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const { t } = useTranslation();
 
   useEffect(() => {
     let disposed = false;
@@ -72,7 +74,7 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
       );
       unlisteners.push(
         await listen<{ id: string }>("pty-exit", (e) => {
-          if (e.payload.id === id) term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+          if (e.payload.id === id) term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
         }),
       );
       if (disposed) return;
@@ -85,7 +87,7 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
         // leave this pane blank forever with zero indication anything went
         // wrong. Write the failure straight into the terminal — it's already
         // the visible surface for this pane, no extra UI needed.
-        term.write(`\r\n\x1b[91mFailed to start "${cmd}": ${String(err)}\x1b[0m\r\n`);
+        term.write(`\r\n\x1b[91m${t("terminal.failedToStart", { cmd, error: String(err) })}\x1b[0m\r\n`);
       }
     })();
 

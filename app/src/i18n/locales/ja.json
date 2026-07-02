@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "キャンセル",
+    "browse": "参照…",
+    "nameLabel": "名前",
+    "projectDirLabel": "プロジェクトディレクトリ"
+  },
+  "startupError": {
+    "loadTeamsFailed": "agmsgのチームを読み込めませんでした: {{error}}。agmsgは ~/.agents/skills/agmsg にインストールされていますか?",
+    "dismiss": "閉じる"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ 新規 ▾",
+      "team": "チーム…",
+      "agent": "エージェント…"
+    },
+    "title": "エージェント",
+    "filter": {
+      "all": "すべて",
+      "none": "なし"
+    },
+    "member": {
+      "checkboxTitle": "チームルームに表示",
+      "titleRunning": "実行中 — クリックしてフォーカス",
+      "titleSpawn": "PTYペインで起動",
+      "noTypes": "—",
+      "emptyState": "エージェントはまだありません。＋ 新規 → エージェント から追加してください。"
+    },
+    "user": {
+      "title": "{{team}} のapp-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# チームルーム",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "さらに読み込み中…",
+    "arrow": "→",
+    "emptyState": "メッセージはまだありません。"
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "セルフモニタリング — このタイプは自身でagmsgメッセージを配信します",
+      "app": "アプリモニター — agmsgメッセージはこのペインの標準入力に注入されます"
+    },
+    "closeTitle": "ペインを閉じる",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "あなたのメッセージ（{{appUser}}として）がここに表示されます。",
+      "noUser": "このチームにapp-userがいません。 ",
+      "addOne": "追加する"
+    }
+  },
+  "composer": {
+    "asPrefix": "として",
+    "targetPlaceholder": "宛先…",
+    "messagePlaceholder": "メッセージ",
+    "sendButton": "送信",
+    "noAppUser": "app-userがいません — 送受信するには追加してください",
+    "sendFailedAlert": "送信に失敗しました: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "{{name}} を削除しますか？",
+      "body": "これにより {{name}} が {{team}} から削除され、実行中の場合はそのペインも閉じられます。この操作はここから元に戻せません。",
+      "confirmLabel": "削除"
+    },
+    "newTeam": {
+      "titleFirstRun": "ようこそ — 最初のチームを作成しましょう",
+      "title": "新しいチーム",
+      "note": "チームを作成し、あなたをapp-user（下部チャットボックスの所有者）として追加します。",
+      "teamNameLabel": "チーム名",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "あなたの名前（app-user）",
+      "create": "作成"
+    },
+    "appUser": {
+      "title": "app-user（あなた）を追加",
+      "note": "app-userはこのチームにおけるあなたの識別情報です — 下部チャットボックスの所有者です。チームごとに1人のみ。",
+      "add": "追加"
+    },
+    "agent": {
+      "title": "エージェントを追加",
+      "typeLabel": "タイプ",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "追加して起動"
+    },
+    "rename": {
+      "title": "{{current}} の名前を変更",
+      "newNameLabel": "新しい名前",
+      "confirmButton": "名前を変更"
+    },
+    "confirm": {
+      "defaultLabel": "確認"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "起動先 ▸",
+      "spawnNewTab": "新しいタブ",
+      "existingTabsDivider": "— 既存のタブ —",
+      "rename": "名前を変更…",
+      "leave": "削除"
+    },
+    "pane": {
+      "close": "閉じる",
+      "moveTo": "移動先 ▸",
+      "moveNewTab": "新しいタブ",
+      "noOtherTabs": "他のタブはありません"
+    },
+    "window": {
+      "rename": "名前を変更…"
+    }
+  },
+  "terminal": {
+    "processExited": "[プロセスが終了しました]",
+    "failedToStart": "\"{{cmd}}\" の起動に失敗しました: {{error}}"
+  },
+  "language": {
+    "label": "言語"
+  }
+}

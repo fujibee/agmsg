@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "취소",
+    "browse": "찾아보기…",
+    "nameLabel": "이름",
+    "projectDirLabel": "프로젝트 디렉터리"
+  },
+  "startupError": {
+    "loadTeamsFailed": "agmsg 팀을 불러올 수 없습니다: {{error}}. ~/.agents/skills/agmsg 경로에 agmsg가 설치되어 있나요?",
+    "dismiss": "닫기"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ 새로 만들기 ▾",
+      "team": "팀…",
+      "agent": "에이전트…"
+    },
+    "title": "에이전트",
+    "filter": {
+      "all": "전체",
+      "none": "없음"
+    },
+    "member": {
+      "checkboxTitle": "팀 채팅방에 표시",
+      "titleRunning": "실행 중 — 클릭하면 포커스",
+      "titleSpawn": "PTY 창에서 실행",
+      "noTypes": "—",
+      "emptyState": "아직 에이전트가 없습니다. ＋ 새로 만들기 → 에이전트를 사용하세요."
+    },
+    "user": {
+      "title": "{{team}}의 app-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# 팀 채팅방",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "더 불러오는 중…",
+    "arrow": "→",
+    "emptyState": "아직 메시지가 없습니다."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "자체 모니터링 — 이 유형은 agmsg 메시지를 직접 전달합니다",
+      "app": "앱 모니터 — agmsg 메시지가 이 창의 표준 입력(stdin)으로 주입됩니다"
+    },
+    "closeTitle": "창 닫기",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "{{appUser}}(으)로 보낸 메시지가 여기에 표시됩니다.",
+      "noUser": "이 팀에는 app-user가 없습니다. ",
+      "addOne": "추가하기"
+    }
+  },
+  "composer": {
+    "asPrefix": "발신",
+    "targetPlaceholder": "받는 사람…",
+    "messagePlaceholder": "메시지",
+    "sendButton": "보내기",
+    "noAppUser": "app-user 없음 — 송수신하려면 추가하세요",
+    "sendFailedAlert": "전송 실패: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "{{name}}을(를) 제거할까요?",
+      "body": "{{team}}에서 {{name}}을(를) 제거하고, 실행 중이라면 해당 창도 닫습니다. 이 작업은 여기서 되돌릴 수 없습니다.",
+      "confirmLabel": "나가기"
+    },
+    "newTeam": {
+      "titleFirstRun": "환영합니다 — 첫 팀을 만들어 보세요",
+      "title": "새 팀",
+      "note": "팀을 만들고 본인을 app-user(하단 채팅창의 소유자)로 추가합니다.",
+      "teamNameLabel": "팀 이름",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "본인 이름 (app-user)",
+      "create": "만들기"
+    },
+    "appUser": {
+      "title": "app-user 추가 (본인)",
+      "note": "app-user는 이 팀에서 본인의 신원으로, 하단 채팅창의 소유자입니다. 팀당 한 명만 가능합니다.",
+      "add": "추가"
+    },
+    "agent": {
+      "title": "에이전트 추가",
+      "typeLabel": "유형",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "추가 후 실행"
+    },
+    "rename": {
+      "title": "{{current}} 이름 변경",
+      "newNameLabel": "새 이름",
+      "confirmButton": "이름 변경"
+    },
+    "confirm": {
+      "defaultLabel": "확인"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "실행 위치 ▸",
+      "spawnNewTab": "새 탭",
+      "existingTabsDivider": "— 기존 탭 —",
+      "rename": "이름 변경…",
+      "leave": "나가기"
+    },
+    "pane": {
+      "close": "닫기",
+      "moveTo": "이동 ▸",
+      "moveNewTab": "새 탭",
+      "noOtherTabs": "다른 탭 없음"
+    },
+    "window": {
+      "rename": "이름 변경…"
+    }
+  },
+  "terminal": {
+    "processExited": "[프로세스가 종료되었습니다]",
+    "failedToStart": "\"{{cmd}}\" 시작 실패: {{error}}"
+  },
+  "language": {
+    "label": "언어"
+  }
+}

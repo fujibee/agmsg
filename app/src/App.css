@@ -441,6 +441,9 @@ body.resizing-row {
 .sidebar-head select {
   width: 100%;
 }
+.language-switcher {
+  font-size: 11px;
+}
 .sidebar-title {
   display: flex;
   align-items: center;

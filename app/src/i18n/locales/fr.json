@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "Annuler",
+    "browse": "Parcourir…",
+    "nameLabel": "Nom",
+    "projectDirLabel": "Répertoire du projet"
+  },
+  "startupError": {
+    "loadTeamsFailed": "Impossible de charger les équipes agmsg : {{error}}. agmsg est-il installé dans ~/.agents/skills/agmsg ?",
+    "dismiss": "Ignorer"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ Nouveau ▾",
+      "team": "Équipe…",
+      "agent": "Agent…"
+    },
+    "title": "Agents",
+    "filter": {
+      "all": "tous",
+      "none": "aucun"
+    },
+    "member": {
+      "checkboxTitle": "afficher dans la salle d'équipe",
+      "titleRunning": "déjà en cours — cliquer pour afficher",
+      "titleSpawn": "démarrer dans un panneau PTY",
+      "noTypes": "—",
+      "emptyState": "Aucun agent pour l'instant. Utilisez ＋ Nouveau → Agent."
+    },
+    "user": {
+      "title": "app-user dans {{team}}"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# salle d'équipe",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "Chargement…",
+    "arrow": "→",
+    "emptyState": "Aucun message pour l'instant."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "Auto-surveillance — ce type délivre les messages agmsg par lui-même",
+      "app": "Moniteur de l'app — les messages agmsg sont injectés dans l'entrée standard de ce panneau"
+    },
+    "closeTitle": "fermer le panneau",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "Vos messages (en tant que {{appUser}}) apparaissent ici.",
+      "noUser": "Aucun app-user pour cette équipe. ",
+      "addOne": "En ajouter un"
+    }
+  },
+  "composer": {
+    "asPrefix": "en tant que",
+    "targetPlaceholder": "à…",
+    "messagePlaceholder": "message",
+    "sendButton": "envoyer",
+    "noAppUser": "aucun app-user — ajoutez-en un pour envoyer/recevoir",
+    "sendFailedAlert": "échec de l'envoi : {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "Supprimer {{name}} ?",
+      "body": "Cela retire {{name}} de {{team}} et ferme son panneau s'il est en cours d'exécution. Cette action est irréversible depuis ici.",
+      "confirmLabel": "Quitter"
+    },
+    "newTeam": {
+      "titleFirstRun": "Bienvenue — créez votre première équipe",
+      "title": "Nouvelle équipe",
+      "note": "Crée l'équipe et vous ajoute comme son app-user (le propriétaire de la zone de discussion en bas).",
+      "teamNameLabel": "Nom de l'équipe",
+      "teamNamePlaceholder": "mon-equipe",
+      "appUserLabel": "Votre nom (app-user)",
+      "create": "Créer"
+    },
+    "appUser": {
+      "title": "Ajouter un app-user (vous)",
+      "note": "L'app-user est votre identité au sein de cette équipe — le propriétaire de la zone de discussion en bas. Un seul par équipe.",
+      "add": "Ajouter"
+    },
+    "agent": {
+      "title": "Ajouter un agent",
+      "typeLabel": "Type",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "Ajouter et démarrer"
+    },
+    "rename": {
+      "title": "Renommer {{current}}",
+      "newNameLabel": "Nouveau nom",
+      "confirmButton": "Renommer"
+    },
+    "confirm": {
+      "defaultLabel": "Confirmer"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "Démarrer vers ▸",
+      "spawnNewTab": "Nouvel onglet",
+      "existingTabsDivider": "— onglets existants —",
+      "rename": "Renommer…",
+      "leave": "Quitter"
+    },
+    "pane": {
+      "close": "Fermer",
+      "moveTo": "Déplacer vers ▸",
+      "moveNewTab": "Nouvel onglet",
+      "noOtherTabs": "Aucun autre onglet"
+    },
+    "window": {
+      "rename": "Renommer…"
+    }
+  },
+  "terminal": {
+    "processExited": "[processus terminé]",
+    "failedToStart": "Échec du démarrage de « {{cmd}} » : {{error}}"
+  },
+  "language": {
+    "label": "Langue"
+  }
+}

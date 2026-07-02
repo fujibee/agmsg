@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "取消",
+    "browse": "浏览…",
+    "nameLabel": "名称",
+    "projectDirLabel": "项目目录"
+  },
+  "startupError": {
+    "loadTeamsFailed": "无法加载 agmsg 团队：{{error}}。是否已在 ~/.agents/skills/agmsg 安装 agmsg？",
+    "dismiss": "关闭"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ 新建 ▾",
+      "team": "团队…",
+      "agent": "智能体…"
+    },
+    "title": "智能体",
+    "filter": {
+      "all": "全部",
+      "none": "无"
+    },
+    "member": {
+      "checkboxTitle": "在团队聊天室中显示",
+      "titleRunning": "已在运行 — 点击以聚焦",
+      "titleSpawn": "在 PTY 面板中启动",
+      "noTypes": "—",
+      "emptyState": "暂无智能体。使用 ＋ 新建 → 智能体。"
+    },
+    "user": {
+      "title": "{{team}} 中的 app-user"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# 团队聊天室",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "正在加载更多…",
+    "arrow": "→",
+    "emptyState": "暂无消息。"
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "自我监控 — 该类型自行投递 agmsg 消息",
+      "app": "应用监控 — agmsg 消息将注入此面板的标准输入"
+    },
+    "closeTitle": "关闭面板",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "你的消息（以 {{appUser}} 身份发送）会显示在这里。",
+      "noUser": "该团队暂无 app-user。",
+      "addOne": "添加一个"
+    }
+  },
+  "composer": {
+    "asPrefix": "以",
+    "targetPlaceholder": "发送至…",
+    "messagePlaceholder": "消息",
+    "sendButton": "发送",
+    "noAppUser": "无 app-user — 添加一个以收发消息",
+    "sendFailedAlert": "发送失败：{{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "移除 {{name}}？",
+      "body": "这将把 {{name}} 从 {{team}} 中移除，并关闭其正在运行的面板（如果有）。此操作无法在此处撤销。",
+      "confirmLabel": "离开"
+    },
+    "newTeam": {
+      "titleFirstRun": "欢迎 — 创建你的第一个团队",
+      "title": "新建团队",
+      "note": "创建团队，并将你添加为该团队的 app-user（底部聊天框的所有者）。",
+      "teamNameLabel": "团队名称",
+      "teamNamePlaceholder": "my-team",
+      "appUserLabel": "你的名字（app-user）",
+      "create": "创建"
+    },
+    "appUser": {
+      "title": "添加 app-user（你）",
+      "note": "app-user 是你在该团队中的身份 — 底部聊天框的所有者。每个团队仅限一个。",
+      "add": "添加"
+    },
+    "agent": {
+      "title": "添加智能体",
+      "typeLabel": "类型",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "添加并启动"
+    },
+    "rename": {
+      "title": "重命名 {{current}}",
+      "newNameLabel": "新名称",
+      "confirmButton": "重命名"
+    },
+    "confirm": {
+      "defaultLabel": "确认"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "启动到 ▸",
+      "spawnNewTab": "新标签页",
+      "existingTabsDivider": "— 现有标签页 —",
+      "rename": "重命名…",
+      "leave": "离开"
+    },
+    "pane": {
+      "close": "关闭",
+      "moveTo": "移动到 ▸",
+      "moveNewTab": "新标签页",
+      "noOtherTabs": "没有其他标签页"
+    },
+    "window": {
+      "rename": "重命名…"
+    }
+  },
+  "terminal": {
+    "processExited": "[进程已退出]",
+    "failedToStart": "启动 “{{cmd}}” 失败：{{error}}"
+  },
+  "language": {
+    "label": "语言"
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "Abbrechen",
+    "browse": "Durchsuchen…",
+    "nameLabel": "Name",
+    "projectDirLabel": "Projektverzeichnis"
+  },
+  "startupError": {
+    "loadTeamsFailed": "agmsg-Teams konnten nicht geladen werden: {{error}}. Ist agmsg unter ~/.agents/skills/agmsg installiert?",
+    "dismiss": "Verwerfen"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ Neu ▾",
+      "team": "Team…",
+      "agent": "Agent…"
+    },
+    "title": "Agenten",
+    "filter": {
+      "all": "alle",
+      "none": "keine"
+    },
+    "member": {
+      "checkboxTitle": "im Team-Room anzeigen",
+      "titleRunning": "läuft bereits — klicken zum Fokussieren",
+      "titleSpawn": "in einem PTY-Bereich starten",
+      "noTypes": "—",
+      "emptyState": "Noch keine Agenten. ＋ Neu → Agent verwenden."
+    },
+    "user": {
+      "title": "app-user in {{team}}"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# Team-Room",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "Weitere werden geladen…",
+    "arrow": "→",
+    "emptyState": "Noch keine Nachrichten."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "Selbstüberwachung — dieser Typ liefert agmsg-Nachrichten selbstständig",
+      "app": "App-Monitor — agmsg-Nachrichten werden in die Standardeingabe (stdin) dieses Bereichs eingespeist"
+    },
+    "closeTitle": "Bereich schließen",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "Deine Nachrichten (als {{appUser}}) erscheinen hier.",
+      "noUser": "Kein App-User für dieses Team. ",
+      "addOne": "Einen hinzufügen"
+    }
+  },
+  "composer": {
+    "asPrefix": "als",
+    "targetPlaceholder": "an…",
+    "messagePlaceholder": "Nachricht",
+    "sendButton": "senden",
+    "noAppUser": "kein App-User — füge einen hinzu, um zu senden/empfangen",
+    "sendFailedAlert": "Senden fehlgeschlagen: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "{{name}} entfernen?",
+      "body": "Dies entfernt {{name}} aus {{team}} und schließt seinen Bereich, falls er läuft. Dies kann hier nicht rückgängig gemacht werden.",
+      "confirmLabel": "Verlassen"
+    },
+    "newTeam": {
+      "titleFirstRun": "Willkommen — erstelle dein erstes Team",
+      "title": "Neues Team",
+      "note": "Erstellt das Team und fügt dich als App-User hinzu (Besitzer der unteren Chatbox).",
+      "teamNameLabel": "Teamname",
+      "teamNamePlaceholder": "mein-team",
+      "appUserLabel": "Dein Name (App-User)",
+      "create": "Erstellen"
+    },
+    "appUser": {
+      "title": "App-User hinzufügen (du)",
+      "note": "Der App-User ist deine Identität in diesem Team — der Besitzer der unteren Chatbox. Einer pro Team.",
+      "add": "Hinzufügen"
+    },
+    "agent": {
+      "title": "Agent hinzufügen",
+      "typeLabel": "Typ",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "Hinzufügen & starten"
+    },
+    "rename": {
+      "title": "{{current}} umbenennen",
+      "newNameLabel": "Neuer Name",
+      "confirmButton": "Umbenennen"
+    },
+    "confirm": {
+      "defaultLabel": "Bestätigen"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "Starten in ▸",
+      "spawnNewTab": "Neuer Tab",
+      "existingTabsDivider": "— vorhandene Tabs —",
+      "rename": "Umbenennen…",
+      "leave": "Verlassen"
+    },
+    "pane": {
+      "close": "Schließen",
+      "moveTo": "Verschieben nach ▸",
+      "moveNewTab": "Neuer Tab",
+      "noOtherTabs": "Keine weiteren Tabs"
+    },
+    "window": {
+      "rename": "Umbenennen…"
+    }
+  },
+  "terminal": {
+    "processExited": "[Prozess beendet]",
+    "failedToStart": "Start von \"{{cmd}}\" fehlgeschlagen: {{error}}"
+  },
+  "language": {
+    "label": "Sprache"
+  }
+}

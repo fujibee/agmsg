@@ -1,0 +1,131 @@
+{
+  "common": {
+    "cancel": "Cancelar",
+    "browse": "Procurar…",
+    "nameLabel": "Nome",
+    "projectDirLabel": "Diretório do projeto"
+  },
+  "startupError": {
+    "loadTeamsFailed": "Não foi possível carregar as equipes do agmsg: {{error}}. O agmsg está instalado em ~/.agents/skills/agmsg?",
+    "dismiss": "Dispensar"
+  },
+  "sidebar": {
+    "logoAlt": "agmsg",
+    "newMenu": {
+      "trigger": "＋ Novo ▾",
+      "team": "Equipe…",
+      "agent": "Agente…"
+    },
+    "title": "Agentes",
+    "filter": {
+      "all": "todos",
+      "none": "nenhum"
+    },
+    "member": {
+      "checkboxTitle": "mostrar na sala da equipe",
+      "titleRunning": "já em execução — clique para focar",
+      "titleSpawn": "iniciar em um painel PTY",
+      "noTypes": "—",
+      "emptyState": "Nenhum agente ainda. Use ＋ Novo → Agente."
+    },
+    "user": {
+      "title": "app-user em {{team}}"
+    }
+  },
+  "tabs": {
+    "roomLabel": "# sala da equipe",
+    "close": "×"
+  },
+  "room": {
+    "loadingMore": "Carregando mais…",
+    "arrow": "→",
+    "emptyState": "Nenhuma mensagem ainda."
+  },
+  "pane": {
+    "monitorTip": {
+      "native": "Automonitorado — este tipo entrega mensagens do agmsg por conta própria",
+      "app": "Monitor do app — mensagens do agmsg são injetadas na entrada padrão deste painel"
+    },
+    "closeTitle": "fechar painel",
+    "closeGlyph": "×"
+  },
+  "chat": {
+    "peer": {
+      "to": "→ {{to}}",
+      "from": "{{from}} →"
+    },
+    "emptyState": {
+      "withUser": "Suas mensagens (como {{appUser}}) aparecem aqui.",
+      "noUser": "Nenhum app-user para esta equipe. ",
+      "addOne": "Adicionar um"
+    }
+  },
+  "composer": {
+    "asPrefix": "como",
+    "targetPlaceholder": "para…",
+    "messagePlaceholder": "mensagem",
+    "sendButton": "enviar",
+    "noAppUser": "nenhum app-user — adicione um para enviar/receber",
+    "sendFailedAlert": "falha ao enviar: {{error}}"
+  },
+  "modal": {
+    "leave": {
+      "title": "Remover {{name}}?",
+      "body": "Isso remove {{name}} de {{team}} e fecha seu painel, caso esteja em execução. Essa ação não pode ser desfeita por aqui.",
+      "confirmLabel": "Sair"
+    },
+    "newTeam": {
+      "titleFirstRun": "Bem-vindo — crie sua primeira equipe",
+      "title": "Nova equipe",
+      "note": "Cria a equipe e adiciona você como app-user dela (o dono da caixa de chat inferior).",
+      "teamNameLabel": "Nome da equipe",
+      "teamNamePlaceholder": "minha-equipe",
+      "appUserLabel": "Seu nome (app-user)",
+      "create": "Criar"
+    },
+    "appUser": {
+      "title": "Adicionar app-user (você)",
+      "note": "O app-user é sua identidade nesta equipe — o dono da caixa de chat inferior. Um por equipe.",
+      "add": "Adicionar"
+    },
+    "agent": {
+      "title": "Adicionar agente",
+      "typeLabel": "Tipo",
+      "namePlaceholder": "alice",
+      "addAndSpawn": "Adicionar e iniciar"
+    },
+    "rename": {
+      "title": "Renomear {{current}}",
+      "newNameLabel": "Novo nome",
+      "confirmButton": "Renomear"
+    },
+    "confirm": {
+      "defaultLabel": "Confirmar"
+    }
+  },
+  "ctxMenu": {
+    "member": {
+      "spawnTo": "Iniciar em ▸",
+      "spawnNewTab": "Nova aba",
+      "existingTabsDivider": "— abas existentes —",
+      "rename": "Renomear…",
+      "leave": "Sair"
+    },
+    "pane": {
+      "close": "Fechar",
+      "moveTo": "Mover para ▸",
+      "moveNewTab": "Nova aba",
+      "noOtherTabs": "Nenhuma outra aba"
+    },
+    "window": {
+      "rename": "Renomear…"
+    }
+  },
+  "terminal": {
+    "processExited": "[processo encerrado]",
+    "failedToStart": "Falha ao iniciar \"{{cmd}}\": {{error}}"
+  },
+  "language": {
+    "label": "Idioma"
+  }
+}
