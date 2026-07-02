@@ -309,7 +309,9 @@ export default function App() {
   }, []);
 
   const spawnMember = useCallback(
-    async (m: Member) => {
+    // targetWindowId: spawn straight into an existing tab as an extra
+    // side-by-side pane, instead of opening a new tab (the default).
+    async (m: Member, targetWindowId?: string) => {
       // Don't spawn a second pane for a member that's already running — just
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
@@ -362,10 +364,17 @@ export default function App() {
             native: monitors,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
-      const winId = `w-${seq.current++}`;
       setPanes((prev) => [...prev, pane]);
-      setWindows((prev) => [...prev, { id: winId, paneIds: [id] }]);
-      setActive(winId);
+      if (targetWindowId) {
+        setWindows((prev) =>
+          prev.map((w) => (w.id === targetWindowId ? { ...w, paneIds: [...w.paneIds, id] } : w)),
+        );
+        setActive(targetWindowId);
+      } else {
+        const winId = `w-${seq.current++}`;
+        setWindows((prev) => [...prev, { id: winId, paneIds: [id] }]);
+        setActive(winId);
+      }
     },
     [cmdName, spawnTypes],
   );
@@ -911,39 +920,65 @@ export default function App() {
         />
       )}
 
-      {memberMenu && (
-        <div
-          className="ctx-menu"
-          style={{ left: memberMenu.x, top: memberMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => {
-              spawnMember(memberMenu.member);
-              setMemberMenu(null);
-            }}
-          >
-            Spawn
-          </button>
-          <button
-            onClick={() => {
-              setModal({ kind: "rename", current: memberMenu.member.name });
-              setMemberMenu(null);
-            }}
-          >
-            Rename…
-          </button>
-          <button
-            className="danger"
-            onClick={() => {
-              setModal({ kind: "leave", name: memberMenu.member.name });
-              setMemberMenu(null);
-            }}
-          >
-            Leave
-          </button>
-        </div>
-      )}
+      {memberMenu &&
+        (() => {
+          // One live agent per identity — same rule spawnMember/the running-dot
+          // indicator already enforce. A running member can't be spawned again,
+          // so don't offer a "Spawn to…" that would silently just focus it.
+          const isRunning = panes.some((p) => p.label === memberMenu.member.name);
+          return (
+            <div
+              className="ctx-menu"
+              style={{ left: memberMenu.x, top: memberMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {!isRunning && (
+                <div className="submenu-trigger">
+                  <span className="submenu-label">Spawn to ▸</span>
+                  <div className="submenu">
+                    <button
+                      onClick={() => {
+                        spawnMember(memberMenu.member);
+                        setMemberMenu(null);
+                      }}
+                    >
+                      New tab
+                    </button>
+                    {windows.length > 0 && <span className="submenu-empty">— existing tabs —</span>}
+                    {windows.map((w) => (
+                      <button
+                        key={w.id}
+                        onClick={() => {
+                          spawnMember(memberMenu.member, w.id);
+                          setMemberMenu(null);
+                        }}
+                      >
+                        {windowLabel(w)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  setModal({ kind: "rename", current: memberMenu.member.name });
+                  setMemberMenu(null);
+                }}
+              >
+                Rename…
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setModal({ kind: "leave", name: memberMenu.member.name });
+                  setMemberMenu(null);
+                }}
+              >
+                Leave
+              </button>
+            </div>
+          );
+        })()}
 
       {paneMenu &&
         (() => {
