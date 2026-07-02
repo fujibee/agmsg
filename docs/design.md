@@ -1,5 +1,7 @@
 # agmsg — Design & Architecture
 
+*[日本語](design.ja.md)*
+
 Developer documentation for contributors and maintainers.
 
 ## Identity Model

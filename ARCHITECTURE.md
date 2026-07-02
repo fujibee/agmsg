@@ -1,5 +1,7 @@
 # Architecture
 
+*[日本語](ARCHITECTURE.ja.md)*
+
 This document describes the internal shape of agmsg — the mental model a contributor needs before reading the code or the interface spec. For *what* to implement, see [`docs/spec/`](docs/spec/). For *why* a decision was made, see [`docs/adr/`](docs/adr/).
 
 ## Goal

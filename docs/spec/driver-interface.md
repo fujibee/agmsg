@@ -1,5 +1,7 @@
 # Driver Interface Specification
 
+*[日本語](driver-interface.ja.md)*
+
 **Status:** draft (epic [#51](https://github.com/fujibee/agmsg/issues/51))
 **Scope:** axis A — storage. The common protocol sections also apply to axes B (agent) and C (delivery) but their axis-specific functions are out of scope here.
 

@@ -1,5 +1,7 @@
 # Contributing to agmsg
 
+*[日本語](CONTRIBUTING.ja.md)*
+
 Thanks for considering a contribution! agmsg is a small project; this guide is intentionally short.
 
 ## Where to start
