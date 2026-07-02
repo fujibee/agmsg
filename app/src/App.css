@@ -551,6 +551,11 @@ body.resizing-row {
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
 }
+.tabs-drag-spacer {
+  flex: 1;
+  min-width: 24px;
+  align-self: stretch;
+}
 .tab {
   display: inline-flex;
   align-items: center;
@@ -623,6 +628,13 @@ body.resizing-row {
   color: var(--muted);
 }
 
+.room-loading {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 6px 0;
+}
+
 /* Team room: a from→to · time header once per run of same-pair messages, with
    bodies stacked beneath (Slack/Discord style grouping). */
 .grp {
@@ -676,6 +688,13 @@ body.resizing-row {
 .pane-cell:not(.inactive) {
   z-index: 1;
 }
+/* .pane-cell's own z-index creates a stacking context, so the tooltip's
+   z-index:70 only wins inside its own pane-cell — against a sibling
+   pane-cell (a split-tab neighbor, same z-index:1) it can still lose and get
+   clipped. Bump the whole hovered pane-cell above its neighbor instead. */
+.pane-cell:has(.monitor-dot:hover) {
+  z-index: 20;
+}
 .pane-header {
   display: flex;
   align-items: center;
@@ -690,9 +709,73 @@ body.resizing-row {
   border-radius: 6px 6px 0 0;
 }
 .pane-header-label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Slow pulse shows which delivery path is watching this pane — see
+   Pane.native. Green = the type self-delivers (its own agmsg Monitor);
+   accent (blue) = the app's universal stdin-inject monitor is doing it.
+   The dot itself stays 7px, but the hoverable box is bigger (16px) so it's
+   easy to land on; the tooltip is a real element (not `title`) so it shows
+   reliably and instantly instead of depending on the OS's native-tooltip
+   delay/behavior. */
+.monitor-dot {
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0 -2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+.monitor-dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  animation: monitor-pulse 2.2s ease-in-out infinite;
+}
+.monitor-dot.native::before {
+  background: var(--green);
+}
+.monitor-dot.app::before {
+  background: var(--accent);
+}
+@keyframes monitor-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.monitor-tip {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 70;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.monitor-dot:hover .monitor-tip {
+  display: block;
 }
 .pane-header-close {
   background: none;

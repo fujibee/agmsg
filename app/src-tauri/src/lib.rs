@@ -3,7 +3,8 @@ mod pty;
 
 use pty::PtyManager;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, PredefinedMenuItem, Submenu};
+use std::sync::Mutex;
+use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 /// Explicit toggle state for View > Show User Chat. We don't rely on
@@ -12,6 +13,15 @@ use tauri::{AppHandle, Emitter, Manager, Wry};
 /// so this is the single source of truth: the handler flips it, pushes it to
 /// the checkbox via set_checked, and emits it to the frontend.
 struct UserChatVisible(AtomicBool);
+
+/// Current webview zoom factor (1.0 = 100%). Tauri's WebviewWindow can set
+/// the zoom but not read it back, so this is the source of truth the Zoom
+/// In/Out/Actual Size menu items adjust and apply via set_zoom.
+struct ZoomLevel(Mutex<f64>);
+
+const ZOOM_STEP: f64 = 0.1;
+const ZOOM_MIN: f64 = 0.5;
+const ZOOM_MAX: f64 = 3.0;
 
 /// Build the application menu. macOS derives the default menu's About/Hide/Quit
 /// labels from the crate name (which can't contain a space), so we define them
@@ -58,18 +68,19 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // "Show User Chat" toggles the app-user send/receive panel (chat +
     // composer) in the frontend. The frontend owns the actual show/hide state;
     // this checkbox just reflects it and emits a toggle event when clicked.
+    // Zoom In/Out/Actual Size mirror the standard browser-app trio (Cmd+=,
+    // Cmd+-, Cmd+0) — see the ZoomLevel handler in run() for the logic.
     let view_menu = Submenu::with_items(
         app,
         "View",
         true,
-        &[&CheckMenuItem::with_id(
-            app,
-            USER_CHAT_MENU_ID,
-            "Show User Chat",
-            true,
-            true,
-            None::<&str>,
-        )?],
+        &[
+            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, "Show User Chat", true, true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?,
+            &MenuItem::with_id(app, ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?,
+            &MenuItem::with_id(app, ZOOM_RESET_ID, "Actual Size", true, Some("CmdOrCtrl+0"))?,
+        ],
     )?;
     let window_menu = Submenu::with_items(
         app,
@@ -85,6 +96,9 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 }
 
 const USER_CHAT_MENU_ID: &str = "toggle_user_chat";
+const ZOOM_IN_ID: &str = "zoom_in";
+const ZOOM_OUT_ID: &str = "zoom_out";
+const ZOOM_RESET_ID: &str = "zoom_reset";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -93,8 +107,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .menu(|app| make_menu(app))
         .manage(UserChatVisible(AtomicBool::new(true)))
+        .manage(ZoomLevel(Mutex::new(1.0)))
         .on_menu_event(|app, event| {
-            if event.id() == USER_CHAT_MENU_ID {
+            let id = event.id().as_ref();
+            if id == USER_CHAT_MENU_ID {
                 let state = app.state::<UserChatVisible>();
                 let next = !state.0.load(Ordering::Relaxed);
                 state.0.store(next, Ordering::Relaxed);
@@ -106,6 +122,17 @@ pub fn run() {
                     }
                 }
                 let _ = app.emit("toggle-user-chat", next);
+            } else if id == ZOOM_IN_ID || id == ZOOM_OUT_ID || id == ZOOM_RESET_ID {
+                let state = app.state::<ZoomLevel>();
+                let mut zoom = state.0.lock().unwrap();
+                *zoom = match id {
+                    _ if id == ZOOM_IN_ID => (*zoom + ZOOM_STEP).min(ZOOM_MAX),
+                    _ if id == ZOOM_OUT_ID => (*zoom - ZOOM_STEP).max(ZOOM_MIN),
+                    _ => 1.0,
+                };
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_zoom(*zoom);
+                }
             }
         })
         .manage(PtyManager::default())
@@ -127,6 +154,7 @@ pub fn run() {
             agmsg::agmsg_join,
             agmsg::agmsg_rename,
             agmsg::agmsg_leave,
+            agmsg::agmsg_delivery_mode,
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
             agmsg::agmsg_spawnable_types,

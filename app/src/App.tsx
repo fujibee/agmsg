@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -27,8 +27,10 @@ type Pane = {
   cmd: string;
   args: string[];
   cwd?: string;
-  /** Booted with `/agmsg actas <name>` → it runs its own agmsg monitor, so the
-   *  app must NOT also inject (that would double-deliver). */
+  /** True only when this pane's type self-delivers agmsg messages (manifest
+   *  monitor=yes) — the app must NOT also inject there (double-delivery).
+   *  False for actas-booted types with no monitor of their own (codex,
+   *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
 };
 // A tab. Holds one or more panes, rendered as equal-width side-by-side
@@ -49,6 +51,8 @@ type Modal =
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
 export const APP_USER_TYPE = "agmsg-app";
+// Team-room history page size — the initial load, and each scroll-up "load more".
+const ROOM_PAGE_SIZE = 30;
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
@@ -72,6 +76,10 @@ export default function App() {
   const [showUserChat, setShowUserChat] = useState(true);
   // Team-room member filter: names the user has UN-checked (default: all shown).
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
+  // Team-room history paging: whether an older page exists, and whether one
+  // is currently loading (guards against duplicate scroll-triggered fetches).
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   // Right-click context menu over a member row: { member, x, y } while open.
   const [memberMenu, setMemberMenu] = useState<{ member: Member; x: number; y: number } | null>(
     null,
@@ -94,6 +102,30 @@ export default function App() {
   renameDraftRef.current = renameDraft;
   const seq = useRef(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  // Set right before prepending an older history page, so the scroll-to-
+  // bottom effect below skips that render (loadOlderMessages restores the
+  // scroll position itself instead).
+  const isPrependingRef = useRef(false);
+  // Guards Enter-to-submit inputs against IME composition. isComposing alone
+  // isn't quite enough on WebKit: the Enter that confirms a Japanese/Chinese/
+  // Korean IME candidate can arrive with isComposing already false, so we also
+  // ignore Enter for a brief window right after compositionend.
+  const imeComposingRef = useRef(false);
+  const imeEndedAtRef = useRef(0);
+  const imeCompositionProps = {
+    onCompositionStart: () => {
+      imeComposingRef.current = true;
+    },
+    onCompositionEnd: () => {
+      imeComposingRef.current = false;
+      imeEndedAtRef.current = Date.now();
+    },
+  };
+  const isSubmitEnter = (e: React.KeyboardEvent) =>
+    e.key === "Enter" &&
+    !e.nativeEvent.isComposing &&
+    !imeComposingRef.current &&
+    Date.now() - imeEndedAtRef.current > 150;
   const chatRef = useRef<HTMLDivElement>(null);
   const panesRef = useRef<Pane[]>([]);
   panesRef.current = panes;
@@ -178,12 +210,18 @@ export default function App() {
       .catch(console.error);
   }, [loadTeams]);
 
-  // On team change: load members + history. Prompt to add an app-user if missing.
+  // On team change: load members + the most recent history page. Prompt to
+  // add an app-user if missing.
   useEffect(() => {
     if (!team) return;
     setDeselected(new Set()); // reset the room filter when switching teams
-    invoke<Message[]>("agmsg_messages", { team, limit: 200 })
-      .then(setMessages)
+    setMessages([]);
+    setHasMoreHistory(true);
+    invoke<Message[]>("agmsg_messages", { team, limit: ROOM_PAGE_SIZE })
+      .then((msgs) => {
+        setMessages(msgs);
+        setHasMoreHistory(msgs.length >= ROOM_PAGE_SIZE);
+      })
       .catch(console.error);
     loadMembers(team)
       .then((m) => {
@@ -207,8 +245,48 @@ export default function App() {
     return () => void p.then((u) => u());
   }, [team]);
 
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+  // Load-more-on-scroll-up: fetch the page older than the currently-oldest
+  // loaded message and prepend it, restoring the scroll position afterward
+  // (a naive prepend would otherwise yank the view down by the new content's
+  // height, since scrollTop stays fixed while scrollHeight grows above it).
+  const loadOlderMessages = useCallback(async () => {
+    if (loadingHistory || !hasMoreHistory || messages.length === 0) return;
+    setLoadingHistory(true);
+    const beforeId = messages[0].id;
+    const el = feedRef.current;
+    const prevScrollHeight = el?.scrollHeight ?? 0;
+    try {
+      const older = await invoke<Message[]>("agmsg_messages", {
+        team,
+        limit: ROOM_PAGE_SIZE,
+        beforeId,
+      });
+      if (older.length > 0) {
+        isPrependingRef.current = true;
+        setMessages((prev) => [...older, ...prev]);
+        requestAnimationFrame(() => {
+          if (el) el.scrollTop += el.scrollHeight - prevScrollHeight;
+        });
+      }
+      setHasMoreHistory(older.length >= ROOM_PAGE_SIZE);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [team, messages, loadingHistory, hasMoreHistory]);
+
+  // useLayoutEffect (not useEffect): runs synchronously right after the DOM
+  // updates and before the browser paints, so scrollHeight already reflects
+  // the just-rendered messages — avoids a visible flash of the wrong scroll
+  // position (e.g. top-of-history) before jumping to the bottom.
+  useLayoutEffect(() => {
+    if (isPrependingRef.current) {
+      isPrependingRef.current = false;
+      return;
+    }
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages, active]);
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight });
@@ -251,13 +329,29 @@ export default function App() {
       const type = m.types.find((t) => freshCliFor.has(t));
       const cli = type ? freshCliFor.get(type)! : undefined;
       const options = type ? (freshOptionsFor.get(type) ?? []) : [];
+      // `native` = "this (type, project) actually self-delivers agmsg
+      // messages" — asked from agmsg's own delivery.sh status (mode derived
+      // from the project's real hooks file), NOT a static type.conf flag.
+      // A static flag can't see per-project setup or advanced opt-in paths
+      // (e.g. codex's app-server bridge "monitor" mode is disabled by
+      // default per type.conf but can be turned on per-project). When it's
+      // NOT self-delivering, the app's PTY stdin-inject universal monitor is
+      // this pane's only way to receive agmsg messages.
+      let monitors = false;
+      if (type && m.project) {
+        try {
+          const mode = await invoke<string>("agmsg_delivery_mode", { agentType: type, project: m.project });
+          monitors = mode === "monitor" || mode === "both";
+        } catch (err) {
+          console.error(err);
+        }
+      }
       const id = `${m.name}-${seq.current++}`;
       // Mirror agmsg spawn.sh: launch the CLI with any per-type spawn-options
       // flags, then `/<cmd> actas <name>` as the final arg — same relative
       // order spawn.sh splices them in — so the agent comes up as the real
-      // member (its own monitor + can send as itself) with the same extra
-      // flags `agmsg spawn` would give it. Types with no spawnable CLI fall
-      // back to a shell.
+      // member (can send as itself, and self-delivers if its type monitors).
+      // Types with no spawnable CLI fall back to a shell.
       const pane: Pane = cli
         ? {
             id,
@@ -265,7 +359,7 @@ export default function App() {
             cmd: cli,
             args: [...options, `/${cmdName} actas ${m.name}`],
             cwd: m.project || undefined,
-            native: true,
+            native: monitors,
           }
         : { id, label: m.name, cmd: "bash", args: [], cwd: m.project || undefined, native: false };
       const winId = `w-${seq.current++}`;
@@ -618,9 +712,10 @@ export default function App() {
                     onChange={(e) => setRenameDraft(e.target.value)}
                     onBlur={() => commitRenameWindow(w.id)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") commitRenameWindow(w.id);
+                      if (isSubmitEnter(e)) commitRenameWindow(w.id);
                       if (e.key === "Escape") setRenamingWindowId(null);
                     }}
+                    {...imeCompositionProps}
                     onClick={(e) => e.stopPropagation()}
                   />
                 ) : (
@@ -633,10 +728,22 @@ export default function App() {
                 </button>
               </span>
             ))}
+            {/* Tabs are all clickable buttons, so they eat the drag region
+                the <nav> itself claims — this dedicated strip is always
+                empty and always draggable, regardless of tab count. */}
+            <div className="tabs-drag-spacer" data-tauri-drag-region />
           </nav>
 
           <section className="stage">
-            <div className="room" hidden={active !== "room"} ref={feedRef}>
+            <div
+              className="room"
+              hidden={active !== "room"}
+              ref={feedRef}
+              onScroll={(e) => {
+                if (e.currentTarget.scrollTop < 60) void loadOlderMessages();
+              }}
+            >
+              {loadingHistory && <div className="room-loading">Loading more…</div>}
               {groups.map((g) => (
                 <div className="grp" key={g.key}>
                   <div className="grp-head">
@@ -685,6 +792,13 @@ export default function App() {
                     }}
                   >
                     <span className="pane-header-label">{p.label}</span>
+                    <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
+                      <span className="monitor-tip">
+                        {p.native
+                          ? "Self-monitoring — this type delivers agmsg messages on its own"
+                          : "App monitor — agmsg messages are injected into this pane's stdin"}
+                      </span>
+                    </span>
                     <button
                       className="pane-header-close"
                       onClick={() => closeWindowPane(p.id)}
@@ -749,7 +863,8 @@ export default function App() {
                   value={draft}
                   placeholder="message"
                   onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && send()}
+                  onKeyDown={(e) => isSubmitEnter(e) && send()}
+                  {...imeCompositionProps}
                 />
                 <button onClick={send} disabled={!draft.trim() || !target}>
                   send

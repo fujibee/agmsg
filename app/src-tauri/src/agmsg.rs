@@ -218,18 +218,26 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
 }
 
 /// Most recent `limit` messages for a team (oldest-first), for the team room.
+/// Paged by id: pass `before_id` (the currently-oldest loaded message's id) to
+/// fetch the next page further back, for "load more" on scroll-up. Defaults
+/// to the 30 most recent when `before_id` is omitted.
 #[tauri::command]
-pub fn agmsg_messages(team: String, limit: Option<u32>) -> Result<Vec<Message>, String> {
-    let limit = limit.unwrap_or(200);
+pub fn agmsg_messages(
+    team: String,
+    limit: Option<u32>,
+    before_id: Option<i64>,
+) -> Result<Vec<Message>, String> {
+    let limit = limit.unwrap_or(30);
+    let before_id = before_id.unwrap_or(i64::MAX);
     let conn = open_ro()?;
     let mut stmt = conn
         .prepare(
             "SELECT id, team, from_agent, to_agent, body, created_at FROM messages \
-             WHERE team=?1 ORDER BY id DESC LIMIT ?2",
+             WHERE team=?1 AND id<?2 ORDER BY id DESC LIMIT ?3",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(rusqlite::params![team, limit], |r| {
+        .query_map(rusqlite::params![team, before_id, limit], |r| {
             Ok(Message {
                 id: r.get(0)?,
                 team: r.get(1)?,
@@ -312,6 +320,24 @@ pub fn agmsg_rename(team: String, old_name: String, new_name: String) -> Result<
 #[tauri::command]
 pub fn agmsg_leave(team: String, name: String) -> Result<(), String> {
     run_script("leave.sh", &[&team, &name]).map(|_| ())
+}
+
+/// The actual delivery mode for (agent_type, project): "monitor", "turn",
+/// "both", or "off". Shells out to `delivery.sh status` — agmsg's own
+/// source of truth (it derives the mode from the project's hooks file,
+/// e.g. .claude/settings.local.json or .codex/hooks.json) — rather than
+/// re-deriving it here, so this never drifts from core's logic (including
+/// per-type paths like codex's opt-in app-server bridge "monitor" mode,
+/// which a static type.conf flag can't see).
+#[tauri::command]
+pub fn agmsg_delivery_mode(agent_type: String, project: String) -> Result<String, String> {
+    let output = run_script("delivery.sh", &["status", &agent_type, &project])?;
+    for line in output.lines() {
+        if let Some(mode) = line.strip_prefix("mode:") {
+            return Ok(mode.trim().to_string());
+        }
+    }
+    Ok("off".to_string())
 }
 
 /// Poll the DB for new rows and emit each as an `agmsg-message` event so the
