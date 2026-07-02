@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "設定"
+    },
+    "closeWindow": {
+      "title": "このタブを閉じますか?",
+      "body": "ここで動いているエージェントが停止します: {{names}}。元に戻せません。",
+      "confirmLabel": "タブを閉じる"
+    },
+    "closePane": {
+      "title": "{{name}} を閉じますか?",
+      "body": "{{name}} が停止します。元に戻せません。",
+      "confirmLabel": "ペインを閉じる"
     }
   },
   "ctxMenu": {

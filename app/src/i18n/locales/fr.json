@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "Paramètres"
+    },
+    "closeWindow": {
+      "title": "Fermer cet onglet ?",
+      "body": "Cela arrêtera les agents en cours d'exécution ici : {{names}}. Cette action est irréversible.",
+      "confirmLabel": "Fermer l'onglet"
+    },
+    "closePane": {
+      "title": "Fermer {{name}} ?",
+      "body": "Cela arrêtera {{name}}. Cette action est irréversible.",
+      "confirmLabel": "Fermer le panneau"
     }
   },
   "ctxMenu": {

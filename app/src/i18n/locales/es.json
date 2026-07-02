@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "Configuración"
+    },
+    "closeWindow": {
+      "title": "¿Cerrar esta pestaña?",
+      "body": "Esto detendrá los agentes que se ejecutan aquí: {{names}}. No se puede deshacer.",
+      "confirmLabel": "Cerrar pestaña"
+    },
+    "closePane": {
+      "title": "¿Cerrar {{name}}?",
+      "body": "Esto detendrá {{name}}. No se puede deshacer.",
+      "confirmLabel": "Cerrar panel"
     }
   },
   "ctxMenu": {

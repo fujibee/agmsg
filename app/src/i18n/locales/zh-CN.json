@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "设置"
+    },
+    "closeWindow": {
+      "title": "关闭此标签页？",
+      "body": "这将停止此处运行的代理：{{names}}。此操作无法撤销。",
+      "confirmLabel": "关闭标签页"
+    },
+    "closePane": {
+      "title": "关闭 {{name}}？",
+      "body": "这将停止 {{name}}。此操作无法撤销。",
+      "confirmLabel": "关闭面板"
     }
   },
   "ctxMenu": {

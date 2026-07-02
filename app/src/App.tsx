@@ -62,6 +62,8 @@ type Modal =
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
   | { kind: "settings" }
+  | { kind: "closeWindow"; windowId: string }
+  | { kind: "closePane"; paneId: string }
   | null;
 
 // The agmsg type that represents the human at the app (the bottom chat box owner).
@@ -885,7 +887,13 @@ export default function App() {
                     ▸ {windowLabel(w)}
                   </button>
                 )}
-                <button className="tab-close" onClick={() => closeWindow(w.id)}>
+                <button
+                  className="tab-close"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setModal({ kind: "closeWindow", windowId: w.id });
+                  }}
+                >
                   ×
                 </button>
               </span>
@@ -987,7 +995,7 @@ export default function App() {
                     </span>
                     <button
                       className="pane-header-close"
-                      onClick={() => closeWindowPane(p.id)}
+                      onClick={() => setModal({ kind: "closePane", paneId: p.id })}
                       title={t("pane.closeTitle")}
                     >
                       ×
@@ -1105,6 +1113,39 @@ export default function App() {
         />
       )}
       {modal?.kind === "settings" && <SettingsModal onClose={() => setModal(null)} />}
+      {modal?.kind === "closeWindow" &&
+        (() => {
+          const win = windows.find((w) => w.id === modal.windowId);
+          if (!win) return null;
+          const names = win.paneIds
+            .map((pid) => panes.find((p) => p.id === pid)?.label)
+            .filter((n): n is string => Boolean(n));
+          return (
+            <ConfirmModal
+              title={t("modal.closeWindow.title")}
+              body={t("modal.closeWindow.body", { names: names.join(", ") })}
+              confirmLabel={t("modal.closeWindow.confirmLabel")}
+              danger
+              onConfirm={() => closeWindow(modal.windowId)}
+              onClose={() => setModal(null)}
+            />
+          );
+        })()}
+      {modal?.kind === "closePane" &&
+        (() => {
+          const pane = panes.find((p) => p.id === modal.paneId);
+          if (!pane) return null;
+          return (
+            <ConfirmModal
+              title={t("modal.closePane.title", { name: pane.label })}
+              body={t("modal.closePane.body", { name: pane.label })}
+              confirmLabel={t("modal.closePane.confirmLabel")}
+              danger
+              onConfirm={() => closeWindowPane(modal.paneId)}
+              onClose={() => setModal(null)}
+            />
+          );
+        })()}
 
       {memberMenu &&
         (() => {
@@ -1189,7 +1230,7 @@ export default function App() {
             >
               <button
                 onClick={() => {
-                  closeWindowPane(paneMenu.paneId);
+                  setModal({ kind: "closePane", paneId: paneMenu.paneId });
                   setPaneMenu(null);
                 }}
               >

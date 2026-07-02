@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "設定"
+    },
+    "closeWindow": {
+      "title": "關閉此分頁？",
+      "body": "這將停止此處執行的代理：{{names}}。此操作無法復原。",
+      "confirmLabel": "關閉分頁"
+    },
+    "closePane": {
+      "title": "關閉 {{name}}？",
+      "body": "這將停止 {{name}}。此操作無法復原。",
+      "confirmLabel": "關閉面板"
     }
   },
   "ctxMenu": {

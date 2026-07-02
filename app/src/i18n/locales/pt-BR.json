@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "Configurações"
+    },
+    "closeWindow": {
+      "title": "Fechar esta aba?",
+      "body": "Isso vai parar os agentes em execução aqui: {{names}}. Isso não pode ser desfeito.",
+      "confirmLabel": "Fechar aba"
+    },
+    "closePane": {
+      "title": "Fechar {{name}}?",
+      "body": "Isso vai parar {{name}}. Isso não pode ser desfeito.",
+      "confirmLabel": "Fechar painel"
     }
   },
   "ctxMenu": {

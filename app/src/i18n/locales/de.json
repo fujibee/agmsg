@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "Einstellungen"
+    },
+    "closeWindow": {
+      "title": "Diesen Tab schließen?",
+      "body": "Dadurch werden die hier laufenden Agenten gestoppt: {{names}}. Dies kann nicht rückgängig gemacht werden.",
+      "confirmLabel": "Tab schließen"
+    },
+    "closePane": {
+      "title": "{{name}} schließen?",
+      "body": "Dadurch wird {{name}} gestoppt. Dies kann nicht rückgängig gemacht werden.",
+      "confirmLabel": "Panel schließen"
     }
   },
   "ctxMenu": {

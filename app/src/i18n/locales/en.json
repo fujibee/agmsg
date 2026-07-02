@@ -109,6 +109,16 @@
     },
     "settings": {
       "title": "Settings"
+    },
+    "closeWindow": {
+      "title": "Close this tab?",
+      "body": "This stops the agent(s) running here: {{names}}. This can't be undone.",
+      "confirmLabel": "Close tab"
+    },
+    "closePane": {
+      "title": "Close {{name}}?",
+      "body": "This stops {{name}}. This can't be undone.",
+      "confirmLabel": "Close pane"
     }
   },
   "ctxMenu": {

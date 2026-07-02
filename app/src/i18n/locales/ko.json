@@ -106,6 +106,16 @@
     },
     "settings": {
       "title": "설정"
+    },
+    "closeWindow": {
+      "title": "이 탭을 닫으시겠습니까?",
+      "body": "여기서 실행 중인 에이전트가 중지됩니다: {{names}}. 되돌릴 수 없습니다.",
+      "confirmLabel": "탭 닫기"
+    },
+    "closePane": {
+      "title": "{{name}}을(를) 닫으시겠습니까?",
+      "body": "{{name}}이(가) 중지됩니다. 되돌릴 수 없습니다.",
+      "confirmLabel": "패널 닫기"
     }
   },
   "ctxMenu": {
