@@ -72,10 +72,42 @@ pnpm build:notarize   # sources APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from
 ```
 
 Auto-update is wired up via `tauri-plugin-updater`, checked silently on launch and
-on-demand via **agmsg app → Check for Updates…**. The updater endpoint points at
-`fujibee/agmsg`'s GitHub Releases (`latest.json`); the private signing key lives in
+on-demand via **agmsg app → Check for Updates…**. The private signing key lives in
 the worktree-root `.secrets/` (never committed) and isn't yet wired into a CI
 release job, so cutting a release still means building and uploading by hand.
+
+The updater endpoint points at a **fixed tag**, `app-latest`
+(`releases/download/app-latest/latest.json`) — deliberately NOT
+`releases/latest/download/...`. `fujibee/agmsg` also hosts the CLI's own
+releases (`v*.*.*`, cut far more often than the app), and GitHub's "latest
+release" is whichever was published most recently across the whole repo,
+not scoped by tag pattern — pointing at it would work right after an app
+release and silently break again the next time the CLI ships. `app-latest`
+sidesteps that: it's a single release whose assets get replaced every time,
+never "the latest release" in GitHub's sense, so the URL never moves.
+
+To cut a release:
+```sh
+cd app
+pnpm build:notarize
+
+# One-time: create the fixed pointer release if it doesn't exist yet.
+gh release create app-latest --repo fujibee/agmsg --title "agmsg app (latest)" \
+  --notes "Always points at the newest agmsg app build. See app-vX.Y.Z releases for changelogs." --prerelease
+
+# Every release: also cut a normal versioned release for history/changelog...
+gh release create app-vX.Y.Z --repo fujibee/agmsg --title "agmsg app vX.Y.Z" \
+  src-tauri/target/release/bundle/macos/*.app.tar.gz \
+  src-tauri/target/release/bundle/macos/*.app.tar.gz.sig \
+  src-tauri/target/release/bundle/dmg/*.dmg
+
+# ...then overwrite app-latest's assets with the same build + latest.json
+# (hand-author latest.json: version, notes, pub_date, per-platform url+signature).
+gh release upload app-latest --repo fujibee/agmsg --clobber \
+  src-tauri/target/release/bundle/macos/*.app.tar.gz \
+  src-tauri/target/release/bundle/macos/*.app.tar.gz.sig \
+  latest.json
+```
 
 ## Known gaps
 
