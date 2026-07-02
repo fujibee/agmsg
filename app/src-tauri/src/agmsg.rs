@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 /// Base dir of the agmsg install (skill layout: db/, teams/, scripts/, ...).
@@ -168,51 +168,71 @@ pub fn agmsg_spawnable_types() -> Result<Vec<AgentType>, String> {
     Ok(types)
 }
 
-/// List team names (directories under teams/ that have a config.json).
+/// Parse each non-empty line of `raw` as JSON into `T`, skipping lines that
+/// fail to parse rather than failing the whole batch — a single malformed
+/// record (a future schema field this build doesn't know about, say)
+/// shouldn't blank out an entire team room.
+fn parse_jsonl<T: for<'de> Deserialize<'de>>(raw: &str) -> Vec<T> {
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// Wire shape of `api.sh get teams <team> members` — see scripts/api.sh.
+/// `project` is nullable there (a member with zero registrations); `Member`
+/// itself keeps a plain `String` for the frontend, so this is mapped rather
+/// than deriving Deserialize directly on `Member`.
+#[derive(Deserialize)]
+struct ApiMember {
+    name: String,
+    #[serde(default)]
+    types: Vec<String>,
+    project: Option<String>,
+}
+
+/// Wire shape of `api.sh get teams <team> messages` — matches the
+/// `message_sent` event schema ADR 0003 (design/storage-axis) defines for
+/// the future `storage_history`, so this struct (and the `at` rename) is
+/// what will need to keep working once that lands, not what needs to change.
+#[derive(Deserialize)]
+struct ApiMessage {
+    id: i64,
+    team: String,
+    from: String,
+    to: String,
+    body: String,
+    #[serde(rename = "at")]
+    created_at: String,
+}
+
+/// List team names. Shells out to api.sh rather than reading teams/
+/// directly — see scripts/api.sh's own header for why this exists
+/// (storage abstraction / non-bash consumers) and docs/adr/0003 on
+/// design/storage-axis for why the team registry itself stays file-based
+/// there (out of scope for that axis) rather than becoming a driver.
 #[tauri::command]
 pub fn agmsg_teams() -> Result<Vec<String>, String> {
-    let dir = agmsg_base().join("teams");
-    let mut teams = Vec::new();
-    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        if entry.path().join("config.json").is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                teams.push(name.to_string());
-            }
-        }
-    }
+    let raw = run_script("api.sh", &["get", "teams"])?;
+    let mut teams: Vec<String> =
+        raw.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
     teams.sort();
     Ok(teams)
 }
 
-/// Members of a team, read from teams/<team>/config.json.
+/// Members of a team, via `api.sh get teams <team> members`.
 #[tauri::command]
 pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
-    let path = agmsg_base().join("teams").join(&team).join("config.json");
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let cfg: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let mut members = Vec::new();
-    if let Some(agents) = cfg.get("agents").and_then(|a| a.as_object()) {
-        for (name, info) in agents {
-            let regs = info.get("registrations").and_then(|r| r.as_array());
-            let mut types: Vec<String> = regs
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|r| r.get("type").and_then(|t| t.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+    let raw = run_script("api.sh", &["get", "teams", &team, "members"])?;
+    let mut members: Vec<Member> = parse_jsonl::<ApiMember>(&raw)
+        .into_iter()
+        .map(|m| {
+            let mut types = m.types;
             types.sort();
             types.dedup();
-            let project = regs
-                .and_then(|arr| arr.first())
-                .and_then(|r| r.get("project"))
-                .and_then(|p| p.as_str())
-                .unwrap_or("")
-                .to_string();
-            members.push(Member { name: name.clone(), types, project });
-        }
-    }
+            Member { name: m.name, types, project: m.project.unwrap_or_default() }
+        })
+        .collect();
     members.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(members)
 }
@@ -220,37 +240,35 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
 /// Most recent `limit` messages for a team (oldest-first), for the team room.
 /// Paged by id: pass `before_id` (the currently-oldest loaded message's id) to
 /// fetch the next page further back, for "load more" on scroll-up. Defaults
-/// to the 30 most recent when `before_id` is omitted.
+/// to the 30 most recent when `before_id` is omitted. Via
+/// `api.sh get teams <team> messages`, which already returns oldest-first —
+/// no local re-sort needed (see that command's own ordering note).
 #[tauri::command]
 pub fn agmsg_messages(
     team: String,
     limit: Option<u32>,
     before_id: Option<i64>,
 ) -> Result<Vec<Message>, String> {
-    let limit = limit.unwrap_or(30);
-    let before_id = before_id.unwrap_or(i64::MAX);
-    let conn = open_ro()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, team, from_agent, to_agent, body, created_at FROM messages \
-             WHERE team=?1 AND id<?2 ORDER BY id DESC LIMIT ?3",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![team, before_id, limit], |r| {
-            Ok(Message {
-                id: r.get(0)?,
-                team: r.get(1)?,
-                from: r.get(2)?,
-                to: r.get(3)?,
-                body: r.get(4)?,
-                created_at: r.get(5)?,
-            })
+    let limit_s = limit.unwrap_or(30).to_string();
+    let mut args = vec!["get", "teams", &team, "messages", "--limit", &limit_s];
+    let before_id_s;
+    if let Some(id) = before_id {
+        before_id_s = id.to_string();
+        args.push("--before-id");
+        args.push(&before_id_s);
+    }
+    let raw = run_script("api.sh", &args)?;
+    Ok(parse_jsonl::<ApiMessage>(&raw)
+        .into_iter()
+        .map(|m| Message {
+            id: m.id,
+            team: m.team,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: m.created_at,
         })
-        .map_err(|e| e.to_string())?;
-    let mut out: Vec<Message> = rows.filter_map(|r| r.ok()).collect();
-    out.reverse(); // oldest-first for display
-    Ok(out)
+        .collect())
 }
 
 /// Run an agmsg script (scripts/<name>) with args. All registry mutations go
