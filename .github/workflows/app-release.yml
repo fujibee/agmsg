@@ -1,0 +1,162 @@
+name: app release
+
+# Builds, signs, and (macOS) notarizes the desktop app (app/) for macOS and
+# Windows. Separate from release.yml, which ships the agmsg CLI to npm — this
+# workflow has its own tag namespace so the two release trains never collide.
+#
+# Trigger: push of a tag matching app-v*.*.*. Also runnable by hand
+# (workflow_dispatch) to validate the pipeline itself.
+#
+# STATUS: written locally, not pushed. Secret names below are reported (not
+# independently verified from this worktree — `gh` here isn't authenticated
+# as fujibee, so listing fujibee/agmsg's secrets 403s) to already exist on
+# fujibee/agmsg. Pushing this workflow, and therefore letting it actually run
+# against those secrets, is withheld pending Koichi's explicit go in this
+# session — same "local commits only" rule this whole branch has followed.
+#
+# Secrets this workflow uses (per report; names may need a final check once
+# push is authorized and they can be verified directly):
+#   macOS codesign + notarization:
+#     MACOS_CERTIFICATE_P12_BASE64   base64-encoded .p12 (Developer ID Application)
+#     MACOS_CERTIFICATE_PASSWORD     .p12 export password
+#     APPLE_SIGNING_IDENTITY         "Developer ID Application: Koichi Fujikawa (A6GJF6MMFV)"
+#     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
+#   Windows codesign (Azure Trusted Signing, OIDC federated — no client
+#   secret. Account: agmsg-artifact-signing, East US, endpoint
+#   https://eus.codesigning.azure.net/, Public Trust certificate profile.
+#   App registration: agmsg-github-actions, federated for the main branch):
+#     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+#   Auto-updater artifact signing (keypair already generated locally, see
+#   app/scripts/build-notarize.sh):
+#     TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#
+# Deliberately does NOT publish a GitHub Release — it only builds and uploads
+# artifacts to the Actions run. Cutting an actual release stays a human-gated
+# step (upload the artifacts + latest.json by hand), matching release.yml's
+# human-approval gates for the CLI.
+
+on:
+  push:
+    tags:
+      - 'app-v*.*.*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: build (macos)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Import Developer ID certificate
+        if: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' }}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          security create-keychain -p "" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN"
+          rm cert.p12
+
+      - name: Build (sign + notarize)
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agmsg-app-macos
+          path: |
+            app/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            app/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+
+  build-windows:
+    name: build (windows)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write  # OIDC federated auth for azure/login — no client secret
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - name: Azure login (OIDC)
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # TODO: sign the .msi/.exe with Azure Trusted Signing (account
+      # agmsg-artifact-signing, endpoint https://eus.codesigning.azure.net/,
+      # Public Trust certificate profile) — exact action name/inputs pending
+      # research; see the header comment.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agmsg-app-windows
+          path: |
+            app/src-tauri/target/release/bundle/msi/*.msi
+            app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
