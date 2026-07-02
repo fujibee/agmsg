@@ -23,9 +23,8 @@ name: app release
 #     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
 #   Windows codesign (azure/artifact-signing-action, OIDC federated via
 #   azure/login — no client secret. Account: agmsg-artifact-signing, East US,
-#   endpoint https://eus.codesigning.azure.net/, Public Trust certificate
-#   profile — profile's exact resource name still unconfirmed, so the signing
-#   step below is `if: false` until it is. App registration:
+#   endpoint https://eus.codesigning.azure.net/, certificate profile
+#   agmsg-app-signing (Public Trust, CN=Koichi Fujikawa). App registration:
 #   agmsg-github-actions, federated for the main branch):
 #     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
 #   Auto-updater artifact signing (keypair already generated locally, see
@@ -150,16 +149,13 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # certificate-profile-name is the Public Trust profile's resource name
-      # within agmsg-artifact-signing — not yet confirmed (see header
-      # comment), so this step is left disabled (`if: false`) until it is.
       - name: Sign Windows binaries (Azure Trusted Signing)
-        if: false # TODO: flip once certificate-profile-name is confirmed
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: https://eus.codesigning.azure.net/
           signing-account-name: agmsg-artifact-signing
-          certificate-profile-name: TODO-confirm-profile-name
+          certificate-profile-name: agmsg-app-signing
           files-folder: ${{ github.workspace }}/app/src-tauri/target/release/bundle
           files-folder-filter: exe,msi
           files-folder-recurse: true
