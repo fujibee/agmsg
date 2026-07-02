@@ -362,13 +362,13 @@ body.resizing-row {
 .divider-h {
   position: relative;
   background: transparent;
-  flex: 0 0 6px;
+  flex: 0 0 3px;
 }
 .divider-v {
   cursor: col-resize;
 }
 .divider-h {
-  height: 6px;
+  height: 3px;
   cursor: row-resize;
 }
 .divider-v::before,
