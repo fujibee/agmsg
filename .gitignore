@@ -9,3 +9,7 @@ teams/
 /.omc/
 /.omx/
 /backlog/
+
+# Local secrets (notarization credentials, etc.) — never commit
+.env
+.env.*
