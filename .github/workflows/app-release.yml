@@ -19,8 +19,10 @@ name: app release
 #   macOS codesign + notarization:
 #     MACOS_CERTIFICATE_P12_BASE64   base64-encoded .p12 (Developer ID Application)
 #     MACOS_CERTIFICATE_PASSWORD     .p12 export password
-#     APPLE_SIGNING_IDENTITY         "Developer ID Application: Koichi Fujikawa (A6GJF6MMFV)"
 #     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
+#   (the signing identity itself is hardcoded in tauri.conf.json, not a
+#   secret — don't set APPLE_SIGNING_IDENTITY as a step env var unless it's
+#   actually populated, an empty override breaks codesign)
 #   Windows codesign (azure/artifact-signing-action, OIDC federated via
 #   azure/login — no client secret. Account: agmsg-artifact-signing, East US,
 #   endpoint https://eus.codesigning.azure.net/, certificate profile
@@ -96,7 +98,9 @@ jobs:
 
       - name: Build (sign + notarize)
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # No APPLE_SIGNING_IDENTITY secret exists (or is needed) — the env
+          # var would override tauri.conf.json's hardcoded identity with an
+          # empty string if set here, which is what broke the first run.
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
