@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -42,6 +42,12 @@ type Window = {
   paneIds: string[];
   /** User-set tab name (Rename); falls back to the joined pane labels. */
   customLabel?: string;
+  /** The team this tab was spawned under. Agents can't message across
+   *  teams, so a window's tab set is scoped to one team — showing another
+   *  team's tabs alongside it would imply cross-team messaging works when
+   *  it doesn't. Windows for other teams stay mounted (PTYs alive) but
+   *  hidden until that team is selected again. */
+  team: string;
 };
 type Modal =
   | { kind: "team"; firstRun: boolean }
@@ -227,6 +233,16 @@ export default function App() {
       });
   }, [loadTeams, t]);
 
+  // Tabs are per-team (see the Window type), so switching teams also swaps
+  // the whole visible tab set — land on the team room rather than leaving
+  // `active` pointing at a now-hidden tab from the previous team (its PTY
+  // keeps running; the tab just isn't shown here). A layout effect (not a
+  // regular one) so this resolves before paint — otherwise the old team's
+  // pane, still technically "active" for one frame, would flash visible.
+  useLayoutEffect(() => {
+    if (team) setActive("room");
+  }, [team]);
+
   // On team change: load members + the most recent history page. Prompt to
   // add an app-user if missing.
   useEffect(() => {
@@ -409,11 +425,11 @@ export default function App() {
         setActive(targetWindowId);
       } else {
         const winId = `w-${seq.current++}`;
-        setWindows((prev) => [...prev, { id: winId, paneIds: [id] }]);
+        setWindows((prev) => [...prev, { id: winId, paneIds: [id], team }]);
         setActive(winId);
       }
     },
-    [cmdName, spawnTypes],
+    [cmdName, spawnTypes, team],
   );
 
   // Close one pane (from its header's × or the context menu). If it was the
@@ -461,10 +477,10 @@ export default function App() {
     (paneId: string) => {
       detachPane(paneId);
       const winId = `w-${seq.current++}`;
-      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId] }]);
+      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId], team }]);
       setActive(winId);
     },
-    [detachPane],
+    [detachPane, team],
   );
 
   // A tab's label: the user's custom name if set, else its panes' names joined.
@@ -477,6 +493,11 @@ export default function App() {
         .join(" · "),
     [panes],
   );
+
+  // Tabs are scoped to the current team (see the Window type) — other
+  // teams' windows stay mounted with their PTYs alive, just not listed
+  // here or offered as spawn/move targets.
+  const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
 
   const startRenameWindow = useCallback(
     (windowId: string) => {
@@ -760,7 +781,7 @@ export default function App() {
                 {t("tabs.roomLabel")}
               </button>
             </span>
-            {windows.map((w) => (
+            {teamWindows.map((w) => (
               <span
                 key={w.id}
                 className={active === w.id ? "tab active" : "tab"}
@@ -1004,10 +1025,10 @@ export default function App() {
                     >
                       {t("ctxMenu.member.spawnNewTab")}
                     </button>
-                    {windows.length > 0 && (
+                    {teamWindows.length > 0 && (
                       <span className="submenu-empty">{t("ctxMenu.member.existingTabsDivider")}</span>
                     )}
-                    {windows.map((w) => (
+                    {teamWindows.map((w) => (
                       <button
                         key={w.id}
                         onClick={() => {
@@ -1045,7 +1066,13 @@ export default function App() {
       {paneMenu &&
         (() => {
           const sourceWindow = windows.find((w) => w.id === paneMenu.windowId);
-          const otherWindows = windows.filter((w) => w.id !== paneMenu.windowId);
+          // Move targets are limited to the source pane's own team — moving
+          // it into another team's tab set would mix a pane into a team it
+          // can't actually message, the same confusion this whole change
+          // is meant to avoid.
+          const otherWindows = windows.filter(
+            (w) => w.id !== paneMenu.windowId && w.team === sourceWindow?.team,
+          );
           // Only offer "split off into a new tab" when this pane is currently
           // sharing its window — if it's already alone, a new tab would be a no-op.
           const canSplitOff = (sourceWindow?.paneIds.length ?? 1) > 1;
