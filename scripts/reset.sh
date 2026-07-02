@@ -30,6 +30,9 @@ source "$SCRIPT_DIR/lib/registry-lock.sh"
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+# Equivalent path spellings (#268) — a drop must remove a registration stored
+# in any Windows/MSYS form, not just the exact resolved string.
+PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 
 # A drop releases the actas lock keyed under this session's per-process instance
 # id (#93). The template passes a bare $CLAUDE_CODE_SESSION_ID; normalize to the
@@ -106,7 +109,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     SELECT count(*)
     FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
     WHERE json_extract(value, '\$.type') = '$AGENT_TYPE'
-      AND json_extract(value, '\$.project') = '$PROJECT_PATH';
+      AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN);
   ")
   if [ "$MATCH_COUNT" -eq 0 ]; then
     agmsg_lock_release
@@ -121,7 +124,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
         FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
         WHERE NOT (
           json_extract(value, '\$.type') = '$AGENT_TYPE'
-          AND json_extract(value, '\$.project') = '$PROJECT_PATH'
+          AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN)
         )
       ), json('[]'))
     );

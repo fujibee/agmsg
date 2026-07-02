@@ -79,6 +79,8 @@ source "$SCRIPT_DIR/lib/type-registry.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/spawn-options.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/resolve-project.sh"
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -173,6 +175,7 @@ if [ ! -d "$PROJECT" ]; then
   die "project path does not exist: $PROJECT"
 fi
 PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(agmsg_normalize_project_path "$PROJECT")"
 
 # --- Resolve the launch method from the manifest ---
 # A non-empty `spawn=` launcher means this type runs via a Node launcher (e.g. an
@@ -240,13 +243,13 @@ fi
 # registered for this project (any type). Zero or many → require --team.
 resolve_team() {
   [ -d "$TEAMS_DIR" ] || return 0
-  local config_file team_name cfg_sql proj_sql count_for_project
+  local config_file team_name cfg_sql project_sql_in count_for_project
   local found=""
   # Read each config via readfile() and compare with SQL string literals rather
   # than `.param set` bindings: the sqlite3 shell's dot-command tokenizer does
   # NOT honour SQL '' escaping, so a value containing a single quote (a project
   # path like /tmp/pro'j) breaks `.param set`. SQL string literals do honour ''.
-  proj_sql=$(printf '%s' "$PROJECT" | sed "s/'/''/g")
+  project_sql_in=$(agmsg_project_sql_in_list "$PROJECT")
   for config_file in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config_file" ] || continue
     cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
@@ -265,7 +268,7 @@ resolve_team() {
       )
       SELECT COUNT(*)
       FROM agents, json_each(agents.registrations) AS r
-      WHERE json_extract(r.value, '\$.project') = '$proj_sql';
+      WHERE json_extract(r.value, '\$.project') IN ($project_sql_in);
     ")
     if [ "${count_for_project:-0}" -gt 0 ]; then
       found="${found:+$found

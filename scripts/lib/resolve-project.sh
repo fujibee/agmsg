@@ -57,6 +57,154 @@ agmsg_canonical_path() {
   fi
 }
 
+# Normalize only path spelling, not filesystem identity. Windows paths use the
+# mixed form used by Git for Windows (`C:/path`); POSIX paths keep their form
+# except for redundant trailing slashes.
+#
+# Trade-off: the reinterpretation is form-based, not platform-gated, so a POSIX
+# path whose first component is a single letter (`/c/foo`) is treated as an
+# MSYS drive form. Lookups stay correct either way — the variant set generated
+# below always includes the original spelling — but such paths are rare enough
+# on POSIX hosts that we prefer the simpler, platform-independent rule.
+agmsg_normalize_project_path() {
+  local p="$1" drive rest squeezed
+  [ -n "$p" ] || { printf '%s' "$p"; return 0; }
+  p="${p//\\//}"
+
+  # Collapse repeated slashes (C://x, /c//x) while preserving a UNC-style
+  # leading double slash.
+  squeezed=$(printf '%s' "$p" | tr -s '/')
+  case "$p" in
+    //*) p="/$squeezed" ;;
+    *)   p="$squeezed" ;;
+  esac
+
+  case "$p" in
+    /[A-Za-z])
+      drive=$(printf '%s' "${p#/}" | tr '[:lower:]' '[:upper:]')
+      printf '%s:/' "$drive"
+      return 0
+      ;;
+    /[A-Za-z]/*)
+      drive=$(printf '%s' "${p:1:1}" | tr '[:lower:]' '[:upper:]')
+      rest="${p:2}"
+      p="$drive:$rest"
+      ;;
+    [A-Za-z]:)
+      drive=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')
+      printf '%s:/' "$drive"
+      return 0
+      ;;
+    [A-Za-z]:/*)
+      drive=$(printf '%s' "${p:0:1}" | tr '[:lower:]' '[:upper:]')
+      p="$drive:${p:2}"
+      ;;
+  esac
+
+  case "$p" in
+    [A-Za-z]:/)
+      printf '%s' "$p"
+      return 0
+      ;;
+    */)
+      while [ "$p" != "/" ] && [ "${p%/}" != "$p" ]; do
+        p="${p%/}"
+      done
+      case "$p" in [A-Za-z]:) p="$p/" ;; esac
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
+# Print equivalent project path spellings for lookup compatibility with legacy
+# registrations. The first line is the canonical comparison form.
+agmsg_project_path_variants() {
+  local raw="$1"
+  local norm="$1" drive lower rest mixed_lower msys_lower msys_upper native_upper native_lower
+  local variants=() existing
+  norm="$(agmsg_normalize_project_path "$norm")"
+
+  _agmsg_add_project_variant() {
+    local candidate="$1" seen
+    [ -n "$candidate" ] || return 0
+    # ${arr[@]+...} guards the empty-array expansion: under `set -u` bash 3.2
+    # (macOS default) treats "${variants[@]}" on an empty array as unbound.
+    for seen in ${variants[@]+"${variants[@]}"}; do
+      [ "$seen" = "$candidate" ] && return 0
+    done
+    variants[${#variants[@]}]="$candidate"
+  }
+
+  _agmsg_add_project_variant "$norm"
+  # The caller's exact spelling always participates — covers exotic forms the
+  # normalizer does not model (e.g. native UNC \\server\share).
+  _agmsg_add_project_variant "$raw"
+  case "$norm" in
+    [A-Z]:/*)
+      drive="${norm:0:1}"
+      lower="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+      rest="${norm:2}"
+      mixed_lower="$lower:$rest"
+      msys_lower="/$lower$rest"
+      msys_upper="/$drive$rest"
+      native_upper="$drive:${rest//\//\\}"
+      native_lower="$lower:${rest//\//\\}"
+
+      _agmsg_add_project_variant "$mixed_lower"
+      _agmsg_add_project_variant "$msys_lower"
+      _agmsg_add_project_variant "$msys_upper"
+      _agmsg_add_project_variant "$native_upper"
+      _agmsg_add_project_variant "$native_lower"
+      if [ "$norm" != "$drive:/" ]; then
+        _agmsg_add_project_variant "$norm/"
+        _agmsg_add_project_variant "$mixed_lower/"
+        _agmsg_add_project_variant "$msys_lower/"
+        _agmsg_add_project_variant "$msys_upper/"
+        _agmsg_add_project_variant "$native_upper\\"
+        _agmsg_add_project_variant "$native_lower\\"
+      fi
+      ;;
+    //*)
+      # UNC: registrations may be stored with backslashes and/or a trailing
+      # separator.
+      _agmsg_add_project_variant "${norm//\//\\}"
+      _agmsg_add_project_variant "$norm/"
+      _agmsg_add_project_variant "${norm//\//\\}\\"
+      ;;
+    /|[A-Z]:/) : ;;
+    /*)
+      # Legacy POSIX registrations may carry a trailing slash.
+      _agmsg_add_project_variant "$norm/"
+      ;;
+  esac
+
+  for existing in ${variants[@]+"${variants[@]}"}; do
+    printf '%s\n' "$existing"
+  done
+  unset -f _agmsg_add_project_variant
+}
+
+agmsg_project_sql_in_list() {
+  local path="$1" candidate escaped out=""
+  while IFS= read -r candidate; do
+    escaped=$(printf '%s' "$candidate" | sed "s/'/''/g")
+    out="${out:+$out,}'$escaped'"
+  done < <(agmsg_project_path_variants "$path")
+  printf '%s' "$out"
+}
+
+agmsg_find_registered_project_variant() {
+  local projects="$1" path="$2" candidate match
+  while IFS= read -r candidate; do
+    match=$(printf '%s\n' "$projects" | grep -Fx -- "$candidate" | head -n 1 || true)
+    if [ -n "$match" ]; then
+      printf '%s' "$match"
+      return 0
+    fi
+  done < <(agmsg_project_path_variants "$path")
+  return 1
+}
+
 # Map an agent type to the binary basename(s) its process may carry.
 _agmsg_agent_binaries() {
   case "$1" in
@@ -197,7 +345,7 @@ agmsg_registered_projects() {
 # dir (the git checkout itself is then unregistered, so we decline and let the
 # ancestor walk handle it). return 1 when git is absent or nothing matches.
 agmsg_gitcommon_project() {
-  local start="$1" type="$2" common main projects
+  local start="$1" type="$2" common main projects match
   command -v git >/dev/null 2>&1 || return 1
   [ -d "$start" ] || return 1
   common=$(cd "$start" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 1
@@ -207,23 +355,27 @@ agmsg_gitcommon_project() {
   main=$(cd "$(dirname "$common")" 2>/dev/null && pwd) || return 1
   projects="$(agmsg_registered_projects "$type")"
   [ -n "$projects" ] || return 1
-  printf '%s\n' "$projects" | grep -Fxq "$main" || return 1
-  printf '%s' "$main"
+  match="$(agmsg_find_registered_project_variant "$projects" "$main")" || return 1
+  printf '%s' "$match"
 }
 
 # Echo the nearest ancestor of <start> (inclusive) that is a registered project
 # for <type>. return 1 when none matches.
 agmsg_ancestor_project() {
-  local start="$1" type="$2" projects d
+  local start="$1" type="$2" projects d next match
   projects="$(agmsg_registered_projects "$type")"
   [ -n "$projects" ] || return 1
-  d="$start"
-  while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "." ]; do
-    if printf '%s\n' "$projects" | grep -Fxq "$d"; then
-      printf '%s' "$d"
+  d="$(agmsg_normalize_project_path "$start")"
+  while [ -n "$d" ] && [ "$d" != "." ]; do
+    if match="$(agmsg_find_registered_project_variant "$projects" "$d")"; then
+      printf '%s' "$match"
       return 0
     fi
-    d=$(dirname "$d")
+    case "$d" in "/"|[A-Za-z]:|[A-Za-z]:/) break ;; esac
+    next=$(dirname "$d")
+    [ -z "$next" ] && break
+    [ "$next" = "$d" ] && break
+    d="$next"
   done
   return 1
 }

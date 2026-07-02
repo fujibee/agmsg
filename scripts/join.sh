@@ -44,6 +44,7 @@ source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
@@ -66,6 +67,7 @@ CONFIG_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
 AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")
+PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 REGISTRATION=$(sqlite3 :memory: "SELECT json_object('type', '$AGENT_TYPE_SQL', 'project', '$PROJECT_SQL');")
 REGISTRATION_ESCAPED=$(printf '%s' "$REGISTRATION" | sed "s/'/''/g")
 
@@ -101,7 +103,7 @@ else
       SELECT 1
       FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
       WHERE json_extract(value, '\$.type') = '$AGENT_TYPE_SQL'
-        AND json_extract(value, '\$.project') = '$PROJECT_SQL'
+        AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN)
     );
   ")
 
