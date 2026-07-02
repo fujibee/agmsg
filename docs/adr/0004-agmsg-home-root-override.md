@@ -29,9 +29,17 @@ watcher fleet was running).
 ADR 0002 previously rejected an `AGMSG_HOME` env var, but for a narrower
 purpose: *external type-plugin discovery* (`~/.config/agmsg/types`), which it
 replaced with the opt-in `AGMSG_PLUGIN_DIRS` + `agmsg plugin trust` scheme.
-That decision is unaffected by this ADR — this is a different concept
-(where the *data* lives, not where *drivers* are discovered from) and does
-not reopen the plugin-trust question.
+That ADR's own "runtime/config dir" note is scoped to plugin *discovery*,
+not the data-root question this ADR answers — the two don't collide as long
+as this ADR doesn't change what "runtime/config dir" means for that purpose.
+
+This ADR does, however, touch a security-relevant file that also lives under
+`db/` today: `driver-registry.sh`'s plugin-trust allowlist
+(`<install_dir>/db/trusted-plugins`, ADR 0002). That decision is unaffected
+by this ADR — this is a different concept (where the *data* lives, not
+where *drivers* are discovered from or trusted) — but the allowlist's own
+storage location needs an explicit call so `AGMSG_HOME` doesn't silently
+change it as a side effect (see Decision).
 
 Separately, the existing env vars have inconsistent naming
 (`AGMSG_STORAGE_PATH` is actually a **directory**, not a path to a file),
@@ -53,6 +61,17 @@ keeps its own default**, unchanged:
   (`~/.agents/skills/<cmd>/`, or a well-known set of candidate command
   names) and prefers it when present, so a user running both the CLI and the
   app end up pointed at the same store without configuring anything.
+
+**`driver-registry.sh`'s plugin-trust allowlist stays install-local — it
+does not follow `AGMSG_HOME`.** `trusted-plugins` continues to resolve from
+`<install_dir>/db/trusted-plugins` (the install's own `SKILL_DIR`) even when
+`AGMSG_HOME` is set. Plugin trust is a driver-execution security boundary
+(ADR 0002's concern), not message/team data (this ADR's concern), and this
+ADR does not extend `AGMSG_HOME`'s reach into it — an install (or the app's
+bundled fallback) trusting a plugin does not silently extend that trust to
+a different install sharing the same `AGMSG_HOME`, even though they'd share
+`db/`, `teams/`, `run/`. `driver-registry.sh` is therefore explicitly
+out of scope for the path-resolution change below.
 
 **Naming convention for env vars going forward:**
 
