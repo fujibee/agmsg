@@ -78,7 +78,15 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
       if (disposed) return;
       term.onData((data) => void invoke("pty_write", { id, data }));
       fitNow(); // size the PTY to the pane if it's already laid out
-      await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols });
+      try {
+        await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols });
+      } catch (err) {
+        // A failed spawn (missing CLI on PATH, bad cwd, ...) would otherwise
+        // leave this pane blank forever with zero indication anything went
+        // wrong. Write the failure straight into the terminal — it's already
+        // the visible surface for this pane, no extra UI needed.
+        term.write(`\r\n\x1b[91mFailed to start "${cmd}": ${String(err)}\x1b[0m\r\n`);
+      }
     })();
 
     // Re-fit whenever the pane's box changes — covers initial layout, switching

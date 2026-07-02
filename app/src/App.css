@@ -29,6 +29,27 @@ body,
   font: 13px/1.5 -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
 }
 
+.startup-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #4a1f1f;
+  color: #ffd7d7;
+  font-size: 12px;
+  border-bottom: 1px solid #6b2b2b;
+}
+.startup-error-banner button {
+  background: transparent;
+  border: 1px solid #ffd7d7;
+  color: #ffd7d7;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* Top bar */
 .topbar {
   display: flex;

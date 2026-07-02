@@ -57,6 +57,12 @@ const ROOM_PAGE_SIZE = 30;
 export type AgentType = { name: string; cli: string; options: string[] };
 
 export default function App() {
+  // Set when a startup call that the whole app depends on (loading teams)
+  // fails outright — most commonly agmsg isn't installed at
+  // ~/.agents/skills/agmsg. Without this the app would just render an empty
+  // shell with no indication anything is wrong (the failure was previously
+  // swallowed by a bare `.catch(console.error)`).
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
@@ -201,13 +207,22 @@ export default function App() {
   }, []);
 
   // First load: teams. If there are none, the first-run flow opens New Team.
+  // A rejection here (most commonly: agmsg isn't installed at
+  // ~/.agents/skills/agmsg, so the teams/ directory read fails) means the
+  // rest of the app has nothing to show — surface it instead of leaving an
+  // unexplained empty shell.
   useEffect(() => {
     loadTeams()
       .then((t) => {
         if (t.length === 0) setModal({ kind: "team", firstRun: true });
         else setTeam((cur) => cur || t[0]);
       })
-      .catch(console.error);
+      .catch((err) => {
+        console.error(err);
+        setStartupError(
+          `Couldn't load agmsg teams: ${String(err)}. Is agmsg installed at ~/.agents/skills/agmsg?`,
+        );
+      });
   }, [loadTeams]);
 
   // On team change: load members + the most recent history page. Prompt to
@@ -608,6 +623,12 @@ export default function App() {
         setWindowMenu(null);
       }}
     >
+      {startupError && (
+        <div className="startup-error-banner">
+          <span>{startupError}</span>
+          <button onClick={() => setStartupError(null)}>Dismiss</button>
+        </div>
+      )}
       <div className="body">
         <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-head" data-tauri-drag-region>
