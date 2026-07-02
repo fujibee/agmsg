@@ -49,6 +49,11 @@ jobs:
   build-macos:
     name: build (macos)
     runs-on: macos-latest
+    env:
+      # Step-level `if:` can't reference `secrets` directly (GitHub rejects
+      # it at dispatch-validation time), so resolve existence into a
+      # job-level env var here and check that instead.
+      HAS_MACOS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' }}
     defaults:
       run:
         working-directory: app
@@ -73,7 +78,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Import Developer ID certificate
-        if: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' }}
+        if: ${{ env.HAS_MACOS_CERT == 'true' }}
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -112,6 +117,8 @@ jobs:
     permissions:
       contents: read
       id-token: write  # OIDC federated auth for azure/login — no client secret
+    env:
+      HAS_AZURE_CREDS: ${{ secrets.AZURE_CLIENT_ID != '' }}
     defaults:
       run:
         working-directory: app
@@ -142,7 +149,7 @@ jobs:
         run: pnpm tauri build
 
       - name: Azure login (OIDC)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
         uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -150,7 +157,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Sign Windows binaries (Azure Trusted Signing)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: https://eus.codesigning.azure.net/
