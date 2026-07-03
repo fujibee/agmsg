@@ -7,12 +7,12 @@ name: app release
 # Trigger: push of a tag matching app-v*.*.*. Also runnable by hand
 # (workflow_dispatch) to validate the pipeline itself.
 #
-# STATUS: written locally, not pushed. Secret names below are reported (not
-# independently verified from this worktree — `gh` here isn't authenticated
-# as fujibee, so listing fujibee/agmsg's secrets 403s) to already exist on
-# fujibee/agmsg. Pushing this workflow, and therefore letting it actually run
-# against those secrets, is withheld pending Koichi's explicit go in this
-# session — same "local commits only" rule this whole branch has followed.
+# STATUS: pushed and exercised via workflow_dispatch from feat/desktop-app.
+# macOS goes end to end (codesign, notarize, staple, artifact upload) as of
+# run 28582001692. Windows builds fine, but Trusted Signing's federated
+# identity trusts the main branch only, so the Azure login step 403s
+# (AADSTS700213) on every feature-branch run — first real signal on that
+# path comes from a main-branch run.
 #
 # Secrets this workflow uses (per report; names may need a final check once
 # push is authorized and they can be verified directly):
