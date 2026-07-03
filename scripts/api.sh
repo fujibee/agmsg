@@ -28,8 +28,12 @@ set -euo pipefail
 #   api.sh get teams <team> members
 #   api.sh get teams <team> messages [--agent <name>] [--limit N] [--before-id <id>]
 #
-# Output is always either plain lines (teams) or JSONL, one record per line,
-# UTF-8, no pretty-printing. Nothing is written; this is read-only.
+# Output is always JSONL — one JSON object per line, UTF-8, no
+# pretty-printing — for every resource, including `teams` (a uniform
+# contract beats a special case a non-bash consumer has to remember).
+# Nothing is written; this is read-only. Every id (message ids included) is
+# a JSON string, never a bare number — ids are opaque per the driver
+# interface spec, and today's sqlite integer ids are no exception.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
@@ -42,10 +46,22 @@ shift
 get_teams() {
   local teams_dir="$SCRIPT_DIR/../teams"
   [ -d "$teams_dir" ] || return 0
+  local names=()
   for dir in "$teams_dir"/*/; do
     [ -f "${dir}config.json" ] || continue
-    basename "$dir"
-  done | sort
+    names+=("$(basename "$dir")")
+  done
+  [ ${#names[@]} -eq 0 ] && return 0
+  # One sqlite call for all names (not one per team) — json_object() still
+  # handles the JSON-escaping per name (a quote in a team name, say), it's
+  # just batched into a single UNION ALL rather than N process spawns.
+  local query="" name
+  for name in "${names[@]}"; do
+    local name_sql; name_sql="$(_agmsg_sqlesc "$name")"
+    [ -n "$query" ] && query="$query UNION ALL "
+    query="${query}SELECT '$name_sql' AS n"
+  done
+  agmsg_sqlite_mem "SELECT json_object('name', n) FROM ($query) ORDER BY n;"
 }
 
 get_members() {
@@ -112,10 +128,15 @@ get_messages() {
   # ASC — oldest-first output, same ordering contract §2.1 of the driver
   # spec requires of storage_history, so a future swap to that function
   # doesn't change what this command prints.
+  # id is CAST to TEXT: the driver-interface spec treats every message id as
+  # opaque, and a legacy sqlite integer id is specifically passed through as
+  # a decimal STRING (not a JSON number) so a future UUIDv7/Redis-stream-id
+  # driver doesn't change this field's JSON type — a consumer parsing id as
+  # a string today needs no change once that lands.
   agmsg_sqlite "$db" "
     SELECT json_object(
       'type', 'message_sent',
-      'id', id,
+      'id', CAST(id AS TEXT),
       'team', team,
       'from', from_agent,
       'to', to_agent,
