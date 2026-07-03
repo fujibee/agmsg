@@ -6,8 +6,26 @@ CLI agent by injecting them into the agent's stdin at its idle prompt — no per
 bridge, hook, or monitor tool.
 
 > Status: past Phase 0 — daily-driven, macOS-signed and notarized, auto-updating.
-> Windows code signing and an automated release pipeline are still pending; until
-> those land, builds are cut locally and installed by hand.
+
+## Install
+
+**macOS**
+```sh
+brew tap fujibee/agmsg && brew install --cask agmsg
+```
+or download the `.dmg` directly from the [Releases page](https://github.com/fujibee/agmsg/releases) —
+look for the newest `app-vX.Y.Z` tag. The app is signed and notarized, so it opens
+normally with no Gatekeeper right-click workaround needed.
+
+**Windows**
+Download the `.msi` or `.exe` installer from the same [Releases page](https://github.com/fujibee/agmsg/releases).
+
+Both platforms auto-update in place after install (**agmsg app → Check for
+Updates…**, or silently on launch).
+
+Prerequisite either way: agmsg itself installed at `~/.agents/skills/agmsg` (the
+app reads its DB and team config from there) — see the
+[main README](../README.md) for that install.
 
 ## Strategic core — universal stdin-inject delivery
 
@@ -61,8 +79,18 @@ DB and team config from there). `claude` must be on `PATH` to spawn Claude Code 
 3. From the bottom composer, send a message to that member as `app-user`. The app
    injects a kickoff notice into the agent's stdin right away and it responds.
 
-## Releasing (macOS)
+## Releasing
 
+`.github/workflows/app-release.yml` builds, signs, and (macOS) notarizes both
+platforms on a push of an `app-vX.Y.Z` tag (or by hand via `workflow_dispatch`).
+macOS goes through codesign → notarize → staple end to end in CI. Windows builds
+and, given Azure credentials, runs Trusted Signing (OIDC via `azure/login`, no
+client secret) — that federated identity trusts `main` only, so it can't be
+exercised from a feature branch. The workflow deliberately doesn't publish a
+GitHub Release itself; cutting one is still a human-gated step (upload artifacts
++ hand-author `latest.json`, below).
+
+For a local macOS build without CI:
 ```sh
 cd app
 pnpm build:notarize   # sources APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from
@@ -73,8 +101,8 @@ pnpm build:notarize   # sources APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from
 
 Auto-update is wired up via `tauri-plugin-updater`, checked silently on launch and
 on-demand via **agmsg app → Check for Updates…**. The private signing key lives in
-the worktree-root `.secrets/` (never committed) and isn't yet wired into a CI
-release job, so cutting a release still means building and uploading by hand.
+the worktree-root `.secrets/` locally (never committed) and as the
+`TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets in CI.
 
 The updater endpoint points at a **fixed tag**, `app-latest`
 (`releases/download/app-latest/latest.json`) — deliberately NOT
@@ -86,33 +114,29 @@ release and silently break again the next time the CLI ships. `app-latest`
 sidesteps that: it's a single release whose assets get replaced every time,
 never "the latest release" in GitHub's sense, so the URL never moves.
 
-To cut a release:
+To cut a release: push an `app-vX.Y.Z` tag (or run `app-release.yml` by hand) to
+get signed artifacts out of CI, download them from the run, then:
 ```sh
-cd app
-pnpm build:notarize
-
 # One-time: create the fixed pointer release if it doesn't exist yet.
 gh release create app-latest --repo fujibee/agmsg --title "agmsg app (latest)" \
   --notes "Always points at the newest agmsg app build. See app-vX.Y.Z releases for changelogs." --prerelease
 
-# Every release: also cut a normal versioned release for history/changelog...
+# Cut a normal versioned release for history/changelog, from CI's artifacts...
 gh release create app-vX.Y.Z --repo fujibee/agmsg --title "agmsg app vX.Y.Z" \
-  src-tauri/target/release/bundle/macos/*.app.tar.gz \
-  src-tauri/target/release/bundle/macos/*.app.tar.gz.sig \
-  src-tauri/target/release/bundle/dmg/*.dmg
+  <downloaded macOS .app.tar.gz, .sig, .dmg, Windows .msi, .exe>
 
 # ...then overwrite app-latest's assets with the same build + latest.json
 # (hand-author latest.json: version, notes, pub_date, per-platform url+signature).
 gh release upload app-latest --repo fujibee/agmsg --clobber \
-  src-tauri/target/release/bundle/macos/*.app.tar.gz \
-  src-tauri/target/release/bundle/macos/*.app.tar.gz.sig \
-  latest.json
+  <same artifacts> latest.json
 ```
+Once artifacts are up, fill in the Homebrew cask
+(`fujibee/homebrew-agmsg`, `Casks/agmsg.rb`) with the release's
+`version`/`sha256`/`url` — it's a TODO placeholder until the first release ships.
 
 ## Known gaps
 
-- Windows code signing (Azure Artifact Signing account is provisioned; not yet
-  wired into the build).
-- No CI pipeline builds/publishes the app — `.github/workflows/release.yml` is the
-  agmsg CLI's npm release and doesn't touch `app/`.
+- Windows Trusted Signing is wired into CI but unverified end to end — its
+  federated identity trusts `main` only, so every `feat/desktop-app` run fails
+  at the Azure login step. First real signal comes from a `main`-branch run.
 - No automated tests for the Tauri app itself.
