@@ -130,7 +130,9 @@
       "close": "Fechar",
       "moveTo": "Mover para ▸",
       "moveNewTab": "Nova aba",
-      "noOtherTabs": "Nenhuma outra aba"
+      "noOtherTabs": "Nenhuma outra aba",
+      "swapWith": "Trocar com ▸",
+      "noOtherPanes": "Nenhum outro painel nesta aba"
     },
     "window": {
       "rename": "Renomear…",

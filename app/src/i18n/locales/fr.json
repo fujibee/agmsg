@@ -130,7 +130,9 @@
       "close": "Fermer",
       "moveTo": "Déplacer vers ▸",
       "moveNewTab": "Nouvel onglet",
-      "noOtherTabs": "Aucun autre onglet"
+      "noOtherTabs": "Aucun autre onglet",
+      "swapWith": "Échanger avec ▸",
+      "noOtherPanes": "Aucun autre panneau dans cet onglet"
     },
     "window": {
       "rename": "Renommer…",

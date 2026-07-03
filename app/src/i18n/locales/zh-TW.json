@@ -130,7 +130,9 @@
       "close": "關閉",
       "moveTo": "移動至 ▸",
       "moveNewTab": "新分頁",
-      "noOtherTabs": "沒有其他分頁"
+      "noOtherTabs": "沒有其他分頁",
+      "swapWith": "交換 ▸",
+      "noOtherPanes": "此分頁中沒有其他面板"
     },
     "window": {
       "rename": "重新命名…",

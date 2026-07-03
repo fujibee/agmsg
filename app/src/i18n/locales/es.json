@@ -130,7 +130,9 @@
       "close": "Cerrar",
       "moveTo": "Mover a ▸",
       "moveNewTab": "Nueva pestaña",
-      "noOtherTabs": "No hay otras pestañas"
+      "noOtherTabs": "No hay otras pestañas",
+      "swapWith": "Intercambiar con ▸",
+      "noOtherPanes": "No hay otros paneles en esta pestaña"
     },
     "window": {
       "rename": "Renombrar…",

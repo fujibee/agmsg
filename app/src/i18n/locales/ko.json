@@ -130,7 +130,9 @@
       "close": "닫기",
       "moveTo": "이동 ▸",
       "moveNewTab": "새 탭",
-      "noOtherTabs": "다른 탭 없음"
+      "noOtherTabs": "다른 탭 없음",
+      "swapWith": "교체 ▸",
+      "noOtherPanes": "이 탭에 다른 창이 없음"
     },
     "window": {
       "rename": "이름 변경…",

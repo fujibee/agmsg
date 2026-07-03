@@ -133,7 +133,9 @@
       "close": "Close",
       "moveTo": "Move to ▸",
       "moveNewTab": "New tab",
-      "noOtherTabs": "No other tabs"
+      "noOtherTabs": "No other tabs",
+      "swapWith": "Swap with ▸",
+      "noOtherPanes": "No other panes in this tab"
     },
     "window": {
       "rename": "Rename…",

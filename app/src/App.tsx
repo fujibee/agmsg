@@ -182,6 +182,12 @@ export default function App() {
   // drop target. Separate from swapSource: that's "picked up", this is
   // "hovering over".
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
+  // Same idea, but for tabs — dropping a pane header on a tab moves it into
+  // that tab instead of swapping within the current one.
+  const [dragOverWindowId, setDragOverWindowId] = useState<string | null>(null);
+  // Dropping on the empty strip past the last tab moves the pane to a new
+  // tab of its own — same as ctxMenu.pane.moveNewTab, just via drag.
+  const [dragOverNewTab, setDragOverNewTab] = useState(false);
   // Which tab is currently showing an inline rename input, and its draft text.
   const [renamingWindowId, setRenamingWindowId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -747,6 +753,23 @@ export default function App() {
         setPaneMenu(null);
         setWindowMenu(null);
       }}
+      onDragOverCapture={(e) => {
+        // WebKit doesn't reliably show a "no-drop" cursor just from
+        // dropEffect = "none" — it only trusts that value once something in
+        // the chain has preventDefault()'d, otherwise it falls back to a
+        // generic "copy" (+) cursor. So every dragover gets preventDefault()
+        // + dropEffect = "none" here first, in the capture phase (root ->
+        // target, runs before any target's own bubble-phase onDragOver
+        // below) — a real drop target's handler still runs after and
+        // overrides dropEffect back to "move". Since nothing here reads
+        // getData or acts on drop, an invalid area silently accepting the
+        // preventDefault is harmless: releasing there fires a drop event
+        // with no handler attached, i.e. still a no-op.
+        if (e.dataTransfer.types.includes(PANE_DRAG_MIME)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "none";
+        }
+      }}
     >
       {startupError && (
         <div className="startup-error-banner">
@@ -886,11 +909,34 @@ export default function App() {
             {teamWindows.map((w) => (
               <span
                 key={w.id}
-                className={active === w.id ? "tab active" : "tab"}
+                className={[
+                  active === w.id ? "tab active" : "tab",
+                  dragOverWindowId === w.id && "drop-target",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                   setWindowMenu({ windowId: w.id, x: e.clientX, y: e.clientY });
+                }}
+                onDragOver={(e) => {
+                  if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  setDragOverWindowId((cur) => (cur === w.id ? cur : w.id));
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                    setDragOverWindowId((cur) => (cur === w.id ? null : cur));
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOverWindowId(null);
+                  setSwapSource(null);
+                  const sourceId = e.dataTransfer.getData(PANE_DRAG_MIME);
+                  if (sourceId) movePaneToWindow(sourceId, w.id);
                 }}
               >
                 {renamingWindowId === w.id ? (
@@ -926,7 +972,28 @@ export default function App() {
             {/* Tabs are all clickable buttons, so they eat the drag region
                 the <nav> itself claims — this dedicated strip is always
                 empty and always draggable, regardless of tab count. */}
-            <div className="tabs-drag-spacer" data-tauri-drag-region />
+            <div
+              className={dragOverNewTab ? "tabs-drag-spacer drop-target" : "tabs-drag-spacer"}
+              data-tauri-drag-region
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setDragOverNewTab(true);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                  setDragOverNewTab(false);
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOverNewTab(false);
+                setSwapSource(null);
+                const sourceId = e.dataTransfer.getData(PANE_DRAG_MIME);
+                if (sourceId) moveToNewWindow(sourceId);
+              }}
+            />
           </nav>
 
           <section className="stage">
@@ -1059,6 +1126,8 @@ export default function App() {
                       onDragEnd={() => {
                         setSwapSource(null);
                         setDragOverPaneId(null);
+                        setDragOverWindowId(null);
+                        setDragOverNewTab(false);
                       }}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1310,6 +1379,13 @@ export default function App() {
           // Only offer "split off into a new tab" when this pane is currently
           // sharing its window — if it's already alone, a new tab would be a no-op.
           const canSplitOff = (sourceWindow?.paneIds.length ?? 1) > 1;
+          // Sibling panes in the same tab — the same swap the header's
+          // click/drag already does, exposed here too for symmetry with
+          // "Move to ▸".
+          const siblingPanes = (sourceWindow?.paneIds ?? [])
+            .filter((pid) => pid !== paneMenu.paneId)
+            .map((pid) => panes.find((p) => p.id === pid))
+            .filter((p): p is Pane => p != null);
           return (
             <div
               className="ctx-menu"
@@ -1354,6 +1430,25 @@ export default function App() {
                       </button>
                     );
                   })}
+                </div>
+              </div>
+              <div className="submenu-trigger">
+                <span className="submenu-label">{t("ctxMenu.pane.swapWith")}</span>
+                <div className="submenu">
+                  {siblingPanes.length === 0 && (
+                    <span className="submenu-empty">{t("ctxMenu.pane.noOtherPanes")}</span>
+                  )}
+                  {siblingPanes.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        swapPanesInWindow(paneMenu.windowId, paneMenu.paneId, p.id);
+                        setPaneMenu(null);
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>

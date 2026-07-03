@@ -604,6 +604,10 @@ body.resizing-row {
   min-width: 24px;
   align-self: stretch;
 }
+.tabs-drag-spacer.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
 .tab {
   display: inline-flex;
   align-items: center;
@@ -616,6 +620,12 @@ body.resizing-row {
 .tab.active {
   color: var(--fg);
   background: var(--bg);
+}
+/* Dragging a pane header over a tab — see onDragOver on the tab in
+   App.tsx. Same dashed-outline language as .pane-cell.drop-target. */
+.tab.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 .tab button {
   background: none;

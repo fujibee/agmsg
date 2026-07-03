@@ -130,7 +130,9 @@
       "close": "Schließen",
       "moveTo": "Verschieben nach ▸",
       "moveNewTab": "Neuer Tab",
-      "noOtherTabs": "Keine weiteren Tabs"
+      "noOtherTabs": "Keine weiteren Tabs",
+      "swapWith": "Tauschen mit ▸",
+      "noOtherPanes": "Keine weiteren Bereiche in diesem Tab"
     },
     "window": {
       "rename": "Umbenennen…",

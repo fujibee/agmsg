@@ -130,7 +130,9 @@
       "close": "閉じる",
       "moveTo": "移動先 ▸",
       "moveNewTab": "新しいタブ",
-      "noOtherTabs": "他のタブはありません"
+      "noOtherTabs": "他のタブはありません",
+      "swapWith": "入れ替え ▸",
+      "noOtherPanes": "このタブに他のペインはありません"
     },
     "window": {
       "rename": "名前を変更…",
