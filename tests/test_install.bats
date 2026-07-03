@@ -45,6 +45,21 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
+  # setup.sh's temp checkout is deleted right after install, so a copy inside
+  # the skill dir is the only uninstaller npx/curl-installed users ever have.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -x "$SK/uninstall.sh" ]
+  diff "$REPO_ROOT/uninstall.sh" "$SK/uninstall.sh"
+}
+
+@test "install: --update refreshes uninstall.sh even if it went missing" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  rm -f "$SK/uninstall.sh"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -x "$SK/uninstall.sh" ]
+}
+
 @test "install: --update --cmd updates the named skill even when a backup skill exists" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"

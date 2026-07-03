@@ -380,11 +380,16 @@ DB and team configs are preserved. Only scripts and assets are updated.
 
 ## Uninstall
 
+An `uninstall.sh` copy ships inside every install, so this works whether you
+installed via `git clone`, `npx agmsg`, or the curl one-liner:
+
 ```bash
-./uninstall.sh              # Interactive (confirms each step)
-./uninstall.sh --yes        # Remove everything
-./uninstall.sh --keep-data  # Remove skill but keep DB and teams
+~/.agents/skills/agmsg/uninstall.sh              # Interactive (confirms each step)
+~/.agents/skills/agmsg/uninstall.sh --yes        # Remove everything
+~/.agents/skills/agmsg/uninstall.sh --keep-data  # Remove skill but keep DB and teams
 ```
+
+(If you have a `git clone` checkout handy, `./uninstall.sh` from the repo root works the same way.)
 
 Auto-detects installed skill directories and cleans up: skill files, slash commands, hooks, AGENTS.md sections, and team configs.
 

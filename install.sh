@@ -255,6 +255,11 @@ if [ "$UPDATE_ONLY" = true ]; then
   # user dropped in and their db/trusted-plugins opt-ins.
   mkdir -p "$SKILL_DIR/plugins"
   cp "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md" 2>/dev/null || true
+  # Ship uninstall.sh alongside the skill itself — npx/curl installs fetch a
+  # temp checkout that gets deleted right after install, so without this copy
+  # those users would have no local uninstaller to run later (only a manual
+  # `git clone` checkout would). See the README's Uninstall section.
+  cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && chmod +x "$SKILL_DIR/uninstall.sh" || true
   # Refresh the Claude Code slash command file (was missed in earlier --update flows).
   CC_COMMANDS_DIR="$HOME/.claude/commands"
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
@@ -357,6 +362,11 @@ cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
 # dropped in and their db/trusted-plugins opt-ins.
 mkdir -p "$SKILL_DIR/plugins"
 cp "$SCRIPT_DIR/plugins/README.md" "$SKILL_DIR/plugins/README.md" 2>/dev/null || true
+# Ship uninstall.sh alongside the skill itself — npx/curl installs fetch a
+# temp checkout that gets deleted right after install, so without this copy
+# those users would have no local uninstaller to run later (only a manual
+# `git clone` checkout would). See the README's Uninstall section.
+cp "$SCRIPT_DIR/uninstall.sh" "$SKILL_DIR/uninstall.sh" 2>/dev/null && chmod +x "$SKILL_DIR/uninstall.sh" || true
 
 cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
 chmod +x "$SKILL_DIR/scripts/"*.sh
