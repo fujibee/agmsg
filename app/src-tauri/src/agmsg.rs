@@ -408,9 +408,15 @@ pub fn agmsg_delivery_mode(agent_type: String, project: String) -> Result<String
 /// team room updates live (and so spawned panes can be fed via stdin-inject).
 pub fn start_watcher(app: AppHandle) {
     thread::spawn(move || {
-        let conn = match open_ro() {
-            Ok(c) => c,
-            Err(_) => return,
+        // agmsg may not be installed yet at startup — the first-run flow
+        // installs it (and creates the DB) after this thread has already
+        // started. Retry instead of giving up once, so that session isn't
+        // permanently missing live updates and stdin-inject delivery.
+        let conn = loop {
+            match open_ro() {
+                Ok(c) => break c,
+                Err(_) => thread::sleep(Duration::from_millis(800)),
+            }
         };
         let mut last_id: i64 = conn
             .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))
