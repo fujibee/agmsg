@@ -81,6 +81,11 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Bundle pinned agmsg-core
+        run: app/scripts/bundle-core.sh
+        working-directory: .
+        shell: bash
+
       - name: Import Developer ID certificate
         if: ${{ env.HAS_MACOS_CERT == 'true' }}
         env:
@@ -149,6 +154,11 @@ jobs:
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
+
+      - name: Bundle pinned agmsg-core
+        run: app/scripts/bundle-core.sh
+        working-directory: .
+        shell: bash
 
       - name: Build
         env:

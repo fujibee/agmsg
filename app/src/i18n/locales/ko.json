@@ -7,6 +7,8 @@
     "close": "닫기"
   },
   "startupError": {
+    "installing": "agmsg 설치 중…",
+    "installFailed": "agmsg 설치에 실패했습니다: {{error}}",
     "loadTeamsFailed": "agmsg 팀을 불러올 수 없습니다: {{error}}. ~/.agents/skills/agmsg 경로에 agmsg가 설치되어 있나요?",
     "dismiss": "닫기"
   },

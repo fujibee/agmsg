@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Base dir of the agmsg install (skill layout: db/, teams/, scripts/, ...).
 fn agmsg_base() -> PathBuf {
@@ -215,6 +215,41 @@ struct ApiMessage {
 #[derive(Deserialize)]
 struct ApiTeam {
     name: String,
+}
+
+/// Cheap existence check, not a full health check — gates the first-run
+/// auto-install flow below. Any other failure (broken install, bad DB, ...)
+/// still surfaces as a real error from agmsg_teams rather than triggering
+/// a reinstall.
+#[tauri::command]
+pub fn agmsg_is_installed() -> bool {
+    agmsg_base().join("scripts").join("api.sh").is_file()
+}
+
+/// First-run bootstrap: run the agmsg-core install.sh bundled into the app
+/// (see scripts/bundle-core.sh, AGMSG_CORE_REF) directly — no network access
+/// at runtime. The bundled ref is fixed at build time and audited via git
+/// history; this command only ever executes that local copy, never fetches
+/// anything itself. install.sh is safe to re-run (preserves db/teams on an
+/// existing install), but this command is only ever called when
+/// agmsg_is_installed() is false.
+#[tauri::command]
+pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
+    let install_sh = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("agmsg-core")
+        .join("install.sh");
+    let output = std::process::Command::new("bash")
+        .arg(&install_sh)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
 }
 
 /// List team names. Shells out to api.sh rather than reading teams/

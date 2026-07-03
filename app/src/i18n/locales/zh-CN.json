@@ -7,6 +7,8 @@
     "close": "关闭"
   },
   "startupError": {
+    "installing": "正在安装 agmsg…",
+    "installFailed": "无法安装 agmsg：{{error}}",
     "loadTeamsFailed": "无法加载 agmsg 团队：{{error}}。是否已在 ~/.agents/skills/agmsg 安装 agmsg？",
     "dismiss": "关闭"
   },

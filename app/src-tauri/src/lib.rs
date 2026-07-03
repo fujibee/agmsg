@@ -309,6 +309,8 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_inject,
+            agmsg::agmsg_is_installed,
+            agmsg::agmsg_install,
             agmsg::agmsg_teams,
             agmsg::agmsg_members,
             agmsg::agmsg_messages,

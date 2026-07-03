@@ -7,6 +7,8 @@
     "close": "閉じる"
   },
   "startupError": {
+    "installing": "agmsgをインストール中…",
+    "installFailed": "agmsgのインストールに失敗しました: {{error}}",
     "loadTeamsFailed": "agmsgのチームを読み込めませんでした: {{error}}。agmsgは ~/.agents/skills/agmsg にインストールされていますか?",
     "dismiss": "閉じる"
   },

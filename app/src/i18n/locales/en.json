@@ -10,6 +10,8 @@
     "title": "Settings"
   },
   "startupError": {
+    "installing": "Installing agmsg…",
+    "installFailed": "Couldn't install agmsg: {{error}}",
     "loadTeamsFailed": "Couldn't load agmsg teams: {{error}}. Is agmsg installed at ~/.agents/skills/agmsg?",
     "dismiss": "Dismiss"
   },

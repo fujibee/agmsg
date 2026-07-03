@@ -50,6 +50,16 @@ body,
   flex-shrink: 0;
 }
 
+.startup-installing-banner {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* Top bar */
 .topbar {
   display: flex;

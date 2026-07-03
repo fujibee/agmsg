@@ -132,6 +132,9 @@ export default function App() {
   // shell with no indication anything is wrong (the failure was previously
   // swallowed by a bare `.catch(console.error)`).
   const [startupError, setStartupError] = useState<string | null>(null);
+  // First-run flow: if agmsg isn't detected at all, install the bundled
+  // copy (see agmsg_install in agmsg.rs) before attempting to load teams.
+  const [installingAgmsg, setInstallingAgmsg] = useState(false);
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
@@ -295,24 +298,39 @@ export default function App() {
   }, []);
 
   // First load: teams. If there are none, the first-run flow opens New Team.
-  // A rejection here (most commonly: agmsg isn't installed at
-  // ~/.agents/skills/agmsg, so the teams/ directory read fails) means the
-  // rest of the app has nothing to show — surface it instead of leaving an
-  // unexplained empty shell.
+  // If agmsg isn't installed at all, install the bundled copy first (no
+  // network — see agmsg_install) and retry once; only a genuine failure
+  // (bad DB, install itself failing, ...) surfaces the diagnostic banner —
+  // otherwise the rest of the app would just render an unexplained empty shell.
   useEffect(() => {
-    loadTeams()
-      .then((loadedTeams) => {
+    async function boot() {
+      try {
+        const installed = await invoke<boolean>("agmsg_is_installed");
+        if (!installed) {
+          setInstallingAgmsg(true);
+          try {
+            await invoke("agmsg_install");
+          } catch (err) {
+            console.error(err);
+            setStartupError(t("startupError.installFailed", { error: String(err) }));
+            return;
+          } finally {
+            setInstallingAgmsg(false);
+          }
+        }
+        const loadedTeams = await loadTeams();
         if (loadedTeams.length === 0) setModal({ kind: "team", firstRun: true });
         else {
           const lastTeam = localStorage.getItem(LAST_TEAM_KEY);
           const fallback = lastTeam && loadedTeams.includes(lastTeam) ? lastTeam : loadedTeams[0];
           setTeam((cur) => cur || fallback);
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error(err);
         setStartupError(t("startupError.loadTeamsFailed", { error: String(err) }));
-      });
+      }
+    }
+    boot();
   }, [loadTeams, t]);
 
   // Tabs are per-team (see the Window type), so switching teams also swaps
@@ -771,6 +789,11 @@ export default function App() {
         }
       }}
     >
+      {installingAgmsg && (
+        <div className="startup-installing-banner">
+          <span>{t("startupError.installing")}</span>
+        </div>
+      )}
       {startupError && (
         <div className="startup-error-banner">
           <span>{startupError}</span>

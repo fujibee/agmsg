@@ -36,5 +36,7 @@ else
   echo "warning: $UPDATER_KEY not found; update artifacts won't be signed" >&2
 fi
 
+"$APP_DIR/scripts/bundle-core.sh"
+
 cd "$APP_DIR"
 exec pnpm tauri build

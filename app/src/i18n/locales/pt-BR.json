@@ -7,6 +7,8 @@
     "close": "Fechar"
   },
   "startupError": {
+    "installing": "Instalando o agmsg…",
+    "installFailed": "Não foi possível instalar o agmsg: {{error}}",
     "loadTeamsFailed": "Não foi possível carregar as equipes do agmsg: {{error}}. O agmsg está instalado em ~/.agents/skills/agmsg?",
     "dismiss": "Dispensar"
   },

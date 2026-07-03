@@ -7,6 +7,8 @@
     "close": "Schließen"
   },
   "startupError": {
+    "installing": "agmsg wird installiert…",
+    "installFailed": "agmsg konnte nicht installiert werden: {{error}}",
     "loadTeamsFailed": "agmsg-Teams konnten nicht geladen werden: {{error}}. Ist agmsg unter ~/.agents/skills/agmsg installiert?",
     "dismiss": "Verwerfen"
   },
