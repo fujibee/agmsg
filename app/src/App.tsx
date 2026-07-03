@@ -75,6 +75,11 @@ const ROOM_PAGE_SIZE = 30;
 // enough for now; panes always start fresh each launch anyway (they're
 // live PTYs, not something a restart could restore even if we tried).
 const LAST_TEAM_KEY = "agmsg-app-last-team";
+// Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
+// usages below) — a made-up type, not text/plain, so a stray OS file drag
+// or an unrelated drag elsewhere on the page never accidentally matches a
+// pane-cell's drop zone.
+const PANE_DRAG_MIME = "application/x-agmsg-pane";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
@@ -165,12 +170,18 @@ export default function App() {
   const [windowMenu, setWindowMenu] = useState<{ windowId: string; x: number; y: number } | null>(
     null,
   );
-  // Manual layout control ahead of real drag-and-drop: click one pane's name
-  // to "pick it up" (its id goes here), then click another pane's name in
-  // the same window to swap their positions. Click the same name again to
-  // cancel. Cheap enough for now — a real reorder should be drag-and-drop,
-  // but this already lets a layout be arranged by hand.
+  // Swap two panes' positions by name: click one pane's name to "pick it
+  // up" (its id goes here), then click another pane's name in the same
+  // window to swap. Click the same name again to cancel. Also doubles as
+  // the HTML5 drag source id during a drag-and-drop swap (dragstart sets
+  // it, dragend clears it) — click and drag share this one state and the
+  // same "armed" highlight, since they're just two ways to pick the same
+  // pane up.
   const [swapSource, setSwapSource] = useState<string | null>(null);
+  // The pane currently under the cursor during a drag — highlighted as the
+  // drop target. Separate from swapSource: that's "picked up", this is
+  // "hovering over".
+  const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
   // Which tab is currently showing an inline rename input, and its draft text.
   const [renamingWindowId, setRenamingWindowId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -962,15 +973,53 @@ export default function App() {
               const count = win.paneIds.length;
               const rect = paneRect(win.layout, idx, count);
               const isActiveWindow = active === win.id;
+              const isDropTarget = dragOverPaneId === p.id && swapSource !== p.id;
               return (
                 <div
                   key={p.id}
-                  className={isActiveWindow ? "pane-cell" : "pane-cell inactive"}
+                  className={[
+                    isActiveWindow ? "pane-cell" : "pane-cell inactive",
+                    isDropTarget && "drop-target",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   style={{
                     left: `${rect.left}%`,
                     top: `${rect.top}%`,
                     width: `${rect.width}%`,
                     height: `${rect.height}%`,
+                  }}
+                  onDragOver={(e) => {
+                    // Gate on dataTransfer.types, NOT React state: dragover
+                    // fires on whatever element is under the cursor, whose
+                    // closures were made at ITS OWN last render — swapSource
+                    // there can be one render behind the dragstart that just
+                    // set it elsewhere. types is native DataTransfer state,
+                    // always current regardless of React's render timing.
+                    // (getData() itself isn't readable until the drop event —
+                    // that's a browser security restriction — types is.)
+                    if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
+                    e.preventDefault(); // required to allow dropping
+                    e.dataTransfer.dropEffect = "move";
+                    setDragOverPaneId((cur) => (cur === p.id ? cur : p.id));
+                  }}
+                  onDragLeave={(e) => {
+                    // Only clear if we're leaving this cell for something
+                    // outside it — a child element's dragleave (e.g. moving
+                    // from the header onto the terminal below) shouldn't
+                    // flicker the highlight off.
+                    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                      setDragOverPaneId((cur) => (cur === p.id ? null : cur));
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverPaneId(null);
+                    setSwapSource(null);
+                    const sourceId = e.dataTransfer.getData(PANE_DRAG_MIME);
+                    if (sourceId && win.paneIds.includes(sourceId) && sourceId !== p.id) {
+                      swapPanesInWindow(win.id, sourceId, p.id);
+                    }
                   }}
                 >
                   <div
@@ -986,6 +1035,31 @@ export default function App() {
                         swapSource === p.id ? "pane-header-label swap-armed" : "pane-header-label"
                       }
                       title={t("pane.swapTitle")}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = "move";
+                        // A custom MIME type, not text/plain — so dragover
+                        // elsewhere in the page (or a stray OS file drag)
+                        // never matches PANE_DRAG_MIME and gets treated as
+                        // a valid drop target by accident.
+                        e.dataTransfer.setData(PANE_DRAG_MIME, p.id);
+                        // The label's own box is flex-stretched to fill the
+                        // header, so the browser's default drag snapshot
+                        // would be the whole bar's width. Swap in a ghost
+                        // sized to the text instead, then discard it —
+                        // setDragImage snapshots synchronously here.
+                        const ghost = document.createElement("div");
+                        ghost.textContent = p.label;
+                        ghost.className = "pane-drag-ghost";
+                        document.body.appendChild(ghost);
+                        e.dataTransfer.setDragImage(ghost, 10, 10);
+                        setTimeout(() => ghost.remove(), 0);
+                        setSwapSource(p.id);
+                      }}
+                      onDragEnd={() => {
+                        setSwapSource(null);
+                        setDragOverPaneId(null);
+                      }}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (swapSource === p.id) {

@@ -774,8 +774,9 @@ body.resizing-row {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* It's a <button> (click-to-swap — see swapSource in App.tsx), styled
-     back down to plain text so it doesn't look like a button until hovered. */
+  /* It's a <button> (click- or drag-to-swap — see swapSource in App.tsx),
+     styled back down to plain text so it doesn't look like a button until
+     hovered. */
   background: none;
   border: none;
   padding: 0;
@@ -783,7 +784,7 @@ body.resizing-row {
   font: inherit;
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: grab;
   border-radius: 3px;
 }
 .pane-header-label:hover {
@@ -792,6 +793,28 @@ body.resizing-row {
 .pane-header-label.swap-armed {
   background: var(--accent);
   color: #fff;
+  cursor: grabbing;
+}
+/* Off-screen drag image for pane-header drags — see onDragStart in App.tsx.
+   Sized to its text content, not the label's flex-stretched box, so the
+   drag snapshot looks like a name chip instead of the whole header bar. */
+.pane-drag-ghost {
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+/* The pane a drag is currently over — see onDragOver in App.tsx. Dashed
+   outline (not the focus ring's solid border) so a drop target reads as
+   distinct from "this pane has keyboard focus". */
+.pane-cell.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 /* Slow pulse shows which delivery path is watching this pane — see
    Pane.native. Green = the type self-delivers (its own agmsg Monitor);
