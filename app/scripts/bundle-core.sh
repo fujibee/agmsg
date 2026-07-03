@@ -26,7 +26,12 @@ fi
 
 cd "$ROOT_DIR"
 echo "bundle-core: fetching tag $REF..."
-git fetch origin tag "$REF" --no-tags --depth 1
+# No --depth here — this runs against the same checkout a developer is
+# working in (build-notarize.sh calls this directly), and a shallow fetch
+# there leaves the whole local repo shallow: git log/merge-base/rebase
+# against origin/main silently stop at the new shallow boundary. CI
+# checkouts are disposable, so this is a non-issue there either way.
+git fetch origin tag "$REF" --no-tags
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
