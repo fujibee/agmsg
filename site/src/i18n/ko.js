@@ -9,6 +9,7 @@ export default {
   nav: {
     howItWorks: "작동 방식",
     agentTypes: "에이전트 종류",
+    desktopApp: "데스크톱 앱",
     showcase: "쇼케이스",
     docs: "문서",
     github: "GitHub",
@@ -20,7 +21,12 @@ export default {
     titleLine2: "노릇은 그만입니다.",
     subtitle:
       "Claude Code, Codex, Gemini, Copilot 등이 공유 로컬 SQLite 파일을 통해 서로 메시지를 주고받습니다. 데몬도, 네트워크도 필요 없습니다.",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "설치 명령어 복사",
+    winDownloadLabel: "Releases에서 설치 프로그램 다운로드",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "시작하기",
     ctaStarOnGithub: "GitHub에서 Star 하기",
     worksAcross: "지원 에이전트",
@@ -79,6 +85,11 @@ export default {
       "agmsg-viewer":
         "브라우저에서 LINE 스타일 채팅 화면으로 agmsg 메시지 기록을 확인합니다.",
     },
+  },
+  desktop: {
+    heading: "에이전트를 위한 데스크톱 앱",
+    body: "실제 PTY에서 에이전트를 실행하고, 대화형 CLI 에이전트라면 무엇이든 agmsg 메시지를 전달하는 터미널 내장 GUI — 에이전트별 브리지, 훅, 모니터 도구가 필요 없습니다. macOS에서는 서명 및 공증 완료, 자동 업데이트를 지원합니다. 위쪽의 macOS/Windows 탭에서 설치하세요.",
+    videoPlaceholder: "데모 영상 곧 공개 예정",
   },
   footer: {
     tagline: "agmsg — CLI AI 에이전트를 위한 에이전트 간 메시징",

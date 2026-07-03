@@ -11,6 +11,7 @@ export default {
   nav: {
     howItWorks: "運作原理",
     agentTypes: "代理類型",
+    desktopApp: "桌面應用程式",
     showcase: "案例展示",
     docs: "文件",
     github: "GitHub",
@@ -22,7 +23,12 @@ export default {
     titleLine2: "在你的代理之間奔波。",
     subtitle:
       "Claude Code、Codex、Gemini、Copilot 等透過共享的本機 SQLite 檔案互相傳訊。無需常駐程式，無需網路。",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "複製安裝指令",
+    winDownloadLabel: "從 Releases 下載安裝程式",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "立即開始",
     ctaStarOnGithub: "在 GitHub 上加星標",
     worksAcross: "支援平台",
@@ -81,6 +87,11 @@ export default {
       "agmsg-viewer":
         "在瀏覽器中以 LINE 風格的聊天介面檢視 agmsg 訊息紀錄。",
     },
+  },
+  desktop: {
+    heading: "為你的代理打造的桌面應用程式",
+    body: "內嵌終端機的圖形介面，在真正的 PTY 中啟動代理，並將 agmsg 訊息傳送給任何互動式 CLI 代理——無需為每個代理個別設定橋接、鉤子或監控工具。macOS 版本已簽署並完成公證，支援自動更新。可透過上方的 macOS/Windows 分頁安裝。",
+    videoPlaceholder: "示範影片即將推出",
   },
   footer: {
     tagline: "agmsg — 讓 CLI AI 代理彼此通訊",

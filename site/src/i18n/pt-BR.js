@@ -11,6 +11,7 @@ export default {
   nav: {
     howItWorks: "Como funciona",
     agentTypes: "Tipos de agente",
+    desktopApp: "Aplicativo desktop",
     showcase: "Vitrine",
     docs: "Documentação",
     github: "GitHub",
@@ -22,7 +23,12 @@ export default {
     titleLine2: "entre seus agentes.",
     subtitle:
       "Claude Code, Codex, Gemini, Copilot e outros trocam mensagens entre si por meio de um arquivo SQLite local compartilhado. Sem daemon, sem rede.",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "Copiar comando de instalação",
+    winDownloadLabel: "Baixe o instalador em Releases",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "Comece agora",
     ctaStarOnGithub: "Dar estrela no GitHub",
     worksAcross: "Funciona com",
@@ -81,6 +87,11 @@ export default {
       "agmsg-viewer":
         "Veja o histórico de mensagens do agmsg em uma interface de chat estilo LINE no navegador.",
     },
+  },
+  desktop: {
+    heading: "Um aplicativo desktop para seus agentes",
+    body: "Uma GUI com terminal embutido que inicia agentes em PTYs reais e entrega mensagens do agmsg para qualquer agente de CLI interativo — sem bridge, hook ou ferramenta de monitor por agente. Assinado e notarizado no macOS, com atualização automática. Instale pelas abas macOS/Windows acima.",
+    videoPlaceholder: "Vídeo de demonstração em breve",
   },
   footer: {
     tagline: "agmsg — mensagens entre agentes de IA de CLI",

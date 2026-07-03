@@ -149,6 +149,7 @@ const localeCodes = Object.keys(languages);
       <div class="hidden items-center gap-7 text-sm text-muted md:flex">
         <a class="hover:text-fg" href="#how">{t.nav.howItWorks}</a>
         <a class="hover:text-fg" href="#agents">{t.nav.agentTypes}</a>
+        <a class="hover:text-fg" href="#desktop">{t.nav.desktopApp}</a>
         <a class="hover:text-fg" href="#showcase">{t.nav.showcase}</a>
         <a class="hover:text-fg" href="https://github.com/fujibee/agmsg">{t.nav.docs}</a>
       </div>
@@ -177,13 +178,34 @@ const localeCodes = Object.keys(languages);
             {t.hero.subtitle}
           </p>
 
-          <div class="mt-8 flex max-w-md items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 font-mono text-sm">
-            <span class="select-none text-muted">$</span>
-            <code class="text-fg">npx agmsg</code>
-            <button id="copy-install" type="button" data-copy="npx agmsg" aria-label={t.hero.copyInstallAria} class="ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg">
-              <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-            </button>
+          <div class="mt-8 max-w-md">
+            <div class="flex gap-1 text-sm font-medium">
+              <button type="button" class="install-tab active rounded-t-lg border border-b-0 border-border bg-surface px-4 py-2 text-fg" data-tab="cli">{t.hero.installTabCli}</button>
+              <button type="button" class="install-tab rounded-t-lg border border-b-0 border-transparent px-4 py-2 text-muted transition hover:text-fg" data-tab="mac">{t.hero.installTabMac}</button>
+              <button type="button" class="install-tab rounded-t-lg border border-b-0 border-transparent px-4 py-2 text-muted transition hover:text-fg" data-tab="win">{t.hero.installTabWin}</button>
+            </div>
+            <div class="rounded-b-xl rounded-tr-xl border border-border bg-surface px-4 py-3 font-mono text-sm">
+              <div class="install-panel flex items-center gap-2" data-panel="cli">
+                <span class="select-none text-muted">$</span>
+                <code class="text-fg">npx agmsg</code>
+                <button type="button" class="copy-btn ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg" data-copy="npx agmsg" aria-label={t.hero.copyInstallAria}>
+                  <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                </button>
+              </div>
+              <div class="install-panel flex items-center gap-2" data-panel="mac" style="display: none;">
+                <span class="select-none text-muted">$</span>
+                <code class="text-fg">brew tap fujibee/agmsg &amp;&amp; brew install --cask agmsg</code>
+                <button type="button" class="copy-btn ml-auto shrink-0 rounded-md p-1.5 text-muted transition hover:bg-white/10 hover:text-fg" data-copy="brew tap fujibee/agmsg && brew install --cask agmsg" aria-label={t.hero.copyInstallAria}>
+                  <svg class="copy-icon h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <svg class="check-icon hidden h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                </button>
+              </div>
+              <div class="install-panel flex items-center justify-between" data-panel="win" style="display: none;">
+                <span class="text-muted">{t.hero.winDownloadLabel}</span>
+                <a href="https://github.com/fujibee/agmsg/releases/tag/app-latest" class="shrink-0 text-accent hover:underline">{t.hero.winDownloadLink}</a>
+              </div>
+            </div>
           </div>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -310,6 +332,20 @@ const localeCodes = Object.keys(languages);
     </div>
   </section>
 
+  <!-- 3b. Desktop app -->
+  <section id="desktop" class="border-y border-border/60 bg-surface/30">
+    <div class="mx-auto max-w-6xl px-6 py-20 md:py-24">
+      <div class="max-w-2xl">
+        <h2 class="text-3xl font-bold tracking-tight md:text-4xl">{t.desktop.heading}</h2>
+        <p class="mt-3 text-muted">{t.desktop.body}</p>
+      </div>
+      <!-- Placeholder until the walkthrough demo video replaces it. -->
+      <div class="mt-10 flex aspect-video items-center justify-center rounded-2xl border border-dashed border-border bg-bg text-sm text-muted">
+        {t.desktop.videoPlaceholder}
+      </div>
+    </div>
+  </section>
+
   <!-- 3. Showcase gallery (Bento) -->
   <section id="showcase" class="border-y border-border/60 bg-surface/30">
     <div class="mx-auto max-w-6xl px-6 py-20 md:py-24">
@@ -382,9 +418,8 @@ const localeCodes = Object.keys(languages);
       })
       .catch(() => {});
 
-    // Copy the install command.
-    const copyBtn = document.getElementById("copy-install");
-    if (copyBtn) {
+    // Copy the install command(s).
+    document.querySelectorAll(".copy-btn").forEach((copyBtn) => {
       copyBtn.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(copyBtn.dataset.copy);
@@ -393,7 +428,23 @@ const localeCodes = Object.keys(languages);
           setTimeout(() => { k.classList.add("hidden"); c.classList.remove("hidden"); }, 1500);
         } catch (_) {}
       });
-    }
+    });
+
+    // Hero install box: CLI / macOS / Windows tabs.
+    const installTabs = document.querySelectorAll(".install-tab");
+    const installPanels = document.querySelectorAll(".install-panel");
+    installTabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        installTabs.forEach((t) => {
+          t.classList.remove("active", "border-border", "bg-surface", "text-fg");
+          t.classList.add("border-transparent", "text-muted");
+        });
+        tab.classList.add("active", "border-border", "bg-surface", "text-fg");
+        tab.classList.remove("border-transparent", "text-muted");
+        installPanels.forEach((p) => { p.style.display = "none"; });
+        document.querySelector(`.install-panel[data-panel="${tab.dataset.tab}"]`).style.display = "flex";
+      });
+    });
 
     // Remember an explicit language choice so future visits (and the
     // auto-detect script below) respect it instead of re-deriving from the

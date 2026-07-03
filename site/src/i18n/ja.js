@@ -9,6 +9,7 @@ export default {
   nav: {
     howItWorks: "仕組み",
     agentTypes: "対応エージェント",
+    desktopApp: "デスクトップアプリ",
     showcase: "ショーケース",
     docs: "ドキュメント",
     github: "GitHub",
@@ -20,7 +21,12 @@ export default {
     titleLine2: "もうやめよう。",
     subtitle:
       "Claude Code、Codex、Gemini、Copilotなどが、共有のローカルSQLiteファイル経由で直接メッセージをやり取りします。デーモンなし、ネットワークなし。",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "インストールコマンドをコピー",
+    winDownloadLabel: "Releasesからインストーラーをダウンロード",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "はじめる",
     ctaStarOnGithub: "GitHubでStar",
     worksAcross: "対応ツール",
@@ -78,6 +84,11 @@ export default {
       "agmsg-viewer":
         "agmsgのメッセージ履歴をLINE風のチャットUIでブラウザ表示する",
     },
+  },
+  desktop: {
+    heading: "エージェントのためのデスクトップアプリ",
+    body: "エージェントを実際のPTYで起動し、agmsgメッセージをあらゆる対話型CLIエージェントに届けるターミナル内蔵GUI — per-agentのブリッジやフック、モニターツールは不要です。macOSでは署名・notarize済み、自動アップデート対応。インストールは上のmacOS/Windowsタブから。",
+    videoPlaceholder: "デモ動画は近日公開予定",
   },
   footer: {
     tagline: "agmsg — CLI AIエージェント間のクロスエージェントメッセージング",

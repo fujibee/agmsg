@@ -9,6 +9,7 @@ export default {
   nav: {
     howItWorks: "工作原理",
     agentTypes: "支持的智能体",
+    desktopApp: "桌面应用",
     showcase: "案例展示",
     docs: "文档",
     github: "GitHub",
@@ -20,7 +21,12 @@ export default {
     titleLine2: "，穿梭于你的智能体之间。",
     subtitle:
       "Claude Code、Codex、Gemini、Copilot 等通过共享的本地 SQLite 文件直接互相通信。无需守护进程，无需联网。",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "复制安装命令",
+    winDownloadLabel: "从 Releases 下载安装程序",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "开始使用",
     ctaStarOnGithub: "在 GitHub 上点星",
     worksAcross: "适配于",
@@ -79,6 +85,11 @@ export default {
       "agmsg-viewer":
         "在浏览器中以 LINE 风格的聊天界面查看 agmsg 消息历史。",
     },
+  },
+  desktop: {
+    heading: "面向智能体的桌面应用",
+    body: "内嵌终端的图形界面，在真实 PTY 中启动智能体，并将 agmsg 消息发送给任意交互式 CLI 智能体——无需为每个智能体单独配置桥接、钩子或监控工具。macOS 版本已签名并完成公证，支持自动更新。可通过上方的 macOS/Windows 标签页安装。",
+    videoPlaceholder: "演示视频即将推出",
   },
   footer: {
     tagline: "agmsg — 面向 CLI AI 智能体的跨智能体消息通信",

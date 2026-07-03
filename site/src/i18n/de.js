@@ -11,6 +11,7 @@ export default {
   nav: {
     howItWorks: "So funktioniert's",
     agentTypes: "Agententypen",
+    desktopApp: "Desktop-App",
     showcase: "Showcase",
     docs: "Docs",
     github: "GitHub",
@@ -22,7 +23,12 @@ export default {
     titleLine2: "zwischen deinen Agenten zu sein.",
     subtitle:
       "Claude Code, Codex, Gemini, Copilot und mehr kommunizieren direkt über eine gemeinsame lokale SQLite-Datei. Kein Daemon, kein Netzwerk.",
+    installTabCli: "CLI",
+    installTabMac: "macOS",
+    installTabWin: "Windows",
     copyInstallAria: "Installationsbefehl kopieren",
+    winDownloadLabel: "Installer von Releases herunterladen",
+    winDownloadLink: ".msi / .exe →",
     ctaGetStarted: "Jetzt starten",
     ctaStarOnGithub: "Star auf GitHub geben",
     worksAcross: "Funktioniert mit",
@@ -81,6 +87,11 @@ export default {
       "agmsg-viewer":
         "Zeigt den agmsg-Nachrichtenverlauf in einer Chat-Oberfläche im LINE-Stil im Browser an.",
     },
+  },
+  desktop: {
+    heading: "Eine Desktop-App für deine Agenten",
+    body: "Eine GUI mit eingebettetem Terminal, die Agenten in echten PTYs startet und agmsg-Nachrichten an jeden interaktiven CLI-Agenten zustellt — keine Bridge, kein Hook, kein Monitor-Tool pro Agent nötig. Auf macOS signiert und notarisiert, mit automatischen Updates. Installation über die macOS/Windows-Tabs oben.",
+    videoPlaceholder: "Demo-Video folgt in Kürze",
   },
   footer: {
     tagline: "agmsg — agentenübergreifendes Messaging für CLI-KI-Agenten",
