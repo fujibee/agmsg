@@ -85,13 +85,15 @@ fn import_login_shell_path() {
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match stdout.find(START).zip(stdout.find(END)) {
-        Some((s, e)) if s + START.len() <= e => {
-            let path = &stdout[s + START.len()..e];
-            if !path.is_empty() {
-                std::env::set_var("PATH", path);
-            }
-        }
+    // Look for END strictly after START, not just anywhere in stdout — shell
+    // startup noise printing the literal END text before our own marker
+    // output would otherwise false-match against it.
+    let parsed = stdout.find(START).and_then(|s| {
+        let after_start = s + START.len();
+        stdout[after_start..].find(END).map(|e| &stdout[after_start..after_start + e])
+    });
+    match parsed {
+        Some(path) if !path.is_empty() => std::env::set_var("PATH", path),
         _ => eprintln!("warning: couldn't parse login shell PATH output from {shell}"),
     }
 }
