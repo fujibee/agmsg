@@ -4,9 +4,24 @@ mod pty;
 
 use pty::PtyManager;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Wry};
+
+/// The PATH import_login_shell_path() resolved, kept around so every spawn
+/// site (pty::pty_spawn, agmsg::bash_command) can attach it to the child
+/// process explicitly via .env("PATH", ...) rather than relying on the
+/// spawned process implicitly inheriting this process's own (mutated)
+/// environment — a real Finder-launch hardware failure persisted even with
+/// the process-level std::env::set_var in place, so this makes the
+/// propagation explicit instead of trusting inheritance. None on Windows
+/// (import_login_shell_path is unix-only) and on unix if the import failed,
+/// in which case callers fall back to their own default behavior.
+static IMPORTED_PATH: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn imported_path() -> Option<&'static str> {
+    IMPORTED_PATH.get().map(|s| s.as_str())
+}
 
 /// The native menu's current language (BCP-47 code, e.g. "ja", "zh-CN") —
 /// the frontend pushes its i18next language here via `set_menu_language` on
@@ -75,12 +90,15 @@ fn save_zoom(app: &AppHandle, zoom: f64) {
 fn import_login_shell_path() {
     const START: &str = "__AGMSG_PATH_START__";
     const END: &str = "__AGMSG_PATH_END__";
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let shell = resolve_login_shell();
+    log_path_import(&format!("resolved login shell: {shell}"));
     let script = format!("printf '{START}%s{END}' \"$PATH\"");
     let output = match std::process::Command::new(&shell).args(["-ilc", &script]).output() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("warning: couldn't run login shell ({shell}) to import PATH: {e}");
+            let msg = format!("couldn't run login shell ({shell}) to import PATH: {e}");
+            eprintln!("warning: {msg}");
+            log_path_import(&msg);
             return;
         }
     };
@@ -93,8 +111,72 @@ fn import_login_shell_path() {
         stdout[after_start..].find(END).map(|e| &stdout[after_start..after_start + e])
     });
     match parsed {
-        Some(path) if !path.is_empty() => std::env::set_var("PATH", path),
-        _ => eprintln!("warning: couldn't parse login shell PATH output from {shell}"),
+        Some(path) if !path.is_empty() => {
+            log_path_import(&format!("imported PATH: {path}"));
+            std::env::set_var("PATH", path);
+            let _ = IMPORTED_PATH.set(path.to_string());
+        }
+        _ => {
+            let msg = format!(
+                "couldn't parse login shell PATH output from {shell} (stdout: {:?})",
+                stdout.trim()
+            );
+            eprintln!("warning: {msg}");
+            log_path_import(&msg);
+        }
+    }
+}
+
+/// Resolves the user's login shell for import_login_shell_path() above.
+/// $SHELL isn't reliably set for a Finder/LaunchServices-launched GUI
+/// process — confirmed on real hardware: present in the same user's
+/// Terminal session, absent (or stale) when the app itself is launched via
+/// Finder. `dscl` asks Directory Services directly for the account's
+/// configured shell, independent of whatever this process's own
+/// environment happens to have inherited. /bin/zsh (macOS's default shell
+/// since Catalina) is the last-resort fallback if even that comes up empty.
+#[cfg(unix)]
+fn resolve_login_shell() -> String {
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    if !user.is_empty() {
+        if let Ok(output) =
+            std::process::Command::new("dscl").args([".", "-read", &format!("/Users/{user}"), "UserShell"]).output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Some(shell) = text.trim().strip_prefix("UserShell: ") {
+                    if !shell.is_empty() {
+                        return shell.to_string();
+                    }
+                }
+            }
+        }
+    }
+    "/bin/zsh".into()
+}
+
+/// Appends a timestamped line to ~/Library/Logs/agmsg/path-import.log. The
+/// only real diagnostic available for import_login_shell_path(): it runs
+/// before the webview (and thus DevTools) exists, and its failure mode was
+/// otherwise silent — a prior Finder-launch gate failure took a slow
+/// back-and-forth to root-cause because all it did on failure was warn to
+/// stderr, which nothing launched from Finder is around to see.
+#[cfg(unix)]
+fn log_path_import(message: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = std::path::PathBuf::from(home).join("Library/Logs/agmsg");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    use std::io::Write;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("path-import.log")) {
+        let _ = writeln!(f, "[{now}] {message}");
     }
 }
 

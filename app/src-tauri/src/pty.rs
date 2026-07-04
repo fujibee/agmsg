@@ -87,6 +87,18 @@ pub fn pty_spawn(
         builder.cwd(dir);
     }
     builder.env("TERM", "xterm-256color");
+    // Explicitly set PATH from what import_login_shell_path() resolved at
+    // startup (lib.rs) rather than relying on this child implicitly
+    // inheriting the process's own (mutated) environment — a real
+    // Finder-launch hardware gate still failed to find `claude`/`codex` even
+    // after that process-level import, so this removes any dependence on
+    // environment-inheritance behavior we can't fully control. No-op (falls
+    // back to whatever this process's own PATH already is) if the import
+    // never ran or failed, e.g. on Windows or if the login shell couldn't be
+    // queried.
+    if let Some(path) = crate::imported_path() {
+        builder.env("PATH", path);
+    }
 
     let mut child = pair.slave.spawn_command(builder).map_err(|e| e.to_string())?;
     drop(pair.slave);

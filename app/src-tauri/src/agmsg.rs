@@ -146,6 +146,13 @@ fn bash_command() -> Result<std::process::Command, String> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    // Explicitly attach the PATH import_login_shell_path() resolved at
+    // startup (lib.rs), same reasoning as pty::pty_spawn: don't rely on this
+    // child implicitly inheriting the process's own (mutated) environment.
+    // No-op on Windows / if the import never ran or failed.
+    if let Some(path) = crate::imported_path() {
+        cmd.env("PATH", path);
+    }
     Ok(cmd)
 }
 
