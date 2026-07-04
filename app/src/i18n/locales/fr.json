@@ -15,6 +15,7 @@
     "updateNow": "Mettre à jour",
     "updating": "Mise à jour d'agmsg…",
     "updateFailed": "Impossible de mettre à jour agmsg : {{error}}",
+    "updateSucceeded": "CLI agmsg mis à jour vers {{version}}.",
     "dismiss": "Ignorer"
   },
   "sidebar": {

@@ -15,6 +15,7 @@
     "updateNow": "지금 업데이트",
     "updating": "agmsg 업데이트 중…",
     "updateFailed": "agmsg 업데이트에 실패했습니다: {{error}}",
+    "updateSucceeded": "agmsg CLI를 {{version}}(으)로 업데이트했습니다.",
     "dismiss": "닫기"
   },
   "sidebar": {

@@ -106,6 +106,12 @@ Auto-update is wired up via `tauri-plugin-updater`, checked silently on launch a
 on-demand via **agmsg → Check for Updates…**. The private signing key lives in
 the worktree-root `.secrets/` locally (never committed) and as the
 `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets in CI.
+`TAURI_SIGNING_PRIVATE_KEY` must be the **decoded** minisign key text itself
+(two lines, starting with `untrusted comment:`) — not the base64-encoded form
+`.secrets/agmsg-app-updater.key` is stored as on disk. Feeding the encoded file
+straight into the secret fails with "failed to decode secret key: Missing
+comment in secret key" the moment something (e.g. `createUpdaterArtifacts`)
+actually exercises it, which can go unnoticed for a while if nothing does.
 
 The updater endpoint points at a **fixed tag**, `app-latest`
 (`releases/download/app-latest/latest.json`) — deliberately NOT

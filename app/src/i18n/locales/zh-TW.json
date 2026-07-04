@@ -15,6 +15,7 @@
     "updateNow": "立即更新",
     "updating": "正在更新 agmsg…",
     "updateFailed": "無法更新 agmsg：{{error}}",
+    "updateSucceeded": "已將 agmsg CLI 更新至 {{version}}。",
     "dismiss": "關閉"
   },
   "sidebar": {

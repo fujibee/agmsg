@@ -193,7 +193,7 @@ jobs:
           name: agmsg-app-windows
           path: |
             app/src-tauri/target/release/bundle/msi/*.msi
+            app/src-tauri/target/release/bundle/msi/*.msi.sig
             app/src-tauri/target/release/bundle/nsis/*.exe
-            app/src-tauri/target/release/bundle/nsis/*.zip
-            app/src-tauri/target/release/bundle/nsis/*.zip.sig
+            app/src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: warn

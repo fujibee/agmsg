@@ -15,6 +15,7 @@
     "updateNow": "今すぐアップデート",
     "updating": "agmsgをアップデート中…",
     "updateFailed": "agmsgのアップデートに失敗しました: {{error}}",
+    "updateSucceeded": "agmsg CLIを{{version}}にアップデートしました。",
     "dismiss": "閉じる"
   },
   "sidebar": {

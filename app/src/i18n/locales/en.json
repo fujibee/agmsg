@@ -18,6 +18,7 @@
     "updateNow": "Update now",
     "updating": "Updating agmsg…",
     "updateFailed": "Couldn't update agmsg: {{error}}",
+    "updateSucceeded": "Updated agmsg CLI to {{version}}.",
     "dismiss": "Dismiss"
   },
   "sidebar": {

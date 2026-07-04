@@ -141,6 +141,10 @@ export default function App() {
   // Never updated automatically: only ever from the user clicking Update.
   const [coreOutdated, setCoreOutdated] = useState<{ installed: string | null; pinned: string } | null>(null);
   const [updatingCore, setUpdatingCore] = useState(false);
+  // The version just updated to, shown as a confirmation banner — Update now
+  // otherwise completes silently (the outdated banner just disappears),
+  // which read as "did that actually work?" in testing.
+  const [coreUpdateSucceeded, setCoreUpdateSucceeded] = useState<string | null>(null);
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
@@ -818,10 +822,12 @@ export default function App() {
           </span>
           <button
             onClick={async () => {
+              const targetVersion = coreOutdated.pinned;
               setUpdatingCore(true);
               try {
                 await invoke("agmsg_update_core");
                 setCoreOutdated(null);
+                setCoreUpdateSucceeded(targetVersion);
                 await loadTeams();
               } catch (err) {
                 console.error(err);
@@ -838,6 +844,12 @@ export default function App() {
       {updatingCore && (
         <div className="startup-installing-banner">
           <span>{t("startupError.updating")}</span>
+        </div>
+      )}
+      {coreUpdateSucceeded && (
+        <div className="startup-success-banner">
+          <span>{t("startupError.updateSucceeded", { version: coreUpdateSucceeded })}</span>
+          <button onClick={() => setCoreUpdateSucceeded(null)}>{t("startupError.dismiss")}</button>
         </div>
       )}
       {startupError && (

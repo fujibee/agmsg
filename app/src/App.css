@@ -29,12 +29,15 @@ body,
   font: 13px/1.5 -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
 }
 
+/* These sit at the very top of the window, same row as the overlaid macOS
+   traffic lights (titleBarStyle: Overlay) — left padding clears them
+   horizontally, same idea as .sidebar-head's top padding does vertically. */
 .startup-error-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 14px;
+  padding: 8px 14px 8px 80px;
   background: #4a1f1f;
   color: #ffd7d7;
   font-size: 12px;
@@ -53,7 +56,7 @@ body,
 .startup-installing-banner {
   display: flex;
   align-items: center;
-  padding: 8px 14px;
+  padding: 8px 14px 8px 80px;
   background: var(--panel-2);
   color: var(--muted);
   font-size: 12px;
@@ -65,7 +68,7 @@ body,
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 14px;
+  padding: 8px 14px 8px 80px;
   background: #4a3a1f;
   color: #ffe7b3;
   font-size: 12px;
@@ -75,6 +78,27 @@ body,
   background: transparent;
   border: 1px solid #ffe7b3;
   color: #ffe7b3;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.startup-success-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px 8px 80px;
+  background: #1f4a2c;
+  color: #c8f7d4;
+  font-size: 12px;
+  border-bottom: 1px solid #2b6b41;
+}
+.startup-success-banner button {
+  background: transparent;
+  border: 1px solid #c8f7d4;
+  color: #c8f7d4;
   border-radius: 4px;
   padding: 2px 8px;
   cursor: pointer;

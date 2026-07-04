@@ -15,6 +15,7 @@
     "updateNow": "Jetzt aktualisieren",
     "updating": "agmsg wird aktualisiert…",
     "updateFailed": "agmsg konnte nicht aktualisiert werden: {{error}}",
+    "updateSucceeded": "agmsg-CLI wurde auf {{version}} aktualisiert.",
     "dismiss": "Verwerfen"
   },
   "sidebar": {
