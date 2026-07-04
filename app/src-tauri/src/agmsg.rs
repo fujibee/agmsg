@@ -12,9 +12,23 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Resolves the user's home directory across platforms. HOME is a POSIX
+/// convention — a native Windows GUI process (launched from the Start Menu
+/// or a desktop shortcut, not a shell) doesn't have it set at all, silently
+/// falling back to "." and resolving every agmsg path relative to whatever
+/// the process's cwd happens to be — confirmed on real Windows hardware
+/// (agmsg_is_installed()/run_script() both silently checking/using a
+/// "./.agents/skills/agmsg" relative to nothing meaningful, sometimes
+/// matching a stray leftover directory from an earlier broken run instead
+/// of erroring outright). USERPROFILE is Windows' own always-set
+/// equivalent, set by the OS itself regardless of what launched the process.
+fn home_dir_string() -> Option<String> {
+    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
+}
+
 /// Base dir of the agmsg install (skill layout: db/, teams/, scripts/, ...).
 fn agmsg_base() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_dir_string().unwrap_or_else(|| ".".into());
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
 
@@ -182,7 +196,7 @@ fn spawn_options_file() -> std::path::PathBuf {
             return std::path::PathBuf::from(p);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_dir_string().unwrap_or_else(|| ".".into());
     std::path::PathBuf::from(home).join(".agmsg/config/spawn_options.yaml")
 }
 
@@ -531,7 +545,7 @@ pub fn agmsg_command_name() -> String {
 /// Default project dir for a freshly-added agent: <HOME>/agmsg-agents/<name>.
 #[tauri::command]
 pub fn agmsg_default_project(name: String) -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let home = home_dir_string().ok_or("Couldn't resolve the home directory (HOME/USERPROFILE unset)")?;
     Ok(format!("{home}/agmsg-agents/{name}"))
 }
 
