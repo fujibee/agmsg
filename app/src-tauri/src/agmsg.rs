@@ -93,7 +93,14 @@ fn resolve_bash() -> Result<PathBuf, String> {
         }
     }
 
-    if let Ok(output) = std::process::Command::new("where").arg("git").output() {
+    let mut where_cmd = std::process::Command::new("where");
+    where_cmd.arg("git");
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        where_cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if let Ok(output) = where_cmd.output() {
         if output.status.success() {
             if let Some(first_line) = String::from_utf8_lossy(&output.stdout).lines().next() {
                 // git.exe sits at <root>\cmd\git.exe or <root>\bin\git.exe;
@@ -121,6 +128,25 @@ fn resolve_bash() -> Result<PathBuf, String> {
 #[cfg(not(target_os = "windows"))]
 fn resolve_bash() -> Result<PathBuf, String> {
     Ok(PathBuf::from("bash"))
+}
+
+/// A bash Command pre-configured for running agmsg-core scripts: resolved
+/// via resolve_bash() (not a bare "bash" — see there), --noprofile --norc
+/// so it doesn't spend a few seconds sourcing the user's shell profile on
+/// every single call (these scripts don't depend on it, on any platform),
+/// and on Windows CREATE_NO_WINDOW so spawning it doesn't flash a console
+/// window on screen for every command — GUI processes get one by default.
+/// Callers add the script path and its args on top of what this returns.
+fn bash_command() -> Result<std::process::Command, String> {
+    let mut cmd = std::process::Command::new(resolve_bash()?);
+    cmd.args(["--noprofile", "--norc"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(cmd)
 }
 
 fn db_path() -> PathBuf {
@@ -346,7 +372,7 @@ pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("agmsg-core")
         .join("install.sh");
-    let output = std::process::Command::new(resolve_bash()?)
+    let output = bash_command()?
         .arg(bash_path(&install_sh))
         .output()
         .map_err(|e| e.to_string())?;
@@ -429,7 +455,7 @@ pub fn agmsg_update_core(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("agmsg-core")
         .join("install.sh");
-    let output = std::process::Command::new(resolve_bash()?)
+    let output = bash_command()?
         .arg(bash_path(&install_sh))
         .args(["--cmd", "agmsg", "--update"])
         .output()
@@ -511,7 +537,7 @@ pub fn agmsg_messages(
 /// itself. Returns stdout on success, stderr on failure.
 fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
     let script = agmsg_base().join("scripts").join(name);
-    let output = std::process::Command::new(resolve_bash()?)
+    let output = bash_command()?
         .arg(bash_path(&script))
         .args(args)
         .output()
