@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [app-v0.1.0] - 2026-07-03
+
+### Added
+- Official agmsg desktop app (#298)
+
 ## [1.1.4] - 2026-07-03
 
 ### Added
@@ -187,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[app-v0.1.0]: https://github.com/fujibee/agmsg/compare/v1.1.4...app-v0.1.0
 [1.1.4]: https://github.com/fujibee/agmsg/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/fujibee/agmsg/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/fujibee/agmsg/compare/v1.1.1...v1.1.2
