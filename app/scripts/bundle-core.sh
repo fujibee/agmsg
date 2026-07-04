@@ -35,7 +35,25 @@ git fetch origin tag "$REF" --no-tags
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
-git archive "$REF" -- scripts/ install.sh uninstall.sh | tar -x -C "$DEST"
+git archive "$REF" -- scripts/ install.sh uninstall.sh VERSION | tar -x -C "$DEST"
 chmod +x "$DEST/install.sh" "$DEST/uninstall.sh"
+
+# Sanity check: the pin must actually satisfy what the app needs from
+# agmsg-core, not just exist. v0.1.0 shipped pinned to a tag that predated
+# the agmsg-app type registration, so a fresh auto-install died the moment
+# a user tried to add an app-user ("Unknown agent type: agmsg-app") — this
+# would have caught it at build time instead of in the field. Add to this
+# list whenever the app starts depending on more of agmsg-core.
+REQUIRED_PATHS=(
+  "scripts/api.sh"
+  "scripts/drivers/types/agmsg-app/type.conf"
+  "VERSION"
+)
+for p in "${REQUIRED_PATHS[@]}"; do
+  if [ ! -f "$DEST/$p" ]; then
+    echo "bundle-core: pinned ref $REF is missing required path '$p' — bump AGMSG_CORE_REF" >&2
+    exit 1
+  fi
+done
 
 echo "bundle-core: bundled agmsg-core @ $REF into $DEST"

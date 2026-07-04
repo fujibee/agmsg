@@ -13,6 +13,11 @@
     "installing": "Installing agmsg…",
     "installFailed": "Couldn't install agmsg: {{error}}",
     "loadTeamsFailed": "Couldn't load agmsg teams: {{error}}. Is agmsg installed at ~/.agents/skills/agmsg?",
+    "coreOutdated": "Your agmsg CLI is out of date ({{installed}} < {{pinned}}) and may not work correctly with this app.",
+    "versionUnknown": "unknown",
+    "updateNow": "Update now",
+    "updating": "Updating agmsg…",
+    "updateFailed": "Couldn't update agmsg: {{error}}",
     "dismiss": "Dismiss"
   },
   "sidebar": {

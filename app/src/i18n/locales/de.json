@@ -10,6 +10,11 @@
     "installing": "agmsg wird installiert…",
     "installFailed": "agmsg konnte nicht installiert werden: {{error}}",
     "loadTeamsFailed": "agmsg-Teams konnten nicht geladen werden: {{error}}. Ist agmsg unter ~/.agents/skills/agmsg installiert?",
+    "coreOutdated": "Deine agmsg-CLI ist veraltet ({{installed}} < {{pinned}}) und funktioniert möglicherweise nicht richtig mit dieser App.",
+    "versionUnknown": "unbekannt",
+    "updateNow": "Jetzt aktualisieren",
+    "updating": "agmsg wird aktualisiert…",
+    "updateFailed": "agmsg konnte nicht aktualisiert werden: {{error}}",
     "dismiss": "Verwerfen"
   },
   "sidebar": {

@@ -194,4 +194,6 @@ jobs:
           path: |
             app/src-tauri/target/release/bundle/msi/*.msi
             app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/bundle/nsis/*.zip
+            app/src-tauri/target/release/bundle/nsis/*.zip.sig
           if-no-files-found: warn

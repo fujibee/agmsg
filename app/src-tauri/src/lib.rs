@@ -311,6 +311,8 @@ pub fn run() {
             pty::pty_inject,
             agmsg::agmsg_is_installed,
             agmsg::agmsg_install,
+            agmsg::agmsg_core_version_status,
+            agmsg::agmsg_update_core,
             agmsg::agmsg_teams,
             agmsg::agmsg_members,
             agmsg::agmsg_messages,

@@ -252,6 +252,83 @@ pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// The AGMSG_CORE_REF this build was compiled against (e.g. "v1.1.5") — the
+/// same value bundle-core.sh reads at build time, embedded here so the
+/// running app can compare against it without shelling out to git.
+const PINNED_CORE_REF: &str = include_str!("../../AGMSG_CORE_REF");
+
+/// Parses a leading "X.Y.Z" out of a version string, ignoring anything after
+/// (git-describe suffixes like "-3-gabc1234", "-dirty", or a leading "v").
+/// None for anything that doesn't start with a clean X.Y.Z — including the
+/// literal "unknown" install.sh writes when it can't determine a version.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.trim().trim_start_matches('v');
+    let core = s.split(['-', '+']).next().unwrap_or(s);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+#[derive(Serialize)]
+pub struct CoreVersionStatus {
+    installed: Option<String>,
+    pinned: String,
+    outdated: bool,
+}
+
+/// Compares the installed agmsg's VERSION file against the version bundled
+/// into this app build. An existing install doesn't go through agmsg_install
+/// (that only fires when nothing is installed at all), so an installed
+/// agmsg predating a core feature the app needs (e.g. v0.1.0 shipping before
+/// agmsg-app's type registration existed) would otherwise fail silently the
+/// first time that feature is used. A missing/unparseable VERSION (very old
+/// installs, or the literal "unknown") counts as outdated too.
+#[tauri::command]
+pub fn agmsg_core_version_status() -> CoreVersionStatus {
+    let pinned = PINNED_CORE_REF.trim().trim_start_matches('v').to_string();
+    let installed = std::fs::read_to_string(agmsg_base().join("VERSION"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let outdated = match (&installed, parse_semver(&pinned)) {
+        (Some(v), Some(pinned_v)) => match parse_semver(v) {
+            Some(installed_v) => installed_v < pinned_v,
+            None => true,
+        },
+        (None, _) => true,
+        (_, None) => false,
+    };
+
+    CoreVersionStatus { installed, pinned, outdated }
+}
+
+/// Updates an existing agmsg install to the version bundled into this app,
+/// via the bundled install.sh's `--update` flag (preserves db/teams). Unlike
+/// agmsg_install, this touches an environment the user already has — it's
+/// only ever invoked from an explicit "Update" click, never automatically.
+#[tauri::command]
+pub fn agmsg_update_core(app: AppHandle) -> Result<(), String> {
+    let install_sh = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("agmsg-core")
+        .join("install.sh");
+    let output = std::process::Command::new("bash")
+        .arg(&install_sh)
+        .arg("--update")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
 /// List team names. Shells out to api.sh rather than reading teams/
 /// directly — see scripts/api.sh's own header for why this exists
 /// (storage abstraction / non-bash consumers); the team registry itself
@@ -452,4 +529,37 @@ pub fn start_watcher(app: AppHandle) {
             thread::sleep(Duration::from_millis(800));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_semver;
+
+    #[test]
+    fn parses_clean_semver() {
+        assert_eq!(parse_semver("1.1.4"), Some((1, 1, 4)));
+        assert_eq!(parse_semver("v1.1.5"), Some((1, 1, 5)));
+    }
+
+    #[test]
+    fn strips_git_describe_and_prerelease_suffixes() {
+        assert_eq!(parse_semver("1.1.4-3-gabc1234"), Some((1, 1, 4)));
+        assert_eq!(parse_semver("1.1.4-dirty"), Some((1, 1, 4)));
+        assert_eq!(parse_semver("1.1.4+build.5"), Some((1, 1, 4)));
+    }
+
+    #[test]
+    fn rejects_unparseable_versions() {
+        assert_eq!(parse_semver("unknown"), None);
+        assert_eq!(parse_semver(""), None);
+        assert_eq!(parse_semver("1.1"), None);
+    }
+
+    #[test]
+    fn compares_by_numeric_value_not_string_order() {
+        // String comparison would get "1.1.10" < "1.1.9" wrong; numeric must not.
+        assert!(parse_semver("1.1.10") > parse_semver("1.1.9"));
+        assert!(parse_semver("1.1.4") < parse_semver("1.2.0"));
+        assert!(parse_semver("1.1.4") < parse_semver("2.0.0"));
+    }
 }

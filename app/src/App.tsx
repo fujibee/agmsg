@@ -135,6 +135,12 @@ export default function App() {
   // First-run flow: if agmsg isn't detected at all, install the bundled
   // copy (see agmsg_install in agmsg.rs) before attempting to load teams.
   const [installingAgmsg, setInstallingAgmsg] = useState(false);
+  // Set when an EXISTING agmsg install predates what this app build needs
+  // (e.g. a v0.1.0 user whose CLI has no agmsg-app type at all) — a stale
+  // install still passes agmsg_is_installed(), so this is a separate check.
+  // Never updated automatically: only ever from the user clicking Update.
+  const [coreOutdated, setCoreOutdated] = useState<{ installed: string | null; pinned: string } | null>(null);
+  const [updatingCore, setUpdatingCore] = useState(false);
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
@@ -317,6 +323,14 @@ export default function App() {
           } finally {
             setInstallingAgmsg(false);
           }
+        }
+        try {
+          const status = await invoke<{ installed: string | null; pinned: string; outdated: boolean }>(
+            "agmsg_core_version_status",
+          );
+          if (status.outdated) setCoreOutdated({ installed: status.installed, pinned: status.pinned });
+        } catch (err) {
+          console.error(err);
         }
         const loadedTeams = await loadTeams();
         if (loadedTeams.length === 0) setModal({ kind: "team", firstRun: true });
@@ -792,6 +806,38 @@ export default function App() {
       {installingAgmsg && (
         <div className="startup-installing-banner">
           <span>{t("startupError.installing")}</span>
+        </div>
+      )}
+      {coreOutdated && !updatingCore && (
+        <div className="startup-outdated-banner">
+          <span>
+            {t("startupError.coreOutdated", {
+              installed: coreOutdated.installed ?? t("startupError.versionUnknown"),
+              pinned: coreOutdated.pinned,
+            })}
+          </span>
+          <button
+            onClick={async () => {
+              setUpdatingCore(true);
+              try {
+                await invoke("agmsg_update_core");
+                setCoreOutdated(null);
+                await loadTeams();
+              } catch (err) {
+                console.error(err);
+                setStartupError(t("startupError.updateFailed", { error: String(err) }));
+              } finally {
+                setUpdatingCore(false);
+              }
+            }}
+          >
+            {t("startupError.updateNow")}
+          </button>
+        </div>
+      )}
+      {updatingCore && (
+        <div className="startup-installing-banner">
+          <span>{t("startupError.updating")}</span>
         </div>
       )}
       {startupError && (
