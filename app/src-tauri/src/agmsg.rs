@@ -486,7 +486,10 @@ pub fn agmsg_join(
     agent_type: String,
     project: String,
 ) -> Result<(), String> {
+    // create_dir_all takes the native form; bash_path is only for the value
+    // that crosses into a bash argument below (join.sh's $4).
     std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
+    let project = bash_path(std::path::Path::new(&project));
     run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ())
 }
 
@@ -511,6 +514,7 @@ pub fn agmsg_leave(team: String, name: String) -> Result<(), String> {
 /// which a static type.conf flag can't see).
 #[tauri::command]
 pub fn agmsg_delivery_mode(agent_type: String, project: String) -> Result<String, String> {
+    let project = bash_path(std::path::Path::new(&project));
     let output = run_script("delivery.sh", &["status", &agent_type, &project])?;
     for line in output.lines() {
         if let Some(mode) = line.strip_prefix("mode:") {
@@ -599,6 +603,16 @@ mod tests {
     fn is_a_no_op_on_an_already_posix_style_path() {
         assert_eq!(to_bash_slashes("/Users/koichi/.agents/skills/agmsg/scripts/join.sh"),
             "/Users/koichi/.agents/skills/agmsg/scripts/join.sh");
+    }
+
+    #[test]
+    fn flips_slashes_in_a_project_dir_argument() {
+        // Not just the script path — join.sh's $4 and delivery.sh's $3 are
+        // project directories that cross the same bash argv boundary.
+        assert_eq!(
+            to_bash_slashes(r"C:\Users\koichi\agmsg-agents\alice"),
+            "C:/Users/koichi/agmsg-agents/alice",
+        );
     }
 
     #[test]
