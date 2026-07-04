@@ -18,6 +18,38 @@ fn agmsg_base() -> PathBuf {
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
 
+/// Matches agmsg-core's own scripts/lib/storage.sh convention (`cygpath -m`:
+/// drive-letter form with forward slashes, e.g. "C:/Users/name/..."). A
+/// standalone string transform (rather than inline in bash_path below) so
+/// it's testable on any host platform, not just Windows — its only
+/// non-test caller is behind a Windows-only cfg, hence the dead_code
+/// allowance on other platforms.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn to_bash_slashes(s: &str) -> String {
+    let s = s.strip_prefix(r"\\?\").unwrap_or(s);
+    s.replace('\\', "/")
+}
+
+/// Converts a native path into a form Git Bash on Windows accepts as an
+/// argument. Without this, a raw Windows path handed to bash.exe has its
+/// backslashes silently eaten by MSYS's argv parsing (backslash is an
+/// escape character there) — "C:\Users\x\y.sh" arrives as "C:Usersxy.sh" and
+/// bash reports "No such file or directory". Also strips the `\\?\`
+/// extended-length prefix Path::canonicalize / Tauri's resource_dir() can
+/// return, which bash doesn't understand either. Every path this app hands
+/// to bash (install.sh, agmsg-core scripts, ...) must go through this —
+/// found in review after first-run install and every agmsg-core script call
+/// (join.sh, send.sh, ...) failed identically on real Windows hardware.
+#[cfg(target_os = "windows")]
+fn bash_path(p: &std::path::Path) -> String {
+    to_bash_slashes(&p.to_string_lossy())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bash_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
 fn db_path() -> PathBuf {
     agmsg_base().join("db/messages.db")
 }
@@ -242,7 +274,7 @@ pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
         .join("agmsg-core")
         .join("install.sh");
     let output = std::process::Command::new("bash")
-        .arg(&install_sh)
+        .arg(bash_path(&install_sh))
         .output()
         .map_err(|e| e.to_string())?;
     if output.status.success() {
@@ -325,7 +357,7 @@ pub fn agmsg_update_core(app: AppHandle) -> Result<(), String> {
         .join("agmsg-core")
         .join("install.sh");
     let output = std::process::Command::new("bash")
-        .arg(&install_sh)
+        .arg(bash_path(&install_sh))
         .args(["--cmd", "agmsg", "--update"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -407,7 +439,7 @@ pub fn agmsg_messages(
 fn run_script(name: &str, args: &[&str]) -> Result<String, String> {
     let script = agmsg_base().join("scripts").join(name);
     let output = std::process::Command::new("bash")
-        .arg(script)
+        .arg(bash_path(&script))
         .args(args)
         .output()
         .map_err(|e| e.to_string())?;
@@ -540,7 +572,34 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_semver;
+    use super::{parse_semver, to_bash_slashes};
+
+    #[test]
+    fn strips_verbatim_prefix_and_flips_slashes() {
+        // The exact shape resource_dir()/canonicalize() produced on the
+        // Windows hardware where this was found.
+        assert_eq!(
+            to_bash_slashes(r"\\?\C:\Users\koichi\AppData\Local\agmsg\agmsg-core\install.sh"),
+            "C:/Users/koichi/AppData/Local/agmsg/agmsg-core/install.sh",
+        );
+    }
+
+    #[test]
+    fn flips_slashes_in_mixed_paths() {
+        // agmsg_base() joins a literal ".agents/skills/agmsg" (forward
+        // slashes) onto a platform-joined home dir (backslashes on
+        // Windows) — the real path run_script() builds is a mix of both.
+        assert_eq!(
+            to_bash_slashes(r"C:\Users\koichi\.agents/skills/agmsg\scripts\join.sh"),
+            "C:/Users/koichi/.agents/skills/agmsg/scripts/join.sh",
+        );
+    }
+
+    #[test]
+    fn is_a_no_op_on_an_already_posix_style_path() {
+        assert_eq!(to_bash_slashes("/Users/koichi/.agents/skills/agmsg/scripts/join.sh"),
+            "/Users/koichi/.agents/skills/agmsg/scripts/join.sh");
+    }
 
     #[test]
     fn parses_clean_semver() {
