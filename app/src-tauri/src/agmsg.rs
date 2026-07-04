@@ -309,6 +309,13 @@ pub fn agmsg_core_version_status() -> CoreVersionStatus {
 /// via the bundled install.sh's `--update` flag (preserves db/teams). Unlike
 /// agmsg_install, this touches an environment the user already has — it's
 /// only ever invoked from an explicit "Update" click, never automatically.
+///
+/// `--cmd agmsg` is required, not optional: without it, `install.sh --update`
+/// updates whichever skill under ~/.agents/skills/* it finds first, which
+/// isn't necessarily the one agmsg_base() (and the version check above) is
+/// hardcoded to — on a machine with more than one agmsg-like skill install,
+/// the wrong one would get updated while ~/.agents/skills/agmsg stays stale
+/// and the outdated banner never clears. Found in review.
 #[tauri::command]
 pub fn agmsg_update_core(app: AppHandle) -> Result<(), String> {
     let install_sh = app
@@ -319,7 +326,7 @@ pub fn agmsg_update_core(app: AppHandle) -> Result<(), String> {
         .join("install.sh");
     let output = std::process::Command::new("bash")
         .arg(&install_sh)
-        .arg("--update")
+        .args(["--cmd", "agmsg", "--update"])
         .output()
         .map_err(|e| e.to_string())?;
     if output.status.success() {
