@@ -56,6 +56,46 @@ fn save_zoom(app: &AppHandle, zoom: f64) {
     let _ = std::fs::write(path, serde_json::json!({ "zoom": zoom }).to_string());
 }
 
+/// Replaces this process's own PATH with the one the user's login shell
+/// resolves — a Finder/LaunchServices-launched GUI app gets the OS's
+/// minimal default PATH, missing anything the shell profile adds (Homebrew,
+/// ~/.claude/local, nvm, etc.), so every agent spawn (pty::pty_spawn) fails
+/// with "not found in PATH" despite working fine from a terminal-launched
+/// `tauri dev`, which inherits the terminal's own full PATH. Must run
+/// before anything could spawn a pane. Windows doesn't have this problem
+/// (PATH comes from the registry regardless of launch method), so this is
+/// only ever called under cfg(unix).
+///
+/// Runs the shell with -i (interactive) as well as -l (login): some PATH
+/// setups (e.g. nvm) only run in .zshrc/.bashrc, which plain -l wouldn't
+/// source. An interactive shell can print other things to stdout first
+/// (MOTD, prompts) — wrapping the $PATH readout in unique markers and
+/// extracting just what's between them keeps that noise from corrupting it.
+#[cfg(unix)]
+fn import_login_shell_path() {
+    const START: &str = "__AGMSG_PATH_START__";
+    const END: &str = "__AGMSG_PATH_END__";
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let script = format!("printf '{START}%s{END}' \"$PATH\"");
+    let output = match std::process::Command::new(&shell).args(["-ilc", &script]).output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("warning: couldn't run login shell ({shell}) to import PATH: {e}");
+            return;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.find(START).zip(stdout.find(END)) {
+        Some((s, e)) if s + START.len() <= e => {
+            let path = &stdout[s + START.len()..e];
+            if !path.is_empty() {
+                std::env::set_var("PATH", path);
+            }
+        }
+        _ => eprintln!("warning: couldn't parse login shell PATH output from {shell}"),
+    }
+}
+
 /// Build the application menu in `lang`. macOS derives the default menu's
 /// About/Hide/Quit labels from the crate name (which can't contain a space),
 /// so we define them explicitly to read "agmsg" (matching productName) and
@@ -286,6 +326,17 @@ pub fn run() {
         })
         .manage(PtyManager::default())
         .setup(|app| {
+            // A Finder/LaunchServices-launched GUI app gets the OS's minimal
+            // default PATH, missing anything a login shell adds (Homebrew,
+            // ~/.claude/local, etc.) — every agent spawn (pty::pty_spawn)
+            // fails with "not found in PATH" despite working fine from a
+            // terminal-launched `tauri dev`, which inherits the terminal's
+            // full PATH. Must run before anything could spawn a pane.
+            // Windows doesn't have this problem (PATH comes from the
+            // registry regardless of launch method), hence unix-only.
+            #[cfg(unix)]
+            import_login_shell_path();
+
             // Restore the zoom level saved on the last quit/change — .manage()
             // above only had 1.0 to work with (no AppHandle yet to read the
             // config file at that point).
