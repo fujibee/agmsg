@@ -20,7 +20,7 @@ normally with no Gatekeeper right-click workaround needed.
 **Windows**
 Download the `.msi` or `.exe` installer from the same [Releases page](https://github.com/fujibee/agmsg/releases).
 
-Both platforms auto-update in place after install (**agmsg app → Check for
+Both platforms auto-update in place after install (**agmsg → Check for
 Updates…**, or silently on launch).
 
 Prerequisite either way: agmsg itself installed at `~/.agents/skills/agmsg` (the
@@ -100,7 +100,7 @@ pnpm build:notarize   # sources APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from
 ```
 
 Auto-update is wired up via `tauri-plugin-updater`, checked silently on launch and
-on-demand via **agmsg app → Check for Updates…**. The private signing key lives in
+on-demand via **agmsg → Check for Updates…**. The private signing key lives in
 the worktree-root `.secrets/` locally (never committed) and as the
 `TAURI_SIGNING_PRIVATE_KEY`/`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets in CI.
 
@@ -118,11 +118,11 @@ To cut a release: push an `app-vX.Y.Z` tag (or run `app-release.yml` by hand) to
 get signed artifacts out of CI, download them from the run, then:
 ```sh
 # One-time: create the fixed pointer release if it doesn't exist yet.
-gh release create app-latest --repo fujibee/agmsg --title "agmsg app (latest)" \
-  --notes "Always points at the newest agmsg app build. See app-vX.Y.Z releases for changelogs." --prerelease
+gh release create app-latest --repo fujibee/agmsg --title "agmsg (latest)" \
+  --notes "Always points at the newest agmsg build. See app-vX.Y.Z releases for changelogs." --prerelease
 
 # Cut a normal versioned release for history/changelog, from CI's artifacts...
-gh release create app-vX.Y.Z --repo fujibee/agmsg --title "agmsg app vX.Y.Z" \
+gh release create app-vX.Y.Z --repo fujibee/agmsg --title "agmsg vX.Y.Z" \
   <downloaded macOS .app.tar.gz, .sig, .dmg, Windows .msi, .exe>
 
 # ...then overwrite app-latest's assets with the same build + latest.json

@@ -58,12 +58,13 @@ fn save_zoom(app: &AppHandle, zoom: f64) {
 
 /// Build the application menu in `lang`. macOS derives the default menu's
 /// About/Hide/Quit labels from the crate name (which can't contain a space),
-/// so we define them explicitly to read "agmsg app" and give About the real
-/// app icon. The Edit menu's Copy/Paste are also needed for the embedded
-/// terminals. All labels come from menu_i18n::t so the whole native menu
-/// tracks the app's language selector rather than the OS locale.
+/// so we define them explicitly to read "agmsg" (matching productName) and
+/// give About the real app icon. The Edit menu's Copy/Paste are also needed
+/// for the embedded terminals. All labels come from menu_i18n::t so the
+/// whole native menu tracks the app's language selector rather than the OS
+/// locale.
 fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
-    let name = "agmsg app";
+    let name = "agmsg";
     let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
     let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")).ok();
@@ -171,7 +172,7 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
             let version = update.version.clone();
             let proceed = app
                 .dialog()
-                .message(d("updateAvailableBody", &[("name", "agmsg app"), ("version", &version)]))
+                .message(d("updateAvailableBody", &[("name", "agmsg"), ("version", &version)]))
                 .title(d("updateAvailableTitle", &[]))
                 .kind(MessageDialogKind::Info)
                 .buttons(MessageDialogButtons::OkCancelCustom(
