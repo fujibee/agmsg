@@ -92,11 +92,27 @@ windows_wrap() {
   printf "\$b=\$env:GIT_BASH; if (-not \$b) { \$b=\$env:AGMSG_BASH }; if (-not \$b) { \$b='C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe' }; & \$b -lc '%s'" "$bash_cmd_ps"
 }
 
+# Build a native PowerShell hook command that only enqueues the event. The
+# dispatcher later invokes Git Bash outside the Codex Windows sandbox.
+windows_enqueue_wrap() {
+  local event="$1"
+  local type="$2"
+  local project="$3"
+  local enqueue_path="$SKILL_DIR/scripts/windows/hook-enqueue.ps1"
+  if command -v cygpath >/dev/null 2>&1; then
+    enqueue_path=$(cygpath -w "$enqueue_path" 2>/dev/null || printf '%s' "$enqueue_path")
+  fi
+  enqueue_path=$(printf '%s' "$enqueue_path" | sed "s/'/''/g")
+  type=$(printf '%s' "$type" | sed "s/'/''/g")
+  project=$(printf '%s' "$project" | sed "s/'/''/g")
+  printf "& '%s' '%s' '%s' '%s'" "$enqueue_path" "$event" "$type" "$project"
+}
+
 # Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}
 # to .hooks.<event> in the JSON at <path>, creating arrays/objects as needed.
-# When the 4th arg is "yes" the entry also carries a "commandWindows" so the hook
-# runs on native Windows; otherwise it is omitted. This layer stays type-agnostic
-# — the caller (delivery.sh) decides from the type manifest whether to wrap.
+# When the 4th arg is "yes" the entry carries the legacy Git Bash wrapper. When
+# it is "queue", SessionStart/SessionEnd use the native enqueue transport. The
+# caller supplies type/project as args 5/6 for that queue command.
 # Writes the result back to <path>. As with strip_agmsg_event_file, the settings
 # are read via readfile() rather than via argv (#95).
 add_event_entry_file() {
@@ -104,6 +120,8 @@ add_event_entry_file() {
   local event="$2"
   local cmd="$3"
   local windows_wrap="${4:-}"
+  local hook_type="${5:-}"
+  local hook_project="${6:-}"
   local sql_path
   sql_path=$(sql_readfile_path "$path")
 
@@ -121,6 +139,18 @@ add_event_entry_file() {
     cw=$(windows_wrap "$cmd")
     cw_lit=$(printf '%s' "$cw" | sed "s/'/''/g")
     hook_obj="$hook_obj,'commandWindows','$cw_lit'"
+  elif [ "$windows_wrap" = "queue" ]; then
+    local queue_event cw cw_lit
+    case "$event" in
+      SessionStart) queue_event="session-start" ;;
+      SessionEnd) queue_event="session-end" ;;
+      *) queue_event="" ;;
+    esac
+    if [ -n "$queue_event" ]; then
+      cw=$(windows_enqueue_wrap "$queue_event" "$hook_type" "$hook_project")
+      cw_lit=$(printf '%s' "$cw" | sed "s/'/''/g")
+      hook_obj="$hook_obj,'commandWindows','$cw_lit'"
+    fi
   fi
   hook_obj="$hook_obj)"
   local entry_sql="json_object('matcher','','hooks',json_array($hook_obj))"

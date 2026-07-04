@@ -43,6 +43,20 @@ The Codex sandbox must allow writes to the installed skill's runtime state:
 `install.sh` and `install.sh --update` add these writable roots to
 `~/.codex/config.toml` when that file exists.
 
+### Windows hook dispatcher
+
+On Windows, Codex SessionStart/SessionEnd hooks use a native PowerShell queue so
+the sandbox does not need to launch Git Bash. Register the per-user dispatcher
+once after installing or updating agmsg:
+
+```powershell
+& "$HOME\.agents\skills\agmsg\scripts\windows\install-hook-dispatcher.ps1" -Register
+```
+
+The dispatcher polls the installed skill's queue and monitor-enabled projects,
+then runs the queued hook through Git Bash outside the Codex sandbox. Use
+`-Status` to check it or `-Unregister` to remove the scheduled task.
+
 Add the printed function to your shell profile. It looks like:
 
 ```bash
