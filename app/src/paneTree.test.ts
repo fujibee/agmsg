@@ -144,6 +144,18 @@ describe("insertBeside", () => {
     expect(insertBeside(tree, "p1", "left", "p1")).toBe(tree);
   });
 
+  // co1 + aggie review: without this guard, splicing newPaneId out FIRST
+  // and only then failing to find a nonexistent targetPaneId would return
+  // "the tree minus newPaneId" — silently dropping the dragged pane
+  // entirely rather than leaving it in place. Reachable via a real UI race
+  // (the target pane closes, e.g. its agent exits, in the moment between
+  // drag-start and drop).
+  it("is a no-op when targetPaneId doesn't exist in the tree (real race: target closed mid-drag)", () => {
+    const tree = split("col", 0.5, leaf("p1"), leaf("p2"));
+    expect(insertBeside(tree, "gone", "left", "p2")).toBe(tree);
+    expect(leaves(insertBeside(tree, "gone", "left", "p2"))).toEqual(["p1", "p2"]);
+  });
+
   it("re-locates the target by paneId after splicing out a SIBLING drop (path is not stable here)", () => {
     // p2 and p3 are siblings under one parent, itself p1's sibling.
     const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));

@@ -109,6 +109,16 @@ function contains(node: SplitNode, paneId: string): boolean {
  *
  * Self-drop (`targetPaneId === newPaneId`) is a no-op: the target IS the
  * dragged pane, so there is nothing to move.
+ *
+ * A missing `targetPaneId` (not found anywhere in `node`) is also a no-op,
+ * returning `node` unchanged (co1 review — was missing): without this
+ * guard, splicing `newPaneId` out first and then failing to find
+ * `targetPaneId` to replace would silently drop the dragged pane from the
+ * tree entirely, since `replaceLeaf` is itself a no-op when the target
+ * isn't found, but by then `newPaneId` has already been removed. Checked
+ * against the ORIGINAL tree, before any splicing — splicing `newPaneId`
+ * out never removes or moves an unrelated `targetPaneId` leaf, so its
+ * presence there is equivalent to its presence in the post-splice tree.
  */
 export function insertBeside(
   node: SplitNode,
@@ -117,6 +127,7 @@ export function insertBeside(
   newPaneId: string,
 ): SplitNode {
   if (targetPaneId === newPaneId) return node;
+  if (!contains(node, targetPaneId)) return node;
 
   const base = contains(node, newPaneId) ? (spliceOutLeaf(node, newPaneId) ?? node) : node;
   const axis: SplitAxis = side === "top" || side === "bottom" ? "row" : "col";
@@ -143,7 +154,18 @@ export function insertAsNewLeaf(node: SplitNode, newPaneId: string): SplitNode {
   return { kind: "split", axis: "col", ratio: (n - 1) / n, a: node, b: leaf(newPaneId) };
 }
 
-/** Renames a single leaf's paneId in place — the cross-window swap building block. */
+/**
+ * Renames a single leaf's paneId in place — the cross-window swap building
+ * block (see the design doc: cross-window swap is two independent
+ * `renameLeaf` calls, one per tree, each renaming the OTHER tree's pane in).
+ *
+ * Only safe when `newId` isn't already present in `node` — callers must
+ * apply at most one `renameLeaf` per tree (which is exactly what
+ * cross-window swap does: `oldId`/`newId` each live in a different tree, so
+ * neither call's `newId` can already be present in the tree it's applied
+ * to). Calling this with a `newId` that already exists in `node` would
+ * silently create two leaves sharing one paneId.
+ */
 export function renameLeaf(node: SplitNode, oldId: string, newId: string): SplitNode {
   if (node.kind === "leaf") {
     return node.paneId === oldId ? { ...node, paneId: newId } : node;
