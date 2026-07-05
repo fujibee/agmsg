@@ -48,8 +48,33 @@ permissions:
   contents: read
 
 jobs:
+  # Guard: on a tag build (app-vX.Y.Z), the tag's version must match the app's
+  # own tauri.conf.json version before either platform builds. Without this a
+  # forgotten bump ships an installer whose in-app version disagrees with the
+  # release tag (the v0.1.4 pin-bump-only slip). Same idea as the CLI's
+  # release.yml tag<->VERSION guard. Skipped on workflow_dispatch (no tag).
+  verify-version:
+    name: verify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert tag matches tauri.conf.json version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Not a tag build (${GITHUB_REF_NAME}) — skipping version assertion."
+            exit 0
+          fi
+          tag_version="${GITHUB_REF_NAME#app-v}"
+          conf_version="$(jq -r '.version' app/src-tauri/tauri.conf.json)"
+          if [ "$tag_version" != "$conf_version" ]; then
+            echo "::error::Tag version ($tag_version) != app/src-tauri/tauri.conf.json version ($conf_version). Run scripts/release/bump-app-version.sh $tag_version and commit the bump before tagging." >&2
+            exit 1
+          fi
+          echo "OK: tag app-v$tag_version matches tauri.conf.json version $conf_version"
+
   build-macos:
     name: build (macos)
+    needs: verify-version
     runs-on: macos-latest
     env:
       # Step-level `if:` can't reference `secrets` directly (GitHub rejects
@@ -124,6 +149,7 @@ jobs:
 
   build-windows:
     name: build (windows)
+    needs: verify-version
     runs-on: windows-latest
     permissions:
       contents: read
