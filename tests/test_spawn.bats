@@ -161,6 +161,42 @@ teardown() {
   [[ "$output" == *"$PROJ"* ]]
 }
 
+@test "spawn: boot script unsets the type's session-identity vars (#294)" {
+  # A same-type spawn (claude-code from a claude-code session) must not leak the
+  # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the
+  # parent's session for its own and every turn fails with an Authentication
+  # error. The generated boot script unsets the type's detect= vars up front.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" == *"unset CLAUDE_CODE_SESSION_ID"* ]]
+  # The unset must come before the CLI launch line, so the exec'd child never
+  # sees the inherited var.
+  run bash -c "grep -n 'unset CLAUDE_CODE_SESSION_ID' '$boot' | cut -d: -f1"
+  local unset_line="$output"
+  run bash -c "grep -n 'actas' '$boot' | head -1 | cut -d: -f1"
+  [ "$unset_line" -lt "$output" ]
+}
+
+@test "spawn: does NOT unset a type's credential/detect vars (#294)" {
+  # The strip list is a dedicated spawn_unset_env=, NOT detect=. gemini's
+  # detect=GEMINI_API_KEY GOOGLE_GEMINI_CLI are credentials, not a session id —
+  # stripping them would break the spawned child's auth (the opposite of the fix).
+  # gemini has no spawn_unset_env=, so its boot script must emit no `unset` at all
+  # and in particular must never unset GEMINI_API_KEY.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run cat "$boot"
+  [[ "$output" != *"unset GEMINI_API_KEY"* ]]
+  [[ "$output" != *"unset "* ]]
+}
+
 @test "spawn: grok-build launches the plain grok CLI with the actas prompt" {
   # grok-build is spawnable and monitor=no, so spawn skips the readiness wait.
   # Delivery is a rule file (no hook), so no folder-trust flag is needed —

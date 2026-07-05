@@ -216,6 +216,24 @@ fi
 # (the default) keeps today's bare-positional behavior.
 PROMPT_ARG="$(agmsg_type_get "$AGENT_TYPE" prompt_arg)"
 
+# Session-identity env vars to strip from a spawned same-type child (issue #294).
+# A terminal launcher (tmux new-window/split-window, a new OS terminal) copies
+# the parent shell's exported environment verbatim. When the spawner is itself a
+# session of the SAME CLI type (e.g. a claude-code session running
+# `agmsg spawn claude-code <name>`), the child inherits the parent's
+# session-identity vars (claude-code's CLAUDE_CODE_SESSION_ID) and mistakes the
+# parent's session for its own — every turn then fails with an Authentication
+# error despite valid credentials. Unset them in the generated boot script so the
+# child starts with a clean identity.
+#
+# This reads a dedicated `spawn_unset_env=` manifest key, NOT `detect=`. `detect=`
+# names the vars whoami uses to recognize a live session of a type, but those are
+# not always session-identity vars: gemini's `detect=GEMINI_API_KEY ...` is a
+# CREDENTIAL, and unsetting it would break the spawned child's auth — the opposite
+# of the fix. `spawn_unset_env=` lists only vars that are safe (and necessary) to
+# drop on spawn; unset (the default) strips nothing.
+SPAWN_UNSET_VARS="$(agmsg_type_get "$AGENT_TYPE" spawn_unset_env)"
+
 # Extra CLI args for this type from the spawn options file (opt-in, see
 # scripts/lib/spawn-options.sh). Read line-by-line — never word-split — so a
 # value containing spaces stays a single token.
@@ -343,6 +361,10 @@ BOOT="$BOOT.command"
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
+  # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
+  if [ -n "$SPAWN_UNSET_VARS" ]; then
+    printf 'unset %s\n' "$SPAWN_UNSET_VARS"
+  fi
   if [ -n "$SPAWN_AGENT" ]; then
     # Node-launcher path: pass the universal agmsg context + the actas prompt.
     # Type-specific config is the launcher's own default/env, so core stays
