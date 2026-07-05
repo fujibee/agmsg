@@ -885,9 +885,11 @@ body.resizing-row {
 /* Draggable dividers BETWEEN panes within one tab (issue #317) — absolutely
    positioned within .stage (left/top/width/height % set inline from
    collectDividers, see App.tsx), unlike .divider-v/.divider-h above (which
-   are flex-layout siblings for the sidebar/chat). Same generous-grab-area,
-   hairline-until-hover language as those. z-index above .pane-cell so the
-   grab area isn't occluded by a neighboring pane's own box. */
+   are flex-layout siblings for the sidebar/chat). Same grab-width (3px,
+   matching .divider-v/.divider-h's own `flex: 0 0 3px`) and
+   hairline-until-hover language as those (aggie review — this one was
+   originally wider and stood out as inconsistent). z-index above .pane-cell
+   so the grab area isn't occluded by a neighboring pane's own box. */
 .pane-divider-v,
 .pane-divider-h {
   position: absolute;
@@ -895,13 +897,13 @@ body.resizing-row {
   background: transparent;
 }
 .pane-divider-v {
-  min-width: 7px;
-  margin-left: -3px;
+  min-width: 3px;
+  margin-left: -1.5px;
   cursor: col-resize;
 }
 .pane-divider-h {
-  min-height: 7px;
-  margin-top: -3px;
+  min-height: 3px;
+  margin-top: -1.5px;
   cursor: row-resize;
 }
 .pane-divider-v::before,
