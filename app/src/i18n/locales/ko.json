@@ -20,6 +20,8 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "사이드바 접기",
+    "expand": "사이드바 펼치기",
     "newMenu": {
       "trigger": "＋ 새로 만들기 ▾",
       "team": "팀…",
@@ -60,6 +62,10 @@
     "swapTitle": "클릭한 다음 이 탭의 다른 패널을 클릭하면 위치가 바뀝니다"
   },
   "chat": {
+    "title": "채팅",
+    "minimize": "최소화",
+    "maximize": "최대화",
+    "restore": "복원",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"

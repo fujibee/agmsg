@@ -3,6 +3,15 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  Maximize2,
+  Minimize2,
+  Minus,
+  PanelLeftClose,
+  RectangleHorizontal,
+  Settings,
+  Users,
+} from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import {
   AgentModal,
@@ -147,8 +156,26 @@ export default function App() {
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
+  // Collapses the team sidebar to an icon-only rail so panes get more width.
+  // Session-only (no persistence needed) — spawning/messaging a member isn't
+  // offered from the collapsed rail; expand to get back to the full list.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Popup the collapsed rail's team-icon button opens — team switching, the
+  // one thing the full sidebar's team <select> offers that needs a menu
+  // instead of a direct icon action at rail width. Settings is a direct
+  // button in the rail (same as the full view's gear icon), no popup needed.
+  const [railTeamMenu, setRailTeamMenu] = useState(false);
   // Toggled from the native "View > Show User Chat" menu item.
   const [showUserChat, setShowUserChat] = useState(true);
+  // The app-user chat pane's 3 states (session-only, like sidebarCollapsed):
+  // "normal" (today's layout), "minimized" (collapses the history away,
+  // leaving just the composer row — the team room becomes the only log,
+  // fixing the double-log fatigue real users reported), "maximized" (the
+  // chat pane fills the whole content area, hiding the team room/agent
+  // panes — a focused 1:1 view). Windows-style min/max header buttons
+  // toggle these; clicking maximize while minimized (or vice versa) jumps
+  // straight to the other state, same as real OS window controls.
+  const [chatPaneState, setChatPaneState] = useState<"normal" | "minimized" | "maximized">("normal");
   // Team-room member filter: names the user has UN-checked (default: all shown).
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   // Team-room history paging: whether an older page exists, and whether one
@@ -844,6 +871,16 @@ export default function App() {
     [chatHeight],
   );
 
+  // Chat pane min/max: clicking one while the OTHER state is active jumps
+  // straight there (minimize while maximized goes directly to minimized,
+  // not back through normal first) — same as real OS window controls.
+  const toggleChatMinimized = useCallback(() => {
+    setChatPaneState((s) => (s === "minimized" ? "normal" : "minimized"));
+  }, []);
+  const toggleChatMaximized = useCallback(() => {
+    setChatPaneState((s) => (s === "maximized" ? "normal" : "maximized"));
+  }, []);
+
   // Draggable pane dividers (issue #317). Same document-level drag-tracking
   // pattern as startSidebarDrag/startChatDrag above, but the ratio being
   // dragged belongs to one specific split node rather than a single flat
@@ -915,6 +952,7 @@ export default function App() {
         setMemberMenu(null);
         setPaneMenu(null);
         setWindowMenu(null);
+        setRailTeamMenu(false);
       }}
       onDragOverCapture={(e) => {
         // WebKit doesn't reliably show a "no-drop" cursor just from
@@ -986,129 +1024,247 @@ export default function App() {
         </div>
       )}
       <div className="body">
-        <aside className="sidebar" style={{ width: sidebarWidth }}>
-          <div className="sidebar-head" data-tauri-drag-region>
-            <div className="brand-row">
-              <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
-              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-              <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
-                {t("sidebar.newMenu.trigger")}
+        <aside
+          className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}
+          style={{ width: sidebarCollapsed ? undefined : sidebarWidth }}
+        >
+          {/* Collapse toggle — level with the traffic lights, expanded state
+              only (koit: it looked fine there, "closing is perfect"). At
+              44px wide the collapsed sidebar sits entirely under the
+              traffic-light cluster, so ANY button in this same slim strip
+              would overlap them there — collapsed state expands via the
+              agmsg mark itself instead (below), not a dedicated button. */}
+          {!sidebarCollapsed && (
+            <div className="sidebar-toggle-row" data-tauri-drag-region>
+              <button
+                className="sidebar-collapse-toggle"
+                title={t("sidebar.collapse")}
+                onClick={() => setSidebarCollapsed(true)}
+              >
+                <PanelLeftClose size={16} />
               </button>
-              {newMenu && (
-                <div className="new-menu">
-                  <button
-                    onClick={() => {
-                      setNewMenu(false);
-                      setModal({ kind: "team", firstRun: false });
-                    }}
-                  >
-                    {t("sidebar.newMenu.team")}
+            </div>
+          )}
+          {sidebarCollapsed ? (
+            // Icon-only rail (koit design): the agmsg mark (click to
+            // expand) → + (new team/agent, same menu as full view) → team
+            // icon (click opens a team-switch popup, replacing the
+            // <select>) → spacer → the app-user avatar + a settings button
+            // at the bottom. No running-dot / member list — spawning/
+            // messaging isn't offered from here at all. Icons are lucide
+            // (koit: prefer a real icon set over ad-hoc unicode
+            // glyphs/hand-drawn SVGs).
+            <div className="sidebar-collapsed-rail">
+              <button
+                className="rail-logo-mark-btn"
+                title={t("sidebar.expand")}
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <img className="rail-logo-mark" src="/agmsg-mark.png" alt={t("sidebar.logoAlt")} />
+              </button>
+
+              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
+                <button className="rail-icon-btn" title={t("sidebar.newMenu.trigger")} onClick={() => setNewMenu((v) => !v)}>
+                  +
+                </button>
+                {newMenu && (
+                  <div className="new-menu rail-popup">
+                    <button
+                      onClick={() => {
+                        setNewMenu(false);
+                        setModal({ kind: "team", firstRun: false });
+                      }}
+                    >
+                      {t("sidebar.newMenu.team")}
+                    </button>
+                    <button
+                      disabled={!team}
+                      onClick={() => {
+                        setNewMenu(false);
+                        setModal({ kind: "agent" });
+                        invoke<AgentType[]>("agmsg_spawnable_types")
+                          .then(setSpawnTypes)
+                          .catch(() => {});
+                      }}
+                    >
+                      {t("sidebar.newMenu.agent")}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {team && (
+                <div className="rail-menu-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button className="rail-icon-btn" title={team} onClick={() => setRailTeamMenu((v) => !v)}>
+                    <Users size={16} />
                   </button>
-                  <button
-                    disabled={!team}
-                    onClick={() => {
-                      setNewMenu(false);
-                      setModal({ kind: "agent" });
-                      // Refresh in case spawn-options.yaml or a new type
-                      // manifest showed up since app start.
-                      invoke<AgentType[]>("agmsg_spawnable_types")
-                        .then(setSpawnTypes)
-                        .catch(() => {});
-                    }}
-                  >
-                    {t("sidebar.newMenu.agent")}
-                  </button>
+                  {railTeamMenu && (
+                    <div className="ctx-menu rail-popup">
+                      {teams.map((teamName) => (
+                        <button
+                          key={teamName}
+                          className={teamName === team ? "active" : undefined}
+                          onClick={() => {
+                            setTeam(teamName);
+                            setRailTeamMenu(false);
+                          }}
+                        >
+                          {teamName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
-              </div>
-            </div>
-            <select value={team} onChange={(e) => setTeam(e.target.value)}>
-              {teams.map((teamName) => (
-                <option key={teamName} value={teamName}>
-                  {teamName}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="sidebar-title">
-            <span>{t("sidebar.title")}</span>
-            {active === "room" && others.length > 0 && (
-              <span className="filter-actions">
-                <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
-                <span>·</span>
-                <button onClick={selectNoMembers}>{t("sidebar.filter.none")}</button>
-              </span>
-            )}
-          </div>
-          <ul className="members">
-            {others.map((m) => (
-              <li
-                key={m.name}
-                className="member-row"
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
-                }}
-              >
-                {active === "room" && (
-                  <input
-                    type="checkbox"
-                    className="member-check"
-                    title={t("sidebar.member.checkboxTitle")}
-                    checked={!deselected.has(m.name)}
-                    onChange={() => toggleMember(m.name)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                )}
+
+              <div className="rail-spacer" />
+
+              {appUser && (
                 <button
-                  className="member"
-                  onClick={() => spawnMember(m)}
-                  title={
-                    panes.some((p) => p.label === m.name)
-                      ? t("sidebar.member.titleRunning")
-                      : t("sidebar.member.titleSpawn")
-                  }
+                  className="rail-avatar-btn"
+                  title={t("sidebar.expand")}
+                  onClick={() => setSidebarCollapsed(false)}
                 >
-                  <span className="member-name">
-                    {m.name}
-                    {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
-                  </span>
-                  <span className="member-types">
-                    {m.types.join(", ") || t("sidebar.member.noTypes")}
-                  </span>
+                  <span className="avatar" title={t("sidebar.user.title", { team })} />
                 </button>
-              </li>
-            ))}
-            {others.length === 0 && (
-              <li className="empty">{t("sidebar.member.emptyState")}</li>
-            )}
-          </ul>
-          {appUser && (
-            <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
-              <span className="avatar" />
-              <div className="su-meta">
-                <span className="su-name">{appUser}</span>
-                <span className="su-team">{team}</span>
-              </div>
+              )}
               <button
-                className="settings-btn"
+                className="rail-icon-btn"
                 title={t("settings.title")}
                 onClick={(e) => {
                   e.stopPropagation();
                   setModal({ kind: "settings" });
                 }}
               >
-                ⚙
+                <Settings size={16} />
               </button>
             </div>
+          ) : (
+            <>
+              <div className="sidebar-head" data-tauri-drag-region>
+                <div className="brand-row">
+                  <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
+                  <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
+                    {t("sidebar.newMenu.trigger")}
+                  </button>
+                  {newMenu && (
+                    <div className="new-menu">
+                      <button
+                        onClick={() => {
+                          setNewMenu(false);
+                          setModal({ kind: "team", firstRun: false });
+                        }}
+                      >
+                        {t("sidebar.newMenu.team")}
+                      </button>
+                      <button
+                        disabled={!team}
+                        onClick={() => {
+                          setNewMenu(false);
+                          setModal({ kind: "agent" });
+                          // Refresh in case spawn-options.yaml or a new type
+                          // manifest showed up since app start.
+                          invoke<AgentType[]>("agmsg_spawnable_types")
+                            .then(setSpawnTypes)
+                            .catch(() => {});
+                        }}
+                      >
+                        {t("sidebar.newMenu.agent")}
+                      </button>
+                    </div>
+                  )}
+                  </div>
+                </div>
+                <select value={team} onChange={(e) => setTeam(e.target.value)}>
+                  {teams.map((teamName) => (
+                    <option key={teamName} value={teamName}>
+                      {teamName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="sidebar-title">
+                <span>{t("sidebar.title")}</span>
+                {active === "room" && others.length > 0 && (
+                  <span className="filter-actions">
+                    <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
+                    <span>·</span>
+                    <button onClick={selectNoMembers}>{t("sidebar.filter.none")}</button>
+                  </span>
+                )}
+              </div>
+              <ul className="members">
+                {others.map((m) => (
+                  <li
+                    key={m.name}
+                    className="member-row"
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    {active === "room" && (
+                      <input
+                        type="checkbox"
+                        className="member-check"
+                        title={t("sidebar.member.checkboxTitle")}
+                        checked={!deselected.has(m.name)}
+                        onChange={() => toggleMember(m.name)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    )}
+                    <button
+                      className="member"
+                      onClick={() => spawnMember(m)}
+                      title={
+                        panes.some((p) => p.label === m.name)
+                          ? t("sidebar.member.titleRunning")
+                          : t("sidebar.member.titleSpawn")
+                      }
+                    >
+                      <span className="member-name">
+                        {m.name}
+                        {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
+                      </span>
+                      <span className="member-types">
+                        {m.types.join(", ") || t("sidebar.member.noTypes")}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+                {others.length === 0 && (
+                  <li className="empty">{t("sidebar.member.emptyState")}</li>
+                )}
+              </ul>
+              {appUser && (
+                <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
+                  <span className="avatar" />
+                  <div className="su-meta">
+                    <span className="su-name">{appUser}</span>
+                    <span className="su-team">{team}</span>
+                  </div>
+                  <button
+                    className="settings-btn"
+                    title={t("settings.title")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModal({ kind: "settings" });
+                    }}
+                  >
+                    <Settings size={15} />
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </aside>
 
-        <div className="divider-v" onMouseDown={startSidebarDrag} />
+        {!sidebarCollapsed && <div className="divider-v" onMouseDown={startSidebarDrag} />}
 
         <main className="main">
-          <nav className="tabs" data-tauri-drag-region>
+          <nav className="tabs" data-tauri-drag-region hidden={chatPaneState === "maximized"}>
             <span className={active === "room" ? "tab active" : "tab"}>
               <button className="tab-label" onClick={() => setActive("room")}>
                 {t("tabs.roomLabel")}
@@ -1204,7 +1360,7 @@ export default function App() {
             />
           </nav>
 
-          <section className="stage">
+          <section className="stage" hidden={chatPaneState === "maximized"}>
             <div
               className="room"
               hidden={active !== "room"}
@@ -1405,75 +1561,104 @@ export default function App() {
               ))}
           </section>
 
-          {showUserChat && <div className="divider-h" onMouseDown={startChatDrag} />}
+          {showUserChat && chatPaneState === "normal" && (
+            <div className="divider-h" onMouseDown={startChatDrag} />
+          )}
 
           {/* App-user chat: the human's own send/receive thread + composer.
-              Hidden via View > Show User Chat (native menu checkbox). Clicking
-              the history jumps focus to the composer input below — the
-              history itself has nothing to focus (nothing to type into), so
-              without this the border-on-focus feedback here was invisible in
-              normal use. */}
+              Hidden via View > Show User Chat (native menu checkbox).
+              min/max header buttons toggle chatPaneState between normal,
+              minimized (history collapsed away — just the composer row,
+              fixing the "my own messages show twice" fatigue real users
+              reported once the room already shows everything), and
+              maximized (fills the whole content area, hiding the team
+              room/agent panes — a focused 1:1 view). Clicking the history
+              jumps focus to the composer input below — the history itself
+              has nothing to focus (nothing to type into), so without this
+              the border-on-focus feedback here was invisible in normal use. */}
           <div
-            className="appuser-chat"
-            ref={chatRef}
-            style={{ height: chatHeight }}
+            className={`appuser-chat-wrap state-${chatPaneState}`}
+            style={chatPaneState === "normal" ? { height: chatHeight } : undefined}
             hidden={!showUserChat}
-            onClick={() => composerInputRef.current?.focus()}
           >
-            {myThread.map((m) => (
-              <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
-                <span className="chat-time">{m.created_at.slice(11, 19)}</span>
-                <span className="chat-peer">
-                  {m.from === appUser
-                    ? t("chat.peer.to", { to: m.to })
-                    : t("chat.peer.from", { from: m.from })}
-                </span>
-                <span className="chat-body">{m.body}</span>
-              </div>
-            ))}
-            {appUser && myThread.length === 0 && (
-              <div className="empty">{t("chat.emptyState.withUser", { appUser })}</div>
-            )}
-            {!appUser && team && (
-              <div className="empty">
-                {t("chat.emptyState.noUser")}
-                <button className="link" onClick={() => setModal({ kind: "appuser" })}>
-                  {t("chat.emptyState.addOne")}
+            <div className="appuser-chat-header" data-tauri-drag-region>
+              <span className="appuser-chat-title">{t("chat.title")}</span>
+              <div className="appuser-chat-controls">
+                <button
+                  className="chat-ctrl-btn"
+                  title={chatPaneState === "minimized" ? t("chat.restore") : t("chat.minimize")}
+                  onClick={toggleChatMinimized}
+                >
+                  {chatPaneState === "minimized" ? <RectangleHorizontal size={14} /> : <Minus size={14} />}
+                </button>
+                <button
+                  className="chat-ctrl-btn"
+                  title={chatPaneState === "maximized" ? t("chat.restore") : t("chat.maximize")}
+                  onClick={toggleChatMaximized}
+                >
+                  {chatPaneState === "maximized" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                 </button>
               </div>
-            )}
-          </div>
+            </div>
 
-          <footer className="composer" hidden={!showUserChat}>
-            {appUser ? (
-              <>
-                <span className="as">
-                  {t("composer.asPrefix")} <b>{appUser}</b>
-                </span>
-                <select value={target} onChange={(e) => setTarget(e.target.value)}>
-                  <option value="">{t("composer.targetPlaceholder")}</option>
-                  {others.map((m) => (
-                    <option key={m.name} value={m.name}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  ref={composerInputRef}
-                  value={draft}
-                  placeholder={t("composer.messagePlaceholder")}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => isSubmitEnter(e) && send()}
-                  {...imeCompositionProps}
-                />
-                <button onClick={send} disabled={!draft.trim() || !target}>
-                  {t("composer.sendButton")}
-                </button>
-              </>
-            ) : (
-              <span className="as">{t("composer.noAppUser")}</span>
+            {chatPaneState !== "minimized" && (
+              <div className="appuser-chat" ref={chatRef} onClick={() => composerInputRef.current?.focus()}>
+                {myThread.map((m) => (
+                  <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
+                    <span className="chat-time">{m.created_at.slice(11, 19)}</span>
+                    <span className="chat-peer">
+                      {m.from === appUser
+                        ? t("chat.peer.to", { to: m.to })
+                        : t("chat.peer.from", { from: m.from })}
+                    </span>
+                    <span className="chat-body">{m.body}</span>
+                  </div>
+                ))}
+                {appUser && myThread.length === 0 && (
+                  <div className="empty">{t("chat.emptyState.withUser", { appUser })}</div>
+                )}
+                {!appUser && team && (
+                  <div className="empty">
+                    {t("chat.emptyState.noUser")}
+                    <button className="link" onClick={() => setModal({ kind: "appuser" })}>
+                      {t("chat.emptyState.addOne")}
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
-          </footer>
+
+            <footer className="composer">
+              {appUser ? (
+                <>
+                  <span className="as">
+                    {t("composer.asPrefix")} <b>{appUser}</b>
+                  </span>
+                  <select value={target} onChange={(e) => setTarget(e.target.value)}>
+                    <option value="">{t("composer.targetPlaceholder")}</option>
+                    {others.map((m) => (
+                      <option key={m.name} value={m.name}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    ref={composerInputRef}
+                    value={draft}
+                    placeholder={t("composer.messagePlaceholder")}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => isSubmitEnter(e) && send()}
+                    {...imeCompositionProps}
+                  />
+                  <button onClick={send} disabled={!draft.trim() || !target}>
+                    {t("composer.sendButton")}
+                  </button>
+                </>
+              ) : (
+                <span className="as">{t("composer.noAppUser")}</span>
+              )}
+            </footer>
+          </div>
         </main>
       </div>
 

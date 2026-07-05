@@ -183,19 +183,37 @@ fn log_path_import(message: &str) {
 /// Build the application menu in `lang`. macOS derives the default menu's
 /// About/Hide/Quit labels from the crate name (which can't contain a space),
 /// so we define them explicitly to read "agmsg" (matching productName) and
-/// give About the real app icon. The Edit menu's Copy/Paste are also needed
-/// for the embedded terminals. All labels come from menu_i18n::t so the
-/// whole native menu tracks the app's language selector rather than the OS
-/// locale.
+/// give About the real app icon (macOS only — muda's Windows About dialog
+/// ignores AboutMetadata.icon entirely, always showing the OS's own
+/// info-bubble glyph; not fixable from here, see issue tracker). The Edit
+/// menu's Copy/Paste are also needed for the embedded terminals. All labels
+/// come from menu_i18n::t so the whole native menu tracks the app's
+/// language selector rather than the OS locale.
 fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let name = "agmsg";
     let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
     let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")).ok();
+    // A single combined string (rather than muda's separate version/
+    // short_version fields, which map to different, platform-divergent
+    // About-panel slots on macOS vs. a parenthetical suffix on Windows) so
+    // both platforms show the exact same text verbatim: "0.1.4 (core
+    // 1.1.6)". CARGO_PKG_VERSION is Cargo.toml's own version, always kept
+    // in sync with tauri.conf.json/package.json at release time; the core
+    // version is whatever AGMSG_CORE_REF this build bundled (agmsg::
+    // pinned_core_version — the same source agmsg_core_version_status's
+    // "pinned" field reads, so the two can never disagree).
+    let version = format!("{} (core {})", env!("CARGO_PKG_VERSION"), agmsg::pinned_core_version());
     let about = PredefinedMenuItem::about(
         app,
         Some(&m_name("about")),
-        Some(AboutMetadataBuilder::new().name(Some(name.to_string())).icon(icon).build()),
+        Some(
+            AboutMetadataBuilder::new()
+                .name(Some(name.to_string()))
+                .version(Some(version))
+                .icon(icon)
+                .build(),
+        ),
     )?;
     let check_updates =
         MenuItem::with_id(app, CHECK_UPDATES_ID, m("checkForUpdates"), true, None::<&str>)?;

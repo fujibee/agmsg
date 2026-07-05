@@ -20,6 +20,8 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "サイドバーを折りたたむ",
+    "expand": "サイドバーを展開",
     "newMenu": {
       "trigger": "＋ 新規 ▾",
       "team": "チーム…",
@@ -60,6 +62,10 @@
     "swapTitle": "クリックしてから、このタブ内の別のペインをクリックすると位置を入れ替えます"
   },
   "chat": {
+    "title": "チャット",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "元に戻す",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"

@@ -20,6 +20,8 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Recolher barra lateral",
+    "expand": "Expandir barra lateral",
     "newMenu": {
       "trigger": "＋ Novo ▾",
       "team": "Equipe…",
@@ -60,6 +62,10 @@
     "swapTitle": "Clique e depois clique em outro painel desta aba para trocar as posições"
   },
   "chat": {
+    "title": "Bate-papo",
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"

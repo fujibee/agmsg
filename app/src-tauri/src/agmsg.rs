@@ -437,6 +437,14 @@ pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
 /// running app can compare against it without shelling out to git.
 const PINNED_CORE_REF: &str = include_str!("../../AGMSG_CORE_REF");
 
+/// The bundled agmsg-core version, stripped of its leading "v" (e.g.
+/// "1.1.6") — the single source of truth both `agmsg_core_version_status`
+/// (below) and the About dialog's version line (see make_menu in lib.rs)
+/// read from, so they can never drift from each other.
+pub(crate) fn pinned_core_version() -> String {
+    PINNED_CORE_REF.trim().trim_start_matches('v').to_string()
+}
+
 /// Parses a leading "X.Y.Z" out of a version string, ignoring anything after
 /// (git-describe suffixes like "-3-gabc1234", "-dirty", or a leading "v").
 /// None for anything that doesn't start with a clean X.Y.Z — including the
@@ -467,7 +475,7 @@ pub struct CoreVersionStatus {
 /// installs, or the literal "unknown") counts as outdated too.
 #[tauri::command]
 pub fn agmsg_core_version_status() -> CoreVersionStatus {
-    let pinned = PINNED_CORE_REF.trim().trim_start_matches('v').to_string();
+    let pinned = pinned_core_version();
     let installed = std::fs::read_to_string(agmsg_base().join("VERSION"))
         .ok()
         .map(|s| s.trim().to_string())

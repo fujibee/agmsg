@@ -23,6 +23,8 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar",
     "newMenu": {
       "trigger": "＋ New ▾",
       "team": "Team…",
@@ -63,6 +65,10 @@
     "swapTitle": "Click, then click another pane in this tab to swap positions"
   },
   "chat": {
+    "title": "Chat",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"

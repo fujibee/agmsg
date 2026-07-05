@@ -20,6 +20,8 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Seitenleiste einklappen",
+    "expand": "Seitenleiste ausklappen",
     "newMenu": {
       "trigger": "＋ Neu ▾",
       "team": "Team…",
@@ -60,6 +62,10 @@
     "swapTitle": "Klicken, dann auf ein anderes Panel in diesem Tab klicken, um die Positionen zu tauschen"
   },
   "chat": {
+    "title": "Chat",
+    "minimize": "Minimieren",
+    "maximize": "Maximieren",
+    "restore": "Wiederherstellen",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
