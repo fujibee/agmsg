@@ -772,13 +772,42 @@ mod tests {
     // run_script() resolves <base>/scripts/<name>, runs it through bash, and maps
     // stdout→Ok / stderr→Err. Pointing AGMSG_APP_BASE at a temp dir of fake
     // scripts lets us exercise that whole path (the 0.1.1→0.1.3 regressions all
-    // lived here) without a real agmsg install. Env is process-global, so these
-    // are #[serial]. Skipped on Windows: the CI runner's `bash` resolution
-    // (resolve_bash) is Git-Bash-specific and covered by the windows app-test job.
+    // lived here) without a real agmsg install. AGMSG_APP_BASE is process-global,
+    // so any test that reads it is #[serial]; add #[serial] to future ones too.
+    // The run_script cases are skipped on Windows: resolve_bash there is Git-Bash
+    // -specific and is covered by the windows-latest app-test CI job instead.
 
-    /// Write the given `(name, body)` fakes under a temp `scripts/` dir and point
-    /// AGMSG_APP_BASE at it. Returns the TempDir — keep it alive for the test.
-    fn fake_base(scripts: &[(&str, &str)]) -> tempfile::TempDir {
+    /// Restores an env var to its prior value (or unsets it) on drop, so a
+    /// panicking test can't leak an override into the next one — the manual
+    /// remove_var-at-end approach loses that on unwind.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            EnvGuard { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// A temp install base whose `scripts/` holds the given `(name, body)` fakes,
+    /// with AGMSG_APP_BASE pointed at it. Bind it for the test's duration; on drop
+    /// the temp dir is removed and AGMSG_APP_BASE is restored.
+    struct FakeBase {
+        _dir: tempfile::TempDir,
+        _env: EnvGuard,
+    }
+    fn fake_base(scripts: &[(&str, &str)]) -> FakeBase {
         let dir = tempfile::tempdir().expect("tempdir");
         let sdir = dir.path().join("scripts");
         std::fs::create_dir_all(&sdir).unwrap();
@@ -787,25 +816,23 @@ mod tests {
             writeln!(f, "#!/usr/bin/env bash").unwrap();
             f.write_all(body.as_bytes()).unwrap();
         }
-        std::env::set_var("AGMSG_APP_BASE", dir.path());
-        dir
+        let env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
+        FakeBase { _dir: dir, _env: env }
     }
 
     #[test]
     #[serial]
     fn agmsg_base_honors_the_env_override() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("AGMSG_APP_BASE", dir.path());
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &dir.path().to_string_lossy());
         assert_eq!(agmsg_base(), dir.path());
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 
     #[test]
     #[serial]
     fn agmsg_base_falls_back_when_override_is_empty() {
-        std::env::set_var("AGMSG_APP_BASE", "");
+        let _env = EnvGuard::set("AGMSG_APP_BASE", "");
         assert!(agmsg_base().ends_with(".agents/skills/agmsg"));
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 
     #[test]
@@ -815,7 +842,6 @@ mod tests {
         let _base = fake_base(&[("ok.sh", "echo hello-from-fake")]);
         let out = run_script("ok.sh", &[]).expect("should succeed");
         assert_eq!(out.trim(), "hello-from-fake");
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 
     #[test]
@@ -825,7 +851,6 @@ mod tests {
         let _base = fake_base(&[("boom.sh", "echo the-error >&2; exit 1")]);
         let err = run_script("boom.sh", &[]).unwrap_err();
         assert!(err.contains("the-error"), "stderr not surfaced: {err:?}");
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 
     #[test]
@@ -835,7 +860,6 @@ mod tests {
         let _base = fake_base(&[("args.sh", "printf '%s\\n' \"$@\"")]);
         let out = run_script("args.sh", &["a", "b c", "d"]).unwrap();
         assert_eq!(out.lines().collect::<Vec<_>>(), ["a", "b c", "d"]);
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 
     #[test]
@@ -844,6 +868,5 @@ mod tests {
     fn run_script_errors_when_the_script_is_missing() {
         let _base = fake_base(&[]);
         assert!(run_script("nope.sh", &[]).is_err());
-        std::env::remove_var("AGMSG_APP_BASE");
     }
 }
