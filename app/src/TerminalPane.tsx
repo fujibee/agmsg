@@ -92,12 +92,24 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
     })();
 
     // Re-fit whenever the pane's box changes — covers initial layout, switching
-    // back to this tab (display:none -> block), and window resizes.
-    const ro = new ResizeObserver(() => fitNow());
+    // back to this tab (display:none -> block), and window resizes. Also
+    // fires continuously while a divider is being dragged (issue #317):
+    // debounced here rather than reacting to every single event, since
+    // fitNow's fit.fit() + pty_resize is expensive and can spam some CLIs
+    // with rapid SIGWINCH in a way that garbles their redraw — the dragged
+    // pane's own CSS size still tracks the cursor live (that's just the
+    // browser reflowing .pane-cell's inline style), only the actual PTY
+    // resize + xterm reflow is throttled.
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(fitNow, 75);
+    });
     if (ref.current) ro.observe(ref.current);
 
     return () => {
       disposed = true;
+      if (resizeTimer) clearTimeout(resizeTimer);
       ro.disconnect();
       unlisteners.forEach((u) => u());
       void invoke("pty_kill", { id });

@@ -35,24 +35,78 @@ export function leaves(node: SplitNode): string[] {
 
 const FULL_RECT: PaneRect = { left: 0, top: 0, width: 100, height: 100 };
 
+/** Splits `rect` into its two children's rects for a `split` node's axis/ratio. */
+function splitRect(rect: PaneRect, axis: SplitAxis, ratio: number): [PaneRect, PaneRect] {
+  if (axis === "col") {
+    const aWidth = rect.width * ratio;
+    return [{ ...rect, width: aWidth }, { ...rect, left: rect.left + aWidth, width: rect.width - aWidth }];
+  }
+  const aHeight = rect.height * ratio;
+  return [{ ...rect, height: aHeight }, { ...rect, top: rect.top + aHeight, height: rect.height - aHeight }];
+}
+
 /** Walks the tree, splitting `rect` at each node's axis/ratio, returning every leaf's rect. */
 export function computeRects(node: SplitNode, rect: PaneRect = FULL_RECT): Map<string, PaneRect> {
   if (node.kind === "leaf") return new Map([[node.paneId, rect]]);
-  const { axis, ratio, a, b } = node;
-  let rectA: PaneRect;
-  let rectB: PaneRect;
-  if (axis === "col") {
-    const aWidth = rect.width * ratio;
-    rectA = { ...rect, width: aWidth };
-    rectB = { ...rect, left: rect.left + aWidth, width: rect.width - aWidth };
-  } else {
-    const aHeight = rect.height * ratio;
-    rectA = { ...rect, height: aHeight };
-    rectB = { ...rect, top: rect.top + aHeight, height: rect.height - aHeight };
-  }
-  const rectsA = computeRects(a, rectA);
-  const rectsB = computeRects(b, rectB);
+  const [rectA, rectB] = splitRect(rect, node.axis, node.ratio);
+  const rectsA = computeRects(node.a, rectA);
+  const rectsB = computeRects(node.b, rectB);
   return new Map([...rectsA, ...rectsB]);
+}
+
+/** A path of child-selectors from the root down to one specific `split` node. */
+export type SplitPath = ("a" | "b")[];
+
+/**
+ * Immutably updates the ratio of the `split` node at `path`. Safe to reuse a
+ * `path` across an uninterrupted sequence of calls (e.g. every `mousemove`
+ * during one divider drag) — a ratio update never changes the tree's shape,
+ * so a path captured at drag-start stays valid for the whole gesture. It is
+ * NOT safe to reuse a path across a splice/insert (see `insertBeside`'s own
+ * doc for why paths go stale there).
+ */
+export function updateRatioAtPath(node: SplitNode, path: SplitPath, ratio: number): SplitNode {
+  if (path.length === 0) {
+    return node.kind === "split" ? { ...node, ratio } : node;
+  }
+  if (node.kind === "leaf") return node;
+  const [head, ...rest] = path;
+  if (head === "a") {
+    const a = updateRatioAtPath(node.a, rest, ratio);
+    return a === node.a ? node : { ...node, a };
+  }
+  const b = updateRatioAtPath(node.b, rest, ratio);
+  return b === node.b ? node : { ...node, b };
+}
+
+export type DividerInfo = {
+  path: SplitPath;
+  axis: SplitAxis;
+  /** The seam itself — a degenerate 0-width (col) or 0-height (row) slice, for positioning the divider line in the UI. */
+  rect: PaneRect;
+  /** The full UN-split parent rect (what `rect` here was before this node's own split) — drag math needs this to convert a pixel delta back into a ratio, since ratio is relative to the PARENT's size, not the whole stage. */
+  bounds: PaneRect;
+  ratio: number;
+};
+
+/**
+ * Walks the tree, returning one `DividerInfo` per internal `split` node —
+ * the axis to drag it along, its current ratio, the `path` to feed back
+ * into `updateRatioAtPath` while dragging, and both the seam's own rect
+ * (positioning) and its parent's full bounds (drag math).
+ */
+export function collectDividers(node: SplitNode, rect: PaneRect = FULL_RECT, path: SplitPath = []): DividerInfo[] {
+  if (node.kind === "leaf") return [];
+  const [rectA, rectB] = splitRect(rect, node.axis, node.ratio);
+  const seam: PaneRect =
+    node.axis === "col"
+      ? { left: rectA.left + rectA.width, top: rect.top, width: 0, height: rect.height }
+      : { left: rect.left, top: rectA.top + rectA.height, width: rect.width, height: 0 };
+  return [
+    { path, axis: node.axis, rect: seam, bounds: rect, ratio: node.ratio },
+    ...collectDividers(node.a, rectA, [...path, "a"]),
+    ...collectDividers(node.b, rectB, [...path, "b"]),
+  ];
 }
 
 /**
@@ -245,6 +299,11 @@ export function classifyDrop(xFrac: number, yFrac: number): DropZone {
   if (rowOuter === colOuter) return { kind: "swap" }; // corner or center
   if (rowOuter) return { kind: "split", side: row === 0 ? "top" : "bottom" };
   return { kind: "split", side: col === 0 ? "left" : "right" };
+}
+
+/** Value-equality for two DropZones — used to skip a state update (and thus a re-render) on every dragover tick that lands in the same zone as before. */
+export function sameZone(a: DropZone, b: DropZone): boolean {
+  return a.kind === "swap" ? b.kind === "swap" : b.kind === "split" && a.side === b.side;
 }
 
 /**

@@ -881,6 +881,99 @@ body.resizing-row {
   outline: 2px dashed var(--accent);
   outline-offset: -2px;
 }
+
+/* Draggable dividers BETWEEN panes within one tab (issue #317) — absolutely
+   positioned within .stage (left/top/width/height % set inline from
+   collectDividers, see App.tsx), unlike .divider-v/.divider-h above (which
+   are flex-layout siblings for the sidebar/chat). Same generous-grab-area,
+   hairline-until-hover language as those. z-index above .pane-cell so the
+   grab area isn't occluded by a neighboring pane's own box. */
+.pane-divider-v,
+.pane-divider-h {
+  position: absolute;
+  z-index: 5;
+  background: transparent;
+}
+.pane-divider-v {
+  min-width: 7px;
+  margin-left: -3px;
+  cursor: col-resize;
+}
+.pane-divider-h {
+  min-height: 7px;
+  margin-top: -3px;
+  cursor: row-resize;
+}
+.pane-divider-v::before,
+.pane-divider-h::before {
+  content: "";
+  position: absolute;
+  background: var(--border);
+}
+.pane-divider-v::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+.pane-divider-h::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+.pane-divider-v:hover::before {
+  left: 0;
+  width: 100%;
+  transform: none;
+  background: var(--accent);
+}
+.pane-divider-h:hover::before {
+  top: 0;
+  height: 100%;
+  transform: none;
+  background: var(--accent);
+}
+
+/* Directional split-drop preview (issue #317, classifyDrop's split zones):
+   the highlighted half is the one the dragged pane will occupy once
+   dropped — the target's existing pane keeps the other half. Without this,
+   the 16-zone rule (swap in the center, directional split near an edge)
+   would be undiscoverable — there'd be no visible difference between a
+   drop that swaps and one that splits until after the drop landed. */
+.pane-split-preview {
+  position: absolute;
+  z-index: 4;
+  background: var(--accent);
+  opacity: 0.25;
+  pointer-events: none;
+}
+.pane-split-preview.preview-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+}
+.pane-split-preview.preview-bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+}
+.pane-split-preview.preview-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 50%;
+}
+.pane-split-preview.preview-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 50%;
+}
 /* Slow pulse shows which delivery path is watching this pane — see
    Pane.native. Green = the type self-delivers (its own agmsg Monitor);
    accent (blue) = the app's universal stdin-inject monitor is doing it.

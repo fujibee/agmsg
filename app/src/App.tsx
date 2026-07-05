@@ -12,6 +12,25 @@ import {
   RenameModal,
   SettingsModal,
 } from "./modals";
+import {
+  classifyDrop,
+  clampRatio,
+  collectDividers,
+  computeRects,
+  insertAsNewLeaf,
+  insertBeside,
+  leaves,
+  presetTree,
+  renameLeaf,
+  sameZone,
+  spliceOutLeaf,
+  swapLeaves,
+  updateRatioAtPath,
+  type DividerInfo,
+  type DropSide,
+  type PaneRect,
+  type SplitNode,
+} from "./paneTree";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
@@ -35,11 +54,13 @@ type Pane = {
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
 };
-// A tab. Holds one or more panes, arranged per its `layout` (see paneRect) —
-// a flat split for now, ahead of tmux-style nested layouts later.
+// A tab. Holds one or more panes, arranged as a binary split tree (see
+// paneTree.ts) — draggable dividers and directional split/swap drag-drop
+// (issue #317) both need real nested structure, which a flat list + layout
+// enum couldn't represent (see the design doc on that issue for why).
 type Window = {
   id: string;
-  paneIds: string[];
+  root: SplitNode;
   /** User-set tab name (Rename); falls back to the joined pane labels. */
   customLabel?: string;
   /** The team this tab was spawned under. Agents can't message across
@@ -48,13 +69,18 @@ type Window = {
    *  it doesn't. Windows for other teams stay mounted (PTYs alive) but
    *  hidden until that team is selected again. */
   team: string;
-  /** How this tab's panes are arranged. "vertical" (default, what plain
-   *  spawn produces): side-by-side full-height columns. "horizontal":
-   *  stacked full-width rows. "tile": a grid, row count/sizes from
-   *  tileRowSizes — see its comment for the rule. */
-  layout: PaneLayout;
 };
+// The three canonical arrangements offered from the right-click Layout
+// submenu and the native View > Pane Layout menu. Picking one is a one-shot
+// RESET (presetTree in paneTree.ts) — it discards whatever manual divider
+// drags or split-drops produced and rebuilds a fresh tree matching the
+// preset; it is NOT a persisted mode the window stays locked into.
 type PaneLayout = "vertical" | "horizontal" | "tile";
+// A pane being dragged, and where within the target pane it's hovering —
+// drives both the drop classification (paneTree's classifyDrop) and the
+// half-occupied preview highlight (see dropPreview below). null while
+// nothing is being dragged over a pane.
+type DropPreview = { paneId: string; zone: ReturnType<typeof classifyDrop> };
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
@@ -82,47 +108,6 @@ const LAST_TEAM_KEY = "agmsg-app-last-team";
 const PANE_DRAG_MIME = "application/x-agmsg-pane";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
-
-// Row sizes for the "tile" layout, front-loading the extra pane(s) onto the
-// earlier (top) rows: n=1→[1], 2→[2], 3→[2,1], 4→[2,2], 5→[3,2], 6→[3,3],
-// 7→[4,3], 8→[4,4], 9→[3,3,3]. Row count caps at 4 columns/row (using 2 rows
-// once that's exceeded) and never drops below 2 rows once n≥3 — a single
-// row of 3+ reads as "vertical" layout, not a tile grid.
-function tileRowSizes(n: number): number[] {
-  const rows = n <= 2 ? 1 : Math.max(2, Math.ceil(n / 4));
-  const base = Math.floor(n / rows);
-  const extra = n % rows;
-  return Array.from({ length: rows }, (_, i) => base + (i < extra ? 1 : 0));
-}
-
-type PaneRect = { left: number; top: number; width: number; height: number };
-
-// A pane's position/size (all percentages of the tab's stage area) for
-// `layout`, given its index among `count` panes in the same window.
-function paneRect(layout: PaneLayout, idx: number, count: number): PaneRect {
-  if (layout === "horizontal") {
-    return { left: 0, width: 100, top: (idx * 100) / count, height: 100 / count };
-  }
-  if (layout === "tile") {
-    const rowSizes = tileRowSizes(count);
-    let seen = 0;
-    for (let row = 0; row < rowSizes.length; row++) {
-      const rowSize = rowSizes[row];
-      if (idx < seen + rowSize) {
-        const col = idx - seen;
-        return {
-          left: (col * 100) / rowSize,
-          width: 100 / rowSize,
-          top: (row * 100) / rowSizes.length,
-          height: 100 / rowSizes.length,
-        };
-      }
-      seen += rowSize;
-    }
-  }
-  // "vertical" (default): side-by-side full-height columns.
-  return { left: (idx * 100) / count, width: 100 / count, top: 0, height: 100 };
-}
 
 export default function App() {
   const { t } = useTranslation();
@@ -191,10 +176,12 @@ export default function App() {
   // same "armed" highlight, since they're just two ways to pick the same
   // pane up.
   const [swapSource, setSwapSource] = useState<string | null>(null);
-  // The pane currently under the cursor during a drag — highlighted as the
-  // drop target. Separate from swapSource: that's "picked up", this is
-  // "hovering over".
-  const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null);
+  // The pane currently under the cursor during a drag, and which of
+  // paneTree's 16 drop zones it's over — drives both the drop's outcome
+  // (swap vs. directional split-replace, see classifyDrop) and the preview
+  // highlight showing which half will be occupied. Separate from
+  // swapSource: that's "picked up", this is "hovering over".
+  const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   // Same idea, but for tabs — dropping a pane header on a tab moves it into
   // that tab instead of swapping within the current one.
   const [dragOverWindowId, setDragOverWindowId] = useState<string | null>(null);
@@ -471,16 +458,14 @@ export default function App() {
   // Remove a pane from whichever window holds it. If that empties the window,
   // drop the window too and fall back to the team room if it was active.
   const detachPane = useCallback((paneId: string) => {
-    const owner = windowsRef.current.find((w) => w.paneIds.includes(paneId));
+    const owner = windowsRef.current.find((w) => leaves(w.root).includes(paneId));
     if (!owner) return;
-    const remaining = owner.paneIds.filter((id) => id !== paneId);
-    setWindows((prev) =>
-      prev
-        .map((w) => (w.id === owner.id ? { ...w, paneIds: remaining } : w))
-        .filter((w) => w.paneIds.length > 0),
-    );
-    if (remaining.length === 0) {
+    const nextRoot = spliceOutLeaf(owner.root, paneId);
+    if (nextRoot === null) {
+      setWindows((prev) => prev.filter((w) => w.id !== owner.id));
       setActive((a) => (a === owner.id ? "room" : a));
+    } else {
+      setWindows((prev) => prev.map((w) => (w.id === owner.id ? { ...w, root: nextRoot } : w)));
     }
   }, []);
 
@@ -492,7 +477,7 @@ export default function App() {
       // focus its window (one live agent per identity).
       const existing = panesRef.current.find((p) => p.label === m.name);
       if (existing) {
-        const w = windowsRef.current.find((win) => win.paneIds.includes(existing.id));
+        const w = windowsRef.current.find((win) => leaves(win.root).includes(existing.id));
         if (w) setActive(w.id);
         return;
       }
@@ -543,12 +528,12 @@ export default function App() {
       setPanes((prev) => [...prev, pane]);
       if (targetWindowId) {
         setWindows((prev) =>
-          prev.map((w) => (w.id === targetWindowId ? { ...w, paneIds: [...w.paneIds, id] } : w)),
+          prev.map((w) => (w.id === targetWindowId ? { ...w, root: insertAsNewLeaf(w.root, id) } : w)),
         );
         setActive(targetWindowId);
       } else {
         const winId = `w-${seq.current++}`;
-        setWindows((prev) => [...prev, { id: winId, paneIds: [id], team, layout: "vertical" }]);
+        setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: id }, team }]);
         setActive(winId);
       }
     },
@@ -570,24 +555,25 @@ export default function App() {
   const closeWindow = useCallback((windowId: string) => {
     const w = windowsRef.current.find((x) => x.id === windowId);
     if (!w) return;
-    for (const pid of w.paneIds) void invoke("pty_kill", { id: pid });
-    setPanes((prev) => prev.filter((p) => !w.paneIds.includes(p.id)));
+    const paneIds = leaves(w.root);
+    for (const pid of paneIds) void invoke("pty_kill", { id: pid });
+    setPanes((prev) => prev.filter((p) => !paneIds.includes(p.id)));
     setWindows((prev) => prev.filter((x) => x.id !== windowId));
     setActive((a) => (a === windowId ? "room" : a));
   }, []);
 
   // Move a pane into another tab, adding it to that tab's side-by-side split
-  // (uncapped — N panes in a tab render as N equal columns). The pane's own
-  // DOM node never unmounts (see the stage render below), so this is a pure
-  // reassignment — the running process and its scrollback are untouched, same
-  // as a tmux pane move.
+  // (uncapped — N panes in a tab render as N equal columns, see
+  // insertAsNewLeaf). The pane's own DOM node never unmounts (see the stage
+  // render below), so this is a pure reassignment — the running process and
+  // its scrollback are untouched, same as a tmux pane move.
   const movePaneToWindow = useCallback(
     (paneId: string, targetWindowId: string) => {
       const target = windowsRef.current.find((w) => w.id === targetWindowId);
-      if (!target || target.paneIds.includes(paneId)) return;
+      if (!target || leaves(target.root).includes(paneId)) return;
       detachPane(paneId);
       setWindows((prev) =>
-        prev.map((w) => (w.id === targetWindowId ? { ...w, paneIds: [...w.paneIds, paneId] } : w)),
+        prev.map((w) => (w.id === targetWindowId ? { ...w, root: insertAsNewLeaf(w.root, paneId) } : w)),
       );
       setActive(targetWindowId);
     },
@@ -600,31 +586,73 @@ export default function App() {
     (paneId: string) => {
       detachPane(paneId);
       const winId = `w-${seq.current++}`;
-      setWindows((prev) => [...prev, { id: winId, paneIds: [paneId], team, layout: "vertical" }]);
+      setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId }, team }]);
       setActive(winId);
     },
     [detachPane, team],
   );
 
-  // Swap two panes' positions within the same window (paneRect derives
-  // position purely from index in paneIds, so this is all a layout swap
-  // needs — no DOM remount, same as every other pane move in this file).
+  // Swap two panes' positions within the same window (tree shape unchanged
+  // — no DOM remount, same as every other pane move in this file).
   const swapPanesInWindow = useCallback((windowId: string, paneA: string, paneB: string) => {
     setWindows((prev) =>
-      prev.map((w) => {
-        if (w.id !== windowId) return w;
-        const ids = [...w.paneIds];
-        const i = ids.indexOf(paneA);
-        const j = ids.indexOf(paneB);
-        if (i === -1 || j === -1) return w;
-        [ids[i], ids[j]] = [ids[j], ids[i]];
-        return { ...w, paneIds: ids };
-      }),
+      prev.map((w) => (w.id === windowId ? { ...w, root: swapLeaves(w.root, paneA, paneB) } : w)),
     );
   }, []);
 
+  // Swap two panes across DIFFERENT windows — the "drop near the center of
+  // another window's pane" case from the directional drag-drop rule
+  // (classifyDrop's swap zones). Two independent renameLeaf calls, one per
+  // tree (see paneTree.ts's renameLeaf doc): each tree keeps its shape, just
+  // the paneId at that leaf changes. Delegates to swapPanesInWindow when
+  // both panes turn out to already be in the same window.
+  const swapPanesAcrossWindows = useCallback(
+    (paneA: string, windowIdB: string, paneB: string) => {
+      const windowA = windowsRef.current.find((w) => leaves(w.root).includes(paneA));
+      if (!windowA) return;
+      if (windowA.id === windowIdB) {
+        swapPanesInWindow(windowIdB, paneA, paneB);
+        return;
+      }
+      setWindows((prev) =>
+        prev.map((w) => {
+          if (w.id === windowA.id) return { ...w, root: renameLeaf(w.root, paneA, paneB) };
+          if (w.id === windowIdB) return { ...w, root: renameLeaf(w.root, paneB, paneA) };
+          return w;
+        }),
+      );
+    },
+    [swapPanesInWindow],
+  );
+
+  // Directional split-drop (classifyDrop's split zones): `sourcePaneId`
+  // becomes a new sibling of `targetPaneId` on `side`, splitting that leaf.
+  // Same-window: insertBeside handles splicing sourcePaneId out of its
+  // current spot in that same tree itself (see its own doc — this is
+  // exactly the "newPaneId already present" path). Cross-window: detach it
+  // from its own window's tree first (same detach the right-click Move-to
+  // path already uses), then insertBeside finds it absent and inserts
+  // directly.
+  const splitPaneBeside = useCallback(
+    (sourcePaneId: string, targetWindowId: string, targetPaneId: string, side: DropSide) => {
+      const sourceWindow = windowsRef.current.find((w) => leaves(w.root).includes(sourcePaneId));
+      if (sourceWindow && sourceWindow.id !== targetWindowId) {
+        detachPane(sourcePaneId);
+      }
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === targetWindowId ? { ...w, root: insertBeside(w.root, targetPaneId, side, sourcePaneId) } : w,
+        ),
+      );
+      setActive(targetWindowId);
+    },
+    [detachPane],
+  );
+
   const setWindowLayout = useCallback((windowId: string, layout: PaneLayout) => {
-    setWindows((prev) => prev.map((w) => (w.id === windowId ? { ...w, layout } : w)));
+    setWindows((prev) =>
+      prev.map((w) => (w.id === windowId ? { ...w, root: presetTree(layout, leaves(w.root)) } : w)),
+    );
   }, []);
 
   // Native "View > Pane Layout" menu items duplicate the right-click-tab
@@ -642,7 +670,7 @@ export default function App() {
   const windowLabel = useCallback(
     (w: Window) =>
       w.customLabel ??
-      w.paneIds
+      leaves(w.root)
         .map((pid) => panes.find((p) => p.id === pid)?.label)
         .filter(Boolean)
         .join(" · "),
@@ -653,6 +681,24 @@ export default function App() {
   // teams' windows stay mounted with their PTYs alive, just not listed
   // here or offered as spawn/move targets.
   const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
+
+  // Every window's leaf rects, computed once per render rather than per-pane
+  // (computeRects walks the whole tree) — looked up by window id, then pane
+  // id, in the panes.map below and again for each window's dividers.
+  const rectsByWindow = useMemo(() => {
+    const m = new Map<string, Map<string, PaneRect>>();
+    for (const w of windows) m.set(w.id, computeRects(w.root));
+    return m;
+  }, [windows]);
+
+  // Dividers only for the currently active window — they're pure UI chrome
+  // with no state of their own beyond the tree's ratios, unlike panes (which
+  // stay mounted while inactive to keep their PTY alive), so there's no
+  // reason to render an invisible window's dividers too.
+  const activeDividers = useMemo(() => {
+    const w = windows.find((win) => win.id === active);
+    return w ? collectDividers(w.root) : [];
+  }, [windows, active]);
 
   const startRenameWindow = useCallback(
     (windowId: string) => {
@@ -790,6 +836,50 @@ export default function App() {
     },
     [chatHeight],
   );
+
+  // Draggable pane dividers (issue #317). Same document-level drag-tracking
+  // pattern as startSidebarDrag/startChatDrag above, but the ratio being
+  // dragged belongs to one specific split node (divider.path) rather than a
+  // single flat width/height — updateRatioAtPath's own doc explains why
+  // reusing this path across the whole gesture is safe (a ratio edit never
+  // changes the tree's shape). divider.bounds is that node's OWN un-split
+  // rect (not the whole stage) — converting a pixel delta into a ratio has
+  // to be relative to the parent being split, not the stage as a whole.
+  const startPaneDividerDrag = useCallback((e: React.MouseEvent, windowId: string, divider: DividerInfo) => {
+    e.preventDefault();
+    const stage = (e.currentTarget as HTMLElement).closest(".stage") as HTMLElement | null;
+    if (!stage) return;
+    const stageBox = stage.getBoundingClientRect();
+    const parentPx = {
+      left: stageBox.left + (divider.bounds.left / 100) * stageBox.width,
+      top: stageBox.top + (divider.bounds.top / 100) * stageBox.height,
+      width: (divider.bounds.width / 100) * stageBox.width,
+      height: (divider.bounds.height / 100) * stageBox.height,
+    };
+    const axis = divider.axis;
+    // Minimum pane size in px, converted to a ratio bound against THIS
+    // divider's own parent size (paneTree's clampRatio) rather than a flat
+    // percent — a flat percent clamp still compounds under nesting (see its
+    // own doc).
+    const MIN_PANE_PX = 120;
+    const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
+    const onMove = (ev: MouseEvent) => {
+      const totalPx = axis === "col" ? parentPx.width : parentPx.height;
+      const raw = axis === "col" ? (ev.clientX - parentPx.left) / totalPx : (ev.clientY - parentPx.top) / totalPx;
+      const ratio = clampRatio(raw, MIN_PANE_PX, totalPx);
+      setWindows((prev) =>
+        prev.map((w) => (w.id === windowId ? { ...w, root: updateRatioAtPath(w.root, divider.path, ratio) } : w)),
+      );
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.classList.remove(cursorClass);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.body.classList.add(cursorClass);
+  }, []);
 
   return (
     <div
@@ -1117,28 +1207,27 @@ export default function App() {
             </div>
 
             {/* Every pane is a permanent, flat child of .stage — its window only
-                decides WHERE it's positioned (paneRect, from its layout),
-                never whether it's mounted. That keeps each pane's DOM node
-                (and TerminalPane's xterm + PTY listeners) alive across a
+                decides WHERE it's positioned (computeRects, from its split
+                tree), never whether it's mounted. That keeps each pane's DOM
+                node (and TerminalPane's xterm + PTY listeners) alive across a
                 Move-to or a layout change, so the running process and its
                 scrollback survive — the same pane split tmux gives you, not
                 a respawn. Inactive-window panes go visibility:hidden but
                 stay laid out, so a resize doesn't leave them stale for next
                 time. */}
             {panes.map((p) => {
-              const win = windows.find((w) => w.paneIds.includes(p.id));
+              const win = windows.find((w) => leaves(w.root).includes(p.id));
               if (!win) return null;
-              const idx = win.paneIds.indexOf(p.id);
-              const count = win.paneIds.length;
-              const rect = paneRect(win.layout, idx, count);
+              const rect = rectsByWindow.get(win.id)?.get(p.id);
+              if (!rect) return null;
               const isActiveWindow = active === win.id;
-              const isDropTarget = dragOverPaneId === p.id && swapSource !== p.id;
+              const preview = dropPreview?.paneId === p.id && swapSource !== p.id ? dropPreview.zone : null;
               return (
                 <div
                   key={p.id}
                   className={[
                     isActiveWindow ? "pane-cell" : "pane-cell inactive",
-                    isDropTarget && "drop-target",
+                    preview?.kind === "swap" && "drop-target",
                   ]
                     .filter(Boolean)
                     .join(" ")}
@@ -1160,7 +1249,15 @@ export default function App() {
                     if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
                     e.preventDefault(); // required to allow dropping
                     e.dataTransfer.dropEffect = "move";
-                    setDragOverPaneId((cur) => (cur === p.id ? cur : p.id));
+                    // Classify by WHERE within this pane's own box the
+                    // cursor is (paneTree's 16-zone rule) — corner/center
+                    // bands mean swap (today's behavior), an edge band
+                    // means a directional split-replace on that side.
+                    const box = e.currentTarget.getBoundingClientRect();
+                    const xFrac = (e.clientX - box.left) / box.width;
+                    const yFrac = (e.clientY - box.top) / box.height;
+                    const zone = classifyDrop(xFrac, yFrac);
+                    setDropPreview((cur) => (cur?.paneId === p.id && sameZone(cur.zone, zone) ? cur : { paneId: p.id, zone }));
                   }}
                   onDragLeave={(e) => {
                     // Only clear if we're leaving this cell for something
@@ -1168,19 +1265,26 @@ export default function App() {
                     // from the header onto the terminal below) shouldn't
                     // flicker the highlight off.
                     if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                      setDragOverPaneId((cur) => (cur === p.id ? null : cur));
+                      setDropPreview((cur) => (cur?.paneId === p.id ? null : cur));
                     }
                   }}
                   onDrop={(e) => {
                     e.preventDefault();
-                    setDragOverPaneId(null);
+                    const zone = dropPreview?.paneId === p.id ? dropPreview.zone : null;
+                    setDropPreview(null);
                     setSwapSource(null);
                     const sourceId = e.dataTransfer.getData(PANE_DRAG_MIME);
-                    if (sourceId && win.paneIds.includes(sourceId) && sourceId !== p.id) {
-                      swapPanesInWindow(win.id, sourceId, p.id);
+                    if (!sourceId || sourceId === p.id || !zone) return;
+                    if (zone.kind === "swap") {
+                      swapPanesAcrossWindows(sourceId, win.id, p.id);
+                    } else {
+                      splitPaneBeside(sourceId, win.id, p.id, zone.side);
                     }
                   }}
                 >
+                  {preview?.kind === "split" && (
+                    <div className={`pane-split-preview preview-${preview.side}`} />
+                  )}
                   <div
                     className="pane-header"
                     onContextMenu={(e) => {
@@ -1217,7 +1321,7 @@ export default function App() {
                       }}
                       onDragEnd={() => {
                         setSwapSource(null);
-                        setDragOverPaneId(null);
+                        setDropPreview(null);
                         setDragOverWindowId(null);
                         setDragOverNewTab(false);
                       }}
@@ -1225,7 +1329,7 @@ export default function App() {
                         e.stopPropagation();
                         if (swapSource === p.id) {
                           setSwapSource(null);
-                        } else if (swapSource && win.paneIds.includes(swapSource)) {
+                        } else if (swapSource && leaves(win.root).includes(swapSource)) {
                           swapPanesInWindow(win.id, swapSource, p.id);
                           setSwapSource(null);
                         } else {
@@ -1254,6 +1358,21 @@ export default function App() {
                 </div>
               );
             })}
+
+            {active !== "room" &&
+              activeDividers.map((d) => (
+                <div
+                  key={d.path.join(".") || "root"}
+                  className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
+                  style={{
+                    left: `${d.rect.left}%`,
+                    top: `${d.rect.top}%`,
+                    width: `${d.rect.width}%`,
+                    height: `${d.rect.height}%`,
+                  }}
+                  onMouseDown={(e) => startPaneDividerDrag(e, active, d)}
+                />
+              ))}
           </section>
 
           {showUserChat && <div className="divider-h" onMouseDown={startChatDrag} />}
@@ -1366,7 +1485,7 @@ export default function App() {
         (() => {
           const win = windows.find((w) => w.id === modal.windowId);
           if (!win) return null;
-          const names = win.paneIds
+          const names = leaves(win.root)
             .map((pid) => panes.find((p) => p.id === pid)?.label)
             .filter((n): n is string => Boolean(n));
           return (
@@ -1468,13 +1587,14 @@ export default function App() {
           const otherWindows = windows.filter(
             (w) => w.id !== paneMenu.windowId && w.team === sourceWindow?.team,
           );
+          const sourceLeaves = sourceWindow ? leaves(sourceWindow.root) : [];
           // Only offer "split off into a new tab" when this pane is currently
           // sharing its window — if it's already alone, a new tab would be a no-op.
-          const canSplitOff = (sourceWindow?.paneIds.length ?? 1) > 1;
+          const canSplitOff = sourceLeaves.length > 1;
           // Sibling panes in the same tab — the same swap the header's
           // click/drag already does, exposed here too for symmetry with
           // "Move to ▸".
-          const siblingPanes = (sourceWindow?.paneIds ?? [])
+          const siblingPanes = sourceLeaves
             .filter((pid) => pid !== paneMenu.paneId)
             .map((pid) => panes.find((p) => p.id === pid))
             .filter((p): p is Pane => p != null);
@@ -1549,7 +1669,6 @@ export default function App() {
 
       {windowMenu &&
         (() => {
-          const win = windows.find((w) => w.id === windowMenu.windowId);
           const layouts: PaneLayout[] = ["vertical", "horizontal", "tile"];
           return (
             <div
@@ -1568,10 +1687,14 @@ export default function App() {
               <div className="submenu-trigger">
                 <span className="submenu-label">{t("ctxMenu.window.layout")}</span>
                 <div className="submenu">
+                  {/* No "active" highlight here (unlike before): a preset is a
+                      one-shot reset, not a persisted mode (issue #317) — the
+                      tab's actual arrangement can be any shape after manual
+                      divider drags or split-drops, so no single preset button
+                      is "the current one" to mark. */}
                   {layouts.map((l) => (
                     <button
                       key={l}
-                      className={win?.layout === l ? "active" : undefined}
                       onClick={() => {
                         setWindowLayout(windowMenu.windowId, l);
                         setWindowMenu(null);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyDrop,
   clampRatio,
+  collectDividers,
   computeRects,
   insertAsNewLeaf,
   insertBeside,
@@ -9,8 +10,10 @@ import {
   minRatioForPx,
   presetTree,
   renameLeaf,
+  sameZone,
   spliceOutLeaf,
   swapLeaves,
+  updateRatioAtPath,
   type SplitNode,
 } from "./paneTree";
 
@@ -84,6 +87,73 @@ describe("computeRects", () => {
       for (const r of rects.values()) area += (r.width / 100) * (r.height / 100);
       expect(area).toBeCloseTo(1, 9);
     }
+  });
+});
+
+describe("updateRatioAtPath", () => {
+  it("updates the root node's ratio at an empty path", () => {
+    const tree = split("col", 0.5, leaf("p1"), leaf("p2"));
+    expect(updateRatioAtPath(tree, [], 0.3)).toEqual(split("col", 0.3, leaf("p1"), leaf("p2")));
+  });
+
+  it("updates a nested node's ratio, leaving the rest of the tree untouched", () => {
+    const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
+    const result = updateRatioAtPath(tree, ["b"], 0.75);
+    expect(result).toEqual(split("col", 0.5, leaf("p1"), split("row", 0.75, leaf("p2"), leaf("p3"))));
+  });
+
+  it("is a no-op when the path runs into a leaf (stale path safety)", () => {
+    const tree = split("col", 0.5, leaf("p1"), leaf("p2"));
+    expect(updateRatioAtPath(tree, ["a", "b"], 0.9)).toBe(tree);
+  });
+});
+
+describe("collectDividers", () => {
+  it("returns one divider per internal split node, at the seam between its children", () => {
+    const tree = split("col", 0.25, leaf("p1"), leaf("p2"));
+    const dividers = collectDividers(tree);
+    expect(dividers).toEqual([
+      {
+        path: [],
+        axis: "col",
+        ratio: 0.25,
+        rect: { left: 25, top: 0, width: 0, height: 100 },
+        bounds: { left: 0, top: 0, width: 100, height: 100 },
+      },
+    ]);
+  });
+
+  it("returns no dividers for a bare leaf", () => {
+    expect(collectDividers(leaf("solo"))).toEqual([]);
+  });
+
+  it("returns one divider per split node in a nested tree, each with its own seam and PARENT bounds (not the whole stage)", () => {
+    const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
+    const dividers = collectDividers(tree);
+    expect(dividers).toHaveLength(2);
+    expect(dividers.find((d) => d.path.length === 0)).toEqual({
+      path: [],
+      axis: "col",
+      ratio: 0.5,
+      rect: { left: 50, top: 0, width: 0, height: 100 },
+      bounds: { left: 0, top: 0, width: 100, height: 100 },
+    });
+    expect(dividers.find((d) => d.path.length === 1)).toEqual({
+      path: ["b"],
+      axis: "row",
+      ratio: 0.5,
+      rect: { left: 50, top: 50, width: 50, height: 0 },
+      // The nested divider's bounds are its OWN parent's rect (the "b" child
+      // of the root split — half the stage), not the full stage.
+      bounds: { left: 50, top: 0, width: 50, height: 100 },
+    });
+  });
+
+  it("a path from collectDividers round-trips through updateRatioAtPath", () => {
+    const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
+    const nested = collectDividers(tree).find((d) => d.path.length === 1)!;
+    const result = updateRatioAtPath(tree, nested.path, 0.8);
+    expect(result).toEqual(split("col", 0.5, leaf("p1"), split("row", 0.8, leaf("p2"), leaf("p3"))));
   });
 });
 
@@ -270,6 +340,24 @@ describe("classifyDrop (16-zone rule)", () => {
   ] as const)("cell %i classifies as %o", (cell, expected) => {
     const [x, y] = cellCenter(cell);
     expect(classifyDrop(x, y)).toEqual(expected);
+  });
+});
+
+describe("sameZone", () => {
+  it("treats any two swap zones as equal", () => {
+    expect(sameZone({ kind: "swap" }, { kind: "swap" })).toBe(true);
+  });
+
+  it("treats split zones with the same side as equal", () => {
+    expect(sameZone({ kind: "split", side: "top" }, { kind: "split", side: "top" })).toBe(true);
+  });
+
+  it("treats split zones with different sides as unequal", () => {
+    expect(sameZone({ kind: "split", side: "top" }, { kind: "split", side: "bottom" })).toBe(false);
+  });
+
+  it("treats swap and split as unequal regardless of side", () => {
+    expect(sameZone({ kind: "swap" }, { kind: "split", side: "left" })).toBe(false);
   });
 });
 
