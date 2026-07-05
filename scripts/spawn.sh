@@ -390,6 +390,26 @@ if [ -n "$PROMPT" ]; then
 ${PROMPT}"
 fi
 
+# Git Bash / MSYS path conversion rewrites exec args that look like absolute
+# POSIX paths when invoking a native Windows binary: a '/<cmd> actas <name>'
+# initial prompt reaches the CLI as 'C:/Program Files/Git/<cmd> actas <name>'
+# and the agent never sees a valid skill invocation. Exclude args starting
+# with the slash command from conversion. The exclusion is prefix-scoped on
+# purpose — MSYS_NO_PATHCONV=1 would also stop converting genuine POSIX-path
+# args (e.g. a node launcher's --project /e/...) that native CLIs rely on.
+# Only the '/' prefix is path-shaped; '$'-prefixed prompts (#283) are never
+# converted, and the variable is inert outside MSYS environments.
+# cmd_prefix/cmd_name are resolved exactly as agmsg_actas_prompt does
+# (lib/boot-command.sh) -- #344 moved that resolution into the helper, so the two
+# inputs the guard needs are recomputed here rather than read from now-absent vars.
+_msys_cmd_name="$(basename "$SKILL_DIR")"
+_msys_cmd_prefix="$(agmsg_type_get "$AGENT_TYPE" cmd_prefix)"
+[ -n "$_msys_cmd_prefix" ] || _msys_cmd_prefix="/"
+MSYS_GUARD=""
+if [ "$_msys_cmd_prefix" = "/" ]; then
+  MSYS_GUARD="MSYS2_ARG_CONV_EXCL=/${_msys_cmd_name} "
+fi
+
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
 # Best-effort GC of boot scripts left behind by spawns whose window was closed
@@ -421,7 +441,7 @@ esac
     # Type-specific config is the launcher's own default/env, so core stays
     # generic and names no add-on. Spawn-options tokens (if any) land before
     # --initial-input, same relative position as the direct-CLI path below.
-    printf '%q %q \\\n' "$NODE_BIN" "$SPAWN_AGENT"
+    printf '%s%q %q \\\n' "$MSYS_GUARD" "$NODE_BIN" "$SPAWN_AGENT"
     printf '  --name %q \\\n' "$NAME"
     printf '  --team %q \\\n' "$TEAM"
     printf '  --project %q \\\n' "$PROJECT"
@@ -441,7 +461,9 @@ esac
     # %q-quoted); the model id and every spawn-options token are quoted. The
     # role-identity tail (name/prompt_arg + the actas prompt) is emitted by
     # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
-    printf '%s' "$CLI_BIN"
+    # MSYS_GUARD (#336) prefixes the CLI line as a command-local env assignment;
+    # emitted with %s (not %q) so it stays an assignment, not a single token.
+    printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
     agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do

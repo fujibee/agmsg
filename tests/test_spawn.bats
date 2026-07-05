@@ -680,6 +680,35 @@ YAML
   [ "$status" -ne 0 ]
 }
 
+@test "spawn: '/'-prefixed boot prompt is guarded against MSYS path conversion" {
+  # On Git Bash / MSYS, an argv token starting with '/' is rewritten to a
+  # Windows path when handed to a native binary: '/agmsg actas alice' arrives
+  # as 'C:/Program Files/Git/agmsg actas alice'. The boot script must scope it
+  # out via MSYS2_ARG_CONV_EXCL on the CLI launch line (prefix-scoped, NOT
+  # MSYS_NO_PATHCONV=1, so genuine path args keep converting).
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  # The guard must sit on the same line as the CLI invocation, ahead of it.
+  run grep -E "^MSYS2_ARG_CONV_EXCL=/$cmd claude" "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: \$-prefixed boot prompt gets no MSYS guard (codex)" {
+  # '$'-prefixed prompts are not path-shaped, so no exclusion is emitted —
+  # keeps the boot script byte-identical for agentskills CLIs.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  run grep -F "MSYS2_ARG_CONV_EXCL" "$boot"
+  [ "$status" -ne 0 ]
+}
+
 @test "spawn: boot script keeps the .command suffix only on macOS (#282)" {
   # macOS `open -a Terminal` needs .command to execute the file; every other
   # launcher runs it via bash or its shebang, and on Windows .command makes
