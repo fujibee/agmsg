@@ -506,6 +506,52 @@ YAML
   [[ "$output" == *"reviewer"* ]]
 }
 
+@test "spawn: codex boot prompt uses the \$ skill prefix, not / (#283)" {
+  # codex invokes a skill with \$<cmd>, not Claude Code's /<cmd>. The boot script
+  # must carry \$<cmd> actas, never /<cmd> actas. (%q escapes the space as "\ ",
+  # so match the "<prefix><cmd>\ actas" token — the cd path's /<cmd>/proj has no
+  # "\ actas" and so can't false-match the slash form.)
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: claude-code boot prompt keeps the / slash prefix (#283)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: boot script keeps the .command suffix only on macOS (#282)" {
+  # macOS `open -a Terminal` needs .command to execute the file; every other
+  # launcher runs it via bash or its shebang, and on Windows .command makes
+  # Explorer/psmux open it in Notepad instead of running it.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  if [ "$(uname -s)" = "Darwin" ]; then
+    [[ "$boot" == *.command ]]
+  else
+    [[ "$boot" != *.command ]]
+  fi
+}
+
 # --- pre-flight exclusivity check ---
 
 @test "spawn: refuses when the name is held by another live session" {

@@ -347,7 +347,15 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # to hand a one-shot goal to a codex peer, which has no Monitor and so never
 # notices a message sent after it goes idle (see docs/codex-monitor-beta.md).
 CMD_NAME="$(basename "$SKILL_DIR")"
-ACTAS_PROMPT="/${CMD_NAME} actas ${NAME}"
+# The skill-invocation prefix differs by CLI: Claude Code dispatches a "/" slash
+# command, while agentskills-based CLIs (codex, gemini, antigravity) invoke a
+# skill with "$" — a `codex '/agmsg actas ...'` boot prompt is not a reliable
+# skill invocation (#283). type.conf's cmd_prefix= names it per type; unset
+# defaults to "/" (Claude Code, the historical hardcoded value) so any type not
+# explicitly configured keeps today's behavior.
+CMD_PREFIX="$(agmsg_type_get "$AGENT_TYPE" cmd_prefix)"
+[ -n "$CMD_PREFIX" ] || CMD_PREFIX="/"
+ACTAS_PROMPT="${CMD_PREFIX}${CMD_NAME} actas ${NAME}"
 if [ -n "$PROMPT" ]; then
   ACTAS_PROMPT="${ACTAS_PROMPT}
 ${PROMPT}"
@@ -357,10 +365,17 @@ BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
 # Best-effort GC of boot scripts left behind by spawns whose window was closed
 # before the script could remove itself (see the trailing rm below).
-find "$BOOT_DIR" -name 'boot-*.command' -type f -mtime +1 -delete 2>/dev/null || true
+# GC matches both the bare and the .command-suffixed form (see the rename below).
+find "$BOOT_DIR" -name 'boot-*' -type f -mtime +1 -delete 2>/dev/null || true
 BOOT="$(mktemp "$BOOT_DIR/boot-XXXXXX")"
-mv "$BOOT" "$BOOT.command"   # .command so macOS `open` runs it in Terminal
-BOOT="$BOOT.command"
+# macOS `open -a Terminal` (launch_macos_terminal) only runs a file as a shell
+# script if it ends in .command, so rename there. Every other launcher invokes
+# the script through bash (Linux/Windows Terminal) or runs it via its shebang
+# (tmux) — and on Windows the .command extension makes Explorer/psmux open it in
+# Notepad instead of executing it (#282), so keep the bare executable path.
+case "$(uname -s)" in
+  Darwin) mv "$BOOT" "$BOOT.command"; BOOT="$BOOT.command" ;;
+esac
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
