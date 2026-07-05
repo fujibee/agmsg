@@ -457,6 +457,11 @@ export default function App() {
 
   // Remove a pane from whichever window holds it. If that empties the window,
   // drop the window too and fall back to the team room if it was active.
+  // Splice-only — it never re-homes the pane into some other window (that's
+  // moveToNewWindow/movePaneToWindow's job) — which is exactly what
+  // splitPaneBeside's cross-window path relies on: detach here, then insert
+  // into the target tree in a SEPARATE setWindows call, with no risk of the
+  // paneId briefly (or permanently) existing as a leaf in two windows at once.
   const detachPane = useCallback((paneId: string) => {
     const owner = windowsRef.current.find((w) => leaves(w.root).includes(paneId));
     if (!owner) return;
@@ -849,6 +854,10 @@ export default function App() {
     e.preventDefault();
     const stage = (e.currentTarget as HTMLElement).closest(".stage") as HTMLElement | null;
     if (!stage) return;
+    // Captured once at drag-start, not re-measured per mousemove — if the OS
+    // window itself is resized mid-drag (rare, and only for the duration of
+    // this one gesture), the math below would be against a stale box. Not
+    // worth guarding: the next drag on the same divider recaptures it fresh.
     const stageBox = stage.getBoundingClientRect();
     const parentPx = {
       left: stageBox.left + (divider.bounds.left / 100) * stageBox.width,
