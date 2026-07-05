@@ -55,7 +55,7 @@ fn agmsg_base() -> PathBuf {
 /// non-test caller is behind a Windows-only cfg, hence the dead_code
 /// allowance on other platforms.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn to_bash_slashes(s: &str) -> String {
+pub(crate) fn to_bash_slashes(s: &str) -> String {
     let s = s.strip_prefix(r"\\?\").unwrap_or(s);
     let s = s.replace('\\', "/");
     let bytes = s.as_bytes();
@@ -63,6 +63,37 @@ fn to_bash_slashes(s: &str) -> String {
         format!("/{}{}", (bytes[0] as char).to_ascii_lowercase(), &s[2..])
     } else {
         s
+    }
+}
+
+/// Converts an MSYS/Git-Bash path ("/c/Users/name") back to native Windows
+/// form ("C:\\Users\\name") — the inverse of to_bash_slashes. Team
+/// registrations on Windows store `project` in MSYS form (every skill script
+/// keys identity on Git Bash's $(pwd)), but that string is worthless to a
+/// native Win32 API: handed to create_dir_all or a PTY's cwd, Windows resolves
+/// the rootless "/c/Users/..." against the current drive and yields the phantom
+/// "C:\\c\\Users\\..." — a genuinely different directory, silently created and
+/// spawned into, which splits the app-user and its agents into separate teams
+/// whose messages never meet (see issue #315). Only the leading "/<drive>"
+/// segment is rewritten; anything already native ("C:\\..." / "C:/...") or
+/// relative passes through untouched. A standalone string transform so it's
+/// testable on any host — its non-test callers (agmsg_join, pty::pty_spawn) are
+/// behind Windows-only cfgs, hence the dead_code allowance elsewhere.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn msys_to_native(s: &str) -> String {
+    let bytes = s.as_bytes();
+    // "/c" or "/c/rest" -> drive letter, but not "/cygdrive/..." or "/home/..."
+    // (a multi-char first segment is a real POSIX root, not a drive).
+    if bytes.len() >= 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && (bytes.len() == 2 || bytes[2] == b'/')
+    {
+        let drive = (bytes[1] as char).to_ascii_uppercase();
+        let rest = s[2..].replace('/', "\\");
+        format!("{drive}:{rest}")
+    } else {
+        s.to_string()
     }
 }
 
@@ -603,8 +634,15 @@ pub fn agmsg_join(
     agent_type: String,
     project: String,
 ) -> Result<(), String> {
-    // create_dir_all takes the native form; bash_path is only for the value
-    // that crosses into a bash argument below (join.sh's $4).
+    // The caller can hand us an MSYS-form path (/c/Users/...) read back from an
+    // existing registration (e.g. adding an agent into the app-user's team). On
+    // Windows create_dir_all needs the native form, or it silently builds the
+    // phantom C:\c\Users\... tree the spawned agent then splits into (#315).
+    // No-op for a path that's already native. create_dir_all takes the native
+    // form; bash_path is only for the value that crosses into a bash argument
+    // below (join.sh's $4).
+    #[cfg(target_os = "windows")]
+    let project = msys_to_native(&project);
     std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
     let project = bash_path(std::path::Path::new(&project));
     run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ())
@@ -693,7 +731,7 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{agmsg_base, parse_semver, run_script, to_bash_slashes};
+    use super::{agmsg_base, msys_to_native, parse_semver, run_script, to_bash_slashes};
     use serial_test::serial;
     use std::io::Write;
 
@@ -737,6 +775,42 @@ mod tests {
     #[test]
     fn lowercases_the_drive_letter() {
         assert_eq!(to_bash_slashes(r"D:\work\x.sh"), "/d/work/x.sh");
+    }
+
+    #[test]
+    fn msys_to_native_rewrites_the_drive_segment() {
+        // The exact registration shape from issue #315: an MSYS project path
+        // must become a native Windows path before it reaches create_dir_all or
+        // a PTY cwd, or Windows builds/spawns the phantom C:\c\Users\... dir.
+        assert_eq!(
+            msys_to_native("/c/Users/kei40/agmsg-agents/Chikamichi"),
+            r"C:\Users\kei40\agmsg-agents\Chikamichi",
+        );
+    }
+
+    #[test]
+    fn msys_to_native_uppercases_and_handles_other_drives() {
+        assert_eq!(msys_to_native("/d/work/x"), r"D:\work\x");
+        assert_eq!(msys_to_native("/c"), "C:");
+    }
+
+    #[test]
+    fn msys_to_native_is_a_no_op_on_native_and_posix_root_paths() {
+        // Already-native paths (either slash style) and genuine multi-segment
+        // POSIX roots must pass through untouched — only "/<drive>" is a drive.
+        assert_eq!(msys_to_native(r"C:\Users\kei40\x"), r"C:\Users\kei40\x");
+        assert_eq!(msys_to_native("C:/Users/kei40/x"), "C:/Users/kei40/x");
+        assert_eq!(msys_to_native("/Users/koichi/x"), "/Users/koichi/x");
+        assert_eq!(msys_to_native("/home/koichi/x"), "/home/koichi/x");
+        assert_eq!(msys_to_native("/cygdrive/c/x"), "/cygdrive/c/x");
+    }
+
+    #[test]
+    fn msys_to_native_round_trips_with_to_bash_slashes() {
+        // The two are inverses across the drive boundary; storage (MSYS) and
+        // native (create_dir_all/cwd) must agree so the agent's $(pwd) matches.
+        let native = r"C:\Users\kei40\agmsg-agents\Chikamichi";
+        assert_eq!(msys_to_native(&to_bash_slashes(native)), native);
     }
 
     #[test]
@@ -868,5 +942,58 @@ mod tests {
     fn run_script_errors_when_the_script_is_missing() {
         let _base = fake_base(&[]);
         assert!(run_script("nope.sh", &[]).is_err());
+    }
+
+    // --- #315 Windows spawn-path regression (runs on the windows-latest job) ---
+
+    /// The core #315 guarantee, independent of bash: create_dir_all runs before
+    /// run_script and must build the NATIVE dir, not the phantom C:\c\Users\...
+    /// Windows would derive from an unconverted MSYS project path. The join.sh
+    /// result is ignored so a bash hiccup can't mask the create_dir_all check.
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn agmsg_join_creates_the_native_dir_not_the_phantom() {
+        let _base = fake_base(&[("join.sh", "exit 0")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let native_proj = tmp.path().join("agmsg-agents").join("alice");
+        // MSYS form, as a Windows registration stores it.
+        let msys_proj = to_bash_slashes(&native_proj.to_string_lossy());
+        let _ = super::agmsg_join("t".into(), "alice".into(), "claude-code".into(), msys_proj);
+        assert!(
+            native_proj.is_dir(),
+            "agmsg_join must create the native dir, not a phantom C:\\c\\Users\\... tree",
+        );
+    }
+
+    /// End to end through the fake join.sh: the native dir is created AND join.sh
+    /// receives the project ($4) in MSYS form, so storage/identity keys stay MSYS
+    /// while the filesystem side is native.
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn agmsg_join_passes_msys_form_to_join_sh() {
+        let dir = tempfile::tempdir().unwrap();
+        // Forward-slash base so both Rust (agmsg_base) and Git Bash ($AGMSG_APP_BASE
+        // expansion / redirect) accept it — a native backslash path gets mangled by
+        // MSYS argv/redirect handling.
+        let base = dir.path().to_string_lossy().replace('\\', "/");
+        let sdir = dir.path().join("scripts");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("join.sh"),
+            "#!/usr/bin/env bash\nprintf '%s' \"$4\" > \"$AGMSG_APP_BASE/arg4.txt\"\n",
+        )
+        .unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &base);
+
+        let native_proj = dir.path().join("agmsg-agents").join("bob");
+        let msys_proj = to_bash_slashes(&native_proj.to_string_lossy());
+        super::agmsg_join("t".into(), "bob".into(), "claude-code".into(), msys_proj.clone())
+            .expect("join should succeed");
+
+        assert!(native_proj.is_dir(), "native project dir should be created");
+        let got = std::fs::read_to_string(dir.path().join("arg4.txt")).unwrap();
+        assert_eq!(got, msys_proj, "join.sh $4 should be the MSYS form");
     }
 }

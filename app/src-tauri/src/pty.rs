@@ -57,6 +57,26 @@ struct ExitEvent {
     id: String,
 }
 
+/// Windows-only: turn a spawn cwd from a team registration (MSYS form,
+/// /c/Users/...) into a native path, and refuse it if it isn't a real directory.
+/// CreateProcessW resolves a rootless /c/Users/... against the current drive ->
+/// the phantom C:\c\Users\... dir; the agent then boots there, its own $(pwd)
+/// matches no registration, and it splits into a phantom team whose messages
+/// never reach the app (#315). Erroring (instead of booting into a mangled dir)
+/// surfaces in the terminal pane via the frontend's failed-spawn handler. Split
+/// out from pty_spawn so it's unit-testable without a Tauri AppHandle.
+#[cfg(target_os = "windows")]
+fn resolve_windows_cwd(dir: &str) -> Result<String, String> {
+    let native = crate::agmsg::msys_to_native(dir);
+    if !std::path::Path::new(&native).is_dir() {
+        return Err(format!(
+            "agent working directory doesn't exist: {native} (from registration \
+             path {dir}). Re-add the agent so its project points at a real folder."
+        ));
+    }
+    Ok(native)
+}
+
 /// Spawn `cmd args` in a fresh PTY and stream its output to the webview as
 /// `pty-output` events. Stores the session under `id`.
 #[tauri::command]
@@ -84,6 +104,9 @@ pub fn pty_spawn(
         builder.arg(a);
     }
     if let Some(dir) = &cwd {
+        #[cfg(target_os = "windows")]
+        builder.cwd(resolve_windows_cwd(dir)?);
+        #[cfg(not(target_os = "windows"))]
         builder.cwd(dir);
     }
     builder.env("TERM", "xterm-256color");
@@ -207,4 +230,24 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // resolve_windows_cwd is behind cfg(windows); this test runs on the
+    // windows-latest app-test CI job (a compile-pass elsewhere isn't validation
+    // — the 0.1.2 lesson). Exercises the #315 phantom-cwd guard end to end.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_windows_cwd_rejects_phantom_and_accepts_a_real_dir() {
+        use super::resolve_windows_cwd;
+        // A nonexistent MSYS-form cwd (the phantom-splitting registration) is
+        // rejected rather than booted into.
+        assert!(resolve_windows_cwd("/c/no/such/agmsg/project/dir").is_err());
+        // A real dir addressed in MSYS form resolves to native and is accepted.
+        let tmp = tempfile::tempdir().unwrap();
+        let msys = crate::agmsg::to_bash_slashes(&tmp.path().to_string_lossy());
+        let native = resolve_windows_cwd(&msys).expect("a real dir should be accepted");
+        assert!(std::path::Path::new(&native).is_dir());
+    }
 }
