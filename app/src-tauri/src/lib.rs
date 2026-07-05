@@ -234,14 +234,32 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     // "Show User Chat" toggles the app-user send/receive panel (chat +
     // composer) in the frontend. The frontend owns the actual show/hide state;
     // this checkbox just reflects it and emits a toggle event when clicked.
-    // Zoom In/Out/Actual Size mirror the standard browser-app trio (Cmd+=,
-    // Cmd+-, Cmd+0) — see the ZoomLevel handler in run() for the logic.
+    // "Pane Layout" duplicates the right-click-tab context menu's Layout
+    // submenu (frontend App.tsx) here too — that one works fine but users
+    // reported not discovering it, being tucked inside a right-click. The
+    // frontend remains the source of truth (this just emits which preset was
+    // picked; App.tsx applies it to whichever tab is currently active, and
+    // is a no-op on the team room, which has no panes). Zoom In/Out/Actual
+    // Size mirror the standard browser-app trio (Cmd+=, Cmd+-, Cmd+0) — see
+    // the ZoomLevel handler in run() for the logic.
+    let pane_layout_menu = Submenu::with_items(
+        app,
+        m("paneLayout"),
+        true,
+        &[
+            &MenuItem::with_id(app, PANE_LAYOUT_VERTICAL_ID, m("paneLayoutVertical"), true, None::<&str>)?,
+            &MenuItem::with_id(app, PANE_LAYOUT_HORIZONTAL_ID, m("paneLayoutHorizontal"), true, None::<&str>)?,
+            &MenuItem::with_id(app, PANE_LAYOUT_TILE_ID, m("paneLayoutTile"), true, None::<&str>)?,
+        ],
+    )?;
     let view_menu = Submenu::with_items(
         app,
         m("viewMenu"),
         true,
         &[
             &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &pane_layout_menu,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, ZOOM_IN_ID, m("zoomIn"), true, Some("CmdOrCtrl+="))?,
             &MenuItem::with_id(app, ZOOM_OUT_ID, m("zoomOut"), true, Some("CmdOrCtrl+-"))?,
@@ -266,6 +284,9 @@ const ZOOM_IN_ID: &str = "zoom_in";
 const ZOOM_OUT_ID: &str = "zoom_out";
 const ZOOM_RESET_ID: &str = "zoom_reset";
 const CHECK_UPDATES_ID: &str = "check_updates";
+const PANE_LAYOUT_VERTICAL_ID: &str = "pane_layout_vertical";
+const PANE_LAYOUT_HORIZONTAL_ID: &str = "pane_layout_horizontal";
+const PANE_LAYOUT_TILE_ID: &str = "pane_layout_tile";
 
 /// Check the updater endpoint and, if a newer build is available, confirm
 /// with the user before downloading, installing, and restarting. When
@@ -401,6 +422,13 @@ pub fn run() {
                     let _ = window.set_zoom(*zoom);
                 }
                 save_zoom(app, *zoom);
+            } else if id == PANE_LAYOUT_VERTICAL_ID || id == PANE_LAYOUT_HORIZONTAL_ID || id == PANE_LAYOUT_TILE_ID {
+                let layout = match id {
+                    _ if id == PANE_LAYOUT_VERTICAL_ID => "vertical",
+                    _ if id == PANE_LAYOUT_HORIZONTAL_ID => "horizontal",
+                    _ => "tile",
+                };
+                let _ = app.emit("set-pane-layout", layout);
             } else if id == CHECK_UPDATES_ID {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {

@@ -627,6 +627,17 @@ export default function App() {
     setWindows((prev) => prev.map((w) => (w.id === windowId ? { ...w, layout } : w)));
   }, []);
 
+  // Native "View > Pane Layout" menu items duplicate the right-click-tab
+  // context menu's Layout submenu (see the windowMenu render below) — same
+  // effect, just also reachable without a right-click. Applies to whichever
+  // tab is currently active; a no-op on the team room, which has no panes.
+  useEffect(() => {
+    const p = listen<PaneLayout>("set-pane-layout", (e) => {
+      if (active !== "room") setWindowLayout(active, e.payload);
+    });
+    return () => void p.then((u) => u());
+  }, [active, setWindowLayout]);
+
   // A tab's label: the user's custom name if set, else its panes' names joined.
   const windowLabel = useCallback(
     (w: Window) =>
