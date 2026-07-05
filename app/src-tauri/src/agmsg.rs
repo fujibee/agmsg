@@ -27,7 +27,18 @@ fn home_dir_string() -> Option<String> {
 }
 
 /// Base dir of the agmsg install (skill layout: db/, teams/, scripts/, ...).
+///
+/// `AGMSG_APP_BASE`, when set to a non-empty path, overrides the derived
+/// location. This is the command layer's injection point — the test harness
+/// points it at a temp dir of fake `scripts/*.sh` (mirrors resolve_bash's
+/// `AGMSG_APP_BASH` override). In normal operation it is unset and the base is
+/// `<home>/.agents/skills/agmsg`.
 fn agmsg_base() -> PathBuf {
+    if let Ok(over) = std::env::var("AGMSG_APP_BASE") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
     let home = home_dir_string().unwrap_or_else(|| ".".into());
     PathBuf::from(home).join(".agents/skills/agmsg")
 }
@@ -682,7 +693,9 @@ pub fn start_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_semver, to_bash_slashes};
+    use super::{agmsg_base, parse_semver, run_script, to_bash_slashes};
+    use serial_test::serial;
+    use std::io::Write;
 
     #[test]
     fn strips_verbatim_prefix_and_converts_to_posix() {
@@ -752,5 +765,85 @@ mod tests {
         assert!(parse_semver("1.1.10") > parse_semver("1.1.9"));
         assert!(parse_semver("1.1.4") < parse_semver("1.2.0"));
         assert!(parse_semver("1.1.4") < parse_semver("2.0.0"));
+    }
+
+    // --- command-layer harness (fake agmsg-core scripts) ---
+    //
+    // run_script() resolves <base>/scripts/<name>, runs it through bash, and maps
+    // stdout→Ok / stderr→Err. Pointing AGMSG_APP_BASE at a temp dir of fake
+    // scripts lets us exercise that whole path (the 0.1.1→0.1.3 regressions all
+    // lived here) without a real agmsg install. Env is process-global, so these
+    // are #[serial]. Skipped on Windows: the CI runner's `bash` resolution
+    // (resolve_bash) is Git-Bash-specific and covered by the windows app-test job.
+
+    /// Write the given `(name, body)` fakes under a temp `scripts/` dir and point
+    /// AGMSG_APP_BASE at it. Returns the TempDir — keep it alive for the test.
+    fn fake_base(scripts: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sdir = dir.path().join("scripts");
+        std::fs::create_dir_all(&sdir).unwrap();
+        for (name, body) in scripts {
+            let mut f = std::fs::File::create(sdir.join(name)).unwrap();
+            writeln!(f, "#!/usr/bin/env bash").unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+        }
+        std::env::set_var("AGMSG_APP_BASE", dir.path());
+        dir
+    }
+
+    #[test]
+    #[serial]
+    fn agmsg_base_honors_the_env_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("AGMSG_APP_BASE", dir.path());
+        assert_eq!(agmsg_base(), dir.path());
+        std::env::remove_var("AGMSG_APP_BASE");
+    }
+
+    #[test]
+    #[serial]
+    fn agmsg_base_falls_back_when_override_is_empty() {
+        std::env::set_var("AGMSG_APP_BASE", "");
+        assert!(agmsg_base().ends_with(".agents/skills/agmsg"));
+        std::env::remove_var("AGMSG_APP_BASE");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn run_script_returns_stdout_on_success() {
+        let _base = fake_base(&[("ok.sh", "echo hello-from-fake")]);
+        let out = run_script("ok.sh", &[]).expect("should succeed");
+        assert_eq!(out.trim(), "hello-from-fake");
+        std::env::remove_var("AGMSG_APP_BASE");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn run_script_returns_stderr_as_err_on_failure() {
+        let _base = fake_base(&[("boom.sh", "echo the-error >&2; exit 1")]);
+        let err = run_script("boom.sh", &[]).unwrap_err();
+        assert!(err.contains("the-error"), "stderr not surfaced: {err:?}");
+        std::env::remove_var("AGMSG_APP_BASE");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn run_script_passes_arguments_through_in_order() {
+        let _base = fake_base(&[("args.sh", "printf '%s\\n' \"$@\"")]);
+        let out = run_script("args.sh", &["a", "b c", "d"]).unwrap();
+        assert_eq!(out.lines().collect::<Vec<_>>(), ["a", "b c", "d"]);
+        std::env::remove_var("AGMSG_APP_BASE");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn run_script_errors_when_the_script_is_missing() {
+        let _base = fake_base(&[]);
+        assert!(run_script("nope.sh", &[]).is_err());
+        std::env::remove_var("AGMSG_APP_BASE");
     }
 }

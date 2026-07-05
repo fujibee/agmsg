@@ -34,3 +34,10 @@ anyhow = "1"
 # PTY output is raw bytes (TUI box-drawing etc.); ship it to the webview as
 # base64 so multibyte sequences split across reads render correctly in xterm.
 base64 = "0.22"
+
+[dev-dependencies]
+# Fake-script harness: a temp install base of stub scripts the command layer runs.
+tempfile = "3"
+# The command layer reads process env (AGMSG_APP_BASE / HOME / PATH); serialize
+# the tests that mutate it so they don't race under the default parallel runner.
+serial_test = "3"

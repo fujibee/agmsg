@@ -275,3 +275,45 @@ jobs:
       - name: Rust check
         if: needs.changes.outputs.app_changed != 'false'
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust tests
+        if: needs.changes.outputs.app_changed != 'false'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Windows leg for the app: the command layer's bash resolution and path
+  # conversion are all behind cfg(windows) and had never run in CI — the very
+  # 0.1.1→0.1.3 regressions (WSL bash.exe, backslash argv). This runs cargo test
+  # on windows-latest so those paths are actually exercised. Same fail-open
+  # convention as app-check: run unless the diff provably doesn't touch app/.
+  app-test-windows:
+    name: app test (windows-latest)
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No app changes — skipping app tests
+        if: needs.changes.outputs.app_changed == 'false'
+        run: echo "Diff does not touch app/ — reporting green without running the app tests."
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.changes.outputs.app_changed != 'false'
+
+      - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.app_changed != 'false'
+        with:
+          workspaces: app/src-tauri
+
+      - name: Bundle pinned agmsg-core
+        if: needs.changes.outputs.app_changed != 'false'
+        run: scripts/bundle-core.sh
+        shell: bash
+
+      - name: Rust tests
+        if: needs.changes.outputs.app_changed != 'false'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
