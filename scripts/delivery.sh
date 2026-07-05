@@ -335,8 +335,8 @@ stop_codex_bridge() {
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
       [ -f "$pidfile" ] || continue
       bpid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
-        kill "$bpid" 2>/dev/null && killed=$((killed + 1))
+      if [ -n "$bpid" ] && compat_pid_alive "$bpid"; then
+        compat_kill_pid "$bpid" && killed=$((killed + 1))
       fi
       # .appserver records which app-server URL the bridge was bound to (the
       # launcher's stale-binding guard); drop it with the rest so it cannot
@@ -359,10 +359,10 @@ EOF
     server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
     if [ -f "$server_pidfile" ]; then
       server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+      if [ -n "$server_pid" ] && compat_pid_alive "$server_pid"; then
         server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
         case "$server_cmd" in
-          *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
+          *codex*app-server*) compat_kill_pid "$server_pid" || true ;;
         esac
       fi
       rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \

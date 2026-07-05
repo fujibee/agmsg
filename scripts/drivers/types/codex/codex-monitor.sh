@@ -122,7 +122,7 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   # so a foreign process that grabbed the same port after ours died is not
   # mistaken for the bridge app-server.
   if [ -n "$existing_port" ] && [ -n "$existing_pid" ] \
-    && kill -0 "$existing_pid" 2>/dev/null && port_alive "$existing_port"; then
+    && compat_pid_alive "$existing_pid" && port_alive "$existing_port"; then
     # Confirm the recorded pid is actually OUR codex app-server before trusting OR
     # killing it: a recycled pid could belong to an unrelated process while the
     # recorded port happens to answer via something else. Only reuse/kill when the
@@ -139,7 +139,7 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
         if [ -z "$CODEX_VERSION" ] || [ "$existing_version" = "$CODEX_VERSION" ]; then
           PORT="$existing_port"
         else
-          kill "$existing_pid" 2>/dev/null || true
+          compat_kill_pid "$existing_pid" || true
           rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE"
         fi
         ;;

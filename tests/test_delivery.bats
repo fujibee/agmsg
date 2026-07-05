@@ -1492,6 +1492,29 @@ EOF
   trap - EXIT
 }
 
+@test "delivery status (codex): canonical project metadata match is accepted" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local dead_pid=999999
+  printf '%s\n' "$dead_pid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  local alias_project="$TEST_PROJECT/../$(basename "$TEST_PROJECT")"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$dead_pid
+project=$alias_project
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (pid $dead_pid not running)"* ]]
+  [[ "$output" != *"metadata mismatch"* ]]
+}
+
 @test "delivery status (codex): stale bridge pidfile is reported as stale" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null

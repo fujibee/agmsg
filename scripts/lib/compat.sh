@@ -57,6 +57,65 @@ _compat_cim_cmdline() {
     | tr -d '\r' | tr '\\' '/'
 }
 
+_compat_powershell_bin() {
+  if command -v powershell.exe >/dev/null 2>&1; then
+    printf '%s\n' powershell.exe
+  elif command -v pwsh.exe >/dev/null 2>&1; then
+    printf '%s\n' pwsh.exe
+  elif command -v pwsh >/dev/null 2>&1; then
+    printf '%s\n' pwsh
+  else
+    return 1
+  fi
+}
+
+compat_pid_alive() {
+  local pid="$1" psbin
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null && return 0
+
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    msys)
+      local psw
+      psw=$(ps -W 2>/dev/null || true)
+      if [ -n "$psw" ]; then
+        printf '%s\n' "$psw" | awk -v pid="$pid" 'NR > 1 && $4 == pid { found=1 } END { exit found ? 0 : 1 }' && return 0
+        return 1
+      fi
+      psbin=$(_compat_powershell_bin) || return 1
+      "$psbin" -NoProfile -Command \
+        "\$p = Get-Process -Id $pid -ErrorAction SilentlyContinue; if (\$null -eq \$p) { exit 1 } else { exit 0 }" \
+        >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+compat_kill_pid() {
+  local pid="$1" psbin
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill "$pid" 2>/dev/null && return 0
+
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    msys)
+      local msys_pid psw
+      psw=$(ps -W 2>/dev/null || true)
+      if [ -n "$psw" ]; then
+        msys_pid=$(printf '%s\n' "$psw" | awk -v pid="$pid" 'NR > 1 && $4 == pid { print $1; exit }')
+        [ -n "$msys_pid" ] && kill "$msys_pid" 2>/dev/null && return 0
+        return 1
+      fi
+      psbin=$(_compat_powershell_bin) || return 1
+      "$psbin" -NoProfile -Command \
+        "Stop-Process -Id $pid -ErrorAction Stop" \
+        >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
 compat_get_cmdline() {
   local pid="$1"
