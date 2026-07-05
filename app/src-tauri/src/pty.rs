@@ -77,6 +77,32 @@ fn resolve_windows_cwd(dir: &str) -> Result<String, String> {
     Ok(native)
 }
 
+/// On Windows a bare agent CLI name can't be handed to CreateProcessW directly:
+/// npm installs an extensionless POSIX shim ("claude") next to "claude.cmd", and
+/// portable-pty's search_path prefers the exact extensionless match — so the
+/// shell script reaches CreateProcessW and fails with os error 193 ("not a valid
+/// Win32 application"), issues #314 / #313 (claude leg). A Store-installed
+/// "codex" is worse: a WindowsApps execution alias (a 0-byte reparse point) that
+/// only resolves when invoked *by name* through a shell, so a direct full-path
+/// spawn fails os error 2 — #313 (codex leg). Routing the launch through
+/// `cmd.exe /d /c <name> <args>` hands name resolution to cmd, which honors
+/// PATHEXT and execution aliases and fixes both.
+///
+/// Quoting: cmd only strips the outer quote pair when the command string
+/// *begins* with a quote. The agent name has no spaces so portable-pty leaves it
+/// unquoted, the string begins with the name's first letter, cmd's strip rule
+/// never fires — and a space-bearing arg like "/agmsg actas Ami" survives as a
+/// single token addressed to the agent. `/d` skips any user AutoRun so a stray
+/// registry command can't corrupt the launch. Standalone (not inlined) so it's
+/// unit-testable on any host; its only caller is behind a Windows cfg, hence the
+/// dead_code allowance elsewhere.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_shell_argv(cmd: &str, args: &[String]) -> Vec<String> {
+    let mut argv = vec!["/d".to_string(), "/c".to_string(), cmd.to_string()];
+    argv.extend(args.iter().cloned());
+    argv
+}
+
 /// Spawn `cmd args` in a fresh PTY and stream its output to the webview as
 /// `pty-output` events. Stores the session under `id`.
 #[tauri::command]
@@ -99,10 +125,25 @@ pub fn pty_spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let mut builder = CommandBuilder::new(&cmd);
-    for a in &args {
-        builder.arg(a);
-    }
+    // On Windows, launch the agent through cmd.exe so PATHEXT / execution-alias
+    // resolution happens (see windows_shell_argv); elsewhere spawn it directly.
+    #[cfg(target_os = "windows")]
+    let mut builder = {
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut b = CommandBuilder::new(comspec);
+        for a in windows_shell_argv(&cmd, &args) {
+            b.arg(a);
+        }
+        b
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut builder = {
+        let mut b = CommandBuilder::new(&cmd);
+        for a in &args {
+            b.arg(a);
+        }
+        b
+    };
     if let Some(dir) = &cwd {
         #[cfg(target_os = "windows")]
         builder.cwd(resolve_windows_cwd(dir)?);
@@ -234,6 +275,29 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
 
 #[cfg(test)]
 mod tests {
+    use super::windows_shell_argv;
+
+    #[test]
+    fn wraps_the_agent_name_through_cmd_slash_c() {
+        // The name stays a bare (unquoted) token so cmd's strip-first/last-quote
+        // rule never fires; the space-bearing boot prompt must survive as ONE
+        // argv element addressed to the agent (issues #314 / #313).
+        let args = vec![
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+            "/agmsg actas Ami".to_string(),
+        ];
+        assert_eq!(
+            windows_shell_argv("claude", &args),
+            vec!["/d", "/c", "claude", "--permission-mode", "acceptEdits", "/agmsg actas Ami"],
+        );
+    }
+
+    #[test]
+    fn wraps_an_argless_launch() {
+        assert_eq!(windows_shell_argv("codex", &[]), vec!["/d", "/c", "codex"]);
+    }
+
     // resolve_windows_cwd is behind cfg(windows); this test runs on the
     // windows-latest app-test CI job (a compile-pass elsewhere isn't validation
     // — the 0.1.2 lesson). Exercises the #315 phantom-cwd guard end to end.
