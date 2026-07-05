@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyAtPath,
   classifyDrop,
   clampRatio,
   collectDividers,
@@ -10,10 +11,13 @@ import {
   minRatioForPx,
   presetTree,
   renameLeaf,
+  sameShapeAndRatio,
   sameZone,
   spliceOutLeaf,
   swapLeaves,
+  transposeGrid,
   updateRatioAtPath,
+  type DividerInfo,
   type SplitNode,
 } from "./paneTree";
 
@@ -109,11 +113,12 @@ describe("updateRatioAtPath", () => {
 });
 
 describe("collectDividers", () => {
-  it("returns one divider per internal split node, at the seam between its children", () => {
+  it("returns one 'single' divider per internal split node, at the seam between its children", () => {
     const tree = split("col", 0.25, leaf("p1"), leaf("p2"));
     const dividers = collectDividers(tree);
     expect(dividers).toEqual([
       {
+        kind: "single",
         path: [],
         axis: "col",
         ratio: 0.25,
@@ -127,18 +132,22 @@ describe("collectDividers", () => {
     expect(collectDividers(leaf("solo"))).toEqual([]);
   });
 
-  it("returns one divider per split node in a nested tree, each with its own seam and PARENT bounds (not the whole stage)", () => {
+  it("returns 'single' (not grid-segment) dividers for a non-aligned tree — one per split node, each with its own seam and PARENT bounds (not the whole stage)", () => {
     const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
     const dividers = collectDividers(tree);
     expect(dividers).toHaveLength(2);
-    expect(dividers.find((d) => d.path.length === 0)).toEqual({
+    const single = dividers.filter((d): d is Extract<DividerInfo, { kind: "single" }> => d.kind === "single");
+    expect(single).toHaveLength(2);
+    expect(single.find((d) => d.path.length === 0)).toEqual({
+      kind: "single",
       path: [],
       axis: "col",
       ratio: 0.5,
       rect: { left: 50, top: 0, width: 0, height: 100 },
       bounds: { left: 0, top: 0, width: 100, height: 100 },
     });
-    expect(dividers.find((d) => d.path.length === 1)).toEqual({
+    expect(single.find((d) => d.path.length === 1)).toEqual({
+      kind: "single",
       path: ["b"],
       axis: "row",
       ratio: 0.5,
@@ -151,9 +160,63 @@ describe("collectDividers", () => {
 
   it("a path from collectDividers round-trips through updateRatioAtPath", () => {
     const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
-    const nested = collectDividers(tree).find((d) => d.path.length === 1)!;
+    const dividers = collectDividers(tree).filter(
+      (d): d is Extract<DividerInfo, { kind: "single" }> => d.kind === "single",
+    );
+    const nested = dividers.find((d) => d.path.length === 1)!;
     const result = updateRatioAtPath(tree, nested.path, 0.8);
     expect(result).toEqual(split("col", 0.5, leaf("p1"), split("row", 0.8, leaf("p2"), leaf("p3"))));
+  });
+
+  it("returns 'grid-segment' dividers (not one 'single') for the seam between two aligned column-chains", () => {
+    // A 2x2 tile: top row [p1,p2], bottom row [p3,p4], both rows split 50/50.
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.5, leaf("p1"), leaf("p2")),
+      split("col", 0.5, leaf("p3"), leaf("p4")),
+    );
+    const dividers = collectDividers(tree);
+    // 1 root seam (as 2 segments, one per column) + 1 nested seam per row (2 rows) = 4 total.
+    expect(dividers).toHaveLength(4);
+    const segments = dividers.filter(
+      (d): d is Extract<DividerInfo, { kind: "grid-segment" }> => d.kind === "grid-segment",
+    );
+    expect(segments).toHaveLength(2);
+    expect(segments).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "grid-segment",
+          basePath: [],
+          segmentPath: ["a"],
+          axis: "row",
+          ratio: 0.5,
+          rect: { left: 0, top: 50, width: 50, height: 0 },
+          bounds: { left: 0, top: 0, width: 50, height: 100 },
+        },
+        {
+          kind: "grid-segment",
+          basePath: [],
+          segmentPath: ["b"],
+          axis: "row",
+          ratio: 0.5,
+          rect: { left: 50, top: 50, width: 50, height: 0 },
+          bounds: { left: 50, top: 0, width: 50, height: 100 },
+        },
+      ]),
+    );
+  });
+
+  it("falls back to a single divider when the two sides don't match ratios (not aligned)", () => {
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.3, leaf("p1"), leaf("p2")), // different ratio from below
+      split("col", 0.7, leaf("p3"), leaf("p4")),
+    );
+    const dividers = collectDividers(tree);
+    const root = dividers.find((d) => d.kind === "single" && d.path.length === 0);
+    expect(root).toMatchObject({ kind: "single", path: [] });
   });
 });
 
@@ -406,5 +469,189 @@ describe("invariants (aggie review, recommendation 4)", () => {
       walk(node.b);
     };
     walk(tree);
+  });
+});
+
+describe("applyAtPath", () => {
+  it("applies fn to the root when path is empty", () => {
+    const tree = split("col", 0.5, leaf("p1"), leaf("p2"));
+    const result = applyAtPath(tree, [], (n) => (n.kind === "split" ? { ...n, ratio: 0.9 } : n));
+    expect(result).toEqual(split("col", 0.9, leaf("p1"), leaf("p2")));
+  });
+
+  it("applies fn at a nested path, leaving the rest of the tree untouched", () => {
+    const tree = split("col", 0.5, leaf("p1"), split("row", 0.5, leaf("p2"), leaf("p3")));
+    const result = applyAtPath(tree, ["b"], (n) => (n.kind === "leaf" ? n : { ...n, ratio: 0.1 }));
+    expect(result).toEqual(split("col", 0.5, leaf("p1"), split("row", 0.1, leaf("p2"), leaf("p3"))));
+  });
+
+  it("is a no-op (same reference) when the path runs into a leaf", () => {
+    const tree = split("col", 0.5, leaf("p1"), leaf("p2"));
+    expect(applyAtPath(tree, ["a", "b"], (n) => n)).toBe(tree);
+  });
+});
+
+describe("sameShapeAndRatio", () => {
+  it("two bare leaves always match, regardless of paneId", () => {
+    expect(sameShapeAndRatio(leaf("p1"), leaf("p2"))).toBe(true);
+  });
+
+  it("a leaf never matches a split", () => {
+    expect(sameShapeAndRatio(leaf("p1"), split("col", 0.5, leaf("p2"), leaf("p3")))).toBe(false);
+  });
+
+  it("matches two splits with the same axis, ratio, and recursively matching children", () => {
+    const a = split("col", 0.5, leaf("p1"), leaf("p2"));
+    const b = split("col", 0.5, leaf("p3"), leaf("p4"));
+    expect(sameShapeAndRatio(a, b)).toBe(true);
+  });
+
+  it("rejects a different axis", () => {
+    const a = split("col", 0.5, leaf("p1"), leaf("p2"));
+    const b = split("row", 0.5, leaf("p3"), leaf("p4"));
+    expect(sameShapeAndRatio(a, b)).toBe(false);
+  });
+
+  it("rejects a different ratio", () => {
+    const a = split("col", 0.5, leaf("p1"), leaf("p2"));
+    const b = split("col", 0.3, leaf("p3"), leaf("p4"));
+    expect(sameShapeAndRatio(a, b)).toBe(false);
+  });
+
+  it("rejects mismatched depth (a 3-column chain vs. a 2-column chain)", () => {
+    const a = split("col", 0.5, leaf("p1"), split("col", 0.5, leaf("p2"), leaf("p3")));
+    const b = split("col", 0.5, leaf("p4"), leaf("p5"));
+    expect(sameShapeAndRatio(a, b)).toBe(false);
+  });
+
+  it("matches arbitrarily deep chains as long as every level's axis and ratio line up", () => {
+    const a = split("col", 0.4, leaf("p1"), split("col", 0.6, leaf("p2"), leaf("p3")));
+    const b = split("col", 0.4, leaf("p4"), split("col", 0.6, leaf("p5"), leaf("p6")));
+    expect(sameShapeAndRatio(a, b)).toBe(true);
+  });
+});
+
+describe("transposeGrid", () => {
+  it("is a no-op for a bare leaf", () => {
+    const solo = leaf("solo");
+    expect(transposeGrid(solo)).toBe(solo);
+  });
+
+  it("is a no-op when either side is a bare leaf (not a chain)", () => {
+    const tree = split("row", 0.5, leaf("p1"), split("col", 0.5, leaf("p2"), leaf("p3")));
+    expect(transposeGrid(tree)).toBe(tree);
+  });
+
+  it("is a no-op when the two sides don't match (not aligned)", () => {
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.3, leaf("p1"), leaf("p2")),
+      split("col", 0.7, leaf("p3"), leaf("p4")),
+    );
+    expect(transposeGrid(tree)).toBe(tree);
+  });
+
+  it("transposes a 2x2 aligned grid: row(col(1,2;c), col(3,4;c); r) -> col(row(1,3;r), row(2,4;r); c)", () => {
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.5, leaf("1"), leaf("2")),
+      split("col", 0.5, leaf("3"), leaf("4")),
+    );
+    const result = transposeGrid(tree);
+    expect(result).toEqual(
+      split("col", 0.5, split("row", 0.5, leaf("1"), leaf("3")), split("row", 0.5, leaf("2"), leaf("4"))),
+    );
+  });
+
+  it("generalizes to a 3-column aligned grid", () => {
+    const row = (leftId: string, rest: SplitNode) => split("col", 0.4, leaf(leftId), rest);
+    const tree = split(
+      "row",
+      0.5,
+      row("1", split("col", 0.6, leaf("2"), leaf("3"))),
+      row("4", split("col", 0.6, leaf("5"), leaf("6"))),
+    );
+    const result = transposeGrid(tree);
+    expect(leaves(result)).toEqual(["1", "4", "2", "5", "3", "6"]);
+    // Each column becomes its own independent row-pair, same 0.5 starting ratio.
+    expect(result).toEqual(
+      split(
+        "col",
+        0.4,
+        split("row", 0.5, leaf("1"), leaf("4")),
+        split("col", 0.6, split("row", 0.5, leaf("2"), leaf("5")), split("row", 0.5, leaf("3"), leaf("6"))),
+      ),
+    );
+  });
+
+  it("is self-inverse for the 2-column/2-row case: transposing twice (with no drag in between) returns the original tree", () => {
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.5, leaf("1"), leaf("2")),
+      split("col", 0.5, leaf("3"), leaf("4")),
+    );
+    expect(transposeGrid(transposeGrid(tree))).toEqual(tree);
+  });
+
+  // co1 review: self-inverse does NOT generalize past 2 columns/rows — a
+  // transposed 3-column grid's own top-level children no longer match each
+  // other (a 1-level leaf-pair vs. a 2-level chain), so a second
+  // transposeGrid call is just a no-op rather than reconstructing the
+  // original. Documented as an accepted limitation, not a bug: the app
+  // never needs to un-transpose (a grabbed segment only ever drags its own
+  // node afterward).
+  it("is NOT self-inverse for 3+ columns — transposing twice is a no-op, not a round-trip", () => {
+    const row = (leftId: string, rest: SplitNode) => split("col", 0.4, leaf(leftId), rest);
+    const tree = split(
+      "row",
+      0.5,
+      row("1", split("col", 0.6, leaf("2"), leaf("3"))),
+      row("4", split("col", 0.6, leaf("5"), leaf("6"))),
+    );
+    const once = transposeGrid(tree);
+    const twice = transposeGrid(once);
+    expect(twice).toBe(once); // second call is a no-op (not aligned anymore)
+    expect(twice).not.toEqual(tree);
+  });
+
+  it("is visually a no-op: computeRects gives identical rects before and after transposing", () => {
+    const tree = split(
+      "row",
+      0.3,
+      split("col", 0.7, leaf("1"), leaf("2")),
+      split("col", 0.7, leaf("3"), leaf("4")),
+    );
+    const before = computeRects(tree);
+    const after = computeRects(transposeGrid(tree));
+    for (const id of ["1", "2", "3", "4"]) {
+      expect(after.get(id)).toEqual(before.get(id));
+    }
+  });
+
+  it("end-to-end: grabbing a grid-segment, transposing, then dragging only moves that one segment", () => {
+    const tree = split(
+      "row",
+      0.5,
+      split("col", 0.5, leaf("1"), leaf("2")),
+      split("col", 0.5, leaf("3"), leaf("4")),
+    );
+    const segment = collectDividers(tree).find(
+      (d): d is Extract<DividerInfo, { kind: "grid-segment" }> => d.kind === "grid-segment" && d.segmentPath[0] === "a",
+    )!;
+    const transposed = applyAtPath(tree, segment.basePath, transposeGrid);
+    const dragPath = [...segment.basePath, ...segment.segmentPath];
+    const dragged = updateRatioAtPath(transposed, dragPath, 0.8);
+
+    // Column 1 (leaves 1,3) moved to the new ratio; column 2 (leaves 2,4)
+    // is untouched, still at the original shared 0.5 — proving the two
+    // columns are now independent instead of both moving together.
+    const rects = computeRects(dragged);
+    expect(rects.get("1")!.height).toBeCloseTo(80, 6);
+    expect(rects.get("3")!.height).toBeCloseTo(20, 6);
+    expect(rects.get("2")!.height).toBeCloseTo(50, 6);
+    expect(rects.get("4")!.height).toBeCloseTo(50, 6);
   });
 });

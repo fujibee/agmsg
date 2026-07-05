@@ -13,6 +13,7 @@ import {
   SettingsModal,
 } from "./modals";
 import {
+  applyAtPath,
   classifyDrop,
   clampRatio,
   collectDividers,
@@ -25,6 +26,7 @@ import {
   sameZone,
   spliceOutLeaf,
   swapLeaves,
+  transposeGrid,
   updateRatioAtPath,
   type DividerInfo,
   type DropSide,
@@ -844,16 +846,31 @@ export default function App() {
 
   // Draggable pane dividers (issue #317). Same document-level drag-tracking
   // pattern as startSidebarDrag/startChatDrag above, but the ratio being
-  // dragged belongs to one specific split node (divider.path) rather than a
-  // single flat width/height — updateRatioAtPath's own doc explains why
-  // reusing this path across the whole gesture is safe (a ratio edit never
-  // changes the tree's shape). divider.bounds is that node's OWN un-split
-  // rect (not the whole stage) — converting a pixel delta into a ratio has
-  // to be relative to the parent being split, not the stage as a whole.
+  // dragged belongs to one specific split node rather than a single flat
+  // width/height. For a "single" divider that's just divider.path directly
+  // — updateRatioAtPath's own doc explains why reusing this path across the
+  // whole gesture is safe (a ratio edit never changes the tree's shape).
+  //
+  // For a "grid-segment" divider (issue #317 part 3 — an aligned grid's
+  // per-column/per-row seam, see transposeGrid), the node to drag doesn't
+  // exist yet: grabbing it first LAZILY transposes the aligned grid at
+  // divider.basePath into the orthogonal arrangement, which is what turns
+  // this one segment into its own independent node at
+  // [...basePath, ...segmentPath] — transposeGrid's own doc explains why
+  // this is safe (visually a no-op, so divider.bounds — captured from
+  // BEFORE the transpose — is already correct for the drag math below).
   const startPaneDividerDrag = useCallback((e: React.MouseEvent, windowId: string, divider: DividerInfo) => {
     e.preventDefault();
     const stage = (e.currentTarget as HTMLElement).closest(".stage") as HTMLElement | null;
     if (!stage) return;
+    if (divider.kind === "grid-segment") {
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === windowId ? { ...w, root: applyAtPath(w.root, divider.basePath, transposeGrid) } : w,
+        ),
+      );
+    }
+    const dragPath = divider.kind === "grid-segment" ? [...divider.basePath, ...divider.segmentPath] : divider.path;
     // Captured once at drag-start, not re-measured per mousemove — if the OS
     // window itself is resized mid-drag (rare, and only for the duration of
     // this one gesture), the math below would be against a stale box. Not
@@ -877,7 +894,7 @@ export default function App() {
       const raw = axis === "col" ? (ev.clientX - parentPx.left) / totalPx : (ev.clientY - parentPx.top) / totalPx;
       const ratio = clampRatio(raw, MIN_PANE_PX, totalPx);
       setWindows((prev) =>
-        prev.map((w) => (w.id === windowId ? { ...w, root: updateRatioAtPath(w.root, divider.path, ratio) } : w)),
+        prev.map((w) => (w.id === windowId ? { ...w, root: updateRatioAtPath(w.root, dragPath, ratio) } : w)),
       );
     };
     const onUp = () => {
@@ -1371,7 +1388,11 @@ export default function App() {
             {active !== "room" &&
               activeDividers.map((d) => (
                 <div
-                  key={d.path.join(".") || "root"}
+                  key={
+                    d.kind === "single"
+                      ? `single:${d.path.join(".") || "root"}`
+                      : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
+                  }
                   className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
                   style={{
                     left: `${d.rect.left}%`,

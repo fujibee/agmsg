@@ -58,6 +58,25 @@ export function computeRects(node: SplitNode, rect: PaneRect = FULL_RECT): Map<s
 export type SplitPath = ("a" | "b")[];
 
 /**
+ * Immutably replaces the node at `path` with `fn(nodeAtPath)`. The general
+ * path-walking machinery `updateRatioAtPath` below is one instance of;
+ * `transposeGrid`'s lazy per-segment divider grab is another (see there).
+ * Returns `node` unchanged (same reference) if `path` runs into a leaf
+ * before it's exhausted — same stale-path safety as `updateRatioAtPath`.
+ */
+export function applyAtPath(node: SplitNode, path: SplitPath, fn: (n: SplitNode) => SplitNode): SplitNode {
+  if (path.length === 0) return fn(node);
+  if (node.kind === "leaf") return node;
+  const [head, ...rest] = path;
+  if (head === "a") {
+    const a = applyAtPath(node.a, rest, fn);
+    return a === node.a ? node : { ...node, a };
+  }
+  const b = applyAtPath(node.b, rest, fn);
+  return b === node.b ? node : { ...node, b };
+}
+
+/**
  * Immutably updates the ratio of the `split` node at `path`. Safe to reuse a
  * `path` across an uninterrupted sequence of calls (e.g. every `mousemove`
  * during one divider drag) — a ratio update never changes the tree's shape,
@@ -66,47 +85,196 @@ export type SplitPath = ("a" | "b")[];
  * doc for why paths go stale there).
  */
 export function updateRatioAtPath(node: SplitNode, path: SplitPath, ratio: number): SplitNode {
-  if (path.length === 0) {
-    return node.kind === "split" ? { ...node, ratio } : node;
-  }
-  if (node.kind === "leaf") return node;
-  const [head, ...rest] = path;
-  if (head === "a") {
-    const a = updateRatioAtPath(node.a, rest, ratio);
-    return a === node.a ? node : { ...node, a };
-  }
-  const b = updateRatioAtPath(node.b, rest, ratio);
-  return b === node.b ? node : { ...node, b };
+  return applyAtPath(node, path, (n) => (n.kind === "split" ? { ...n, ratio } : n));
 }
 
-export type DividerInfo = {
-  path: SplitPath;
-  axis: SplitAxis;
-  /** The seam itself — a degenerate 0-width (col) or 0-height (row) slice, for positioning the divider line in the UI. */
-  rect: PaneRect;
-  /** The full UN-split parent rect (what `rect` here was before this node's own split) — drag math needs this to convert a pixel delta back into a ratio, since ratio is relative to the PARENT's size, not the whole stage. */
-  bounds: PaneRect;
-  ratio: number;
-};
+export type DividerInfo =
+  | {
+      kind: "single";
+      path: SplitPath;
+      axis: SplitAxis;
+      /** The seam itself — a degenerate 0-width (col) or 0-height (row) slice, for positioning the divider line in the UI. */
+      rect: PaneRect;
+      /** The full UN-split parent rect (what `rect` here was before this node's own split) — drag math needs this to convert a pixel delta back into a ratio, since ratio is relative to the PARENT's size, not the whole stage. */
+      bounds: PaneRect;
+      ratio: number;
+    }
+  | {
+      kind: "grid-segment";
+      /** Path to the aligned-grid split node itself (BEFORE transposing — see transposeGrid). */
+      basePath: SplitPath;
+      /** Path, within `basePath`'s `a` child's own shape, to this segment's leaf-pair. Doubles as the path to this segment's own independent node once transposeGrid has been applied at `basePath` — the transposed structure mirrors `a`'s shape exactly (see transposeGrid's doc). */
+      segmentPath: SplitPath;
+      axis: SplitAxis;
+      rect: PaneRect;
+      /** This segment's own slice of the grid — already correct for drag math even before transposing, since transposeGrid doesn't change rendered geometry (only which future drags are independent). */
+      bounds: PaneRect;
+      ratio: number;
+    };
 
 /**
- * Walks the tree, returning one `DividerInfo` per internal `split` node —
- * the axis to drag it along, its current ratio, the `path` to feed back
- * into `updateRatioAtPath` while dragging, and both the seam's own rect
- * (positioning) and its parent's full bounds (drag math).
+ * True if `a` and `b` have identical tree SHAPE (same nesting) and the same
+ * ratio at every corresponding split node — i.e. they'd form visually
+ * aligned columns (or rows) if placed side by side, regardless of which
+ * specific panes occupy the leaves. This is the "aligned grid" check
+ * `collectDividers` and `transposeGrid` both use.
+ *
+ * The ratio comparison is intentionally exact (`===`), not a tolerance
+ * range: the moment a manual drag nudges one side's ratio even slightly
+ * off the other's, the grid is no longer aligned and per-segment grabbing
+ * should stop offering itself — falling back to one whole-grid divider is
+ * the confirmed-correct behavior once symmetry breaks (see transposeGrid's
+ * own doc), not a bug to loosen this into tolerating.
+ */
+export function sameShapeAndRatio(a: SplitNode, b: SplitNode): boolean {
+  if (a.kind === "leaf" || b.kind === "leaf") return a.kind === "leaf" && b.kind === "leaf";
+  return a.axis === b.axis && a.ratio === b.ratio && sameShapeAndRatio(a.a, b.a) && sameShapeAndRatio(a.b, b.b);
+}
+
+function leafPaths(node: SplitNode, path: SplitPath = []): SplitPath[] {
+  if (node.kind === "leaf") return [path];
+  return [...leafPaths(node.a, [...path, "a"]), ...leafPaths(node.b, [...path, "b"])];
+}
+
+function orderedLeafRects(node: SplitNode, rect: PaneRect): PaneRect[] {
+  if (node.kind === "leaf") return [rect];
+  const [rectA, rectB] = splitRect(rect, node.axis, node.ratio);
+  return [...orderedLeafRects(node.a, rectA), ...orderedLeafRects(node.b, rectB)];
+}
+
+// One segment per leaf position in `node.a`'s own shape (equivalently
+// `node.b`'s — sameShapeAndRatio guarantees they match), each covering just
+// that segment's own slice of the seam instead of the whole thing.
+function gridSegments(
+  node: Extract<SplitNode, { kind: "split" }>,
+  rect: PaneRect,
+  rectA: PaneRect,
+  basePath: SplitPath,
+): DividerInfo[] {
+  const segmentPaths = leafPaths(node.a);
+  const segmentRects = orderedLeafRects(node.a, rectA);
+  return segmentPaths.map((segmentPath, i) => {
+    const segRect = segmentRects[i];
+    const seam: PaneRect =
+      node.axis === "col"
+        ? { left: rectA.left + rectA.width, top: segRect.top, width: 0, height: segRect.height }
+        : { left: segRect.left, top: rectA.top + rectA.height, width: segRect.width, height: 0 };
+    // This segment's bounds AFTER transposing — what its own independent
+    // node's rect becomes — span the segment's own slice on the axis
+    // node.a/node.b were divided along, but the FULL original rect on the
+    // OTHER axis. E.g. for row(colChain, colChain), a column's eventual
+    // row-node spans that column's own width but the WHOLE original height
+    // (both rows combined), not just the one row segRect came from — using
+    // segRect's height directly here would be wrong (co1/self-review catch:
+    // the naive version undersized every segment's drag bounds to just its
+    // own row/column instead of the full space its transposed node owns).
+    const bounds: PaneRect =
+      node.axis === "col"
+        ? { left: rect.left, top: segRect.top, width: rect.width, height: segRect.height }
+        : { left: segRect.left, top: rect.top, width: segRect.width, height: rect.height };
+    return { kind: "grid-segment", basePath, segmentPath, axis: node.axis, rect: seam, bounds, ratio: node.ratio };
+  });
+}
+
+/**
+ * Walks the tree, returning one `DividerInfo` per internal `split` node's
+ * seam — a plain `"single"` divider spanning the whole seam ordinarily, or,
+ * when that node's two children are themselves an ALIGNED grid (see
+ * sameShapeAndRatio), one `"grid-segment"` divider per column/row instead —
+ * letting each be dragged independently (see transposeGrid). Recursion into
+ * `node.a`/`node.b`'s own children happens unconditionally either way; only
+ * how THIS ONE seam is represented changes.
  */
 export function collectDividers(node: SplitNode, rect: PaneRect = FULL_RECT, path: SplitPath = []): DividerInfo[] {
   if (node.kind === "leaf") return [];
   const [rectA, rectB] = splitRect(rect, node.axis, node.ratio);
-  const seam: PaneRect =
-    node.axis === "col"
-      ? { left: rectA.left + rectA.width, top: rect.top, width: 0, height: rect.height }
-      : { left: rect.left, top: rectA.top + rectA.height, width: rect.width, height: 0 };
-  return [
-    { path, axis: node.axis, rect: seam, bounds: rect, ratio: node.ratio },
-    ...collectDividers(node.a, rectA, [...path, "a"]),
-    ...collectDividers(node.b, rectB, [...path, "b"]),
-  ];
+  const isAlignedGrid = node.a.kind !== "leaf" && node.b.kind !== "leaf" && sameShapeAndRatio(node.a, node.b);
+  const thisSeam: DividerInfo[] = isAlignedGrid
+    ? gridSegments(node, rect, rectA, path)
+    : [
+        {
+          kind: "single",
+          path,
+          axis: node.axis,
+          rect:
+            node.axis === "col"
+              ? { left: rectA.left + rectA.width, top: rect.top, width: 0, height: rect.height }
+              : { left: rect.left, top: rectA.top + rectA.height, width: rect.width, height: 0 },
+          bounds: rect,
+          ratio: node.ratio,
+        },
+      ];
+  return [...thisSeam, ...collectDividers(node.a, rectA, [...path, "a"]), ...collectDividers(node.b, rectB, [...path, "b"])];
+}
+
+function zipPairs(a: SplitNode, b: SplitNode, pairAxis: SplitAxis, pairRatio: number): SplitNode {
+  if (a.kind === "leaf" && b.kind === "leaf") {
+    return { kind: "split", axis: pairAxis, ratio: pairRatio, a, b };
+  }
+  // sameShapeAndRatio (checked by transposeGrid before calling) guarantees
+  // both are "split" here, with matching axis/ratio to each other.
+  const splitA = a as Extract<SplitNode, { kind: "split" }>;
+  const splitB = b as Extract<SplitNode, { kind: "split" }>;
+  return {
+    kind: "split",
+    axis: splitA.axis,
+    ratio: splitA.ratio,
+    a: zipPairs(splitA.a, splitB.a, pairAxis, pairRatio),
+    b: zipPairs(splitA.b, splitB.b, pairAxis, pairRatio),
+  };
+}
+
+/**
+ * Transposes an ALIGNED grid — a split whose two children are themselves
+ * matching chains (same shape, same ratios at every level; see
+ * sameShapeAndRatio) — into the orthogonal arrangement. E.g.
+ * row(colChain, colChain) with identical column ratios on both sides
+ * becomes col(rowChain, rowChain), where each new row-pair has its OWN
+ * (initially identical) ratio, independent of the others:
+ *   row(col(1,2;c), col(3,4;c); r)  ⇄  col(row(1,3;r), row(2,4;r); c)
+ *
+ * Visually a no-op at the moment of transpose regardless of size —
+ * computeRects produces IDENTICAL leaf rects before and after (only which
+ * FUTURE divider drags are independent of each other changes). This is what
+ * makes per-column (or per-row) independent divider dragging possible on an
+ * aligned N-way grid without a true N-ary grid data structure: as long as
+ * the grid stays aligned, grabbing one column's own seam lazily transposes
+ * just that one seam into its own independent node, rather than needing
+ * every divider to already be independently addressable up front.
+ *
+ * Self-inverse ONLY for the 2-column/2-row case (co1 review — the doc here
+ * previously overclaimed this generally): transposing
+ * row(col(1,2;c),col(3,4;c);r) twice does return the original tree, because
+ * the transposed result col(row(1,3;r),row(2,4;r);c) is ITSELF a valid
+ * aligned-grid input (its two children match). For 3+ columns this doesn't
+ * hold — e.g. transposing a 3-column grid produces
+ * col(row(1,4;r), col(row(2,5;r),row(3,6;r);c2); c1), whose own two
+ * top-level children (a 1-level pair vs. a 2-level chain) no longer match
+ * each other, so a second transposeGrid call is just a no-op rather than
+ * reconstructing the original 2-row form. This is fine for how the app
+ * actually uses this: grabbing a segment transposes once and then only
+ * drags that segment's own node — nothing ever needs to un-transpose.
+ *
+ * Returns `node` unchanged if it isn't an aligned grid (not a split whose
+ * two children are themselves matching further-split chains) — the plain
+ * single-divider, whole-grid-drag fallback applies there, same as any
+ * asymmetric or manually-adjusted tree today. Deliberately scoped to
+ * exactly this one shape — a further generalization to partially-aligned
+ * nested arrangements is out of scope (confirmed with koit).
+ */
+export function transposeGrid(node: SplitNode): SplitNode {
+  if (node.kind === "leaf") return node;
+  const { axis, ratio, a, b } = node;
+  if (a.kind === "leaf" || b.kind === "leaf") return node; // not a chain on either side
+  if (!sameShapeAndRatio(a, b)) return node; // not aligned
+  const innerAxis: SplitAxis = axis === "row" ? "col" : "row";
+  return {
+    kind: "split",
+    axis: innerAxis,
+    ratio: a.ratio,
+    a: zipPairs(a.a, b.a, axis, ratio),
+    b: zipPairs(a.b, b.b, axis, ratio),
+  };
 }
 
 /**
