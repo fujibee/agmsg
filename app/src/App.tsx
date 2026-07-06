@@ -547,6 +547,32 @@ export default function App() {
     [cmdName, spawnTypes, team],
   );
 
+  // External-spawn entry point, paired with the single-instance handler in
+  // lib.rs: `agmsg-app spawn <team> <role>` run from outside the GUI (a
+  // script, an orchestrator agent, a shell alias) emits an "external-spawn"
+  // event carrying [team, role]. We validate it against the live member
+  // registry here — the Rust side forwards the raw strings without acting on
+  // them — so the trust boundary matches a manual member click. An unknown
+  // team/role is logged rather than silently dropped.
+  useEffect(() => {
+    const p = listen<string[]>("external-spawn", (e) => {
+      const [evTeam, role] = e.payload;
+      if (evTeam !== team) {
+        console.warn(`[external-spawn] ignored: team "${evTeam}" is not the active team "${team}"`);
+        return;
+      }
+      const member = members.find((m) => m.name === role);
+      if (!member) {
+        console.warn(`[external-spawn] ignored: no member "${role}" in team "${team}"`);
+        return;
+      }
+      // spawnMember is idempotent — an already-running member just gets its
+      // window focused instead of opening a duplicate pane.
+      void spawnMember(member);
+    });
+    return () => void p.then((u) => u());
+  }, [team, members, spawnMember]);
+
   // Close one pane (from its header's × or the context menu). If it was the
   // last pane in its window, the window/tab disappears too.
   const closeWindowPane = useCallback(
