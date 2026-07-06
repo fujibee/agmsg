@@ -240,6 +240,60 @@ settings_file() {
   [ "$3" = "$sp" ]
 }
 
+# --- session-start.sh role-aware resume directive (#339) ---
+
+# Write a role-session record into the isolated skill dir's run/.
+_seed_role_record() {
+  local team="$1" agent="$2" sid="$3" proj="$4" type="${5:-claude-code}"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"
+  ' _ "$SCRIPTS" "$team" "$agent" "$sid" "$proj" "$type"
+}
+
+@test "session-start: a resumed role's sid emits the role-filtered directive (#339)" {
+  local sp="$TEST_PROJECT"
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$sp" >/dev/null
+  _seed_role_record team alice "sid-resumed" "$sp" claude-code
+
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$sp" <<< '{"session_id":"sid-resumed"}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"resumed role"* ]]
+  [[ "$output" == *"acting as alice"* ]]
+  # The 4th watch.sh arg restricts receive to the role.
+  local cmdline; cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
+  eval "set -- $cmdline"
+  [ "$5" = "alice" ]
+}
+
+@test "session-start: an unrecorded sid emits the generic directive (#339)" {
+  local sp="$TEST_PROJECT"
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$sp" >/dev/null
+  # no record for this sid
+
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$sp" <<< '{"session_id":"sid-unknown"}'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"resumed role"* ]]
+  [[ "$output" == *"invoke the Monitor tool"* ]]
+  # Generic directive: watch.sh has no 4th (role) arg.
+  local cmdline; cmdline=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*command: //p')
+  eval "set -- $cmdline"
+  [ "$#" -eq 4 ]
+}
+
+@test "session-start: a record for a role not registered here is ignored (#339)" {
+  local sp="$TEST_PROJECT"
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$sp" >/dev/null
+  # Same sid, but recorded for a (team, agent) that is NOT registered in this
+  # project -- a cross-project sid collision must not mis-seat this session.
+  _seed_role_record team ghost "sid-resumed" "/some/other/proj" claude-code
+
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$sp" <<< '{"session_id":"sid-resumed"}'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"resumed role"* ]]
+  [[ "$output" == *"invoke the Monitor tool"* ]]
+}
+
 @test "delivery set turn: emits AGMSG-DIRECTIVE to stop any running watcher" {
   run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
   [[ "$output" =~ "AGMSG-DIRECTIVE" ]]

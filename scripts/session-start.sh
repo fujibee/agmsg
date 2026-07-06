@@ -44,6 +44,8 @@ source "$SCRIPT_DIR/lib/hash.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"  # role->session reverse lookup (#339)
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -237,11 +239,58 @@ EOF
   fi
 fi
 
+# --- Role-aware resume (#339). ---
+# If this session's bare sid was recorded as a role's seat (by actas-claim, or
+# codex actas), and that (team, agent) is registered for THIS project, emit the
+# ROLE-FILTERED directive instead of the generic unfiltered one: watch.sh with a
+# 4th <agent> arg restricts receive to that role AND re-claims its exclusivity
+# lock. This covers a manual `claude --resume <uuid>` that bypasses spawn's actas
+# boot prompt -- the resumed session re-arms as its role automatically. Fail-open:
+# no record, no project match, or an unreadable record => generic directive.
+ROLE_NAME=""; ROLE_TEAM=""
+_bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID" 2>/dev/null || printf '%s' "$SESSION_ID")"
+_rec="$(agmsg_role_session_lookup_by_sid "$_bare_sid" 2>/dev/null || true)"
+if [ -n "$_rec" ]; then
+  _r_agent="$(printf '%s\n' "$_rec" | sed -n 's/^agent=//p' | head -1)"
+  _r_team="$(printf '%s\n' "$_rec" | sed -n 's/^team=//p' | head -1)"
+  # Guard against a cross-project sid collision: only honor the record when its
+  # (team, agent) is actually one of this project's registered pairs.
+  if [ -n "$_r_agent" ] && [ -n "$_r_team" ] \
+     && printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$_r_team" "$_r_agent")"; then
+    ROLE_NAME="$_r_agent"; ROLE_TEAM="$_r_team"
+  fi
+fi
+
 WATCH="$SKILL_DIR/scripts/watch.sh"
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe
 # (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
-# safely for shell re-execution (#188).
+# safely for shell re-execution (#188). A resumed role adds the 4th <agent> arg.
+if [ -n "$ROLE_NAME" ]; then
+  WATCH_COMMAND="$(printf '%q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "$ROLE_NAME")"
+  cat <<EOF
+AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`): this
+session was recorded as that role's seat, so invoke the Monitor tool now with the
+following parameters, before any other action in this session.
+
+  command: $WATCH_COMMAND
+  description: agmsg inbox stream (acting as $ROLE_NAME)
+  persistent: true
+
+The 4th argument restricts receive to \`$ROLE_NAME\` only and re-claims its actas
+exclusivity lock — a resume restores context but not runtime state, so this
+re-establishes the role. Send with \`send.sh ... $ROLE_NAME ...\` (this session's
+active FROM is \`$ROLE_NAME\`). Each output line is one message:
+\`<ts> | <team> | <from> → <to> | <body>\`. React as they arrive.
+
+Note: On a /clear or --continue/--resume re-fire, you may shortly see a
+"Monitor … stopped" notification for an earlier 'agmsg inbox stream'
+task. That is the previous watcher being cleaned up — expected. Do NOT
+relaunch it; the Monitor you invoke from this directive replaces it.
+EOF
+  exit 0
+fi
+
 WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
 
 cat <<EOF
