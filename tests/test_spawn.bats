@@ -262,6 +262,39 @@ seed_resumable() {
   [[ "$output" != *"--resume"* ]]
 }
 
+@test "spawn: codex resumes via the 'resume' subcommand right after the cli (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  # Record a codex role->session and a matching rollout (codex's transcript).
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-1" "$PROJ" codex
+  mkdir -p "$HOME/.codex/sessions/2026/07/05"
+  : > "$HOME/.codex/sessions/2026/07/05/rollout-2026-07-05T10-00-00-cx-uuid-1.jsonl"
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Subcommand shape: `codex resume cx-uuid-1 ...` -- resume token right after cli.
+  [[ "$output" == *"codex resume cx-uuid-1"* ]]
+  [[ "$output" == *"actas"* ]]
+  # codex has no name_arg, so no -n.
+  [[ "$output" != *" -n "* ]]
+}
+
+@test "spawn: codex boots fresh when no rollout backs the record (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-gone" "$PROJ" codex   # record, no rollout
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"resume"* ]]
+}
+
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
   # A same-type spawn (claude-code from a claude-code session) must not leak the
   # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the

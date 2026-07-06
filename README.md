@@ -235,8 +235,12 @@ a role, agmsg records `(team, agent) → session id`, and `spawn` names the sess
 conversation**, not as a blank session. Pass `--fresh` to force a brand-new
 session, and re-running `actas` on resume is what re-arms the watcher, the
 exclusivity lock, and the active FROM (resume restores context only). If the old
-transcript is gone, spawn silently falls back to a fresh session. (Claude Code
-only for now — types without a resume flag always boot fresh.)
+transcript is gone, spawn silently falls back to a fresh session. Supported for
+**Claude Code** (`--resume <uuid>`) and **Codex** (`codex resume <id>`); other
+types have no resume equivalent and always boot fresh. (Codex has no session
+display-name flag, so its sessions are not renamed `<team>-<agent>`, and it
+records its resumable session at `actas` time only when its thread id is
+unambiguous — otherwise it just boots fresh.)
 
 For sessions you start by hand (`claude`, then `/agmsg actas <name>`) rather than
 via `spawn`, rename the session to the convention so the `/resume` picker and pane
