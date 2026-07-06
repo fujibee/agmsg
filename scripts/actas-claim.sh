@@ -90,7 +90,7 @@ done <<< "$TEAMS"
 BARE_SID="$(agmsg_instance_bare_sid "$SESSION_ID")"
 while IFS= read -r team; do
   [ -z "$team" ] && continue
-  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT" || true
+  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT" "$TYPE" || true
 done <<< "$TEAMS"
 
 # Print a line describing each claimed team. One team per most projects but

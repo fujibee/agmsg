@@ -62,15 +62,28 @@ fake_session() {
   [ "$(agmsg_role_session_uuid T alice)" = "sid-abc" ]
 }
 
-@test "record: stores name/team/agent/project/updated_at fields" {
+@test "record: stores session/name/team/agent/type/project/updated_at fields" {
+  agmsg_role_session_record T alice "sid-abc" /tmp/proj claude-code
+  local f; f=$(_agmsg_role_session_path T alice)
+  grep -q "^session=sid-abc$"    "$f"
+  grep -q "^name=T-alice$"       "$f"
+  grep -q "^team=T$"             "$f"
+  grep -q "^agent=alice$"        "$f"
+  grep -q "^type=claude-code$"   "$f"
+  grep -q "^project=/tmp/proj$"  "$f"
+  grep -q "^updated_at="         "$f"
+}
+
+@test "record: type is empty when omitted (back-compat 4-arg call)" {
   agmsg_role_session_record T alice "sid-abc" /tmp/proj
   local f; f=$(_agmsg_role_session_path T alice)
-  grep -q "^session=sid-abc$"   "$f"
-  grep -q "^name=T-alice$"      "$f"
-  grep -q "^team=T$"            "$f"
-  grep -q "^agent=alice$"       "$f"
-  grep -q "^project=/tmp/proj$" "$f"
-  grep -q "^updated_at="        "$f"
+  grep -q "^type=$" "$f"
+}
+
+@test "get: reads back an arbitrary field (type)" {
+  agmsg_role_session_record T alice "sid-abc" /tmp/proj claude-code
+  [ "$(agmsg_role_session_get T alice type)" = "claude-code" ]
+  [ "$(agmsg_role_session_get T alice team)" = "T" ]
 }
 
 @test "record: name= joins team and agent whole (halves may contain '-')" {
@@ -148,6 +161,8 @@ fake_session() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "status=ok" ]]
   [ "$(agmsg_role_session_uuid T alice)" = "sid-me" ]
+  # The claim knows the type, so the record captures it (for the resurrect hook).
+  [ "$(agmsg_role_session_get T alice type)" = "claude-code" ]
 }
 
 @test "actas-claim: records the BARE sid when handed a composite instance id" {

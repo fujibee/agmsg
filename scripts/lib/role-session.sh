@@ -62,10 +62,13 @@ _agmsg_role_session_path() {
 #                          itself contain '-')
 #   team=<team>            stored explicitly so by-sid consumers (PR-E) recover
 #   agent=<agent>          the role without re-parsing the joined name
+#   type=<type>            the agent type (claude-code/...); the resurrect hook
+#                          (PR-D) needs it to rebuild the role's boot command
+#                          from the type manifest. Empty when unknown.
 #   project=<project>      the resolved project root
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
 agmsg_role_session_record() {
-  local team="$1" agent="$2" bare_sid="$3" project="${4:-}"
+  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts
   path="$(_agmsg_role_session_path "$team" "$agent")" || return 0
@@ -78,11 +81,21 @@ agmsg_role_session_record() {
     printf 'name=%s-%s\n' "$team" "$agent"
     printf 'team=%s\n' "$team"
     printf 'agent=%s\n' "$agent"
+    printf 'type=%s\n' "$type"
     printf 'project=%s\n' "$project"
     printf 'updated_at=%s\n' "$ts"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   return 0
+}
+
+# Read a single field from a role's record by (team, agent). Empty if absent.
+# Convenience getter used by consumers that need one field (e.g. the resurrect
+# hook reading `type`); mirrors agmsg_role_session_uuid's read of `session`.
+agmsg_role_session_get() {
+  local team="$1" agent="$2" key="$3" path
+  path="$(_agmsg_role_session_path "$team" "$agent")" || return 0
+  _agmsg_role_session_field "$path" "$key"
 }
 
 # Read a single field from a record file. Empty if file/field absent.

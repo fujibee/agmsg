@@ -226,6 +226,43 @@ By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control m
 
 Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
 
+### Bring a role back with its context (session resume & tmux-resurrect)
+
+A role remembers the session that last embodied it. The moment an agent `actas`'s
+a role, agmsg records `(team, agent) → session id`, and `spawn` names the session
+`<team>-<agent>` (Claude Code's `-n`). So when you re-`spawn` a role — after a
+`despawn`, a crash, or a machine restart — it comes back **resumed into its prior
+conversation**, not as a blank session. Pass `--fresh` to force a brand-new
+session, and re-running `actas` on resume is what re-arms the watcher, the
+exclusivity lock, and the active FROM (resume restores context only). If the old
+transcript is gone, spawn silently falls back to a fresh session. (Claude Code
+only for now — types without a resume flag always boot fresh.)
+
+For sessions you start by hand (`claude`, then `/agmsg actas <name>`) rather than
+via `spawn`, rename the session to the convention so the `/resume` picker and pane
+titles stay meaningful:
+
+```
+/rename <team>-<agent>
+```
+
+**tmux-resurrect.** If you use [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect),
+add the restore-time hook so each role pane comes back **resumed into its
+session** after a tmux server restart:
+
+```tmux
+# ~/.tmux.conf
+set -g @resurrect-hook-post-restore-all '~/.agents/skills/agmsg/scripts/internal/resurrect-panes.sh'
+```
+
+Do **not** add the agent CLI to `@resurrect-processes` — a verbatim argv re-run is
+wrong both ways (a fresh-boot argv starts *another* new session; a name-based
+resume argv stalls on the interactive picker). The hook instead lets resurrect
+restore panes as plain shells, then relaunches each role pane into its current
+session at restore time. It only touches panes that came back as a shell (it never
+clobbers a pane already running something) and fails open — no records, no save
+file, or a role whose transcript is gone just boots fresh.
+
 ## Delivery modes
 
 How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
