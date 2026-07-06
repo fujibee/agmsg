@@ -49,6 +49,11 @@ set -euo pipefail
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
 #                      `model_arg=`. Refused for a type with no model_arg.
+#   --fresh            force a brand-new session even when the role has a
+#                      resumable prior session. Without it, a type that supports
+#                      resume (manifest `resume_arg=`) is brought back into its
+#                      last session's context when that transcript still exists
+#                      (#339); with it, spawn always boots fresh.
 #
 # Spawn options: extra CLI args to always pass a given type's launched
 # binary (e.g. a default permission mode or sandbox policy), configured
@@ -81,6 +86,8 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/spawn-options.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record lookup (#339)
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -131,6 +138,7 @@ TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
 MODEL_ID=""          # --model: pass-through model id for the launched CLI
+FRESH=0              # --fresh: force a fresh session even if the role is resumable
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -147,6 +155,7 @@ while [ $# -gt 0 ]; do
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -230,6 +239,15 @@ PROMPT_ARG="$(agmsg_type_get "$AGENT_TYPE" prompt_arg)"
 NAME_ARG="$(agmsg_type_get "$AGENT_TYPE" name_arg)"
 # SESSION_NAME (<team>-<agent>) is computed AFTER team resolution below, since
 # --team may be resolved from the project rather than passed on the CLI.
+
+# Resume support (#339). A type whose manifest declares `resume_arg=` (claude-
+# code's --resume) CAN be brought back into a prior session's context. When the
+# role has a recorded session (from actas-claim, PR-A) whose transcript still
+# exists, spawn resumes it instead of booting fresh -- so a despawned/dead role
+# comes back where it left off. Gated on the type's own transcript-existence
+# driver hook (the on-disk layout is CLI-internal). The whole path is decided
+# after team resolution below; here we just read the flag.
+RESUME_ARG="$(agmsg_type_get "$AGENT_TYPE" resume_arg)"
 
 # Session-identity env vars to strip from a spawned same-type child (issue #294).
 # A terminal launcher (tmux new-window/split-window, a new OS terminal) copies
@@ -323,6 +341,35 @@ fi
 # Role's session display name (#339): now that TEAM is final, join it to the
 # agent name. Emitted into the boot script when the type declares name_arg.
 SESSION_NAME="${TEAM}-${NAME}"
+
+# Resume-or-fresh decision (#339). RESUME_UUID stays empty (=> fresh boot) unless
+# ALL of these hold, each a fail-open gate:
+#   - the type supports resume (resume_arg declared),
+#   - the caller did not force --fresh,
+#   - a role-session record resolves to a bare session id (PR-A wrote it),
+#   - the type's transcript-existence hook confirms that session still exists
+#     (a stale record whose transcript was deleted must fall back to fresh --
+#     `--resume <gone-uuid>` errors out rather than starting fresh, verified).
+RESUME_UUID=""
+if [ -n "$RESUME_ARG" ] && [ "$FRESH" -eq 0 ]; then
+  _cand_uuid="$(agmsg_role_session_uuid "$TEAM" "$NAME" 2>/dev/null || true)"
+  if [ -n "$_cand_uuid" ]; then
+    # Load the type's transcript-existence driver hook, if it ships one. The
+    # on-disk transcript layout is CLI-internal, so the check lives in the type
+    # driver (scripts/drivers/types/<type>/_transcript-exists.sh defining
+    # agmsg_transcript_exists), never in core. Absent hook => cannot verify =>
+    # fail open to fresh.
+    _tdir="$(agmsg_type_dir "$AGENT_TYPE" 2>/dev/null || true)"
+    if [ -n "$_tdir" ] && [ -f "$_tdir/_transcript-exists.sh" ]; then
+      # shellcheck disable=SC1090
+      . "$_tdir/_transcript-exists.sh"
+      if command -v agmsg_transcript_exists >/dev/null 2>&1 \
+         && agmsg_transcript_exists "$_cand_uuid" "$PROJECT"; then
+        RESUME_UUID="$_cand_uuid"
+      fi
+    fi
+  fi
+fi
 
 # --- Pre-flight: refuse if <name> is currently held by another live session ---
 # The child's actas flow would refuse anyway; failing here avoids launching a
@@ -429,6 +476,11 @@ esac
     # Name the session after its role (#339) when the type supports it. The flag
     # is bare manifest data; the name is %q-quoted.
     [ -n "$NAME_ARG" ] && printf ' %s %q' "$NAME_ARG" "$SESSION_NAME"
+    # Resume the role's prior session (#339) when one was resolved above. The
+    # actas prompt is still passed (below, in BOTH branches): resume restores
+    # context only, so re-running actas re-establishes the watcher, the lock,
+    # and the active FROM (claim is idempotent for the same session id).
+    [ -n "$RESUME_UUID" ] && printf ' %s %q' "$RESUME_ARG" "$RESUME_UUID"
     [ -n "$PROMPT_ARG" ] && printf ' %s' "$PROMPT_ARG"
     printf ' %q\n' "$ACTAS_PROMPT"
   fi

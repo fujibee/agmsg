@@ -186,6 +186,82 @@ teardown() {
   [[ "$output" != *"gteam-bob"* ]]
 }
 
+# Seed a role-session record + its transcript so spawn's resume path fires.
+# Mirrors spawn's own project normalization + the driver's munging so the paths
+# line up. With want_transcript=0 the record exists but the transcript does not
+# (stale record → spawn must fall back to fresh).
+seed_resumable() {
+  local team="$1" agent="$2" uuid="$3" proj="$4" want_transcript="${5:-1}"
+  local norm munged
+  export SKILL_DIR="$TEST_SKILL_DIR"   # both libs below require it at source time
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  norm="$(cd "$proj" && pwd)"
+  norm="$(agmsg_normalize_project_path "$norm")"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record "$team" "$agent" "$uuid" "$norm"
+  if [ "$want_transcript" -eq 1 ]; then
+    munged="$(printf '%s' "$norm" | LC_ALL=C sed 's/[^A-Za-z0-9-]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$munged"
+    : > "$HOME/.claude/projects/$munged/$uuid.jsonl"
+  fi
+}
+
+@test "spawn: resumes the role's prior session when record + transcript exist (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Resumed by uuid, still named after the role, still runs the actas prompt.
+  [[ "$output" == *"--resume sess-uuid-1"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: --fresh forces a fresh session even when resumable (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --fresh
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]   # naming still applies
+}
+
+@test "spawn: falls back to fresh when the record's transcript is gone (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 0   # record only, no transcript
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a fresh role (no record) boots fresh (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a type without resume_arg never resumes (#339)" {
+  # gemini has no resume_arg in its manifest, so even with a record present the
+  # boot must be fresh (and gemini also has no name_arg, so no -n either).
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  seed_resumable gteam bob "sess-uuid-9" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
   # A same-type spawn (claude-code from a claude-code session) must not leak the
   # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the
