@@ -63,6 +63,25 @@ teardown() { teardown_test_env; }
   ! agmsg_instance_is_composite "sess.12a"
 }
 
+# --- agmsg_instance_bare_sid ---
+
+@test "bare_sid: strips the pid from a composite token" {
+  [ "$(agmsg_instance_bare_sid "sess.1234")" = "sess" ]
+}
+
+@test "bare_sid: UUID-shaped composite yields the bare UUID" {
+  [ "$(agmsg_instance_bare_sid "11111111-2222-3333-4444-555555555555.987")" = "11111111-2222-3333-4444-555555555555" ]
+}
+
+@test "bare_sid: a bare sid passes through unchanged" {
+  [ "$(agmsg_instance_bare_sid "sess")" = "sess" ]
+}
+
+@test "bare_sid: a non-composite token with a dot but non-numeric suffix is unchanged" {
+  # "sess.12a" is NOT composite (suffix not all-digits), so it is a bare sid.
+  [ "$(agmsg_instance_bare_sid "sess.12a")" = "sess.12a" ]
+}
+
 # --- agmsg_instance_alive ---
 
 @test "instance_alive: composite with a live pid is alive" {
