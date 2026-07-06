@@ -606,13 +606,16 @@ launch_in_herdr() {
     new_id="$(printf '%s' "$resp" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')"
     [ -n "$new_id" ] || die "herdr pane split: could not extract pane_id from response: $resp"
   fi
-  herdr pane rename "$new_id" "$NAME" 2>/dev/null || true
+  herdr pane rename "$new_id" "$NAME" >/dev/null 2>&1 || true
   herdr pane run "$new_id" "$BOOT" 2>/dev/null \
     || die "herdr pane run failed for pane $new_id"
   # Record placement with herdr: scheme tag. The herdr pane_id contains ":"
   # (e.g. wC:pN), so despawn strips the prefix with ${id#herdr:}.
+  local _spawn_rec
+  _spawn_rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+  mkdir -p "$(dirname "$_spawn_rec")"
   printf 'herdr:%s\t%s\t%s\n' "$new_id" "$PROJECT" "$AGENT_TYPE" \
-    > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
+    > "$_spawn_rec" 2>/dev/null || true
 }
 
 place_and_launch() {
