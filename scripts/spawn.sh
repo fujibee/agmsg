@@ -427,23 +427,27 @@ esac
     printf '  --initial-input %q\n' "$ACTAS_PROMPT"
   else
     # Direct-CLI launch:
-    # `<cli> [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<resume_arg> <uuid>] [<prompt_arg>] "/<cmd> actas <name>"`.
+    # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
     # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
     # above) that may itself be several tokens (e.g. `opencode run --interactive`).
-    # model_arg is the manifest flag spelling (not %q-quoted — a bare flag like
-    # --model); the model id and every spawn-options token are quoted. The
-    # role-identity tail (name/resume/prompt_arg + the actas prompt, #339) is
-    # emitted by agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
+    # The resume head (#339) is emitted RIGHT AFTER the cli, before all other
+    # args: mandatory for a subcommand-shaped resume (codex `resume <id>`),
+    # harmless for a flag-shaped one (claude `--resume <id>`) -- see
+    # agmsg_role_resume_head. model_arg is the manifest flag spelling (bare, not
+    # %q-quoted); the model id and every spawn-options token are quoted. The
+    # role-identity tail (name/prompt_arg + the actas prompt) is emitted by
+    # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
     printf '%s' "$CLI_BIN"
+    agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
       printf ' %q' "$_tok"
     done
-    # Role-identity tail: name the session, resume its prior session when one was
-    # resolved (empty RESUME_UUID => fresh), and pass the actas prompt in BOTH
-    # cases -- resume restores context only, so the actas re-run re-establishes
-    # the watcher, the lock, and the active FROM (claim is idempotent per sid).
-    agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$RESUME_UUID" "$ACTAS_PROMPT"
+    # Role-identity tail: name the session and pass the actas prompt. The actas
+    # prompt runs in BOTH fresh and resume cases -- resume restores context only,
+    # so the actas re-run re-establishes the watcher, the lock, and the active
+    # FROM (claim is idempotent per sid).
+    agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
     printf '\n'
   fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits

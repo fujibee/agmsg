@@ -118,7 +118,9 @@ agmsg_resurrect_plan() {
     proj="${cpath#:}"
     uuid="$(agmsg_role_resume_uuid "$rty" "${teams[$idx]}" "${agents[$idx]}" "$proj" 2>/dev/null || true)"
     prompt="$(agmsg_actas_prompt "$rty" "${agents[$idx]}")"
-    line="$cli$(agmsg_role_cli_args "$rty" "${names[$idx]}" "$uuid" "$prompt")"
+    # Resume head right after the cli (cli-immediately-after convention), then
+    # the name/prompt tail -- same order spawn emits.
+    line="$cli$(agmsg_role_resume_head "$rty" "$uuid")$(agmsg_role_cli_args "$rty" "${names[$idx]}" "$prompt")"
     target="${session}:${windex}.${pindex}"
     printf '%s\t%s\n' "$target" "$line"
   done < "$save"

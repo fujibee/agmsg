@@ -52,27 +52,38 @@ agmsg_role_resume_uuid() {
   printf '%s' "$cand"
 }
 
-# Emit the role-identity CLI args for <type>, in the order every launcher agrees
-# on: [name_arg <session_name>] [resume_arg <uuid>] [prompt_arg] <prompt>. Each
-# token is space-prefixed; flags are bare manifest data, values are %q-quoted.
-# The caller has already emitted the cli binary (and, for spawn, model +
-# spawn-options). A non-empty <resume_uuid> adds the resume flag; empty => fresh.
+# Emit the resume HEAD for <type>: the manifest `resume_arg` value followed by
+# <resume_uuid>, or nothing when the uuid is empty (=> fresh boot). Space-prefixed;
+# resume_arg is emitted VERBATIM (bare manifest data), the uuid %q-quoted.
 #
-# Resume shape: this assumes the FLAG form `<resume_arg> <uuid>` placed among the
-# CLI's options (claude-code's `--resume <uuid>`). Some CLIs instead resume via a
-# SUBCOMMAND that must lead the argv, e.g. codex 0.142's `codex resume <id>
-# [prompt]`. Wiring one up would need a manifest hint for the emission shape and a
-# branch here (subcommand => emit right after the cli, before other flags), not
-# just a different resume_arg string. #339 is claude-code-scoped; a codex resume
-# is a deliberate follow-up (out of scope here).
-agmsg_role_cli_args() {
-  local type="$1" session_name="$2" resume_uuid="$3" prompt="$4"
-  local name_arg resume_arg prompt_arg
-  name_arg="$(agmsg_type_get "$type" name_arg)"
+# One-key, cli-immediately-after convention: a single manifest key `resume_arg`
+# carries the resume token in whatever shape the CLI wants -- a FLAG
+# ('--resume', claude-code) or a SUBCOMMAND ('resume', codex 0.142's
+# `codex resume <id> [prompt]`). Callers MUST emit this head right after the cli
+# binary and before any other args. That position is mandatory for the subcommand
+# shape (a subcommand must lead the argv) and harmless for the flag shape (flags
+# are order-independent), so one emission order serves both -- no per-shape branch
+# and no second manifest key.
+agmsg_role_resume_head() {
+  local type="$1" resume_uuid="$2" resume_arg
+  [ -n "$resume_uuid" ] || return 0
   resume_arg="$(agmsg_type_get "$type" resume_arg)"
+  [ -n "$resume_arg" ] || return 0
+  printf ' %s %q' "$resume_arg" "$resume_uuid"
+}
+
+# Emit the role-identity TAIL for <type>: [name_arg <session_name>] [prompt_arg]
+# <prompt>. Space-prefixed; flags are bare manifest data, values are %q-quoted.
+# The caller has already emitted the cli, the resume head (agmsg_role_resume_head),
+# and -- for spawn -- model + spawn-options. The resume head is separate because
+# it must sit right after the cli (see the convention above); name/prompt are
+# order-independent and live here.
+agmsg_role_cli_args() {
+  local type="$1" session_name="$2" prompt="$3"
+  local name_arg prompt_arg
+  name_arg="$(agmsg_type_get "$type" name_arg)"
   prompt_arg="$(agmsg_type_get "$type" prompt_arg)"
   [ -n "$name_arg" ] && printf ' %s %q' "$name_arg" "$session_name"
-  [ -n "$resume_uuid" ] && [ -n "$resume_arg" ] && printf ' %s %q' "$resume_arg" "$resume_uuid"
   [ -n "$prompt_arg" ] && printf ' %s' "$prompt_arg"
   printf ' %q' "$prompt"
 }
