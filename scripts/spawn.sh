@@ -437,13 +437,23 @@ launch_in_tmux() {
   # the boot script's filename (boot-XXXXXX). `automatic-rename off` keeps the
   # name from being clobbered once the boot script runs the CLI / drops to a
   # shell.
+  # On Windows (MSYS2/Git Bash + psmux), tmux hands the command token to
+  # CreateProcess/ShellExecute. An extensionless boot script has no file
+  # association, so Windows shows an "Open with" dialog instead of executing
+  # it (#282 follow-up). Prefix `bash -l` so the interpreter is an .exe
+  # Windows can resolve — matches launch_windows_terminal's pattern.
+  local boot_argv=("$BOOT")
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) boot_argv=(bash -l "$BOOT") ;;
+  esac
+
   local target_id
   if [ "$TMUX_TARGET" = "window" ]; then
-    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "$BOOT")"
+    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "${boot_argv[@]}")"
     tmux set-window-option -t "$target_id" automatic-rename off 2>/dev/null || true
   else
     local dir="-h"; [ "$SPLIT" = "v" ] && dir="-v"
-    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "$BOOT")"
+    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "${boot_argv[@]}")"
     tmux select-pane -t "$target_id" -T "$NAME" 2>/dev/null || true
   fi
   # Record placement so `despawn --force` can tear this member down even if its
