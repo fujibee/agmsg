@@ -440,6 +440,8 @@ while true; do
           "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
           if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
             tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
+          elif [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+            herdr pane close "$HERDR_PANE_ID" 2>/dev/null || true
           else
             echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
           fi

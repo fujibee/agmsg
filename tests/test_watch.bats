@@ -14,6 +14,9 @@ setup() {
   # the walk can produce different instance IDs. Pin to bare-sid on MSYS2 so
   # both contexts agree deterministically.
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export AGMSG_AGENT_PID="" ;; esac
+  # Never inherit real herdr env from the test runner to prevent accidental
+  # pane close on ctrl:despawn.
+  unset HERDR_PANE_ID HERDR_ENV
   export PROJ="/tmp/agmsg-watch-proj"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
@@ -613,4 +616,44 @@ _read_at_for_body() {
   # Alice's exclusive ready sentinel means this broad watcher must defer —
   # it must NOT have consumed the read state that alice's own watcher owns.
   [ -z "$(_read_at_for_body "M-broad-guard-alice")" ]
+}
+
+@test "watch: ctrl:despawn calls herdr pane close when HERDR_PANE_ID is set" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+
+  # Set up a fake herdr binary.
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stub_bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  cat > "$stub_bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$herdr_log"
+echo '{"id":"cli:pane:close","result":{"type":"ok"}}'
+STUB
+  chmod +x "$stub_bin/herdr"
+
+  setup_live_owner "$TEST_SKILL_DIR/run" sess-herdr
+
+  # Launch watcher with HERDR_PANE_ID set (simulating a herdr-spawned agent).
+  AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE \
+    HERDR_PANE_ID="wC:p42" HERDR_ENV=1 PATH="$stub_bin:$PATH" \
+    bash "$SCRIPTS/watch.sh" sess-herdr "$PROJ" claude-code alice \
+    >/dev/null 2>&1 &
+  local wpid=$! i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.5
+  done
+  [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
+
+  bash "$SCRIPTS/send.sh" team boss alice "ctrl:despawn" >/dev/null
+  # Wait for the watcher to process the message and exit.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$wpid" 2>/dev/null || break; sleep 0.5
+  done
+
+  # herdr pane close was called with the watcher's own pane id.
+  [ -f "$herdr_log" ]
+  grep -q "pane close wC:p42" "$herdr_log"
+
+  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }

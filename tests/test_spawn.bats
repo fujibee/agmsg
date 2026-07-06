@@ -22,9 +22,13 @@ EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
 
-  # Never inherit a real tmux server from the test runner — force the
-  # OS-terminal path, which we redirect into record.sh via a {cmd} template.
+  # Never inherit a real tmux server or herdr env from the test runner —
+  # force the OS-terminal path, which we redirect into record.sh via a {cmd}
+  # template. Unsetting HERDR_ENV/HERDR_PANE_ID is critical when the test
+  # runner itself is inside herdr: a real herdr pane split would affect the
+  # live session.
   unset TMUX
+  unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
 
   export PROJ="$TEST_SKILL_DIR/proj"
@@ -948,4 +952,119 @@ EOF
   # ...and the bare boot path is still the launched command.
   run grep -E 'split-window .* /.*boot-' "$cap"
   [ "$status" -eq 0 ]
+}
+
+# --- herdr placement ---
+
+# Helper: set up a fake herdr binary that records calls and returns canned JSON.
+_setup_fake_herdr() {
+  local herdr_stub="$STUB_BIN/herdr"
+  export HERDR_CALL_LOG="$TEST_SKILL_DIR/herdr-calls.log"
+  cat > "$herdr_stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HERDR_CALL_LOG"
+case "$1/$2" in
+  pane/split)
+    echo '{"id":"cli:pane:split","result":{"pane":{"pane_id":"wT:pN","tab_id":"wT:tA"},"type":"pane_info"}}'
+    ;;
+  pane/rename|pane/run|pane/close)
+    echo '{"id":"cli:pane:'"$2"'","result":{"type":"ok"}}'
+    ;;
+  tab/create)
+    echo '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"wT:pR","tab_id":"wT:tN"},"tab":{"tab_id":"wT:tN","label":"test"},"type":"tab_created"}}'
+    ;;
+  tab/close)
+    echo '{"id":"cli:tab:close","result":{"type":"ok"}}'
+    ;;
+  *)
+    echo '{"error":"unknown stub call: '"$*"'}' >&2
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "$herdr_stub"
+  export HERDR_ENV=1
+  export HERDR_PANE_ID="wT:pSelf"
+  export HERDR_WORKSPACE_ID="wT"
+  # Clear the terminal template so spawn does not take the template path.
+  unset AGMSG_TERMINAL
+  # Ensure the run/ directory exists for placement records.
+  mkdir -p "$TEST_SKILL_DIR/run"
+}
+
+@test "spawn: herdr split — launches in a herdr pane with herdr: placement record" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"spawned claude-code 'alice' in herdr"* ]]
+
+  # herdr was called: pane split, pane rename, pane run.
+  grep -q "pane split wT:pSelf --direction right --no-focus" "$HERDR_CALL_LOG"
+  grep -q "pane rename wT:pN alice" "$HERDR_CALL_LOG"
+  grep -q "pane run wT:pN" "$HERDR_CALL_LOG"
+
+  # Placement record uses herdr: scheme tag.
+  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  [ -f "$rec" ]
+  local rec_id
+  IFS=$'\t' read -r rec_id _ _ < "$rec"
+  [ "$rec_id" = "herdr:wT:pN" ]
+}
+
+@test "spawn: herdr split --split v maps to --direction down" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --split v
+  [ "$status" -eq 0 ]
+  grep -q "pane split wT:pSelf --direction down --no-focus" "$HERDR_CALL_LOG"
+}
+
+@test "spawn: herdr --window uses tab create and extracts root_pane pane_id" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  grep -q "tab create --workspace wT --label alice" "$HERDR_CALL_LOG"
+  grep -q "pane run wT:pR" "$HERDR_CALL_LOG"
+
+  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  [ -f "$rec" ]
+  local rec_id
+  IFS=$'\t' read -r rec_id _ _ < "$rec"
+  [ "$rec_id" = "herdr:wT:pR" ]
+}
+
+@test "spawn: herdr --window falls back to split when HERDR_WORKSPACE_ID is unset" {
+  _setup_fake_herdr
+  unset HERDR_WORKSPACE_ID
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  # Fell back to split, not tab create.
+  ! grep -q "tab create" "$HERDR_CALL_LOG"
+  grep -q "pane split" "$HERDR_CALL_LOG"
+}
+
+@test "spawn: tmux takes priority over herdr (backward compat for tmux-inside-herdr)" {
+  _setup_fake_herdr
+  # Set $TMUX so the tmux path wins; re-set the terminal template so the test
+  # doesn't actually run tmux (use the stub recorder).
+  export TMUX="/tmp/fake,1,0"
+  export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
+  # Provide a tmux stub that just records the call.
+  cat > "$STUB_BIN/tmux" <<'TMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  split-window) echo "%99" ;;
+  select-pane|set-window-option) ;;
+esac
+TMUXSTUB
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"in tmux"* ]]
+  # herdr was NOT called.
+  [ ! -f "$HERDR_CALL_LOG" ] || ! grep -q "pane split" "$HERDR_CALL_LOG"
 }

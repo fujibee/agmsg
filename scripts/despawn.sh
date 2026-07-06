@@ -56,12 +56,19 @@ kill_recorded_placement() {
   local id _proj _type
   IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
   [ -n "$id" ] || return 1
-  if command -v tmux >/dev/null 2>&1; then
-    case "$id" in
-      %*) tmux kill-pane   -t "$id" 2>/dev/null || true ;;
-      @*) tmux kill-window -t "$id" 2>/dev/null || true ;;
-    esac
-  fi
+  case "$id" in
+    herdr:*)
+      command -v herdr >/dev/null 2>&1 && herdr pane close "${id#herdr:}" 2>/dev/null || true
+      ;;
+    *)
+      if command -v tmux >/dev/null 2>&1; then
+        case "$id" in
+          %*) tmux kill-pane   -t "$id" 2>/dev/null || true ;;
+          @*) tmux kill-window -t "$id" 2>/dev/null || true ;;
+        esac
+      fi
+      ;;
+  esac
   printf '%s\t%s\t%s' "$id" "$_proj" "$_type"   # echo back for the caller
 }
 

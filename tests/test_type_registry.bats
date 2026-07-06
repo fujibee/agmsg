@@ -231,7 +231,7 @@ nodetype:
   --extra-flag: extra-value
 YAML
 
-  run env -u TMUX AGMSG_TERMINAL="$stub_bin/record.sh {cmd}" \
+  run env -u TMUX -u HERDR_ENV -u HERDR_PANE_ID AGMSG_TERMINAL="$stub_bin/record.sh {cmd}" \
     AGMSG_SPAWN_OPTIONS_FILE="$opts" \
     bash "$SCRIPTS/spawn.sh" nodetype nodeagent --project "$proj" --no-wait
   [ "$status" -eq 0 ]

@@ -580,14 +580,56 @@ launch_with_template() {
   bash -c "$cmd"
 }
 
+is_herdr_env() {
+  [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
+    && command -v herdr >/dev/null 2>&1
+}
+
+launch_in_herdr() {
+  local new_id resp
+  if [ "$TMUX_TARGET" = "window" ]; then
+    local ws="${HERDR_WORKSPACE_ID:-}"
+    if [ -z "$ws" ]; then
+      echo "spawn: --window requested but \$HERDR_WORKSPACE_ID is not set; falling back to split" >&2
+      TMUX_TARGET="pane"
+      launch_in_herdr
+      return $?
+    fi
+    resp="$(herdr tab create --workspace "$ws" --label "$NAME" --cwd "$PROJECT" 2>&1)" \
+      || die "herdr tab create failed: $resp"
+    new_id="$(printf '%s' "$resp" | sed -n 's/.*"root_pane":{[^}]*"pane_id":"\([^"]*\)".*/\1/p')"
+    [ -n "$new_id" ] || die "herdr tab create: could not extract pane_id from response: $resp"
+  else
+    local dir="right"; [ "$SPLIT" = "v" ] && dir="down"
+    resp="$(herdr pane split "$HERDR_PANE_ID" --direction "$dir" --no-focus --cwd "$PROJECT" 2>&1)" \
+      || die "herdr pane split failed: $resp"
+    new_id="$(printf '%s' "$resp" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')"
+    [ -n "$new_id" ] || die "herdr pane split: could not extract pane_id from response: $resp"
+  fi
+  herdr pane rename "$new_id" "$NAME" 2>/dev/null || true
+  herdr pane run "$new_id" "$BOOT" 2>/dev/null \
+    || die "herdr pane run failed for pane $new_id"
+  # Record placement with herdr: scheme tag. The herdr pane_id contains ":"
+  # (e.g. wC:pN), so despawn strips the prefix with ${id#herdr:}.
+  printf 'herdr:%s\t%s\t%s\n' "$new_id" "$PROJECT" "$AGENT_TYPE" \
+    > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
+}
+
 place_and_launch() {
+  # Priority: $TMUX (tmux-inside-herdr backward compat) → herdr → OS terminal.
   if [ -n "${TMUX:-}" ]; then
     launch_in_tmux
     echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
     return 0
   fi
 
-  # Non-tmux: open an OS terminal. A {cmd} template wins outright on any OS.
+  if is_herdr_env; then
+    launch_in_herdr
+    echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
+    return 0
+  fi
+
+  # Non-tmux/herdr: open an OS terminal. A {cmd} template wins outright on any OS.
   if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
     launch_with_template
     echo "spawned ${AGENT_TYPE} '${NAME}' via custom terminal template"
