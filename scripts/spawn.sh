@@ -219,6 +219,18 @@ fi
 # (the default) keeps today's bare-positional behavior.
 PROMPT_ARG="$(agmsg_type_get "$AGENT_TYPE" prompt_arg)"
 
+# Session display name (#339). A type whose manifest declares `name_arg=` (e.g.
+# claude-code's -n) is launched with `<name_arg> <team>-<agent>`, so the spawned
+# session is born named after its role: meaningful in the prompt box / resume
+# picker, and -- key for the tmux-resurrect hook -- recorded verbatim in the
+# argv resurrect saves. Types without the key skip naming (unchanged). The name
+# joins team and agent with a '-'; either half may itself contain '-', so the
+# role-session record stores the whole `name=` for reverse lookup rather than
+# splitting it apart.
+NAME_ARG="$(agmsg_type_get "$AGENT_TYPE" name_arg)"
+# SESSION_NAME (<team>-<agent>) is computed AFTER team resolution below, since
+# --team may be resolved from the project rather than passed on the CLI.
+
 # Session-identity env vars to strip from a spawned same-type child (issue #294).
 # A terminal launcher (tmux new-window/split-window, a new OS terminal) copies
 # the parent shell's exported environment verbatim. When the spawner is itself a
@@ -307,6 +319,10 @@ if [ -z "$TEAM" ]; then
     die "project belongs to multiple teams ($(printf '%s' "$CANDIDATES" | paste -sd, -)); pass --team <team>"
   fi
 fi
+
+# Role's session display name (#339): now that TEAM is final, join it to the
+# agent name. Emitted into the boot script when the type declares name_arg.
+SESSION_NAME="${TEAM}-${NAME}"
 
 # --- Pre-flight: refuse if <name> is currently held by another live session ---
 # The child's actas flow would refuse anyway; failing here avoids launching a
@@ -410,6 +426,9 @@ esac
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
       printf ' %q' "$_tok"
     done
+    # Name the session after its role (#339) when the type supports it. The flag
+    # is bare manifest data; the name is %q-quoted.
+    [ -n "$NAME_ARG" ] && printf ' %s %q' "$NAME_ARG" "$SESSION_NAME"
     [ -n "$PROMPT_ARG" ] && printf ' %s' "$PROMPT_ARG"
     printf ' %q\n' "$ACTAS_PROMPT"
   fi

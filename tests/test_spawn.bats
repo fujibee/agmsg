@@ -161,6 +161,31 @@ teardown() {
   [[ "$output" == *"$PROJ"* ]]
 }
 
+@test "spawn: names the session <team>-<agent> when the type has name_arg (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # claude-code's manifest declares name_arg=-n, so the boot script launches the
+  # CLI with `-n myteam-alice` (the resolved team joined to the agent name).
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"-n myteam-alice"* ]]
+}
+
+@test "spawn: a type without name_arg emits no name flag (#339)" {
+  # gemini's manifest has no name_arg=, so the boot script must not name the
+  # session -- no bare `-n` token, unchanged from pre-#339 behavior.
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *" -n "* ]]
+  [[ "$output" != *"gteam-bob"* ]]
+}
+
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
   # A same-type spawn (claude-code from a claude-code session) must not leak the
   # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the
