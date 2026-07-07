@@ -69,6 +69,16 @@ configure_codex_sandbox() {
   fi
 
   local writable_paths=("$SKILL_DIR/db" "$SKILL_DIR/teams" "$SKILL_DIR/run")
+  # On Windows (MSYS2/Git Bash), $SKILL_DIR is in MSYS form (/c/Users/...).
+  # Codex is a native Windows binary whose Rust path resolution cannot parse
+  # MSYS paths — /c/Users/... is resolved to C:\c\Users\... (a phantom path).
+  # Convert to the mixed C:/Users/... form that both the shell and Codex accept.
+  if command -v cygpath >/dev/null 2>&1; then
+    local i
+    for i in "${!writable_paths[@]}"; do
+      writable_paths[$i]="$(cygpath -m "${writable_paths[$i]}" 2>/dev/null || printf '%s' "${writable_paths[$i]}")"
+    done
+  fi
   local missing=()
   local p
   for p in "${writable_paths[@]}"; do
