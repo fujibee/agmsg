@@ -112,6 +112,16 @@ agmsg_resurrect_plan() {
     done
     [ "$idx" -ge 0 ] || continue
 
+    # Skip a role whose actas lock is held by a LIVE session (mirrors spawn's
+    # pre-flight). The role is already seated elsewhere -- its record may have
+    # been sown from a still-running session in another process, and resuming its
+    # uuid here would double-launch, which the CLI rejects, killing the pane back
+    # to a bare shell. "the pane restored as a shell" alone can't catch this; the
+    # lock is the source of truth for "is this role's owner alive right now". A
+    # dead owner leaves a stale lock -> actas_lock_state reports free -> we reseat.
+    lockstate="$(actas_lock_state "${teams[$idx]}" "${agents[$idx]}" '' 2>/dev/null || echo free)"
+    case "$lockstate" in other:*) continue ;; esac
+
     rty="${types[$idx]}"
     cli="$(agmsg_type_get "$rty" cli 2>/dev/null || true)"
     [ -n "$cli" ] || continue

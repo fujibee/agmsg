@@ -64,6 +64,34 @@ make_transcript() {
   [[ "$output" == *"actas"* ]]
 }
 
+@test "plan: skips a role whose actas lock is held by a live session (#339)" {
+  # The role's owner is alive elsewhere (its record may have been sown from a
+  # still-running session in another process). Reseating would resume a uuid that
+  # is already open -> the CLI rejects the double-launch and the pane dies to a
+  # shell. The lock -- not "pane is a shell" -- is the source of truth here.
+  put_record agmsg aggie "sess-1" /proj
+  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  # A live actas-lock owner: cc-instance for this test's pid holds the owner sid.
+  echo "live-owner" > "$RUN_DIR/cc-instance.$$"
+  echo "live-owner" > "$(actas_lock_path agmsg aggie)"
+
+  run agmsg_resurrect_plan "$FIXTURE"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "plan: still reseats when the lock is stale (owner sid dead) (#339)" {
+  # A dead owner (no live cc-instance references the sid) is a stale lock ->
+  # actas_lock_state reports free -> the role really needs reseating.
+  put_record agmsg aggie "sess-1" /proj
+  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  echo "dead-owner" > "$(actas_lock_path agmsg aggie)"   # no cc-instance -> not alive
+
+  run agmsg_resurrect_plan "$FIXTURE"
+  [[ "$output" == "agmsg:0.0"* ]]
+  [[ "$output" == *"-n agmsg-aggie"* ]]
+}
+
 @test "plan: matches by the -n role marker in the saved argv when the title is generic" {
   put_record agmsg worker "sess-2" /proj
   pane_line agmsg 1 2 "zsh" /proj zsh "claude -n agmsg-worker /agmsg actas worker"
