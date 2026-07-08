@@ -183,7 +183,7 @@ teardown() {
 
 @test "spawn: does NOT unset a type's credential/detect vars (#294)" {
   # The strip list is a dedicated spawn_unset_env=, NOT detect=. gemini's
-  # detect=GEMINI_API_KEY GOOGLE_GEMINI_CLI are credentials, not a session id —
+  # detect=GEMINI_CLI GEMINI_API_KEY: the session marker + a credential, not a session id —
   # stripping them would break the spawned child's auth (the opposite of the fix).
   # gemini has no spawn_unset_env=, so its boot script must emit no `unset` at all
   # and in particular must never unset GEMINI_API_KEY.
