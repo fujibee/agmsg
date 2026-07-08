@@ -173,6 +173,16 @@ teardown() {
   [[ "$output" == *"-n myteam-alice"* ]]
 }
 
+@test "spawn: boot script marks the session AGMSG_SPAWNED=1 (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # The spawned session carries the marker so the actas flow suppresses the
+  # hand-started "rename this session" tip.
+  [[ "$output" == *"export AGMSG_SPAWNED=1"* ]]
+}
+
 @test "spawn: a type without name_arg emits no name flag (#339)" {
   # gemini's manifest has no name_arg=, so the boot script must not name the
   # session -- no bare `-n` token, unchanged from pre-#339 behavior.
