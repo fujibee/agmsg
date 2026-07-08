@@ -44,6 +44,13 @@ make_transcript() {
   : > "$HOME/.claude/projects/$munged/$uuid.jsonl"
 }
 
+@test "resurrect-panes.sh is executable (tmux-resurrect execs the hook directly)" {
+  # The hook is the @resurrect-hook-post-restore-all target, run directly (not
+  # via `bash <path>`), so a missing exec bit makes it die with Permission denied
+  # -- the restore succeeds but no pane gets seated. Guard the committed mode.
+  [ -x "$SCRIPTS/internal/resurrect-panes.sh" ]
+}
+
 @test "plan: seats a role pane matched by its saved title" {
   put_record agmsg aggie "sess-1" /proj
   pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
