@@ -160,3 +160,55 @@ line"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "for quote" ]]
 }
+
+# --- send.sh --all / multi-recipient (#25/#26) ---
+
+@test "send --all: broadcasts to every member except the sender" {
+  bash "$SCRIPTS/join.sh" testteam carol claude-code /tmp/project-c
+  run bash "$SCRIPTS/send.sh" testteam alice --all "team ping"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  [[ "$output" =~ "Sent to carol" ]]
+  [[ ! "$output" =~ "Sent to alice" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "team ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam carol
+  [[ "$output" =~ "team ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  [[ "$output" =~ "No new messages" ]]
+}
+
+@test "send @all: alias works" {
+  run bash "$SCRIPTS/send.sh" testteam alice @all "alias ping"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+}
+
+@test "send --all: fails when team does not exist" {
+  run bash "$SCRIPTS/send.sh" ghostteam alice --all "nobody home"
+  [ "$status" -ne 0 ]
+}
+
+@test "send --all: fails when sender is the only member" {
+  bash "$SCRIPTS/join.sh" soloteam alice claude-code /tmp/project-a
+  run bash "$SCRIPTS/send.sh" soloteam alice --all "echo chamber"
+  [ "$status" -ne 0 ]
+}
+
+@test "send: comma-separated recipients each get the message" {
+  bash "$SCRIPTS/join.sh" testteam carol claude-code /tmp/project-c
+  run bash "$SCRIPTS/send.sh" testteam alice bob,carol "pair ping"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  [[ "$output" =~ "Sent to carol" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "pair ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam carol
+  [[ "$output" =~ "pair ping" ]]
+}
+
+@test "send: single recipient still works unchanged" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "solo hello"
+  [ "$status" -eq 0 ]
+  [ "$output" = "Sent to bob in team testteam" ]
+}
