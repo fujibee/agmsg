@@ -194,19 +194,25 @@ agmsg_project_sql_in_list() {
 }
 
 agmsg_find_registered_project_variant() {
-  local projects="$1" path="$2" candidate match home_norm
+  local projects="$1" path="$2" candidate match match_norm home_norm
   # #357: never resolve to `/` or $HOME. They are ancestors of nearly every
   # directory, so one stray registration there (even in another team, or a
   # leftover) would capture unrelated sessions -- the ancestor walk climbs
   # through them and would otherwise MATCH them, silently rewriting a project to
   # $HOME. The walk may still ASCEND through these dirs; it just must not land on
   # one. (marker resolution, step 1, is unaffected.)
+  #
+  # The exclusion compares NORMALIZED paths, so a registration stored with a
+  # trailing/duplicate slash ("$HOME/", "//") -- which raw string compare would
+  # miss -- is still excluded (agmsg_normalize_project_path collapses/strips
+  # those). Normalization is logical, not symlink-resolving; see the PR notes.
   home_norm="$(agmsg_normalize_project_path "${HOME:-}" 2>/dev/null || true)"
   while IFS= read -r candidate; do
     match=$(printf '%s\n' "$projects" | grep -Fx -- "$candidate" | head -n 1 || true)
     if [ -n "$match" ]; then
-      case "$match" in "/"|""|[A-Za-z]:|[A-Za-z]:/) continue ;; esac
-      { [ -n "$home_norm" ] && [ "$match" = "$home_norm" ]; } && continue
+      match_norm="$(agmsg_normalize_project_path "$match" 2>/dev/null || printf '%s' "$match")"
+      case "$match_norm" in "/"|""|[A-Za-z]:|[A-Za-z]:/) continue ;; esac
+      { [ -n "$home_norm" ] && [ "$match_norm" = "$home_norm" ]; } && continue
       printf '%s' "$match"
       return 0
     fi

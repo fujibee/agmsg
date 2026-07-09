@@ -104,6 +104,32 @@ JSON
   rm -rf "$other"
 }
 
+@test "resolve: a \$HOME/ (trailing slash) registration is still excluded (#357 normalized compare)" {
+  local home_norm; home_norm="$(agmsg_normalize_project_path "$HOME")"
+  mkdir -p "$HOME/agmsg-agents/aglive"
+  poison_reg test cc "$home_norm/" claude-code       # stored WITH a trailing slash
+
+  # The walk generates a trailing-slash candidate too, so this really matches the
+  # poison -- the exclusion must still fire because it compares normalized paths.
+  result="$(agmsg_resolve_project "$HOME/agmsg-agents/aglive" claude-code)"
+  [ "$result" = "$(agmsg_normalize_project_path "$HOME/agmsg-agents/aglive")" ]
+}
+
+@test "resolve: a // (doubled-slash root) registration is still excluded (#357)" {
+  poison_reg test cc "//" claude-code
+  other="$(mktemp -d)"
+  result="$(agmsg_resolve_project "$other/x" claude-code)"
+  [ "$result" = "$other/x" ]            # // normalizes to / -> excluded
+  rm -rf "$other"
+}
+
+@test "join: refuses a trailing-slash \$HOME registration (#357)" {
+  # $HOME/ normalizes to $HOME before the guard, so it must still be refused.
+  run bash "$SKILL_DIR/scripts/join.sh" T alice claude-code "$HOME/"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to register a project at \$HOME"* ]]
+}
+
 @test "resolve: team scoping ignores another team's registration (#357)" {
   local home_norm; home_norm="$(agmsg_normalize_project_path "$HOME")"
   mkdir -p "$HOME/agmsg-agents/aglive"
