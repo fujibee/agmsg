@@ -28,6 +28,16 @@ source "$SCRIPT_DIR/../../../lib/node.sh"
 NODE_BIN="$(agmsg_resolve_node)"
 TAB="$(printf '\t')"
 
+# role-session record (#350): the bridge prefers this role's RECORDED codex thread
+# over the app-server's "loaded" thread (see the thread-resolution block below).
+# shellcheck source=../../../lib/role-session.sh
+source "$SCRIPT_DIR/../../../lib/role-session.sh"
+# shellcheck source=../../../lib/resolve-project.sh
+source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+# Canonicalize once so the record's project (stored from the codex actas flow's
+# cwd) compares equal to this launcher's project even across a symlinked path.
+PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+
 mkdir -p "$RUN_DIR"
 
 resolve_identity() {  # prints "team<TAB>name" lines for the project's codex roles
@@ -59,6 +69,11 @@ log="$RUN_DIR/codex-bridge.$team.$name.log"
 # launcher instance can tell a bridge bound to a stale app-server (old port,
 # from before a codex upgrade) from one bound to the current server. See #197/#237.
 appserver_file="$RUN_DIR/codex-bridge.$team.$name.appserver"
+# Records the thread a live bridge was bound to (#350), so a later launcher can
+# rebind when the resolved thread changes -- e.g. once a role-session record
+# appears for a bridge first launched on "loaded", it is torn down and relaunched
+# on the recorded thread instead of clinging to the ambiguous "loaded" one.
+thread_file="$RUN_DIR/codex-bridge.$team.$name.thread"
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -87,6 +102,24 @@ EOF
     fi
   fi
 
+  # Prefer this role's RECORDED codex thread (#350). The app-server's "loaded"
+  # thread is whichever conversation the server last touched -- ambiguous when a
+  # cwd has run more than one codex thread, so a co-resident thread can capture
+  # this role's messages. The role-session record (#339) stores this role's own
+  # thread deterministically; use it when present AND recorded for THIS project.
+  # A request-file thread (above) still wins; no record -- or a record for a
+  # different project -- falls back to "loaded" (fail-open for roles predating the
+  # record). Freshness holds because a role re-runs actas on resume (#339), which
+  # rewrites the record with its current thread.
+  if [ "$thread_id" = "loaded" ]; then
+    rec_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+    if [ -n "$rec_thread" ]; then
+      rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
+      rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
+      [ "$rec_project_phys" = "$PROJECT_PHYS" ] && thread_id="$rec_thread"
+    fi
+  fi
+
   if [ -f "$pidfile" ]; then
     bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
     if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
@@ -96,13 +129,19 @@ EOF
       # alive but delivers nothing. The bridge's own exit-on-close covers most of
       # this, but guard the race where the old bridge has not exited yet by the
       # time a new launcher re-checks: an app-server mismatch means tear it down.
+      # Reuse only when the live bridge is bound to BOTH the current app-server
+      # AND the current thread. The thread guard (#350) is what lets a bridge
+      # first launched on the ambiguous "loaded" thread rebind once this role's
+      # recorded thread becomes known -- otherwise the app-server match alone
+      # would keep the wrong-thread bridge alive indefinitely.
       bound_url="$(cat "$appserver_file" 2>/dev/null || true)"
-      if [ "$bound_url" = "$req_app_server" ]; then
+      bound_thread="$(cat "$thread_file" 2>/dev/null || true)"
+      if [ "$bound_url" = "$req_app_server" ] && [ "$bound_thread" = "$thread_id" ]; then
         sleep 0.3
         continue
       fi
       kill "$bridge_pid" 2>/dev/null || true
-      rm -f "$pidfile" "$appserver_file"
+      rm -f "$pidfile" "$appserver_file" "$thread_file"
     fi
   fi
 
@@ -117,5 +156,6 @@ EOF
     >>"$log" 2>&1 &
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
+  printf '%s' "$thread_id" > "$thread_file"
   sleep 1
 done
