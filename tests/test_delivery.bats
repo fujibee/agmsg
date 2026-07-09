@@ -1700,13 +1700,6 @@ JSON
   [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode rejects monitor mode" {
-  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
-}
-
 @test "opencode rejects both mode" {
   run bash "$SCRIPTS/delivery.sh" set both opencode "$TEST_PROJECT"
   [ "$status" -ne 0 ]
@@ -1714,15 +1707,45 @@ JSON
   [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode rejects monitor: does NOT delete an existing turn rule" {
+@test "opencode rejects both: does NOT delete an existing turn rule" {
   bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
   [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
-  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" set both opencode "$TEST_PROJECT"
   [ "$status" -ne 0 ]
   [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode supports turn and off modes: status derives mode from rule file existence" {
+@test "opencode set monitor: passes the delivery_modes gate and writes a sentinel_monitor rule" {
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  local rule_file="$TEST_PROJECT/.opencode/rules/agmsg.md"
+  [ -f "$rule_file" ]
+  run cat "$rule_file"
+  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
+  [[ "$output" == *"sentinel_monitor"* ]]
+  [[ "$output" == *"watch.sh"* ]]
+  [[ "$output" == *"SENTINEL_SESSION_ID"* ]]
+  # Fallback instructions for when sentinel_monitor is unavailable.
+  [[ "$output" == *"check-inbox.sh"* ]]
+}
+
+@test "opencode status: reports monitor when the monitor rule is present" {
+  bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "opencode set turn then monitor: rewrites the rule from turn to monitor" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+  bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "opencode supports turn/monitor/off modes: status derives mode from rule file content" {
   run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
   [[ "$output" =~ "mode: off" ]]
 
