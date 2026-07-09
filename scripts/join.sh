@@ -43,8 +43,25 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+# Scope resolution to the join target team (#357): a poison registration in an
+# unrelated team must not steer this join's ancestor/git-common fallback.
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
 PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
+
+# Refuse to register a project at `/` or $HOME (#357): those are ancestors of
+# nearly every directory, so registering one there poisons the ancestor-walk
+# resolution for every session beneath it. This guards the source; A stray
+# resolution can no longer land here, and neither can a mistaken explicit path.
+_home_norm="$(agmsg_normalize_project_path "${HOME:-}" 2>/dev/null || true)"
+case "$PROJECT_PATH" in
+  "/"|[A-Za-z]:|[A-Za-z]:/)
+    echo "join: refusing to register a project at the filesystem root ('$PROJECT_PATH') — pick a project subdirectory" >&2
+    exit 1 ;;
+esac
+if [ -n "$_home_norm" ] && [ "$PROJECT_PATH" = "$_home_norm" ]; then
+  echo "join: refusing to register a project at \$HOME ('$PROJECT_PATH') — pick a project subdirectory, or a session there would capture unrelated resolutions" >&2
+  exit 1
+fi
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"
 
