@@ -192,10 +192,23 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
     let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")).ok();
+    // version → macOS ApplicationVersion / the Windows "Version:" line;
+    // short_version → the parenthesized build suffix on both (muda's
+    // full_version() renders "version (short_version)" on Windows, and the
+    // macOS About panel does the same with its ApplicationVersion/Version
+    // pair). Both OSes thus show "0.1.4 (core v1.1.6)" — the app version and
+    // which agmsg core this build bundles.
     let about = PredefinedMenuItem::about(
         app,
         Some(&m_name("about")),
-        Some(AboutMetadataBuilder::new().name(Some(name.to_string())).icon(icon).build()),
+        Some(
+            AboutMetadataBuilder::new()
+                .name(Some(name.to_string()))
+                .version(Some(app.package_info().version.to_string()))
+                .short_version(Some(format!("core {}", agmsg::pinned_core_ref())))
+                .icon(icon)
+                .build(),
+        ),
     )?;
     let check_updates =
         MenuItem::with_id(app, CHECK_UPDATES_ID, m("checkForUpdates"), true, None::<&str>)?;

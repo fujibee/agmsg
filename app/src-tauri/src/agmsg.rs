@@ -437,6 +437,12 @@ pub fn agmsg_install(app: AppHandle) -> Result<(), String> {
 /// running app can compare against it without shelling out to git.
 const PINNED_CORE_REF: &str = include_str!("../../AGMSG_CORE_REF");
 
+/// The pinned core ref for display (e.g. "v1.1.6") — the About dialog shows
+/// which agmsg core this build bundles next to the app's own version.
+pub(crate) fn pinned_core_ref() -> &'static str {
+    PINNED_CORE_REF.trim()
+}
+
 /// Parses a leading "X.Y.Z" out of a version string, ignoring anything after
 /// (git-describe suffixes like "-3-gabc1234", "-dirty", or a leading "v").
 /// None for anything that doesn't start with a clean X.Y.Z — including the
