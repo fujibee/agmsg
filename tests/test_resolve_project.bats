@@ -123,12 +123,6 @@ JSON
   rm -rf "$other"
 }
 
-@test "join: refuses a trailing-slash \$HOME registration (#357)" {
-  # $HOME/ normalizes to $HOME before the guard, so it must still be refused.
-  run bash "$SKILL_DIR/scripts/join.sh" T alice claude-code "$HOME/"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to register a project at \$HOME"* ]]
-}
 
 @test "resolve: team scoping ignores another team's registration (#357)" {
   local home_norm; home_norm="$(agmsg_normalize_project_path "$HOME")"
@@ -154,16 +148,21 @@ JSON
   [[ "$output" == *"/some/other/proj"* ]]
 }
 
-@test "join: refuses to register a project at \$HOME (#357)" {
-  run bash "$SKILL_DIR/scripts/join.sh" T alice claude-code "$HOME"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to register a project at \$HOME"* ]]
+@test "join: ALLOWS registering a project at \$HOME (deliberate use case) (#357)" {
+  # Starting a project at $HOME is legitimate (both claude and codex run there);
+  # #357 protects on the resolution side, not by refusing the registration.
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SKILL_DIR/scripts/join.sh" T alice claude-code "$HOME"
+  [ "$status" -eq 0 ]
 }
 
-@test "join: refuses to register a project at the filesystem root (#357)" {
-  run env AGMSG_RESOLVE_PROJECT=0 bash "$SKILL_DIR/scripts/join.sh" T alice claude-code "/"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"filesystem root"* ]]
+@test "resolve: an exact \$HOME registration still resolves \$HOME for a session AT \$HOME (#357)" {
+  # The exclusion stops the ancestor walk from LANDING on $HOME for sessions
+  # beneath it, but a session whose pwd IS $HOME still resolves to $HOME -- via
+  # the pwd fallback, so "someone who started there works".
+  local home_norm; home_norm="$(agmsg_normalize_project_path "$HOME")"
+  poison_reg test cc "$home_norm" claude-code
+  result="$(agmsg_resolve_project "$HOME" claude-code)"
+  [ "$result" = "$home_norm" ]
 }
 
 # --- opt-out ---
