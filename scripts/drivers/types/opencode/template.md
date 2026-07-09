@@ -48,19 +48,25 @@ Four possible outputs:
      ```
      Choose delivery mode for incoming messages:
 
-       1) turn — Check inbox at the end of each assistant turn
-                  Stop hook pulls after each response.
+       1) monitor — Real-time push via the `sentinel_monitor` tool (recommended)
+                     Launches watch.sh through `sentinel_monitor`; each new
+                     message streams in as a notification. Falls back to
+                     turn-mode self-checks if `sentinel_monitor` is unavailable.
 
-       2) off  — No automatic delivery
-                  Manual $__SKILL_NAME__ only.
+       2) turn    — Check inbox at the end of each assistant turn
+                     A rule has you self-check the inbox after each tool call.
+
+       3) off     — No automatic delivery
+                     Manual $__SKILL_NAME__ only.
 
      [1]:
      ```
 
-     - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
+     - **Wait for the user's answer before proceeding.** Empty input means `1` (monitor).
+     - Map the chosen number to a mode (`1`→`monitor`, `2`→`turn`, `3`→`off`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> opencode "$(pwd)"`
-     - OpenCode has no Monitor tool, so `monitor` and `both` modes are not offered here.
+     - `both` is not supported for opencode.
+     - If you chose `monitor`, follow the "Ensure monitor is running first" step below now, so the watcher starts streaming into this session immediately.
 
   6. Then check inbox for the newly joined team.
 
@@ -77,6 +83,15 @@ Four possible outputs:
 ## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
+
+**Ensure monitor is running first (monitor mode only).** If the project's delivery mode is `monitor` (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status opencode "$(pwd)"`) and no `agmsg inbox stream` watcher is already streaming into this session, launch one now with the `sentinel_monitor` tool:
+
+- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode`
+- description: `agmsg inbox stream`
+
+Pass the command to `sentinel_monitor` exactly as written. If `sentinel_monitor` is not available in this environment, fall back to a turn-based self-check instead: after each tool call, run `~/.agents/skills/__SKILL_NAME__/scripts/check-inbox.sh opencode "$(pwd)"` to check the agmsg inbox for unread messages.
+
+Launch the watcher only once per session — if it is already streaming, do not start a second one. In `turn`/`off` mode there is no watcher; skip this.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
@@ -107,22 +122,32 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" opencode` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> opencode "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
-4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (OpenCode has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+4. **If delivery mode is `monitor`**, switch the watcher to the new role so receive is restricted to it:
+   a. Run `sentinel_list` to find a running monitor described `agmsg inbox stream`; if one is running in this session, stop it with `sentinel_stop` on its id.
+   b. Launch a fresh watcher with the `sentinel_monitor` tool:
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode <name>`
+      - description: `agmsg inbox stream`
+   The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
+5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
+6. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" opencode <name>` to remove that role's registration.
 3. If the session's active FROM was `<name>`, clear that state.
-4. Tell the user: "Dropped role `<name>` from this project."
+4. **If delivery mode is `monitor`**: run `sentinel_list` to find a running monitor described `agmsg inbox stream`; if one is running in this session, stop it with `sentinel_stop` on its id, then relaunch it with the `sentinel_monitor` tool using the default (no 4th arg) subscription so receive covers the project's remaining roles:
+   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode`
+   - description: `agmsg inbox stream`
+5. Tell the user: "Dropped role `<name>` from this project."
 
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status opencode "$(pwd)"`
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
-1. Parse the mode. OpenCode supports only `turn` and `off` — reject `monitor` and `both` with: "OpenCode has no Monitor tool; only `turn` or `off` modes are supported."
+1. Parse the mode. OpenCode supports `monitor`, `turn`, and `off` — reject `both` with: "OpenCode does not support `both`; use `monitor`, `turn`, or `off`."
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> opencode "$(pwd)"`
+3. If the mode is `monitor`, follow the "Ensure monitor is running first" step above to launch the watcher in this session now.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn opencode "$(pwd)"`
