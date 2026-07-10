@@ -474,17 +474,25 @@ launch_in_tmux() {
   command -v tmux >/dev/null 2>&1 \
     || die "\$TMUX is set but the tmux binary is not on PATH; add it to PATH, or run outside tmux to use the OS-terminal path"
 
+  # On Windows (psmux), tmux launches processes via Windows APIs that do not
+  # process shebang lines; an extensionless boot script is accepted but never
+  # executed (#335). Wrap with `bash -l` — same pattern as launch_windows_terminal.
+  local -a tmux_boot=("$BOOT")
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) tmux_boot=(bash -l "$BOOT") ;;
+  esac
+
   # Name the window/pane after the agent rather than letting tmux fall back to
   # the boot script's filename (boot-XXXXXX). `automatic-rename off` keeps the
   # name from being clobbered once the boot script runs the CLI / drops to a
   # shell.
   local target_id
   if [ "$TMUX_TARGET" = "window" ]; then
-    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "$BOOT")"
+    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "${tmux_boot[@]}")"
     tmux set-window-option -t "$target_id" automatic-rename off 2>/dev/null || true
   else
     local dir="-h"; [ "$SPLIT" = "v" ] && dir="-v"
-    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "$BOOT")"
+    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "${tmux_boot[@]}")"
     tmux select-pane -t "$target_id" -T "$NAME" 2>/dev/null || true
   fi
   # Record placement so `despawn --force` can tear this member down even if its
