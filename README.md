@@ -269,7 +269,8 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg                                  — check inbox (all teams)
 /agmsg history                          — message history
 /agmsg team                             — list team members
-/agmsg send <agent> <message>           — send message
+/agmsg send <agent|--all|@all|a,b> <message>
+                                        — send message
 /agmsg mode <monitor|turn|both|off>     — switch delivery mode
 /agmsg mode                             — show current mode
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
@@ -316,7 +317,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ### Shell (any agent)
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>"
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to|--all|@all|a,b> "<message>"
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -326,7 +327,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` takes exactly four positional arguments: `<team> <from> <to> "<message>"`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed.
+`send.sh` takes exactly four positional arguments: `<team> <from> <to|--all|@all|a,b> "<message>"`. `<to>` may be one agent, `--all`, `@all`, or a comma-separated list such as `alice,bob`; spaces after commas are trimmed and empty entries are skipped. Quote the message so the shell sees it as one argument. Wrappers and shell integrations must pass the body as one argument too; otherwise a message with spaces will be truncated or misparsed.
 
 ## FAQ / Design notes
 

@@ -36,7 +36,7 @@ Four possible outputs:
 
   > **Joined!** You can now use `/__SKILL_NAME__` to check and send messages.
   > - `/__SKILL_NAME__` — check inbox
-  > - `/__SKILL_NAME__ send <agent> <message>` — send a message
+  > - `/__SKILL_NAME__ send <agent|--all|@all|a,b> <message>` — send a message
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
   > - `/__SKILL_NAME__ mode <monitor|turn|both|off>` — switch delivery mode
@@ -115,7 +115,7 @@ The allowlist merges across scopes and takes effect immediately — no restart n
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
 2. Do NOT ask the user what to do — just run the inbox check.
 3. If there are messages, read and respond appropriately. To reply:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent|--all|@all|a,b> "<message>"`
 
 If argument is "history":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/history.sh $TEAM $AGENT`
@@ -124,9 +124,10 @@ If argument is "team":
 1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM`
 
 If argument starts with "send" (e.g. "send misaki check the server"):
-1. Parse target agent and message from the arguments
-2. Determine which team the target agent belongs to, then run:
-   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+1. Parse target spec (`agent`, `--all`, `@all`, or comma-separated agents) and message from the arguments.
+2. Keep the message body as one shell argument when invoking the script.
+3. Determine which team the target spec belongs to, then run:
+   `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent|--all|@all|a,b> "<message>"`
 
 If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 1. Parse the new role name.

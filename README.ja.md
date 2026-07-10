@@ -268,7 +268,8 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 /agmsg                                  — 受信箱を確認（全チーム）
 /agmsg history                          — メッセージ履歴
 /agmsg team                             — チームメンバー一覧
-/agmsg send <agent> <message>           — メッセージ送信
+/agmsg send <agent|--all|@all|a,b> <message>
+                                        — メッセージ送信
 /agmsg mode <monitor|turn|both|off>     — 配信モード切り替え
 /agmsg mode                             — 現在のモードを表示
 /agmsg actas <name>                     — このプロジェクトで別のロールに切り替え（必要なら作成）
@@ -315,7 +316,7 @@ $agmsg
 ### シェル（任意のエージェント）
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>"
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to|--all|@all|a,b> "<message>"
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -325,7 +326,7 @@ $agmsg
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` はちょうど4つの位置引数を取る: `<team> <from> <to> "<message>"`。シェルが1つの引数として認識するようメッセージはクォートすること — クォートされていないスペース入りメッセージは誤って分割される。
+`send.sh` はちょうど4つの位置引数を取る: `<team> <from> <to|--all|@all|a,b> "<message>"`。`<to>` には単一エージェント、`--all`、`@all`、または `alice,bob` のようなカンマ区切りリストを指定できる。カンマ後の空白は取り除かれ、空の宛先はスキップされる。シェルが1つの引数として認識するようメッセージはクォートすること。ラッパーやシェル連携でも本文を1引数として渡す必要があり、そうしないとスペース入りメッセージは切り詰めまたは誤分割される。
 
 ## FAQ / 設計メモ
 

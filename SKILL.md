@@ -57,7 +57,9 @@ Do NOT manually edit config files. Always use join.sh.
 ~/.agents/skills/agmsg/scripts/inbox.sh <team> <agent_id>
 
 # Send a message
-~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>"
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent|--all|@all|a,b> "<message>"
+# Recipient may be one agent, --all, @all, or comma-separated agents.
+# Pass the message body as one quoted shell argument.
 
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
