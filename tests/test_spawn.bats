@@ -161,6 +161,150 @@ teardown() {
   [[ "$output" == *"$PROJ"* ]]
 }
 
+@test "spawn: names the session <team>-<agent> when the type has name_arg (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # claude-code's manifest declares name_arg=-n, so the boot script launches the
+  # CLI with `-n myteam-alice` (the resolved team joined to the agent name).
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"-n myteam-alice"* ]]
+}
+
+@test "spawn: boot script marks the session AGMSG_SPAWNED=1 (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # The spawned session carries the marker so the actas flow suppresses the
+  # hand-started "rename this session" tip.
+  [[ "$output" == *"export AGMSG_SPAWNED=1"* ]]
+}
+
+@test "spawn: a type without name_arg emits no name flag (#339)" {
+  # gemini's manifest has no name_arg=, so the boot script must not name the
+  # session -- no bare `-n` token, unchanged from pre-#339 behavior.
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *" -n "* ]]
+  [[ "$output" != *"gteam-bob"* ]]
+}
+
+# Seed a role-session record + its transcript so spawn's resume path fires.
+# Mirrors spawn's own project normalization + the driver's munging so the paths
+# line up. With want_transcript=0 the record exists but the transcript does not
+# (stale record → spawn must fall back to fresh).
+seed_resumable() {
+  local team="$1" agent="$2" uuid="$3" proj="$4" want_transcript="${5:-1}"
+  local norm munged
+  export SKILL_DIR="$TEST_SKILL_DIR"   # both libs below require it at source time
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  norm="$(cd "$proj" && pwd)"
+  norm="$(agmsg_normalize_project_path "$norm")"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record "$team" "$agent" "$uuid" "$norm"
+  if [ "$want_transcript" -eq 1 ]; then
+    munged="$(printf '%s' "$norm" | LC_ALL=C sed 's/[^A-Za-z0-9-]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$munged"
+    : > "$HOME/.claude/projects/$munged/$uuid.jsonl"
+  fi
+}
+
+@test "spawn: resumes the role's prior session when record + transcript exist (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Resumed by uuid, still named after the role, still runs the actas prompt.
+  [[ "$output" == *"--resume sess-uuid-1"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn: --fresh forces a fresh session even when resumable (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --fresh
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+  [[ "$output" == *"-n myteam-alice"* ]]   # naming still applies
+}
+
+@test "spawn: falls back to fresh when the record's transcript is gone (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  seed_resumable myteam alice "sess-uuid-1" "$PROJ" 0   # record only, no transcript
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a fresh role (no record) boots fresh (#339)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: a type without resume_arg never resumes (#339)" {
+  # gemini has no resume_arg in its manifest, so even with a record present the
+  # boot must be fresh (and gemini also has no name_arg, so no -n either).
+  bash "$SCRIPTS/join.sh" gteam existing gemini "$PROJ"
+  seed_resumable gteam bob "sess-uuid-9" "$PROJ" 1
+
+  run bash "$SCRIPTS/spawn.sh" gemini bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"--resume"* ]]
+}
+
+@test "spawn: codex resumes via the 'resume' subcommand right after the cli (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  # Record a codex role->session and a matching rollout (codex's transcript).
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-1" "$PROJ" codex
+  mkdir -p "$HOME/.codex/sessions/2026/07/05"
+  : > "$HOME/.codex/sessions/2026/07/05/rollout-2026-07-05T10-00-00-cx-uuid-1.jsonl"
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # Subcommand shape: `codex resume cx-uuid-1 ...` -- resume token right after cli.
+  [[ "$output" == *"codex resume cx-uuid-1"* ]]
+  [[ "$output" == *"actas"* ]]
+  # codex has no name_arg, so no -n.
+  [[ "$output" != *" -n "* ]]
+}
+
+@test "spawn: codex boots fresh when no rollout backs the record (#339)" {
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record cxteam bob "cx-uuid-gone" "$PROJ" codex   # record, no rollout
+
+  run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  [[ "$output" != *"resume"* ]]
+}
+
 @test "spawn: boot script unsets the type's session-identity vars (#294)" {
   # A same-type spawn (claude-code from a claude-code session) must not leak the
   # parent's CLAUDE_CODE_SESSION_ID to the child, or the child mistakes the
@@ -183,7 +327,7 @@ teardown() {
 
 @test "spawn: does NOT unset a type's credential/detect vars (#294)" {
   # The strip list is a dedicated spawn_unset_env=, NOT detect=. gemini's
-  # detect=GEMINI_API_KEY GOOGLE_GEMINI_CLI are credentials, not a session id —
+  # detect=GEMINI_CLI GEMINI_API_KEY: the session marker + a credential, not a session id —
   # stripping them would break the spawned child's auth (the opposite of the fix).
   # gemini has no spawn_unset_env=, so its boot script must emit no `unset` at all
   # and in particular must never unset GEMINI_API_KEY.

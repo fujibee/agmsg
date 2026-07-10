@@ -73,6 +73,21 @@ agmsg_instance_is_composite() {
   esac
 }
 
+# Extract the bare session_id from an instance id <token>: strips the trailing
+# ".<pid>" of a composite "<sid>.<pid>"; a bare "<sid>" is returned unchanged.
+# The bare sid is the identity that is STABLE across resume generations (the
+# enclosing pid changes on each resume, the session_id does not), so role→
+# session records key on it rather than on the composite instance id — see
+# role-session.sh.
+agmsg_instance_bare_sid() {
+  local token="$1"
+  if agmsg_instance_is_composite "$token"; then
+    printf '%s' "${token%.*}"
+  else
+    printf '%s' "$token"
+  fi
+}
+
 # Derive an instance id for <session_id> from the enclosing agent <type>.
 # Resolves the agent pid via agmsg_agent_pid; on failure falls back to the bare
 # session_id and emits a one-line stderr warning. The fallback is a known

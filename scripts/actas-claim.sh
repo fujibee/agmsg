@@ -34,6 +34,8 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record (#339)
 
 # Resolve the session's real project root (see #92) before any lookup, so an
 # actas issued from a subdir/worktree claims against the registered project
@@ -78,6 +80,17 @@ while IFS= read -r team; do
       ;;
   esac
   claimed="${claimed:+$claimed$'\n'}$team"
+done <<< "$TEAMS"
+
+# All teams claimed. Record (team, agent) -> bare session id for each, so this
+# role is resumable back into its context (#339). Keyed on the BARE sid (stable
+# across resume generations), not the composite lock token. Best-effort: a
+# failed record write must never fail the claim, and the record is written only
+# on full success — the held/rollback path above writes none.
+BARE_SID="$(agmsg_instance_bare_sid "$SESSION_ID")"
+while IFS= read -r team; do
+  [ -z "$team" ] && continue
+  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT" "$TYPE" || true
 done <<< "$TEAMS"
 
 # Print a line describing each claimed team. One team per most projects but

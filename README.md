@@ -226,6 +226,19 @@ By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control m
 
 Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
 
+### Bring a role back with its context (session resume)
+
+A role remembers the session that last embodied it: sessions are named
+`<team>-<agent>`, and `spawn` **resumes a role's previous session by default** —
+so re-spawning after a `despawn`, crash, or restart comes back in the prior
+conversation, not blank (`--fresh` forces new). With
+[tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect), one `~/.tmux.conf`
+line re-seats every role pane into its session after a tmux-server restart.
+
+See **[docs/session-resurrect.md](docs/session-resurrect.md)** for the tmux-resurrect
+setup, how it resolves each pane, what does and doesn't come back automatically, and
+the manual fallback.
+
 ## Delivery modes
 
 How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.

@@ -49,6 +49,11 @@ set -euo pipefail
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
 #                      `model_arg=`. Refused for a type with no model_arg.
+#   --fresh            force a brand-new session even when the role has a
+#                      resumable prior session. Without it, a type that supports
+#                      resume (manifest `resume_arg=`) is brought back into its
+#                      last session's context when that transcript still exists
+#                      (#339); with it, spawn always boots fresh.
 #
 # Spawn options: extra CLI args to always pass a given type's launched
 # binary (e.g. a default permission mode or sandbox policy), configured
@@ -81,6 +86,10 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/spawn-options.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record lookup (#339)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/boot-command.sh"  # shared boot-command construction (#339)
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -131,6 +140,7 @@ TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
 MODEL_ID=""          # --model: pass-through model id for the launched CLI
+FRESH=0              # --fresh: force a fresh session even if the role is resumable
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -147,6 +157,7 @@ while [ $# -gt 0 ]; do
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -211,13 +222,24 @@ if [ -n "$MODEL_ID" ] && [ -z "$MODEL_ARG" ]; then
   die "agent type '$AGENT_TYPE' does not support --model (no model_arg in its manifest)"
 fi
 
-# Some CLIs don't accept the actas prompt as a bare positional argument — they
-# require it as the value of a named flag instead (e.g. antigravity's
-# `--prompt-interactive <text>`, copilot's `-i/--interactive <text>`; their
-# `-p/--prompt` equivalents are a DIFFERENT one-shot, non-interactive mode and
-# would not work here). `prompt_arg=` in the manifest names that flag; unset
-# (the default) keeps today's bare-positional behavior.
-PROMPT_ARG="$(agmsg_type_get "$AGENT_TYPE" prompt_arg)"
+# Note: prompt_arg= (some CLIs require the actas prompt as a named flag's value
+# rather than a bare positional, e.g. antigravity's --prompt-interactive) is
+# resolved inside agmsg_role_cli_args (lib/boot-command.sh) now, so it stays in
+# sync with the name/resume flags across spawn and resurrect-panes.sh.
+
+# Session display name (#339). A type whose manifest declares `name_arg=` (e.g.
+# claude-code's -n) is launched with `<name_arg> <team>-<agent>`, so the spawned
+# session is born named after its role: meaningful in the prompt box / resume
+# picker, and -- key for the tmux-resurrect hook -- recorded verbatim in the
+# argv resurrect saves. Types without the key skip naming (unchanged). The name
+# joins team and agent with a '-'; either half may itself contain '-', so the
+# role-session record stores the whole `name=` for reverse lookup rather than
+# splitting it apart.
+# SESSION_NAME (<team>-<agent>) and the resume-or-fresh decision (#339) are both
+# computed AFTER team resolution below (a project-resolved --team is only known
+# then). The role-identity CLI args (name_arg/resume_arg/prompt) are emitted by
+# agmsg_role_cli_args (lib/boot-command.sh), so the launch flag order stays in
+# sync with resurrect-panes.sh.
 
 # Session-identity env vars to strip from a spawned same-type child (issue #294).
 # A terminal launcher (tmux new-window/split-window, a new OS terminal) copies
@@ -308,6 +330,16 @@ if [ -z "$TEAM" ]; then
   fi
 fi
 
+# Role's session display name (#339): now that TEAM is final, join it to the
+# agent name. Emitted into the boot script when the type declares name_arg.
+SESSION_NAME="${TEAM}-${NAME}"
+
+# Resume-or-fresh decision (#339): resumable session id, or empty for a fresh
+# boot. All fail-open gates (force --fresh, no resume_arg, no record, stale/
+# missing transcript) live in agmsg_role_resume_uuid (lib/boot-command.sh), so
+# spawn and resurrect-panes.sh decide identically.
+RESUME_UUID="$(agmsg_role_resume_uuid "$AGENT_TYPE" "$TEAM" "$NAME" "$PROJECT" "$FRESH")"
+
 # --- Pre-flight: refuse if <name> is currently held by another live session ---
 # The child's actas flow would refuse anyway; failing here avoids launching a
 # process that immediately can't take its identity.
@@ -346,16 +378,13 @@ AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PR
 # its identity AND acts on the task in the same first turn. This is the only way
 # to hand a one-shot goal to a codex peer, which has no Monitor and so never
 # notices a message sent after it goes idle (see docs/codex-monitor-beta.md).
-CMD_NAME="$(basename "$SKILL_DIR")"
-# The skill-invocation prefix differs by CLI: Claude Code dispatches a "/" slash
-# command, while agentskills-based CLIs (codex, gemini, antigravity) invoke a
-# skill with "$" — a `codex '/agmsg actas ...'` boot prompt is not a reliable
-# skill invocation (#283). type.conf's cmd_prefix= names it per type; unset
-# defaults to "/" (Claude Code, the historical hardcoded value) so any type not
-# explicitly configured keeps today's behavior.
-CMD_PREFIX="$(agmsg_type_get "$AGENT_TYPE" cmd_prefix)"
-[ -n "$CMD_PREFIX" ] || CMD_PREFIX="/"
-ACTAS_PROMPT="${CMD_PREFIX}${CMD_NAME} actas ${NAME}"
+# Base actas prompt: `<cmd_prefix><cmd_name> actas <name>` (the cmd_prefix "/"
+# vs "$" per-CLI subtlety and the custom-install command name live in
+# agmsg_actas_prompt, lib/boot-command.sh, shared with resurrect-panes.sh). When
+# --boot-prompt gives a task, append it newline-separated so the agent claims its
+# identity AND acts on the task in the same first turn -- the only way to hand a
+# one-shot goal to a codex peer, which has no Monitor.
+ACTAS_PROMPT="$(agmsg_actas_prompt "$AGENT_TYPE" "$NAME")"
 if [ -n "$PROMPT" ]; then
   ACTAS_PROMPT="${ACTAS_PROMPT}
 ${PROMPT}"
@@ -379,6 +408,10 @@ esac
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
+  # Mark the launched session as spawn-born (#339): the CLI inherits this, so the
+  # actas flow knows the session is already named <team>-<agent> (name_arg) and
+  # suppresses the "rename this session" tip meant for hand-started sessions.
+  echo 'export AGMSG_SPAWNED=1'
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   if [ -n "$SPAWN_UNSET_VARS" ]; then
     printf 'unset %s\n' "$SPAWN_UNSET_VARS"
@@ -398,20 +431,28 @@ esac
     printf '  --initial-input %q\n' "$ACTAS_PROMPT"
   else
     # Direct-CLI launch:
-    # `<cli> [<model_arg> <model_id>] [spawn-options...] [<prompt_arg>] "/<cmd> actas <name>"`.
+    # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
     # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
     # above) that may itself be several tokens (e.g. `opencode run --interactive`).
-    # model_arg/prompt_arg are the manifest flag spellings (not %q-quoted — bare
-    # flags like --model or -i); the model id, every spawn-options token, and the
-    # actas prompt are quoted. prompt_arg (when set) lands immediately before the
-    # prompt so there is no ambiguity about which token is its value.
+    # The resume head (#339) is emitted RIGHT AFTER the cli, before all other
+    # args: mandatory for a subcommand-shaped resume (codex `resume <id>`),
+    # harmless for a flag-shaped one (claude `--resume <id>`) -- see
+    # agmsg_role_resume_head. model_arg is the manifest flag spelling (bare, not
+    # %q-quoted); the model id and every spawn-options token are quoted. The
+    # role-identity tail (name/prompt_arg + the actas prompt) is emitted by
+    # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
     printf '%s' "$CLI_BIN"
+    agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
       printf ' %q' "$_tok"
     done
-    [ -n "$PROMPT_ARG" ] && printf ' %s' "$PROMPT_ARG"
-    printf ' %q\n' "$ACTAS_PROMPT"
+    # Role-identity tail: name the session and pass the actas prompt. The actas
+    # prompt runs in BOTH fresh and resume cases -- resume restores context only,
+    # so the actas re-run re-establishes the watcher, the lock, and the active
+    # FROM (claim is idempotent per sid).
+    agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
+    printf '\n'
   fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'

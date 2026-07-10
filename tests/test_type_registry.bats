@@ -82,7 +82,7 @@ write_node_launcher_fixtures() {
   g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
   [ "$(g claude-code detect)" = "CLAUDE_CODE_SESSION_ID" ]
   [ "$(g codex detect)" = "CODEX_SANDBOX CODEX_THREAD_ID" ]
-  [ "$(g gemini detect)" = "GEMINI_API_KEY GOOGLE_GEMINI_CLI" ]
+  [ "$(g gemini detect)" = "GEMINI_CLI GEMINI_API_KEY" ]
   [ "$(g antigravity detect)" = "explicit" ]
   [ "$(g copilot detect)" = "explicit" ]
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
