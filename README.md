@@ -442,6 +442,8 @@ Claude Code's sandbox restricts filesystem writes to the project directory. In `
 }
 ```
 
+The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Code to choose a sandbox mode, or add `"enabled": true` alongside `"filesystem"` under `"sandbox"` to configure it in settings. The allowlist has no effect until sandboxing is enabled.
+
 This can also go in project-level `.claude/settings.local.json` if you prefer per-project scope. The allowlist merges across all settings scopes and takes effect immediately — no restart needed.
 
 If you installed agmsg under a custom command name (e.g. `m`), adjust the path accordingly (`~/.agents/skills/m/`).
