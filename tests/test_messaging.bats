@@ -179,9 +179,15 @@ line"
 }
 
 @test "send @all: alias works" {
+  bash "$SCRIPTS/join.sh" testteam carol claude-code /tmp/project-c
   run bash "$SCRIPTS/send.sh" testteam alice @all "alias ping"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Sent to bob" ]]
+  [[ "$output" =~ "Sent to carol" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "alias ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam carol
+  [[ "$output" =~ "alias ping" ]]
 }
 
 @test "send --all: fails when team does not exist" {
@@ -205,6 +211,39 @@ line"
   [[ "$output" =~ "pair ping" ]]
   run bash "$SCRIPTS/inbox.sh" testteam carol
   [[ "$output" =~ "pair ping" ]]
+}
+
+@test "send: comma-separated recipients tolerate spaces after commas" {
+  bash "$SCRIPTS/join.sh" testteam carol claude-code /tmp/project-c
+  run bash "$SCRIPTS/send.sh" testteam alice "bob, carol" "spaced pair ping"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  [[ "$output" =~ "Sent to carol" ]]
+  [[ ! "$output" =~ "Sent to  carol" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "spaced pair ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam carol
+  [[ "$output" =~ "spaced pair ping" ]]
+}
+
+@test "send: comma-separated recipients skip empty middle entries" {
+  bash "$SCRIPTS/join.sh" testteam carol claude-code /tmp/project-c
+  run bash "$SCRIPTS/send.sh" testteam alice bob,,carol "empty middle ping"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  [[ "$output" =~ "Sent to carol" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "empty middle ping" ]]
+  run bash "$SCRIPTS/inbox.sh" testteam carol
+  [[ "$output" =~ "empty middle ping" ]]
+}
+
+@test "send: comma-separated recipients skip trailing empty entries" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob, "trailing empty ping"
+  [ "$status" -eq 0 ]
+  [ "$output" = "Sent to bob in team testteam" ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" =~ "trailing empty ping" ]]
 }
 
 @test "send: single recipient still works unchanged" {

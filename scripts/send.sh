@@ -35,6 +35,13 @@ else
   IFS=',' read -r -a RECIPIENTS <<< "$TO"
 fi
 
+trim_recipient() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
 # Escape EVERY interpolated value as a SQL string literal, not just body: a
@@ -46,6 +53,7 @@ _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 # the message or none does (no partial fan-out if a later row fails).
 VALUES=""
 for _to in "${RECIPIENTS[@]}"; do
+  _to="$(trim_recipient "$_to")"
   [ -n "$_to" ] || continue
   [ -n "$VALUES" ] && VALUES="$VALUES, "
   VALUES="$VALUES('$(_agmsg_sqlesc "$TEAM")', '$(_agmsg_sqlesc "$FROM")', '$(_agmsg_sqlesc "$_to")', '$(_agmsg_sqlesc "$BODY")')"
@@ -69,6 +77,7 @@ if ! printf '%s
 fi
 
 for _to in "${RECIPIENTS[@]}"; do
+  _to="$(trim_recipient "$_to")"
   [ -n "$_to" ] || continue
   echo "Sent to $_to in team $TEAM"
 done
