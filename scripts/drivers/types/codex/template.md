@@ -52,10 +52,10 @@ Four possible outputs:
        2) off     — No automatic delivery
                     Manual $__SKILL_NAME__ only.
 
-      3) monitor — Real-time push (BETA, advanced)
-                   Normal Codex.app sessions are woken with `codex exec resume`.
-                   CLI sessions route through an app-server bridge (printed
-                   shell function or PATH shim). See docs/codex-monitor-beta.md.
+       3) monitor — Persistent visible delivery (BETA)
+                    SessionStart rebinds the last actas role after restart.
+                    An app-server provides real-time visible turns; otherwise
+                    the Stop hook pulls visibly. Headless handling stays off.
 
      [1]:
      ```
@@ -63,7 +63,7 @@ Four possible outputs:
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
      - Map the chosen number to a mode (`1`→`turn`, `2`→`off`, `3`→`monitor`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-     - If monitor is chosen, tell the user: "Codex monitor is a BETA. In Codex.app, `$__SKILL_NAME__ actas <name>` starts a per-thread app monitor and incoming agmsg messages wake the same Codex.app thread through `codex exec resume`. CLI sessions route through the app-server bridge instead: add the printed `codex` shell function to your shell profile (or run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` for a global PATH shim with `~/.agents/bin` first on PATH). The bridge starts on the **first turn** of a new Codex session, so restart your Codex session and send one message for monitor to take effect. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+     - If monitor is chosen, tell the user: "Codex monitor is a BETA. It persists the last `actas` role and rebinds it at SessionStart. When a visible app-server bridge is available, incoming messages become visible turns. Ordinary Codex.app sessions use the visible Stop-hook fallback and never start headless `codex exec resume` unless `AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1` is explicitly set."
 
   6. Then check inbox for the newly joined team.
 
@@ -145,9 +145,9 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
-1. Parse the mode. Codex supports `monitor` (beta bridge), `turn`, and `off` — reject `both` with: "Codex bridge beta supports `monitor`, `turn`, or `off`; `both` is not supported yet."
+1. Parse the mode. Codex supports `monitor`, `turn`, `both`, and `off`. `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor`, tell the user: "Codex monitor beta is enabled. Add the printed shell function to your shell profile, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+3. If mode is `monitor` or `both`, tell the user: "Persistent visible Codex delivery is enabled. SessionStart rebinds the last `actas` role after restart. The app-server bridge is used when available; otherwise the Stop hook pulls messages in the visible thread. Headless `codex exec resume` remains disabled unless explicitly opted in."
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

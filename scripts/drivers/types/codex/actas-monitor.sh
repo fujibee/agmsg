@@ -8,10 +8,11 @@ set -euo pipefail
 #
 # Codex has no Monitor tool. Monitor mode is implemented by a bridge process
 # that watches one agmsg identity and wakes a Codex thread. Sessions launched
-# through codex-monitor.sh use app-server; ordinary Codex.app sessions fall back
-# to codex-app-monitor.sh, which wakes the Desktop thread via `codex exec resume`.
-# actas must therefore start or rebind that receiver, otherwise sends use the new
-# identity while receives keep watching the old one.
+# through codex-monitor.sh use app-server and can report in the visible chat.
+# Ordinary Codex.app sessions must not fall back to headless `codex exec resume`
+# unless AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1 is explicitly set.
+# actas must therefore start or rebind the visible receiver, otherwise sends use
+# the new identity while receives keep watching the old one.
 
 PROJECT="${1:?Usage: actas-monitor.sh <project> <type> <name> [session_id]}"
 TYPE="${2:?Missing type}"
@@ -69,7 +70,7 @@ fi
 
 record_last_actas() {
   local project_hash state tmp
-  project_hash="$(agmsg_sha1 <<<"$PROJECT")"
+  project_hash="$(printf '%s' "$PROJECT" | agmsg_sha1)"
   state="$RUN_DIR/codex-last-actas.$project_hash.tsv"
   tmp="$state.$$"
   printf '%s\t%s\t%s\t%s\t%s\n' \
@@ -79,12 +80,15 @@ record_last_actas() {
 
 record_last_actas
 
-# actas means "make this role live now", so enable monitor mode if needed.
+# Codex uses both mode for persistent SessionStart rebind plus a visible Stop
+# hook fallback. This keeps monitoring armed across restarts without allowing a
+# headless worker to consume or answer messages outside the visible thread.
 MODE="$("$SCRIPT_DIR/../../../delivery.sh" status "$TYPE" "$PROJECT" 2>/dev/null \
   | sed -n 's/^mode: //p')"
-if [ "$MODE" != "monitor" ]; then
-  "$SCRIPT_DIR/../../../delivery.sh" set monitor "$TYPE" "$PROJECT" >/dev/null
-fi
+case "$MODE" in
+  monitor|both) ;;
+  *) "$SCRIPT_DIR/../../../delivery.sh" set both "$TYPE" "$PROJECT" >/dev/null ;;
+esac
 
 resolve_thread_id() {
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
@@ -170,7 +174,7 @@ kill_receiver_files() {
   if [ -f "$meta" ] && command -v launchctl >/dev/null 2>&1; then
     label="$(sed -n 's/^launch_label=//p' "$meta" | head -1)"
     if [ -n "$label" ]; then
-      launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+      bootout_label_and_wait "gui/$(id -u)" "$label"
     fi
   fi
   [ -f "$pidfile" ] || return 0
@@ -201,11 +205,24 @@ codex_app_monitor_label() {
   printf 'com.agmsg.codex-app-monitor.%s.%s.%s' "$PROJECT_HASH" "$safe_team" "$safe_name"
 }
 
+bootout_label_and_wait() {
+  local domain="$1" label="$2" check=0
+  launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+  while [ "$check" -lt 20 ] && launchctl print "$domain/$label" >/dev/null 2>&1; do
+    sleep 0.1
+    check=$((check + 1))
+  done
+}
+
 write_codex_app_monitor_plist() {
   local plist="$1" label="$2" thread_id="$3" log="$4" tmp
   local codex_bin path_value
-  if [ -x "/Applications/Codex.app/Contents/Resources/codex" ]; then
+  if [ -n "${AGMSG_CODEX_APP_MONITOR_CODEX:-}" ]; then
+    codex_bin="$AGMSG_CODEX_APP_MONITOR_CODEX"
+  elif [ -x "/Applications/Codex.app/Contents/Resources/codex" ]; then
     codex_bin="/Applications/Codex.app/Contents/Resources/codex"
+  elif [ -x "$HOME/.npm-global/bin/codex" ]; then
+    codex_bin="$HOME/.npm-global/bin/codex"
   else
     codex_bin="$(command -v codex 2>/dev/null || true)"
   fi
@@ -237,6 +254,20 @@ write_codex_app_monitor_plist() {
     <string>$(plist_string "$label")</string>
     <key>AGMSG_CODEX_APP_MONITOR_CODEX</key>
     <string>$(plist_string "${codex_bin:-codex}")</string>
+    <key>AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR</key>
+    <string>$(plist_string "${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_TIMEOUT</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_TIMEOUT:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_INTERVAL</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_INTERVAL:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_MAX_WAKES</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_MAX_WAKES:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_MAX_FAILURES</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_MAX_FAILURES:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_FLAGS</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_FLAGS:-}")</string>
+    <key>AGMSG_CODEX_APP_MONITOR_DISABLE_NOTIFY</key>
+    <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_DISABLE_NOTIFY:-}")</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>$(plist_string "$PROJECT")</string>
@@ -256,7 +287,8 @@ EOF
 
 start_codex_app_monitor() {
   local thread_id="$1"
-  local pidfile log existing_pid existing_thread app_monitor_pid label plist domain
+  local pidfile log health existing_pid existing_thread existing_health app_monitor_pid label plist domain
+  local health_status ready_seconds ready_checks check
   if [ -z "$thread_id" ]; then
     actas_lock_gc_stale >/dev/null 2>&1 || true
     echo "status=no_thread team=$TEAM name=$NAME reason=codex_app_thread_id_unavailable"
@@ -268,6 +300,7 @@ start_codex_app_monitor() {
 
   pidfile="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.pid"
   log="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.log"
+  health="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.health"
   label="$(codex_app_monitor_label)"
   plist="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.plist"
   domain="gui/$(id -u)"
@@ -275,8 +308,9 @@ start_codex_app_monitor() {
     existing_pid="$(cat "$pidfile" 2>/dev/null || true)"
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
       existing_thread="$(sed -n 's/^thread=//p' "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta" 2>/dev/null | head -1)"
-      if [ "$existing_thread" = "$thread_id" ]; then
-        echo "status=already_running team=$TEAM name=$NAME app_monitor_pid=$existing_pid thread=$thread_id transport=codex-app-exec-resume"
+      existing_health="$(sed -n 's/^status=//p' "$health" 2>/dev/null | head -1 || true)"
+      if [ "$existing_thread" = "$thread_id" ] && [ "$existing_health" = "ready" ]; then
+        echo "status=already_running team=$TEAM name=$NAME app_monitor_pid=$existing_pid thread=$thread_id transport=codex-app-exec-resume health=ready"
         exit 0
       fi
       kill_receiver_files "$pidfile" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
@@ -284,27 +318,65 @@ start_codex_app_monitor() {
       rm -f "$pidfile" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
     fi
   fi
+  rm -f "$health" "$RUN_DIR/codex-chat-visible.$TEAM.$NAME.meta"
 
   if command -v launchctl >/dev/null 2>&1 && launchctl print "$domain" >/dev/null 2>&1; then
     write_codex_app_monitor_plist "$plist" "$label" "$thread_id" "$log"
-    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+    bootout_label_and_wait "$domain" "$label"
     if ! launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
-      echo "status=app_monitor_failed team=$TEAM name=$NAME reason=launchctl_bootstrap_failed log=$log plist=$plist"
-      exit 9
+      start_chat_visible_turn_delivery "$thread_id" "app_monitor_launchctl_bootstrap_failed"
     fi
   else
     nohup "$SCRIPT_DIR/codex-app-monitor.sh" "$PROJECT" "$TYPE" "$TEAM" "$NAME" "$thread_id" >>"$log" 2>&1 &
   fi
 
-  sleep 1.2
-  app_monitor_pid="$(cat "$pidfile" 2>/dev/null || true)"
-  if ! kill -0 "$app_monitor_pid" 2>/dev/null; then
-    rm -f "$pidfile" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
-    actas_lock_gc_stale >/dev/null 2>&1 || true
-    echo "status=app_monitor_failed team=$TEAM name=$NAME log=$log"
-    exit 9
-  fi
-  echo "status=ok team=$TEAM name=$NAME app_monitor_pid=$app_monitor_pid thread=$thread_id transport=codex-app-exec-resume"
+  ready_seconds="${AGMSG_CODEX_APP_MONITOR_READY_SECONDS:-5}"
+  case "$ready_seconds" in ''|*[!0-9]*) ready_seconds=5 ;; esac
+  [ "$ready_seconds" -gt 0 ] || ready_seconds=1
+  ready_checks=$((ready_seconds * 5))
+  check=0
+  while [ "$check" -lt "$ready_checks" ]; do
+    app_monitor_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    health_status="$(sed -n 's/^status=//p' "$health" 2>/dev/null | head -1 || true)"
+    if [ "$health_status" = "ready" ] && [ -n "$app_monitor_pid" ] && kill -0 "$app_monitor_pid" 2>/dev/null; then
+      echo "status=ok team=$TEAM name=$NAME app_monitor_pid=$app_monitor_pid thread=$thread_id transport=codex-app-exec-resume health=ready"
+      exit 0
+    fi
+    case "$health_status" in preflight_failed|fallback_failed) break ;; esac
+    if [ -n "$app_monitor_pid" ] && ! kill -0 "$app_monitor_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+    check=$((check + 1))
+  done
+
+  bootout_label_and_wait "$domain" "$label"
+  rm -f "$pidfile" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
+  actas_lock_gc_stale >/dev/null 2>&1 || true
+  start_chat_visible_turn_delivery "$thread_id" "app_monitor_${health_status:-not_ready}"
+}
+
+start_chat_visible_turn_delivery() {
+  local thread_id="$1"
+  local reason="${2:-headless_app_monitor_disabled}"
+  local meta="$RUN_DIR/codex-chat-visible.$TEAM.$NAME.meta"
+
+  kill_other_project_receivers
+  kill_receiver_files "$RUN_DIR/codex-bridge.$TEAM.$NAME.pid" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
+  kill_receiver_files "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.pid" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
+
+  {
+    printf 'project=%s\n' "$PROJECT"
+    printf 'type=%s\n' "$TYPE"
+    printf 'team=%s\n' "$TEAM"
+    printf 'name=%s\n' "$NAME"
+    printf 'thread=%s\n' "${thread_id:-unresolved}"
+    printf 'transport=codex-chat-visible-turn\n'
+    printf 'status=waiting_for_chat_turn\n'
+    printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$meta"
+
+  echo "status=visible_turn_only team=$TEAM name=$NAME thread=${thread_id:-unresolved} transport=codex-chat-visible-turn reason=$reason"
   exit 0
 }
 
@@ -334,6 +406,9 @@ if [ -z "$APP_SERVER" ] && [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
 fi
 
 if [ -z "$APP_SERVER" ]; then
+  if [ "${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}" != "1" ]; then
+    start_chat_visible_turn_delivery "$THREAD_ID"
+  fi
   start_codex_app_monitor "$THREAD_ID"
 fi
 

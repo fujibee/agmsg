@@ -1038,6 +1038,14 @@ class CodexBridge {
   buildPrompt() {
     const inbox = path.join(SCRIPTS_DIR, "inbox.sh");
     const send = path.join(SCRIPTS_DIR, "send.sh");
+    const visibleUiRequirement = [
+      "Visible UI requirement:",
+      '1. Before the first tool call, post a short Japanese progress update in the Codex thread UI starting with "agmsg対応状況:" and include sender, summary, planned action, and whether you will reply.',
+      "2. Keep substantive work in the visible thread. Before each major action, post a short Japanese progress update; do not complete the task in an unreported background worker.",
+      "3. After handling the message, post a final Japanese status update with: sender, received instruction, action taken, reply target, reply summary, remaining blocker, and next step.",
+      "4. If you do not reply, state why in the visible status.",
+      "5. Do not treat DB writes, monitor delivery, or a send.sh result as complete unless the handling is visible in the Codex thread UI.",
+    ].join("\n");
     if (this.opts.inlineInbox) {
       return [
         `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
@@ -1047,10 +1055,7 @@ class CodexBridge {
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
         `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
         "",
-        "Visible UI requirement: in this assistant turn, briefly show the agmsg sender,",
-        "the message summary, what you did, and any reply target plus reply summary.",
-        "If you do not reply, state why. Do not treat DB writes or monitor delivery as",
-        "complete unless the handling is visible in the Codex thread UI.",
+        visibleUiRequirement,
       ].join("\n");
     }
     return [
@@ -1059,10 +1064,7 @@ class CodexBridge {
       "Read the messages and continue the conversation. If a reply is needed, send it with:",
       `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
       "",
-      "Visible UI requirement: in this assistant turn, briefly show the agmsg sender,",
-      "the message summary, what you did, and any reply target plus reply summary.",
-      "If you do not reply, state why. Do not treat DB writes or monitor delivery as",
-      "complete unless the handling is visible in the Codex thread UI.",
+      visibleUiRequirement,
     ].join("\n");
   }
 
