@@ -6,9 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.7] - 2026-07-12
 
+### Added
+- Role-to-session affinity: named sessions, resume-by-role boot, tmux-resurrect (#339) (#344)
+
 ### Fixed
 - Wrap boot script with bash -l for psmux on Windows (#335) (#363)
 - Guard '/'-prefixed boot prompt against MSYS path conversion on Git Bash (#358)
+- Stop ancestor project resolution from over-reaching to $HOME / other teams (#357) (#359)
 - Bind the bridge to the role's recorded thread, not "loaded" (#350) (#353)
 - Detect the real GEMINI_CLI env var, not GOOGLE_GEMINI_CLI (#351)
 
