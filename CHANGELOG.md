@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-07-12
+
+### Fixed
+- Wrap boot script with bash -l for psmux on Windows (#335) (#363)
+- Guard '/'-prefixed boot prompt against MSYS path conversion on Git Bash (#358)
+- Bind the bridge to the role's recorded thread, not "loaded" (#350) (#353)
+- Detect the real GEMINI_CLI env var, not GOOGLE_GEMINI_CLI (#351)
+
 ## [1.1.6] - 2026-07-05
 
 ### Added
@@ -233,6 +241,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.7]: https://github.com/fujibee/agmsg/compare/app-v0.1.4...v1.1.7
 [1.1.6]: https://github.com/fujibee/agmsg/compare/app-v0.1.3...v1.1.6
 [app-v0.1.3]: https://github.com/fujibee/agmsg/compare/app-v0.1.2...app-v0.1.3
 [app-v0.1.2]: https://github.com/fujibee/agmsg/compare/app-v0.1.1...app-v0.1.2
