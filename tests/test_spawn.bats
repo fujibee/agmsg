@@ -800,3 +800,74 @@ YAML
   [[ "$output" == *"reviewer"* ]]
   [[ "$output" == *"REVIEW_THE_DIFF"* ]]
 }
+
+# --- #335: psmux on Windows cannot exec an extensionless boot script ---
+#
+# These fake `uname -s` (via a stub honoring $FAKE_UNAME_S) and stub `tmux` to
+# capture its argv, so the Windows launch path is exercised on a Linux/macOS
+# runner. On Windows the boot script must run through `bash -l`; elsewhere the
+# bare path (shebang-honored by Unix tmux) is kept.
+
+@test "spawn: launch_in_tmux runs the boot script via bash -l on Windows (#335)" {
+  local cap="$TEST_SKILL_DIR/tmux-argv.txt"
+  : > "$cap"
+  cat > "$STUB_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${FAKE_UNAME_S:-Linux}"
+EOF
+  chmod +x "$STUB_BIN/uname"
+  cat > "$STUB_BIN/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$cap"
+case "\$1" in
+  new-window)   echo '@1' ;;
+  split-window) echo '%1' ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  # Default target is a split pane.
+  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  # A new window is the other branch.
+  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+    bash "$SCRIPTS/spawn.sh" claude-code bob --project "$PROJ" --no-wait --window
+  [ "$status" -eq 0 ]
+  # Both branches must launch through `bash -l <boot>`, not the bare path.
+  run grep -E 'split-window .* bash -l /' "$cap"
+  [ "$status" -eq 0 ]
+  run grep -E 'new-window .* bash -l /' "$cap"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: launch_in_tmux keeps the bare boot path off Windows (#335)" {
+  local cap="$TEST_SKILL_DIR/tmux-argv.txt"
+  : > "$cap"
+  cat > "$STUB_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${FAKE_UNAME_S:-Linux}"
+EOF
+  chmod +x "$STUB_BIN/uname"
+  cat > "$STUB_BIN/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$cap"
+case "\$1" in
+  new-window)   echo '@1' ;;
+  split-window) echo '%1' ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_BIN/tmux"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="Linux" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  # Unix tmux honors the shebang, so no `bash -l` wrapper is emitted.
+  run grep -F 'bash -l' "$cap"
+  [ "$status" -ne 0 ]
+  # ...and the bare boot path is still the launched command.
+  run grep -E 'split-window .* /.*boot-' "$cap"
+  [ "$status" -eq 0 ]
+}
