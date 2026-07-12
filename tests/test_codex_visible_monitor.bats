@@ -39,6 +39,7 @@ join_codex_roles() {
   local hooks="$TEST_PROJECT/.codex/hooks.json"
   grep -q "session-start.sh" "$hooks"
   grep -q "check-inbox.sh" "$hooks"
+  [[ "$output" == *"lease_id=codex-monitor-lease."* ]]
 }
 
 @test "codex SessionStart rebinds the last actas role after restart" {
@@ -94,10 +95,21 @@ name=alice
 thread=thread-123
 transport=codex-app-exec-resume
 EOF
+  bash "$TYPES/codex/codex-monitor-lease.sh" arm \
+    "$TEST_PROJECT" team alice thread-123 >/dev/null
+  bash "$TYPES/codex/codex-monitor-lease.sh" automation \
+    "$TEST_PROJECT" team alice thread-123 heartbeat-id watchdog-id >/dev/null
 
   run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Stopped 1 Codex bridge/app monitor process"* ]]
+  [[ "$output" == *"heartbeat_automation_id=heartbeat-id"* ]]
+  [[ "$output" == *"watchdog_automation_id=watchdog-id"* ]]
   ! kill -0 "$app_pid" 2>/dev/null
   [ ! -e "$TEST_SKILL_DIR/run/codex-app-monitor.team.alice.pid" ]
+
+  run bash "$TYPES/codex/codex-monitor-lease.sh" status \
+    "$TEST_PROJECT" team alice thread-123
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=inactive"* ]]
 }

@@ -87,4 +87,12 @@ done
 # a sibling resume process's locks are not released out from under it. See #62.
 actas_lock_release_all "$INSTANCE_ID" 2>/dev/null || true
 
+# A Codex Desktop heartbeat/watchdog must not keep waking a thread after its
+# session ends. Keep an inactive tombstone so the independent watchdog can read
+# the automation ids and delete both scheduled jobs on its next run.
+if [ "$TYPE" = "codex" ]; then
+  "$SCRIPT_DIR/drivers/types/codex/codex-monitor-lease.sh" \
+    deactivate-thread "$PROJECT" "$SESSION_ID" >/dev/null 2>&1 || true
+fi
+
 exit 0

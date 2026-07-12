@@ -81,6 +81,35 @@ Four possible outputs:
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
+### Codex Desktop scheduled receiver
+
+When `actas-monitor.sh` prints an active `codex-monitor-lease.*` lease and the
+Codex app automation tools are available, install both jobs below. This is
+opt-in: never create either job for a session that did not explicitly run
+`actas` while monitor mode is active, or explicitly run `mode monitor`.
+
+1. Run `codex-monitor-lease.sh prompt <project> <team> <name> <thread> heartbeat`
+   and use its stdout verbatim as a one-minute `heartbeat` automation attached
+   to the current thread.
+2. Run `codex-monitor-lease.sh prompt <project> <team> <name> <thread> watchdog`
+   and use its stdout verbatim as a three-minute local `cron` automation for the
+   current project. The watchdog may use the app-internal
+   `send_message_to_thread` capability, but it must not run `inbox.sh` itself.
+3. Name both jobs with the lease id so an existing pair can be updated instead
+   of duplicated. Inspect existing Codex automation records before creating a
+   job. Keep the heartbeat on the current thread and the watchdog on the current
+   project.
+4. Record the two returned automation ids with
+   `codex-monitor-lease.sh automation <project> <team> <name> <thread> <heartbeat_id> <watchdog_id>`.
+5. If the Codex automation tools are unavailable, keep the app-server / visible
+   turn fallback and say that scheduled recovery could not be armed. Never
+   replace it with a hidden `codex exec resume` worker.
+
+When `drop`, `mode turn`, `mode off`, `reset`, or a lease status reports
+`inactive` / `expired`, delete or pause both recorded automation ids. The shell
+scripts deactivate the lease first, so a late automation run cannot wake the
+thread after teardown.
+
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
 2. If the active AGENT name starts with `codex-pro-`, route unread messages through Oracle GPT-5.5 Pro by running `~/.agents/skills/__SKILL_NAME__/scripts/oracle-pro-reply.sh $TEAM $AGENT` instead of answering them directly. Use `ORACLE_PRO_DRY_RUN=1` only when the user asks to preview the browser run.
@@ -114,15 +143,17 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
 5. Rebind the receive-side monitor by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. Prefer the visible app-server bridge. If no visible bridge is available, preserve unread messages and arm chat-visible turn delivery; do not start a headless worker unless the operator explicitly opts in.
-6. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
-7. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
-8. Otherwise tell the user: "Now acting as `<name>`. Sends and visible receive are bound to `<name>`."
+6. If that command reports an active monitor lease, follow **Codex Desktop scheduled receiver** above before returning to the user.
+7. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
+8. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
+9. Otherwise tell the user: "Now acting as `<name>`. Sends and visible receive are bound to `<name>`."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex <name>` to remove that role's registration.
-3. If the session's active FROM was `<name>`, clear that state.
-4. Tell the user: "Dropped role `<name>` from this project."
+2. Disarm the role's lease and delete or pause its recorded Codex automations as described above.
+3. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex <name>` to remove that role's registration.
+4. If the session's active FROM was `<name>`, clear that state.
+5. Tell the user: "Dropped role `<name>` from this project."
 
 If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
 1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
@@ -147,7 +178,9 @@ If argument is "mode" (no further args):
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
 1. Parse the mode. Codex supports `monitor`, `turn`, `both`, and `off`. `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor` or `both`, tell the user: "Persistent visible Codex delivery is enabled. SessionStart rebinds the last `actas` role after restart. The app-server bridge is used when available; otherwise the Stop hook pulls messages in the visible thread. Headless `codex exec resume` remains disabled unless explicitly opted in."
+3. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and follow **Codex Desktop scheduled receiver** above.
+4. If mode is `turn` or `off`, delete or pause the automation ids printed by `delivery.sh` teardown.
+5. If mode is `monitor` or `both`, tell the user: "Persistent visible Codex delivery is enabled. The app-server bridge is the low-latency path; a thread heartbeat and independent watchdog provide scheduled recovery when Codex app automation is available. Headless `codex exec resume` remains disabled unless explicitly opted in."
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

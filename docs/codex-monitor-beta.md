@@ -1,9 +1,11 @@
 # Codex Monitor Beta
 
 Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
-uses a visible app-server bridge when available and a visible Stop-hook fallback
-for ordinary Codex.app sessions. It records the last explicit `actas` role and
-rebinds that role from SessionStart after restart or compaction.
+uses a visible app-server bridge when available. In Codex Desktop, an opt-in
+thread heartbeat performs the normal scheduled inbox check and an independent
+project watchdog wakes the visible thread only when the heartbeat is stale.
+The Stop hook remains the final visible fallback. The last explicit `actas`
+role is rebound from SessionStart after restart or compaction.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
 > Enabling monitor mode prints a shell function that makes `codex` route through
@@ -33,7 +35,9 @@ The command:
 1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
    fallback for the project.
 2. Persists the last explicit `actas` role so SessionStart can rebind it.
-3. Prints a shell function that routes interactive `codex` launches through the
+3. When Codex app automation is available, arms a session-scoped heartbeat and
+   a slower watchdog. Both are keyed by project, team, role, and thread id.
+4. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
 
 Headless `codex exec resume` handling is disabled by default because it can
@@ -73,9 +77,17 @@ In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
 When Codex.app is opened normally, SessionStart restores the last `actas` role.
-If no visible app-server is available, the Stop hook checks that role's inbox at
-turn boundaries. Unread messages remain unread until the visible turn displays
-them.
+If no visible app-server is available, the heartbeat checks that role without
+waiting for operator input. The watchdog uses unread-only detection and the
+Codex app's visible thread wake capability if the heartbeat stops. Neither
+collector marks a message read; the target thread owns `inbox.sh`. Repeated
+wakes for the same unread high-water mark are suppressed for a bounded retry
+window.
+
+`mode off`, `mode turn`, `drop`, and SessionEnd deactivate the lease before the
+scheduled jobs are removed. A late watchdog run therefore cannot wake a thread
+after monitoring has been stopped. Sessions that never opt into monitor mode do
+not create scheduled jobs.
 
 ## Optional PATH Shim
 

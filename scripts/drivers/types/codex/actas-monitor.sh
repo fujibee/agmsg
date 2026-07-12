@@ -376,6 +376,14 @@ start_chat_visible_turn_delivery() {
     printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$meta"
 
+  if [ -n "$thread_id" ] && [ "$thread_id" != "loaded" ] && [ "$thread_id" != "new" ]; then
+    # Arm the session-scoped scheduler fallback. The host agent reads this
+    # status and creates the Codex heartbeat/watchdog automations; the shell
+    # helper itself never calls app-internal tools or consumes the inbox.
+    "$SCRIPT_DIR/codex-monitor-lease.sh" arm \
+      "$PROJECT" "$TEAM" "$NAME" "$thread_id" || true
+  fi
+
   echo "status=visible_turn_only team=$TEAM name=$NAME thread=${thread_id:-unresolved} transport=codex-chat-visible-turn reason=$reason"
   exit 0
 }
@@ -383,6 +391,11 @@ start_chat_visible_turn_delivery() {
 THREAD_ID="${AGMSG_CODEX_ACTAS_THREAD:-}"
 if [ -z "$THREAD_ID" ]; then
   THREAD_ID="$(resolve_thread_id || true)"
+fi
+
+if [ -n "$THREAD_ID" ] && [ "$THREAD_ID" != "loaded" ] && [ "$THREAD_ID" != "new" ]; then
+  "$SCRIPT_DIR/codex-monitor-lease.sh" arm \
+    "$PROJECT" "$TEAM" "$NAME" "$THREAD_ID" || true
 fi
 
 port_alive() {

@@ -56,11 +56,14 @@ agmsg_delivery_on_enable() {
 
 agmsg_delivery_on_disable() {
   local project="$2"
-  local stopped
+  local stopped lease_cleanup
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then
     echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."
   fi
+  lease_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
+    disarm-project "$project" 2>/dev/null || true)
+  [ -n "$lease_cleanup" ] && printf '%s\n' "$lease_cleanup"
   echo "Note: shell profile functions are not changed automatically."
   echo "  If you installed the optional global shim and no other project uses monitor mode, remove it:"
   echo "    $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh remove"
@@ -82,6 +85,8 @@ agmsg_delivery_stop_directive() {
     if [ "${stopped:-0}" -gt 0 ]; then
       echo "Stopped $stopped Codex bridge/app monitor process(es) for this project and cleaned their run files."
     fi
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
+      disarm-project "$project" 2>/dev/null || true
   fi
 }
 
