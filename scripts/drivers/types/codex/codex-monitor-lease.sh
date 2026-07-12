@@ -367,16 +367,16 @@ EOF
         ;;
       watchdog)
         cat <<EOF
-This is the independent fallback watchdog for the opt-in agmsg lease $TEAM/$NAME targeting Codex thread $THREAD.
+This is the low-cost independent agmsg collector for the opt-in lease $TEAM/$NAME targeting Codex thread $THREAD.
 Run:
-$claim_cmd --fallback-after 150 --retry-after 90
-If it reports healthy, idle, waiting, inactive, expired, or error, do not read any inbox body. Stay quiet, except that inactive or expired must delete or pause both automation ids reported by the lease.
+$claim_cmd --fallback-after 0 --retry-after 90
+If it reports idle, waiting, inactive, expired, or error, do not read any inbox body. Stay quiet, except that inactive or expired must delete or pause both automation ids reported by the lease.
 If it reports status=wake, use the Codex app send_message_to_thread capability to send this follow-up to thread $THREAD: "agmsg has unread mail for $TEAM/$NAME. Run $inbox_cmd now, handle the messages in this visible thread, and reply through the official agmsg scripts when needed. Do not read any other identity's inbox or access the database directly."
 Only after send_message_to_thread succeeds, run:
 $delivered_cmd
 If the visible wake fails, run:
 $failed_cmd
-The watchdog is an unread-only collector. It must never run inbox.sh or mark messages read itself.
+This collector is unread-only. It must never run inbox.sh or mark messages read itself.
 EOF
         ;;
       *) usage ;;

@@ -2,8 +2,8 @@
 
 Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
 uses a visible app-server bridge when available. In Codex Desktop, an opt-in
-thread heartbeat performs the normal scheduled inbox check and an independent
-project watchdog wakes the visible thread only when the heartbeat is stale.
+low-frequency thread heartbeat renews the session lease and an independent
+low-cost project collector checks unread state and wakes the visible thread.
 The Stop hook remains the final visible fallback. The last explicit `actas`
 role is rebound from SessionStart after restart or compaction.
 
@@ -35,8 +35,9 @@ The command:
 1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
    fallback for the project.
 2. Persists the last explicit `actas` role so SessionStart can rebind it.
-3. When Codex app automation is available, arms a session-scoped heartbeat and
-   a slower watchdog. Both are keyed by project, team, role, and thread id.
+3. When Codex app automation is available, arms a 15-minute session-scoped
+   heartbeat and a one-minute `gpt-5.4-mini` collector. Both are keyed by
+   project, team, role, and thread id.
 4. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
 
@@ -77,12 +78,12 @@ In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
 When Codex.app is opened normally, SessionStart restores the last `actas` role.
-If no visible app-server is available, the heartbeat checks that role without
-waiting for operator input. The watchdog uses unread-only detection and the
-Codex app's visible thread wake capability if the heartbeat stops. Neither
-collector marks a message read; the target thread owns `inbox.sh`. Repeated
-wakes for the same unread high-water mark are suppressed for a bounded retry
-window.
+If no visible app-server is available, the one-minute low-cost collector uses
+unread-only detection and the Codex app's visible thread wake capability. The
+15-minute heartbeat renews the session lease and provides a second recovery
+path without paying for a full thread turn every minute. Neither automation
+marks a message read; the target thread owns `inbox.sh`. Repeated wakes for the
+same unread high-water mark are suppressed for a bounded retry window.
 
 `mode off`, `mode turn`, `drop`, and SessionEnd deactivate the lease before the
 scheduled jobs are removed. A late watchdog run therefore cannot wake a thread

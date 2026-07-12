@@ -89,11 +89,13 @@ opt-in: never create either job for a session that did not explicitly run
 `actas` while monitor mode is active, or explicitly run `mode monitor`.
 
 1. Run `codex-monitor-lease.sh prompt <project> <team> <name> <thread> heartbeat`
-   and use its stdout verbatim as a one-minute `heartbeat` automation attached
-   to the current thread.
+   and use its stdout verbatim as a 15-minute `heartbeat` automation attached
+   to the current thread. A one-minute thread heartbeat can be unexpectedly
+   expensive because it runs the thread's full model even when the inbox is
+   empty.
 2. Run `codex-monitor-lease.sh prompt <project> <team> <name> <thread> watchdog`
-   and use its stdout verbatim as a three-minute local `cron` automation for the
-   current project. The watchdog may use the app-internal
+   and use its stdout verbatim as a one-minute local `cron` automation for the
+   current project, with `gpt-5.4-mini` and low reasoning. The watchdog may use the app-internal
    `send_message_to_thread` capability, but it must not run `inbox.sh` itself.
 3. Name both jobs with the lease id so an existing pair can be updated instead
    of duplicated. Inspect existing Codex automation records before creating a

@@ -152,6 +152,8 @@ arm() {
   run bash "$LEASE" prompt "$TEST_PROJECT" team alice thread-123 watchdog
   [ "$status" -eq 0 ]
   [[ "$output" == *"send_message_to_thread"* ]]
+  [[ "$output" == *"--fallback-after 0"* ]]
+  [[ "$output" == *"low-cost independent agmsg collector"* ]]
   [[ "$output" == *"must never run inbox.sh"* ]]
 }
 
