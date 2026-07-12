@@ -35,4 +35,11 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_unread ON messages(team, to_agent, read_at) WHERE read_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_history ON messages(team, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS claims (
+  message_id INTEGER PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_claims_expiry ON claims(expires_at);
 SQL
