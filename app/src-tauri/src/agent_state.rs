@@ -117,6 +117,23 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
         "(y/n)",
         "[y/N]",
         "[Y/n]",
+        // Generic numbered-choice menus (e.g. the plan-mode-exit conflict
+        // dialog) don't say "Do you want to proceed?" at all — confirmed
+        // from a live capture, #385 — but they all share this footer
+        // regardless of which menu is showing, so it covers the class
+        // instead of enumerating every prompt's own wording.
+        "Enter to select",
+        // Structural fallback for the SAME class of menu, for when even
+        // that footer isn't there (confirmed from a live capture, #385: the
+        // plan-review "Ready to code?" screen has neither "Do you want to
+        // proceed?" nor "Enter to select" — just "Would you like to
+        // proceed?" and a numbered list). Every one of these interactive
+        // menus opens with its first option pre-selected behind "❯", so
+        // matching that marker generalizes across prompt wording we
+        // haven't seen yet instead of enumerating each one — the same idea
+        // herdr uses for codex's "›" cursor glyph (src/detect/manifest.rs),
+        // just applied to claude's own selector character.
+        "❯ 1.",
     ];
     const BRAILLE_SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     // Claude Code's "thinking" spinner cycles through these sparkle glyphs,
@@ -213,13 +230,115 @@ impl TailBuffer {
         // bytes were still sitting near the front of that one giant "line"
         // long after the real terminal had moved past them.
         let lines: Vec<&str> = text.split(['\r', '\n']).collect();
+        let recent = &lines[lines.len().saturating_sub(20)..];
+
+        // Structural narrowing, ported from herdr's src/detect/manifest.rs
+        // (prompt_box_body / after_last_horizontal_rule): scope down to the
+        // live bordered box's body when the window holds a complete one,
+        // else to whatever came after the most recent box's closing rule.
+        // Pure box-drawing-character geometry, no words involved, so it
+        // generalizes across every dialog's own wording and sheds stale
+        // scrollback the recency window alone can't (a resolved dialog's
+        // closing rule marks everything above it as no-longer-current).
+        let scoped = prompt_box_body(recent).unwrap_or_else(|| after_last_horizontal_rule(recent));
+        let menu_option_selected = scoped.iter().any(|line| is_chevron_menu_line(line));
+
         // Joined with a space, not '\n'/'\r': a narrow pane wraps a prompt
         // like "Do you want to proceed?" across two frames, and either
         // separator would split that phrase apart, permanently defeating
         // classify()'s substring match for as long as the pane stays that
         // width.
-        lines[lines.len().saturating_sub(20)..].join(" ")
+        let mut flattened = scoped.join(" ");
+        if menu_option_selected {
+            // A line starting with claude's selector glyph followed by real
+            // content (not the bare, nothing-highlighted composer prompt)
+            // means SOME option is currently highlighted in an interactive
+            // menu — herdr: claude.toml's `^\s*❯` gate, the same idea as
+            // codex's `›` cursor glyph. Guaranteed present in the flattened
+            // text this way regardless of which option number is shown or
+            // whether an adjacent color code broke the natural adjacency.
+            flattened.push_str(" ❯ 1.");
+        }
+        flattened
     }
+}
+
+// Structural detectors ported from herdr's src/detect/manifest.rs — pure
+// box-drawing-character and glyph geometry, no literal English words. herdr
+// uses these to pick WHICH region of the screen to run its phrase rules
+// against, not to classify state by shape alone; we do the same, applying
+// them ahead of classify()'s (still literal) pattern matching.
+
+/// A line made (almost) entirely of the box-drawing rule character, with
+/// nothing but whitespace after it — the top/bottom border of a bordered
+/// box (the permission-prompt/plan-review dialogs all draw one).
+fn is_horizontal_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let rule_chars = trimmed.chars().take_while(|&ch| ch == '─').count();
+    if rule_chars == 0 {
+        return false;
+    }
+    let rest: String = trimmed.chars().skip(rule_chars).collect();
+    rest.trim().is_empty() || rule_chars >= 3
+}
+
+/// Index of the top border of the most recently opened box: the
+/// second-to-last horizontal-rule line, scanning bottom-up.
+fn prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
+    let mut rules_seen = 0;
+    for index in (0..lines.len()).rev() {
+        if is_horizontal_rule(lines[index]) {
+            rules_seen += 1;
+            if rules_seen == 2 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+/// The lines strictly between a currently-open box's top and bottom
+/// border, if the window holds a complete one.
+fn prompt_box_body<'a>(lines: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let top = prompt_box_top_border_index(lines)?;
+    let body_start = top + 1;
+    let body_end = lines[body_start..]
+        .iter()
+        .position(|line| is_horizontal_rule(line))
+        .map(|relative| body_start + relative)
+        .unwrap_or(lines.len());
+    lines.get(body_start..body_end)
+}
+
+/// Everything after the last horizontal-rule line in the window (the
+/// fallback when there's no complete box, only a box that just closed).
+fn after_last_horizontal_rule<'a>(lines: &'a [&'a str]) -> &'a [&'a str] {
+    match lines.iter().rposition(|line| is_horizontal_rule(line)) {
+        Some(index) => &lines[index + 1..],
+        None => lines,
+    }
+}
+
+/// claude's menu-selector glyph followed by a NUMBERED option ("❯ 1. ...")
+/// means an option is currently highlighted in an interactive menu (herdr:
+/// claude.toml's `^\s*❯` gate). The bare composer prompt ("❯" alone) is
+/// already excluded by requiring real content — but the composer ALSO
+/// shows "❯ " immediately followed by whatever the user is typing (e.g.
+/// "❯ fix the bug"), which looks just as "non-empty" and caused a false
+/// Blocked the moment anyone typed a message (#385, live repro). Requiring
+/// the content to start with digits + '.' (the option-numbering every one
+/// of these menus actually uses) rules that out without misclassifying a
+/// real menu.
+fn is_chevron_menu_line(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix('❯') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && rest.as_bytes().get(digits) == Some(&b'.')
 }
 
 // Cursor Forward (CSI n C) and Cursor Horizontal Absolute (CSI n G) both move
@@ -297,7 +416,10 @@ fn strip_ansi(input: &str) -> String {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{classify, DetectionTracker, PaneState, TailBuffer, TAIL_CAPACITY};
+    use super::{
+        after_last_horizontal_rule, classify, is_chevron_menu_line, is_horizontal_rule,
+        prompt_box_body, DetectionTracker, PaneState, TailBuffer, TAIL_CAPACITY,
+    };
 
     #[test]
     fn tail_is_bounded_to_capacity() {
@@ -340,6 +462,100 @@ mod tests {
             "got: {snapshot:?}"
         );
         assert_eq!(classify("claude", &snapshot), PaneState::Idle);
+    }
+
+    #[test]
+    fn is_horizontal_rule_requires_only_whitespace_after_a_short_run() {
+        assert!(is_horizontal_rule("────────────"));
+        assert!(is_horizontal_rule("  ───  "));
+        // A pure rule of any length (nothing after it) still counts.
+        assert!(is_horizontal_rule("──"));
+        // With trailing content, at least 3 rule chars are required — a
+        // labeled divider like "── Section ──" is still a rule, but a
+        // stray "--" in normal prose isn't.
+        assert!(is_horizontal_rule("─── Section"));
+        assert!(!is_horizontal_rule("── not a rule"));
+        assert!(!is_horizontal_rule(""));
+        assert!(!is_horizontal_rule("plain text"));
+    }
+
+    #[test]
+    fn is_chevron_menu_line_excludes_the_bare_composer_prompt() {
+        assert!(is_chevron_menu_line("❯ 1. Yes"));
+        assert!(is_chevron_menu_line("  ❯ 1. Exit plan mode"));
+        assert!(is_chevron_menu_line("❯ 10. tenth option"));
+        assert!(!is_chevron_menu_line("❯"));
+        assert!(!is_chevron_menu_line("❯ "));
+        assert!(!is_chevron_menu_line("no chevron here"));
+    }
+
+    #[test]
+    fn is_chevron_menu_line_ignores_the_user_typing_a_message() {
+        // Live repro (#385): the composer shows "❯ <whatever you're
+        // typing>" the same way it shows "❯ 1. <option>" for a real menu —
+        // "content after the glyph" alone isn't enough to tell them apart.
+        // Typing any message briefly flipped the pane to Blocked until this
+        // was tightened to require the option-numbering real menus use.
+        assert!(!is_chevron_menu_line("❯ あああ"));
+        assert!(!is_chevron_menu_line("❯ /agmsg actas Alice"));
+        assert!(!is_chevron_menu_line("❯ fix the lint errors"));
+    }
+
+    #[test]
+    fn prompt_box_body_extracts_the_lines_between_the_two_most_recent_rules() {
+        let lines = [
+            "stale text",
+            "────",
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "────",
+        ];
+        assert_eq!(
+            prompt_box_body(&lines),
+            Some(&["Do you want to proceed?", "❯ 1. Yes"][..])
+        );
+    }
+
+    #[test]
+    fn after_last_horizontal_rule_falls_back_when_only_one_rule_is_in_view() {
+        let lines = [
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "────",
+            "next turn's output",
+        ];
+        assert_eq!(prompt_box_body(&lines), None);
+        assert_eq!(after_last_horizontal_rule(&lines), &["next turn's output"]);
+    }
+
+    #[test]
+    fn detection_tail_scopes_to_the_open_box_and_drops_a_stale_closed_one() {
+        // Two dialogs back to back: an earlier, already-resolved box (whose
+        // "Do you want to proceed?" is stale scrollback now) followed by a
+        // brand new one that's actually open. Only the open box's content
+        // should survive — this is what makes a resolved dialog's text stop
+        // poisoning classify() even within the same 20-line window, on top
+        // of (not instead of) the recency window itself (#385).
+        let mut tail = TailBuffer::default();
+        tail.push(
+            "────\n\
+Do you want to proceed?\n\
+❯ 1. Yes\n\
+────\n\
+some output after answering\n\
+────\n\
+Would you like to proceed?\n\
+❯ 1. Yes, and use auto mode\n\
+────\n"
+                .as_bytes(),
+        );
+        let snapshot = tail.detection_tail();
+        assert!(
+            !snapshot.contains("Do you want to proceed?"),
+            "got: {snapshot:?}"
+        );
+        assert!(snapshot.contains("Would you like to proceed?"));
+        assert_eq!(classify("claude", &snapshot), PaneState::Blocked);
     }
 
     #[test]
@@ -437,6 +653,35 @@ mod tests {
         assert_eq!(
             classify("claude", "Working\nCompleted\n3 awaiting input"),
             PaneState::Idle
+        );
+    }
+
+    #[test]
+    fn detects_generic_numbered_choice_menus() {
+        // Captured live (#385): the plan-mode-exit conflict dialog never
+        // says "Do you want to proceed?" — only a numbered list and this
+        // footer.
+        assert_eq!(
+            classify(
+                "claude",
+                "1. Exit plan mode and continue actas 2. Stay in plan mode Enter to select · ↑/↓ to navigate · Esc to cancel"
+            ),
+            PaneState::Blocked
+        );
+    }
+
+    #[test]
+    fn detects_menus_with_neither_known_phrase_via_the_selector_marker() {
+        // Captured live (#385): the plan-review "Ready to code?" screen has
+        // neither "Do you want to proceed?" nor "Enter to select" — just
+        // "Would you like to proceed?", which isn't in any pattern list —
+        // so only the "❯ 1." selector marker catches it.
+        assert_eq!(
+            classify(
+                "claude",
+                "Would you like to proceed? ❯ 1. Yes, and use auto mode   2. Yes, manually approve edits"
+            ),
+            PaneState::Blocked
         );
     }
 
