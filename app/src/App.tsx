@@ -355,6 +355,21 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // Rust holds the only durable copy of these two flags (see view_visibility
+  // in lib.rs) — seed our state from there on mount rather than guessing
+  // `true`. Without this, a webview remount that doesn't restart the Rust
+  // process (Vite HMR during `tauri dev`, or any future webview reload)
+  // would reset these back to `true` while the native menu checkbox and
+  // Rust's own state kept whatever was last set, silently disagreeing.
+  useEffect(() => {
+    invoke<{ team_room: boolean; user_chat: boolean }>("view_visibility")
+      .then((v) => {
+        setShowTeamRoom(v.team_room);
+        setShowUserChat(v.user_chat);
+      })
+      .catch(() => {});
+  }, []);
+
   // Native "View > Show Team Room" menu checkbox toggles the room tab itself.
   useEffect(() => {
     const p = listen<boolean>("toggle-team-room", (e) => setShowTeamRoom(e.payload));

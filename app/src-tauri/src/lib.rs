@@ -3,6 +3,7 @@ mod menu_i18n;
 mod pty;
 
 use pty::PtyManager;
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::menu::{AboutMetadataBuilder, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -41,6 +42,15 @@ struct UserChatVisible(AtomicBool);
 /// falls back to whichever pane tab is active, or an empty-state hint if
 /// none exist yet.
 struct TeamRoomVisible(AtomicBool);
+
+/// Handles to the View menu's two checkboxes — see make_menu's comment on
+/// why these can't just be looked up via app.menu().get(id) each time.
+/// Rebuilt (and these Mutexes overwritten) on every set_menu_language call,
+/// since that constructs an entirely new Menu with fresh CheckMenuItems.
+struct ViewMenuCheckboxes {
+    team_room: Mutex<CheckMenuItem<Wry>>,
+    user_chat: Mutex<CheckMenuItem<Wry>>,
+}
 
 /// Current webview zoom factor (1.0 = 100%). Tauri's WebviewWindow can set
 /// the zoom but not read it back, so this is the source of truth the Zoom
@@ -195,7 +205,7 @@ fn log_path_import(message: &str) {
 /// menu's Copy/Paste are also needed for the embedded terminals. All labels
 /// come from menu_i18n::t so the whole native menu tracks the app's
 /// language selector rather than the OS locale.
-fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
+fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<(Menu<Wry>, CheckMenuItem<Wry>, CheckMenuItem<Wry>)> {
     let name = "agmsg";
     let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
     let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
@@ -288,13 +298,25 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
             &MenuItem::with_id(app, PANE_LAYOUT_TILE_ID, m("paneLayoutTile"), true, None::<&str>)?,
         ],
     )?;
+    // Owned locals (not inline in the items array below) so we can hand
+    // clones back to the caller — Menu::get()/Submenu::get() only search a
+    // menu's OWN direct children, never nested submenus, so app.menu().
+    // get(TEAM_ROOM_MENU_ID) can never find an item that lives inside this
+    // view_menu; every other call site that needs to flip these checkboxes
+    // programmatically (on_menu_event, set_team_room_visible,
+    // set_user_chat_visible) holds one of these clones instead of
+    // re-searching a tree that doesn't contain them at the level searched.
+    let team_room_item =
+        CheckMenuItem::with_id(app, TEAM_ROOM_MENU_ID, m("showTeamRoom"), true, team_room_checked, None::<&str>)?;
+    let user_chat_item =
+        CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, user_chat_checked, None::<&str>)?;
     let view_menu = Submenu::with_items(
         app,
         m("viewMenu"),
         true,
         &[
-            &CheckMenuItem::with_id(app, TEAM_ROOM_MENU_ID, m("showTeamRoom"), true, team_room_checked, None::<&str>)?,
-            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, user_chat_checked, None::<&str>)?,
+            &team_room_item,
+            &user_chat_item,
             &PredefinedMenuItem::separator(app)?,
             &pane_layout_menu,
             &PredefinedMenuItem::separator(app)?,
@@ -313,7 +335,8 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::close_window(app, Some(&m("closeWindow")))?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
+    let menu = Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])?;
+    Ok((menu, team_room_item, user_chat_item))
 }
 
 const TEAM_ROOM_MENU_ID: &str = "toggle_team_room";
@@ -403,8 +426,11 @@ async fn check_for_updates(app: &AppHandle, user_initiated: bool) {
 #[tauri::command]
 fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
     *app.state::<MenuLanguage>().0.lock().unwrap() = lang.clone();
-    let menu = make_menu(&app, &lang).map_err(|e| e.to_string())?;
+    let (menu, team_room_item, user_chat_item) = make_menu(&app, &lang).map_err(|e| e.to_string())?;
     app.set_menu(menu).map_err(|e| e.to_string())?;
+    let checkboxes = app.state::<ViewMenuCheckboxes>();
+    *checkboxes.team_room.lock().unwrap() = team_room_item;
+    *checkboxes.user_chat.lock().unwrap() = user_chat_item;
     Ok(())
 }
 
@@ -417,13 +443,7 @@ fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
 #[tauri::command]
 fn set_team_room_visible(app: AppHandle, visible: bool) {
     app.state::<TeamRoomVisible>().0.store(visible, Ordering::Relaxed);
-    if let Some(menu) = app.menu() {
-        if let Some(item) = menu.get(TEAM_ROOM_MENU_ID) {
-            if let Some(check) = item.as_check_menuitem() {
-                let _ = check.set_checked(visible);
-            }
-        }
-    }
+    let _ = app.state::<ViewMenuCheckboxes>().team_room.lock().unwrap().set_checked(visible);
 }
 
 /// Same idea as set_team_room_visible, for the chat pane header's own
@@ -431,12 +451,31 @@ fn set_team_room_visible(app: AppHandle, visible: bool) {
 #[tauri::command]
 fn set_user_chat_visible(app: AppHandle, visible: bool) {
     app.state::<UserChatVisible>().0.store(visible, Ordering::Relaxed);
-    if let Some(menu) = app.menu() {
-        if let Some(item) = menu.get(USER_CHAT_MENU_ID) {
-            if let Some(check) = item.as_check_menuitem() {
-                let _ = check.set_checked(visible);
-            }
-        }
+    let _ = app.state::<ViewMenuCheckboxes>().user_chat.lock().unwrap().set_checked(visible);
+}
+
+/// Rust holds the only durable copy of these two flags — the frontend's
+/// own showTeamRoom/showUserChat state defaulted to `true` unconditionally
+/// and only ever updated reactively (via the toggle-team-room/toggle-user-
+/// chat events below), with no way to ask what the real value currently
+/// is. That's invisible on a cold start (both sides agree on `true`), but
+/// during `tauri dev` Vite hot-reloads the webview independently of this
+/// Rust process — the frontend remounts and its state resets to `true`
+/// while Rust (and the menu checkbox) still hold whatever was last set,
+/// so the menu checkbox and the actual visible pane silently disagree.
+/// The frontend now calls this once on mount to seed its state from here
+/// instead of guessing.
+#[derive(Serialize)]
+pub struct ViewVisibility {
+    team_room: bool,
+    user_chat: bool,
+}
+
+#[tauri::command]
+fn view_visibility(app: AppHandle) -> ViewVisibility {
+    ViewVisibility {
+        team_room: app.state::<TeamRoomVisible>().0.load(Ordering::Relaxed),
+        user_chat: app.state::<UserChatVisible>().0.load(Ordering::Relaxed),
     }
 }
 
@@ -462,7 +501,14 @@ pub fn run() {
         // report its actual language until after the webview loads and
         // i18next resolves it, so set_menu_language rebuilds this shortly
         // after startup with the real choice.
-        .menu(|app| make_menu(app, "en"))
+        .menu(|app| {
+            let (menu, team_room_item, user_chat_item) = make_menu(app, "en")?;
+            app.manage(ViewMenuCheckboxes {
+                team_room: Mutex::new(team_room_item),
+                user_chat: Mutex::new(user_chat_item),
+            });
+            Ok(menu)
+        })
         .manage(TeamRoomVisible(AtomicBool::new(true)))
         .manage(UserChatVisible(AtomicBool::new(true)))
         .manage(ZoomLevel(Mutex::new(1.0)))
@@ -473,25 +519,13 @@ pub fn run() {
                 let state = app.state::<TeamRoomVisible>();
                 let next = !state.0.load(Ordering::Relaxed);
                 state.0.store(next, Ordering::Relaxed);
-                if let Some(menu) = app.menu() {
-                    if let Some(item) = menu.get(TEAM_ROOM_MENU_ID) {
-                        if let Some(check) = item.as_check_menuitem() {
-                            let _ = check.set_checked(next);
-                        }
-                    }
-                }
+                let _ = app.state::<ViewMenuCheckboxes>().team_room.lock().unwrap().set_checked(next);
                 let _ = app.emit("toggle-team-room", next);
             } else if id == USER_CHAT_MENU_ID {
                 let state = app.state::<UserChatVisible>();
                 let next = !state.0.load(Ordering::Relaxed);
                 state.0.store(next, Ordering::Relaxed);
-                if let Some(menu) = app.menu() {
-                    if let Some(item) = menu.get(USER_CHAT_MENU_ID) {
-                        if let Some(check) = item.as_check_menuitem() {
-                            let _ = check.set_checked(next);
-                        }
-                    }
-                }
+                let _ = app.state::<ViewMenuCheckboxes>().user_chat.lock().unwrap().set_checked(next);
                 let _ = app.emit("toggle-user-chat", next);
             } else if id == ZOOM_IN_ID || id == ZOOM_OUT_ID || id == ZOOM_RESET_ID {
                 let state = app.state::<ZoomLevel>();
@@ -574,6 +608,7 @@ pub fn run() {
             set_menu_language,
             set_team_room_visible,
             set_user_chat_visible,
+            view_visibility,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
