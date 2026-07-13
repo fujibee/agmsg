@@ -64,8 +64,8 @@ impl PtyManager {
                 .collect();
             let now = std::time::Instant::now();
             for (id, tail, detection) in snapshots {
-                let (tail, output_seq) = tail.lock().unwrap().snapshot();
-                if let Some(state) = detection.lock().unwrap().observe(&tail, output_seq, now) {
+                let tail = tail.lock().unwrap().detection_tail();
+                if let Some(state) = detection.lock().unwrap().observe(&tail, now) {
                     let _ = app.emit("agent-state", AgentStateEvent { id, state });
                 }
             }
