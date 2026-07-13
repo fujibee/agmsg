@@ -1337,13 +1337,6 @@ export default function App() {
                   )}
                   </div>
                 </div>
-                <select value={team} onChange={(e) => setTeam(e.target.value)}>
-                  {teams.map((teamName) => (
-                    <option key={teamName} value={teamName}>
-                      {teamName}
-                    </option>
-                  ))}
-                </select>
               </div>
               <div className="team-status-rail" aria-label="Open pane status">
                 {teams.map((teamName) => {
@@ -1356,6 +1349,7 @@ export default function App() {
                       onClick={() => setTeam(teamName)}
                     >
                       <span className={`team-status-dot status-${status}`} />
+                      <span className="team-status-name">{teamName}</span>
                     </button>
                   );
                 })}

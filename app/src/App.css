@@ -631,20 +631,32 @@ body.resizing-row {
   padding: 3px 6px;
 }
 .team-status-row {
-  height: 16px;
+  height: 20px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 0 4px;
   background: none;
   border: none;
   border-radius: 3px;
   cursor: pointer;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
 }
 .team-status-row:hover,
 .team-status-row.active {
   background: var(--panel-2);
 }
+.team-status-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .team-status-dot {
+  flex: 0 0 auto;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -662,6 +674,11 @@ body.resizing-row {
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 4px;
+}
+.collapsed-team-status .team-status-row {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
 }
 .language-switcher {
   font-size: 11px;
