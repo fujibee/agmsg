@@ -164,10 +164,11 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
       Otherwise (mode `turn` or `off`), leave it stopped.
 4. Tell the user: "Dropped role `<name>` from this project."
 
-If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code alice --window"):
-1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
+If argument starts with "spawn" (e.g. "spawn codex reviewer --effort xhigh", "spawn claude-code alice --window"):
+1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--effort`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
    - spawn.sh pre-joins `<name>`, then opens a tmux pane/window (when this session is inside tmux) or a new OS terminal, and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt.
+   - `--effort` selects the reasoning effort through the target type's manifest. Unsupported types reject it instead of ignoring it.
    - By default it BLOCKS until the new agent's watcher attaches and prints `status=ready` — so you can message `<name>` right away. It prints `status=timeout` and exits 3 if not ready within `--ready-timeout` (default 90s); pass `--no-wait` for fire-and-forget. Codex skips the wait (no Monitor).
    - It refuses early if `<name>` is already held by another live session, if the target CLI is not installed, or if there is no tmux and no usable terminal (headless).
 3. Show the script's output. Do NOT TaskStop or relaunch this session's own Monitor — spawn affects a separate, newly launched agent, not this session's subscription.

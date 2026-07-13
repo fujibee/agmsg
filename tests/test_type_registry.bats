@@ -88,6 +88,15 @@ write_node_launcher_fixtures() {
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
 }
 
+@test "type-registry: effort mapping is manifest data" {
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
+  [ "$(g claude-code effort_arg)" = "--effort" ]
+  [ "$(g claude-code effort_value_prefix)" = "" ]
+  [ "$(g codex effort_arg)" = "-c" ]
+  [ "$(g codex effort_value_prefix)" = "model_reasoning_effort=" ]
+  [ "$(g grok-build effort_arg)" = "" ]
+}
+
 @test "type-registry: whoami detects codex end-to-end from CODEX_THREAD_ID" {
   # Join a codex agent so whoami has a registration to report, then call it with
   # no explicit type: detection must pick codex from the manifest's detect= key.
@@ -208,6 +217,17 @@ write_node_launcher_fixtures() {
   [ "$status" -ne 0 ]
   ! echo "$output" | grep -q "is not supported by spawn yet"
   ! echo "$output" | grep -q "unknown agent type"
+}
+
+@test "spawn --effort: node-launcher types keep effort configuration launcher-owned" {
+  write_node_launcher_fixtures
+  printf 'effort_arg=--effort\n' >> \
+    "$TEST_SKILL_DIR/scripts/drivers/types/nodetype/type.conf"
+  run "$SCRIPTS/spawn.sh" nodetype someagent --project "$BATS_TEST_TMPDIR" \
+    --effort high
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"node-launcher type"* ]]
+  [[ "$output" == *"core --effort is not supported"* ]]
 }
 
 @test "spawn: the node-launcher path also splices spawn-options tokens (before --initial-input) (#273)" {

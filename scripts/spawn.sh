@@ -49,6 +49,10 @@ set -euo pipefail
 #                      through to the CLI unchecked (the CLI rejects unknown
 #                      ids); the flag spelling comes from the type's manifest
 #                      `model_arg=`. Refused for a type with no model_arg.
+#   --effort <level>   launch the agent with a specific reasoning effort. The
+#                      value is passed through unchecked; argument spelling and
+#                      any value prefix come from manifest `effort_arg=` and
+#                      `effort_value_prefix=`. Refused when effort_arg is absent.
 #   --fresh            force a brand-new session even when the role has a
 #                      resumable prior session. Without it, a type that supports
 #                      resume (manifest `resume_arg=`) is brought back into its
@@ -140,6 +144,7 @@ TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
 MODEL_ID=""          # --model: pass-through model id for the launched CLI
+EFFORT=""            # --effort: pass-through effort level for the launched CLI
 FRESH=0              # --fresh: force a fresh session even if the role is resumable
 
 while [ $# -gt 0 ]; do
@@ -157,6 +162,7 @@ while [ $# -gt 0 ]; do
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
+    --effort) EFFORT="${2:?--effort needs a level}"; shift 2 ;;
     --fresh) FRESH=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
@@ -221,6 +227,22 @@ MODEL_ARG="$(agmsg_type_get "$AGENT_TYPE" model_arg)"
 if [ -n "$MODEL_ID" ] && [ -z "$MODEL_ARG" ]; then
   die "agent type '$AGENT_TYPE' does not support --model (no model_arg in its manifest)"
 fi
+
+# --effort follows the same pass-through contract as --model, but some CLIs
+# encode the value. Claude uses `--effort high`; Codex uses
+# `-c model_reasoning_effort=high`. Both shapes stay manifest data:
+# `effort_arg=` supplies the flag and optional `effort_value_prefix=` supplies
+# the value prefix. Types without effort_arg refuse the option rather than
+# guessing or silently ignoring it.
+EFFORT_ARG="$(agmsg_type_get "$AGENT_TYPE" effort_arg)"
+EFFORT_VALUE_PREFIX="$(agmsg_type_get "$AGENT_TYPE" effort_value_prefix)"
+if [ -n "$EFFORT" ] && [ -n "$SPAWN_LAUNCHER" ]; then
+  die "agent type '$AGENT_TYPE' is a node-launcher type; its launcher owns effort configuration and core --effort is not supported"
+fi
+if [ -n "$EFFORT" ] && [ -z "$EFFORT_ARG" ]; then
+  die "agent type '$AGENT_TYPE' does not support --effort (no effort_arg in its manifest)"
+fi
+EFFORT_VALUE="${EFFORT_VALUE_PREFIX}${EFFORT}"
 
 # Note: prompt_arg= (some CLIs require the actas prompt as a named flag's value
 # rather than a bare positional, e.g. antigravity's --prompt-interactive) is
@@ -451,14 +473,14 @@ esac
     printf '  --initial-input %q\n' "$ACTAS_PROMPT"
   else
     # Direct-CLI launch:
-    # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
+    # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [<effort_arg> <effort_value>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
     # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
     # above) that may itself be several tokens (e.g. `opencode run --interactive`).
     # The resume head (#339) is emitted RIGHT AFTER the cli, before all other
     # args: mandatory for a subcommand-shaped resume (codex `resume <id>`),
     # harmless for a flag-shaped one (claude `--resume <id>`) -- see
-    # agmsg_role_resume_head. model_arg is the manifest flag spelling (bare, not
-    # %q-quoted); the model id and every spawn-options token are quoted. The
+    # agmsg_role_resume_head. model_arg/effort_arg are manifest flag spellings
+    # (bare, not %q-quoted); their values and every spawn-options token are quoted. The
     # role-identity tail (name/prompt_arg + the actas prompt) is emitted by
     # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
     # MSYS_GUARD (#336) prefixes the CLI line as a command-local env assignment;
@@ -466,6 +488,7 @@ esac
     printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
     agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
+    [ -n "$EFFORT" ] && printf ' %s %q' "$EFFORT_ARG" "$EFFORT_VALUE"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
       printf ' %q' "$_tok"
     done
