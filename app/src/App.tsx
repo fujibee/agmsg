@@ -14,6 +14,12 @@ import {
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import {
+  applyStateChange,
+  displayPaneStatus,
+  type PaneStatusMap,
+  type RawState,
+} from "./agentStatus";
+import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
@@ -146,6 +152,7 @@ export default function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
+  const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
   const [active, setActive] = useState<string>("room");
   const [target, setTarget] = useState<string>("");
@@ -298,6 +305,33 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const focusedPaneRef = useRef<string | null>(null);
+
+  const paneIsFocused = useCallback((paneId: string) => {
+    const owner = windowsRef.current.find((window) => leaves(window.root).includes(paneId));
+    return focusedPaneRef.current === paneId && owner?.id === activeRef.current;
+  }, []);
+
+  const applyAgentState = useCallback(
+    (paneId: string, state: RawState) => {
+      setPaneStatus((current) =>
+        applyStateChange(current, paneId, state, paneIsFocused(paneId), Date.now()),
+      );
+    },
+    [paneIsFocused],
+  );
+
+  const focusPane = useCallback((paneId: string) => {
+    focusedPaneRef.current = paneId;
+    setPaneStatus((current) => {
+      const status = current[paneId];
+      return status
+        ? applyStateChange(current, paneId, status.state, true, Date.now())
+        : current;
+    });
+  }, []);
 
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
@@ -501,6 +535,24 @@ export default function App() {
     });
     return () => void p.then((u) => u());
   }, [team, cmdName]);
+
+  useEffect(() => {
+    const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
+      applyAgentState(event.payload.id, event.payload.state);
+    });
+    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
+      setPaneStatus((current) => {
+        if (!(event.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[event.payload.id];
+        return next;
+      });
+    });
+    return () => {
+      void stateListener.then((unlisten) => unlisten());
+      void exitListener.then((unlisten) => unlisten());
+    };
+  }, [applyAgentState]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
   // loaded message and prepend it, restoring the scroll position afterward
@@ -1269,46 +1321,62 @@ export default function App() {
                 )}
               </div>
               <ul className="members">
-                {others.map((m) => (
-                  <li
-                    key={m.name}
-                    className="member-row"
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      closeAllMenus();
-                      setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
-                    }}
-                  >
-                    {active === "room" && (
-                      <input
-                        type="checkbox"
-                        className="member-check"
-                        title={t("sidebar.member.checkboxTitle")}
-                        checked={!deselected.has(m.name)}
-                        onChange={() => toggleMember(m.name)}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    )}
-                    <button
-                      className="member"
-                      onClick={() => spawnMember(m)}
-                      title={
-                        panes.some((p) => p.label === m.name)
-                          ? t("sidebar.member.titleRunning")
-                          : t("sidebar.member.titleSpawn")
-                      }
+                {others.map((m) => {
+                  const pane = panes.find(
+                    (candidate) =>
+                      candidate.label === m.name &&
+                      windows.some(
+                        (window) =>
+                          window.team === team && leaves(window.root).includes(candidate.id),
+                      ),
+                  );
+                  const status = pane ? displayPaneStatus(paneStatus[pane.id]) : null;
+                  return (
+                    <li
+                      key={m.name}
+                      className="member-row"
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                      }}
                     >
-                      <span className="member-name">
-                        {m.name}
-                        {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
-                      </span>
-                      <span className="member-types">
-                        {m.types.join(", ") || t("sidebar.member.noTypes")}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                      {active === "room" && (
+                        <input
+                          type="checkbox"
+                          className="member-check"
+                          title={t("sidebar.member.checkboxTitle")}
+                          checked={!deselected.has(m.name)}
+                          onChange={() => toggleMember(m.name)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      )}
+                      <button
+                        className="member"
+                        onClick={() => spawnMember(m)}
+                        title={
+                          pane
+                            ? t("sidebar.member.titleRunning")
+                            : t("sidebar.member.titleSpawn")
+                        }
+                      >
+                        <span className="member-name">
+                          {m.name}
+                          {status && (
+                            <span
+                              className={`agent-status-dot status-${status}`}
+                              title={status}
+                            />
+                          )}
+                        </span>
+                        <span className="member-types">
+                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
                 {others.length === 0 && (
                   <li className="empty">{t("sidebar.member.emptyState")}</li>
                 )}
@@ -1512,6 +1580,7 @@ export default function App() {
                     width: `${rect.width}%`,
                     height: `${rect.height}%`,
                   }}
+                  onFocusCapture={() => focusPane(p.id)}
                   onDragOver={(e) => {
                     // Gate on dataTransfer.types, NOT React state: dragover
                     // fires on whatever element is under the cursor, whose
@@ -1630,7 +1699,13 @@ export default function App() {
                       ×
                     </button>
                   </div>
-                  <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
+                  <TerminalPane
+                    id={p.id}
+                    cmd={p.cmd}
+                    args={p.args}
+                    cwd={p.cwd}
+                    onAgentState={applyAgentState}
+                  />
                 </div>
               );
             })}

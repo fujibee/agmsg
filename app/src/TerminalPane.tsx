@@ -12,6 +12,7 @@ type Props = {
   cmd: string;
   args?: string[];
   cwd?: string;
+  onAgentState?: (id: string, state: "idle" | "working" | "blocked" | "unknown") => void;
 };
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -25,7 +26,7 @@ function b64ToBytes(b64: string): Uint8Array {
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
  */
-export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
+export function TerminalPane({ id, cmd, args = [], cwd, onAgentState }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
 
@@ -88,7 +89,11 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
         // wrong. Write the failure straight into the terminal — it's already
         // the visible surface for this pane, no extra UI needed.
         term.write(`\r\n\x1b[91m${t("terminal.failedToStart", { cmd, error: String(err) })}\x1b[0m\r\n`);
+        return;
       }
+      void invoke<"idle" | "working" | "blocked" | "unknown">("agent_state", { id })
+        .then((state) => onAgentState?.(id, state))
+        .catch(() => {});
     })();
 
     // Re-fit whenever the pane's box changes — covers initial layout, switching
@@ -115,7 +120,7 @@ export function TerminalPane({ id, cmd, args = [], cwd }: Props) {
       void invoke("pty_kill", { id });
       term.dispose();
     };
-  }, [id, cmd, cwd]);
+  }, [id, cmd, cwd, onAgentState]);
 
   return <div className="term-pane" ref={ref} />;
 }

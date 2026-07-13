@@ -694,15 +694,25 @@ body.resizing-row {
 .member-name {
   font-weight: 600;
 }
-/* Green dot marks a member that already has a live pane. */
-.running-dot {
+.agent-status-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
   margin-left: 6px;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--muted);
   vertical-align: middle;
+}
+.agent-status-dot.status-blocked { background: #f7768e; }
+.agent-status-dot.status-working {
+  background: #e0af68;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+}
+.agent-status-dot.status-done { background: #2ac3de; }
+.agent-status-dot.status-idle { display: none; }
+
+@keyframes agent-status-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
 }
 .member-types {
   font-size: 11px;
