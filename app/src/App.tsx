@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import {
+  aggregateTeamStatus,
   applyStateChange,
   displayPaneStatus,
   type PaneStatusMap,
@@ -832,6 +833,24 @@ export default function App() {
   // teams' windows stay mounted with their PTYs alive, just not listed
   // here or offered as spawn/move targets.
   const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
+  const teamStatusByName = useMemo(() => {
+    return Object.fromEntries(
+      teams.map((teamName) => {
+        const paneIds = windows
+          .filter((window) => window.team === teamName)
+          .flatMap((window) => leaves(window.root));
+        const statuses = paneIds.map(
+          (paneId) =>
+            paneStatus[paneId] ?? {
+              state: "unknown" as const,
+              seen: true,
+              changedAt: 0,
+            },
+        );
+        return [teamName, aggregateTeamStatus(statuses)];
+      }),
+    );
+  }, [teams, windows, paneStatus]);
 
   // If Show Team Room gets switched off while it's the active tab, land on
   // whichever pane tab exists instead — the room tab itself is about to
@@ -1243,6 +1262,22 @@ export default function App() {
                 </div>
               )}
 
+              <div className="team-status-rail collapsed-team-status" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className={`team-status-dot status-${status}`} />
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="rail-spacer" />
 
               {appUser && (
@@ -1309,6 +1344,21 @@ export default function App() {
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="team-status-rail" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className={`team-status-dot status-${status}`} />
+                    </button>
+                  );
+                })}
               </div>
               <div className="sidebar-title">
                 <span>{t("sidebar.title")}</span>

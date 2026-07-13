@@ -624,6 +624,45 @@ body.resizing-row {
 .sidebar-head select {
   width: 100%;
 }
+.team-status-rail {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+}
+.team-status-row {
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.team-status-row:hover,
+.team-status-row.active {
+  background: var(--panel-2);
+}
+.team-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.team-status-dot.status-blocked { background: #f7768e; }
+.team-status-dot.status-working {
+  background: #e0af68;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+}
+.team-status-dot.status-done { background: #2ac3de; }
+.team-status-dot.status-idle { background: var(--green); }
+.collapsed-team-status {
+  width: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 .language-switcher {
   font-size: 11px;
 }
