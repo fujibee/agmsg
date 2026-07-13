@@ -36,6 +36,12 @@ struct MenuLanguage(Mutex<String>);
 /// the checkbox via set_checked, and emits it to the frontend.
 struct UserChatVisible(AtomicBool);
 
+/// Same idea as UserChatVisible, for View > Show Team Room — when off, the
+/// frontend removes the Team Room tab entirely (not just its content), and
+/// falls back to whichever pane tab is active, or an empty-state hint if
+/// none exist yet.
+struct TeamRoomVisible(AtomicBool);
+
 /// Current webview zoom factor (1.0 = 100%). Tauri's WebviewWindow can set
 /// the zoom but not read it back, so this is the source of truth the Zoom
 /// In/Out/Actual Size menu items adjust and apply via set_zoom.
@@ -194,6 +200,17 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     let m = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[]);
     let m_name = |key: &str| menu_i18n::t(lang, "nativeMenu", key, &[("name", name)]);
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")).ok();
+    // This runs again on every language switch (set_menu_language rebuilds
+    // the whole menu — Tauri has no per-item relabel API), which used to
+    // hardcode both checkboxes back to checked regardless of their actual
+    // current state (koit bug report: the checkmark went stale after
+    // hiding Team Room, even though the real show/hide behavior was
+    // correct). try_state — not state, which panics — since the very
+    // FIRST call happens from the initial .menu(...) builder hook, before
+    // .manage() has registered either of these yet; true is the correct
+    // default for that one call only.
+    let team_room_checked = app.try_state::<TeamRoomVisible>().map(|s| s.0.load(Ordering::Relaxed)).unwrap_or(true);
+    let user_chat_checked = app.try_state::<UserChatVisible>().map(|s| s.0.load(Ordering::Relaxed)).unwrap_or(true);
     // A single combined string (rather than muda's separate version/
     // short_version fields, which map to different, platform-divergent
     // About-panel slots on macOS vs. a parenthetical suffix on Windows) so
@@ -249,9 +266,10 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::select_all(app, Some(&m("selectAll")))?,
         ],
     )?;
-    // "Show User Chat" toggles the app-user send/receive panel (chat +
-    // composer) in the frontend. The frontend owns the actual show/hide state;
-    // this checkbox just reflects it and emits a toggle event when clicked.
+    // "Show Team Room" / "Show User Chat" toggle the team-room tab and the
+    // app-user send/receive panel (chat + composer), respectively, in the
+    // frontend. The frontend owns the actual show/hide state; these
+    // checkboxes just reflect it and emit a toggle event when clicked.
     // "Pane Layout" duplicates the right-click-tab context menu's Layout
     // submenu (frontend App.tsx) here too — that one works fine but users
     // reported not discovering it, being tucked inside a right-click. The
@@ -275,7 +293,8 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
         m("viewMenu"),
         true,
         &[
-            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, true, None::<&str>)?,
+            &CheckMenuItem::with_id(app, TEAM_ROOM_MENU_ID, m("showTeamRoom"), true, team_room_checked, None::<&str>)?,
+            &CheckMenuItem::with_id(app, USER_CHAT_MENU_ID, m("showUserChat"), true, user_chat_checked, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &pane_layout_menu,
             &PredefinedMenuItem::separator(app)?,
@@ -297,6 +316,7 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<Wry>> {
     Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])
 }
 
+const TEAM_ROOM_MENU_ID: &str = "toggle_team_room";
 const USER_CHAT_MENU_ID: &str = "toggle_user_chat";
 const ZOOM_IN_ID: &str = "zoom_in";
 const ZOOM_OUT_ID: &str = "zoom_out";
@@ -388,6 +408,38 @@ fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Called by the frontend when it changes showTeamRoom from a surface OTHER
+/// than the View > Show Team Room checkbox itself (the tab's own right-click
+/// "Hide Team Room" — see App.tsx) — keeps the native checkbox and
+/// TeamRoomVisible in sync with a change the menu didn't originate, the
+/// same way clicking the checkbox itself does (see TEAM_ROOM_MENU_ID's
+/// on_menu_event handler).
+#[tauri::command]
+fn set_team_room_visible(app: AppHandle, visible: bool) {
+    app.state::<TeamRoomVisible>().0.store(visible, Ordering::Relaxed);
+    if let Some(menu) = app.menu() {
+        if let Some(item) = menu.get(TEAM_ROOM_MENU_ID) {
+            if let Some(check) = item.as_check_menuitem() {
+                let _ = check.set_checked(visible);
+            }
+        }
+    }
+}
+
+/// Same idea as set_team_room_visible, for the chat pane header's own
+/// right-click "Hide User Chat" (see App.tsx).
+#[tauri::command]
+fn set_user_chat_visible(app: AppHandle, visible: bool) {
+    app.state::<UserChatVisible>().0.store(visible, Ordering::Relaxed);
+    if let Some(menu) = app.menu() {
+        if let Some(item) = menu.get(USER_CHAT_MENU_ID) {
+            if let Some(check) = item.as_check_menuitem() {
+                let _ = check.set_checked(visible);
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -411,12 +463,25 @@ pub fn run() {
         // i18next resolves it, so set_menu_language rebuilds this shortly
         // after startup with the real choice.
         .menu(|app| make_menu(app, "en"))
+        .manage(TeamRoomVisible(AtomicBool::new(true)))
         .manage(UserChatVisible(AtomicBool::new(true)))
         .manage(ZoomLevel(Mutex::new(1.0)))
         .manage(MenuLanguage(Mutex::new("en".to_string())))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
-            if id == USER_CHAT_MENU_ID {
+            if id == TEAM_ROOM_MENU_ID {
+                let state = app.state::<TeamRoomVisible>();
+                let next = !state.0.load(Ordering::Relaxed);
+                state.0.store(next, Ordering::Relaxed);
+                if let Some(menu) = app.menu() {
+                    if let Some(item) = menu.get(TEAM_ROOM_MENU_ID) {
+                        if let Some(check) = item.as_check_menuitem() {
+                            let _ = check.set_checked(next);
+                        }
+                    }
+                }
+                let _ = app.emit("toggle-team-room", next);
+            } else if id == USER_CHAT_MENU_ID {
                 let state = app.state::<UserChatVisible>();
                 let next = !state.0.load(Ordering::Relaxed);
                 state.0.store(next, Ordering::Relaxed);
@@ -507,6 +572,8 @@ pub fn run() {
             agmsg::agmsg_command_name,
             agmsg::agmsg_spawnable_types,
             set_menu_language,
+            set_team_room_visible,
+            set_user_chat_visible,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

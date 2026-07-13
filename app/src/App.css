@@ -165,6 +165,7 @@ select:focus {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 4px 10px;
+  white-space: nowrap;
   cursor: pointer;
 }
 .new-btn:hover {
@@ -635,6 +636,7 @@ body.resizing-row {
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
+  white-space: nowrap;
 }
 .filter-actions {
   display: flex;
@@ -642,6 +644,7 @@ body.resizing-row {
   gap: 4px;
   text-transform: none;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 .filter-actions button {
   background: none;
@@ -901,6 +904,19 @@ body.resizing-row {
 .empty {
   color: var(--muted);
   padding: 20px;
+}
+
+/* Show Team Room off + no pane tabs yet — the stage would otherwise be
+   entirely blank. */
+.stage-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  padding: 20px;
+  text-align: center;
 }
 
 .term-pane {

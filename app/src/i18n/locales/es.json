@@ -77,7 +77,7 @@
     }
   },
   "composer": {
-    "asPrefix": "como",
+    "asLabel": "como {{appUser}}",
     "targetPlaceholder": "para…",
     "messagePlaceholder": "mensaje",
     "sendButton": "enviar",
@@ -154,6 +154,12 @@
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Mosaico"
+    },
+    "room": {
+      "hide": "Ocultar sala de equipo"
+    },
+    "chat": {
+      "hide": "Ocultar mi chat"
     }
   },
   "terminal": {
@@ -181,6 +187,7 @@
     "paste": "Pegar",
     "selectAll": "Seleccionar todo",
     "viewMenu": "Ver",
+    "showTeamRoom": "Mostrar sala de equipo",
     "showUserChat": "Mostrar mi chat",
     "paneLayout": "Diseño de paneles",
     "paneLayoutVertical": "Vertical",
@@ -202,5 +209,8 @@
     "updateFailed": "Error al actualizar: {{error}}",
     "upToDate": "Tienes la última versión.",
     "noUpdatesTitle": "Sin actualizaciones"
+  },
+  "stage": {
+    "emptyHint": "Haz clic en un miembro de la izquierda para iniciar un agente."
   }
 }

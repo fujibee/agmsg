@@ -77,7 +77,7 @@
     }
   },
   "composer": {
-    "asPrefix": "발신",
+    "asLabel": "{{appUser}}(으)로",
     "targetPlaceholder": "받는 사람…",
     "messagePlaceholder": "메시지",
     "sendButton": "보내기",
@@ -154,6 +154,12 @@
       "layoutVertical": "세로",
       "layoutHorizontal": "가로",
       "layoutTile": "타일"
+    },
+    "room": {
+      "hide": "팀 룸 숨기기"
+    },
+    "chat": {
+      "hide": "내 채팅 숨기기"
     }
   },
   "terminal": {
@@ -181,6 +187,7 @@
     "paste": "붙여넣기",
     "selectAll": "모두 선택",
     "viewMenu": "보기",
+    "showTeamRoom": "팀 룸 표시",
     "showUserChat": "내 채팅 표시",
     "paneLayout": "패널 레이아웃",
     "paneLayoutVertical": "세로",
@@ -202,5 +209,8 @@
     "updateFailed": "업데이트 실패: {{error}}",
     "upToDate": "최신 버전입니다.",
     "noUpdatesTitle": "업데이트 없음"
+  },
+  "stage": {
+    "emptyHint": "왼쪽의 멤버를 클릭하여 에이전트를 시작하세요."
   }
 }

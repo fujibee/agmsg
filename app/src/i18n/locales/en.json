@@ -80,7 +80,7 @@
     }
   },
   "composer": {
-    "asPrefix": "as",
+    "asLabel": "as {{appUser}}",
     "targetPlaceholder": "to…",
     "messagePlaceholder": "message",
     "sendButton": "send",
@@ -157,6 +157,12 @@
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Tile"
+    },
+    "room": {
+      "hide": "Hide Team Room"
+    },
+    "chat": {
+      "hide": "Hide User Chat"
     }
   },
   "terminal": {
@@ -181,6 +187,7 @@
     "paste": "Paste",
     "selectAll": "Select All",
     "viewMenu": "View",
+    "showTeamRoom": "Show Team Room",
     "showUserChat": "Show User Chat",
     "paneLayout": "Pane Layout",
     "paneLayoutVertical": "Vertical",
@@ -202,5 +209,8 @@
     "updateFailed": "Update failed: {{error}}",
     "upToDate": "You're on the latest version.",
     "noUpdatesTitle": "No Updates"
+  },
+  "stage": {
+    "emptyHint": "Click a member on the left to start an agent."
   }
 }

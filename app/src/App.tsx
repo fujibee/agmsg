@@ -165,6 +165,10 @@ export default function App() {
   // instead of a direct icon action at rail width. Settings is a direct
   // button in the rail (same as the full view's gear icon), no popup needed.
   const [railTeamMenu, setRailTeamMenu] = useState(false);
+  // Toggled from the native "View > Show Team Room" menu item — when off,
+  // the room tab itself disappears from the tab bar (not just its
+  // content), matching Show User Chat's own toggle just below it.
+  const [showTeamRoom, setShowTeamRoom] = useState(true);
   // Toggled from the native "View > Show User Chat" menu item.
   const [showUserChat, setShowUserChat] = useState(true);
   // The app-user chat pane's 3 states (session-only, like sidebarCollapsed):
@@ -197,6 +201,46 @@ export default function App() {
   const [windowMenu, setWindowMenu] = useState<{ windowId: string; x: number; y: number } | null>(
     null,
   );
+  // Right-click context menu over the Team Room tab itself: { x, y }. Just
+  // one action (Hide Team Room) — no per-window data needed, unlike windowMenu.
+  const [roomMenu, setRoomMenu] = useState<{ x: number; y: number } | null>(null);
+  // Same idea, over the app-user chat pane's own header: { x, y }.
+  const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // Closes every context/dropdown menu (koit: opening a second one while a
+  // first is still open used to stack both — right-clicking a different
+  // target, or clicking a different trigger button, never went through the
+  // background click-away handler that normally closes these, since it's
+  // a completely separate element being interacted with). Every
+  // menu-opening handler below calls this first.
+  const closeAllMenus = useCallback(() => {
+    setNewMenu(false);
+    setMemberMenu(null);
+    setPaneMenu(null);
+    setWindowMenu(null);
+    setRoomMenu(null);
+    setChatMenu(null);
+    setRailTeamMenu(false);
+  }, []);
+  // The two menus opened by clicking a trigger button (rather than
+  // right-clicking somewhere) toggle themselves off on a second click of
+  // their OWN button — closeAllMenus alone would fight that (it'd close
+  // then the plain !v toggle would immediately reopen it), so these check
+  // "is it already open" first and only close-all-others when opening fresh.
+  const toggleNewMenu = useCallback(() => {
+    if (newMenu) setNewMenu(false);
+    else {
+      closeAllMenus();
+      setNewMenu(true);
+    }
+  }, [newMenu, closeAllMenus]);
+  const toggleRailTeamMenu = useCallback(() => {
+    if (railTeamMenu) setRailTeamMenu(false);
+    else {
+      closeAllMenus();
+      setRailTeamMenu(true);
+    }
+  }, [railTeamMenu, closeAllMenus]);
   // Swap two panes' positions by name: click one pane's name to "pick it
   // up" (its id goes here), then click another pane's name in the same
   // window to swap. Click the same name again to cancel. Also doubles as
@@ -309,6 +353,12 @@ export default function App() {
   // The agmsg slash-command name, for the `/<cmd> actas <name>` boot prompt.
   useEffect(() => {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
+  }, []);
+
+  // Native "View > Show Team Room" menu checkbox toggles the room tab itself.
+  useEffect(() => {
+    const p = listen<boolean>("toggle-team-room", (e) => setShowTeamRoom(e.payload));
+    return () => void p.then((u) => u());
   }, []);
 
   // Native "View > Show User Chat" menu checkbox toggles the chat/composer panel.
@@ -716,6 +766,17 @@ export default function App() {
   // here or offered as spawn/move targets.
   const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
 
+  // If Show Team Room gets switched off while it's the active tab, land on
+  // whichever pane tab exists instead — the room tab itself is about to
+  // disappear from the bar, so "active" can't keep pointing at it. If there
+  // are no pane tabs either, there's genuinely nothing to switch to yet;
+  // the stage below shows a hint in that case rather than a blank area.
+  useEffect(() => {
+    if (!showTeamRoom && active === "room" && teamWindows.length > 0) {
+      setActive(teamWindows[0].id);
+    }
+  }, [showTeamRoom, active, teamWindows]);
+
   // Every window's leaf rects, computed once per render rather than per-pane
   // (computeRects walks the whole tree) — looked up by window id, then pane
   // id, in the panes.map below and again for each window's dividers.
@@ -836,8 +897,12 @@ export default function App() {
       e.preventDefault();
       const startX = e.clientX;
       const startW = sidebarWidth;
+      // 180, not 140 — narrower than that wraps the brand-row's + New
+      // button and the sidebar-title row's All/None filter links onto a
+      // second line (koit). Full collapse (the rail toggle) is the way to
+      // go narrower than a usable full sidebar now anyway.
       const onMove = (ev: MouseEvent) =>
-        setSidebarWidth(Math.max(140, Math.min(520, startW + ev.clientX - startX)));
+        setSidebarWidth(Math.max(180, Math.min(520, startW + ev.clientX - startX)));
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
@@ -947,13 +1012,7 @@ export default function App() {
   return (
     <div
       className="app"
-      onClick={() => {
-        setNewMenu(false);
-        setMemberMenu(null);
-        setPaneMenu(null);
-        setWindowMenu(null);
-        setRailTeamMenu(false);
-      }}
+      onClick={closeAllMenus}
       onDragOverCapture={(e) => {
         // WebKit doesn't reliably show a "no-drop" cursor just from
         // dropEffect = "none" — it only trusts that value once something in
@@ -1064,7 +1123,7 @@ export default function App() {
               </button>
 
               <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-                <button className="rail-icon-btn" title={t("sidebar.newMenu.trigger")} onClick={() => setNewMenu((v) => !v)}>
+                <button className="rail-icon-btn" title={t("sidebar.newMenu.trigger")} onClick={toggleNewMenu}>
                   +
                 </button>
                 {newMenu && (
@@ -1095,7 +1154,7 @@ export default function App() {
 
               {team && (
                 <div className="rail-menu-wrap" onClick={(e) => e.stopPropagation()}>
-                  <button className="rail-icon-btn" title={team} onClick={() => setRailTeamMenu((v) => !v)}>
+                  <button className="rail-icon-btn" title={team} onClick={toggleRailTeamMenu}>
                     <Users size={16} />
                   </button>
                   {railTeamMenu && (
@@ -1145,7 +1204,7 @@ export default function App() {
                 <div className="brand-row">
                   <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
                   <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-                  <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
+                  <button className="new-btn" onClick={toggleNewMenu}>
                     {t("sidebar.newMenu.trigger")}
                   </button>
                   {newMenu && (
@@ -1202,6 +1261,7 @@ export default function App() {
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      closeAllMenus();
                       setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
                     }}
                   >
@@ -1264,12 +1324,22 @@ export default function App() {
         {!sidebarCollapsed && <div className="divider-v" onMouseDown={startSidebarDrag} />}
 
         <main className="main">
-          <nav className="tabs" data-tauri-drag-region hidden={chatPaneState === "maximized"}>
-            <span className={active === "room" ? "tab active" : "tab"}>
-              <button className="tab-label" onClick={() => setActive("room")}>
-                {t("tabs.roomLabel")}
-              </button>
-            </span>
+          <nav className="tabs" data-tauri-drag-region hidden={showUserChat && chatPaneState === "maximized"}>
+            {showTeamRoom && (
+              <span
+                className={active === "room" ? "tab active" : "tab"}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  closeAllMenus();
+                  setRoomMenu({ x: e.clientX, y: e.clientY });
+                }}
+              >
+                <button className="tab-label" onClick={() => setActive("room")}>
+                  {t("tabs.roomLabel")}
+                </button>
+              </span>
+            )}
             {teamWindows.map((w) => (
               <span
                 key={w.id}
@@ -1282,6 +1352,7 @@ export default function App() {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
+                  closeAllMenus();
                   setWindowMenu({ windowId: w.id, x: e.clientX, y: e.clientY });
                 }}
                 onDragOver={(e) => {
@@ -1360,10 +1431,10 @@ export default function App() {
             />
           </nav>
 
-          <section className="stage" hidden={chatPaneState === "maximized"}>
+          <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"
-              hidden={active !== "room"}
+              hidden={active !== "room" || !showTeamRoom}
               ref={feedRef}
               onScroll={(e) => {
                 if (e.currentTarget.scrollTop < 60) void loadOlderMessages();
@@ -1387,6 +1458,13 @@ export default function App() {
               ))}
               {messages.length === 0 && <div className="empty">{t("room.emptyState")}</div>}
             </div>
+
+            {/* Show Team Room is off AND no pane tabs exist yet — the stage
+                would otherwise be entirely blank (no room, nothing else to
+                switch "active" to). */}
+            {!showTeamRoom && teamWindows.length === 0 && (
+              <div className="stage-empty-hint">{t("stage.emptyHint")}</div>
+            )}
 
             {/* Every pane is a permanent, flat child of .stage — its window only
                 decides WHERE it's positioned (computeRects, from its split
@@ -1472,6 +1550,7 @@ export default function App() {
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      closeAllMenus();
                       setPaneMenu({ paneId: p.id, windowId: win.id, x: e.clientX, y: e.clientY });
                     }}
                   >
@@ -1581,7 +1660,16 @@ export default function App() {
             style={chatPaneState === "normal" ? { height: chatHeight } : undefined}
             hidden={!showUserChat}
           >
-            <div className="appuser-chat-header" data-tauri-drag-region>
+            <div
+              className="appuser-chat-header"
+              data-tauri-drag-region
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeAllMenus();
+                setChatMenu({ x: e.clientX, y: e.clientY });
+              }}
+            >
               <span className="appuser-chat-title">{t("chat.title")}</span>
               <div className="appuser-chat-controls">
                 <button
@@ -1632,7 +1720,21 @@ export default function App() {
               {appUser ? (
                 <>
                   <span className="as">
-                    {t("composer.asPrefix")} <b>{appUser}</b>
+                    {/* Word order around the name varies by language (English
+                        "as X" puts it after; Japanese "X として" puts it
+                        before) — asLabel is the whole template with a literal
+                        "{{appUser}}" placeholder, split here so only the name
+                        itself renders bold, wherever the translation puts it. */}
+                    {(() => {
+                      const [before, after] = t("composer.asLabel").split("{{appUser}}");
+                      return (
+                        <>
+                          {before}
+                          <b>{appUser}</b>
+                          {after}
+                        </>
+                      );
+                    })()}
                   </span>
                   <select value={target} onChange={(e) => setTarget(e.target.value)}>
                     <option value="">{t("composer.targetPlaceholder")}</option>
@@ -1881,6 +1983,40 @@ export default function App() {
             </div>
           );
         })()}
+
+      {roomMenu && (
+        <div className="ctx-menu" style={{ left: roomMenu.x, top: roomMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => {
+              setShowTeamRoom(false);
+              setRoomMenu(null);
+              // Keeps the native View > Show Team Room checkbox in sync —
+              // it's not the surface that changed this, so Rust's own copy
+              // of the toggle state would otherwise go stale.
+              void invoke("set_team_room_visible", { visible: false });
+            }}
+          >
+            {t("ctxMenu.room.hide")}
+          </button>
+        </div>
+      )}
+
+      {chatMenu && (
+        <div className="ctx-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => {
+              setShowUserChat(false);
+              setChatMenu(null);
+              // Keeps the native View > Show User Chat checkbox in sync —
+              // it's not the surface that changed this, so Rust's own copy
+              // of the toggle state would otherwise go stale.
+              void invoke("set_user_chat_visible", { visible: false });
+            }}
+          >
+            {t("ctxMenu.chat.hide")}
+          </button>
+        </div>
+      )}
 
       {windowMenu &&
         (() => {

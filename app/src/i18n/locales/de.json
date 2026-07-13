@@ -77,7 +77,7 @@
     }
   },
   "composer": {
-    "asPrefix": "als",
+    "asLabel": "als {{appUser}}",
     "targetPlaceholder": "an…",
     "messagePlaceholder": "Nachricht",
     "sendButton": "senden",
@@ -154,6 +154,12 @@
       "layoutVertical": "Vertikal",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Kacheln"
+    },
+    "room": {
+      "hide": "Team-Raum ausblenden"
+    },
+    "chat": {
+      "hide": "Meinen Chat ausblenden"
     }
   },
   "terminal": {
@@ -181,6 +187,7 @@
     "paste": "Einsetzen",
     "selectAll": "Alles auswählen",
     "viewMenu": "Darstellung",
+    "showTeamRoom": "Team-Raum anzeigen",
     "showUserChat": "Meinen Chat anzeigen",
     "paneLayout": "Bereichslayout",
     "paneLayoutVertical": "Vertikal",
@@ -202,5 +209,8 @@
     "updateFailed": "Aktualisierung fehlgeschlagen: {{error}}",
     "upToDate": "Sie verwenden die neueste Version.",
     "noUpdatesTitle": "Keine Updates"
+  },
+  "stage": {
+    "emptyHint": "Klicke links auf ein Mitglied, um einen Agenten zu starten."
   }
 }

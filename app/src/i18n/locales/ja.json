@@ -77,7 +77,7 @@
     }
   },
   "composer": {
-    "asPrefix": "として",
+    "asLabel": "{{appUser}} として",
     "targetPlaceholder": "宛先…",
     "messagePlaceholder": "メッセージ",
     "sendButton": "送信",
@@ -154,6 +154,12 @@
       "layoutVertical": "縦",
       "layoutHorizontal": "横",
       "layoutTile": "タイル"
+    },
+    "room": {
+      "hide": "チームルームを非表示"
+    },
+    "chat": {
+      "hide": "自分のチャットを非表示"
     }
   },
   "terminal": {
@@ -181,6 +187,7 @@
     "paste": "ペースト",
     "selectAll": "すべてを選択",
     "viewMenu": "表示",
+    "showTeamRoom": "チームルームを表示",
     "showUserChat": "自分のチャットを表示",
     "paneLayout": "ペインレイアウト",
     "paneLayoutVertical": "縦",
@@ -202,5 +209,8 @@
     "updateFailed": "アップデートに失敗しました: {{error}}",
     "upToDate": "最新バージョンです。",
     "noUpdatesTitle": "アップデートなし"
+  },
+  "stage": {
+    "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
   }
 }
