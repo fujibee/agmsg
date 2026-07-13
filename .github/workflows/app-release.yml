@@ -192,8 +192,8 @@ jobs:
       # Login BEFORE the build: Authenticode signing now happens inside
       # `tauri build` (bundle > windows > signCommand -> sign-windows.ps1), so
       # the Azure CLI credential must already exist when the bundler runs.
-      # Signing binaries after the build (the old artifact-signing-action
-      # step) mutated bytes the updater's minisign .sig had already been
+      # Signing binaries after the build (the old post-build signing step,
+      # since removed) mutated bytes the updater's minisign .sig had already been
       # computed over — every 0.1.4 update failed signature verification, and
       # the in-place pass also corrupted the MSI's embedded cabinet (#333).
       - name: Azure login (OIDC)

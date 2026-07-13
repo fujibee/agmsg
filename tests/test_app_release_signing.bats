@@ -12,8 +12,15 @@ WORKFLOW="${BATS_TEST_DIRNAME}/../.github/workflows/app-release.yml"
 SIGN_SCRIPT="${BATS_TEST_DIRNAME}/../app/scripts/sign-windows.ps1"
 
 @test "app-release: no post-build in-place signing action remains" {
-  ! grep -q "artifact-signing-action" "$WORKFLOW"
-  ! grep -q "trusted-signing-action" "$WORKFLOW"
+  # `run` + explicit status check, not bare `! grep ...`: bash's `set -e`
+  # (which bats enables for the test body) exempts `!`-negated commands from
+  # aborting the function on failure, so two bare `! grep` statements in a
+  # row would silently swallow the first one's failure — only the LAST
+  # statement's exit code would determine the test's outcome.
+  run grep -q -- "uses: azure/artifact-signing-action" "$WORKFLOW"
+  [ "$status" -ne 0 ]
+  run grep -q -- "uses: azure/trusted-signing-action" "$WORKFLOW"
+  [ "$status" -ne 0 ]
 }
 
 @test "app-release: azure login runs before the windows build" {
