@@ -663,10 +663,7 @@ body.resizing-row {
   background: var(--muted);
 }
 .team-status-dot.status-blocked { background: #f7768e; }
-.team-status-dot.status-working {
-  background: #e0af68;
-  animation: agent-status-pulse 1.2s ease-in-out infinite;
-}
+.team-status-dot.status-working { background: #e0af68; }
 .team-status-dot.status-idle { background: var(--green); }
 .collapsed-team-status {
   width: 28px;
@@ -728,6 +725,14 @@ body.resizing-row {
   cursor: pointer;
   margin-left: 4px;
 }
+.member-check-slot {
+  flex-shrink: 0;
+  width: 13px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .member {
   flex: 1;
   min-width: 0;
@@ -753,7 +758,6 @@ body.resizing-row {
   display: inline-block;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
   border-radius: 50%;
   background: var(--muted);
   vertical-align: middle;

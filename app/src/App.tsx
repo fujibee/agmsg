@@ -1349,7 +1349,7 @@ export default function App() {
                         setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
                       }}
                     >
-                      {active === "room" && (
+                      {active === "room" ? (
                         <input
                           type="checkbox"
                           className="member-check"
@@ -1358,6 +1358,10 @@ export default function App() {
                           onChange={() => toggleMember(m.name)}
                           onClick={(e) => e.stopPropagation()}
                         />
+                      ) : (
+                        <span className="member-check-slot">
+                          {status && <span className={`agent-status-dot status-${status}`} title={status} />}
+                        </span>
                       )}
                       <button
                         className="member"
@@ -1368,15 +1372,7 @@ export default function App() {
                             : t("sidebar.member.titleSpawn")
                         }
                       >
-                        <span className="member-name">
-                          {m.name}
-                          {status && (
-                            <span
-                              className={`agent-status-dot status-${status}`}
-                              title={status}
-                            />
-                          )}
-                        </span>
+                        <span className="member-name">{m.name}</span>
                         <span className="member-types">
                           {m.types.join(", ") || t("sidebar.member.noTypes")}
                         </span>
