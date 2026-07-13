@@ -178,7 +178,12 @@ impl TailBuffer {
         let raw: Vec<u8> = self.bytes.iter().copied().collect();
         let text = strip_ansi(&String::from_utf8_lossy(&raw));
         let lines: Vec<&str> = text.lines().collect();
-        lines[lines.len().saturating_sub(20)..].join("\n")
+        // Joined with a space, not "\n": a narrow pane wraps a prompt like "Do
+        // you want to proceed?" across two lines, and a literal "\n" would
+        // split that phrase apart, permanently defeating classify()'s
+        // substring match for as long as the pane stays that width (#385
+        // "blocking doesn't react" diagnosis).
+        lines[lines.len().saturating_sub(20)..].join(" ")
     }
 
     pub fn snapshot(&self) -> (String, u64) {
@@ -252,6 +257,17 @@ mod tests {
         let mut tail = TailBuffer::default();
         tail.push(b"before\x1b]0;title\x07middle\x1b]9;progress\x1b\\after");
         assert_eq!(tail.detection_tail(), "beforemiddleafter");
+    }
+
+    #[test]
+    fn detection_tail_survives_narrow_pane_word_wrap() {
+        let mut tail = TailBuffer::default();
+        // A narrow pane wraps the approval prompt mid-phrase.
+        tail.push(b"Do you want to\nproceed?\n");
+        assert_eq!(
+            classify("claude", &tail.detection_tail()),
+            PaneState::Blocked
+        );
     }
 
     #[test]
