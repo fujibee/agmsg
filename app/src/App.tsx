@@ -13,13 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
-import {
-  aggregateTeamStatus,
-  applyStateChange,
-  displayPaneStatus,
-  type PaneStatusMap,
-  type RawState,
-} from "./agentStatus";
+import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
 import {
   AgentModal,
   AppUserModal,
@@ -306,32 +300,8 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
-  const activeRef = useRef(active);
-  activeRef.current = active;
-  const focusedPaneRef = useRef<string | null>(null);
-
-  const paneIsFocused = useCallback((paneId: string) => {
-    const owner = windowsRef.current.find((window) => leaves(window.root).includes(paneId));
-    return focusedPaneRef.current === paneId && owner?.id === activeRef.current;
-  }, []);
-
-  const applyAgentState = useCallback(
-    (paneId: string, state: RawState) => {
-      setPaneStatus((current) =>
-        applyStateChange(current, paneId, state, paneIsFocused(paneId), Date.now()),
-      );
-    },
-    [paneIsFocused],
-  );
-
-  const focusPane = useCallback((paneId: string) => {
-    focusedPaneRef.current = paneId;
-    setPaneStatus((current) => {
-      const status = current[paneId];
-      return status
-        ? applyStateChange(current, paneId, status.state, true, Date.now())
-        : current;
-    });
+  const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
 
   // The app user = the member registered with the agmsg-app type (one per team).
@@ -839,14 +809,7 @@ export default function App() {
         const paneIds = windows
           .filter((window) => window.team === teamName)
           .flatMap((window) => leaves(window.root));
-        const statuses = paneIds.map(
-          (paneId) =>
-            paneStatus[paneId] ?? {
-              state: "unknown" as const,
-              seen: true,
-              changedAt: 0,
-            },
-        );
+        const statuses = paneIds.map((paneId) => paneStatus[paneId] ?? { state: "unknown" as const });
         return [teamName, aggregateTeamStatus(statuses)];
       }),
     );
@@ -1374,7 +1337,7 @@ export default function App() {
                           window.team === team && leaves(window.root).includes(candidate.id),
                       ),
                   );
-                  const status = pane ? displayPaneStatus(paneStatus[pane.id]) : null;
+                  const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
                   return (
                     <li
                       key={m.name}
@@ -1624,7 +1587,6 @@ export default function App() {
                     width: `${rect.width}%`,
                     height: `${rect.height}%`,
                   }}
-                  onFocusCapture={() => focusPane(p.id)}
                   onDragOver={(e) => {
                     // Gate on dataTransfer.types, NOT React state: dragover
                     // fires on whatever element is under the cursor, whose

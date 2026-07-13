@@ -667,7 +667,6 @@ body.resizing-row {
   background: #e0af68;
   animation: agent-status-pulse 1.2s ease-in-out infinite;
 }
-.team-status-dot.status-done { background: #2ac3de; }
 .team-status-dot.status-idle { background: var(--green); }
 .collapsed-team-status {
   width: 28px;
@@ -764,8 +763,7 @@ body.resizing-row {
   background: #e0af68;
   animation: agent-status-pulse 1.2s ease-in-out infinite;
 }
-.agent-status-dot.status-done { background: #2ac3de; }
-.agent-status-dot.status-idle { display: none; }
+.agent-status-dot.status-idle { background: var(--green); }
 
 @keyframes agent-status-pulse {
   50% { opacity: 0.35; transform: scale(0.8); }
