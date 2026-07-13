@@ -7,9 +7,9 @@ set -euo pipefail
 #   actas-monitor.sh <project> <type> <name> [session_id]
 #
 # Codex has no native Monitor tool. An explicitly selected monitor/both mode
-# binds one agmsg identity to a persisted Codex thread. A live app-server bridge
-# is preferred; otherwise a shell-only watcher resumes that same thread only
-# when unread mail exists. turn/off never start the background receiver.
+# binds one agmsg identity to a persisted Codex thread only when a visible
+# app-server bridge is available. Without that bridge the effective mode is
+# changed to turn, so unread mail waits for the next visible assistant turn.
 
 PROJECT="${1:?Usage: actas-monitor.sh <project> <type> <name> [session_id]}"
 TYPE="${2:?Missing type}"
@@ -395,10 +395,20 @@ start_chat_visible_turn_delivery() {
   local thread_id="$1"
   local reason="${2:-foreground_turn_mode}"
   local meta="$RUN_DIR/codex-chat-visible.$TEAM.$NAME.meta"
+  local requested_mode="$MODE"
 
   kill_other_project_receivers
   kill_receiver_files "$RUN_DIR/codex-bridge.$TEAM.$NAME.pid" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
   kill_receiver_files "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.pid" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
+
+  # A queued foreground check is not a monitor. Preserve an honest delivery
+  # state so operators do not mistake waiting_for_chat_turn for active receipt.
+  case "$requested_mode" in
+    monitor|both)
+      "$SCRIPT_DIR/../../../delivery.sh" set turn "$TYPE" "$PROJECT" >/dev/null
+      MODE="turn"
+      ;;
+  esac
 
   {
     printf 'project=%s\n' "$PROJECT"
@@ -411,7 +421,7 @@ start_chat_visible_turn_delivery() {
     printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$meta"
 
-  echo "status=visible_turn_only team=$TEAM name=$NAME thread=${thread_id:-unresolved} transport=codex-chat-visible-turn reason=$reason"
+  echo "status=visible_turn_only team=$TEAM name=$NAME thread=${thread_id:-unresolved} transport=codex-chat-visible-turn requested_mode=$requested_mode effective_mode=$MODE reason=$reason"
   exit 0
 }
 
@@ -459,7 +469,7 @@ if [ -z "$APP_SERVER" ] && [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
 fi
 
 if [ -z "$APP_SERVER" ]; then
-  start_codex_app_monitor "$THREAD_ID"
+  start_chat_visible_turn_delivery "$THREAD_ID" "visible_app_server_unavailable"
 fi
 
 if [ -z "$THREAD_ID" ]; then
@@ -502,16 +512,11 @@ BRIDGE_PID="$(start_bridge "$THREAD_ID")"
 sleep 0.8
 if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
   # Codex Desktop rollouts can be unreadable to a standalone app-server while
-  # the Desktop owns them. Never retry without a thread: thread/start would
-  # create a new Codex task. Preserve a concrete thread through the explicit
-  # background receiver, or fall back to foreground turn delivery when the
-  # loaded thread could not be resolved.
+  # the Desktop owns them. Never retry through a background CLI resume because
+  # that can consume mail without updating the visible Codex thread.
   rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
   printf 'actas-monitor: thread attach failed; refusing thread/start for thread=%s\n' "$THREAD_ID" >>"$BRIDGE_LOG"
-  case "$THREAD_ID" in
-    ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_thread_attach_failed" ;;
-    *) start_codex_app_monitor "$THREAD_ID" ;;
-  esac
+  start_chat_visible_turn_delivery "$THREAD_ID" "app_server_thread_attach_failed"
 fi
 
 READY_SECONDS="${AGMSG_CODEX_ACTAS_READY_SECONDS:-8}"
@@ -519,10 +524,7 @@ sleep "$READY_SECONDS"
 if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
   rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
   actas_lock_gc_stale >/dev/null 2>&1 || true
-  case "$THREAD_ID" in
-    ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_bridge_exited" ;;
-    *) start_codex_app_monitor "$THREAD_ID" ;;
-  esac
+  start_chat_visible_turn_delivery "$THREAD_ID" "app_server_bridge_exited"
 fi
 case "$APP_SERVER" in
   ws://127.0.0.1:*)
@@ -531,10 +533,7 @@ case "$APP_SERVER" in
     if ! port_alive "$check_port"; then
       rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
       actas_lock_gc_stale >/dev/null 2>&1 || true
-      case "$THREAD_ID" in
-        ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_exited" ;;
-        *) start_codex_app_monitor "$THREAD_ID" ;;
-      esac
+      start_chat_visible_turn_delivery "$THREAD_ID" "app_server_exited"
     fi
     ;;
 esac

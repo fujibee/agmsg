@@ -4,8 +4,8 @@
 # codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
 # enable/disable side effects (print the monitor shim setup on enable, stop the
 # receiver on disable) and replaces the runtime status summary with Codex
-# receiver liveness. Monitor mode is explicit opt-in to event-driven resumption
-# of the same persisted thread; turn/off never start a background receiver.
+# receiver liveness. Monitor mode requires a visible app-server bridge;
+# turn/off never start a background receiver.
 # Sourced into delivery.sh's context,
 # so SKILL_DIR, SCRIPT_DIR, RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL
 # and stop_codex_bridge are in scope.
@@ -31,8 +31,8 @@ agmsg_delivery_status() {
 
 agmsg_delivery_on_enable() {
   echo "Codex monitor beta is enabled."
-  echo "After actas binds a concrete role/thread, a shell-only watcher waits without model calls."
-  echo "Unread mail resumes that same Codex thread, which owns inbox reading and replies."
+  echo "After actas binds a concrete role/thread, monitor requires a visible app-server bridge."
+  echo "Without that bridge, actas downgrades the effective mode to turn and keeps mail unread."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
     echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."

@@ -1,25 +1,16 @@
 # Codex Monitor Beta
 
-Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta is
-an explicit opt-in, event-driven receiver bound to one persisted Codex thread.
-A shell-only watcher waits for unread state without starting a model. When mail
-arrives, it resumes that same thread once; the resumed thread runs the official
-`inbox.sh`, continues substantive work, verifies it, and replies when needed.
-A visible app-server bridge is still preferred when available. The last
-explicit `actas` role is rebound from SessionStart after restart or compaction.
+Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta can
+deliver mail only through an app-server bridge that renders the handling in the
+same visible Codex thread. The last explicit `actas` role is rebound from
+SessionStart after restart or compaction.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
-> Enabling monitor mode permits unread agmsg mail to resume the selected Codex
-> thread in the background. **Only enable it for a role and thread whose
-> existing scope is safe to continue unattended.** The receiver preserves the
-> thread's approval, production, customer-data, secret, and external-mutation
-> boundaries. Enabling also prints an optional shell function that routes
-> interactive launches through the app-server bridge. A concrete thread id
-> supplied by `actas` binds immediately. After a Codex restart, SessionStart
-> rebinds the role on the first turn because opening the app alone does not fire
-> that hook. SessionEnd stops the receiver for the ending thread. Multiple
-> registered identities are supported by restoring the most recent explicit
-> `actas` role.
+> Monitor mode is active only after a visible app-server bridge attaches to the
+> selected thread. If no bridge is available, agmsg keeps mail unread and changes
+> the effective mode to `turn`. Background `codex exec resume`, cron, heartbeat,
+> and scheduled polling are prohibited because they can process mail without
+> showing the work to the human operator.
 
 ## Quick Start
 
@@ -34,15 +25,14 @@ The command:
 1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
    fallback for the project.
 2. Persists the last explicit `actas` role so SessionStart can rebind it.
-3. After `actas` binds a concrete thread, starts a persistent shell-only watcher
-   for that exact team/role/thread tuple.
+3. After `actas` binds a concrete thread, attaches the visible app-server bridge
+   for that exact team/role/thread tuple or downgrades to `turn`.
 4. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
 
-Monitor mode itself is the explicit opt-in for background thread resumption.
-`turn` and `off` never start it. The watcher only observes unread count and
-high-water id; it never reads message bodies or marks messages read. The same
-persisted thread owns the official inbox read and any reply.
+The bridge may observe unread count and high-water id, but it does not read
+message bodies or mark messages read. The visible persisted thread owns the
+official inbox read, substantive work, progress reporting, and any reply.
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -73,11 +63,9 @@ In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
 When Codex.app is opened normally, SessionStart restores the last `actas` role.
-If no visible app-server is available, `watch-once.sh` remains blocked in a
-shell process until unread mail exists, then invokes `codex exec resume` for the
-same thread id. Empty inboxes therefore create no model turn and no new Codex
-task. Repeated failure to consume the same unread high-water mark stops active
-delivery and leaves the message unread.
+If no visible app-server is available, the effective delivery mode becomes
+`turn`; the Stop hook checks the inbox on a later visible assistant turn. agmsg
+does not claim that autonomous monitoring is active in this state.
 
 `mode off`, `mode turn`, `drop`/`reset`, and SessionEnd stop the matching
 receiver and remove its LaunchAgent/runtime files. No cron, heartbeat, or
@@ -230,12 +218,10 @@ shape: a short-interval scheduler that runs a heavyweight agent as the poller,
 with no cheap no-op path, so empty inboxes still pay the full cost — and Codex
 Desktop's per-session UI/log accumulation amplifies it.
 
-### Gate with `watch-once.sh`, launch the agent only on a hit
+### `watch-once.sh` is not a Codex Desktop delivery fallback
 
-agmsg already ships the cheap gate this needs. `watch-once.sh` is a shell-only,
-one-shot inbox oracle — no agent, no Codex turn. It is the same primitive the
-Codex monitor bridge uses (see [Bridge Mechanics](#bridge-mechanics)) to avoid
-starting a turn on an empty inbox.
+`watch-once.sh` is a shell-only, one-shot inbox oracle. The visible app-server
+bridge uses it to avoid starting a turn on an empty inbox.
 
 ```text
 exit 0  unread inbound exists   (prints: status=pending count=<n> max_id=<id>)
@@ -243,27 +229,13 @@ exit 2  nothing pending          (prints: status=timeout)
 exit 1  configuration / runtime error
 ```
 
-Two-stage worker — the shell gate decides whether the expensive agent runs:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-SKILL=~/.agents/skills/agmsg/scripts
-PROJECT="/path/to/project"
-
-# 1. Cheap shell-only check. --timeout 0 makes it a single poll, then exit.
-#    --team/--name scope the gate to one identity (matches the single-flight
-#    key below, and disambiguates when the same agent name exists in two teams).
-if "$SKILL/watch-once.sh" "$PROJECT" codex --team myteam --name myagent --timeout 0; then
-  # 2. Unread exists — only now pay for a full Codex/Claude session.
-  codex exec "Handle the new agmsg messages for this project."
-fi
-# exit 2 (nothing pending) falls through and the worker ends cheaply.
-```
+Do not combine it with a scheduler and `codex exec` as a substitute for Codex
+Desktop delivery. That path cannot guarantee that the received message,
+progress, reply, and result appear in the user's visible thread.
 
 ### Defense in depth
 
-For an unattended worker, layer these on top of the gate:
+For a separately authorized non-Desktop worker, layer these on top of the gate:
 
 - **Single-flight lock per `(team, agent)`** so overlapping ticks don't stack
   concurrent agents:
@@ -289,7 +261,7 @@ For an unattended worker, layer these on top of the gate:
 
 1. Make the worker inactive / unschedule the `cron` job so it stops spawning.
 2. Back off delivery: `delivery.sh set turn codex "$PROJECT"` (or `off`) to stop
-   monitor-driven launches.
+   monitor delivery.
 3. Kill stale monitors / spawned sessions and any orphaned bridge
    (`mode off` tears the bridge down; see #149).
 4. Inspect Codex Desktop log-DB bloat: `~/.codex/logs_*.sqlite` and its WAL.

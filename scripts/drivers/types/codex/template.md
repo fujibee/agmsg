@@ -52,10 +52,9 @@ Four possible outputs:
        2) off     — No automatic delivery
                     Manual $__SKILL_NAME__ only.
 
-       3) monitor — Persistent autonomous delivery (BETA)
-                    A shell-only watcher is free while idle. Unread mail
-                    resumes this same Codex task to read, work, and reply.
-                    SessionStart rebinds the last actas role after restart.
+       3) monitor — Visible app-server delivery (BETA)
+                    Requires a bridge attached to this Codex task. If the
+                    bridge is unavailable, delivery safely degrades to turn.
 
      [1]:
      ```
@@ -65,7 +64,7 @@ Four possible outputs:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
      - If monitor is chosen, immediately bind the newly joined role by running:
        `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <agent_name> "${CODEX_THREAD_ID:-}"`
-     - If monitor is chosen, tell the user: "Codex monitor is a BETA. It persistently binds the last `actas` role to this task. Waiting is shell-only; unread mail resumes this same task, whose first action is the official inbox command. Monitor mode is explicit opt-in and remains active until mode turn/off or drop."
+     - If monitor is chosen, report whether the visible app-server bridge attached. If it did not, say that the effective mode was downgraded to `turn`.
 
   6. Then check inbox for the newly joined team.
 
@@ -83,20 +82,22 @@ Four possible outputs:
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
-### Codex event-driven receiver
+### Codex visible monitor invariant
 
-`mode monitor` is an explicit opt-in to background resumption of the same
-persisted Codex task. After `actas-monitor.sh` binds a concrete role and thread:
+`mode monitor` may deliver mail only through an app-server bridge that inserts
+the handling into the same visible Codex thread.
 
-1. `watch-once.sh` waits for unread state in a shell-only process. It does not
-   start a model, read a message body, or mark a message read while idle.
-2. On unread mail, the receiver runs `codex exec resume <same-thread-id>` once.
-3. The resumed task must run the official `inbox.sh` first. Only that command
-   reads the body and marks it read.
-4. Substantive requests continue through work, verification, and an evidence-
-   backed reply. ACK-only mail does not trigger a reply, preventing ping-pong.
-5. `mode turn`, `mode off`, and `drop` stop the receiver. Do not create cron,
-   heartbeat, or scheduled polling jobs for Codex agmsg delivery.
+1. A shell watcher may detect unread state, but it must not read the body, mark
+   it read, start substantive work, or reply by itself.
+2. Before `inbox.sh`, show a short visible notice that agmsg mail was detected.
+3. Immediately after `inbox.sh`, show the sender, body or safe summary, planned
+   action, and whether a reply is needed before any other tool call.
+4. Keep progress, decisions, blockers, replies, and the final result visible in
+   the same Codex thread. ACK-only mail still requires a visible receipt notice.
+5. Background `codex exec resume` delivery is prohibited.
+6. If a visible bridge cannot attach, keep mail unread, change the effective
+   mode to `turn`, and fall back to the next visible turn.
+7. Do not create cron, heartbeat, or scheduled polling jobs for Codex delivery.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
@@ -130,7 +131,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" codex` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Rebind the receive side by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. In monitor/both mode, prefer a visible app-server bridge; otherwise start the event-driven same-task receiver. In turn/off mode, never start a background receiver.
+5. Rebind the receive side by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. In monitor/both mode, allow only a visible app-server bridge. If it cannot attach, keep mail unread and downgrade to `turn`. Never start a background receiver.
 6. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
 7. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
 8. Otherwise tell the user: "Now acting as `<name>`. Sends and receive are bound to `<name>`."
@@ -166,7 +167,7 @@ If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
 3. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and concrete thread id.
 4. If mode is `turn` or `off`, confirm that the background receiver stopped.
-5. If mode is `monitor` or `both`, tell the user: "Persistent autonomous Codex delivery is enabled. Idle waiting is shell-only; unread mail resumes this same task to run the official inbox, continue substantive work, and reply. No scheduled polling jobs are created."
+5. If mode is `monitor` or `both`, report whether a visible app-server bridge attached. If it did not attach, report that the effective mode was downgraded to `turn`. Never describe visible-turn fallback as an active monitor.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

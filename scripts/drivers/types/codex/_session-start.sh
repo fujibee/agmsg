@@ -60,9 +60,9 @@ INNER_EOF
 }
 
 agmsg_session_start() {
-  # `codex exec resume` runs the normal Codex hooks. It is already the child of
-  # this role's receiver, so rebinding here would stop or duplicate the parent
-  # receiver while it is delivering the unread batch.
+  # Compatibility guard for rollouts created by older background receivers.
+  # Current builds prohibit that transport, but must not duplicate a legacy
+  # parent receiver during an in-flight upgrade.
   if [ "${AGMSG_CODEX_BACKGROUND_RESUME:-}" = "1" ]; then
     exit 0
   fi
@@ -112,9 +112,9 @@ agmsg_session_start() {
     fi
   fi
   if [ -z "$app_server" ]; then
-    # Ordinary Codex.app has no app-server endpoint. Rebind the explicit
-    # monitor role to the event-driven same-thread receiver; turn/off mode is
-    # enforced inside actas-monitor.sh and never starts that receiver.
+    # Ordinary Codex.app has no externally reachable app-server endpoint.
+    # actas-monitor.sh records visible-turn fallback and downgrades monitor to
+    # turn instead of starting an invisible background receiver.
     log="$RUN_DIR/codex-actas-restore.log"
     "$SKILL_DIR/scripts/drivers/types/codex/actas-monitor.sh" \
       "$PROJECT" "$TYPE" "$name" "$thread_id" >>"$log" 2>&1 || true

@@ -29,9 +29,9 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 
-# A background `codex exec resume` fires the same hooks as the visible task.
-# Its parent receiver owns lifecycle cleanup, so the internal SessionEnd must
-# not stop that receiver or release its role while it is handling a batch.
+# Compatibility guard for legacy background-resume processes created before
+# that transport was disabled. Their parent owns cleanup, so this hook must not
+# change role state while an old process is still unwinding.
 if [ "$TYPE" = "codex" ] && [ "${AGMSG_CODEX_BACKGROUND_RESUME:-}" = "1" ]; then
   exit 0
 fi

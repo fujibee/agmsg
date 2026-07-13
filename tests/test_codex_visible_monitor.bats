@@ -83,11 +83,11 @@ join_codex_roles() {
   [[ "$output" == *"visible-bob-message"* ]]
 }
 
-@test "codex background thread receiver is disabled unless monitor explicitly opts in" {
+@test "codex background thread receiver is always disabled" {
   run bash "$TYPES/codex/codex-app-monitor.sh" \
     "$TEST_PROJECT" codex team bob thread-123
   [ "$status" -eq 64 ]
-  [[ "$output" == *"disabled"* ]]
+  [[ "$output" == *"background-only handling is prohibited"* ]]
   [ ! -e "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid" ]
 }
 
@@ -116,92 +116,25 @@ EOF
   printf '%s\n' "$fake"
 }
 
-@test "codex monitor does not start a model while inbox is empty" {
-  skip_on_windows "background receiver liveness uses POSIX signals"
+@test "legacy background opt-in cannot resume a Codex thread or consume unread mail" {
   join_codex_roles
-  local fake log prompt monitor_pid
+  bash "$SCRIPTS/send.sh" team alice bob "preserve-visible-mail" >/dev/null
+  local fake log prompt
   fake="$(make_fake_codex)"
   log="$TEST_SKILL_DIR/fake-codex.log"
   prompt="$TEST_SKILL_DIR/fake-codex.prompt"
 
-  env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
+  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
     AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=1 \
-    AGMSG_CODEX_APP_MONITOR_INTERVAL=1 \
     AGMSG_FAKE_CODEX_LOG="$log" \
     AGMSG_FAKE_CODEX_PROMPT="$prompt" \
     AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
     bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-empty >/dev/null 2>&1 &
-  monitor_pid=$!
-
-  for _ in {1..30}; do
-    grep -qx "status=ready" "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.health" 2>/dev/null && break
-    sleep 0.1
-  done
-  sleep 1.2
-  kill "$monitor_pid" 2>/dev/null || true
-  wait "$monitor_pid" 2>/dev/null || true
-
-  grep -q "<mcp> <list>" "$log"
-  run ! grep -q "<exec>" "$log"
+      "$TEST_PROJECT" codex team bob thread-123
+  [ "$status" -eq 64 ]
+  [[ "$output" == *"background-only handling is prohibited"* ]]
+  [ ! -e "$log" ]
   [ ! -e "$prompt" ]
-}
-
-@test "codex monitor resumes the same thread and leaves body ownership to inbox.sh" {
-  join_codex_roles
-  bash "$SCRIPTS/send.sh" team alice bob "secret-body-must-not-be-in-wake-prompt" >/dev/null
-  local fake log prompt
-  fake="$(make_fake_codex)"
-  log="$TEST_SKILL_DIR/fake-codex.log"
-  prompt="$TEST_SKILL_DIR/fake-codex.prompt"
-
-  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
-    AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=0 \
-    AGMSG_CODEX_APP_MONITOR_MAX_WAKES=1 \
-    AGMSG_FAKE_CODEX_LOG="$log" \
-    AGMSG_FAKE_CODEX_PROMPT="$prompt" \
-    AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
-    AGMSG_FAKE_CODEX_CONSUME=1 \
-    bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-123
-  [ "$status" -eq 0 ]
-
-  grep -q "<resume> <thread-123>" "$log"
-  grep -q '<-s> <workspace-write>' "$log"
-  grep -q '<-c> <approval_policy="never">' "$log"
-  grep -q 'BACKGROUND <1>' "$log"
-  run ! grep -q -- "--dangerously-bypass-approvals-and-sandbox" "$log"
-  grep -q "$SCRIPTS/inbox.sh team bob" "$prompt"
-  run ! grep -q "secret-body-must-not-be-in-wake-prompt" "$prompt"
-
-  run bash "$TYPES/codex/watch-once.sh" "$TEST_PROJECT" codex \
-    --team team --name bob --timeout 0
-  [ "$status" -eq 2 ]
-}
-
-@test "codex monitor never marks unread mail when resumed thread fails to consume it" {
-  join_codex_roles
-  bash "$SCRIPTS/send.sh" team alice bob "preserve-me" >/dev/null
-  local fake log prompt
-  fake="$(make_fake_codex)"
-  log="$TEST_SKILL_DIR/fake-codex.log"
-  prompt="$TEST_SKILL_DIR/fake-codex.prompt"
-
-  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
-    AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=0 \
-    AGMSG_CODEX_APP_MONITOR_MAX_FAILURES=1 \
-    AGMSG_FAKE_CODEX_LOG="$log" \
-    AGMSG_FAKE_CODEX_PROMPT="$prompt" \
-    AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
-    bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-123
-  [ "$status" -eq 70 ]
-  [ "$(grep -c '<exec>' "$log")" -eq 1 ]
-  grep -qx "last_error=thread_did_not_consume_inbox" \
-    "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.health"
 
   run bash "$TYPES/codex/watch-once.sh" "$TEST_PROJECT" codex \
     --team team --name bob --timeout 0
@@ -209,26 +142,34 @@ EOF
   [[ "$output" == *"count=1"* ]]
 }
 
-@test "codex monitor never retries an unread id after resume returns an error" {
+@test "monitor request without a visible app-server downgrades to turn and preserves unread mail" {
   join_codex_roles
-  bash "$SCRIPTS/send.sh" team alice bob "one-wake-only" >/dev/null
+  bash "$SCRIPTS/send.sh" team alice bob "visible-turn-required" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
   local fake log prompt
   fake="$(make_fake_codex)"
   log="$TEST_SKILL_DIR/fake-codex.log"
   prompt="$TEST_SKILL_DIR/fake-codex.prompt"
 
-  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
+  run env CODEX_THREAD_ID=thread-123 \
+    AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
     AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=0 \
-    AGMSG_CODEX_APP_MONITOR_MAX_FAILURES=3 \
     AGMSG_FAKE_CODEX_LOG="$log" \
     AGMSG_FAKE_CODEX_PROMPT="$prompt" \
     AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
-    AGMSG_FAKE_CODEX_EXEC_STATUS=42 \
-    bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-123
-  [ "$status" -eq 70 ]
-  [ "$(grep -c '<exec>' "$log")" -eq 1 ]
+    bash "$TYPES/codex/actas-monitor.sh" \
+      "$TEST_PROJECT" codex bob thread-123
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"requested_mode=monitor"* ]]
+  [[ "$output" == *"effective_mode=turn"* ]]
+  [[ "$output" == *"reason=visible_app_server_unavailable"* ]]
+  [ ! -e "$log" ]
+  [ ! -e "$prompt" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: turn"* ]]
 
   run bash "$TYPES/codex/watch-once.sh" "$TEST_PROJECT" codex \
     --team team --name bob --timeout 0
@@ -236,34 +177,25 @@ EOF
   [[ "$output" == *"count=1"* ]]
 }
 
-@test "supervised codex monitor exits successfully after one failed wake" {
+@test "repeated monitor requests without a visible app-server never start a receiver" {
   join_codex_roles
-  bash "$SCRIPTS/send.sh" team alice bob "supervisor-must-not-restart" >/dev/null
-  local fake log prompt
-  fake="$(make_fake_codex)"
-  log="$TEST_SKILL_DIR/fake-codex.log"
-  prompt="$TEST_SKILL_DIR/fake-codex.prompt"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
-  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
-    AGMSG_CODEX_APP_MONITOR_SUPERVISED=1 \
-    AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=0 \
-    AGMSG_CODEX_APP_MONITOR_MAX_FAILURES=3 \
-    AGMSG_FAKE_CODEX_LOG="$log" \
-    AGMSG_FAKE_CODEX_PROMPT="$prompt" \
-    AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
-    AGMSG_FAKE_CODEX_EXEC_STATUS=42 \
-    bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-123
+  run env CODEX_THREAD_ID=thread-123 \
+    bash "$TYPES/codex/actas-monitor.sh" "$TEST_PROJECT" codex bob thread-123
   [ "$status" -eq 0 ]
-  [ "$(grep -c '<exec>' "$log")" -eq 1 ]
-  grep -qx "last_error=codex_exec_resume_failed_42" \
-    "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.health"
+  [[ "$output" == *"effective_mode=turn"* ]]
 
-  run bash "$TYPES/codex/watch-once.sh" "$TEST_PROJECT" codex \
-    --team team --name bob --timeout 0
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  run env CODEX_THREAD_ID=thread-123 \
+    bash "$TYPES/codex/actas-monitor.sh" "$TEST_PROJECT" codex bob thread-123
   [ "$status" -eq 0 ]
-  [[ "$output" == *"count=1"* ]]
+  [[ "$output" == *"effective_mode=turn"* ]]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: turn"* ]]
 }
 
 @test "delivery turn stops an app monitor even when no bridge pidfile exists" {
@@ -359,42 +291,32 @@ EOF
   TEST_RECEIVER_PIDS=""
 }
 
-@test "codex monitor rejects a second receiver for the same role" {
-  skip_on_windows "background receiver liveness uses POSIX signals"
+@test "legacy monitor opt-in cannot create a second hidden receiver" {
   join_codex_roles
-  local fake log prompt first_pid owner_pid
+  local fake log prompt
   fake="$(make_fake_codex)"
   log="$TEST_SKILL_DIR/fake-codex.log"
   prompt="$TEST_SKILL_DIR/fake-codex.prompt"
 
-  env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
+  run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
     AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=30 \
     AGMSG_FAKE_CODEX_LOG="$log" \
     AGMSG_FAKE_CODEX_PROMPT="$prompt" \
     AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
     bash "$TYPES/codex/codex-app-monitor.sh" \
-      "$TEST_PROJECT" codex team bob thread-owner >/dev/null 2>&1 &
-  first_pid=$!
-  TEST_RECEIVER_PIDS="$first_pid"
-  for _ in {1..30}; do
-    grep -qx "status=ready" "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.health" 2>/dev/null && break
-    sleep 0.1
-  done
-  owner_pid="$(cat "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid")"
+      "$TEST_PROJECT" codex team bob thread-owner
+  [ "$status" -eq 64 ]
 
   run env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
     AGMSG_CODEX_APP_MONITOR_CODEX="$fake" \
-    AGMSG_CODEX_APP_MONITOR_TIMEOUT=0 \
     AGMSG_FAKE_CODEX_LOG="$log" \
     AGMSG_FAKE_CODEX_PROMPT="$prompt" \
     AGMSG_FAKE_CODEX_INBOX="$SCRIPTS/inbox.sh" \
     bash "$TYPES/codex/codex-app-monitor.sh" \
       "$TEST_PROJECT" codex team bob thread-duplicate
-  [ "$status" -eq 73 ]
-  [[ "$output" == *"receiver already owns team/bob"* ]]
-  [ "$(cat "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid")" = "$owner_pid" ]
-  kill -0 "$first_pid" 2>/dev/null
+  [ "$status" -eq 64 ]
+  [ ! -e "$log" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-monitor.team.bob.pid" ]
 }
 
 @test "background resume hooks do not rebind or stop their parent receiver" {
@@ -475,9 +397,11 @@ EOF
   TEST_RECEIVER_PIDS=""
 }
 
-@test "codex monitor supervisor restarts crashes but never falls back to a new task" {
-  grep -q '<key>AGMSG_CODEX_APP_MONITOR_SUPERVISED</key>' "$TYPES/codex/actas-monitor.sh"
-  grep -A3 -q '<key>SuccessfulExit</key>' "$TYPES/codex/actas-monitor.sh"
+@test "codex monitor never falls back to hidden resume or a new task" {
+  grep -q 'background-only handling is prohibited' "$TYPES/codex/codex-app-monitor.sh"
+  grep -q 'visible_app_server_unavailable' "$TYPES/codex/actas-monitor.sh"
+  run grep -q 'start_codex_app_monitor "$THREAD_ID"' "$TYPES/codex/actas-monitor.sh"
+  [ "$status" -ne 0 ]
   run grep -q 'start_bridge ""' "$TYPES/codex/actas-monitor.sh"
   [ "$status" -ne 0 ]
   run grep -q 'THREAD_ID="new"' "$TYPES/codex/actas-monitor.sh"

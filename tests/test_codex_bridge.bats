@@ -803,7 +803,7 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing inline inbox body" } });
       return;
     }
-    if (!message.params.input[0].text.includes("agmsg対応状況:")) {
+    if (!message.params.input[0].text.includes('starting with "agmsg受信:"')) {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing visible progress contract" } });
       return;
     }

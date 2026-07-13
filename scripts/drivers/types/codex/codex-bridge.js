@@ -1048,11 +1048,12 @@ class CodexBridge {
     ].join("\n");
     const visibleUiRequirement = [
       "Visible UI requirement:",
-      '1. Before the first tool call, post a short Japanese progress update in the Codex thread UI starting with "agmsg対応状況:" and include sender, summary, planned action, and whether you will reply.',
-      "2. Keep substantive work in the visible thread. Before each major action, post a short Japanese progress update; do not complete the task in an unreported background worker.",
-      "3. After handling the message, post a final Japanese status update with: sender, received instruction, action taken, reply target, reply summary, remaining blocker, and next step.",
-      "4. If you do not reply, state why in the visible status.",
-      "5. Do not treat DB writes, monitor delivery, or a send.sh result as complete unless the handling is visible in the Codex thread UI.",
+      '1. Before the inbox tool call, post "agmsg受信を検知しました。内容を確認します。" in the visible Codex thread.',
+      '2. Immediately after inbox.sh and before any other tool call, post a Japanese update starting with "agmsg受信:" and include sender, received body or safe summary, planned action, and whether you will reply.',
+      "3. Keep substantive work in the visible thread. Before each major action, post a short Japanese progress update; never complete the task in an unreported background worker.",
+      "4. After handling the message, post a final Japanese status update with: sender, received instruction, action taken, reply target, reply summary, remaining blocker, and next step.",
+      "5. If you do not reply, state why in the visible status. ACK-only mail still requires a visible receipt notice.",
+      "6. Do not treat inbox consumption, DB writes, monitor delivery, send.sh, or a successful process exit as complete unless the handling result is visible in the Codex thread UI.",
     ].join("\n");
     if (this.opts.inlineInbox) {
       return [

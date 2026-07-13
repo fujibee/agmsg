@@ -300,9 +300,9 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` as a **beta** event-driven receiver, plus `mode turn` and `mode off`.
+Codex supports `mode monitor` as a **beta** visible app-server receiver, plus `mode turn` and `mode off`.
 
-> ⚠️ **Monitor is explicit opt-in for unattended continuation of one persisted Codex task.** A shell-only watcher costs no model turn while the inbox is empty. On unread mail it resumes the same task, whose first tool call is the official `inbox.sh`; only that task reads or marks the message, continues substantive work, verifies it, and replies. ACK-only mail is not answered, preventing ping-pong. No heartbeat, cron, or scheduled polling task is created. Existing safety and approval boundaries still apply. A visible app-server bridge remains the preferred path when available.
+> ⚠️ **Monitor is active only when a visible app-server bridge attaches to the persisted Codex task.** Background `codex exec resume` delivery is prohibited because a successful CLI turn can consume and answer mail without displaying the handling in Codex Desktop. When no visible bridge is available, agmsg keeps mail unread and downgrades the effective mode to `turn`. No heartbeat, cron, or scheduled polling task is created.
 
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
