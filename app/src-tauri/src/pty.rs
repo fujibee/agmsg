@@ -29,7 +29,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::agent_state::{TailBuffer, DETECTION_INTERVAL};
+use crate::agent_state::{DetectionTracker, PaneState, TailBuffer, DETECTION_INTERVAL};
 
 /// One live PTY-backed agent terminal.
 struct PtySession {
@@ -39,6 +39,7 @@ struct PtySession {
     /// (and let its SessionEnd hook release the agmsg actas lock).
     pid: Option<u32>,
     tail: Arc<Mutex<TailBuffer>>,
+    detection: Arc<Mutex<DetectionTracker>>,
 }
 
 /// All live sessions, keyed by a frontend-chosen id (e.g. "claude-1").
@@ -49,21 +50,33 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
-    pub fn start_detection_tick(&self) {
+    pub fn start_detection_tick(&self, app: AppHandle) {
         let sessions = Arc::clone(&self.sessions);
         thread::spawn(move || loop {
             thread::sleep(DETECTION_INTERVAL);
-            let tails: Vec<Arc<Mutex<TailBuffer>>> = sessions
+            let snapshots: Vec<(String, Arc<Mutex<TailBuffer>>, Arc<Mutex<DetectionTracker>>)> = sessions
                 .lock()
                 .unwrap()
-                .values()
-                .map(|session| Arc::clone(&session.tail))
+                .iter()
+                .map(|(id, session)| {
+                    (id.clone(), Arc::clone(&session.tail), Arc::clone(&session.detection))
+                })
                 .collect();
-            for tail in tails {
-                let _ = tail.lock().unwrap().detection_tail();
+            let now = std::time::Instant::now();
+            for (id, tail, detection) in snapshots {
+                let (tail, output_seq) = tail.lock().unwrap().snapshot();
+                if let Some(state) = detection.lock().unwrap().observe(&tail, output_seq, now) {
+                    let _ = app.emit("agent-state", AgentStateEvent { id, state });
+                }
             }
         });
     }
+}
+
+#[derive(Clone, Serialize)]
+struct AgentStateEvent {
+    id: String,
+    state: PaneState,
 }
 
 #[derive(Clone, Serialize)]
@@ -192,6 +205,12 @@ pub fn pty_spawn(
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let tail = Arc::new(Mutex::new(TailBuffer::default()));
+    let agent_type = std::path::Path::new(&cmd)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&cmd)
+        .to_ascii_lowercase();
+    let detection = Arc::new(Mutex::new(DetectionTracker::new(agent_type)));
 
     // Reader thread: stream output to the webview.
     {
@@ -219,9 +238,17 @@ pub fn pty_spawn(
 
     manager.sessions.lock().unwrap().insert(
         id,
-        PtySession { master: pair.master, writer, pid, tail },
+        PtySession { master: pair.master, writer, pid, tail, detection },
     );
     Ok(())
+}
+
+#[tauri::command]
+pub fn agent_state(manager: State<'_, PtyManager>, id: String) -> Result<PaneState, String> {
+    let sessions = manager.sessions.lock().unwrap();
+    let session = sessions.get(&id).ok_or("no such pty session")?;
+    let state = session.detection.lock().unwrap().state();
+    Ok(state)
 }
 
 /// Forward keystrokes/data from xterm.js into the PTY.

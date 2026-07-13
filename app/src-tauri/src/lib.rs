@@ -577,7 +577,7 @@ pub fn run() {
             }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
-            app.state::<PtyManager>().start_detection_tick();
+            app.state::<PtyManager>().start_detection_tick(app.handle().clone());
             // Quiet startup check — only surfaces a dialog when an update is
             // actually available (see check_for_updates's user_initiated flag).
             let app_handle = app.handle().clone();
@@ -592,6 +592,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_inject,
+            pty::agent_state,
             agmsg::agmsg_is_installed,
             agmsg::agmsg_install,
             agmsg::agmsg_core_version_status,
