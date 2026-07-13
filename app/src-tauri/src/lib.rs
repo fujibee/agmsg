@@ -1,4 +1,5 @@
 mod agmsg;
+mod agent_state;
 mod menu_i18n;
 mod pty;
 
@@ -576,6 +577,7 @@ pub fn run() {
             }
             // Start the agmsg DB watcher so the team room updates live.
             agmsg::start_watcher(app.handle().clone());
+            app.state::<PtyManager>().start_detection_tick();
             // Quiet startup check — only surfaces a dialog when an update is
             // actually available (see check_for_updates's user_initiated flag).
             let app_handle = app.handle().clone();

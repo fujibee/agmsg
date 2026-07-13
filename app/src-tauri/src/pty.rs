@@ -29,6 +29,8 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::agent_state::{TailBuffer, DETECTION_INTERVAL};
+
 /// One live PTY-backed agent terminal.
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -36,6 +38,7 @@ struct PtySession {
     /// Child process id, so closing a pane can actually terminate the agent
     /// (and let its SessionEnd hook release the agmsg actas lock).
     pid: Option<u32>,
+    tail: Arc<Mutex<TailBuffer>>,
 }
 
 /// All live sessions, keyed by a frontend-chosen id (e.g. "claude-1").
@@ -43,6 +46,24 @@ struct PtySession {
 #[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+}
+
+impl PtyManager {
+    pub fn start_detection_tick(&self) {
+        let sessions = Arc::clone(&self.sessions);
+        thread::spawn(move || loop {
+            thread::sleep(DETECTION_INTERVAL);
+            let tails: Vec<Arc<Mutex<TailBuffer>>> = sessions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|session| Arc::clone(&session.tail))
+                .collect();
+            for tail in tails {
+                let _ = tail.lock().unwrap().detection_tail();
+            }
+        });
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -170,17 +191,20 @@ pub fn pty_spawn(
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let tail = Arc::new(Mutex::new(TailBuffer::default()));
 
     // Reader thread: stream output to the webview.
     {
         let app = app.clone();
         let id = id.clone();
+        let reader_tail = Arc::clone(&tail);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        reader_tail.lock().unwrap().push(&buf[..n]);
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                         let _ = app.emit("pty-output", OutputEvent { id: id.clone(), b64 });
                     }
@@ -193,7 +217,10 @@ pub fn pty_spawn(
         });
     }
 
-    manager.sessions.lock().unwrap().insert(id, PtySession { master: pair.master, writer, pid });
+    manager.sessions.lock().unwrap().insert(
+        id,
+        PtySession { master: pair.master, writer, pid, tail },
+    );
     Ok(())
 }
 
