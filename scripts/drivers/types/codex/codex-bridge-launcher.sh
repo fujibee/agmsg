@@ -113,7 +113,6 @@ EOF
     --name "$name" \
     --thread "$thread_id" \
     --app-server "$req_app_server" \
-    --inline-inbox \
     >>"$log" 2>&1 &
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"

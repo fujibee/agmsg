@@ -190,7 +190,9 @@ $agmsg              # Codex, Gemini CLI, Antigravity
 
 `spawn <type> <name>` は事前に `<name>` を参加させ、actasのスラッシュコマンド（`/<your-command> actas <name>`、インストールしたコマンド名に合わせる）を初期プロンプトとして対象のCLIを起動する。現在のセッションが**tmux**内であれば新しいペイン（`--window` で新しいウィンドウ、`--split h|v` で分割方向）を開き、そうでなければ新しい**OSターミナル**ウィンドウを開く。
 
-`--boot-prompt <text>` を渡すと、新しいエージェントに初期タスクを渡せる — ブートプロンプトはactasのスラッシュコマンドに続けて（改行区切りで）指定したテキストになるので、エージェントは同じ最初のターンでアイデンティティを主張し**かつ**タスクに着手する。Monitorを持たず、アイドルになった後の `send` メッセージに気づくことが決してない**codex**ピアに対してワンショットのゴールを渡す唯一の方法がこれだ。
+`--boot-prompt <text>` を渡すと、新しいエージェントに初期タスクを渡せる — ブートプロンプトはactasのスラッシュコマンドに続けて（改行区切りで）指定したテキストになるので、エージェントは同じ最初のターンでアイデンティティを主張し**かつ**タスクに着手する。
+これは**codex**ピアへワンショットのゴールを確実に渡す方法である。
+アイドル中に後続メッセージを受信するには、`mode monitor` への明示的なオプトインが必要になる。
 
 デフォルトでは `spawn` は**新しいエージェントが実際にリッスンし始めるまでブロックする** — ウォッチャーがアタッチし、レディネスの目印に触れる — その後 `status=ready` を表示するので、`spawn` が返ってきた瞬間にエージェントの起動直後の空白時間を気にせず作業を送れる。フックアンドフォーゲットなら `--no-wait`、待機時間の上限を決めたいなら `--ready-timeout <secs>`（デフォルト90、タイムアウト時は `status=timeout` を表示して終了コード3、呼び出し側は再spawnできる）を使う。Codexはこの待機をスキップする（Monitorがないため）。
 
@@ -286,9 +288,16 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 $agmsg                          — または /skills → agmsg
 ```
 
-Codexは `mode monitor` を**ベータ**のapp-serverブリッジとしてサポートし、加えて `mode turn` と `mode off` にも対応している。
+Codexは `mode monitor` を**ベータ**のイベント駆動受信としてサポートし、加えて `mode turn` と `mode off` にも対応している。
 
-> ⚠️ **monitorベータはCodexの起動方法を変える — 理解した上でのみオプトインすること。** CodexにはMonitorツールがないため、`mode monitor` はインタラクティブシェル内で `codex` をagmsgのmonitorシム経由にルーティングするシェル関数を表示する。monitorモードのプロジェクトでは、このシムがインタラクティブな起動を、受信したagmsgメッセージを現在のCodexスレッドのターンに変換するブリッジ経由にルーティングする。`codex exec` とmonitor対象外のプロジェクトは実物のCodexにそのまま通る。これは実験的なCodex app-serverの挙動に依存しており、既知の粗さがある（TUIを閉じるとオーファンが残る — #149、プロジェクトごとに1アイデンティティのみ — #150）。
+> ⚠️ **monitorは、1つのCodexタスクを無人で継続させる明示的なオプトインである。**
+> 受信箱が空の間はシェルだけで待機し、モデルのターンを作らない。
+> 未読が届いた時だけ同じタスクを再開し、そのタスクが最初のツール呼び出しで公式の `inbox.sh` を実行する。
+> 本文の取得と既読化、実作業、検証、返信は、再開されたタスクだけが担う。
+> ACKだけのメッセージには返信せず、無限往復を防ぐ。
+> heartbeat、cron、定期ポーリングによる自動実行は作らない。
+> 既存の安全境界と承認境界は維持される。
+> 利用可能な場合は、可視のapp-serverブリッジを優先する。
 
 グローバルなPATHシムを好むなら、`~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` を実行し、`~/.agents/bin` を実物のCodexバイナリより前にPATHに置く。`~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh` で直接起動することもできる。Codexのサンドボックスはスキルの `db/`、`teams/`、`run/` ディレクトリへの書き込みを許可する必要がある — `~/.codex/config.toml` が存在する場合、`install.sh` がその `writable_roots` を設定する。セットアップの詳細と内部動作: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md)。
 

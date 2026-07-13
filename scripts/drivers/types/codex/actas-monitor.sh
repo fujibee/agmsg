@@ -6,13 +6,10 @@ set -euo pipefail
 # Usage:
 #   actas-monitor.sh <project> <type> <name> [session_id]
 #
-# Codex has no Monitor tool. Monitor mode is implemented by a bridge process
-# that watches one agmsg identity and wakes a Codex thread. Sessions launched
-# through codex-monitor.sh use app-server and can report in the visible chat.
-# Ordinary Codex.app sessions must not fall back to headless `codex exec resume`
-# unless AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1 is explicitly set.
-# actas must therefore start or rebind the visible receiver, otherwise sends use
-# the new identity while receives keep watching the old one.
+# Codex has no native Monitor tool. An explicitly selected monitor/both mode
+# binds one agmsg identity to a persisted Codex thread. A live app-server bridge
+# is preferred; otherwise a shell-only watcher resumes that same thread only
+# when unread mail exists. turn/off never start the background receiver.
 
 PROJECT="${1:?Usage: actas-monitor.sh <project> <type> <name> [session_id]}"
 TYPE="${2:?Missing type}"
@@ -27,6 +24,8 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
+# shellcheck source=../../../lib/compat.sh
+source "$SCRIPT_DIR/../../../lib/compat.sh"
 # shellcheck source=../../../lib/resolve-project.sh
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # shellcheck source=../../../lib/actas-lock.sh
@@ -80,15 +79,8 @@ record_last_actas() {
 
 record_last_actas
 
-# Codex uses both mode for persistent SessionStart rebind plus a visible Stop
-# hook fallback. This keeps monitoring armed across restarts without allowing a
-# headless worker to consume or answer messages outside the visible thread.
 MODE="$("$SCRIPT_DIR/../../../delivery.sh" status "$TYPE" "$PROJECT" 2>/dev/null \
   | sed -n 's/^mode: //p')"
-case "$MODE" in
-  monitor|both) ;;
-  *) "$SCRIPT_DIR/../../../delivery.sh" set both "$TYPE" "$PROJECT" >/dev/null ;;
-esac
 
 resolve_thread_id() {
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
@@ -148,7 +140,7 @@ NODE
 }
 
 kill_other_project_receivers() {
-  local meta pidfile pid meta_project meta_type meta_team meta_name
+  local meta pidfile meta_project meta_type meta_team meta_name
   for meta in "$RUN_DIR"/codex-bridge.*.meta "$RUN_DIR"/codex-app-monitor.*.meta; do
     [ -f "$meta" ] || continue
     meta_project="$(sed -n 's/^project=//p' "$meta" | head -1)"
@@ -159,30 +151,64 @@ kill_other_project_receivers() {
     [ "$meta_type" = "$TYPE" ] || continue
     [ "$meta_team" = "$TEAM" ] && [ "$meta_name" = "$NAME" ] && continue
     pidfile="${meta%.meta}.pid"
-    [ -f "$pidfile" ] || continue
-    pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-    fi
-    rm -f "$pidfile" "$meta"
+    kill_receiver_files "$pidfile" "$meta"
   done
 }
 
+wait_for_pid_exit() {
+  local pid="$1" check=0 state
+  while [ "$check" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    case "$state" in Z*) return 0 ;; esac
+    sleep 0.1
+    check=$((check + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || return 1
+    check=0
+    while [ "$check" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+      state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+      case "$state" in Z*) return 0 ;; esac
+      sleep 0.1
+      check=$((check + 1))
+    done
+  fi
+  ! kill -0 "$pid" 2>/dev/null
+}
+
 kill_receiver_files() {
-  local pidfile="$1" meta="$2" pid
-  local label
-  if [ -f "$meta" ] && command -v launchctl >/dev/null 2>&1; then
+  local pidfile="$1" meta="$2" pid="" cmd="" label="" kind base plist
+  base="${pidfile%.pid}"
+  kind="${base##*/}"
+  plist="$base.plist"
+  if [ -f "$meta" ]; then
     label="$(sed -n 's/^launch_label=//p' "$meta" | head -1)"
-    if [ -n "$label" ]; then
-      bootout_label_and_wait "gui/$(id -u)" "$label"
-    fi
   fi
-  [ -f "$pidfile" ] || return 0
-  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [ -z "$label" ] && [ -f "$plist" ]; then
+    label="$(awk '/<key>Label<\/key>/{getline; sub(/^[[:space:]]*<string>/, ""); sub(/<\/string>[[:space:]]*$/, ""); print; exit}' "$plist")"
+  fi
+  if [ -n "$label" ] && command -v launchctl >/dev/null 2>&1; then
+    bootout_label_and_wait "gui/$(id -u)" "$label"
+  fi
+  if [ -f "$pidfile" ]; then
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+  fi
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
+    cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+    case "$kind:$cmd" in
+      codex-bridge.*:*codex-bridge.js*|codex-app-monitor.*:*codex-app-monitor.sh*)
+        kill "$pid" 2>/dev/null || true
+        if ! wait_for_pid_exit "$pid"; then
+          echo "actas-monitor: receiver pid $pid did not stop; preserving its run files" >&2
+          return 1
+        fi
+        ;;
+    esac
   fi
-  rm -f "$pidfile" "$meta"
+  rm -f "$pidfile" "$meta" "$base.appserver" "$base.log" "$plist" \
+    "$base.health" "$base.preflight.log" "$base.last-prompt.txt" \
+    "$base.last-message.txt" "$base.last-status" "$base.last-ids" \
+    "$base.watch-output"
 }
 
 xml_escape() {
@@ -219,6 +245,8 @@ write_codex_app_monitor_plist() {
   local codex_bin path_value
   if [ -n "${AGMSG_CODEX_APP_MONITOR_CODEX:-}" ]; then
     codex_bin="$AGMSG_CODEX_APP_MONITOR_CODEX"
+  elif [ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ]; then
+    codex_bin="/Applications/ChatGPT.app/Contents/Resources/codex"
   elif [ -x "/Applications/Codex.app/Contents/Resources/codex" ]; then
     codex_bin="/Applications/Codex.app/Contents/Resources/codex"
   elif [ -x "$HOME/.npm-global/bin/codex" ]; then
@@ -254,8 +282,10 @@ write_codex_app_monitor_plist() {
     <string>$(plist_string "$label")</string>
     <key>AGMSG_CODEX_APP_MONITOR_CODEX</key>
     <string>$(plist_string "${codex_bin:-codex}")</string>
-    <key>AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR</key>
-    <string>$(plist_string "${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}")</string>
+    <key>AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME</key>
+    <string>1</string>
+    <key>AGMSG_CODEX_APP_MONITOR_SUPERVISED</key>
+    <string>1</string>
     <key>AGMSG_CODEX_APP_MONITOR_TIMEOUT</key>
     <string>$(plist_string "${AGMSG_CODEX_APP_MONITOR_TIMEOUT:-}")</string>
     <key>AGMSG_CODEX_APP_MONITOR_INTERVAL</key>
@@ -278,7 +308,12 @@ write_codex_app_monitor_plist() {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <false/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>2</integer>
 </dict>
 </plist>
 EOF
@@ -291,8 +326,7 @@ start_codex_app_monitor() {
   local health_status ready_seconds ready_checks check
   if [ -z "$thread_id" ]; then
     actas_lock_gc_stale >/dev/null 2>&1 || true
-    echo "status=no_thread team=$TEAM name=$NAME reason=codex_app_thread_id_unavailable"
-    exit 8
+    start_chat_visible_turn_delivery "" "codex_app_thread_id_unavailable"
   fi
 
   kill_other_project_receivers
@@ -309,8 +343,8 @@ start_codex_app_monitor() {
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
       existing_thread="$(sed -n 's/^thread=//p' "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta" 2>/dev/null | head -1)"
       existing_health="$(sed -n 's/^status=//p' "$health" 2>/dev/null | head -1 || true)"
-      if [ "$existing_thread" = "$thread_id" ] && [ "$existing_health" = "ready" ]; then
-        echo "status=already_running team=$TEAM name=$NAME app_monitor_pid=$existing_pid thread=$thread_id transport=codex-app-exec-resume health=ready"
+      if [ "$existing_thread" = "$thread_id" ]; then
+        echo "status=already_running team=$TEAM name=$NAME app_monitor_pid=$existing_pid thread=$thread_id transport=codex-background-thread-resume health=${existing_health:-unknown}"
         exit 0
       fi
       kill_receiver_files "$pidfile" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
@@ -327,7 +361,8 @@ start_codex_app_monitor() {
       start_chat_visible_turn_delivery "$thread_id" "app_monitor_launchctl_bootstrap_failed"
     fi
   else
-    nohup "$SCRIPT_DIR/codex-app-monitor.sh" "$PROJECT" "$TYPE" "$TEAM" "$NAME" "$thread_id" >>"$log" 2>&1 &
+    nohup env AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1 \
+      "$SCRIPT_DIR/codex-app-monitor.sh" "$PROJECT" "$TYPE" "$TEAM" "$NAME" "$thread_id" >>"$log" 2>&1 &
   fi
 
   ready_seconds="${AGMSG_CODEX_APP_MONITOR_READY_SECONDS:-5}"
@@ -339,7 +374,7 @@ start_codex_app_monitor() {
     app_monitor_pid="$(cat "$pidfile" 2>/dev/null || true)"
     health_status="$(sed -n 's/^status=//p' "$health" 2>/dev/null | head -1 || true)"
     if [ "$health_status" = "ready" ] && [ -n "$app_monitor_pid" ] && kill -0 "$app_monitor_pid" 2>/dev/null; then
-      echo "status=ok team=$TEAM name=$NAME app_monitor_pid=$app_monitor_pid thread=$thread_id transport=codex-app-exec-resume health=ready"
+      echo "status=ok team=$TEAM name=$NAME app_monitor_pid=$app_monitor_pid thread=$thread_id transport=codex-background-thread-resume health=ready"
       exit 0
     fi
     case "$health_status" in preflight_failed|fallback_failed) break ;; esac
@@ -358,7 +393,7 @@ start_codex_app_monitor() {
 
 start_chat_visible_turn_delivery() {
   local thread_id="$1"
-  local reason="${2:-headless_app_monitor_disabled}"
+  local reason="${2:-foreground_turn_mode}"
   local meta="$RUN_DIR/codex-chat-visible.$TEAM.$NAME.meta"
 
   kill_other_project_receivers
@@ -376,14 +411,6 @@ start_chat_visible_turn_delivery() {
     printf 'updated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$meta"
 
-  if [ -n "$thread_id" ] && [ "$thread_id" != "loaded" ] && [ "$thread_id" != "new" ]; then
-    # Arm the session-scoped scheduler fallback. The host agent reads this
-    # status and creates the Codex heartbeat/watchdog automations; the shell
-    # helper itself never calls app-internal tools or consumes the inbox.
-    "$SCRIPT_DIR/codex-monitor-lease.sh" arm \
-      "$PROJECT" "$TEAM" "$NAME" "$thread_id" || true
-  fi
-
   echo "status=visible_turn_only team=$TEAM name=$NAME thread=${thread_id:-unresolved} transport=codex-chat-visible-turn reason=$reason"
   exit 0
 }
@@ -393,10 +420,24 @@ if [ -z "$THREAD_ID" ]; then
   THREAD_ID="$(resolve_thread_id || true)"
 fi
 
-if [ -n "$THREAD_ID" ] && [ "$THREAD_ID" != "loaded" ] && [ "$THREAD_ID" != "new" ]; then
-  "$SCRIPT_DIR/codex-monitor-lease.sh" arm \
-    "$PROJECT" "$TEAM" "$NAME" "$THREAD_ID" || true
-fi
+case "$MODE" in
+  monitor|both)
+    ;;
+  turn)
+    start_chat_visible_turn_delivery "$THREAD_ID" "foreground_turn_mode"
+    ;;
+  off|"")
+    kill_other_project_receivers
+    kill_receiver_files "$RUN_DIR/codex-bridge.$TEAM.$NAME.pid" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
+    kill_receiver_files "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.pid" "$RUN_DIR/codex-app-monitor.$TEAM.$NAME.meta"
+    echo "status=receive_disabled team=$TEAM name=$NAME mode=${MODE:-off}"
+    exit 0
+    ;;
+  *)
+    echo "status=invalid_mode team=$TEAM name=$NAME mode=$MODE" >&2
+    exit 4
+    ;;
+esac
 
 port_alive() {
   local port="$1"
@@ -404,7 +445,6 @@ port_alive() {
 }
 
 PROJECT_HASH="$(agmsg_sha1 <<<"$PROJECT")"
-SERVER_LOG="$RUN_DIR/codex-app-server.$PROJECT_HASH.log"
 SERVER_PID="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
 PORT_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.port"
 
@@ -419,9 +459,6 @@ if [ -z "$APP_SERVER" ] && [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
 fi
 
 if [ -z "$APP_SERVER" ]; then
-  if [ "${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}" != "1" ]; then
-    start_chat_visible_turn_delivery "$THREAD_ID"
-  fi
   start_codex_app_monitor "$THREAD_ID"
 fi
 
@@ -452,7 +489,6 @@ start_bridge() {
     --team "$TEAM"
     --name "$NAME"
     --app-server "$APP_SERVER"
-    --inline-inbox
   )
   if [ -n "$thread_id" ]; then
     args+=(--thread "$thread_id")
@@ -466,18 +502,16 @@ BRIDGE_PID="$(start_bridge "$THREAD_ID")"
 sleep 0.8
 if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
   # Codex Desktop rollouts can be unreadable to a standalone app-server while
-  # the Desktop owns them. Fall back to a new bridge-owned thread instead of
-  # leaving actas with no receive side.
+  # the Desktop owns them. Never retry without a thread: thread/start would
+  # create a new Codex task. Preserve a concrete thread through the explicit
+  # background receiver, or fall back to foreground turn delivery when the
+  # loaded thread could not be resolved.
   rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
-  printf 'actas-monitor: retrying without thread attach after failed thread=%s\n' "$THREAD_ID" >>"$BRIDGE_LOG"
-  THREAD_ID="new"
-  BRIDGE_PID="$(start_bridge "")"
-  sleep 0.8
-fi
-
-if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-  echo "status=bridge_failed team=$TEAM name=$NAME log=$BRIDGE_LOG"
-  exit 5
+  printf 'actas-monitor: thread attach failed; refusing thread/start for thread=%s\n' "$THREAD_ID" >>"$BRIDGE_LOG"
+  case "$THREAD_ID" in
+    ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_thread_attach_failed" ;;
+    *) start_codex_app_monitor "$THREAD_ID" ;;
+  esac
 fi
 
 READY_SECONDS="${AGMSG_CODEX_ACTAS_READY_SECONDS:-8}"
@@ -485,8 +519,10 @@ sleep "$READY_SECONDS"
 if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
   rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
   actas_lock_gc_stale >/dev/null 2>&1 || true
-  echo "status=bridge_exited team=$TEAM name=$NAME log=$BRIDGE_LOG"
-  exit 5
+  case "$THREAD_ID" in
+    ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_bridge_exited" ;;
+    *) start_codex_app_monitor "$THREAD_ID" ;;
+  esac
 fi
 case "$APP_SERVER" in
   ws://127.0.0.1:*)
@@ -495,8 +531,10 @@ case "$APP_SERVER" in
     if ! port_alive "$check_port"; then
       rm -f "$BRIDGE_PIDFILE" "$RUN_DIR/codex-bridge.$TEAM.$NAME.meta"
       actas_lock_gc_stale >/dev/null 2>&1 || true
-      echo "status=app_server_exited team=$TEAM name=$NAME app_server=$APP_SERVER log=$SERVER_LOG"
-      exit 6
+      case "$THREAD_ID" in
+        ""|loaded) start_chat_visible_turn_delivery "$THREAD_ID" "app_server_exited" ;;
+        *) start_codex_app_monitor "$THREAD_ID" ;;
+      esac
     fi
     ;;
 esac

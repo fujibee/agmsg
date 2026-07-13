@@ -1038,6 +1038,14 @@ class CodexBridge {
   buildPrompt() {
     const inbox = path.join(SCRIPTS_DIR, "inbox.sh");
     const send = path.join(SCRIPTS_DIR, "send.sh");
+    const autonomousHandlingContract = [
+      "Autonomous handling contract:",
+      `1. Your first tool call must be this official inbox command: ${inbox} ${this.identity.team} ${this.identity.name}`,
+      "2. Do not read the agmsg database or team files directly. The resumed Codex task alone owns message reading and acknowledgement through inbox.sh.",
+      "3. For a substantive request, new evidence, correction, or blocker, continue the in-scope work through verification and send an evidence-backed reply with the official send.sh command below. Do not stop after an ACK or status-only reply.",
+      "4. Do not reply to ACK-only, thanks-only, or status-only mail that contains no new request, evidence, correction, or blocker. This prevents autonomous ping-pong.",
+      "5. Preserve existing approval, production, customer-data, credential, and destructive-action boundaries. Stop and report a real blocker when new authority is required.",
+    ].join("\n");
     const visibleUiRequirement = [
       "Visible UI requirement:",
       '1. Before the first tool call, post a short Japanese progress update in the Codex thread UI starting with "agmsg対応状況:" and include sender, summary, planned action, and whether you will reply.',
@@ -1055,14 +1063,18 @@ class CodexBridge {
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
         `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
         "",
+        autonomousHandlingContract,
+        "",
         visibleUiRequirement,
       ].join("\n");
     }
     return [
       `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
-      `Run: ${inbox} ${this.identity.team} ${this.identity.name}`,
-      "Read the messages and continue the conversation. If a reply is needed, send it with:",
+      "The bridge did not read or acknowledge their contents.",
+      "Continue the conversation in this same Codex thread. If a reply is needed, send it with:",
       `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+      "",
+      autonomousHandlingContract,
       "",
       visibleUiRequirement,
     ].join("\n");

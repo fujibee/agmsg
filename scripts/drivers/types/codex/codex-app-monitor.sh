@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Legacy headless fallback for sessions opened directly in Codex.app.
+# Event-driven background receiver for an explicitly monitored Codex thread.
 #
-# This script wakes a Codex thread through `codex exec resume`, which does not
-# report progress in the active Codex.app chat. It is therefore disabled by
-# default. Use the app-server bridge for visible real-time delivery, or turn
-# delivery for chat-visible handling at turn boundaries.
+# The shell-only watcher does not start a model while the inbox is empty. When
+# unread mail appears it resumes the same persisted Codex thread, whose first
+# action is the official inbox.sh command. The receiver never reads message
+# bodies and never marks them read itself.
 
 usage() {
   cat <<EOF
 Usage: codex-app-monitor.sh <project> <type> <team> <name> <thread_id>
 
 Environment:
-  AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1
-                                      opt in to this legacy headless fallback
+  AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME=1
+                                      required explicit monitor opt-in
   AGMSG_CODEX_APP_MONITOR_TIMEOUT    watch-once timeout seconds (default: 300)
   AGMSG_CODEX_APP_MONITOR_INTERVAL   watch-once poll interval seconds (default: 2)
   AGMSG_CODEX_APP_MONITOR_MAX_WAKES  stop after N wakes, useful for tests
@@ -23,6 +23,10 @@ Environment:
                                       consecutive failures (default: 3)
   AGMSG_CODEX_APP_MONITOR_FLAGS      extra flags passed to "codex exec"
   AGMSG_CODEX_APP_MONITOR_CODEX      codex binary override
+  AGMSG_CODEX_APP_MONITOR_DANGEROUS_BYPASS=1
+                                      legacy escape hatch; disabled by default
+  AGMSG_CODEX_APP_MONITOR_SUPERVISED=1  restart unexpected exits through launchd;
+                                      terminal fallback still exits successfully
 EOF
 }
 
@@ -31,10 +35,9 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
-if [ "${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}" != "1" ]; then
-  echo "codex-app-monitor: disabled; it handles messages via headless 'codex exec resume'." >&2
-  echo "codex-app-monitor: use the Codex app-server bridge or turn delivery for visible chat status." >&2
-  echo "codex-app-monitor: set AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1 only for legacy opt-in runs." >&2
+if [ "${AGMSG_CODEX_ALLOW_BACKGROUND_THREAD_RESUME:-${AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR:-}}" != "1" ]; then
+  echo "codex-app-monitor: disabled; background thread resume requires explicit monitor opt-in." >&2
+  echo "codex-app-monitor: use mode monitor to opt in, or turn delivery for foreground-only handling." >&2
   exit 64
 fi
 
@@ -72,6 +75,10 @@ resolve_codex_bin() {
     printf '%s\n' "$AGMSG_CODEX_APP_MONITOR_CODEX"
     return 0
   fi
+  if [ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ]; then
+    printf '%s\n' "/Applications/ChatGPT.app/Contents/Resources/codex"
+    return 0
+  fi
   if [ -x "/Applications/Codex.app/Contents/Resources/codex" ]; then
     printf '%s\n' "/Applications/Codex.app/Contents/Resources/codex"
     return 0
@@ -85,6 +92,8 @@ resolve_codex_bin() {
 
 CODEX_BIN="$(resolve_codex_bin)"
 OWNER_ID="agmsg-codex-app-monitor-$$.$$"
+ACTIVE_CHILD=""
+LOCK_CLAIMED=0
 
 case "$TIMEOUT" in ''|*[!0-9]*) echo "codex-app-monitor: timeout must be a whole number" >&2; exit 2 ;; esac
 case "$INTERVAL" in ''|*[!0-9]*) echo "codex-app-monitor: interval must be a whole number" >&2; exit 2 ;; esac
@@ -99,9 +108,9 @@ LOG="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.log"
 LAST_PROMPT="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.last-prompt.txt"
 LAST_OUTPUT="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.last-message.txt"
 LAST_STATUS="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.last-status"
-LAST_IDS="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.last-ids"
 HEALTH="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.health"
 PREFLIGHT_LOG="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.preflight.log"
+WATCH_OUTPUT="$RUN_DIR/codex-app-monitor.$TEAM.$NAME.watch-output"
 CHAT_META="$RUN_DIR/codex-chat-visible.$TEAM.$NAME.meta"
 
 consecutive_failures=0
@@ -116,7 +125,7 @@ write_health() {
     printf 'team=%s\n' "$TEAM"
     printf 'name=%s\n' "$NAME"
     printf 'thread=%s\n' "$THREAD_ID"
-    printf 'transport=codex-app-exec-resume\n'
+    printf 'transport=codex-background-thread-resume\n'
     printf 'status=%s\n' "$status"
     printf 'consecutive_failures=%s\n' "$consecutive_failures"
     printf 'last_error=%s\n' "$last_error"
@@ -162,34 +171,62 @@ fallback_to_turn() {
   # SessionStart hook and prevent automatic rebind after the next restart.
   write_chat_visible_meta
   write_health "fallback_turn" "$reason"
-  return 70
+  return "$(terminal_exit_code 70)"
 }
 
-if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
-  write_health "preflight_failed" "codex_binary_not_found"
-  echo "codex-app-monitor: codex binary not found: $CODEX_BIN" >&2
-  exit 3
-fi
+terminal_exit_code() {
+  if [ "${AGMSG_CODEX_APP_MONITOR_SUPERVISED:-}" = "1" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$1"
+  fi
+}
 
-write_health "starting" "none"
-if ! "$CODEX_BIN" mcp list >"$PREFLIGHT_LOG" 2>&1; then
-  write_health "preflight_failed" "codex_config_invalid"
-  notify_delivery_failure "自動配送を開始できません。未読メッセージは保持しています。"
-  echo "codex-app-monitor: codex config preflight failed; see $PREFLIGHT_LOG" >&2
-  exit 78
-fi
-rm -f "$PREFLIGHT_LOG"
-write_health "ready" "none"
+exit_after_fallback() {
+  local status=0
+  fallback_to_turn "$1" || status=$?
+  exit "$status"
+}
+
+stop_active_child() {
+  local child="${ACTIVE_CHILD:-}" check=0
+  [ -n "$child" ] || return 0
+  if kill -0 "$child" 2>/dev/null; then
+    kill "$child" 2>/dev/null || true
+    while [ "$check" -lt 20 ] && kill -0 "$child" 2>/dev/null; do
+      sleep 0.1
+      check=$((check + 1))
+    done
+    if kill -0 "$child" 2>/dev/null; then
+      kill -KILL "$child" 2>/dev/null || true
+    fi
+  fi
+  wait "$child" 2>/dev/null || true
+  ACTIVE_CHILD=""
+}
 
 cleanup() {
-  actas_lock_release "$TEAM" "$NAME" "$OWNER_ID" 2>/dev/null || true
-  rm -f "$PIDFILE" "$META"
+  stop_active_child
+  if [ "$LOCK_CLAIMED" = "1" ]; then
+    actas_lock_release "$TEAM" "$NAME" "$OWNER_ID" 2>/dev/null || true
+  fi
+  if [ "$(cat "$PIDFILE" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$PIDFILE" "$META"
+  fi
+  rm -f "$WATCH_OUTPUT"
 }
 terminate() {
   write_health "stopped" "terminated"
+  trap - EXIT
   cleanup
   exit 0
 }
+
+if ! lock_result="$(actas_lock_claim "$TEAM" "$NAME" "$OWNER_ID" 2>&1)"; then
+  echo "codex-app-monitor: receiver already owns $TEAM/$NAME (${lock_result:-held})" >&2
+  exit "$(terminal_exit_code 73)"
+fi
+LOCK_CLAIMED=1
 trap cleanup EXIT
 trap terminate INT TERM
 
@@ -200,54 +237,56 @@ printf '%s\n' "$$" > "$PIDFILE"
   printf 'team=%s\n' "$TEAM"
   printf 'name=%s\n' "$NAME"
   printf 'thread=%s\n' "$THREAD_ID"
-  printf 'transport=codex-app-exec-resume\n'
+  printf 'transport=codex-background-thread-resume\n'
   printf 'owner=%s\n' "$OWNER_ID"
   if [ -n "${AGMSG_CODEX_APP_MONITOR_LABEL:-}" ]; then
     printf 'launch_label=%s\n' "$AGMSG_CODEX_APP_MONITOR_LABEL"
   fi
 } > "$META"
 
+if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
+  write_health "preflight_failed" "codex_binary_not_found"
+  echo "codex-app-monitor: codex binary not found: $CODEX_BIN" >&2
+  exit "$(terminal_exit_code 3)"
+fi
+
+write_health "starting" "none"
+if ! "$CODEX_BIN" mcp list >"$PREFLIGHT_LOG" 2>&1; then
+  write_health "preflight_failed" "codex_config_invalid"
+  notify_delivery_failure "自動配送を開始できません。未読メッセージは保持しています。"
+  echo "codex-app-monitor: codex config preflight failed; see $PREFLIGHT_LOG" >&2
+  exit "$(terminal_exit_code 78)"
+fi
+rm -f "$PREFLIGHT_LOG"
+write_health "ready" "none"
+
 build_prompt() {
-  local inbox_text="$1"
+  local inbox_script="$SKILL_DIR/scripts/inbox.sh"
   local send_script="$SKILL_DIR/scripts/send.sh"
   cat <<EOF
-agmsg delivered the following unread messages for ${TEAM}/${NAME}:
+agmsg has unread mail for ${TEAM}/${NAME}. Continue this persisted Codex thread
+as ${NAME} and handle the mail within the thread's existing scope.
 
-${inbox_text}
+Your first tool call must be this official inbox command:
+${inbox_script} ${TEAM} ${NAME}
 
-Continue the conversation in this Codex thread. You are currently acting as ${NAME}.
-If a reply to an agmsg sender is needed, send it with:
+Do not use inbox-peek.sh and do not access the agmsg database or team files
+directly. If the official inbox reports no new messages, stop without replying.
+Use the official sender when a response is needed:
 ${send_script} ${TEAM} ${NAME} <to> <message>
 
-Visible UI requirement:
-1. Before the first tool call, post a short Japanese progress update in the
-   Codex thread UI starting with "agmsg対応状況:" and include sender, summary,
-   planned action, and whether you will reply.
-2. Keep substantive work in the visible thread. Before each major action, post
-   a short Japanese progress update; do not complete the task in an unreported
-   background worker.
-3. After handling the message, post a final Japanese status update with:
-   sender, received instruction, action taken, reply target, reply summary,
-   remaining blocker, and next step.
-4. If you do not reply, state why in the visible status.
-5. Do not treat DB writes, monitor delivery, or a send.sh result as complete
-   unless the handling is visible in the Codex thread UI.
+Autonomous collaboration contract:
+1. For a substantive request, review, or new evidence, continue the requested
+   work through verification and reply with concrete evidence. Do not stop at
+   an ACK when safe in-scope work remains.
+2. Do not reply to ACK-only, thanks-only, or status-only mail that contains no
+   new request, evidence, correction, or blocker. This prevents reply loops.
+3. Preserve all existing safety, approval, production, customer-data, secret,
+   and scope boundaries. Stop and report a real blocker when new authority or
+   an unsafe/external mutation would be required.
+4. Keep the handling visible in this same Codex thread with concise Japanese
+   progress and a final status. Never claim completion from delivery alone.
 EOF
-	}
-
-sql_escape() {
-  printf '%s' "$1" | sed "s/'/''/g"
-}
-
-read_unread_for_prompt() {
-  : > "$LAST_IDS"
-  "$SKILL_DIR/scripts/inbox-peek.sh" "$TEAM" "$NAME" --quiet --ids-file "$LAST_IDS"
-  [ -s "$LAST_IDS" ] || return 1
-}
-
-mark_delivered_ids_read() {
-  [ -f "$LAST_IDS" ] || return 0
-  "$SKILL_DIR/scripts/mark-read.sh" "$TEAM" "$NAME" --ids-file "$LAST_IDS"
 }
 
 run_resume() {
@@ -256,11 +295,15 @@ run_resume() {
   local child wait_status
   cmd=("$CODEX_BIN" exec)
 
-  # Non-interactive wakeups cannot answer approval prompts. The default mirrors
-  # Codex.app's automation context; callers can override or append with
-  # AGMSG_CODEX_APP_MONITOR_FLAGS when they need a stricter profile.
-  if [ -z "${AGMSG_CODEX_APP_MONITOR_NO_BYPASS:-}" ]; then
+  # Background turns cannot answer approval prompts. Keep them non-interactive
+  # and workspace-bounded by default; the agmsg runtime dirs are added so the
+  # official inbox/send scripts can update their own state. The dangerous
+  # bypass remains an explicit compatibility escape hatch only.
+  if [ "${AGMSG_CODEX_APP_MONITOR_DANGEROUS_BYPASS:-}" = "1" ]; then
     cmd+=(--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust)
+  else
+    cmd+=(-c 'approval_policy="never"' -s workspace-write)
+    cmd+=(--add-dir "$SKILL_DIR/run" --add-dir "$SKILL_DIR/db" --add-dir "$SKILL_DIR/teams")
   fi
   if [ -n "${AGMSG_CODEX_APP_MONITOR_FLAGS:-}" ]; then
     # shellcheck disable=SC2206
@@ -274,17 +317,32 @@ run_resume() {
   printf ' %q' "${cmd[@]:1}"
   printf '\n'
 
-  (
-    set +e
-    "${cmd[@]}" < "$prompt_file"
-    printf '%s\n' "$?" > "$LAST_STATUS"
-  ) >>"$LOG" 2>&1 &
+  AGMSG_CODEX_BACKGROUND_RESUME=1 \
+    "${cmd[@]}" < "$prompt_file" >>"$LOG" 2>&1 &
   child="$!"
+  ACTIVE_CHILD="$child"
   wait "$child"
   wait_status=$?
-  if [ -s "$LAST_STATUS" ]; then
-    wait_status="$(cat "$LAST_STATUS" 2>/dev/null || printf '%s' "$wait_status")"
-  fi
+  ACTIVE_CHILD=""
+  printf '%s\n' "$wait_status" > "$LAST_STATUS"
+  return "$wait_status"
+}
+
+run_watch_once() {
+  local timeout="$1" interval="$2" child wait_status
+  : > "$WATCH_OUTPUT"
+  "$SCRIPT_DIR/watch-once.sh" "$PROJECT" "$TYPE" \
+    --team "$TEAM" \
+    --name "$NAME" \
+    --owner "$OWNER_ID" \
+    --claim \
+    --timeout "$timeout" \
+    --interval "$interval" >"$WATCH_OUTPUT" 2>&1 &
+  child="$!"
+  ACTIVE_CHILD="$child"
+  wait "$child"
+  wait_status=$?
+  ACTIVE_CHILD=""
   return "$wait_status"
 }
 
@@ -293,15 +351,11 @@ printf 'codex-app-monitor: started team=%s name=%s thread=%s pid=%s\n' "$TEAM" "
 
 while :; do
   set +e
-  watch_output="$("$SCRIPT_DIR/watch-once.sh" "$PROJECT" "$TYPE" \
-    --team "$TEAM" \
-    --name "$NAME" \
-    --owner "$OWNER_ID" \
-    --claim \
-    --timeout "$TIMEOUT" \
-    --interval "$INTERVAL" 2>&1)"
+  run_watch_once "$TIMEOUT" "$INTERVAL"
   watch_status=$?
   set -e
+  watch_output="$(cat "$WATCH_OUTPUT" 2>/dev/null || true)"
+  rm -f "$WATCH_OUTPUT"
 
   case "$watch_status" in
     0)
@@ -314,19 +368,26 @@ while :; do
       write_health "degraded" "watch_once_exit_${watch_status}"
       printf 'codex-app-monitor: watch-once failed status=%s output=%s\n' "$watch_status" "$watch_output" >&2
       if [ "$consecutive_failures" -ge "$MAX_FAILURES" ]; then
-        fallback_to_turn "watch_once_failed_${watch_status}" || fallback_status=$?
-        exit "${fallback_status:-70}"
+        exit_after_fallback "watch_once_failed_${watch_status}"
       fi
       sleep 5
       continue
       ;;
   esac
 
-  if ! inbox_text="$(read_unread_for_prompt)"; then
+  pending_max_id="$(printf '%s\n' "$watch_output" | sed -n 's/.*max_id=\([0-9][0-9]*\).*/\1/p' | head -1)"
+  case "$pending_max_id" in ''|*[!0-9]*) pending_max_id=0 ;; esac
+  if [ "$pending_max_id" -le 0 ]; then
+    consecutive_failures=$((consecutive_failures + 1))
+    write_health "degraded" "watch_once_missing_max_id"
+    printf 'codex-app-monitor: watch-once wake omitted a valid max_id: %s\n' "$watch_output" >&2
+    if [ "$consecutive_failures" -ge "$MAX_FAILURES" ]; then
+      exit_after_fallback "watch_once_missing_max_id"
+    fi
+    sleep 5
     continue
   fi
-
-  build_prompt "$inbox_text" > "$LAST_PROMPT"
+  build_prompt > "$LAST_PROMPT"
   wake_count=$((wake_count + 1))
   last_wake_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   write_health "delivering" "none"
@@ -340,16 +401,48 @@ while :; do
     consecutive_failures=$((consecutive_failures + 1))
     write_health "degraded" "codex_exec_resume_exit_${resume_status}"
     printf 'codex-app-monitor: codex exec resume failed status=%s prompt=%s output=%s\n' "$resume_status" "$LAST_PROMPT" "$LAST_OUTPUT" >&2
-    if [ "$consecutive_failures" -ge "$MAX_FAILURES" ]; then
-      fallback_to_turn "codex_exec_resume_failed_${resume_status}" || fallback_status=$?
-      exit "${fallback_status:-70}"
-    fi
-    sleep 30
+    # A non-zero CLI status does not prove that the app rejected the turn
+    # before creating it. Retrying the same unread high-water mark could wake
+    # the visible task twice, so preserve the inbox and stop after one attempt.
+    exit_after_fallback "codex_exec_resume_failed_${resume_status}"
   else
-    mark_delivered_ids_read
-    consecutive_failures=0
-    last_success_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    write_health "ready" "none"
+    # Success means the resumed thread ran. Verify that it also consumed the
+    # high-water mark through inbox.sh; otherwise keep the message unread and
+    # degrade instead of silently declaring delivery.
+    set +e
+    run_watch_once 0 1
+    post_status=$?
+    set -e
+    post_output="$(cat "$WATCH_OUTPUT" 2>/dev/null || true)"
+    rm -f "$WATCH_OUTPUT"
+    post_max_id="$(printf '%s\n' "$post_output" | sed -n 's/.*max_id=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    case "$post_max_id" in ''|*[!0-9]*) post_max_id=0 ;; esac
+    if [ "$post_status" -eq 0 ] && [ "$post_max_id" -eq "$pending_max_id" ]; then
+      consecutive_failures=$((consecutive_failures + 1))
+      write_health "degraded" "thread_did_not_consume_inbox"
+      printf 'codex-app-monitor: resumed thread did not consume max_id=%s\n' "$pending_max_id" >&2
+      # A successful resume already created a turn. Never wake the same unread
+      # high-water mark twice; preserve it and fall back for operator recovery.
+      exit_after_fallback "thread_did_not_consume_inbox"
+    elif [ "$post_status" -eq 0 ]; then
+      # A different high-water mark means the resumed turn consumed the
+      # original batch while newer mail arrived (or left another batch). Re-arm
+      # immediately so the new mail gets its own serialized turn.
+      consecutive_failures=0
+      last_success_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_health "pending" "new_mail_after_resume"
+    elif [ "$post_status" -eq 2 ]; then
+      consecutive_failures=0
+      last_success_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_health "ready" "none"
+    else
+      consecutive_failures=$((consecutive_failures + 1))
+      write_health "degraded" "post_watch_exit_${post_status}"
+      printf 'codex-app-monitor: post-resume watch failed status=%s output=%s\n' "$post_status" "$post_output" >&2
+      # The wake already ran and consumption cannot be proved. Fail closed
+      # instead of risking a second turn for the same unread message.
+      exit_after_fallback "post_watch_failed_${post_status}"
+    fi
   fi
 
   if [ "$MAX_WAKES" -gt 0 ] && [ "$wake_count" -ge "$MAX_WAKES" ]; then

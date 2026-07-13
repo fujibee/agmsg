@@ -191,7 +191,7 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 
 `spawn <type> <name>` pre-joins `<name>`, then launches the target CLI with the actas slash command (`/<your-command> actas <name>`, matching your install command name) as its initial prompt. If the current session is inside **tmux**, it opens in a new pane (or `--window` for a new window, `--split h|v` for the direction); otherwise it opens a new **OS terminal** window.
 
-Pass `--boot-prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the only way to give a one-shot goal to a **codex** peer, which has no Monitor and so never notices a message you `send` after it goes idle.
+Pass `--boot-prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the reliable way to give a one-shot goal to a **codex** peer; receiving later messages while idle requires explicit `mode monitor` opt-in.
 
 By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex skips the wait (it has no Monitor).
 
@@ -300,9 +300,9 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` as a **beta** app-server bridge, plus `mode turn` and `mode off`.
+Codex supports `mode monitor` as a **beta** event-driven receiver, plus `mode turn` and `mode off`.
 
-> ⚠️ **The monitor beta changes how Codex starts — opt in only if you understand it.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. Codex Desktop can also attach an opt-in 15-minute thread heartbeat plus an independent one-minute `gpt-5.4-mini` project collector, so a visible session can recover delivery without paying for a full thread-model turn every minute. The collector only detects unread high-water marks and never consumes inbox bodies itself. It depends on experimental Codex app-server and app automation behavior and has known rough edges (orphans on TUI close — #149; one identity per project — #150).
+> ⚠️ **Monitor is explicit opt-in for unattended continuation of one persisted Codex task.** A shell-only watcher costs no model turn while the inbox is empty. On unread mail it resumes the same task, whose first tool call is the official `inbox.sh`; only that task reads or marks the message, continues substantive work, verifies it, and replies. ACK-only mail is not answered, preventing ping-pong. No heartbeat, cron, or scheduled polling task is created. Existing safety and approval boundaries still apply. A visible app-server bridge remains the preferred path when available.
 
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 

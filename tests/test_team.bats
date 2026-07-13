@@ -218,7 +218,22 @@ teardown() {
 
 @test "whoami: defaults to claude-code when no env vars set" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
-  run bash "$SCRIPTS/whoami.sh" /tmp/proj
+  # Bats may itself run under Codex/Claude/Gemini, so both the inherited
+  # detector variables and the parent agent process must be hidden to exercise
+  # the actual no-runtime fallback.
+  local fake_bin="$TEST_SKILL_DIR/no-agent-bin"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*) printf 'bash\n' ;;
+  *ppid=*) printf '1\n' ;;
+esac
+EOF
+  chmod +x "$fake_bin/ps"
+  run env -u CLAUDE_CODE_SESSION_ID -u CODEX_SANDBOX -u CODEX_THREAD_ID \
+    -u GEMINI_CLI -u GEMINI_API_KEY -u GROK_SESSION_ID \
+    PATH="$fake_bin:$PATH" bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
   [[ "$output" =~ "type=claude-code" ]]

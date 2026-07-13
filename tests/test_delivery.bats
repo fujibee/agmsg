@@ -1473,7 +1473,8 @@ EOF
   grep -q -- "--project $TEST_PROJECT" "$log"
   grep -q -- "--thread thread-123" "$log"
   grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
-  grep -q -- "--inline-inbox" "$log"
+  run grep -q -- "--inline-inbox" "$log"
+  [ "$status" -ne 0 ]
 }
 
 @test "session-start.sh for codex stays quiet without monitor launcher env" {

@@ -601,6 +601,14 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing wakeup prompt" } });
       return;
     }
+    if (!message.params.input[0].text.includes("first tool call must be this official inbox command")) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing official inbox ownership" } });
+      return;
+    }
+    if (!message.params.input[0].text.includes("ACK-only")) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing ping-pong guard" } });
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     setTimeout(() => {
       send({

@@ -60,6 +60,13 @@ INNER_EOF
 }
 
 agmsg_session_start() {
+  # `codex exec resume` runs the normal Codex hooks. It is already the child of
+  # this role's receiver, so rebinding here would stop or duplicate the parent
+  # receiver while it is delivering the unread batch.
+  if [ "${AGMSG_CODEX_BACKGROUND_RESUME:-}" = "1" ]; then
+    exit 0
+  fi
+
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
 
@@ -105,9 +112,9 @@ agmsg_session_start() {
     fi
   fi
   if [ -z "$app_server" ]; then
-    # Ordinary Codex.app has no supported external wake transport. Re-arm the
-    # role without starting a hidden worker; `both` mode's Stop hook performs
-    # the actual inbox pull in the visible conversation.
+    # Ordinary Codex.app has no app-server endpoint. Rebind the explicit
+    # monitor role to the event-driven same-thread receiver; turn/off mode is
+    # enforced inside actas-monitor.sh and never starts that receiver.
     log="$RUN_DIR/codex-actas-restore.log"
     "$SKILL_DIR/scripts/drivers/types/codex/actas-monitor.sh" \
       "$PROJECT" "$TYPE" "$name" "$thread_id" >>"$log" 2>&1 || true
@@ -151,7 +158,6 @@ agmsg_session_start() {
     --name "$name" \
     --thread "$thread_id" \
     --app-server "$app_server" \
-    --inline-inbox \
     >>"$log" 2>&1 &
   exit 0
 }

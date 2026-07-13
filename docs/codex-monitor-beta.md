@@ -1,26 +1,25 @@
 # Codex Monitor Beta
 
-Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
-uses a visible app-server bridge when available. In Codex Desktop, an opt-in
-low-frequency thread heartbeat renews the session lease and an independent
-low-cost project collector checks unread state and wakes the visible thread.
-The Stop hook remains the final visible fallback. The last explicit `actas`
-role is rebound from SessionStart after restart or compaction.
+Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta is
+an explicit opt-in, event-driven receiver bound to one persisted Codex thread.
+A shell-only watcher waits for unread state without starting a model. When mail
+arrives, it resumes that same thread once; the resumed thread runs the official
+`inbox.sh`, continues substantive work, verifies it, and replies when needed.
+A visible app-server bridge is still preferred when available. The last
+explicit `actas` role is rebound from SessionStart after restart or compaction.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
-> Enabling monitor mode prints a shell function that makes `codex` route through
-> agmsg's monitor shim in your interactive shell. In monitor-mode projects the
-> shim re-routes interactive launches through an app-server bridge; everywhere
-> else it passes straight through. **Only enable this if you are comfortable with
-> the `codex` command being intercepted in that shell.** Ordinary Codex.app does
-> not require the shim; it uses the visible Stop-hook fallback. It also depends on Codex
-> app-server behavior and may break as Codex changes. Known rough edges:
-> enabling monitor takes effect only after you **restart Codex and send your
-> first message** — the SessionStart hook fires on the first turn, not the
-> moment Codex opens, so the bridge is absent until you interact once; the
-> bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149). Multiple registered identities are
-> supported by restoring the most recent explicit `actas` role.
+> Enabling monitor mode permits unread agmsg mail to resume the selected Codex
+> thread in the background. **Only enable it for a role and thread whose
+> existing scope is safe to continue unattended.** The receiver preserves the
+> thread's approval, production, customer-data, secret, and external-mutation
+> boundaries. Enabling also prints an optional shell function that routes
+> interactive launches through the app-server bridge. A concrete thread id
+> supplied by `actas` binds immediately. After a Codex restart, SessionStart
+> rebinds the role on the first turn because opening the app alone does not fire
+> that hook. SessionEnd stops the receiver for the ending thread. Multiple
+> registered identities are supported by restoring the most recent explicit
+> `actas` role.
 
 ## Quick Start
 
@@ -35,19 +34,15 @@ The command:
 1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
    fallback for the project.
 2. Persists the last explicit `actas` role so SessionStart can rebind it.
-3. When Codex app automation is available, arms a 15-minute session-scoped
-   heartbeat and a one-minute `gpt-5.4-mini` collector. Both are keyed by
-   project, team, role, and thread id.
+3. After `actas` binds a concrete thread, starts a persistent shell-only watcher
+   for that exact team/role/thread tuple.
 4. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
 
-Headless `codex exec resume` handling is disabled by default because it can
-consume and answer messages outside the visible Codex thread. It remains
-available only as a legacy explicit opt-in:
-
-```bash
-export AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1
-```
+Monitor mode itself is the explicit opt-in for background thread resumption.
+`turn` and `off` never start it. The watcher only observes unread count and
+high-water id; it never reads message bodies or marks messages read. The same
+persisted thread owns the official inbox read and any reply.
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -78,17 +73,15 @@ In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
 When Codex.app is opened normally, SessionStart restores the last `actas` role.
-If no visible app-server is available, the one-minute low-cost collector uses
-unread-only detection and the Codex app's visible thread wake capability. The
-15-minute heartbeat renews the session lease and provides a second recovery
-path without paying for a full thread turn every minute. Neither automation
-marks a message read; the target thread owns `inbox.sh`. Repeated wakes for the
-same unread high-water mark are suppressed for a bounded retry window.
+If no visible app-server is available, `watch-once.sh` remains blocked in a
+shell process until unread mail exists, then invokes `codex exec resume` for the
+same thread id. Empty inboxes therefore create no model turn and no new Codex
+task. Repeated failure to consume the same unread high-water mark stops active
+delivery and leaves the message unread.
 
-`mode off`, `mode turn`, `drop`, and SessionEnd deactivate the lease before the
-scheduled jobs are removed. A late watchdog run therefore cannot wake a thread
-after monitoring has been stopped. Sessions that never opt into monitor mode do
-not create scheduled jobs.
+`mode off`, `mode turn`, `drop`/`reset`, and SessionEnd stop the matching
+receiver and remove its LaunchAgent/runtime files. No cron, heartbeat, or
+scheduled polling automation is created for this path.
 
 ## Optional PATH Shim
 
@@ -168,9 +161,11 @@ connect to the unix socket (EPERM). Instead:
    sandbox, reads the request file and starts `codex-bridge.js`.
 3. The bridge connects to the same app-server over **WebSocket-over-UDS**,
    resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
-   API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
-4. On an unread message it inlines the text into a `turn/start` on that thread —
-   surfacing it in the live Codex TUI — then re-arms after the turn ends.
+   API (which checks the agmsg DB for unread rows, `read_at IS NULL`).
+4. On unread state it starts a turn on that thread with an instruction to run
+   the official `inbox.sh`. The bridge does not read the message body or mark it
+   read on the normal path. The visible Codex turn owns reading, substantive
+   work, verification, and any reply, then the bridge re-arms after the turn.
 
 Turns are serialized (one per thread): a message that arrives while a turn is
 running stays unread and is delivered after the turn completes. The turn ends
@@ -202,10 +197,11 @@ flowchart TD
   watch --> db[("agmsg SQLite DB (read_at IS NULL)")]
   db --> unread{"Unread message?"}
   unread -- "no (timeout)" --> watch
-  unread -- "yes" --> inbox["inline unread inbox text"]
-  inbox --> turn["turn/start on the thread"]
+  unread -- "yes" --> turn["turn/start with official inbox instruction"]
   turn --> tui["Current Codex TUI thread"]
-  tui --> ended["turn ends: completed / idle / watchdog"]
+  tui --> inbox["official inbox.sh reads and marks messages"]
+  inbox --> work["substantive work, verification, and reply"]
+  work --> ended["turn ends: completed / idle / watchdog"]
   ended --> watch
 ```
 

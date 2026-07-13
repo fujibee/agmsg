@@ -3,9 +3,10 @@
 #
 # codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
 # enable/disable side effects (print the monitor shim setup on enable, stop the
-# bridge on disable) and replaces the runtime status summary with Codex bridge
-# liveness. Ordinary Codex.app fallback is chat-visible turn delivery; the
-# legacy headless app monitor is opt-in only. Sourced into delivery.sh's context,
+# receiver on disable) and replaces the runtime status summary with Codex
+# receiver liveness. Monitor mode is explicit opt-in to event-driven resumption
+# of the same persisted thread; turn/off never start a background receiver.
+# Sourced into delivery.sh's context,
 # so SKILL_DIR, SCRIPT_DIR, RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL
 # and stop_codex_bridge are in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
@@ -30,6 +31,8 @@ agmsg_delivery_status() {
 
 agmsg_delivery_on_enable() {
   echo "Codex monitor beta is enabled."
+  echo "After actas binds a concrete role/thread, a shell-only watcher waits without model calls."
+  echo "Unread mail resumes that same Codex thread, which owns inbox reading and replies."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
     echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."
@@ -48,9 +51,8 @@ agmsg_delivery_on_enable() {
     echo "WARNING: Node.js ('$codex_node') was not found. The Codex bridge needs Node —"
     echo "  monitor delivery will NOT start until Node is installed (or set AGMSG_NODE)."
   fi
-  echo "Restart your Codex session (quit and relaunch \`codex\`), then send your first"
-  echo "  message — the bridge starts on your first turn, not the moment Codex opens."
-  echo "  Already-running sessions stay unmonitored until they restart."
+  echo "Run agmsg actas <role> in the intended Codex task to bind the receiver now."
+  echo "SessionStart rebinds the last role after a later restart."
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }
 
@@ -61,6 +63,7 @@ agmsg_delivery_on_disable() {
   if [ "${stopped:-0}" -gt 0 ]; then
     echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."
   fi
+  # Remove any legacy scheduled-receiver lease left by pre-event-driven builds.
   lease_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
     disarm-project "$project" 2>/dev/null || true)
   [ -n "$lease_cleanup" ] && printf '%s\n' "$lease_cleanup"
@@ -74,8 +77,7 @@ agmsg_delivery_stop_directive() {
   local project="${PROJECT:-}"
   local mode="${MODE:-}"
   if [ "$mode" = "turn" ] && [ -n "$project" ]; then
-    # The app monitor invokes `delivery.sh set turn` after repeated delivery
-    # failures. Let that process finish writing fallback health and chat-visible
+    # Let a failing receiver finish writing fallback health and chat-visible
     # metadata before it exits on its own.
     if [ "${AGMSG_CODEX_PRESERVE_CURRENT_MONITOR:-}" = "1" ]; then
       return 0
@@ -135,7 +137,7 @@ agmsg_delivery_runtime_status() {
         app_thread=$(awk -F= '/^thread=/{sub(/^thread=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
         app_transport=$(awk -F= '/^transport=/{sub(/^transport=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
         if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
-          echo "Codex app monitor: $team/$name alive (pid $app_pid, thread $app_thread, transport ${app_transport:-codex-app-exec-resume})"
+          echo "Codex app monitor: $team/$name alive (pid $app_pid, thread $app_thread, transport ${app_transport:-codex-background-thread-resume})"
         else
           echo "Codex app monitor: $team/$name stale pidfile (pid ${app_pid:-empty} not running)"
         fi
