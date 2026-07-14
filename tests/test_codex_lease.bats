@@ -59,9 +59,21 @@ teardown() {
 
 @test "codex lease: ref replacement publishes new before removing old" {
   local old new
+  codex_record_write_ready project-hash generation-a version msys 999999 1234
   old="$(codex_appserver_ref_add project-hash old-ref generation-a)"
   new="$(codex_appserver_ref_replace project-hash "$old" new-ref generation-a)"
   [ ! -e "$old" ]
   [ -f "$new" ]
   [ "$(codex_lease_field "$new" generation)" = generation-a ]
+}
+
+@test "codex lease: ref replacement rejects a generation changed before lock acquisition" {
+  local old
+  codex_record_write_ready project-hash generation-b version msys 999999 1234
+  old="$(codex_appserver_ref_add project-hash old-ref generation-a)"
+
+  run codex_appserver_ref_replace project-hash "$old" new-ref generation-a
+  [ "$status" -ne 0 ]
+  [ -f "$old" ]
+  [ ! -e "$(codex_appserver_refs_dir project-hash)/new-ref" ]
 }

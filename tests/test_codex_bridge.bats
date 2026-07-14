@@ -99,6 +99,97 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "codex-bridge: does not start a turn after shutdown begins" {
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts={appServer:"ws://127.0.0.1:1",inlineInbox:true,project:process.cwd(),threadId:"thread-1",turnTimeout:0,type:"codex"}; const b=new CodexBridge(opts,{team:"team",name:"alice"}); let fetched=0,turns=0;b.stopping=true;b.pendingWake=true;b.fetchUnreadForPrompt=()=>{fetched++;return{text:"message",ids:[1]}};b.client.request=async()=>{turns++};b.tryStartTurn().then(()=>{if(fetched||turns)process.exit(1)})' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: ignores watch exit notifications after shutdown begins" {
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts={appServer:"ws://127.0.0.1:1",inlineInbox:false,project:process.cwd(),threadId:"thread-1",turnTimeout:0,type:"codex"}; const b=new CodexBridge(opts,{team:"team",name:"alice"}); let turns=0;b.stopping=true;b.watchHandle="watch-1";b.tryStartTurn=async()=>{turns++};b.onProcessExited({processHandle:"watch-1",exitCode:0,stdout:"1"}).then(()=>{if(turns||b.pendingWake||b.watchHandle!=="watch-1")process.exit(1)})' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: overlapping generations preserve at-least-once delivery and exact acknowledgements" {
+  bash "$SCRIPTS/send.sh" team bob alice "first" >/dev/null
+  local now lease_old="$TEST_SKILL_DIR/old.lease" lease_new="$TEST_SKILL_DIR/new.lease"
+  now="$(date +%s)"
+  cat >"$lease_old" <<EOF
+format_version=1
+owner_kind=tui
+generation=generation-old
+updated_at=$now
+EOF
+  cat >"$lease_new" <<EOF
+format_version=1
+owner_kind=tui
+generation=generation-new
+updated_at=$now
+EOF
+
+  local runner="$TEST_SKILL_DIR/concurrent-bridges.js"
+  cat >"$runner" <<'EOF'
+const { spawnSync } = require("child_process");
+const { CodexBridge } = require(process.argv[2]);
+
+const project = process.argv[3];
+const scripts = process.argv[4];
+const bash = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
+const prompts = [];
+let requests = 0;
+let release;
+const bothFetched = new Promise((resolve) => { release = resolve; });
+
+function makeBridge(lease, generation) {
+  const bridge = new CodexBridge({
+    appServer: "ws://127.0.0.1:1",
+    boundGeneration: generation,
+    inlineInbox: true,
+    leaseTimeout: 60,
+    project,
+    threadId: "thread-1",
+    tuiLease: lease,
+    turnTimeout: 0,
+    type: "codex",
+  }, { team: "team", name: "alice" });
+  bridge.client.request = async (_method, params) => {
+    prompts.push(params.input[0].text);
+    requests += 1;
+    if (requests === 2) {
+      const sent = spawnSync(bash, [scripts + "/send.sh", "team", "bob", "alice", "late"], {
+        cwd: project,
+        encoding: "utf8",
+      });
+      if (sent.status !== 0) throw new Error(sent.stderr || "late send failed");
+      release();
+    }
+    await bothFetched;
+  };
+  bridge.pendingWake = true;
+  return bridge;
+}
+
+(async () => {
+  const oldBridge = makeBridge(process.argv[5], "generation-old");
+  const newBridge = makeBridge(process.argv[6], "generation-new");
+  await Promise.all([oldBridge.tryStartTurn(), newBridge.tryStartTurn()]);
+  if (requests !== 2 || prompts.some((prompt) => !prompt.includes("first") || prompt.includes("late"))) process.exit(1);
+  const peek = spawnSync(bash, [scripts + "/peek-inbox.sh", "team", "alice"], {
+    cwd: project,
+    encoding: "utf8",
+  });
+  if (peek.status !== 0) throw new Error(peek.stderr || "peek failed");
+  const payload = JSON.parse(peek.stdout);
+  if (payload.rows.length !== 1 || payload.rows[0].body !== "late") process.exit(1);
+})().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
+EOF
+
+  run node "$runner" "$TYPES/codex/codex-bridge.js" "$PROJ" "$SCRIPTS" "$lease_old" "$lease_new"
+  [ "$status" -eq 0 ]
+}
+
 @test "codex-bridge: stale lease timer kills an armed watch before exiting" {
   local lease="$TEST_SKILL_DIR/stale.lease" bridge_lease="$TEST_SKILL_DIR/bridge.lease"
   cat >"$lease" <<EOF

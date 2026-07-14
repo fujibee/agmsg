@@ -31,8 +31,9 @@ case "${1:-}" in
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
     # cmdline check matches. The child exits when this parent is killed.
-    python3 - <<'PY'
-import socket, sys, os
+    python3 - <<'PY' &
+import socket, sys, os, time
+time.sleep(float(os.environ.get("FAKE_CODEX_LISTEN_DELAY", "0")))
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
@@ -47,6 +48,9 @@ while True:
     except Exception:
         pass
 PY
+    listener_pid=$!
+    trap 'kill "$listener_pid" 2>/dev/null || true' EXIT INT TERM
+    wait "$listener_pid"
     ;;
   *)
     printf 'plain-codex' >> "$CALL_LOG"
@@ -59,6 +63,9 @@ EOF
 }
 
 teardown() {
+  if [ -n "${ABANDONED_SERVER_PID:-}" ]; then
+    kill "$ABANDONED_SERVER_PID" 2>/dev/null || true
+  fi
   # Kill any app-server listeners these tests spawned.
   for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
     [ -f "$pf" ] || continue
@@ -66,6 +73,25 @@ teardown() {
   done
   rm -rf "$TEST_PROJECT"
   teardown_test_env
+}
+
+project_hash() {
+  local resolved
+  resolved="$(cd "$TEST_PROJECT" && pwd)"
+  printf '%s' "$resolved" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 )
+}
+
+seed_abandoned_starting_server() {
+  local generation="$1" delay="$2" hash log
+  hash="$(project_hash)"
+  log="$TEST_SKILL_DIR/run/codex-app-server.$hash.$generation.log"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  FAKE_CODEX_LISTEN_DELAY="$delay" "$FAKE_CODEX" app-server --listen "ws://127.0.0.1:0" >"$log" 2>&1 3>&- &
+  ABANDONED_SERVER_PID=$!
+  export ABANDONED_SERVER_PID
+  SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run" bash -c \
+    'source "$1/lib/codex-lease.sh"; codex_record_write_starting "$2" "$3" "codex-cli 0.142.2" 999999; codex_marker_write "$2" "$3" msys "$4" "$5"' \
+    _ "$SCRIPTS" "$hash" "$generation" "$ABANDONED_SERVER_PID" "$log"
 }
 
 # --- fail-open (A) ---
@@ -167,4 +193,48 @@ while True:
   [ "$(cat "$base.pid")" != "$foreign_pid" ]
 
   kill "$foreign_pid" 2>/dev/null || true
+}
+
+@test "codex-monitor: adopts a marked app-server when its starter dies before listen" {
+  [ "${AGMSG_TEST_FORCE_CODEX_MONITOR_LIFECYCLE:-0}" = 1 ] || \
+    skip_on_windows "spawns a delayed python socket listener; covered on POSIX CI"
+  seed_abandoned_starting_server generation-adopt 0.5
+
+  run env AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=true AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+
+  local record="$TEST_SKILL_DIR/run/codex-app-server.$(project_hash).record"
+  [ "$(sed -n 's/^status=//p' "$record")" = ready ]
+  [ "$(sed -n 's/^generation=//p' "$record")" = generation-adopt ]
+  [ "$(sed -n 's/^pid=//p' "$record")" = "$ABANDONED_SERVER_PID" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-server.$(project_hash).spawning.generation-adopt" ]
+  kill -0 "$ABANDONED_SERVER_PID"
+}
+
+@test "codex-monitor: concurrent successors publish one adopted generation" {
+  [ "${AGMSG_TEST_FORCE_CODEX_MONITOR_LIFECYCLE:-0}" = 1 ] || \
+    skip_on_windows "spawns a delayed python socket listener; covered on POSIX CI"
+  seed_abandoned_starting_server generation-shared 0.8
+
+  env AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=true AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- \
+    >"$TEST_PROJECT/monitor-1.log" 2>&1 3>&- &
+  local monitor1=$!
+  sleep 0.05
+  env AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=true AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex -- \
+    >"$TEST_PROJECT/monitor-2.log" 2>&1 3>&- &
+  local monitor2=$!
+  local status1=0 status2=0
+  wait "$monitor1" || status1=$?
+  wait "$monitor2" || status2=$?
+  [ "$status1" -eq 0 ]
+  [ "$status2" -eq 0 ]
+
+  local record="$TEST_SKILL_DIR/run/codex-app-server.$(project_hash).record"
+  [ "$(sed -n 's/^status=//p' "$record")" = ready ]
+  [ "$(sed -n 's/^generation=//p' "$record")" = generation-shared ]
+  [ "$(sed -n 's/^pid=//p' "$record")" = "$ABANDONED_SERVER_PID" ]
+  [ "$(grep -c '^plain-codex' "$CALL_LOG")" -eq 2 ]
 }

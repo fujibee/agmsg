@@ -36,11 +36,23 @@ put_record() {
     _ "$SCRIPTS" "$@"
 }
 
+project_hash() {
+  printf '%s' "$PROJ" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 )
+}
+
+seed_ready_record() {
+  SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$RUN_DIR" bash -c \
+    'source "$1/lib/codex-lease.sh"; codex_record_write_ready "$2" "$3" "codex-cli test" msys 999999 1234' \
+    _ "$SCRIPTS" "$(project_hash)" "${1:-server-generation}"
+}
+
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
 run_launcher() {
-  sleep 2 3>&- & local p=$!
+  # Windows process startup and isolated DB initialization can consume most of a
+  # two-second parent lifetime before the launcher reaches identity resolution.
+  sleep 5 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
   wait "$p" 2>/dev/null || true
 }
@@ -71,4 +83,49 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
+}
+
+@test "launcher: disabled marker prevents lease publication and bridge start" {
+  local disabled="$RUN_DIR/codex-monitor-disabled.$(project_hash)"
+  : >"$disabled"
+  run_launcher
+  [ ! -e "$CAPTURE" ]
+  ! find "$RUN_DIR" -maxdepth 1 -name 'codex-tui-lease.*' -print -quit | grep -q .
+}
+
+@test "launcher: thread rebind replaces its lease and app-server ref then cleans both" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  seed_ready_record server-generation
+
+  sleep 8 3>&- & local parent_pid=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_pid" >/dev/null 2>&1 3>&- &
+  local launcher_pid=$!
+  for _ in $(seq 1 50); do
+    [ -s "$CAPTURE" ] && break
+    sleep 0.1
+  done
+  [ -s "$CAPTURE" ]
+  local old_lease
+  old_lease="$(awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "--tui-lease") { print $(i+1); exit } }' "$CAPTURE")"
+  [ -f "$old_lease" ]
+
+  put_record team alice rec-thread-2 "$PROJ" codex
+  for _ in $(seq 1 60); do
+    grep -q -- '--thread rec-thread-2' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- '--thread rec-thread-2' "$CAPTURE"
+  local new_lease
+  new_lease="$(awk '/--thread rec-thread-2/ { for (i=1; i<=NF; i++) if ($i == "--tui-lease") { print $(i+1); exit } }' "$CAPTURE")"
+  [ "$new_lease" != "$old_lease" ]
+  [ ! -e "$old_lease" ]
+  [ -f "$new_lease" ]
+
+  local refs="$RUN_DIR/codex-app-server.$(project_hash).refs"
+  [ "$(find "$refs" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 1 ]
+
+  kill "$parent_pid" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+  [ ! -e "$new_lease" ]
+  ! find "$refs" -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q .
 }
