@@ -50,6 +50,47 @@ teardown() {
   [[ "$output" =~ "No new messages" ]]
 }
 
+@test "peek-inbox: returns stable JSON without marking messages read" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "first" >/dev/null
+  bash "$SCRIPTS/send.sh" testteam alice bob "second" >/dev/null
+
+  run bash "$SCRIPTS/peek-inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  local first="$output"
+  [[ "$first" == *'"body":"first"'* ]]
+  [[ "$first" == *'"body":"second"'* ]]
+
+  run bash "$SCRIPTS/peek-inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first" ]
+}
+
+@test "mark-read: acknowledges only exact validated IDs and is idempotent" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "first" >/dev/null
+  bash "$SCRIPTS/send.sh" testteam alice bob "second" >/dev/null
+  local json="$TEST_SKILL_DIR/peek.json" sql_json id1 id2
+  bash "$SCRIPTS/peek-inbox.sh" testteam bob >"$json"
+  sql_json="$(rf "$json")"
+  id1="$(sqlite_mem "SELECT json_extract(value, '\$.id') FROM json_each(readfile('$sql_json'), '\$.rows') ORDER BY key LIMIT 1;")"
+  id2="$(sqlite_mem "SELECT json_extract(value, '\$.id') FROM json_each(readfile('$sql_json'), '\$.rows') ORDER BY key LIMIT 1 OFFSET 1;")"
+
+  run bash -c "printf '%s\n' '$id1' | bash '$SCRIPTS/mark-read.sh' testteam bob"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"updated=1"* ]]
+  run bash "$SCRIPTS/peek-inbox.sh" testteam bob
+  [[ "$output" != *'"body":"first"'* ]]
+  [[ "$output" == *'"body":"second"'* ]]
+
+  run bash -c "printf '%s\n' '$id1' | bash '$SCRIPTS/mark-read.sh' testteam bob"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"updated=0"* ]]
+
+  run bash -c "printf '%s\n' '$id2' '1; DROP TABLE messages;' | bash '$SCRIPTS/mark-read.sh' testteam bob"
+  [ "$status" -ne 0 ]
+  run bash "$SCRIPTS/peek-inbox.sh" testteam bob
+  [[ "$output" == *'"body":"second"'* ]]
+}
+
 @test "inbox: --quiet suppresses output when no messages" {
   run bash "$SCRIPTS/inbox.sh" testteam alice --quiet
   [ "$status" -eq 0 ]

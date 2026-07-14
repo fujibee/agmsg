@@ -39,13 +39,14 @@ _AGMSG_INSTANCE_ID_SH=1
 # tasklist.exe which queries the native process table.
 _agmsg_pid_alive() {
   local pid="$1"
+  if command -v compat_pid_alive_native >/dev/null 2>&1; then
+    compat_pid_alive_native "$pid"
+    return $?
+  fi
   case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*)
-      MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
-      return $?
-      ;;
+    MINGW*|MSYS*|CLANGARM*) MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid" ;;
+    *) kill -0 "$pid" 2>/dev/null ;;
   esac
-  kill -0 "$pid" 2>/dev/null
 }
 
 # Compose from an explicit pid. Bare sid when pid is empty/non-numeric.

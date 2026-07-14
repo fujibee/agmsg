@@ -46,15 +46,73 @@ _compat_get_winpid() {
   '
 }
 
+# Public PID-domain helpers.  MSYS PIDs and native Windows PIDs are different
+# namespaces; callers must choose explicitly instead of feeding an unknown PID
+# to a best-effort generic probe.
+compat_msys_pid_to_winpid() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  case "$pid" in *[!0-9]*) return 1 ;; esac
+  _agmsg_detect_platform
+  if [ "$_agmsg_platform" = "msys" ]; then
+    _compat_get_winpid "$pid"
+  else
+    printf '%s\n' "$pid"
+  fi
+}
+
+compat_pid_alive_msys() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  case "$pid" in *[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+compat_pid_alive_native() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  case "$pid" in *[!0-9]*) return 1 ;; esac
+  _agmsg_detect_platform
+  if [ "$_agmsg_platform" = "msys" ]; then
+    MSYS_NO_PATHCONV=1 tasklist.exe /FI "PID eq $pid" /FO CSV /NH 2>/dev/null \
+      | tr -d '\r' \
+      | awk -F',' -v wanted="$pid" '{ gsub(/^"|"$/, "", $2); if ($2 == wanted) found=1 } END { exit !found }'
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
+}
+
+# Query a single Win32_Process property.  Property names are fixed by callers;
+# reject anything else so this helper can never become a PowerShell injection
+# surface.
+_compat_cim_property() {
+  local winpid="$1" property="$2"
+  [ -n "$winpid" ] || return 1
+  case "$winpid" in *[!0-9]*) return 1 ;; esac
+  case "$property" in CommandLine|CreationDate|ParentProcessId) ;; *) return 1 ;; esac
+  [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
+  _agmsg_detect_platform
+  [ "$_agmsg_platform" = "msys" ] || return 1
+  powershell.exe -NoProfile -Command \
+    "(Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\").$property" 2>/dev/null \
+    | tr -d '\r'
+}
+
 # Query Windows CIM for the full command line of a process by WINPID.
 _compat_cim_cmdline() {
   local winpid="$1"
   [ -n "$winpid" ] || return 1
   case "$winpid" in *[!0-9]*) return 1 ;; esac
   [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
-  powershell.exe -NoProfile -Command \
-    "(Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\").CommandLine" 2>/dev/null \
-    | tr -d '\r' | tr '\\' '/'
+  _compat_cim_property "$winpid" CommandLine | tr '\\' '/'
+}
+
+compat_native_creation_date() {
+  _compat_cim_property "$1" CreationDate
+}
+
+compat_native_parent_pid() {
+  _compat_cim_property "$1" ParentProcessId
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
