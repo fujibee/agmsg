@@ -53,7 +53,12 @@ function formatterFor(timeZone: string): Intl.DateTimeFormat {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-      hour12: false,
+      // hour12: false alone is ambiguous — depending on the ICU version,
+      // "false" can still resolve to the h24 cycle (which renders midnight
+      // as "24", not "00"). hourCycle: "h23" is the unambiguous way to pin
+      // 0-23 with midnight as "00" (caught by CI running a different Node
+      // than local dev — see the midnight regression test).
+      hourCycle: "h23",
     });
     formatterCache.set(timeZone, formatter);
   }
