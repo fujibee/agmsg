@@ -292,7 +292,8 @@ resolve_team() {
   project_sql_in=$(agmsg_project_sql_in_list "$PROJECT")
   for config_file in "$TEAMS_DIR"/*/config.json; do
     [ -f "$config_file" ] || continue
-    cfg_sql=$(printf '%s' "$config_file" | sed "s/'/''/g")
+    # readfile() needs a native-Windows path — agmsg_sql_readfile_path converts and SQL-escapes it.
+    cfg_sql=$(agmsg_sql_readfile_path "$config_file")
     team_name=$(agmsg_sqlite_mem \
       "SELECT json_extract(CAST(readfile('$cfg_sql') AS TEXT), '\$.name');")
     # Does any agent in this team have a registration for PROJECT (any type)?
