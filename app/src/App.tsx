@@ -28,6 +28,7 @@ import {
   clampRatio,
   collectDividers,
   computeRects,
+  dividerDragKey,
   insertAsNewLeaf,
   insertBeside,
   leaves,
@@ -317,6 +318,12 @@ export default function App() {
     cellSizeRef.current = { w, h };
     setCellSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
   }, []);
+
+  // Which divider (by dividerDragKey, below) is currently being dragged —
+  // state, not a captured DOM element, so the highlight survives a
+  // grid-segment transpose remounting the divider mid-drag (co1 review,
+  // PR #390).
+  const [draggingDividerKey, setDraggingDividerKey] = useState<string | null>(null);
 
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
@@ -1054,11 +1061,6 @@ export default function App() {
     // own doc).
     const MIN_PANE_PX = 120;
     const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
-    // Toggled on THIS divider's own element, not document.body — koit: only
-    // the divider actually being dragged should highlight, not every
-    // same-axis divider in the tab (body.resizing-col/row is shared with
-    // the sidebar/chat dividers too, so it can't be reused for this either).
-    const dividerEl = e.currentTarget as HTMLElement;
     // koit: prefers the divider snapping to whole terminal cells over a
     // free pixel drag (herdr-inspired, though herdr itself had nothing
     // reusable here — this is agmsg's own design). Every pane shares the
@@ -1079,11 +1081,15 @@ export default function App() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.classList.remove(cursorClass);
-      dividerEl.classList.remove("pane-divider-dragging");
+      setDraggingDividerKey(null);
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-    dividerEl.classList.add("pane-divider-dragging");
+    // dragPath.join(".") is this divider's identity on BOTH sides of the
+    // grid-segment transpose queued above (see dividerDragKey's doc) — key
+    // off that, not a captured DOM element, so the highlight survives even
+    // if this transpose swaps in a differently-shaped divider set.
+    setDraggingDividerKey(dragPath.join(".") || "root");
     document.body.classList.add(cursorClass);
   }, []);
 
@@ -1755,6 +1761,7 @@ export default function App() {
 
             {active !== "room" &&
               activeDividers.map((d) => {
+                const isDragging = draggingDividerKey !== null && dividerDragKey(d) === draggingDividerKey;
                 return (
                   <div
                     key={
@@ -1762,7 +1769,12 @@ export default function App() {
                         ? `single:${d.path.join(".") || "root"}`
                         : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
                     }
-                    className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
+                    className={[
+                      d.axis === "col" ? "pane-divider-v" : "pane-divider-h",
+                      isDragging && "pane-divider-dragging",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                     style={{
                       left: `${d.rect.left}%`,
                       top: `${d.rect.top}%`,
