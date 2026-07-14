@@ -27,7 +27,12 @@
       "team": "Team…",
       "agent": "Agent…"
     },
+    "team": {
+      "title": "Team",
+      "new": "Neues Team"
+    },
     "title": "Agenten",
+    "newAgent": "Neuer Agent",
     "filter": {
       "all": "alle",
       "none": "keine"
@@ -37,7 +42,7 @@
       "titleRunning": "läuft bereits — klicken zum Fokussieren",
       "titleSpawn": "in einem PTY-Bereich starten",
       "noTypes": "—",
-      "emptyState": "Noch keine Agenten. ＋ Neu → Agent verwenden."
+      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen."
     },
     "user": {
       "title": "app-user in {{team}}"

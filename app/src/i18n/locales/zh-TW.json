@@ -27,7 +27,12 @@
       "team": "團隊…",
       "agent": "代理…"
     },
+    "team": {
+      "title": "團隊",
+      "new": "新增團隊"
+    },
     "title": "代理",
+    "newAgent": "新增代理",
     "filter": {
       "all": "全部",
       "none": "無"
@@ -37,7 +42,7 @@
       "titleRunning": "已在執行中 — 點選以切換至該面板",
       "titleSpawn": "在 PTY 面板中啟動",
       "noTypes": "—",
-      "emptyState": "尚無代理。請使用「＋ 新增 → 代理」新增。"
+      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
     },
     "user": {
       "title": "{{team}} 的 app-user"

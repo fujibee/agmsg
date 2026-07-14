@@ -27,7 +27,12 @@
       "team": "チーム…",
       "agent": "エージェント…"
     },
+    "team": {
+      "title": "チーム",
+      "new": "新規チーム"
+    },
     "title": "エージェント",
+    "newAgent": "新規エージェント",
     "filter": {
       "all": "すべて",
       "none": "なし"
@@ -37,7 +42,7 @@
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",
       "noTypes": "—",
-      "emptyState": "エージェントはまだありません。＋ 新規 → エージェント から追加してください。"
+      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
     },
     "user": {
       "title": "{{team}} のapp-user"
