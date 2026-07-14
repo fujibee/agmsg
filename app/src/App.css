@@ -3,6 +3,11 @@
   --panel: #11151f;
   --panel-2: #161b27;
   --border: #232a3a;
+  /* One step brighter than --border, specifically for the pane frame
+     (koit: --border alone was too faint to read as a visible box at
+     rest). Its own variable, not a --border change, so the other 27
+     places --border is used elsewhere in the UI stay as-is. */
+  --pane-border: #3a4660;
   --fg: #c5c8c6;
   --muted: #6b7280;
   --accent: #7aa2f7;
@@ -1029,7 +1034,7 @@ body.resizing-row {
   font-size: 11px;
   color: var(--muted);
   background: var(--panel);
-  border: 1px solid var(--border);
+  border: 1px solid var(--pane-border);
   border-bottom: none;
   border-radius: 6px 6px 0 0;
 }
@@ -1123,7 +1128,11 @@ body.resizing-row {
 .pane-divider-h::before {
   content: "";
   position: absolute;
-  background: var(--border);
+  /* Invisible at rest now that the gap itself is a full terminal cell
+     (koit) — a static hairline sitting in the middle of that gap read as
+     a redundant, always-on divider line. Shows only on hover/while
+     actively dragging (below), same as before. */
+  background: transparent;
 }
 .pane-divider-v::before {
   top: 0;
@@ -1139,13 +1148,15 @@ body.resizing-row {
   height: 1px;
   transform: translateY(-50%);
 }
-.pane-divider-v:hover::before {
+.pane-divider-v:hover::before,
+.pane-divider-v.pane-divider-dragging::before {
   left: 0;
   width: 100%;
   transform: none;
   background: var(--accent);
 }
-.pane-divider-h:hover::before {
+.pane-divider-h:hover::before,
+.pane-divider-h.pane-divider-dragging::before {
   top: 0;
   height: 100%;
   transform: none;
@@ -1268,7 +1279,7 @@ body.resizing-row {
   min-height: 0;
   width: 100%;
   height: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--pane-border);
   border-top: none;
 }
 

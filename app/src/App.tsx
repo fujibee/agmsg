@@ -304,6 +304,20 @@ export default function App() {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
 
+  // Cell size in CSS px. The ref is for snapping a divider drag to whole
+  // terminal rows/cols — read once at drag-start, doesn't need a re-render
+  // on every fit. The state twin drives the gap BETWEEN panes below (koit:
+  // should be a full terminal cell per axis, herdr-style, not an arbitrary
+  // fixed px value) — that one has to be real React state since it feeds
+  // rendered CSS. Every pane uses the same fixed font today, so any one of
+  // them reporting is representative of them all.
+  const cellSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const [cellSize, setCellSize] = useState<{ w: number; h: number } | null>(null);
+  const handleCellSize = useCallback((w: number, h: number) => {
+    cellSizeRef.current = { w, h };
+    setCellSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+  }, []);
+
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
   const appUser = appUserMember?.name ?? "";
@@ -1040,10 +1054,23 @@ export default function App() {
     // own doc).
     const MIN_PANE_PX = 120;
     const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
+    // Toggled on THIS divider's own element, not document.body — koit: only
+    // the divider actually being dragged should highlight, not every
+    // same-axis divider in the tab (body.resizing-col/row is shared with
+    // the sidebar/chat dividers too, so it can't be reused for this either).
+    const dividerEl = e.currentTarget as HTMLElement;
+    // koit: prefers the divider snapping to whole terminal cells over a
+    // free pixel drag (herdr-inspired, though herdr itself had nothing
+    // reusable here — this is agmsg's own design). Every pane shares the
+    // same fixed font, so one representative cell size (captured by any
+    // TerminalPane's fit) is enough regardless of which panes flank this
+    // specific divider.
+    const cellPx = axis === "col" ? cellSizeRef.current?.w : cellSizeRef.current?.h;
     const onMove = (ev: MouseEvent) => {
       const totalPx = axis === "col" ? parentPx.width : parentPx.height;
       const raw = axis === "col" ? (ev.clientX - parentPx.left) / totalPx : (ev.clientY - parentPx.top) / totalPx;
-      const ratio = clampRatio(raw, MIN_PANE_PX, totalPx);
+      const snapped = cellPx ? (Math.round((raw * totalPx) / cellPx) * cellPx) / totalPx : raw;
+      const ratio = clampRatio(snapped, MIN_PANE_PX, totalPx);
       setWindows((prev) =>
         prev.map((w) => (w.id === windowId ? { ...w, root: updateRatioAtPath(w.root, dragPath, ratio) } : w)),
       );
@@ -1052,9 +1079,11 @@ export default function App() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.classList.remove(cursorClass);
+      dividerEl.classList.remove("pane-divider-dragging");
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    dividerEl.classList.add("pane-divider-dragging");
     document.body.classList.add(cursorClass);
   }, []);
 
@@ -1582,6 +1611,17 @@ export default function App() {
                     top: `${rect.top}%`,
                     width: `${rect.width}%`,
                     height: `${rect.height}%`,
+                    // The gap between two adjacent panes is each side's own
+                    // padding added together, so half a cell per side makes
+                    // a full terminal cell of gap at the shared seam
+                    // (koit/herdr: the gap should read as "one cell", not
+                    // an arbitrary fixed px value — falls back to the old
+                    // fixed padding before any pane has fit and reported
+                    // its real cell size).
+                    paddingLeft: cellSize ? cellSize.w / 2 : undefined,
+                    paddingRight: cellSize ? cellSize.w / 2 : undefined,
+                    paddingTop: cellSize ? cellSize.h / 2 : undefined,
+                    paddingBottom: cellSize ? cellSize.h / 2 : undefined,
                   }}
                   onDragOver={(e) => {
                     // Gate on dataTransfer.types, NOT React state: dragover
@@ -1707,29 +1747,32 @@ export default function App() {
                     args={p.args}
                     cwd={p.cwd}
                     onAgentState={applyAgentState}
+                    onCellSize={handleCellSize}
                   />
                 </div>
               );
             })}
 
             {active !== "room" &&
-              activeDividers.map((d) => (
-                <div
-                  key={
-                    d.kind === "single"
-                      ? `single:${d.path.join(".") || "root"}`
-                      : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
-                  }
-                  className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
-                  style={{
-                    left: `${d.rect.left}%`,
-                    top: `${d.rect.top}%`,
-                    width: `${d.rect.width}%`,
-                    height: `${d.rect.height}%`,
-                  }}
-                  onMouseDown={(e) => startPaneDividerDrag(e, active, d)}
-                />
-              ))}
+              activeDividers.map((d) => {
+                return (
+                  <div
+                    key={
+                      d.kind === "single"
+                        ? `single:${d.path.join(".") || "root"}`
+                        : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
+                    }
+                    className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
+                    style={{
+                      left: `${d.rect.left}%`,
+                      top: `${d.rect.top}%`,
+                      width: `${d.rect.width}%`,
+                      height: `${d.rect.height}%`,
+                    }}
+                    onMouseDown={(e) => startPaneDividerDrag(e, active, d)}
+                  />
+                );
+              })}
           </section>
 
           {showUserChat && chatPaneState === "normal" && (

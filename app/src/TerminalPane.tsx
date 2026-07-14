@@ -13,6 +13,9 @@ type Props = {
   args?: string[];
   cwd?: string;
   onAgentState?: (id: string, state: "idle" | "working" | "blocked" | "unknown") => void;
+  /** Reported on every fit — the pane's current cell size in CSS px, so a
+   * divider drag elsewhere can snap to whole terminal rows/cols. */
+  onCellSize?: (widthPx: number, heightPx: number) => void;
 };
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -26,7 +29,7 @@ function b64ToBytes(b64: string): Uint8Array {
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
  */
-export function TerminalPane({ id, cmd, args = [], cwd, onAgentState }: Props) {
+export function TerminalPane({ id, cmd, args = [], cwd, onAgentState, onCellSize }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
 
@@ -63,6 +66,10 @@ export function TerminalPane({ id, cmd, args = [], cwd, onAgentState }: Props) {
         lastCols = term.cols;
         void invoke("pty_resize", { id, rows: term.rows, cols: term.cols });
       }
+      // Every pane uses the same fixed font today, so any one of them
+      // reporting its cell size is representative of them all — a divider
+      // drag doesn't need to know which specific panes it's between.
+      onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
     };
 
     const unlisteners: Array<() => void> = [];
@@ -120,7 +127,7 @@ export function TerminalPane({ id, cmd, args = [], cwd, onAgentState }: Props) {
       void invoke("pty_kill", { id });
       term.dispose();
     };
-  }, [id, cmd, cwd, onAgentState]);
+  }, [id, cmd, cwd, onAgentState, onCellSize]);
 
   return <div className="term-pane" ref={ref} />;
 }
