@@ -56,12 +56,17 @@ Four possible outputs:
                     Requires a bridge attached to this Codex task. If the
                     bridge is unavailable, delivery safely degrades to turn.
 
+       4) scheduled — Native ChatGPT Scheduled task
+                    Returns to this task. Starts every 2 minutes, then backs
+                    off to 15 minutes and 1 hour when no message arrives.
+
      [1]:
      ```
 
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`, `3`→`monitor`) and run:
+     - Map `1`→`turn`, `2`→`off`, and `3`→`monitor`, then run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
+     - For `4`, follow the `scheduled start` flow below instead of enabling a hook or bridge.
      - If monitor is chosen, immediately bind the newly joined role by running:
        `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <agent_name> "${CODEX_THREAD_ID:-}"`
      - If monitor is chosen, report whether the visible app-server bridge attached. If it did not, say that the effective mode was downgraded to `turn`.
@@ -97,7 +102,24 @@ the handling into the same visible Codex thread.
 5. Background `codex exec resume` delivery is prohibited.
 6. If a visible bridge cannot attach, keep mail unread, change the effective
    mode to `turn`, and fall back to the next visible turn.
-7. Do not create cron, heartbeat, or scheduled polling jobs for Codex delivery.
+7. Do not create cron, launchd, shell heartbeat, or background polling jobs for
+   Codex delivery. The only allowed schedule is the native ChatGPT Scheduled
+   task created by the `scheduled start` flow below.
+
+### Codex native Scheduled monitor invariant
+
+`scheduled start` may use only one native ChatGPT Scheduled task that returns
+to the current task and runs in the local project directory.
+
+1. Start at two-minute intervals. The checked-in state machine changes the
+   cadence to 15 minutes after 30 minutes and one hour after four hours.
+2. A new unread message addressed to the selected role resets the cycle to two
+   minutes. The metadata check must not read the body or mark it read.
+3. Empty, waiting, and not-due runs produce no user notification.
+4. At 24 hours, or after `scheduled stop` / `mode off`, pause the same Scheduled
+   task. Do not create a replacement task.
+5. Never use Desktop relay, `CODEX_APP_SERVER_WS_URL`, app restart, launchd,
+   cron, a background receiver, or `codex exec resume`.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
@@ -162,12 +184,42 @@ If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status codex "$(pwd)"`
 2. Show the output to the user.
 
+If argument starts with "scheduled start" (optionally followed by an agent name):
+1. Resolve the selected Codex role and its team with `identities.sh`. Prefer the
+   active `actas` role. If multiple roles remain and none was specified, ask the
+   user which role to monitor.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off codex "$(pwd)"`
+   so no hook or bridge remains active.
+3. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh prepare "$(pwd)" <team> <name>`.
+4. Create or update one native ChatGPT automation with `kind=heartbeat` and
+   `targetThreadId` set to this current task. Use the emitted prompt verbatim,
+   the local project directory, and a two-minute recurrence. Do not use a
+   worktree.
+5. If native Scheduled-task creation is unavailable, run `stop-identity` for
+   the same project/team/name and report the limitation. Do not claim that the
+   monitor is active.
+
+If argument starts with "scheduled status" (optionally followed by an agent name):
+1. Resolve the role and team as in `scheduled start`.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh status-identity "$(pwd)" <team> <name>`.
+3. Report the native Scheduled task's status too when that capability is available.
+
+If argument starts with "scheduled stop" (optionally followed by an agent name):
+1. Resolve the role and team as in `scheduled start`.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh stop-identity "$(pwd)" <team> <name>`.
+3. Pause the same native Scheduled task. If direct pause is unavailable, the
+   next run will see `status=inactive` and pause itself.
+
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
-1. Parse the mode. Codex supports `monitor`, `turn`, `both`, and `off`. `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
-2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and concrete thread id.
-4. If mode is `turn` or `off`, confirm that the background receiver stopped.
-5. If mode is `monitor` or `both`, report whether a visible app-server bridge attached. If it did not attach, report that the effective mode was downgraded to `turn`. Never describe visible-turn fallback as an active monitor.
+1. Parse the mode. Codex supports `monitor`, `turn`, `both`, `scheduled`, and `off`.
+   `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
+2. If the mode is `scheduled`, follow `scheduled start` above and stop this flow.
+3. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
+4. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and concrete thread id.
+5. If mode is `turn` or `off`, confirm that the background receiver stopped.
+   Also pause the native Scheduled task when possible; switching to any
+   hook/bridge mode disarms its local state even if direct pause is unavailable.
+6. If mode is `monitor` or `both`, report whether a visible app-server bridge attached. If it did not attach, report that the effective mode was downgraded to `turn`. Never describe visible-turn fallback as an active monitor.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

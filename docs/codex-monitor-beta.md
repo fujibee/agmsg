@@ -9,8 +9,10 @@ SessionStart after restart or compaction.
 > Monitor mode is active only after a visible app-server bridge attaches to the
 > selected thread. If no bridge is available, agmsg keeps mail unread and changes
 > the effective mode to `turn`. Background `codex exec resume`, cron, heartbeat,
-> and scheduled polling are prohibited because they can process mail without
-> showing the work to the human operator.
+> and ad hoc scheduled polling are prohibited because they can process mail
+> without showing the work to the human operator. The separate native ChatGPT
+> Scheduled path returns to the same task and is documented in
+> [codex-scheduled-monitor.md](codex-scheduled-monitor.md).
 
 ## Quick Start
 

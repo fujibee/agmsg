@@ -53,6 +53,53 @@ check_at() {
   [[ "$output" == *"next_rrule=FREQ=HOURLY;INTERVAL=1"* ]]
 }
 
+@test "scheduled prepare is idempotent and emits one current-task prompt" {
+  export AGMSG_CODEX_SCHEDULED_OWNER="owner-prepared"
+
+  run bash "$MONITOR" prepare "$TEST_PROJECT" team alice --now 1000
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=prepared owner=owner-prepared"* ]]
+  [[ "$output" == *"FREQ=MINUTELY;INTERVAL=2"* ]]
+  [[ "$output" == *"returns to this current task"* ]]
+
+  run bash "$MONITOR" prepare "$TEST_PROJECT" team alice --now 1001
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=already_prepared owner=owner-prepared"* ]]
+  state_count="$(find "$AGMSG_RUN_PATH" -maxdepth 1 -name 'codex-scheduled-monitor.*.state' -type f | wc -l | tr -d ' ')"
+  [ "$state_count" -eq 1 ]
+
+  run bash "$MONITOR" status-identity "$TEST_PROJECT" team alice --now 1001
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=active"* ]]
+
+  run bash "$MONITOR" status-project "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"identity=team/alice"* ]]
+  [[ "$output" == *"status=active count=1"* ]]
+
+  run bash "$MONITOR" stop-identity "$TEST_PROJECT" team alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=inactive schedule_action=pause"* ]]
+
+  run bash "$MONITOR" stop-identity "$TEST_PROJECT" team alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=inactive schedule_action=pause"* ]]
+}
+
+@test "scheduled stop-project disarms every role in the project" {
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-alice" bash "$MONITOR" prepare "$TEST_PROJECT" team alice --now 1000 >/dev/null
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-bob" bash "$MONITOR" prepare "$TEST_PROJECT" team bob --now 1000 >/dev/null
+
+  run bash "$MONITOR" stop-project "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stopped=2"* ]]
+  [[ "$output" == *"schedule_action=pause"* ]]
+
+  run bash "$MONITOR" status-project "$TEST_PROJECT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=inactive count=0"* ]]
+}
+
 @test "new unread mail resets a slow cycle to two minutes without consuming it" {
   arm >/dev/null
   bash "$MONITOR" scheduled "$TEST_PROJECT" team alice owner-1 3600 >/dev/null
@@ -110,7 +157,10 @@ check_at() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"do not notify the user"* ]]
   [[ "$output" == *"Do not create another task"* ]]
+  [[ "$output" == *"heartbeat automation"* ]]
+  [[ "$output" == *"targetThreadId is this current task"* ]]
   [[ "$output" == *"Never edit automation files directly"* ]]
   [[ "$output" == *"Never use Desktop relay"* ]]
   [[ "$output" == *"ChatGPT.app restart"* ]]
+  [[ "$output" == *"status is inactive"* ]]
 }

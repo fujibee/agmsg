@@ -248,6 +248,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 | **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
 | **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
+| **`scheduled`** (Codex only) | native ChatGPT Scheduled task returning to the same task | 2 min, then 15 min, then 1 hour | unattended Codex follow-up without a relay |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
 ### Picking a mode
@@ -256,6 +257,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 /agmsg mode monitor    — switch this project to real-time push (Claude Code)
 /agmsg mode turn       — switch to between-turns checking
 /agmsg mode both       — monitor with turn as a safety net
+/agmsg mode scheduled  — native ChatGPT Scheduled monitoring in this task
 /agmsg mode off        — manual /agmsg only
 /agmsg mode            — show current mode
 ```
@@ -300,11 +302,15 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` as a **beta** visible app-server receiver, plus `mode turn` and `mode off`.
+Codex supports `mode scheduled` through a native ChatGPT Scheduled task, plus
+`mode monitor` as a **beta** visible app-server receiver, `mode turn`, and
+`mode off`.
 
-> ⚠️ **Monitor is active only when a visible app-server bridge attaches to the persisted Codex task.** Background `codex exec resume` delivery is prohibited because a successful CLI turn can consume and answer mail without displaying the handling in Codex Desktop. When no visible bridge is available, agmsg keeps mail unread and downgrades the effective mode to `turn`. No heartbeat, cron, or scheduled polling task is created.
+> ⚠️ **Monitor is active only when a visible app-server bridge attaches to the persisted Codex task.** Background `codex exec resume` delivery is prohibited because a successful CLI turn can consume and answer mail without displaying the handling in Codex Desktop. When no visible bridge is available, agmsg keeps mail unread and downgrades the effective mode to `turn`. The separate `scheduled` path uses only ChatGPT's native Scheduled-task feature; neither path creates a heartbeat, cron job, launchd job, Desktop relay, or app restart.
 
-If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
+Run `$agmsg scheduled start <role>` to create the native adaptive schedule in
+the current task. See [docs/codex-scheduled-monitor.md](docs/codex-scheduled-monitor.md).
+If you prefer the beta bridge and a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Bridge setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
 ### GitHub Copilot CLI
 
@@ -495,9 +501,10 @@ writable_roots = [
 ]
 ```
 
-Codex only supports `mode turn` and `mode off`; it does not have Claude Code's
-Monitor tool. The sandbox allowlist is still required for writes performed by
-manual `$agmsg` commands and turn-end inbox checks.
+Codex supports manual, `turn`, native `scheduled`, and beta visible-bridge
+workflows. It does not have Claude Code's Monitor tool. The sandbox allowlist is
+required for writes performed by manual commands, turn-end inbox checks, and
+the native Scheduled state machine.
 
 Some Codex runtimes or automations may inject a managed permission profile for a
 single run. In that case, the run-specific writable roots must also include the

@@ -16,6 +16,13 @@
 # is the safe path when no app-server can inject into the visible thread.
 agmsg_delivery_apply() {
   local type="$1" project="$2" mode="$3"
+  # Native Scheduled monitoring is mutually exclusive with hook/bridge modes.
+  # Invalidate its local state before enabling any of those modes; the next
+  # native run sees status=inactive and pauses itself.
+  if [ "$mode" != "off" ]; then
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+      stop-project "$project" >/dev/null 2>&1 || true
+  fi
   if [ "$mode" = "monitor" ]; then
     agmsg_delivery_apply_default "$type" "$project" both
   else
@@ -26,7 +33,22 @@ agmsg_delivery_apply() {
 # `monitor` is the user-facing mode name even though Codex installs both hook
 # types internally. Keep status stable for callers and existing automation.
 agmsg_delivery_status() {
-  agmsg_delivery_status_default "$@" | sed '1s/^mode: both$/mode: monitor/'
+  local type="$1" project="$2" hook_status scheduled_status
+  hook_status="$(agmsg_delivery_status_default "$type" "$project" | sed '1s/^mode: both$/mode: monitor/')"
+  scheduled_status="$("$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+    status-project "$project" 2>/dev/null || true)"
+  if printf '%s\n' "$scheduled_status" | grep -q '^status=active '; then
+    if printf '%s\n' "$hook_status" | grep -q '^mode: off$'; then
+      printf '%s\n' "$hook_status" | sed '1s/^mode: off$/mode: scheduled/'
+    else
+      printf '%s\n' "$hook_status"
+      echo "WARNING: native Scheduled monitoring and Codex delivery hooks are both active."
+    fi
+    printf 'Codex Scheduled monitor: %s\n' \
+      "$(printf '%s\n' "$scheduled_status" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  else
+    printf '%s\n' "$hook_status"
+  fi
 }
 
 agmsg_delivery_on_enable() {
@@ -59,7 +81,7 @@ agmsg_delivery_on_enable() {
 
 agmsg_delivery_on_disable() {
   local project="$2"
-  local stopped lease_cleanup
+  local stopped lease_cleanup scheduled_cleanup
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then
     echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."
@@ -68,6 +90,12 @@ agmsg_delivery_on_disable() {
   lease_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
     disarm-project "$project" 2>/dev/null || true)
   [ -n "$lease_cleanup" ] && printf '%s\n' "$lease_cleanup"
+  # Turning delivery off must also invalidate native Scheduled runs. The next
+  # unattended run sees status=inactive and pauses itself; no local process is
+  # started to enforce that transition.
+  scheduled_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+    stop-project "$project" 2>/dev/null || true)
+  [ -n "$scheduled_cleanup" ] && printf 'Codex Scheduled monitor: %s\n' "$scheduled_cleanup"
   echo "Note: shell profile functions are not changed automatically."
   echo "  If you installed the optional global shim and no other project uses monitor mode, remove it:"
   echo "    $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh remove"

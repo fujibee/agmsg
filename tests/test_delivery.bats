@@ -1518,6 +1518,36 @@ EOF
   grep -q "check-inbox.sh" "$hook_file"
 }
 
+@test "delivery status (codex): native Scheduled state is reported without hooks" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local scheduled="$TYPES/codex/codex-scheduled-monitor.sh"
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-delivery" \
+    bash "$scheduled" prepare "$TEST_PROJECT" team alice --now 1000 >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: scheduled"* ]]
+  [[ "$output" == *"identity=team/alice"* ]]
+  [[ "$output" == *"status=active count=1"* ]]
+
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stopped=1 schedule_action=pause"* ]]
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: off"* ]]
+  [[ "$output" != *"mode: scheduled"* ]]
+
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-delivery-turn" \
+    bash "$scheduled" prepare "$TEST_PROJECT" team alice --now 2000 >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  run bash "$scheduled" status-project "$TEST_PROJECT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=inactive count=0"* ]]
+}
+
 @test "delivery status (codex): live bridge reports alive and suppresses watch count" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null

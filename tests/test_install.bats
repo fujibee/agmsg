@@ -122,6 +122,14 @@ teardown() {
   [[ "$drop_block" == *"delivery.sh status"* ]]
 }
 
+@test "install: Codex skill ships the native Scheduled monitor workflow" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  grep -q 'scheduled start' "$SK/SKILL.md"
+  grep -q 'kind=heartbeat' "$SK/SKILL.md"
+  grep -q 'targetThreadId' "$SK/SKILL.md"
+  grep -q 'Never use Desktop relay' "$SK/scripts/drivers/types/codex/codex-scheduled-monitor.sh"
+}
+
 @test "install: --update warns to re-register delivery hooks (#133)" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update

@@ -16,6 +16,8 @@ WATCH_ONCE="${AGMSG_WATCH_ONCE:-$SCRIPT_DIR/watch-once.sh}"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 # shellcheck source=/dev/null
+source "$SCRIPT_DIR/../../../lib/compat.sh"
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/../../../lib/validate.sh"
@@ -31,6 +33,11 @@ RETRY_AFTER="${AGMSG_CODEX_SCHEDULED_RETRY_AFTER:-300}"
 usage() {
   cat >&2 <<'EOF'
 Usage:
+  codex-scheduled-monitor.sh prepare <project> <team> <name> [--now <epoch>]
+  codex-scheduled-monitor.sh status-identity <project> <team> <name> [--now <epoch>]
+  codex-scheduled-monitor.sh stop-identity <project> <team> <name>
+  codex-scheduled-monitor.sh status-project <project>
+  codex-scheduled-monitor.sh stop-project <project>
   codex-scheduled-monitor.sh arm <project> <team> <name> <owner> [--now <epoch>]
   codex-scheduled-monitor.sh check <project> <team> <name> <owner> [--now <epoch>] [--force]
   codex-scheduled-monitor.sh delivered <project> <team> <name> <owner> <max_id> [--now <epoch>]
@@ -209,6 +216,26 @@ rrule_for_interval() {
   esac
 }
 
+active_state_for_identity() {
+  local file state_project state_team state_name state_status found=""
+  for file in "$RUN_DIR"/codex-scheduled-monitor.*.state; do
+    [ -f "$file" ] || continue
+    state_project="$(state_field project "$file")"
+    state_team="$(state_field team "$file")"
+    state_name="$(state_field name "$file")"
+    state_status="$(state_field status "$file")"
+    if [ "$state_project" = "$PROJECT" ] && [ "$state_team" = "$TEAM" ] \
+        && [ "$state_name" = "$NAME" ] && [ "$state_status" = "active" ]; then
+      if [ -n "$found" ]; then
+        echo "agmsg: multiple active Scheduled monitor states exist for $TEAM/$NAME" >&2
+        return 70
+      fi
+      found="$file"
+    fi
+  done
+  printf '%s\n' "$found"
+}
+
 emit_runtime_status() {
   local now="$1" elapsed stage interval change next_due
   elapsed=$((now - CYCLE_STARTED_AT))
@@ -224,6 +251,97 @@ emit_runtime_status() {
 }
 
 case "$ACTION" in
+  prepare)
+    [ "$#" -ge 3 ] || usage
+    PROJECT="${1:?Missing project}"
+    TEAM="${2:?Missing team}"
+    NAME="${3:?Missing name}"
+    shift 3
+    agmsg_validate_team_name "$TEAM"
+    agmsg_validate_agent_name "$NAME"
+    reject_line_breaks "$PROJECT" || { echo "agmsg: invalid project path" >&2; exit 64; }
+    PROJECT="$(agmsg_resolve_project "$PROJECT" codex)"
+    parse_now_options "$@"
+
+    existing_state="$(active_state_for_identity)" || exit $?
+    if [ -n "$existing_state" ]; then
+      owner="$(state_field owner "$existing_state")"
+      [ -n "$owner" ] || { echo "agmsg: active Scheduled monitor state has no owner" >&2; exit 70; }
+      printf 'status=already_prepared owner=%s\n' "$owner"
+    else
+      owner="${AGMSG_CODEX_SCHEDULED_OWNER:-task-$(compat_uuidgen | tr '[:upper:]' '[:lower:]')}"
+      reject_line_breaks "$owner" || { echo "agmsg: invalid generated owner" >&2; exit 70; }
+      arm_output="$("$0" arm "$PROJECT" "$TEAM" "$NAME" "$owner" --now "$NOW")"
+      printf 'status=prepared owner=%s %s\n' "$owner" "$arm_output"
+    fi
+    echo "--- scheduled-task-prompt ---"
+    "$0" prompt "$PROJECT" "$TEAM" "$NAME" "$owner"
+    ;;
+  status-identity)
+    [ "$#" -ge 3 ] || usage
+    PROJECT="${1:?Missing project}"
+    TEAM="${2:?Missing team}"
+    NAME="${3:?Missing name}"
+    shift 3
+    agmsg_validate_team_name "$TEAM"
+    agmsg_validate_agent_name "$NAME"
+    reject_line_breaks "$PROJECT" || { echo "agmsg: invalid project path" >&2; exit 64; }
+    PROJECT="$(agmsg_resolve_project "$PROJECT" codex)"
+    parse_now_options "$@"
+    existing_state="$(active_state_for_identity)" || exit $?
+    [ -n "$existing_state" ] || { echo "status=inactive"; exit 3; }
+    owner="$(state_field owner "$existing_state")"
+    "$0" status "$PROJECT" "$TEAM" "$NAME" "$owner" --now "$NOW"
+    ;;
+  stop-identity)
+    [ "$#" -eq 3 ] || usage
+    PROJECT="${1:?Missing project}"
+    TEAM="${2:?Missing team}"
+    NAME="${3:?Missing name}"
+    agmsg_validate_team_name "$TEAM"
+    agmsg_validate_agent_name "$NAME"
+    reject_line_breaks "$PROJECT" || { echo "agmsg: invalid project path" >&2; exit 64; }
+    PROJECT="$(agmsg_resolve_project "$PROJECT" codex)"
+    existing_state="$(active_state_for_identity)" || exit $?
+    [ -n "$existing_state" ] || { echo "status=inactive schedule_action=pause"; exit 0; }
+    owner="$(state_field owner "$existing_state")"
+    "$0" stop "$PROJECT" "$TEAM" "$NAME" "$owner"
+    ;;
+  status-project)
+    [ "$#" -eq 1 ] || usage
+    PROJECT="$(agmsg_resolve_project "${1:?Missing project}" codex)"
+    count=0
+    for existing_state in "$RUN_DIR"/codex-scheduled-monitor.*.state; do
+      [ -f "$existing_state" ] || continue
+      [ "$(state_field project "$existing_state")" = "$PROJECT" ] || continue
+      [ "$(state_field status "$existing_state")" = "active" ] || continue
+      count=$((count + 1))
+      printf 'identity=%s/%s\n' \
+        "$(state_field team "$existing_state")" "$(state_field name "$existing_state")"
+    done
+    if [ "$count" -eq 0 ]; then
+      echo "status=inactive count=0"
+      exit 3
+    fi
+    echo "status=active count=$count"
+    ;;
+  stop-project)
+    [ "$#" -eq 1 ] || usage
+    PROJECT="$(agmsg_resolve_project "${1:?Missing project}" codex)"
+    stopped=0
+    for existing_state in "$RUN_DIR"/codex-scheduled-monitor.*.state; do
+      [ -f "$existing_state" ] || continue
+      [ "$(state_field project "$existing_state")" = "$PROJECT" ] || continue
+      [ "$(state_field status "$existing_state")" = "active" ] || continue
+      TEAM="$(state_field team "$existing_state")"
+      NAME="$(state_field name "$existing_state")"
+      owner="$(state_field owner "$existing_state")"
+      [ -n "$TEAM" ] && [ -n "$NAME" ] && [ -n "$owner" ] || continue
+      "$0" stop "$PROJECT" "$TEAM" "$NAME" "$owner" >/dev/null
+      stopped=$((stopped + 1))
+    done
+    printf 'status=inactive stopped=%s schedule_action=pause\n' "$stopped"
+    ;;
   arm)
     [ "$#" -ge 4 ] || usage
     init_identity "$1" "$2" "$3" "$4"
@@ -396,6 +514,7 @@ case "$ACTION" in
     scheduled_cmd="$scheduled_cmd $(printf '%q' "$OWNER") <next_interval>"
     cat <<EOF
 This is the single adaptive agmsg monitor for $TEAM/$NAME in this existing ChatGPT task.
+Use only one native ChatGPT heartbeat automation whose targetThreadId is this current task and whose working directory is the local project directory.
 Run exactly this metadata-only check first:
 $check_cmd
 If status is idle, waiting, or not_due, do not run inbox.sh and do not notify the user.
@@ -405,7 +524,7 @@ After inbox.sh succeeds, run:
 $delivered_cmd
 If schedule_change=1, update this same Scheduled task to next_rrule. Do not create another task. Only after the update succeeds, run:
 $scheduled_cmd
-If status is expired or schedule_action=pause, pause this same Scheduled task.
+If status is inactive, expired, or schedule_action=pause, pause this same Scheduled task.
 Never edit automation files directly. Never use Desktop relay, CODEX_APP_SERVER_WS_URL, launchd, cron, a background receiver, codex exec resume, or a ChatGPT.app restart.
 If the native Scheduled-task update capability is unavailable, leave agmsg unread, pause this task if possible, and visibly report the limitation once.
 EOF
