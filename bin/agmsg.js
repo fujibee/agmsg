@@ -79,6 +79,19 @@ function printHelp() {
   ].join('\n'));
 }
 
+// Normalise a native path to the forward-slash form that bash.exe and
+// curl.exe accept on Windows. bash is an MSYS2 program: Windows gives it a
+// raw command-line string rather than a real argv[], and MSYS's own argv
+// reconstruction treats backslash as an escape character, so a native
+// `C:\Users\...\setup.sh` argument gets corrupted (e.g. `\U`, `\T` are read
+// as escapes) into a path that doesn't exist — "No such file or directory"
+// for a file that's actually there. Forward slashes have no such ambiguity,
+// and both bash and curl accept them on Windows. No-op on POSIX (no
+// backslashes to replace). See #262.
+function toBashPath(p) {
+  return p.replace(/\\/g, '/');
+}
+
 function runInstaller(passthroughArgs) {
   // Fetch the canonical setup.sh to a private tempdir, then exec it directly
   // with bash. This keeps the installer's stdin wired to the parent process's
@@ -92,7 +105,10 @@ function runInstaller(passthroughArgs) {
   const ref = installRef();
   const setupUrl = RAW_BASE + '/' + ref + '/setup.sh';
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agmsg-bootstrap-'));
-  const setupPath = path.join(tmpDir, 'setup.sh');
+  // os.tmpdir()/path.join() return backslash-separated paths on Windows.
+  // fs.rmSync (below) handles that form fine since it's a native Node call;
+  // curl and bash are external processes, so they get the bash-safe form.
+  const setupPath = toBashPath(path.join(tmpDir, 'setup.sh'));
 
   try {
     const fetch = spawnSync('curl', ['-fsSL', '-o', setupPath, setupUrl], { stdio: 'inherit' });
@@ -120,22 +136,30 @@ function runInstaller(passthroughArgs) {
   }
 }
 
-const args = process.argv.slice(2);
+function main() {
+  const args = process.argv.slice(2);
 
-if (args.length === 0 || args[0] === 'install') {
-  // Forward anything after `install` (e.g. `agmsg install --cmd m`) to
-  // setup.sh, which passes "$@" through to install.sh.
-  const passthrough = args[0] === 'install' ? args.slice(1) : args;
-  runInstaller(passthrough);
-} else if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
-  printHelp();
-  process.exit(0);
-} else if (args[0] === '--version' || args[0] === '-v') {
-  process.stdout.write('agmsg bootstrapper ' + readVersion() + '\n');
-  process.stdout.write('canonical project: ' + REPO_URL + '\n');
-  process.exit(0);
-} else {
-  console.error('agmsg: unknown argument: ' + args[0]);
-  console.error('Run `npx agmsg --help` for usage.');
-  process.exit(2);
+  if (args.length === 0 || args[0] === 'install') {
+    // Forward anything after `install` (e.g. `agmsg install --cmd m`) to
+    // setup.sh, which passes "$@" through to install.sh.
+    const passthrough = args[0] === 'install' ? args.slice(1) : args;
+    runInstaller(passthrough);
+  } else if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
+    printHelp();
+    process.exit(0);
+  } else if (args[0] === '--version' || args[0] === '-v') {
+    process.stdout.write('agmsg bootstrapper ' + readVersion() + '\n');
+    process.stdout.write('canonical project: ' + REPO_URL + '\n');
+    process.exit(0);
+  } else {
+    console.error('agmsg: unknown argument: ' + args[0]);
+    console.error('Run `npx agmsg --help` for usage.');
+    process.exit(2);
+  }
 }
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { toBashPath };
