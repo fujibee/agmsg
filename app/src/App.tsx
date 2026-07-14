@@ -18,6 +18,8 @@ import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
   RenameModal,
   SettingsModal,
@@ -176,10 +178,15 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
   // Terminal font size, adjustable from the Settings modal and persisted
-  // across restarts (see TERMINAL_FONT_SIZE_KEY).
+  // across restarts (see TERMINAL_FONT_SIZE_KEY). Validated against the same
+  // range the Settings <input> enforces — a stray/corrupted localStorage
+  // value (NaN, Infinity, out of range) would otherwise reach xterm as-is
+  // and persist itself right back on the next write.
   const [terminalFontSize, setTerminalFontSize] = useState(() => {
     const stored = Number(localStorage.getItem(TERMINAL_FONT_SIZE_KEY));
-    return stored > 0 ? stored : DEFAULT_TERMINAL_FONT_SIZE;
+    return Number.isFinite(stored) && stored >= MIN_TERMINAL_FONT_SIZE && stored <= MAX_TERMINAL_FONT_SIZE
+      ? stored
+      : DEFAULT_TERMINAL_FONT_SIZE;
   });
   // Collapses the team sidebar to an icon-only rail so panes get more width.
   // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
@@ -196,9 +203,23 @@ export default function App() {
   // Toggled from the native "View > Show Team Room" menu item — when off,
   // the room tab itself disappears from the tab bar (not just its
   // content), matching Show User Chat's own toggle just below it.
-  const [showTeamRoom, setShowTeamRoom] = useState(true);
-  // Toggled from the native "View > Show User Chat" menu item.
-  const [showUserChat, setShowUserChat] = useState(true);
+  // Lazily restored from localStorage (see SHOW_TEAM_ROOM_KEY) rather than
+  // always starting `true` and correcting via an effect — the mount-time
+  // seeding effect below still exists, but only to push this already-
+  // correct initial value INTO Rust, not to setState a second time (that
+  // would race the persist effect just below it: a persist effect keyed on
+  // [showTeamRoom] captures the value AS OF THE RENDER IT WAS DECLARED IN,
+  // so if this state started `true` and got corrected by a later setState,
+  // the initial-render persist effect would already have fired and written
+  // the stale `true` back to localStorage before the correction landed).
+  const [showTeamRoom, setShowTeamRoom] = useState(
+    () => localStorage.getItem(SHOW_TEAM_ROOM_KEY) !== "false",
+  );
+  // Toggled from the native "View > Show User Chat" menu item. See
+  // showTeamRoom just above for why this is lazily restored.
+  const [showUserChat, setShowUserChat] = useState(
+    () => localStorage.getItem(SHOW_USER_CHAT_KEY) !== "false",
+  );
   // The app-user chat pane's 3 states (session-only, like sidebarCollapsed):
   // "normal" (today's layout), "minimized" (collapses the history away,
   // leaving just the composer row — the team room becomes the only log,
@@ -406,29 +427,27 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
-  // Rust holds the only durable-within-process copy of these two flags (see
-  // view_visibility in lib.rs) — it exists so a webview remount that doesn't
-  // restart the Rust process (Vite HMR during `tauri dev`, or any future
-  // webview reload) doesn't reset the frontend back to `true` while Rust
-  // (and the native menu checkbox) still hold whatever was last set.
-  // Across a real restart Rust itself always inits to `true`, so on mount we
-  // restore from localStorage first and PUSH that into Rust via
-  // set_team_room_visible/set_user_chat_visible (also resyncs the native
-  // menu checkbox) — falling back to view_visibility only the first time
-  // there's nothing stored yet.
+  // showTeamRoom/showUserChat are already correctly seeded from localStorage
+  // by their useState initializers above — this effect's only job is to
+  // PUSH that initial value into Rust (set_team_room_visible/
+  // set_user_chat_visible, which also resyncs the native menu checkbox), so
+  // Rust doesn't sit at its own process-default `true` while the frontend
+  // shows something else. No setState here: doing so would re-introduce the
+  // write-then-correct race this replaced (a persist effect below, keyed on
+  // showTeamRoom/showUserChat, would capture the stale initial-render value
+  // and write it back to localStorage before a corrective setState's
+  // re-render could fix it).
+  //
+  // Falls back to Rust's own view_visibility only when localStorage has
+  // nothing stored yet (true first run) — this also covers a webview
+  // remount that doesn't restart the Rust process (Vite HMR during
+  // `tauri dev`), where Rust may hold a value localStorage hasn't caught
+  // up to yet.
   useEffect(() => {
     const storedTeamRoom = localStorage.getItem(SHOW_TEAM_ROOM_KEY);
     const storedUserChat = localStorage.getItem(SHOW_USER_CHAT_KEY);
-    if (storedTeamRoom !== null) {
-      const v = storedTeamRoom === "true";
-      setShowTeamRoom(v);
-      void invoke("set_team_room_visible", { visible: v });
-    }
-    if (storedUserChat !== null) {
-      const v = storedUserChat === "true";
-      setShowUserChat(v);
-      void invoke("set_user_chat_visible", { visible: v });
-    }
+    if (storedTeamRoom !== null) void invoke("set_team_room_visible", { visible: storedTeamRoom === "true" });
+    if (storedUserChat !== null) void invoke("set_user_chat_visible", { visible: storedUserChat === "true" });
     if (storedTeamRoom === null || storedUserChat === null) {
       invoke<{ team_room: boolean; user_chat: boolean }>("view_visibility")
         .then((v) => {

@@ -364,8 +364,11 @@ export function ConfirmModal(props: {
   );
 }
 
-const MIN_TERMINAL_FONT_SIZE = 8;
-const MAX_TERMINAL_FONT_SIZE = 24;
+// Exported so App.tsx can validate a localStorage-restored value against the
+// same range this modal's <input> enforces (see terminalFontSize's lazy
+// useState initializer).
+export const MIN_TERMINAL_FONT_SIZE = 8;
+export const MAX_TERMINAL_FONT_SIZE = 24;
 
 export function SettingsModal(props: {
   onClose: () => void;
