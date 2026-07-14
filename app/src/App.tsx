@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
-import { AUTO_TIMEZONE, formatMessageTime, resolveTimeZone } from "./time";
+import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
   AppUserModal,
@@ -194,8 +194,15 @@ export default function App() {
       : DEFAULT_TERMINAL_FONT_SIZE;
   });
   // Timezone used to display chat/team-room timestamps (see time.ts and
-  // TIMEZONE_KEY) — "auto" (the default) tracks the OS timezone live.
-  const [timezone, setTimezone] = useState(() => localStorage.getItem(TIMEZONE_KEY) ?? AUTO_TIMEZONE);
+  // TIMEZONE_KEY) — "auto" (the default) tracks the OS timezone live. A
+  // corrupted/no-longer-recognized stored zone falls back to "auto" here
+  // too, so the Settings <select> always has a matching option instead of
+  // rendering blank.
+  const [timezone, setTimezone] = useState(() => {
+    const stored = localStorage.getItem(TIMEZONE_KEY);
+    if (!stored || stored === AUTO_TIMEZONE) return AUTO_TIMEZONE;
+    return isValidTimeZone(stored) ? stored : AUTO_TIMEZONE;
+  });
   // Collapses the team sidebar to an icon-only rail so panes get more width.
   // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
   // messaging a member isn't offered from the collapsed rail; expand to get

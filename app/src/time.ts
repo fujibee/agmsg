@@ -31,6 +31,35 @@ export function listTimeZones(): string[] {
   return [detectTimeZone()];
 }
 
+export function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// One formatter per zone, reused across every message/render — a chat
+// history with hundreds of visible messages would otherwise construct a
+// fresh Intl.DateTimeFormat per message per render for what's always the
+// same (timeZone, options) pair.
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(timeZone: string): Intl.DateTimeFormat {
+  let formatter = formatterCache.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    formatterCache.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 /** Formats a UTC ISO 8601 timestamp as 24-hour HH:MM:SS in `timeZone`.
  * Built from Intl.DateTimeFormat's parts (not its formatted string) to
  * avoid locale-specific punctuation/midnight-as-"24:00" quirks across
@@ -39,13 +68,7 @@ export function formatMessageTime(createdAt: string, timeZone: string): string {
   const d = new Date(createdAt);
   if (Number.isNaN(d.getTime())) return createdAt.slice(11, 19);
   try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).formatToParts(d);
+    const parts = formatterFor(timeZone).formatToParts(d);
     const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
     return `${get("hour")}:${get("minute")}:${get("second")}`;
   } catch {
@@ -53,8 +76,14 @@ export function formatMessageTime(createdAt: string, timeZone: string): string {
   }
 }
 
-/** Resolves the "auto" sentinel to a real IANA zone; passes an explicit
- * override through unchanged. */
+/** Resolves the "auto" sentinel to a real IANA zone; passes a valid
+ * explicit override through unchanged. Falls back to the auto-detected
+ * zone for anything invalid (a corrupted localStorage value, or a zone
+ * name the runtime no longer recognizes) rather than letting an unknown
+ * zone reach Intl.DateTimeFormat, which would make formatMessageTime fall
+ * back to the raw UTC slice — silently reintroducing #393 for that one
+ * stored value. */
 export function resolveTimeZone(selected: string): string {
-  return selected === AUTO_TIMEZONE ? detectTimeZone() : selected;
+  if (selected === AUTO_TIMEZONE) return detectTimeZone();
+  return isValidTimeZone(selected) ? selected : detectTimeZone();
 }
