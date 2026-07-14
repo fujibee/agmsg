@@ -145,11 +145,23 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
     // for claude was relying on neither signal actually firing — any tick
     // without a Blocked match fell straight through to Idle mid-generation.
     const CLAUDE_SPINNERS: &[&str] = &["✢", "✳", "✶", "✻", "✽"];
+    // Verified against herdr's codex.toml (src/detect/manifests/codex.toml)
+    // rather than guessed: "Press enter to continue" and "Do you trust the
+    // contents of this directory?" were never real Codex CLI strings (the
+    // latter reads like VS Code's workspace-trust dialog, not Codex) and
+    // never matched anything.
     const CODEX_BLOCKED: &[&str] = &[
         "Allow command?",
-        "Do you trust the contents of this directory?",
-        "Press enter to continue",
         "enter to submit answer",
+        "enter to submit all",
+        "press enter to confirm or esc to cancel",
+        "[y/n]",
+        "yes (y)",
+        // Set in the window title, not the screen — TailBuffer::detection_tail
+        // appends the last-seen title to the flattened text, so this still
+        // matches via the same plain substring check. herdr's cheapest/
+        // highest-priority Codex blocked signal.
+        "Action Required",
     ];
     const GEMINI_BLOCKED: &[&str] = &[
         "Do you trust the files in this folder?",
@@ -163,6 +175,11 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
     };
     let working_patterns: &[&str] = match agent_type {
         "gemini" => &["Thinking", "esc to cancel"],
+        // Codex's working signal is purely the title-bar spinner glyph
+        // (below) — herdr's codex.toml has no phrase-based working rule at
+        // all, and "esc to interrupt" is confirmed absent from it (it only
+        // appears in devin.toml/opencode.toml).
+        "codex" => &[],
         _ => &["esc to interrupt", "Esc to interrupt"],
     };
     let spinners: &[&str] = match agent_type {
@@ -170,16 +187,22 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
         _ => BRAILLE_SPINNERS,
     };
 
+    // Case-insensitive, matching herdr's own gates (they normalize both
+    // sides via `.to_lowercase()`) — we don't actually know the exact
+    // casing every one of these strings renders with on screen, so
+    // matching loosely here beats silently missing a real match over a
+    // capitalization difference.
+    let tail_lower = tail.to_lowercase();
     if COMMON_BLOCKED
         .iter()
         .chain(blocked_patterns.iter())
-        .any(|pattern| tail.contains(pattern))
+        .any(|pattern| tail_lower.contains(&pattern.to_lowercase()))
     {
         PaneState::Blocked
     } else if working_patterns
         .iter()
         .chain(spinners.iter())
-        .any(|pattern| tail.contains(pattern))
+        .any(|pattern| tail_lower.contains(&pattern.to_lowercase()))
     {
         PaneState::Working
     } else {
@@ -219,7 +242,7 @@ impl TailBuffer {
 
     pub fn detection_tail(&self) -> String {
         let raw: Vec<u8> = self.bytes.iter().copied().collect();
-        let text = strip_ansi(&String::from_utf8_lossy(&raw));
+        let (text, title) = strip_ansi(&String::from_utf8_lossy(&raw));
         // Split on '\r' as well as '\n': ink redraws the spinner/status line
         // in place with a bare carriage return, not a newline (confirmed
         // from a real capture, #385 — dozens of "Cerebrating…" spinner
@@ -258,6 +281,15 @@ impl TailBuffer {
             // text this way regardless of which option number is shown or
             // whether an adjacent color code broke the natural adjacency.
             flattened.push_str(" ❯ 1.");
+        }
+        // Codex reports its own state through the window title, not the
+        // screen (herdr: codex.toml's `osc_title` region — a Braille
+        // spinner glyph means Working, "Action Required" means Blocked).
+        // Appending it here lets classify()'s existing substring patterns
+        // pick it up without needing their own code path.
+        if let Some(title) = title {
+            flattened.push(' ');
+            flattened.push_str(&title);
         }
         flattened
     }
@@ -351,8 +383,16 @@ fn is_chevron_menu_line(line: &str) -> bool {
 // Blocked/Working). `col` tracks the 0-indexed column the next printed
 // character would land on, reset on '\r'/'\n', so both forms can be
 // rendered back as the gap of spaces they visually are.
-fn strip_ansi(input: &str) -> String {
+//
+// Returns the stripped body text plus the LAST OSC 0/2 window-title string
+// seen, if any. Codex sets its live/blocked state in the window title, not
+// the visible screen (herdr: codex.toml's `osc_title` region) — e.g. a
+// Braille spinner glyph in the title means Working, "Action Required" means
+// Blocked — so that title text has to survive somewhere for classify() to
+// see it, instead of being silently discarded like every other OSC.
+fn strip_ansi(input: &str) -> (String, Option<String>) {
     let mut output = String::with_capacity(input.len());
+    let mut title: Option<String> = None;
     let mut col: usize = 0;
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -398,18 +438,26 @@ fn strip_ansi(input: &str) -> String {
             }
             Some(']') => {
                 chars.next();
+                let mut body = String::new();
                 let mut escaped = false;
                 for c in chars.by_ref() {
                     if c == '\u{7}' || (escaped && c == '\\') {
                         break;
                     }
                     escaped = c == '\u{1b}';
+                    body.push(c);
+                }
+                // "0;<title>" or "2;<title>" (OSC 0 sets icon+title, OSC 2
+                // sets title only — both are the window title as far as a
+                // reader is concerned).
+                if let Some(rest) = body.strip_prefix("0;").or_else(|| body.strip_prefix("2;")) {
+                    title = Some(rest.trim_end_matches('\u{1b}').to_string());
                 }
             }
             _ => {}
         }
     }
-    output
+    (output, title)
 }
 
 #[cfg(test)]
@@ -559,10 +607,45 @@ Would you like to proceed?\n\
     }
 
     #[test]
-    fn detection_tail_strips_bel_and_st_terminated_osc_sequences() {
+    fn detection_tail_strips_non_title_bel_and_st_terminated_osc_sequences() {
         let mut tail = TailBuffer::default();
-        tail.push(b"before\x1b]0;title\x07middle\x1b]9;progress\x1b\\after");
+        tail.push(b"before\x1b]9;progress\x07middle\x1b]8;;url\x1b\\after");
         assert_eq!(tail.detection_tail(), "beforemiddleafter");
+    }
+
+    #[test]
+    fn detection_tail_appends_the_osc_0_and_2_window_title() {
+        // Codex reports Working/Blocked through the window title, not the
+        // screen (herdr: codex.toml's `osc_title` region) — the title has
+        // to survive into the flattened text for classify() to see it.
+        let mut tail = TailBuffer::default();
+        tail.push(b"before\x1b]0;Action Required\x07after");
+        assert_eq!(tail.detection_tail(), "beforeafter Action Required");
+
+        // OSC 2 (title-only, no icon) counts the same way.
+        let mut tail2 = TailBuffer::default();
+        tail2.push(b"before\x1b]2;codex\x07after");
+        assert_eq!(tail2.detection_tail(), "beforeafter codex");
+    }
+
+    #[test]
+    fn codex_blocked_and_working_signals_come_from_the_title_not_the_screen() {
+        // End-to-end (TailBuffer -> classify()): a codex pane whose visible
+        // screen has nothing recognizable, but whose title carries the
+        // real signal (herdr: codex.toml's osc_title region).
+        let mut blocked = TailBuffer::default();
+        blocked.push(b"ordinary transcript output\x1b]0;Action Required\x07");
+        assert_eq!(
+            classify("codex", &blocked.detection_tail()),
+            PaneState::Blocked
+        );
+
+        let mut working = TailBuffer::default();
+        working.push("ordinary transcript output\x1b]2;⠙ codex\u{7}".as_bytes());
+        assert_eq!(
+            classify("codex", &working.detection_tail()),
+            PaneState::Working
+        );
     }
 
     #[test]
@@ -619,12 +702,15 @@ Would you like to proceed?\n\
             classify("gemini", "Do you trust the files in this folder?"),
             PaneState::Blocked
         );
+        // "enter to submit ANSWER", not COMMON_BLOCKED's "Enter to confirm"
+        // — picked to not accidentally overlap with the shared list, so
+        // this only passes if it's really CODEX_BLOCKED doing the work.
         assert_eq!(
-            classify("codex", "Press enter to continue"),
+            classify("codex", "please press Enter to submit Answer now"),
             PaneState::Blocked
         );
         assert_eq!(
-            classify("claude", "Press enter to continue"),
+            classify("claude", "please press Enter to submit Answer now"),
             PaneState::Idle
         );
     }
@@ -693,7 +779,7 @@ Would you like to proceed?\n\
     #[test]
     fn working_to_idle_requires_three_confirmations() {
         let started = Instant::now();
-        let mut tracker = DetectionTracker::new("codex".to_string());
+        let mut tracker = DetectionTracker::new("claude".to_string());
         let ready = started + Duration::from_secs(3);
         assert_eq!(
             tracker.observe("esc to interrupt", ready),
@@ -739,7 +825,7 @@ Would you like to proceed?\n\
         // zero-width escape (e.g. cursor blink) starts firing every tick
         // regardless of real activity (#385).
         let started = Instant::now();
-        let mut tracker = DetectionTracker::new("codex".to_string());
+        let mut tracker = DetectionTracker::new("claude".to_string());
         let ready = started + Duration::from_secs(3);
         assert_eq!(
             tracker.observe("esc to interrupt (1s)", ready),
