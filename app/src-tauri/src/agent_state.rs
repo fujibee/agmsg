@@ -103,8 +103,70 @@ impl DetectionTracker {
     }
 }
 
+/// The last `n` NON-BLANK lines, in original order — herdr's
+/// `bottom_non_empty_lines(n)`, used for grok's footer-hint dialogs below.
+/// Unlike the rest of classify()'s substring matching (which runs against
+/// the whole ~20-line window), these hints are only meaningful confined to
+/// the very bottom of the screen — matching them anywhere in the wider
+/// window risks tripping on ordinary scrollback that happens to mention
+/// one of the same words (co1 review, #384/grok).
+fn bottom_non_empty_lines<'a>(lines: &[&'a str], n: usize) -> Vec<&'a str> {
+    let mut result: Vec<&'a str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if result.len() > n {
+        result.drain(..result.len() - n);
+    }
+    result
+}
+
+/// True for grok's Working status line: contains the "[stop]" chip
+/// anywhere. Originally required a Braille spinner glyph at the START of
+/// the SAME line too (matching herdr's grok.toml, which anchors on that
+/// pairing since the startup splash also draws its logo out of Braille
+/// characters — a bare glyph alone isn't safe). Dropped after a live
+/// capture (#384/grok) showed why: grok's real "thinking" animation
+/// redraws several overlapping spinner/counter elements in the same
+/// screen region every tick, and our tail buffer is a linear byte stream,
+/// not a real 2D screen grid — those redraws interleave into the same
+/// captured text rather than each overwriting the last, so the glyph and
+/// "[stop]" frequently land nowhere near each other or even on different
+/// reconstructed "lines" despite being adjacent on screen. That line-
+/// anchored check matched only ~10 of 124 ticks during a real "thinking"
+/// stretch; "[stop]" alone, unanchored, matched consistently across long
+/// runs in the same capture — the splash-only false positive it was
+/// meant to prevent doesn't apply here since the splash never contains
+/// "[stop]" at all, so requiring it is still safe on its own.
+fn grok_working_line(line: &str) -> bool {
+    line.contains("[stop]")
+}
+
+// grok's footer-hint dialogs need AND logic and bottom-two-line scoping
+// that plain substring matching over the whole flattened tail can't
+// express (co1 review, #384/grok) — TailBuffer::detection_tail evaluates
+// them against the real, still-line-structured text (before flattening
+// loses that structure) and bakes the result into these sentinels, which
+// classify() then just treats as two more literal patterns like any other
+// agent's. `\u{1}`-wrapped so they can never collide with real screen text.
+//
+// Covers two of grok's three known dialog shapes, confirmed against
+// herdr's grok.toml (fork-herdr/src/detect/manifests/grok.toml) plus real
+// Grok Build 0.2.82 observation. NOT covered: the option-select dialog
+// (gutter + option key + ●/○ marker on one line, per herdr) — its exact
+// on-screen format wasn't available to verify against real output, and
+// guessing at it risks the same false-positive/negative class of bug this
+// sentinel approach exists to avoid.
+const GROK_PERMISSION_DIALOG_SENTINEL: &str = "\u{1}GROK_PERMISSION_DIALOG\u{1}";
+const GROK_QUESTION_DIALOG_SENTINEL: &str = "\u{1}GROK_QUESTION_DIALOG\u{1}";
+const GROK_WORKING_SENTINEL: &str = "\u{1}GROK_WORKING\u{1}";
+
 pub fn classify(agent_type: &str, tail: &str) -> PaneState {
-    if !matches!(agent_type, "claude-code" | "claude" | "codex" | "gemini") {
+    if !matches!(
+        agent_type,
+        "claude-code" | "claude" | "codex" | "gemini" | "grok" | "grok-build"
+    ) {
         return PaneState::Unknown;
     }
 
@@ -168,9 +230,16 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
         "(Use Enter to select)",
     ];
 
+    const GROK_BLOCKED: &[&str] = &[
+        GROK_PERMISSION_DIALOG_SENTINEL,
+        GROK_QUESTION_DIALOG_SENTINEL,
+    ];
+    const GROK_WORKING: &[&str] = &[GROK_WORKING_SENTINEL];
+
     let blocked_patterns = match agent_type {
         "codex" => CODEX_BLOCKED,
         "gemini" => GEMINI_BLOCKED,
+        "grok" | "grok-build" => GROK_BLOCKED,
         _ => &[],
     };
     let working_patterns: &[&str] = match agent_type {
@@ -180,10 +249,15 @@ pub fn classify(agent_type: &str, tail: &str) -> PaneState {
         // all, and "esc to interrupt" is confirmed absent from it (it only
         // appears in devin.toml/opencode.toml).
         "codex" => &[],
+        "grok" | "grok-build" => GROK_WORKING,
         _ => &["esc to interrupt", "Esc to interrupt"],
     };
     let spinners: &[&str] = match agent_type {
         "claude" | "claude-code" => CLAUDE_SPINNERS,
+        // No bare braille here on purpose — see GROK_WORKING_SENTINEL's
+        // doc: the startup splash draws its logo out of Braille characters
+        // too, so BRAILLE_SPINNERS alone would misclassify it as Working.
+        "grok" | "grok-build" => &[],
         _ => BRAILLE_SPINNERS,
     };
 
@@ -255,6 +329,24 @@ impl TailBuffer {
         let lines: Vec<&str> = text.split(['\r', '\n']).collect();
         let recent = &lines[lines.len().saturating_sub(20)..];
 
+        // grok evaluated here, against real lines, before the flattening
+        // below loses that structure — see the GROK_*_SENTINEL consts'
+        // doc. herdr scopes grok's own rules to bottom_non_empty_lines(2)
+        // of the whole recent screen (not the box-region scoping below,
+        // which is a claude-specific concept), so this runs against
+        // `recent` directly rather than `scoped`.
+        let grok_footer = bottom_non_empty_lines(recent, 2).join(" ").to_lowercase();
+        // "ctrl+o:always-approve" — confirmed from a live capture, #384/
+        // grok: the real footer says "always-approve", not "yolo" as
+        // first assumed from herdr's notes. That earlier wrong string
+        // meant this AND-condition could never fire at all.
+        let grok_permission_dialog = grok_footer.contains(":select")
+            && grok_footer.contains("ctrl+o:always-approve")
+            && grok_footer.contains("ctrl+c:cancel");
+        let grok_question_dialog =
+            grok_footer.contains("tab:scrollback") && grok_footer.contains("shift+x:dismiss");
+        let grok_working = recent.iter().any(|line| grok_working_line(line));
+
         // Structural narrowing, ported from herdr's src/detect/manifest.rs
         // (prompt_box_body / after_last_horizontal_rule): scope down to the
         // live bordered box's body when the window holds a complete one,
@@ -290,6 +382,18 @@ impl TailBuffer {
         if let Some(title) = title {
             flattened.push(' ');
             flattened.push_str(&title);
+        }
+        if grok_permission_dialog {
+            flattened.push(' ');
+            flattened.push_str(GROK_PERMISSION_DIALOG_SENTINEL);
+        }
+        if grok_question_dialog {
+            flattened.push(' ');
+            flattened.push_str(GROK_QUESTION_DIALOG_SENTINEL);
+        }
+        if grok_working {
+            flattened.push(' ');
+            flattened.push_str(GROK_WORKING_SENTINEL);
         }
         flattened
     }
@@ -394,10 +498,19 @@ fn strip_ansi(input: &str) -> (String, Option<String>) {
     let mut output = String::with_capacity(input.len());
     let mut title: Option<String> = None;
     let mut col: usize = 0;
+    // Tracks a VIRTUAL row, not a real terminal grid — there's no screen
+    // buffer here, just a linear byte stream. Incremented on '\n' and on a
+    // forward CSI H/f jump (below); a backward jump is left alone, same
+    // rationale as a backward 'G' — already-emitted text can't be
+    // un-printed, so there's nothing correct to insert for it either.
+    let mut row: usize = 0;
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '\u{1b}' {
-            if ch == '\r' || ch == '\n' {
+            if ch == '\n' {
+                row += 1;
+                col = 0;
+            } else if ch == '\r' {
                 col = 0;
             } else {
                 col += 1;
@@ -427,6 +540,42 @@ fn strip_ansi(input: &str) -> (String, Option<String>) {
                                     let gap = (target - 1 - col).min(512);
                                     output.extend(std::iter::repeat_n(' ', gap));
                                     col = target - 1;
+                                }
+                            }
+                            // Cursor Position ("row;colH", 'f' is the VT100
+                            // alias) — grok's multi-panel layout jumps
+                            // between screen regions with this, not just
+                            // within-row 'G' (confirmed from a live
+                            // capture, #384/grok: distinct panel text was
+                            // running together with no separator at all —
+                            // "response… 0.0s0.0s [stop]ccancl" was really
+                            // three separate lines/regions). A forward row
+                            // jump becomes a newline (there's no real
+                            // screen buffer to overwrite, so "new row" is
+                            // the closest honest representation); the
+                            // column portion then reuses 'G's logic.
+                            'H' | 'f' => {
+                                let mut parts = params.splitn(2, ';');
+                                let target_row: usize = parts
+                                    .next()
+                                    .and_then(|p| p.parse().ok())
+                                    .unwrap_or(1)
+                                    .max(1);
+                                let target_col: usize = parts
+                                    .next()
+                                    .and_then(|p| p.parse().ok())
+                                    .unwrap_or(1)
+                                    .max(1);
+                                if target_row - 1 > row {
+                                    let rows = (target_row - 1 - row).min(512);
+                                    output.extend(std::iter::repeat_n('\n', rows));
+                                    row = target_row - 1;
+                                    col = 0;
+                                }
+                                if target_row - 1 == row && target_col > col + 1 {
+                                    let gap = (target_col - 1 - col).min(512);
+                                    output.extend(std::iter::repeat_n(' ', gap));
+                                    col = target_col - 1;
                                 }
                             }
                             _ => {}
@@ -465,8 +614,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        after_last_horizontal_rule, classify, is_chevron_menu_line, is_horizontal_rule,
-        prompt_box_body, DetectionTracker, PaneState, TailBuffer, TAIL_CAPACITY,
+        after_last_horizontal_rule, bottom_non_empty_lines, classify, grok_working_line,
+        is_chevron_menu_line, is_horizontal_rule, prompt_box_body, DetectionTracker, PaneState,
+        TailBuffer, TAIL_CAPACITY,
     };
 
     #[test]
@@ -678,6 +828,26 @@ Would you like to proceed?\n\
     }
 
     #[test]
+    fn cursor_position_jumps_to_a_new_row_become_a_newline() {
+        // grok's multi-panel TUI writes separate screen regions with CSI
+        // "row;colH" (Cursor Position), not just within-row 'G' — dropping
+        // that (the old behavior) glued unrelated panel text together with
+        // no separator at all (confirmed from a live capture, #384/grok:
+        // "response… 0.0s0.0s [stop]ccancl" was really three distinct
+        // lines run together). A forward row jump now becomes a newline.
+        let mut tail = TailBuffer::default();
+        tail.push(b"line one\x1b[2;1Hline two\x1b[3;5Hline three");
+        assert_eq!(tail.detection_tail(), "line one line two     line three");
+
+        // Same row, different column — still just a same-row space gap,
+        // same as plain 'G' (an absolute row;col jump where the row part
+        // happens to be unchanged).
+        let mut same_row = TailBuffer::default();
+        same_row.push(b"ab\x1b[1;5Hcd");
+        assert_eq!(same_row.detection_tail(), "ab  cd");
+    }
+
+    #[test]
     fn detection_tail_survives_narrow_pane_word_wrap() {
         let mut tail = TailBuffer::default();
         // A narrow pane wraps the approval prompt mid-phrase.
@@ -773,7 +943,96 @@ Would you like to proceed?\n\
 
     #[test]
     fn unsupported_agents_remain_unknown() {
-        assert_eq!(classify("grok", "Thinking"), PaneState::Unknown);
+        assert_eq!(classify("devin", "Thinking"), PaneState::Unknown);
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_skips_blanks_wherever_they_fall() {
+        let lines = ["a", "b", "", "c", "", ""];
+        assert_eq!(bottom_non_empty_lines(&lines, 2), vec!["b", "c"]);
+        // Fewer real lines than requested — returns what's there.
+        assert_eq!(bottom_non_empty_lines(&["only"], 2), vec!["only"]);
+        assert_eq!(bottom_non_empty_lines(&[], 2), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn grok_working_line_detects_the_stop_chip_anywhere_in_the_line() {
+        assert!(grok_working_line(
+            "⠋ Waiting on subagent... 2.8s   13s [stop]"
+        ));
+        assert!(grok_working_line("some line ending in [stop]"));
+        // A bare spinner glyph with no "[stop]" chip at all — e.g. the
+        // startup splash logo, which is drawn out of Braille characters
+        // too — still doesn't match on its own.
+        assert!(!grok_working_line("⠋ agmsg logo splash art"));
+    }
+
+    #[test]
+    fn grok_detects_working_status_line_via_a_real_capture() {
+        let mut tail = TailBuffer::default();
+        tail.push("some earlier output\n⠋ Waiting on subagent... 2.8s   13s [stop]\n".as_bytes());
+        assert_eq!(classify("grok", &tail.detection_tail()), PaneState::Working);
+    }
+
+    #[test]
+    fn grok_ignores_a_startup_splash_logo_line_starting_with_braille() {
+        // A logo art line that legitimately STARTS with a Braille glyph
+        // (as real dot-matrix ASCII art does), same as a working status
+        // line would — but with no "[stop]" chip, since it's just artwork.
+        let mut tail = TailBuffer::default();
+        tail.push(
+            "\u{2807}\u{2807}\u{2807} GROK BUILD \u{2807}\u{2807}\u{2807}\nready\n".as_bytes(),
+        );
+        assert_eq!(classify("grok", &tail.detection_tail()), PaneState::Idle);
+    }
+
+    #[test]
+    fn grok_requires_all_three_permission_hints_on_the_bottom_two_lines() {
+        // All three, present — Blocked. Footer text is verbatim from a
+        // real capture (#384/grok): "ctrl+o:yolo" was the original
+        // (wrong) guess — the actual CLI says "always-approve".
+        let mut blocked = TailBuffer::default();
+        blocked.push(b"1 (\xe2\x97\x8f) Yes, and don't ask again\n1/3:select  |  Ctrl+o:always-approve  |  Ctrl+c:cancel\n");
+        assert_eq!(
+            classify("grok", &blocked.detection_tail()),
+            PaneState::Blocked
+        );
+
+        // Only one of the three — a real permission dialog needs all of
+        // them, so a lone mention (e.g. in ordinary help text) must NOT
+        // trigger Blocked (co1 review: this was the actual false-positive
+        // risk with a flat OR-list of single fragments).
+        let mut partial = TailBuffer::default();
+        partial.push(b"press Ctrl+o:always-approve to skip confirmations\nready\n");
+        assert_eq!(classify("grok", &partial.detection_tail()), PaneState::Idle);
+    }
+
+    #[test]
+    fn grok_permission_hints_outside_the_bottom_two_lines_do_not_block() {
+        // The three hints appear, but scrolled up out of the bottom two
+        // lines by later, unrelated output — must not still read as
+        // Blocked (co1 review: herdr scopes this to bottom_non_empty_lines
+        // (2), not the whole visible window).
+        let mut tail = TailBuffer::default();
+        tail.push(b"1/3:select  |  Ctrl+o:always-approve  |  Ctrl+c:cancel\nsome later normal output\nready\n");
+        assert_eq!(classify("grok", &tail.detection_tail()), PaneState::Idle);
+    }
+
+    #[test]
+    fn grok_detects_the_question_dialog_footer() {
+        let mut tail = TailBuffer::default();
+        tail.push(b"What should I call the new file?\ntab:scrollback  shift+x:dismiss\n");
+        assert_eq!(classify("grok", &tail.detection_tail()), PaneState::Blocked);
+    }
+
+    #[test]
+    fn grok_build_agent_type_is_recognized_the_same_as_grok() {
+        let mut tail = TailBuffer::default();
+        tail.push("⠋ Waiting on subagent... [stop]\n".as_bytes());
+        assert_eq!(
+            classify("grok-build", &tail.detection_tail()),
+            PaneState::Working
+        );
     }
 
     #[test]
