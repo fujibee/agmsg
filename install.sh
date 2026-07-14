@@ -150,6 +150,52 @@ install_windows_helpers() {
   fi
 }
 
+retire_codex_desktop_relay() {
+  # The desktop relay made ChatGPT.app depend on a local WebSocket endpoint.
+  # A stale LaunchAgent or environment value then caused repeated app exits, so
+  # updates must remove the retired transport even though cp -R preserves files
+  # deleted from newer agmsg releases.
+  local relay_dir="$SKILL_DIR/scripts/drivers/types/codex"
+  local relay_pidfile="$SKILL_DIR/run/codex-desktop-relay.pid"
+  local relay_pid relay_command uid label
+
+  if [ -f "$relay_pidfile" ]; then
+    relay_pid="$(cat "$relay_pidfile" 2>/dev/null || true)"
+    if [[ "$relay_pid" =~ ^[0-9]+$ ]]; then
+      relay_command="$(ps -p "$relay_pid" -o command= 2>/dev/null || true)"
+      case "$relay_command" in
+        *"$relay_dir/codex-desktop-relay.js"*|*"$relay_dir/codex-desktop-relay-run.sh"*)
+          kill -TERM "$relay_pid" 2>/dev/null || true
+          ;;
+      esac
+    fi
+  fi
+
+  if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+    uid="$(id -u)"
+    for label in com.agmsg.codex-desktop-relay com.agmsg.codex-chatgpt-restart-once; do
+      launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    done
+    launchctl unsetenv CODEX_APP_SERVER_WS_URL >/dev/null 2>&1 || true
+  fi
+
+  rm -f \
+    "$HOME/Library/LaunchAgents/com.agmsg.codex-desktop-relay.plist" \
+    "$HOME/Library/LaunchAgents/com.agmsg.codex-chatgpt-restart-once.plist" \
+    "$relay_dir/codex-desktop-relay-run.sh" \
+    "$relay_dir/codex-desktop-relayctl.sh" \
+    "$relay_dir/codex-desktop-relay.js" \
+    "$SKILL_DIR/run/codex-desktop-relay.pid" \
+    "$SKILL_DIR/run/codex-desktop-relay.port" \
+    "$SKILL_DIR/run/codex-desktop-relay.health" \
+    "$SKILL_DIR/run/codex-desktop-relay.log" \
+    "$SKILL_DIR/run/codex-desktop-relay.desktop-token" \
+    "$SKILL_DIR/run/codex-desktop-relay.bridge-token" \
+    "$SKILL_DIR/run/codex-desktop-relay.desktop-endpoint" \
+    "$SKILL_DIR/run/codex-desktop-relay.bridge-endpoint" \
+    "$SKILL_DIR/run/codex-desktop-relay.prior-desktop-endpoint"
+}
+
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -250,6 +296,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+  retire_codex_desktop_relay
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
@@ -357,6 +404,7 @@ sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path "$TPL_TYPE")" > "
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
 cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+retire_codex_desktop_relay
 # Ship the external-plugin drop-in dir (just its README) so the location exists
 # post-install. A plain cp — not cp -R --delete — preserves any plugins the user
 # dropped in and their db/trusted-plugins opt-ins.
