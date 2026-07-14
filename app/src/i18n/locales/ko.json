@@ -27,7 +27,12 @@
       "team": "팀…",
       "agent": "에이전트…"
     },
+    "team": {
+      "title": "팀",
+      "new": "새 팀"
+    },
     "title": "에이전트",
+    "newAgent": "새 에이전트",
     "filter": {
       "all": "전체",
       "none": "없음"
@@ -37,7 +42,7 @@
       "titleRunning": "실행 중 — 클릭하면 포커스",
       "titleSpawn": "PTY 창에서 실행",
       "noTypes": "—",
-      "emptyState": "아직 에이전트가 없습니다. ＋ 새로 만들기 → 에이전트를 사용하세요."
+      "emptyState": "아직 에이전트가 없습니다. 위의 ＋ 버튼을 사용해 추가하세요."
     },
     "user": {
       "title": "{{team}}의 app-user"

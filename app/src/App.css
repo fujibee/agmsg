@@ -160,21 +160,10 @@ select:focus {
   border-color: var(--accent);
 }
 
-/* + New menu */
+/* + New menu (collapsed-rail only — the expanded sidebar has its own
+   direct + buttons per section instead, see .section-add-btn) */
 .new-wrap {
   position: relative;
-}
-.new-btn {
-  background: var(--panel-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 10px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.new-btn:hover {
-  border-color: var(--accent);
 }
 .new-menu {
   position: absolute;
@@ -620,9 +609,6 @@ body.resizing-row {
   width: auto;
   display: block;
 }
-.brand-row .new-wrap {
-  margin-left: auto;
-}
 .sidebar-head .brand {
   font-size: 15px;
 }
@@ -694,6 +680,34 @@ body.resizing-row {
   letter-spacing: 0.6px;
   color: var(--muted);
   white-space: nowrap;
+}
+.sidebar-title-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.section-add-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.section-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .filter-actions {
   display: flex;

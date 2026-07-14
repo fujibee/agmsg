@@ -1303,38 +1303,19 @@ export default function App() {
               <div className="sidebar-head" data-tauri-drag-region>
                 <div className="brand-row">
                   <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
-                  <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-                  <button className="new-btn" onClick={toggleNewMenu}>
-                    {t("sidebar.newMenu.trigger")}
-                  </button>
-                  {newMenu && (
-                    <div className="new-menu">
-                      <button
-                        onClick={() => {
-                          setNewMenu(false);
-                          setModal({ kind: "team", firstRun: false });
-                        }}
-                      >
-                        {t("sidebar.newMenu.team")}
-                      </button>
-                      <button
-                        disabled={!team}
-                        onClick={() => {
-                          setNewMenu(false);
-                          setModal({ kind: "agent" });
-                          // Refresh in case spawn-options.yaml or a new type
-                          // manifest showed up since app start.
-                          invoke<AgentType[]>("agmsg_spawnable_types")
-                            .then(setSpawnTypes)
-                            .catch(() => {});
-                        }}
-                      >
-                        {t("sidebar.newMenu.agent")}
-                      </button>
-                    </div>
-                  )}
-                  </div>
                 </div>
+              </div>
+              <div className="sidebar-title">
+                <span className="sidebar-title-label">
+                  {t("sidebar.team.title")}
+                  <button
+                    className="section-add-btn"
+                    title={t("sidebar.team.new")}
+                    onClick={() => setModal({ kind: "team", firstRun: false })}
+                  >
+                    +
+                  </button>
+                </span>
               </div>
               <div className="team-status-rail" aria-label="Open pane status">
                 {teams.map((teamName) => {
@@ -1353,7 +1334,24 @@ export default function App() {
                 })}
               </div>
               <div className="sidebar-title">
-                <span>{t("sidebar.title")}</span>
+                <span className="sidebar-title-label">
+                  {t("sidebar.title")}
+                  <button
+                    className="section-add-btn"
+                    title={t("sidebar.newAgent")}
+                    disabled={!team}
+                    onClick={() => {
+                      setModal({ kind: "agent" });
+                      // Refresh in case spawn-options.yaml or a new type
+                      // manifest showed up since app start.
+                      invoke<AgentType[]>("agmsg_spawnable_types")
+                        .then(setSpawnTypes)
+                        .catch(() => {});
+                    }}
+                  >
+                    +
+                  </button>
+                </span>
                 {active === "room" && others.length > 0 && (
                   <span className="filter-actions">
                     <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>

@@ -27,7 +27,12 @@
       "team": "团队…",
       "agent": "智能体…"
     },
+    "team": {
+      "title": "团队",
+      "new": "新建团队"
+    },
     "title": "智能体",
+    "newAgent": "新建智能体",
     "filter": {
       "all": "全部",
       "none": "无"
@@ -37,7 +42,7 @@
       "titleRunning": "已在运行 — 点击以聚焦",
       "titleSpawn": "在 PTY 面板中启动",
       "noTypes": "—",
-      "emptyState": "暂无智能体。使用 ＋ 新建 → 智能体。"
+      "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。"
     },
     "user": {
       "title": "{{team}} 中的 app-user"
