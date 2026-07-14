@@ -14,9 +14,9 @@ approximates the same experience by launching Codex through an app-server bridge
 > first message** — the SessionStart hook fires on the first turn, not the
 > moment Codex opens, so the bridge is absent until you interact once; an
 > already-running session stays unmonitored until you restart it (#151); the
-> bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149); and only one Codex identity per project
-> is supported (#150).
+> teardown after an abruptly closed terminal is lease-timeout based rather than
+> instantaneous; and projects with multiple Codex identities still require an
+> unambiguous active role (#150).
 
 ## Quick Start
 
@@ -136,18 +136,31 @@ connect to the unix socket (EPERM). Instead:
    writes a **request file** under `run/` (it never touches the socket).
 2. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
    sandbox, reads the request file and starts `codex-bridge.js`.
-3. The bridge connects to the same app-server over **WebSocket-over-UDS**,
+3. The bridge connects to the same app-server over loopback **WebSocket**,
    resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
    API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
-4. On an unread message it inlines the text into a `turn/start` on that thread —
-   surfacing it in the live Codex TUI — then re-arms after the turn ends.
+4. On an unread message it peeks the exact rows without changing `read_at`,
+   validates the TUI generation lease again, and inlines the text into a
+   `turn/start`. Only a successful request acknowledgement marks those exact
+   message IDs read. An ambiguous timeout leaves them unread, so delivery is
+   at-least-once and may duplicate rather than silently lose data.
+
+The launcher publishes a generation-specific TUI lease before starting the
+bridge. The bridge checks it before arming, before fetching, immediately before
+`turn/start`, and from an independent timer while `watch-once` is blocked. A
+normal TUI exit deletes its lease immediately; an abruptly closed terminal
+stops refreshing it, so the bridge kills its outstanding watch and exits after
+the bounded stale timeout. Shared app-servers are protected by per-TUI ref
+files and a project lifecycle lock, and are stopped only after the ref set is
+empty.
 
 Turns are serialized (one per thread): a message that arrives while a turn is
 running stays unread and is delivered after the turn completes. The turn ends
 via `turn/completed`, a `thread/status` idle, or a watchdog (the real app-server
 does not reliably send `turn/completed`); only then is the next `watch-once`
-armed. If a turn does not consume the unread message, the same `max_id` reappears
-and the bridge stops instead of looping.
+armed. If acknowledgement is ambiguous, the same unread rows can be delivered
+again. This at-least-once behavior is deliberate: duplicates are safer than a
+message being marked read without reaching any Codex turn.
 
 ```mermaid
 flowchart TD
@@ -156,24 +169,26 @@ flowchart TD
   mode -- "not monitor / codex exec / --version" --> real["real codex"]
   mode -- "monitor (interactive)" --> monitor["codex-monitor.sh"]
 
-  monitor --> server{"app-server socket exists?"}
-  server -- "no" --> startServer["codex app-server --listen unix://..."]
-  server -- "yes" --> reuseServer["reuse socket"]
+  monitor --> server{"ready app-server record exists?"}
+  server -- "no" --> startServer["lifecycle lock → starting → app-server"]
+  server -- "yes" --> reuseServer["validate generation / PID / version / port"]
   monitor --> launcher["codex-bridge-launcher.sh (outside sandbox)"]
-  startServer --> remote["codex --remote unix://..."]
+  startServer --> remote["codex --remote ws://127.0.0.1:port"]
   reuseServer --> remote
 
   remote --> hook["SessionStart hook → session-start.sh (in sandbox)"]
   hook --> thread["resolve thread: CODEX_THREAD_ID || newest matching rollout"]
   thread --> request["write request file under run/ (no socket — EPERM)"]
   request -.-> launcher
-  launcher --> bridge["codex-bridge.js → app-server (WebSocket-over-UDS)"]
+  launcher --> lease["publish generation-specific TUI lease"]
+  lease --> bridge["codex-bridge.js → loopback WebSocket app-server"]
   bridge --> watch["arm watch-once.sh (process/spawn)"]
   watch --> db[("agmsg SQLite DB (read_at IS NULL)")]
   db --> unread{"Unread message?"}
   unread -- "no (timeout)" --> watch
-  unread -- "yes" --> inbox["inline unread inbox text"]
-  inbox --> turn["turn/start on the thread"]
+  unread -- "yes" --> inbox["peek exact unread IDs (no read_at update)"]
+  inbox --> gate["re-check TUI lease"]
+  gate --> turn["turn/start on the thread"]
   turn --> tui["Current Codex TUI thread"]
   tui --> ended["turn ends: completed / idle / watchdog"]
   ended --> watch

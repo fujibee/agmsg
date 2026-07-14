@@ -10,6 +10,10 @@
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
 agmsg_delivery_on_enable() {
+  local project="$3" project_hash
+  mkdir -p "$RUN_DIR"
+  project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
+  [ -n "$project_hash" ] && rm -f "$RUN_DIR/codex-monitor-disabled.$project_hash"
   echo "Codex monitor beta is enabled."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
@@ -37,7 +41,12 @@ agmsg_delivery_on_enable() {
 
 agmsg_delivery_on_disable() {
   local project="$2"
-  local stopped
+  local stopped project_hash
+  mkdir -p "$RUN_DIR"
+  project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
+  # Stop the owning launcher loop before killing its bridge, otherwise a live
+  # TUI immediately recreates the bridge on the next 300ms iteration.
+  [ -n "$project_hash" ] && : >"$RUN_DIR/codex-monitor-disabled.$project_hash"
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then
     echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."

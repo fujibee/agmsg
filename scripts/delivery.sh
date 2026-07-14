@@ -46,6 +46,8 @@ RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/hash.sh"
 # shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/codex-lease.sh"
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/type-registry.sh"
 # storage.sh provides agmsg_sqlite_mem (CR-safe sqlite, #180); hooks-json.sh's
 # primitives use it, so source storage first.
@@ -327,7 +329,7 @@ EOF
 # shim is left alone (it is cross-project). Echoes how many bridges were killed.
 stop_codex_bridge() {
   local project="$1"
-  local pairs team name pidfile bpid killed=0
+  local pairs team name pidfile bpid killed=0 bridge_domain
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" codex 2>/dev/null || true)
   if [ -n "$pairs" ]; then
     while IFS=$'\t' read -r team name _rest; do
@@ -335,13 +337,20 @@ stop_codex_bridge() {
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
       [ -f "$pidfile" ] || continue
       bpid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
-        kill "$bpid" 2>/dev/null && killed=$((killed + 1))
+      bridge_domain="$(awk -F= '/^pid_domain=/{print $2; exit}' "${pidfile%.pid}.meta" 2>/dev/null || true)"
+      if [ -n "$bpid" ] && [ "$bridge_domain" = native ] && compat_pid_alive_native "$bpid"; then
+        codex_pid_kill_domain native "$bpid" && killed=$((killed + 1))
+      elif [ -n "$bpid" ] && [ -z "$bridge_domain" ] && compat_pid_alive_msys "$bpid"; then
+        codex_pid_kill_domain msys "$bpid" && killed=$((killed + 1))
+      elif [ -n "$bpid" ] && [ -z "$bridge_domain" ] && compat_pid_alive_native "$bpid"; then
+        codex_pid_kill_domain native "$bpid" && killed=$((killed + 1))
       fi
       # .appserver records which app-server URL the bridge was bound to (the
       # launcher's stale-binding guard); drop it with the rest so it cannot
       # mislead a later launcher.
-      rm -f "$pidfile" "${pidfile%.pid}.meta" "${pidfile%.pid}.log" "${pidfile%.pid}.appserver"
+      rm -f "$pidfile" "${pidfile%.pid}.meta" "${pidfile%.pid}.log" \
+        "${pidfile%.pid}.appserver" "${pidfile%.pid}.thread" \
+        "$(codex_bridge_lease_path "$team" "$name")"
     done <<EOF
 $pairs
 EOF
@@ -353,13 +362,47 @@ EOF
   # would have to recreate anyway. Only kill the recorded pid when its cmdline
   # confirms it is our app-server (a recycled pid could be unrelated); drop the
   # record either way.
-  local project_hash server_pidfile server_pid server_cmd
+  local project_hash server_pidfile server_pid server_cmd refs record domain generation starter_pid
   project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
   if [ -n "$project_hash" ]; then
+    refs="$(codex_appserver_refs_dir "$project_hash")"
+    # Launchers observe the disabled marker and remove their own refs. Give
+    # those compare/delete cleanups a short bounded window; unknown/live refs
+    # fail closed and prevent a shared server kill.
+    for _ in $(seq 1 20); do
+      find "$refs" -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q . || break
+      sleep 0.1
+    done
+    record="$(codex_appserver_record_path "$project_hash")"
+    if ! find "$refs" -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q . \
+      && codex_lifecycle_lock_acquire "$project_hash"; then
+      generation="$(codex_lease_field "$record" generation 2>/dev/null || true)"
+      server_pid="$(codex_lease_field "$record" pid 2>/dev/null || true)"
+      domain="$(codex_lease_field "$record" pid_domain 2>/dev/null || true)"
+      server_cmd="$(codex_pid_cmdline_domain "$domain" "$server_pid" 2>/dev/null || true)"
+      if [ -n "$generation" ]; then
+        if [ -n "$server_pid" ]; then
+          case "$server_cmd" in *codex*app-server*) codex_pid_kill_domain "$domain" "$server_pid" || true ;; esac
+          rm -f "$record" "$RUN_DIR/codex-app-server.$project_hash.pid" \
+            "$RUN_DIR/codex-app-server.$project_hash.port" \
+            "$RUN_DIR/codex-app-server.$project_hash.version"
+        else
+          starter_pid="$(codex_lease_field "$record" starter_msys_pid 2>/dev/null || true)"
+          if [ -z "$starter_pid" ] || ! compat_pid_alive_msys "$starter_pid"; then
+            rm -f "$record" "$(codex_appserver_marker_path "$project_hash" "$generation")"
+          fi
+        fi
+      fi
+      codex_lifecycle_lock_release "$project_hash"
+      rmdir "$refs" 2>/dev/null || true
+    fi
+
+    # Upgrade fallback for a pre-record app-server. New protocol runs above;
+    # this legacy path is used only when no .record existed.
     server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
-    if [ -f "$server_pidfile" ]; then
+    if [ ! -f "$record" ] && [ -f "$server_pidfile" ]; then
       server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+      if [ -n "$server_pid" ] && compat_pid_alive_msys "$server_pid"; then
         server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
         case "$server_cmd" in
           *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
