@@ -1,7 +1,9 @@
 # agmsg / Codex monitor Windows障害の調査・修正記録
 
-最終更新: 2026-07-14  
-対象環境: Windows、Git Bash、Codex Desktop / CLI、`hameln-hozon`、`hameln/codex1`  
+最終更新: 2026-07-14
+
+対象環境: Windows、Git Bash、Codex Desktop / CLI、`hameln-hozon`、`hameln/codex1`
+
 基準ソース: agmsg `v1.1.7` (`baa064e`) + 未コミットのローカル修正
 
 ## 1. 先に結論
@@ -364,19 +366,19 @@ seat修正後、このチャットでさらにlogを確認した。
 
 ### 修正した方がよい点
 
-1. **「今回直したのはagmsg本体ではなくseatだけ」**  
+1. **「今回直したのはagmsg本体ではなくseatだけ」**
    seat修正時点の説明として限定すれば正しい。その後のsource-level修正まで含む総括としては誤り。
 
-2. **「根本原因はstale seat」**  
+2. **「根本原因はstale seat」**
    old taskへの配送の根本原因ではあるが、project-wide turn、Windows shell/path/PID、ACK timeout/rearmは独立した原因。
 
-3. **「PowerShellやcmdから直接実行してはいけない」**  
+3. **「PowerShellやcmdから直接実行してはいけない」**
    より正確には、agmsgの`.sh`をnative shellの解釈に任せず、正しいGit Bash executable経由で実行する。PowerShellからGit Bashを明示して呼ぶこと自体は正しい。
 
-4. **「DBや設定の直接編集は禁止」**  
+4. **「DBや設定の直接編集は禁止」**
    通常運用では公式scriptを使うべき、という安全規則として妥当。ただしread-only診断まで禁止する技術仕様ではない。直接writeは整合性を壊すため避ける、と表現する方が正確。
 
-5. **`actas`の説明**  
+5. **`actas`の説明**
    Claude watcherの`actas`とCodexのseat記録は完全に同じ仕組みではない。v1.1.7のCodex skill flowはbest-effortでsessionを記録するが、`docs/actas.md`にはCodex receive-side narrowingの制約も記載されている。`actas`成功だけで配送先が正しいとみなさず、end-to-endで確認する。
 
 ## 12. 現在の状態と残るリスク
@@ -384,9 +386,10 @@ seat修正後、このチャットでさらにlogを確認した。
 ### 現在の状態
 
 - repository: `E:\Project\agmsg`
-- HEAD: detached at `v1.1.7` / `baa064e`
-- local diff: 4 source/test files、未コミット
-- installed agmsg: sourceから `./install.sh --update` 済み
+- branch: `codex/monitor-teardown`（`v1.1.7`を基点とするstacked branch）
+- 既存local diff: `codex/preserve-monitor-local-fixes`の`acb0b83`として保護済み
+- teardown実装: `91b0e81`、`5a60f5a`、`f6d5186`の3段階コミット
+- installed agmsg: このbranchの最終実装はまだ再installしていない
 - target project: `E:/Project/hameln-hozon`
 - team / identity: `hameln/codex1`
 - mode: `monitor`
@@ -394,23 +397,23 @@ seat修正後、このチャットでさらにlogを確認した。
 
 ### 残るリスク
 
-1. **未コミット・detached HEAD**  
-   今の修正はbranchにもcommitにも保護されていない。checkout、clean install、別versionへの更新で失われ得る。
+1. **remote未保存**
+   修正はlocal branchとcommitには保護されたが、まだpush/PR作成はしていない。local repository自体の消失には備えていない。
 
-2. **installed runtimeとrelease名の差**  
-   表示versionが1.1.7でも、中身は1.1.7 tagそのものではなくlocal patch入りである。
+2. **installed runtimeとrepository実装の差**
+   現在インストール済みのruntimeは今回の最終teardown実装より古い。実運用検証前に明示的な再installが必要。
 
-3. **全テスト未完走**  
-   targeted testsは通ったが、full suiteの保証はない。
+3. **full suiteのWindows固有flaky**
+   Codex対象testと新規testは成功した。full `test_delivery.bats`ではwatcher process管理の既存Windows flakyが失敗したため、suite全体greenの保証はCI（Linux/macOS/Windows各leg）で再確認する。
 
-4. **experimental API依存**  
+4. **experimental API依存**
    Codex app-serverのnotification/response順、rollout、loaded thread APIが変わると再び壊れ得る。
 
-5. **orphan process**  
-   TUI終了後もbridge/app-serverが残る既知のrough edgeがある。
+5. **spawn→marker間の狭いorphan窓**
+   lease/ref teardownは実装済みだが、app-server spawn成功後からspawning marker書き込み前にstarterが死亡する極短時間の未追跡窓は既知の制約として残る。
 
-6. **docsと実装の時間差**  
-   monitor beta文書のtask解決説明には古い方式が残り、v1.1.7のrole-recorded task優先と完全には一致しない箇所がある。
+6. **experimental APIと実機差**
+   `docs/codex-monitor-beta.md`は今回のlease/at-least-once方式へ更新したが、Codex app-server API更新時には実機acceptance testを再実行する必要がある。
 
 ## 13. 次にやるべきこと
 

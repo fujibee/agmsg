@@ -34,7 +34,7 @@ agmsgのCodex monitor betaとClaude Code monitorは、いずれも「TUI/セッ�
 ### 2.1 Codex monitor beta
 
 ```
-codex（shell function） 
+codex（shell function）
   → codex-shim.sh
   → codex-monitor.sh（bash, PID=A）
        ├─ app-server 起動 or 再利用（codex app-server --listen ws://127.0.0.1:PORT, ネイティブ）
