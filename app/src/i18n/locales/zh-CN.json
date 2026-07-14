@@ -173,6 +173,10 @@
     "title": "设置",
     "terminalFontSize": {
       "label": "终端字体大小"
+    },
+    "timezone": {
+      "label": "时区",
+      "auto": "自动 ({{zone}})"
     }
   },
   "nativeMenu": {

@@ -173,6 +173,10 @@
     "title": "설정",
     "terminalFontSize": {
       "label": "터미널 글꼴 크기"
+    },
+    "timezone": {
+      "label": "시간대",
+      "auto": "자동 ({{zone}})"
     }
   },
   "nativeMenu": {

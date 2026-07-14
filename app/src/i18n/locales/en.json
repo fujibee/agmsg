@@ -10,6 +10,10 @@
     "title": "Settings",
     "terminalFontSize": {
       "label": "Terminal font size"
+    },
+    "timezone": {
+      "label": "Timezone",
+      "auto": "Auto ({{zone}})"
     }
   },
   "startupError": {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
+import { AUTO_TIMEZONE, detectTimeZone, listTimeZones } from "./time";
 
 type BrowseDir = (current: string) => Promise<string | null>;
 
@@ -374,8 +375,13 @@ export function SettingsModal(props: {
   onClose: () => void;
   terminalFontSize: number;
   onTerminalFontSizeChange: (size: number) => void;
+  timezone: string;
+  onTimezoneChange: (timezone: string) => void;
 }) {
   const { t, i18n } = useTranslation();
+  // Computed once per modal open, not on every keystroke — the full zone
+  // list (400+ IANA names) doesn't change while the dropdown is open.
+  const [timeZones] = useState(listTimeZones);
   return (
     <Modal title={t("modal.settings.title")} onClose={props.onClose}>
       <label>
@@ -405,6 +411,17 @@ export function SettingsModal(props: {
             }
           }}
         />
+      </label>
+      <label>
+        {t("settings.timezone.label")}
+        <select value={props.timezone} onChange={(e) => props.onTimezoneChange(e.target.value)}>
+          <option value={AUTO_TIMEZONE}>{t("settings.timezone.auto", { zone: detectTimeZone() })}</option>
+          {timeZones.map((zone) => (
+            <option key={zone} value={zone}>
+              {zone}
+            </option>
+          ))}
+        </select>
       </label>
       <div className="modal-actions">
         <button type="button" className="primary" onClick={props.onClose}>

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
+import { AUTO_TIMEZONE, formatMessageTime, resolveTimeZone } from "./time";
 import {
   AgentModal,
   AppUserModal,
@@ -132,6 +133,10 @@ const DEFAULT_TERMINAL_FONT_SIZE = 12;
 // the chat's "Add one" link, so a user who dismisses the auto-prompt once
 // shouldn't be re-asked on every future team switch.
 const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
+// Persists the Settings modal's timezone choice (see time.ts) — defaults to
+// AUTO_TIMEZONE, which tracks the OS timezone live rather than freezing
+// whatever was detected at first launch.
+const TIMEZONE_KEY = "agmsg-app-timezone";
 // Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
 // usages below) — a made-up type, not text/plain, so a stray OS file drag
 // or an unrelated drag elsewhere on the page never accidentally matches a
@@ -188,6 +193,9 @@ export default function App() {
       ? stored
       : DEFAULT_TERMINAL_FONT_SIZE;
   });
+  // Timezone used to display chat/team-room timestamps (see time.ts and
+  // TIMEZONE_KEY) — "auto" (the default) tracks the OS timezone live.
+  const [timezone, setTimezone] = useState(() => localStorage.getItem(TIMEZONE_KEY) ?? AUTO_TIMEZONE);
   // Collapses the team sidebar to an icon-only rail so panes get more width.
   // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
   // messaging a member isn't offered from the collapsed rail; expand to get
@@ -484,6 +492,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(terminalFontSize));
   }, [terminalFontSize]);
+  useEffect(() => {
+    localStorage.setItem(TIMEZONE_KEY, timezone);
+  }, [timezone]);
+  // Resolved once per render for both message-time display sites below.
+  const effectiveTimeZone = resolveTimeZone(timezone);
 
   // Spawnable agent types (for the Add-agent type picker). spawnMember
   // re-fetches this itself right before spawning — see there for why.
@@ -1648,7 +1661,7 @@ export default function App() {
                     <b className="mf">{g.from}</b>
                     <span className="arrow">→</span>
                     <b className="mt">{g.to}</b>
-                    <span className="grp-time">{g.items[0].created_at.slice(11, 19)}</span>
+                    <span className="grp-time">{formatMessageTime(g.items[0].created_at, effectiveTimeZone)}</span>
                   </div>
                   {g.items.map((m) => (
                     <div className="grp-body" key={m.id}>
@@ -1921,7 +1934,7 @@ export default function App() {
               <div className="appuser-chat" ref={chatRef} onClick={() => composerInputRef.current?.focus()}>
                 {myThread.map((m) => (
                   <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
-                    <span className="chat-time">{m.created_at.slice(11, 19)}</span>
+                    <span className="chat-time">{formatMessageTime(m.created_at, effectiveTimeZone)}</span>
                     <span className="chat-peer">
                       {m.from === appUser
                         ? t("chat.peer.to", { to: m.to })
@@ -2041,6 +2054,8 @@ export default function App() {
           onClose={() => setModal(null)}
           terminalFontSize={terminalFontSize}
           onTerminalFontSizeChange={setTerminalFontSize}
+          timezone={timezone}
+          onTimezoneChange={setTimezone}
         />
       )}
       {modal?.kind === "closeWindow" &&

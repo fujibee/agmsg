@@ -173,6 +173,10 @@
     "title": "Configurações",
     "terminalFontSize": {
       "label": "Tamanho da fonte do terminal"
+    },
+    "timezone": {
+      "label": "Fuso horário",
+      "auto": "Automático ({{zone}})"
     }
   },
   "nativeMenu": {

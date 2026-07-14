@@ -173,6 +173,10 @@
     "title": "設定",
     "terminalFontSize": {
       "label": "ターミナルのフォントサイズ"
+    },
+    "timezone": {
+      "label": "タイムゾーン",
+      "auto": "自動 ({{zone}})"
     }
   },
   "nativeMenu": {

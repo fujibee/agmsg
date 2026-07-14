@@ -173,6 +173,10 @@
     "title": "Einstellungen",
     "terminalFontSize": {
       "label": "Terminal-Schriftgröße"
+    },
+    "timezone": {
+      "label": "Zeitzone",
+      "auto": "Automatisch ({{zone}})"
     }
   },
   "nativeMenu": {

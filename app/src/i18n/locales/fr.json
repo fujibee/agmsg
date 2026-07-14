@@ -173,6 +173,10 @@
     "title": "Paramètres",
     "terminalFontSize": {
       "label": "Taille de police du terminal"
+    },
+    "timezone": {
+      "label": "Fuseau horaire",
+      "auto": "Auto ({{zone}})"
     }
   },
   "nativeMenu": {
