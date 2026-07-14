@@ -693,10 +693,12 @@ JSON
   unset CLAUDE_CODE_SESSION_ID
 }
 
-@test "session-start.sh for codex never infers an exact thread from a symlink-matched rollout" {
+@test "session-start.sh for codex matches rollout cwd via a symlinked project path (#160)" {
   skip_on_windows "codex bridge launch and symlink path on Windows (#182)"
-  # A rollout can match the same project through a physical/symlink spelling,
-  # but it is not proof that this visible Codex task owns that thread.
+  # agmsg opens the project through a symlink (linkproj), but Codex records the
+  # canonical/physical cwd (realproj) in session_meta. A raw string compare
+  # misses the rollout, so the thread never resolves and the bridge never
+  # starts. With physical-path canonicalization the two reconcile.
   local realproj="$TEST_PROJECT/realproj"
   local linkproj="$TEST_PROJECT/linkproj"
   mkdir -p "$realproj"
@@ -720,16 +722,22 @@ printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
 EOF
   chmod +x "$fake"
 
-  # Legacy launcher inputs are intentionally ignored as well: without an exact
-  # current thread and a matching saved actas binding, SessionStart is quiet.
+  # env -u CODEX_THREAD_ID forces the rollout-scan fallback that does the
+  # compare — without it, a CODEX_THREAD_ID inherited from the parent env (e.g.
+  # running the suite inside a Codex session) short-circuits the resolver and
+  # this test never exercises the path it's meant to cover.
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
   AGMSG_TEST_LOG="$log" \
     env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$linkproj" >/dev/null
 
-  [ ! -f "$log" ]
-  run bash -c "compgen -G '$TEST_SKILL_DIR/run/codex-bridge.*.pid' >/dev/null"
-  [ "$status" -ne 0 ]
+  for _ in {1..20}; do
+    [ -f "$log" ] && break
+    sleep 0.1
+  done
+
+  [ -f "$log" ]
+  grep -q -- "--thread thread-sym" "$log"
 }
 
 # --- gemini agent tests ---
@@ -1439,7 +1447,7 @@ JSON
 }
 
 # --- Codex monitor bridge (#41) ---
-@test "session-start.sh for codex ignores legacy launcher env without a saved exact binding" {
+@test "session-start.sh for codex starts bridge when monitor launcher env is present" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
@@ -1456,12 +1464,20 @@ EOF
   CODEX_THREAD_ID="thread-123" \
     bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
 
-  [ ! -f "$log" ]
-  run bash -c "compgen -G '$TEST_SKILL_DIR/run/codex-bridge.*.pid' >/dev/null"
+  for _ in {1..20}; do
+    [ -f "$log" ] && break
+    sleep 0.1
+  done
+
+  [ -f "$log" ]
+  grep -q -- "--project $TEST_PROJECT" "$log"
+  grep -q -- "--thread thread-123" "$log"
+  grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
+  run grep -q -- "--inline-inbox" "$log"
   [ "$status" -ne 0 ]
 }
 
-@test "session-start.sh for codex stays quiet without a saved exact actas binding" {
+@test "session-start.sh for codex stays quiet without monitor launcher env" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
@@ -1480,14 +1496,13 @@ EOF
 @test "delivery set monitor (codex): installs persistent SessionStart plus visible Stop fallback" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Codex visible monitor beta is enabled"* ]] || return 1
-  [[ "$output" == *"authenticated Desktop relay"* ]] || return 1
-  [[ "$output" == *"intended visible Codex task"* ]] || return 1
-  [[ "$output" == *"mail remains unread"* ]] || return 1
-  [[ "$output" != *"codex-shim.sh"* ]] || return 1
-  [[ "$output" != *"codex() {"* ]] || return 1
-  [[ "$output" == *"For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"* ]] || return 1
-  [[ "$output" != *"Monitor tool"* ]] || return 1
+  [[ "$output" == *"Codex monitor beta is enabled"* ]]
+  [[ "$output" == *"codex() {"* ]]
+  [[ "$output" == *"codex-shim.sh"* ]]
+  [[ "$output" == *"launch with codex"* ]]
+  [[ "$output" == *"Optional global PATH shim is still available"* ]]
+  [[ "$output" == *"For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"* ]]
+  [[ "$output" != *"Monitor tool"* ]]
   [ ! -e "$HOME/.agents/bin/codex" ]
   local hook_file="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hook_file" ]
@@ -1503,7 +1518,7 @@ EOF
   grep -q "check-inbox.sh" "$hook_file"
 }
 
-@test "delivery status (codex): live bridge reports the visible exact-thread runtime" {
+@test "delivery status (codex): live bridge reports alive and suppresses watch count" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
@@ -1520,21 +1535,20 @@ project=$TEST_PROJECT
 team=team
 name=alice
 type=codex
-thread=thread-status
 EOF
   printf '%s\n' 99999999 > "$TEST_SKILL_DIR/run/watch.fake.pid"
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: team/alice active pid=$bpid thread=thread-status"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 
   kill "$bpid" 2>/dev/null || true
   trap - EXIT
 }
 
-@test "delivery status (codex): dead bridge metadata is reported as stale" {
+@test "delivery status (codex): stale bridge pidfile is reported as stale" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
@@ -1551,17 +1565,16 @@ project=$TEST_PROJECT
 team=team
 name=alice
 type=codex
-thread=thread-stale
 EOF
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: team/alice stale thread=thread-stale"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (pid $dead_pid not running)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): another project's bridge metadata is excluded" {
+@test "delivery status (codex): bridge metadata mismatch is reported as stale" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
@@ -1578,11 +1591,11 @@ EOF
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: no role is currently bound for this project"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (metadata mismatch)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): a pidfile without metadata is not reported as a bridge" {
+@test "delivery status (codex): missing bridge metadata is reported as stale" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
@@ -1592,22 +1605,22 @@ EOF
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: no role is currently bound for this project"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice stale pidfile (missing metadata)"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): identity without a runtime reports no bound role" {
+@test "delivery status (codex): identity with no bridge reports not running" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: no role is currently bound for this project"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice not running"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): reports only identities with runtime metadata" {
+@test "delivery status (codex): multiple identities are enumerated independently" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
@@ -1625,37 +1638,30 @@ project=$TEST_PROJECT
 team=team
 name=alice
 type=codex
-thread=thread-alice
 EOF
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Codex visible bridge: team/alice active pid=$bpid thread=thread-alice"* ]] || return 1
-  [[ "$output" != *"team/bob"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+  [[ "$output" == *"Codex bridge: team/bob not running"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 
   kill "$bpid" 2>/dev/null || true
   trap - EXIT
 }
 
-@test "delivery status (codex): monitor mode with no bound role is explicit" {
+@test "delivery status (codex): monitor mode with no identities is explicit" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex visible bridge: no role is currently bound for this project"* ]] || return 1
-  [[ "$output" != *"watch processes:"* ]] || return 1
+  [[ "$output" == *"Codex bridge: no identities registered for this project"* ]]
+  [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "session-start.sh for codex preserves the saved exact thread when CODEX_THREAD_ID is unset" {
+@test "session-start.sh for codex resolves thread id from rollout when CODEX_THREAD_ID is unset" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
-  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
-  env CODEX_THREAD_ID=thread-owner \
-    bash "$TYPES/codex/actas-monitor.sh" "$TEST_PROJECT" codex alice thread-owner >/dev/null
-  local project_hash
-  project_hash="$(printf '%s' "$(cd "$TEST_PROJECT" && pwd)" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
-  rm -f "$TEST_SKILL_DIR/run/codex-chat-visible.$project_hash.team.alice.meta"
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
   cat >"$fake" <<'EOF'
@@ -1664,8 +1670,8 @@ printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
 EOF
   chmod +x "$fake"
 
-  # A matching rollout is still ambiguous across visible tasks and must not
-  # replace the explicit thread-owner binding.
+  # Fresh/exec Codex sessions do not export CODEX_THREAD_ID; the hook must read
+  # the thread id from the newest rollout whose session_meta cwd matches (#41).
   local rollout_dir="$TEST_SKILL_DIR/home/.codex/sessions/2026/06/17"
   mkdir -p "$rollout_dir"
   printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"rollout-thread-999\",\"cwd\":\"$TEST_PROJECT\"}}" \
@@ -1678,11 +1684,9 @@ EOF
   AGMSG_TEST_LOG="$log" \
     env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
 
-  [ ! -f "$log" ]
-  [ ! -e "$TEST_SKILL_DIR/run/codex-chat-visible.$project_hash.team.alice.meta" ]
-  grep -q '^codex-seat:' "$TEST_SKILL_DIR/run/actas.team__alice.session"
-  awk -F '\t' '$5 == "thread-owner" { found=1 } END { exit !found }' \
-    "$TEST_SKILL_DIR/run/codex-seat.team.alice.tsv"
+  for _ in {1..20}; do [ -f "$log" ] && break; sleep 0.1; done
+  [ -f "$log" ]
+  grep -q -- "--thread rollout-thread-999" "$log"
 }
 
 @test "delivery set monitor (codex): warns loudly when Node is missing" {
@@ -1695,50 +1699,33 @@ EOF
   [[ "$output" == *"monitor delivery will NOT start"* ]]
 }
 
-@test "delivery set off (codex): stops the bridge and preserves the shared relay" {
+@test "delivery set off (codex): stops the bridge, cleans run files, notes shell profile cleanup" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  source "$SCRIPTS/lib/hash.sh"
-  local h; h="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
-  local state_key="$h.team.alice"
-  local base="$TEST_SKILL_DIR/run/codex-bridge.$state_key"
-  local bridge="$TYPES/codex/codex-bridge.js"
-  cat > "$bridge" <<'EOF'
-#!/usr/bin/env bash
-trap 'exit 0' TERM INT
-while :; do sleep 1; done
-EOF
-  chmod +x "$bridge"
-  "$bridge" --project "$TEST_PROJECT" --type codex --team team --name alice \
-    --state-key "$state_key" --app-server-file "$base.appserver" --thread thread-off &
+  # Stand in for a live bridge with a real process we can check kill -0 against.
+  sleep 60 &
   local bpid=$!
-  echo "$bpid" > "$base.pid"
-  cat > "$base.meta" <<EOF
-pid=$bpid
-project=$TEST_PROJECT
-type=codex
-team=team
-name=alice
-thread=thread-off
-EOF
-  : > "$base.log"
+  echo "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  echo "pid=$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta"
+  : > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.log"
   # The launcher's stale-binding sidecar + the project's shared app-server record
   # must be torn down too. Use a non-codex pid for the server record so the
   # cmdline guard skips the kill — the record is still dropped.
-  : > "$base.appserver"
+  : > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.appserver"
+  source "$SCRIPTS/lib/hash.sh"
+  local h; h="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
   echo 2147483647 > "$TEST_SKILL_DIR/run/codex-app-server.$h.pid"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.port"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.version"
 
   run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Stopped 1"*"Codex bridge"* ]] || return 1
-  [[ "$output" == *"shared Codex Desktop relay remains installed"* ]] || return 1
-  [[ "$output" != *"shim"* ]] || return 1
+  [[ "$output" == *"Stopped 1 Codex bridge"* ]]
+  [[ "$output" == *"shim"* ]]
   ! kill -0 "$bpid" 2>/dev/null
-  [ ! -f "$base.pid" ]
-  [ ! -f "$base.meta" ]
-  [ ! -f "$base.appserver" ]
+  [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
+  [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" ]
+  [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.appserver" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.pid" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.port" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.version" ]

@@ -84,8 +84,8 @@ Four possible outputs:
 
 ### Codex visible monitor invariant
 
-`mode monitor` may deliver mail only through the authenticated Desktop relay
-and a role bridge bound to this exact visible Codex task.
+`mode monitor` may deliver mail only through an app-server bridge that inserts
+the handling into the same visible Codex thread.
 
 1. A shell watcher may detect unread state, but it must not read the body, mark
    it read, start substantive work, or reply by itself.
@@ -94,27 +94,16 @@ and a role bridge bound to this exact visible Codex task.
    action, and whether a reply is needed before any other tool call.
 4. Keep progress, decisions, blockers, replies, and the final result visible in
    the same Codex thread. ACK-only mail still requires a visible receipt notice.
-5. Background receivers, `codex exec resume`, rollout inference, loaded-task
-   discovery, and new-thread fallback are prohibited.
-6. If the relay or bridge cannot attach, keep the requested project mode as
-   `monitor`, report the current effective mode as `turn`, leave mail unread,
-   and retry only from SessionStart of the same stored exact thread or a new
-   explicit `actas`.
-7. A different Codex task must not inherit or steal the stored role. SessionStart
-   may restore it only when its exact thread id equals the stored thread id.
-8. `mode turn`, `mode off`, `drop`/`reset`, and SessionEnd stop the matching
-   role bridge. They must not stop another project's bridge; mode changes keep
-   the shared Desktop relay installed.
-9. Do not create cron, heartbeat, or scheduled polling jobs for Codex delivery.
+5. Background `codex exec resume` delivery is prohibited.
+6. If a visible bridge cannot attach, keep mail unread, change the effective
+   mode to `turn`, and fall back to the next visible turn.
+7. Do not create cron, heartbeat, or scheduled polling jobs for Codex delivery.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. If messages are returned, before any other tool call show the sender and body
-   or a safe summary, what you will do, and whether a reply is needed. Do not
-   handle the message invisibly in the background.
-3. If the active AGENT name starts with `codex-pro-`, route unread messages through Oracle GPT-5.5 Pro by running `~/.agents/skills/__SKILL_NAME__/scripts/oracle-pro-reply.sh $TEAM $AGENT` instead of answering them directly. Use `ORACLE_PRO_DRY_RUN=1` only when the user asks to preview the browser run.
-4. Do NOT ask the user what to do — just run the inbox check.
-5. If there are messages for a normal agent, read and respond appropriately. To reply:
+2. If the active AGENT name starts with `codex-pro-`, route unread messages through Oracle GPT-5.5 Pro by running `~/.agents/skills/__SKILL_NAME__/scripts/oracle-pro-reply.sh $TEAM $AGENT` instead of answering them directly. Use `ORACLE_PRO_DRY_RUN=1` only when the user asks to preview the browser run.
+3. Do NOT ask the user what to do — just run the inbox check.
+4. If there are messages for a normal agent, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
 If argument is "history":
@@ -142,7 +131,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" codex` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Rebind the receive side by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. In monitor/both mode, allow only the authenticated Desktop relay plus an exact-thread role bridge. If it cannot attach, keep the requested mode as `monitor`, report effective `turn` for this task, and leave mail unread. Never start a background receiver or infer/create a thread.
+5. Rebind the receive side by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. In monitor/both mode, allow only a visible app-server bridge. If it cannot attach, keep mail unread and downgrade to `turn`. Never start a background receiver.
 6. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
 7. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
 8. Otherwise tell the user: "Now acting as `<name>`. Sends and receive are bound to `<name>`."
@@ -176,9 +165,9 @@ If argument is "mode" (no further args):
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
 1. Parse the mode. Codex supports `monitor`, `turn`, `both`, and `off`. `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor` or `both` and an active role is already bound to this exact task, run `actas-monitor.sh` with that concrete thread id. Do not infer a thread or take a role from another task.
-4. If mode is `turn` or `off`, confirm that the matching role bridge stopped. Do not call a visible-turn fallback a background receiver.
-5. If mode is `monitor` or `both`, report whether the relay and exact-thread bridge attached. If they did not, report requested `monitor` and effective `turn`; do not rewrite the requested mode or describe fallback as an active monitor.
+3. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and concrete thread id.
+4. If mode is `turn` or `off`, confirm that the background receiver stopped.
+5. If mode is `monitor` or `both`, report whether a visible app-server bridge attached. If it did not attach, report that the effective mode was downgraded to `turn`. Never describe visible-turn fallback as an active monitor.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

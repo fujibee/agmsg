@@ -4,9 +4,11 @@ set -euo pipefail
 # Runs outside Codex's tool sandbox and owns the app-server connection: it starts
 # codex-bridge.js for this project's single codex identity.
 #
-# This legacy launcher is fail-closed: it launches only when its request file
-# contains one exact thread id. Loaded-thread discovery and thread creation can
-# select a different visible task and are forbidden.
+# On codex 0.141+ the SessionStart hook cannot resolve the thread id
+# (CODEX_THREAD_ID is not exported and no rollout is written for --remote
+# sessions), so the bridge discovers the live TUI thread itself via
+# thread/loaded/list (`--thread loaded`). If an older codex DID write a request
+# file with a real thread id, that id is used instead. See #170, #41.
 
 TYPE="${1:?Usage: codex-bridge-launcher.sh <type> <project_path> <app_server> <parent_pid>}"
 PROJECT="${2:?Missing project_path}"
@@ -53,8 +55,6 @@ done
 
 pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
 log="$RUN_DIR/codex-bridge.$team.$name.log"
-: >"$log"
-chmod 600 "$log"
 # Records the app-server URL the live bridge was launched against, so a later
 # launcher instance can tell a bridge bound to a stale app-server (old port,
 # from before a codex upgrade) from one bound to the current server. See #197/#237.
@@ -69,20 +69,12 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
-bridge_pid_matches() {
-  local pid="$1" app_server="$2" thread="$3" expected cmd
-  [ -n "$app_server" ] && [ -n "$thread" ] || return 1
-  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
-  expected="$SCRIPT_DIR/codex-bridge.js --project $PROJECT --type $TYPE --team $team --name $name --thread $thread --app-server $app_server"
-  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-  case " $cmd " in *" $expected "*) return 0 ;; esac
-  return 1
-}
-
 while kill -0 "$PARENT_PID" 2>/dev/null; do
-  # Resolve an exact thread before the reuse check. Missing, reserved, or unsafe
-  # values leave the launcher idle without creating another Codex task.
-  thread_id=""
+  # Resolve the app-server URL (and thread) this iteration would launch against
+  # FIRST, so the reuse check can compare a live bridge's bound server with the
+  # current one. Thread source: a request file (older-codex hook) wins; otherwise
+  # discover the live TUI thread via thread/loaded/list.
+  thread_id="loaded"
   req_app_server="$APP_SERVER"
   if [ -f "$REQUEST_FILE" ]; then
     request="$(cat "$REQUEST_FILE" 2>/dev/null || true)"
@@ -90,16 +82,9 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
       IFS="$TAB" read -r _rtype _rteam _rname _rthread _rapp <<EOF
 $request
 EOF
-      case "${_rthread:-}" in
-        ""|loaded|current|unresolved|*[!A-Za-z0-9._-]*) thread_id="" ;;
-        *) thread_id="$_rthread" ;;
-      esac
+      [ -n "${_rthread:-}" ] && thread_id="$_rthread"
       [ -n "${_rapp:-}" ] && req_app_server="$_rapp"
     fi
-  fi
-  if [ -z "$thread_id" ]; then
-    sleep 0.3
-    continue
   fi
 
   if [ -f "$pidfile" ]; then
@@ -112,15 +97,11 @@ EOF
       # this, but guard the race where the old bridge has not exited yet by the
       # time a new launcher re-checks: an app-server mismatch means tear it down.
       bound_url="$(cat "$appserver_file" 2>/dev/null || true)"
-      bound_thread="$(sed -n 's/^thread=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
-      if bridge_pid_matches "$bridge_pid" "$bound_url" "$bound_thread" \
-          && [ "$bound_url" = "$req_app_server" ] && [ "$bound_thread" = "$thread_id" ]; then
+      if [ "$bound_url" = "$req_app_server" ]; then
         sleep 0.3
         continue
       fi
-      if bridge_pid_matches "$bridge_pid" "$bound_url" "$bound_thread"; then
-        kill "$bridge_pid" 2>/dev/null || true
-      fi
+      kill "$bridge_pid" 2>/dev/null || true
       rm -f "$pidfile" "$appserver_file"
     fi
   fi
@@ -137,13 +118,3 @@ EOF
   printf '%s' "$req_app_server" > "$appserver_file"
   sleep 1
 done
-
-# The launcher owns only the exact legacy bridge recorded for this parent.
-# Never signal a recycled pid or another project's bridge during TUI teardown.
-bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
-bound_url="$(cat "$appserver_file" 2>/dev/null || true)"
-bound_thread="$(sed -n 's/^thread=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
-if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null \
-    && bridge_pid_matches "$bridge_pid" "$bound_url" "$bound_thread"; then
-  kill "$bridge_pid" 2>/dev/null || true
-fi

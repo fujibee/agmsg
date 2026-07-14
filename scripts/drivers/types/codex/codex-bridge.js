@@ -8,12 +8,10 @@ const net = require("net");
 const path = require("path");
 const readline = require("readline");
 
-process.umask(0o077);
-
 const SCRIPT_DIR = __dirname;                              // .../scripts/drivers/types/codex (codex siblings live here)
 const SKILL_DIR = path.resolve(SCRIPT_DIR, "..", "..", "..", "..");    // skill root
 const SCRIPTS_DIR = path.join(SKILL_DIR, "scripts");       // type-independent engine scripts (identities/inbox/send)
-const RUN_DIR = path.resolve(process.env.AGMSG_CODEX_DESKTOP_RELAY_RUN_DIR || path.join(SKILL_DIR, "run"));
+const RUN_DIR = path.join(SKILL_DIR, "run");
 
 // Git Bash on Windows cannot exec a .sh path directly — spawnSync of the script
 // fails with EFTYPE. Invoke the helper scripts through bash on every platform.
@@ -31,10 +29,10 @@ Options:
   --type <agent_type>     Agent type for identity resolution (default: codex).
   --team <team>           Limit wakeups to one team.
   --name <agent>          Limit wakeups to one agent name.
-  --state-key <key>       Private runtime suffix chosen by the launcher.
   --timeout <sec>         watch-once timeout before re-arming (default: 300).
   --interval <sec>        watch-once poll interval (default: 2).
   --max-wakes <n>         Stop after n wakeups, useful for tests.
+  --stale-wake-limit <n>  Stop after n repeated unchanged wakeups (default: 1).
   --connect-timeout-ms <ms>
                           Max wait for direct app-server connect/upgrade (default: 10000).
   --request-timeout-ms <ms>
@@ -43,10 +41,12 @@ Options:
                           Stop after n consecutive watch-once failures; 0 disables (default: 3).
   --app-server <url>      Connect through an existing app-server endpoint.
                           Supports unix://PATH or ws://host:port over WebSocket.
-  --app-server-file <path>
-                          Read the endpoint from a private (0600) file.
-  --thread <id>           Resume this exact existing app-server thread.
-  --inline-inbox          Rejected: background inbox reads are unsafe.
+  --thread <id|current|loaded>
+                          Resume an existing app-server thread. "current" uses
+                          CODEX_THREAD_ID; "loaded" discovers the live TUI thread
+                          via thread/loaded/list (codex 0.141+, see #170).
+  --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
+  --inline-inbox          Read inbox in the bridge and include message text in the turn input.
   --resolve-only          Print resolved team/name and exit.
   --help                  Show this help.
 
@@ -56,20 +56,6 @@ Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
 function die(message) {
   console.error(`codex-bridge: ${message}`);
   process.exit(1);
-}
-
-class TerminalBridgeError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "TerminalBridgeError";
-  }
-}
-
-class ExistingBridgeError extends TerminalBridgeError {
-  constructor(message) {
-    super(message);
-    this.name = "ExistingBridgeError";
-  }
 }
 
 // Convert a native Windows path into the MSYS/Git-Bash POSIX form that agmsg
@@ -94,14 +80,12 @@ function parseArgs(argv) {
     timeout: Number(process.env.AGMSG_WATCH_ONCE_TIMEOUT || 300),
     interval: Number(process.env.AGMSG_WATCH_ONCE_INTERVAL || 2),
     maxWakes: 0,
+    staleWakeLimit: Number(process.env.AGMSG_CODEX_BRIDGE_STALE_WAKE_LIMIT || 1),
     connectTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_CONNECT_TIMEOUT_MS || 10000),
     requestTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_REQUEST_TIMEOUT_MS || 30000),
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
-    retryBaseMs: Number(process.env.AGMSG_CODEX_BRIDGE_RETRY_BASE_MS || 5000),
-    retryMaxMs: Number(process.env.AGMSG_CODEX_BRIDGE_RETRY_MAX_MS || 300000),
-    sameUnreadDelayMs: Number(process.env.AGMSG_CODEX_BRIDGE_SAME_UNREAD_DELAY_MS || 30000),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -118,14 +102,14 @@ function parseArgs(argv) {
       opts.team = argv[++i];
     } else if (arg === "--name") {
       opts.name = argv[++i];
-    } else if (arg === "--state-key") {
-      opts.stateKey = argv[++i];
     } else if (arg === "--timeout") {
       opts.timeout = Number(argv[++i]);
     } else if (arg === "--interval") {
       opts.interval = Number(argv[++i]);
     } else if (arg === "--max-wakes") {
       opts.maxWakes = Number(argv[++i]);
+    } else if (arg === "--stale-wake-limit") {
+      opts.staleWakeLimit = Number(argv[++i]);
     } else if (arg === "--connect-timeout-ms") {
       opts.connectTimeoutMs = Number(argv[++i]);
     } else if (arg === "--request-timeout-ms") {
@@ -136,12 +120,12 @@ function parseArgs(argv) {
       opts.turnTimeout = Number(argv[++i]);
     } else if (arg === "--app-server") {
       opts.appServer = argv[++i];
-    } else if (arg === "--app-server-file") {
-      opts.appServerFile = path.resolve(argv[++i]);
     } else if (arg === "--thread") {
       opts.threadId = argv[++i];
+    } else if (arg === "--loaded-timeout") {
+      opts.loadedTimeout = Number(argv[++i]);
     } else if (arg === "--inline-inbox") {
-      opts.inlineInboxRequested = true;
+      opts.inlineInbox = true;
     } else {
       die(`unknown option: ${arg}`);
     }
@@ -152,6 +136,9 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) die("--timeout must be a positive number");
   if (!Number.isFinite(opts.interval) || opts.interval <= 0) die("--interval must be a positive number");
   if (!Number.isFinite(opts.maxWakes) || opts.maxWakes < 0) die("--max-wakes must be a non-negative number");
+  if (!Number.isFinite(opts.staleWakeLimit) || opts.staleWakeLimit < 0) {
+    die("--stale-wake-limit must be a non-negative number");
+  }
   if (!Number.isFinite(opts.connectTimeoutMs) || opts.connectTimeoutMs < 0) {
     die("--connect-timeout-ms must be a non-negative number");
   }
@@ -164,29 +151,14 @@ function parseArgs(argv) {
   if (!Number.isFinite(opts.turnTimeout) || opts.turnTimeout < 0) {
     die("--turn-timeout must be a non-negative number");
   }
-  for (const key of ["retryBaseMs", "retryMaxMs", "sameUnreadDelayMs"]) {
-    if (!Number.isFinite(opts[key]) || opts[key] < 1) die(`${key} must be a positive number`);
+  if (opts.threadId === "current") {
+    opts.threadId = process.env.CODEX_THREAD_ID || "";
+    if (!opts.threadId) die("--thread current requires CODEX_THREAD_ID");
   }
-  if (opts.appServer && opts.appServerFile) die("pass only one of --app-server or --app-server-file");
-  if (opts.appServerFile) opts.appServer = readPrivateEndpoint(opts.appServerFile);
-  if (!opts.resolveOnly && (!opts.threadId || !/^[A-Za-z0-9._-]+$/.test(opts.threadId))) {
-    die("one exact --thread id is required");
-  }
-  if (!opts.resolveOnly && ["loaded", "current", "unresolved"].includes(opts.threadId)) {
-    die("one exact --thread id is required; discovery aliases are not supported");
-  }
-  if (opts.inlineInboxRequested) {
-    die("--inline-inbox is disabled; only the visible Codex task may run the official inbox command");
-  }
-  if (opts.stateKey && !/^[A-Za-z0-9._%-]+$/.test(opts.stateKey)) die("--state-key contains unsafe characters");
   opts.project = path.resolve(opts.project);
   if (!fs.existsSync(opts.project) || !fs.statSync(opts.project).isDirectory()) {
     die(`project path is not a directory: ${opts.project}`);
   }
-  // Preserve the registry spelling for identities.sh (macOS may register
-  // /var while realpath is /private/var), and use the canonical root for all
-  // relay-authorized app-server requests.
-  opts.canonicalProject = fs.realpathSync(opts.project);
   return opts;
 }
 
@@ -241,17 +213,12 @@ class AppServerClient {
     this.pending = new Map();
     this.handlers = new Map();
     this.child = null;
-    this.disconnectHandler = null;
-    this.intentionalStop = false;
   }
 
   start() {
     const [bin, ...args] = this.command;
-    const childEnv = { ...process.env };
-    delete childEnv.CODEX_APP_SERVER_WS_URL;
     this.child = spawn(bin, args, {
       cwd: this.cwd,
-      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -264,17 +231,15 @@ class AppServerClient {
     });
 
     this.child.on("exit", (code, signal) => {
-      const error = new Error(`app-server exited (${code ?? signal})`);
       for (const { reject } of this.pending.values()) {
-        reject(error);
+        reject(new Error(`app-server exited (${code || signal})`));
       }
       this.pending.clear();
-      if (!this.intentionalStop && this.disconnectHandler) this.disconnectHandler(error);
     });
 
-    // app-server stderr can contain user-visible model content. Keep bridge
-    // logs as lifecycle telemetry only.
-    this.child.stderr.on("data", () => {});
+    this.child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+    });
 
     const lines = readline.createInterface({ input: this.child.stdout });
     lines.on("line", (line) => this.handleLine(line));
@@ -284,40 +249,16 @@ class AppServerClient {
     this.handlers.set(method, handler);
   }
 
-  onDisconnect(handler) {
-    this.disconnectHandler = handler;
-  }
-
   handleLine(line) {
     if (!line.trim()) return;
     let message;
     try {
       message = JSON.parse(line);
     } catch (error) {
-      console.error("codex-bridge: ignoring non-json app-server line");
+      console.error(`codex-bridge: ignoring non-json app-server line: ${line}`);
       return;
     }
 
-    if (message.method && Object.prototype.hasOwnProperty.call(message, "id")) {
-      const handler = this.handlers.get(message.method);
-      if (!handler) {
-        this.sendJson({
-          jsonrpc: "2.0",
-          id: message.id,
-          error: { code: -32601, message: `No handler for ${message.method}` },
-        });
-        return;
-      }
-      Promise.resolve(handler(message.params || {})).then(
-        (result) => this.sendJson({ jsonrpc: "2.0", id: message.id, result: result || {} }),
-        (error) => this.sendJson({
-          jsonrpc: "2.0",
-          id: message.id,
-          error: { code: -32000, message: error.message || String(error) },
-        }),
-      );
-      return;
-    }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -377,10 +318,6 @@ class AppServerClient {
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
-  sendJson(value) {
-    this.child.stdin.write(`${JSON.stringify(value)}\n`);
-  }
-
   dispatch(method, params) {
     try {
       Promise.resolve(this.handlers.get(method)(params)).catch((error) => {
@@ -392,7 +329,6 @@ class AppServerClient {
   }
 
   stop() {
-    this.intentionalStop = true;
     if (this.child && !this.child.killed) {
       this.child.kill("SIGTERM");
     }
@@ -408,7 +344,6 @@ class WebSocketAppServerClient {
   constructor(connectOptions, label, opts = {}) {
     this.connectOptions = connectOptions;
     this.label = label || "app-server";
-    this.requestPath = opts.requestPath || "/";
     this.connectTimeoutMs = opts.connectTimeoutMs || 0;
     this.requestTimeoutMs = opts.requestTimeoutMs || 0;
     this.nextId = 1;
@@ -423,7 +358,6 @@ class WebSocketAppServerClient {
     // Set when WE close the socket (shutdown); distinguishes an intentional stop
     // from the app-server going away under us.
     this.intentionalStop = false;
-    this.disconnectHandler = null;
   }
 
   start() {
@@ -465,7 +399,7 @@ class WebSocketAppServerClient {
       this.socket.on("connect", () => {
         this.socket.write(
           [
-            `GET ${this.requestPath} HTTP/1.1`,
+            "GET / HTTP/1.1",
             "Host: localhost",
             "Upgrade: websocket",
             "Connection: Upgrade",
@@ -494,7 +428,10 @@ class WebSocketAppServerClient {
         // starts a fresh one against the new app-server — delivery silently
         // stops. Exit instead; the launcher then relaunches a fresh bridge bound
         // to the current app-server. Skipped when WE closed the socket.
-        if (!this.intentionalStop && this.disconnectHandler) this.disconnectHandler(error);
+        if (!this.intentionalStop) {
+          console.error(`codex-bridge: ${error.message}; exiting so a fresh bridge can attach`);
+          process.exit(1);
+        }
       });
     });
   }
@@ -505,10 +442,6 @@ class WebSocketAppServerClient {
 
   on(method, handler) {
     this.handlers.set(method, handler);
-  }
-
-  onDisconnect(handler) {
-    this.disconnectHandler = handler;
   }
 
   handleData(chunk, resolveStart, rejectStart) {
@@ -604,27 +537,7 @@ class WebSocketAppServerClient {
     try {
       message = JSON.parse(line);
     } catch (_) {
-      console.error("codex-bridge: ignoring non-json app-server message");
-      return;
-    }
-    if (message.method && Object.prototype.hasOwnProperty.call(message, "id")) {
-      const handler = this.handlers.get(message.method);
-      if (!handler) {
-        this.sendJson({
-          jsonrpc: "2.0",
-          id: message.id,
-          error: { code: -32601, message: `No handler for ${message.method}` },
-        });
-        return;
-      }
-      Promise.resolve(handler(message.params || {})).then(
-        (result) => this.sendJson({ jsonrpc: "2.0", id: message.id, result: result || {} }),
-        (error) => this.sendJson({
-          jsonrpc: "2.0",
-          id: message.id,
-          error: { code: -32000, message: error.message || String(error) },
-        }),
-      );
+      console.error(`codex-bridge: ignoring non-json app-server message: ${line}`);
       return;
     }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
@@ -753,70 +666,42 @@ class CodexBridge {
     this.threadIdle = true;
     this.turnActive = false;
     this.turnTimer = null;
-    this.pendingWakeMaxId = 0;
+    this.pendingWake = false;
     this.watchHandle = null;
     this.wakeCount = 0;
+    this.lastWakeMaxId = 0;
+    this.staleWakeCount = 0;
     this.watchFailureCount = 0;
-    this.wakeRetryCount = 0;
     this.watchRearmTimer = null;
+    this.inlineInboxText = "";
+    this.inlineInboxIdsFile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.last-ids`);
+    this.deliveredInboxPending = false;
     this.stopping = false;
-    this.preserveHealthOnExit = false;
-    this.signalHandler = null;
-    this.lifetimeSettled = false;
-    this.lifetime = new Promise((resolve, reject) => {
-      this.resolveLifetime = (value) => {
-        if (this.lifetimeSettled) return;
-        this.lifetimeSettled = true;
-        resolve(value);
-      };
-      this.rejectLifetime = (error) => {
-        if (this.lifetimeSettled) return;
-        this.lifetimeSettled = true;
-        reject(error);
-      };
-    });
-    const stateKey = opts.stateKey || `${identity.team}.${identity.name}`;
-    this.stateKey = stateKey;
-    this.pidfile = path.join(RUN_DIR, `codex-bridge.${stateKey}.pid`);
-    this.metafile = path.join(RUN_DIR, `codex-bridge.${stateKey}.meta`);
-    this.healthfile = path.join(RUN_DIR, `codex-bridge.${stateKey}.health`);
-    const threadHash = crypto.createHash("sha256").update(this.threadId).digest("hex").slice(0, 24);
-    this.threadHash = threadHash;
-    this.wakeStateFile = path.join(RUN_DIR, `codex-bridge.${stateKey}.wake.${threadHash}.json`);
+    this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
+    this.metafile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.meta`);
   }
 
   async run() {
     fs.mkdirSync(RUN_DIR, { recursive: true });
     this.ensureSingleInstance();
     this.writeMeta();
-    this.writeHealth("connecting");
     this.installSignals();
     this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
     this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
     this.client.on("thread/status/changed", this.clientHandler("thread/status/changed", (params) => this.onThreadStatus(params)));
-    this.client.on("turn/started", this.clientHandler("turn/started", (params) => {
-      if (params.threadId !== this.threadId) return;
+    this.client.on("turn/started", this.clientHandler("turn/started", () => {
       this.turnActive = true;
       this.threadIdle = false;
     }));
     this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
-    this.client.on("turn/failed", this.clientHandler("turn/failed", (params) => this.onTurnCompleted(params)));
-    this.client.onDisconnect((error) => {
-      if (!this.stopping) this.rejectLifetime(error);
-    });
+    this.client.on("turn/failed", this.clientHandler("turn/failed", () => this.onTurnCompleted()));
 
     this.client.start();
     await this.client.ready?.();
-    this.writeHealth("connected");
     await this.initialize();
     await this.ensureThread();
-    this.writeHealth("thread_attached");
     await this.armWatch();
-    this.writeMeta();
-    this.writeHealth("ready");
-    this.readyAt = Date.now();
-    await this.lifetime;
   }
 
   clientHandler(method, handler) {
@@ -831,13 +716,12 @@ class CodexBridge {
 
   failClientHandler(method, error) {
     console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
-    this.writeHealth("retrying_transient", `${method}: ${error.message}`);
-    this.rejectLifetime(error);
+    this.shutdown().finally(() => process.exit(1));
   }
 
   writeMeta() {
-    atomicWritePrivate(this.pidfile, `${process.pid}\n`);
-    atomicWritePrivate(
+    fs.writeFileSync(this.pidfile, `${process.pid}\n`);
+    fs.writeFileSync(
       this.metafile,
       [
         `pid=${process.pid}`,
@@ -845,78 +729,20 @@ class CodexBridge {
         `team=${this.identity.team}`,
         `name=${this.identity.name}`,
         `type=${this.opts.type}`,
-        `thread=${this.threadId || ""}`,
-        `app_server=${redactAppServer(this.opts.appServer || "stdio://")}`,
-        `launch_label=${process.env.AGMSG_CODEX_BRIDGE_LAUNCH_LABEL || ""}`,
       ].join("\n") + "\n",
     );
   }
 
-  writeHealth(status, detail = "") {
-    const temporary = `${this.healthfile}.${process.pid}.tmp`;
-    try {
-      fs.writeFileSync(
-        temporary,
-        [
-          `status=${status}`,
-          `pid=${process.pid}`,
-          `thread=${this.threadId || "unresolved"}`,
-          `detail=${String(detail).replace(/[\r\n]+/g, " ")}`,
-          `updated_at=${new Date().toISOString()}`,
-          "",
-        ].join("\n"),
-      );
-      fs.chmodSync(temporary, 0o600);
-      fs.renameSync(temporary, this.healthfile);
-    } catch (_) {
-      try { fs.unlinkSync(temporary); } catch (_) {}
-    }
-  }
-
-  readWakeState({ tolerateCorrupt = false } = {}) {
-    if (!fs.existsSync(this.wakeStateFile)) return null;
-    try {
-      const stat = fs.lstatSync(this.wakeStateFile);
-      if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
-        throw new Error("wake state is not a private regular file");
-      }
-      const state = JSON.parse(fs.readFileSync(this.wakeStateFile, "utf8"));
-      const expectedId = wakeClientMessageId(this.stateKey, this.threadId, state.maxId);
-      if (
-        state.version !== 1
-        || state.threadHash !== this.threadHash
-        || !Number.isInteger(state.maxId)
-        || state.maxId <= 0
-        || !["observed", "dispatching", "accepted", "ack_confirmed"].includes(state.phase)
-        || state.clientUserMessageId !== expectedId
-      ) {
-        throw new Error("wake state failed validation");
-      }
-      return state;
-    } catch (error) {
-      if (tolerateCorrupt) return null;
-      throw new Error(`cannot trust durable wake state: ${error.message}`);
-    }
-  }
-
-  writeWakeState(state) {
-    const value = {
-      version: 1,
-      threadHash: this.threadHash,
-      maxId: state.maxId,
-      phase: state.phase,
-      clientUserMessageId: state.clientUserMessageId,
-      updatedAt: new Date().toISOString(),
-    };
-    atomicWritePrivate(this.wakeStateFile, `${JSON.stringify(value)}\n`);
-  }
-
   installSignals() {
-    this.signalHandler = () => {
-      this.shutdown().finally(() => this.resolveLifetime());
+    const stop = () => {
+      this.shutdown().finally(() => process.exit(0));
     };
-    process.once("SIGINT", this.signalHandler);
-    process.once("SIGTERM", this.signalHandler);
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    process.on("exit", () => {
+      this.client.stop();
+      this.cleanupMeta();
+    });
   }
 
   async initialize() {
@@ -935,25 +761,58 @@ class CodexBridge {
     this.client.notify("initialized");
   }
 
+  async resolveLoadedThread() {
+    // codex 0.141+ does not export CODEX_THREAD_ID to hooks and writes no rollout
+    // for --remote sessions, so the thread id cannot be resolved out-of-band.
+    // Ask the app-server which thread the live TUI has loaded instead. See #170.
+    const deadline = Date.now() + (this.opts.loadedTimeout || 30000);
+    for (;;) {
+      const response = await this.client.request("thread/loaded/list", {});
+      const ids = response && Array.isArray(response.data) ? response.data : [];
+      if (ids.length > 0) {
+        if (ids.length > 1) {
+          console.error(
+            `codex-bridge: ${ids.length} threads loaded; attaching to the first (${ids[0]})`,
+          );
+        }
+        return ids[0];
+      }
+      if (Date.now() >= deadline) {
+        die("no loaded codex thread found via thread/loaded/list");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
   async ensureThread() {
-    let response;
-    try {
-      response = await this.client.request("thread/resume", {
+    if (this.threadId === "loaded") {
+      this.threadId = await this.resolveLoadedThread();
+      console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
+    }
+    if (this.threadId) {
+      const response = await this.client.request("thread/resume", {
         threadId: this.threadId,
-        cwd: this.opts.canonicalProject,
-        runtimeWorkspaceRoots: [this.opts.canonicalProject],
+        cwd: this.opts.project,
+        runtimeWorkspaceRoots: [this.opts.project],
         excludeTurns: true,
       });
-    } catch (error) {
-      throw new TerminalBridgeError(`cannot resume exact thread ${this.threadId}: ${error.message}`);
+      if (!response.thread || response.thread.id !== this.threadId) {
+        die("thread/resume did not return the requested thread id");
+      }
+      const type = response.thread.status && response.thread.status.type;
+      this.threadIdle = type !== "active";
+      this.turnActive = type === "active";
+      console.error(`codex-bridge: resumed thread ${this.threadId}`);
+      return;
     }
-    if (!response.thread || response.thread.id !== this.threadId) {
-      throw new TerminalBridgeError("thread/resume did not return the requested thread id");
-    }
-    const type = response.thread.status && response.thread.status.type;
-    this.threadIdle = type !== "active";
-    this.turnActive = type === "active";
-    console.error(`codex-bridge: resumed thread ${this.threadId}`);
+    const response = await this.client.request("thread/start", {
+      cwd: this.opts.project,
+      runtimeWorkspaceRoots: [this.opts.project],
+      ephemeral: false,
+    });
+    this.threadId = response.thread && response.thread.id;
+    if (!this.threadId) die("thread/start did not return a thread id");
+    console.error(`codex-bridge: started thread ${this.threadId}`);
   }
 
   async armWatch() {
@@ -963,7 +822,7 @@ class CodexBridge {
     this.watchHandle = handle;
     const ownerId = `agmsg-codex-bridge-${process.pid}.${process.pid}`;
     const command = [
-      fs.existsSync("/bin/bash") ? "/bin/bash" : BASH_BIN,
+      BASH_BIN,
       path.join(SCRIPT_DIR, "watch-once.sh"),
       // watch-once.sh resolves the subscription set through the same exact
       // project-key lookup as identities.sh, so it needs the POSIX form of the
@@ -986,7 +845,7 @@ class CodexBridge {
       await this.client.request("process/spawn", {
         command,
         processHandle: handle,
-        cwd: this.opts.canonicalProject,
+        cwd: this.opts.project,
         outputBytesCap: 8192,
         timeoutMs: (this.opts.timeout + this.opts.interval + 10) * 1000,
       });
@@ -1004,86 +863,42 @@ class CodexBridge {
     if (params.exitCode === 0) {
       this.watchFailureCount = 0;
       const maxId = parseMaxId(params.stdout);
-      if (!maxId) {
-        this.writeHealth("paused_ambiguous_wake", "watch-once returned pending without a valid max_id");
-        this.scheduleWatchRearm(this.nextRetryDelay());
-        return;
+      if (this.isStaleWake(maxId)) {
+        await this.shutdown();
+        process.exit(1);
       }
-
-      let state;
-      try {
-        state = this.readWakeState();
-      } catch (error) {
-        this.writeHealth("paused_ambiguous_wake", error.message);
-        this.scheduleWatchRearm(this.opts.sameUnreadDelayMs);
-        return;
-      }
-      if (state && maxId < state.maxId) {
-        this.writeHealth(
-          "paused_ambiguous_wake",
-          `unread max_id ${maxId} is older than durable max_id ${state.maxId}`,
-        );
-        this.scheduleWatchRearm(this.opts.sameUnreadDelayMs);
-        return;
-      }
-      if (state && maxId === state.maxId && ["accepted", "ack_confirmed"].includes(state.phase)) {
-        this.writeHealth("waiting_for_ack", `unread max_id ${maxId} is already ${state.phase}`);
-        this.scheduleWatchRearm(this.opts.sameUnreadDelayMs);
-        return;
-      }
-
-      const clientUserMessageId = wakeClientMessageId(this.stateKey, this.threadId, maxId);
-      if (!state || maxId > state.maxId) {
-        this.writeWakeState({ maxId, phase: "observed", clientUserMessageId });
-      }
-      this.pendingWakeMaxId = maxId;
-      console.error(`codex-bridge: observed unread max_id ${maxId} for ${this.identity.team}/${this.identity.name}`);
+      this.pendingWake = true;
+      this.wakeCount += 1;
+      console.error(`codex-bridge: wakeup ${this.wakeCount} for ${this.identity.team}/${this.identity.name}`);
       await this.tryStartTurn();
       return;
     }
 
     if (params.exitCode === 2) {
       this.watchFailureCount = 0;
-      this.wakeRetryCount = 0;
-      const state = this.readWakeState({ tolerateCorrupt: true });
-      if (state && state.phase !== "ack_confirmed") {
-        this.writeWakeState({ ...state, phase: "ack_confirmed" });
-      }
-      this.writeHealth("ready");
       await this.armWatch();
       return;
     }
 
     this.watchFailureCount += 1;
-    const detail = sanitizeLogDetail(params.stderr || `exit ${params.exitCode}`);
+    const detail = [params.stderr, params.stdout].filter(Boolean).join("\n").trim();
     console.error(`codex-bridge: watch-once failed with exit ${params.exitCode}${detail ? `: ${detail}` : ""}`);
     if (this.opts.watchFailureLimit > 0 && this.watchFailureCount >= this.opts.watchFailureLimit) {
-      this.writeHealth(
-        "paused_watch_failure",
-        `${this.watchFailureCount} consecutive watch-once failure(s)`,
+      console.error(
+        `codex-bridge: stopping after ${this.watchFailureCount} consecutive watch-once failure(s)`,
       );
-    } else {
-      this.writeHealth("waiting_watch_retry", `${this.watchFailureCount} watch-once failure(s)`);
+      await this.shutdown();
+      process.exit(1);
     }
-    this.scheduleWatchRearm(this.nextRetryDelay());
+    this.scheduleWatchRearm();
   }
 
-  nextRetryDelay() {
-    const exponent = Math.min(this.wakeRetryCount, 12);
-    this.wakeRetryCount += 1;
-    return Math.min(this.opts.retryBaseMs * (2 ** exponent), this.opts.retryMaxMs);
-  }
-
-  scheduleWatchRearm(delayMs = this.opts.retryBaseMs) {
+  scheduleWatchRearm() {
     if (this.stopping || this.watchHandle || this.watchRearmTimer) return;
     this.watchRearmTimer = setTimeout(() => {
       this.watchRearmTimer = null;
-      this.armWatch().catch((error) => {
-        this.watchFailureCount += 1;
-        this.writeHealth("waiting_watch_retry", sanitizeLogDetail(error.message));
-        this.scheduleWatchRearm(this.nextRetryDelay());
-      });
-    }, delayMs);
+      this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
+    }, 5000);
   }
 
   clearWatchRearmTimer() {
@@ -1113,7 +928,7 @@ class CodexBridge {
   async onTurnCompleted(params = {}) {
     if (params.threadId && params.threadId !== this.threadId) return;
     if (params.turn && params.turn.error) {
-      console.error(`codex-bridge: turn completed with error code ${sanitizeLogDetail(params.turn.error.code || "unknown")}`);
+      console.error(`codex-bridge: turn completed with error: ${JSON.stringify(params.turn.error)}`);
     } else {
       console.error(`codex-bridge: turn completed on thread ${this.threadId}`);
     }
@@ -1128,10 +943,10 @@ class CodexBridge {
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
+    this.markDeliveredInboxRead();
     if (this.opts.maxWakes && this.wakeCount >= this.opts.maxWakes) {
       await this.shutdown();
-      this.resolveLifetime();
-      return;
+      process.exit(0);
     }
     // A wake can arrive while a turn is still active — the bridge resumed an
     // already-active thread (SessionStart fires on the first user turn), or a
@@ -1139,7 +954,7 @@ class CodexBridge {
     // was set. Deliver that pending wake now instead of re-arming: a fresh
     // watch-once would re-observe the same unread max_id and the stale-wake
     // guard would stop the bridge with exit 1 before the message is delivered.
-    if (this.pendingWakeMaxId) {
+    if (this.pendingWake) {
       await this.tryStartTurn();
       return;
     }
@@ -1150,73 +965,42 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
-    if (!this.pendingWakeMaxId || this.turnActive || !this.threadIdle) return;
-    const maxId = this.pendingWakeMaxId;
-    const clientUserMessageId = wakeClientMessageId(this.stateKey, this.threadId, maxId);
-    let state;
-    try {
-      state = this.readWakeState();
-    } catch (error) {
-      this.writeHealth("paused_ambiguous_wake", "durable wake state is unavailable");
-      this.scheduleWakeRetry(this.nextRetryDelay());
-      return;
-    }
-    if (!state || state.maxId !== maxId || !["observed", "dispatching"].includes(state.phase)) {
-      this.writeHealth("paused_ambiguous_wake", "durable wake phase does not permit dispatch");
-      this.scheduleWakeRetry(this.nextRetryDelay());
-      return;
-    }
-    if (state.phase === "observed") {
-      // Record bridge-side intent before asking the relay. The relay owns the
-      // later at-most-once boundary: it fsyncs its own dispatch state before
-      // turn/start. After a relay restart, only that relay state decides
-      // whether this request may start or must reconcile.
-      this.writeWakeState({ maxId, phase: "dispatching", clientUserMessageId });
-    }
-    try {
-      const response = await this.client.request("agmsg/wake/dispatch", {
-        threadId: this.threadId,
-        maxId,
-        clientUserMessageId,
-        dispatchMode: "start-or-reconcile",
-        cwd: this.opts.canonicalProject,
-        runtimeWorkspaceRoots: [this.opts.canonicalProject],
-      });
-      if (!response || !["accepted", "reconciled"].includes(response.status) || response.maxId !== maxId) {
-        throw new Error("wake dispatch returned an ambiguous result");
-      }
-      this.writeWakeState({ maxId, phase: "accepted", clientUserMessageId });
-      this.pendingWakeMaxId = 0;
-      this.wakeRetryCount = 0;
-      if (response.status === "accepted") {
-        this.wakeCount += 1;
-        this.turnActive = true;
-        this.threadIdle = false;
-        console.error(`codex-bridge: accepted wakeup ${this.wakeCount} on thread ${this.threadId}`);
-        this.startTurnWatchdog();
+    if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (this.opts.inlineInbox) {
+      this.inlineInboxText = this.readInboxForPrompt();
+      if (!this.inlineInboxText.trim()) {
+        console.error("codex-bridge: pending wake had no inbox output; re-arming");
+        this.pendingWake = false;
+        await this.armWatch();
         return;
       }
-
-      console.error(`codex-bridge: reconciled wake max_id ${maxId} on thread ${this.threadId}`);
-      this.writeHealth("waiting_for_ack", `reconciled max_id ${maxId}`);
-      if (this.turnActive) this.startTurnWatchdog();
-      else this.scheduleWatchRearm(this.opts.sameUnreadDelayMs);
-    } catch (error) {
-      // A timeout can happen after app-server accepted turn/start. The relay
-      // reconciles the deterministic client id against thread history on the
-      // next attempt, so never issue an unmarked fallback turn here.
-      this.writeHealth("paused_ambiguous_wake", "wake dispatch response unavailable; reconciliation pending");
-      console.error(`codex-bridge: wake max_id ${maxId} is ambiguous; retrying reconciliation later`);
-      this.scheduleWakeRetry(this.nextRetryDelay());
     }
-  }
-
-  scheduleWakeRetry(delayMs) {
-    if (this.stopping || this.watchRearmTimer) return;
-    this.watchRearmTimer = setTimeout(() => {
-      this.watchRearmTimer = null;
-      this.tryStartTurn().catch((error) => this.failClientHandler("agmsg/wake/dispatch", error));
-    }, delayMs);
+    const prompt = this.buildPrompt();
+    this.turnActive = true;
+    this.threadIdle = false;
+    try {
+      await this.client.request("turn/start", {
+        threadId: this.threadId,
+        input: [{ type: "text", text: prompt, text_elements: [] }],
+        cwd: this.opts.project,
+        runtimeWorkspaceRoots: [this.opts.project],
+      });
+      console.error(`codex-bridge: started turn on thread ${this.threadId}`);
+      this.pendingWake = false;
+      if (this.opts.inlineInbox && fs.existsSync(this.inlineInboxIdsFile)) {
+        const ids = fs.readFileSync(this.inlineInboxIdsFile, "utf8").trim();
+        this.deliveredInboxPending = Boolean(ids);
+      }
+      // Bound how long we treat the turn as active. The real app-server may
+      // never send turn/completed; the watchdog (and thread/status idle) drive
+      // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
+      this.startTurnWatchdog();
+    } catch (error) {
+      this.turnActive = false;
+      this.threadIdle = true;
+      this.clearTurnWatchdog();
+      throw error;
+    }
   }
 
   startTurnWatchdog() {
@@ -1243,14 +1027,12 @@ class CodexBridge {
 
   onServerError(params) {
     if (params.threadId && params.threadId !== this.threadId) return;
-    const code = params.code || (params.error && params.error.code) || "unknown";
-    console.error(`codex-bridge: server error code ${sanitizeLogDetail(code)}`);
+    console.error(`codex-bridge: server error: ${JSON.stringify(params)}`);
   }
 
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
-    // Agent content belongs only in the visible Codex task. The bridge log is
-    // lifecycle telemetry and must never become a second transcript.
+    process.stderr.write(params.delta);
   }
 
   buildPrompt() {
@@ -1273,6 +1055,20 @@ class CodexBridge {
       "5. If you do not reply, state why in the visible status. ACK-only mail still requires a visible receipt notice.",
       "6. Do not treat inbox consumption, DB writes, monitor delivery, send.sh, or a successful process exit as complete unless the handling result is visible in the Codex thread UI.",
     ].join("\n");
+    if (this.opts.inlineInbox) {
+      return [
+        `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
+        "",
+        this.inlineInboxText.trim(),
+        "",
+        "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
+        `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+        "",
+        autonomousHandlingContract,
+        "",
+        visibleUiRequirement,
+      ].join("\n");
+    }
     return [
       `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
       "The bridge did not read or acknowledge their contents.",
@@ -1285,16 +1081,59 @@ class CodexBridge {
     ].join("\n");
   }
 
-  async pauseWithoutRestart(status, detail) {
-    this.writeHealth(status, detail);
-    this.preserveHealthOnExit = true;
-    await this.shutdown({ preserveHealth: true });
+  readInboxForPrompt() {
+    try {
+      fs.writeFileSync(this.inlineInboxIdsFile, "");
+    } catch (_) {
+      // Best effort. inbox-peek will report an error if the path cannot be used.
+    }
+    const result = spawnSync(BASH_BIN, [
+      path.join(SCRIPTS_DIR, "inbox-peek.sh"),
+      this.identity.team,
+      this.identity.name,
+      "--quiet",
+      "--ids-file",
+      this.inlineInboxIdsFile,
+    ], {
+      cwd: this.opts.project,
+      encoding: "utf8",
+    });
+    if (result.error) {
+      console.error(`codex-bridge: inbox.sh failed: ${result.error.message}`);
+      return "";
+    }
+    if (result.status !== 0) {
+      console.error(`codex-bridge: inbox.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
+      return "";
+    }
+    return result.stdout || "";
   }
 
-  async shutdown({ preserveHealth = false } = {}) {
+  markDeliveredInboxRead() {
+    if (!this.opts.inlineInbox || !this.deliveredInboxPending) return;
+    this.deliveredInboxPending = false;
+    const result = spawnSync(BASH_BIN, [
+      path.join(SCRIPTS_DIR, "mark-read.sh"),
+      this.identity.team,
+      this.identity.name,
+      "--ids-file",
+      this.inlineInboxIdsFile,
+    ], {
+      cwd: this.opts.project,
+      encoding: "utf8",
+    });
+    if (result.error) {
+      console.error(`codex-bridge: mark-read.sh failed: ${result.error.message}`);
+      return;
+    }
+    if (result.status !== 0) {
+      console.error(`codex-bridge: mark-read.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
+    }
+  }
+
+  async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
-    this.preserveHealthOnExit = this.preserveHealthOnExit || preserveHealth;
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
@@ -1307,11 +1146,6 @@ class CodexBridge {
     }
     this.client.stop();
     this.cleanupMeta();
-    if (this.signalHandler) {
-      process.removeListener("SIGINT", this.signalHandler);
-      process.removeListener("SIGTERM", this.signalHandler);
-      this.signalHandler = null;
-    }
   }
 
   cleanupMeta() {
@@ -1333,9 +1167,7 @@ class CodexBridge {
       return;
     }
 
-    const files = [this.pidfile, this.metafile];
-    if (!this.preserveHealthOnExit) files.push(this.healthfile);
-    for (const file of files) {
+    for (const file of [this.pidfile, this.metafile]) {
       try {
         if (fs.existsSync(file)) fs.unlinkSync(file);
       } catch (_) {
@@ -1349,48 +1181,38 @@ class CodexBridge {
     if (!existing) return;
     try {
       process.kill(existing, 0);
-      const meta = readKeyValueFile(this.metafile);
-      const command = readProcessCommand(existing);
-      const expectedScript = fs.realpathSync(__filename);
-      const ownsPid = Boolean(
-        meta
-        && meta.pid === String(existing)
-        && meta.project === this.opts.project
-        && meta.team === this.identity.team
-        && meta.name === this.identity.name
-        && meta.type === this.opts.type
-        && meta.thread === this.threadId
-        && command.includes(expectedScript)
-        && command.includes(`--state-key ${this.stateKey}`)
-      );
-      if (ownsPid) {
-        throw new ExistingBridgeError(
-          `bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`,
-        );
-      }
-      // The pid was recycled or the metadata is not sufficient to prove
-      // ownership. Remove only this role's stale runtime files; never signal an
-      // unrelated live process.
-      this.removeStaleRuntimeFiles();
-      return;
+      die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
     } catch (error) {
-      if (error instanceof ExistingBridgeError) throw error;
       if (error && error.code === "ESRCH") {
-        this.removeStaleRuntimeFiles();
+        for (const file of [this.pidfile, this.metafile]) {
+          try {
+            if (fs.existsSync(file)) fs.unlinkSync(file);
+          } catch (_) {
+            // Best-effort stale cleanup.
+          }
+        }
         return;
       }
-      throw new TerminalBridgeError(`cannot verify existing bridge pid ${existing}: ${error.message}`);
+      die(`cannot verify existing bridge pid ${existing}: ${error.message}`);
     }
   }
 
-  removeStaleRuntimeFiles() {
-    for (const file of [this.pidfile, this.metafile, this.healthfile]) {
-      try {
-        if (fs.existsSync(file)) fs.unlinkSync(file);
-      } catch (_) {
-        // Best-effort removal of files owned by this exact state key.
-      }
+  isStaleWake(maxId) {
+    if (maxId <= 0 || this.lastWakeMaxId !== maxId) {
+      this.lastWakeMaxId = maxId;
+      this.staleWakeCount = 0;
+      return false;
     }
+
+    this.staleWakeCount += 1;
+    console.error(
+      `codex-bridge: unread max_id is still ${maxId}; inbox was not marked read after the prior wakeup`,
+    );
+    if (this.opts.staleWakeLimit > 0 && this.staleWakeCount >= this.opts.staleWakeLimit) {
+      console.error("codex-bridge: stopping to avoid a repeated wakeup loop");
+      return true;
+    }
+    return false;
   }
 }
 
@@ -1411,24 +1233,15 @@ function appServerCommand(opts = {}) {
 }
 
 function parseWsTarget(url) {
-  // wss:// would need TLS, which the plain net socket below does not do.
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch (_) {
-    die("--app-server must be a valid ws:// URL");
-  }
-  if (parsed.protocol !== "ws:" || parsed.username || parsed.password || !parsed.hostname || !parsed.port) {
-    die("--app-server must be ws://host:port[/path]");
-  }
-  const port = Number(parsed.port);
+  // ws://host:port → { host, port }. wss:// would need TLS, which the plain
+  // net socket below does not do; the agmsg app-server is loopback ws only.
+  const match = /^ws:\/\/([^/:]+):(\d+)\/?$/.exec(url);
+  if (!match) die(`--app-server ${url} must be ws://host:port`);
+  const port = Number(match[2]);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    die("--app-server has an invalid port");
+    die(`--app-server ${url} has an invalid port`);
   }
-  return {
-    connectOptions: { host: parsed.hostname, port },
-    requestPath: `${parsed.pathname || "/"}${parsed.search || ""}`,
-  };
+  return { host: match[1], port };
 }
 
 function createAppServerClient(opts) {
@@ -1440,37 +1253,9 @@ function createAppServerClient(opts) {
   }
   if (opts.appServer && opts.appServer.startsWith("ws://")) {
     const target = parseWsTarget(opts.appServer);
-    return new WebSocketAppServerClient(
-      target.connectOptions,
-      redactAppServer(opts.appServer),
-      { ...opts, requestPath: target.requestPath },
-    );
+    return new WebSocketAppServerClient(target, opts.appServer, opts);
   }
   return new AppServerClient(appServerCommand(opts), opts.project, opts);
-}
-
-function readPrivateEndpoint(file) {
-  let endpoint;
-  try {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink()) die("--app-server-file must name a regular non-symlink file");
-    if ((stat.mode & 0o077) !== 0) die("--app-server-file must not be group/world accessible");
-    endpoint = fs.readFileSync(file, "utf8").trim();
-  } catch (error) {
-    die(`cannot read --app-server-file: ${error.message}`);
-  }
-  if (!endpoint) die("--app-server-file is empty");
-  return endpoint;
-}
-
-function redactAppServer(endpoint) {
-  if (!String(endpoint).startsWith("ws://")) return endpoint;
-  try {
-    const parsed = new URL(endpoint);
-    return `ws://${parsed.host}/<capability>`;
-  } catch (_) {
-    return "ws://<invalid>";
-  }
 }
 
 function readVersion() {
@@ -1496,79 +1281,6 @@ function parseMaxId(stdout) {
   return match ? Number(match[1]) : 0;
 }
 
-function wakeClientMessageId(stateKey, threadId, maxId) {
-  const digest = crypto
-    .createHash("sha256")
-    .update(`${stateKey}\0${threadId}\0${maxId}`)
-    .digest("hex");
-  return `agmsg-wake-v1-${digest}`;
-}
-
-function atomicWritePrivate(file, contents) {
-  const temporary = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  let fd;
-  try {
-    fd = fs.openSync(temporary, "wx", 0o600);
-    fs.writeFileSync(fd, contents, "utf8");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    fs.renameSync(temporary, file);
-    try {
-      const dirFd = fs.openSync(path.dirname(file), "r");
-      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-    } catch (_) {
-      // Some filesystems do not support directory fsync. The file itself was
-      // still fully synced before the atomic rename.
-    }
-  } catch (error) {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch (_) {}
-    }
-    try { fs.unlinkSync(temporary); } catch (_) {}
-    throw error;
-  }
-}
-
-function readKeyValueFile(file) {
-  try {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink()) return null;
-    const result = {};
-    for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-      const index = line.indexOf("=");
-      if (index <= 0) continue;
-      result[line.slice(0, index)] = line.slice(index + 1);
-    }
-    return result;
-  } catch (_) {
-    return null;
-  }
-}
-
-function readProcessCommand(pid) {
-  try {
-    const proc = `/proc/${pid}/cmdline`;
-    if (fs.existsSync(proc)) return fs.readFileSync(proc).toString("utf8").replace(/\0/g, " ").trim();
-  } catch (_) {
-    // Fall through to ps, which is available on macOS.
-  }
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-  return result.status === 0 ? String(result.stdout || "").trim() : "";
-}
-
-function sanitizeLogDetail(value) {
-  return String(value == null ? "" : value)
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 240);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -1582,41 +1294,12 @@ async function main() {
     return;
   }
 
-  let retryCount = 0;
-  for (;;) {
-    const bridge = new CodexBridge(opts, identity);
-    try {
-      await bridge.run();
-      return;
-    } catch (error) {
-      if (error instanceof ExistingBridgeError) {
-        console.error(`codex-bridge: ${error.message}`);
-        return;
-      }
-      if (error instanceof TerminalBridgeError) {
-        if (!opts.stateKey) throw error;
-        bridge.writeHealth("terminal_thread_error", error.message);
-        await bridge.shutdown({ preserveHealth: true });
-        console.error(`codex-bridge: terminal configuration error: ${error.message}`);
-        return;
-      }
-      if (!opts.stateKey) {
-        await bridge.shutdown();
-        throw error;
-      }
-      if (bridge.readyAt && Date.now() - bridge.readyAt >= 300000) retryCount = 0;
-      retryCount += 1;
-      const delayMs = Math.min(opts.retryBaseMs * (2 ** Math.min(retryCount - 1, 12)), opts.retryMaxMs);
-      bridge.writeHealth("retrying_transient", `${sanitizeLogDetail(error.message)}; retry in ${delayMs}ms`);
-      await bridge.shutdown({ preserveHealth: true });
-      console.error(`codex-bridge: transient failure; retrying in ${delayMs}ms: ${sanitizeLogDetail(error.message)}`);
-      await sleep(delayMs);
-    }
-  }
+  const bridge = new CodexBridge(opts, identity);
+  await bridge.run();
 }
 
 if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { toPosixPath, WebSocketAppServerClient };
+module.exports = { toPosixPath };

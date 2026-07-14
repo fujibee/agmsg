@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
+# codex delivery plug.
+#
+# codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
+# enable/disable side effects (print the monitor shim setup on enable, stop the
+# receiver on disable) and replaces the runtime status summary with Codex
+# receiver liveness. Monitor mode may use only a visible app-server bridge;
+# turn/off and visible-turn fallback never start a background receiver.
+# Sourced into delivery.sh's context,
+# so SKILL_DIR, SCRIPT_DIR, RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL
+# and stop_codex_bridge are in scope.
+# Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
-# Codex delivery plug. Monitor means one authenticated Desktop relay plus one
-# exact-thread, project-owned bridge. Foreground Stop delivery remains the safe
-# fallback and does not mark Codex mail read.
-
+# Codex monitor mode always includes the visible Stop-hook fallback. The
+# SessionStart hook preserves/rebinds the monitor after restart; the Stop hook
+# is the safe path when no app-server can inject into the visible thread.
 agmsg_delivery_apply() {
   local type="$1" project="$2" mode="$3"
   if [ "$mode" = "monitor" ]; then
@@ -13,63 +23,70 @@ agmsg_delivery_apply() {
   fi
 }
 
+# `monitor` is the user-facing mode name even though Codex installs both hook
+# types internally. Keep status stable for callers and existing automation.
 agmsg_delivery_status() {
   agmsg_delivery_status_default "$@" | sed '1s/^mode: both$/mode: monitor/'
 }
 
 agmsg_delivery_on_enable() {
-  local project="$3" legacy_cleanup
-  legacy_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
-    disarm-project "$project" 2>/dev/null || true)
-  if printf '%s\n' "$legacy_cleanup" | grep -q 'lease_id='; then
-    echo "Disabled legacy Codex heartbeat/watchdog lease state for this project."
-  fi
   echo "Codex visible monitor beta is enabled."
-  echo "Unread mail is delivered only through the authenticated Desktop relay into the exact visible task."
-  echo "If the relay, Desktop, exact thread, or role bridge is unavailable, delivery downgrades to turn and mail remains unread."
-  case "$SKILL_DIR" in
-    "$HOME"/.agents/skills/*)
-      if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
-        local relay_status
-        relay_status="$("$SKILL_DIR/scripts/drivers/types/codex/codex-desktop-relayctl.sh" enable 2>&1 || true)"
-        if printf '%s\n' "$relay_status" | grep -q '^status='; then
-          echo "Codex Desktop relay: $relay_status"
-          echo "Restart Codex Desktop once if it is not yet connected through the relay."
-        else
-          echo "WARNING: Codex Desktop relay did not start: $relay_status"
-        fi
-      fi
-      ;;
-  esac
+  echo "After actas binds a role, only a visible app-server bridge may deliver unread mail."
+  echo "If the bridge cannot attach, mail stays unread until the next visible Codex turn."
+  echo "Background codex exec resume handling is prohibited."
+  echo "Add this shell function to your interactive shell profile, then restart the shell:"
+  if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
+    echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."
+    echo "Optional global PATH shim is still available with:"
+    echo "  $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh install"
+  else
+    echo "Codex monitor mode is enabled, but the codex shell function could not be printed."
+    echo "Future Codex sessions: launch with $SKILL_DIR/scripts/drivers/types/codex/codex-monitor.sh, or resolve the setup issue above."
+  fi
+  # Node preflight: the bridge (codex-bridge.js) is a Node program, so without
+  # Node it silently never starts — flag it at enable time. Resolve via the same
+  # path the runtime uses (lib/node.sh). AGMSG_NODE / AGMSG_CODEX_NODE override.
   local codex_node
   codex_node="$(agmsg_resolve_node)"
   if ! command -v "$codex_node" >/dev/null 2>&1 && [ ! -x "$codex_node" ]; then
-    echo "WARNING: Node.js ('$codex_node') was not found; monitor delivery will NOT start."
+    echo "WARNING: Node.js ('$codex_node') was not found. The Codex bridge needs Node —"
+    echo "  monitor delivery will NOT start until Node is installed (or set AGMSG_NODE)."
   fi
-  echo "Run agmsg actas <role> in the intended visible Codex task to bind its exact thread."
+  echo "Run agmsg actas <role> in the intended Codex task to bind the receiver now."
+  echo "SessionStart rebinds the last role after a later restart."
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }
 
 agmsg_delivery_on_disable() {
-  local project="$2" stopped lease_cleanup
-  stopped="$(stop_codex_bridge "$project")"
+  local project="$2"
+  local stopped lease_cleanup
+  stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then
-    echo "Stopped $stopped project-owned Codex bridge process(es) and cleaned their private run files."
+    echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."
   fi
+  # Remove any legacy scheduled-receiver lease left by pre-event-driven builds.
   lease_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
     disarm-project "$project" 2>/dev/null || true)
   [ -n "$lease_cleanup" ] && printf '%s\n' "$lease_cleanup"
-  echo "The shared Codex Desktop relay remains installed for other projects and future monitor sessions."
+  echo "Note: shell profile functions are not changed automatically."
+  echo "  If you installed the optional global shim and no other project uses monitor mode, remove it:"
+  echo "    $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh remove"
+  echo "    # then drop any agmsg Codex function or ~/.agents/bin PATH entry you added for monitor"
 }
 
 agmsg_delivery_stop_directive() {
-  local project="${PROJECT:-}" mode="${MODE:-}"
+  local project="${PROJECT:-}"
+  local mode="${MODE:-}"
   if [ "$mode" = "turn" ] && [ -n "$project" ]; then
-    [ "${AGMSG_CODEX_PRESERVE_CURRENT_MONITOR:-}" = "1" ] && return 0
+    # Let a failing receiver finish writing fallback health and chat-visible
+    # metadata before it exits on its own.
+    if [ "${AGMSG_CODEX_PRESERVE_CURRENT_MONITOR:-}" = "1" ]; then
+      return 0
+    fi
     local stopped
-    stopped="$(stop_codex_bridge "$project")"
+    stopped=$(stop_codex_bridge "$project")
     if [ "${stopped:-0}" -gt 0 ]; then
-      echo "Stopped $stopped project-owned Codex bridge process(es) and cleaned their run files."
+      echo "Stopped $stopped Codex bridge/app monitor process(es) for this project and cleaned their run files."
     fi
     "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
       disarm-project "$project" 2>/dev/null || true
@@ -77,38 +94,102 @@ agmsg_delivery_stop_directive() {
 }
 
 agmsg_delivery_runtime_status() {
-  local type="$1" project="$2" relay_status meta meta_project status thread team name pid found=0 chat
-  relay_status="$("$SKILL_DIR/scripts/drivers/types/codex/codex-desktop-relayctl.sh" status 2>/dev/null || true)"
-  echo "Codex Desktop relay: ${relay_status:-status=unknown app_server=ws://127.0.0.1/<capability>}"
+  local type="$1" project="$2"
+  local pairs found=0
+  pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
 
-  for meta in "$RUN_DIR"/codex-bridge.*.meta; do
-    [ -f "$meta" ] || continue
-    meta_project="$(sed -n 's/^project=//p' "$meta" | head -1)"
-    [ "$(agmsg_canonical_path "$meta_project")" = "$(agmsg_canonical_path "$project")" ] || continue
-    [ "$(sed -n 's/^type=//p' "$meta" | head -1)" = "$type" ] || continue
-    found=1
-    team="$(sed -n 's/^team=//p' "$meta" | head -1)"
-    name="$(sed -n 's/^name=//p' "$meta" | head -1)"
-    thread="$(sed -n 's/^thread=//p' "$meta" | head -1)"
-    pid="$(sed -n 's/^pid=//p' "$meta" | head -1)"
-    status="$(sed -n 's/^status=//p' "${meta%.meta}.health" 2>/dev/null | head -1 || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      echo "Codex visible bridge: $team/$name active pid=$pid thread=$thread health=${status:-unknown} app_server=ws://127.0.0.1/<capability>"
-    else
-      echo "Codex visible bridge: $team/$name stale thread=$thread health=${status:-unknown}"
+  if [ -z "$pairs" ]; then
+    echo "Codex bridge: no identities registered for this project"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r team name _rest; do
+    if [ -z "$team" ] || [ -z "$name" ]; then
+      continue
     fi
-  done
-
-  for chat in "$RUN_DIR"/codex-chat-visible.*.meta; do
-    [ -f "$chat" ] || continue
-    meta_project="$(sed -n 's/^project=//p' "$chat" | head -1)"
-    [ "$(agmsg_canonical_path "$meta_project")" = "$(agmsg_canonical_path "$project")" ] || continue
-    [ "$(sed -n 's/^type=//p' "$chat" | head -1)" = "$type" ] || continue
     found=1
-    team="$(sed -n 's/^team=//p' "$chat" | head -1)"
-    name="$(sed -n 's/^name=//p' "$chat" | head -1)"
-    thread="$(sed -n 's/^thread=//p' "$chat" | head -1)"
-    echo "Codex visible turn fallback: $team/$name waiting thread=$thread unread_preserved=true"
-  done
-  [ "$found" -eq 1 ] || echo "Codex visible bridge: no role is currently bound for this project"
+
+    local healthfile health_status health_failures health_error health_updated
+    healthfile="$RUN_DIR/codex-app-monitor.$team.$name.health"
+    if [ -f "$healthfile" ]; then
+      health_status=$(awk -F= '/^status=/{sub(/^status=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_failures=$(awk -F= '/^consecutive_failures=/{sub(/^consecutive_failures=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_error=$(awk -F= '/^last_error=/{sub(/^last_error=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_updated=$(awk -F= '/^updated_at=/{sub(/^updated_at=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      echo "Codex monitor health: $team/$name status=${health_status:-unknown} failures=${health_failures:-unknown} last_error=${health_error:-unknown} updated=${health_updated:-unknown}"
+    fi
+
+    local base pidfile metafile pid meta_pid meta_project meta_type meta_ok
+    base="$RUN_DIR/codex-bridge.$team.$name"
+    pidfile="$base.pid"
+    metafile="$base.meta"
+
+    local app_base app_pidfile app_metafile app_pid app_thread app_transport
+    app_base="$RUN_DIR/codex-app-monitor.$team.$name"
+    app_pidfile="$app_base.pid"
+    app_metafile="$app_base.meta"
+
+    local chat_metafile chat_project chat_type chat_transport chat_status chat_updated
+    chat_metafile="$RUN_DIR/codex-chat-visible.$team.$name.meta"
+
+    if [ ! -f "$pidfile" ]; then
+      if [ -f "$app_pidfile" ] && [ -f "$app_metafile" ]; then
+        app_pid=$(cat "$app_pidfile" 2>/dev/null || true)
+        app_thread=$(awk -F= '/^thread=/{sub(/^thread=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
+        app_transport=$(awk -F= '/^transport=/{sub(/^transport=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
+        if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+          echo "Codex app monitor: $team/$name alive (pid $app_pid, thread $app_thread, transport ${app_transport:-codex-background-thread-resume})"
+        else
+          echo "Codex app monitor: $team/$name stale pidfile (pid ${app_pid:-empty} not running)"
+        fi
+      elif [ -f "$chat_metafile" ]; then
+        chat_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_transport=$(awk -F= '/^transport=/{sub(/^transport=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_status=$(awk -F= '/^status=/{sub(/^status=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_updated=$(awk -F= '/^updated_at=/{sub(/^updated_at=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        if [ "$chat_project" = "$project" ] && [ "$chat_type" = "$type" ]; then
+          echo "Codex chat-visible turn: $team/$name armed (transport ${chat_transport:-codex-chat-visible-turn}, status ${chat_status:-waiting_for_chat_turn}, updated ${chat_updated:-unknown})"
+        else
+          echo "Codex chat-visible turn: $team/$name stale metadata"
+        fi
+      else
+        echo "Codex bridge: $team/$name not running"
+      fi
+      continue
+    fi
+
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -z "$pid" ]; then
+      echo "Codex bridge: $team/$name stale pidfile (empty pid)"
+      continue
+    fi
+
+    if [ ! -f "$metafile" ]; then
+      echo "Codex bridge: $team/$name stale pidfile (missing metadata)"
+      continue
+    fi
+
+    meta_ok=1
+    meta_pid=$(awk -F= '/^pid=/{sub(/^pid=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    meta_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    meta_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
+    [ -n "$meta_pid" ] && [ "$meta_pid" != "$pid" ] && meta_ok=0
+    [ -n "$meta_project" ] && [ "$meta_project" != "$project" ] && meta_ok=0
+    [ -n "$meta_type" ] && [ "$meta_type" != "$type" ] && meta_ok=0
+    if [ "$meta_ok" -ne 1 ]; then
+      echo "Codex bridge: $team/$name stale pidfile (metadata mismatch)"
+      continue
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Codex bridge: $team/$name alive (pid $pid)"
+    else
+      echo "Codex bridge: $team/$name stale pidfile (pid $pid not running)"
+    fi
+  done <<< "$pairs"
+
+  if [ "$found" -eq 0 ]; then
+    echo "Codex bridge: no identities registered for this project"
+  fi
 }

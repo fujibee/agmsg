@@ -245,7 +245,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
-| **`monitor`** (default on Claude Code) | Claude Code: Monitor tool stream. Codex beta: authenticated Desktop relay + exact-thread role bridge | ~5s after attachment | Claude Code users; opted-in Codex Desktop users |
+| **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
 | **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
@@ -302,9 +302,9 @@ $agmsg                          — or /skills → agmsg
 
 Codex supports `mode monitor` as a **beta** visible app-server receiver, plus `mode turn` and `mode off`.
 
-> ⚠️ **Monitor is active only when the Codex Desktop relay and the exact-thread role bridge both report ready.** The relay multiplexes Desktop and the bridge onto one app-server, so a bridge-initiated turn is rendered in the same task. Bridge access requires both the relay's private seed and a `0600` per-role binding fixed to the canonical project, role, and exact thread; the shared seed alone cannot attach. Enabling it requires one Codex Desktop restart. A temporary fallback keeps the requested mode as `monitor`, uses the visible turn path for that task, and leaves mail unread. Background `codex exec resume`, heartbeat, cron, rollout inference, and scheduled polling are prohibited.
+> ⚠️ **Monitor is active only when a visible app-server bridge attaches to the persisted Codex task.** Background `codex exec resume` delivery is prohibited because a successful CLI turn can consume and answer mail without displaying the handling in Codex Desktop. When no visible bridge is available, agmsg keeps mail unread and downgrades the effective mode to `turn`. No heartbeat, cron, or scheduled polling task is created.
 
-Run `agmsg actas <role>` in the intended visible task to bind its exact thread. SessionStart restores that role only in the same exact task; another task cannot infer or steal the binding. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
+If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
 ### GitHub Copilot CLI
 
@@ -473,7 +473,6 @@ sandbox_mode = "workspace-write"
 writable_roots = [
   "~/.agents/skills/agmsg/db",
   "~/.agents/skills/agmsg/teams",
-  "~/.agents/skills/agmsg/run",
 ]
 ```
 
@@ -484,7 +483,6 @@ If you installed agmsg under a custom command name, adjust the path accordingly:
 writable_roots = [
   "~/.agents/skills/m/db",
   "~/.agents/skills/m/teams",
-  "~/.agents/skills/m/run",
 ]
 ```
 
@@ -497,10 +495,9 @@ writable_roots = [
 ]
 ```
 
-Codex supports `mode turn`, `mode off`, and an opted-in Desktop `mode monitor`
-beta. The beta uses an authenticated local relay because Codex does not expose
-Claude Code's Monitor tool. The sandbox allowlist is required for manual
-commands, turn-end checks, and the monitor's private runtime state.
+Codex only supports `mode turn` and `mode off`; it does not have Claude Code's
+Monitor tool. The sandbox allowlist is still required for writes performed by
+manual `$agmsg` commands and turn-end inbox checks.
 
 Some Codex runtimes or automations may inject a managed permission profile for a
 single run. In that case, the run-specific writable roots must also include the

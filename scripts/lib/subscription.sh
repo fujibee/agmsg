@@ -20,7 +20,7 @@ agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 agmsg_subscription_pairs() {
   local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}"
   local scripts_dir="$SKILL_DIR/scripts"
-  local pairs filtered skipped held state result codex_seat_owned
+  local pairs filtered skipped held state result
 
   pairs="$("$scripts_dir/identities.sh" "$project" "$type")"
   if [ -n "$active_name" ]; then
@@ -35,27 +35,19 @@ agmsg_subscription_pairs() {
   local team agent
   while IFS=$'\t' read -r team agent; do
     [ -z "$team" ] && continue
-    codex_seat_owned=""
-    if [ "$type" = "codex" ] && actas_codex_seat_matches "$team" "$agent" "$project"; then
-      codex_seat_owned=1
-    fi
     state=$(actas_lock_state "$team" "$agent" "$owner_id")
     case "$state" in
       other:*)
-        if [ -n "$codex_seat_owned" ] && [[ "${state#other:}" == codex-seat:* ]]; then
-          :
+        if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
+          held="${held:+$held }${team}/${agent}(${state#other:})"
         else
-          if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
-            held="${held:+$held }${team}/${agent}(${state#other:})"
-          else
-            skipped="${skipped:+$skipped }${team}/${agent}(${state#other:})"
-          fi
-          continue
+          skipped="${skipped:+$skipped }${team}/${agent}(${state#other:})"
         fi
+        continue
         ;;
     esac
 
-    if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ] && [ -z "$codex_seat_owned" ]; then
+    if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
       result=$(actas_lock_claim "$team" "$agent" "$owner_id" 2>/dev/null || true)
       case "$result" in
         held:*)

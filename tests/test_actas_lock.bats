@@ -217,26 +217,6 @@ live_pid() { echo "$$"; }
   [ -f "$(actas_lock_path "T" "alice")" ]
 }
 
-@test "Codex seat survives GC and blocks a generic actas claim" {
-  local seat owner project
-  project="$TEST_SKILL_DIR/project"
-  seat="$(codex_seat_path "T" "alice")"
-  owner="$(actas_codex_owner "$project" "thread-visible")"
-  printf '%s\tcodex\tT\talice\tthread-visible\t2026-07-14T00:00:00Z\n' \
-    "$project" > "$seat"
-  chmod 600 "$seat"
-
-  run actas_lock_gc_stale
-  [ "$status" -eq 0 ]
-  [ "$output" = "0" ]
-  [ -f "$seat" ]
-
-  run actas_lock_claim "T" "alice" "generic-owner"
-  [ "$status" -eq 1 ]
-  [ "$output" = "held:$owner" ]
-  [ -f "$seat" ]
-}
-
 # --- state classification ---
 
 @test "state: free when no lock exists" {

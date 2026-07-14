@@ -18,6 +18,8 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"  # agmsg_agent_pid, for instance-id derivation
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hash.sh"
 
 # Some Stop-hook runtimes (codex, copilot) want an explicit JSON status object
 # even when there is nothing to deliver; others (claude-code) stay silent. This
@@ -90,25 +92,23 @@ if [ -z "$AGENT" ] || [ -z "$TEAMS" ]; then
   exit 0
 fi
 
-# Codex seats are globally keyed by team + role and contain one project plus
-# exact task id. Select only the seat owned by this visible task; never fall
-# back to another role in the same project when the exact id is unavailable.
+# Codex actas changes the visible role for sends. In turn delivery, use that
+# same role for receives so a chat-visible fallback does not keep polling the
+# first registered identity for the project.
 if [ "$TYPE" = "codex" ]; then
   PROJECT_RESOLVED="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
-  ACTAS_THREAD="${AGMSG_CODEX_ACTAS_THREAD:-${CODEX_THREAD_ID:-}}"
-  case "$ACTAS_THREAD" in ""|loaded|current|unresolved) exit 0 ;; esac
-  ACTAS_MATCHES=0
-  for ACTAS_STATE in "$SKILL_DIR/run"/codex-seat.*.tsv; do
-    [ -f "$ACTAS_STATE" ] || continue
-    IFS=$'\t' read -r ACTAS_PROJECT ACTAS_TYPE ACTAS_TEAM ACTAS_NAME ACTAS_SAVED_THREAD _ACTAS_TS < "$ACTAS_STATE" || true
-    if [ "$ACTAS_PROJECT" = "$PROJECT_RESOLVED" ] && [ "$ACTAS_TYPE" = "$TYPE" ] \
-        && [ "$ACTAS_SAVED_THREAD" = "$ACTAS_THREAD" ]; then
+  PROJECT_HASH="$(printf '%s' "$PROJECT_RESOLVED" | agmsg_sha1)"
+  ACTAS_STATE="$SKILL_DIR/run/codex-last-actas.$PROJECT_HASH.tsv"
+  if [ -f "$ACTAS_STATE" ]; then
+    IFS=$'\t' read -r ACTAS_PROJECT ACTAS_TYPE ACTAS_TEAM ACTAS_NAME _ACTAS_TS < "$ACTAS_STATE" || true
+    if [ "$ACTAS_PROJECT" = "$PROJECT_RESOLVED" ] \
+        && [ "$ACTAS_TYPE" = "$TYPE" ] \
+        && [ -n "${ACTAS_TEAM:-}" ] \
+        && [ -n "${ACTAS_NAME:-}" ]; then
       AGENT="$ACTAS_NAME"
       TEAMS="$ACTAS_TEAM"
-      ACTAS_MATCHES=$((ACTAS_MATCHES + 1))
     fi
-  done
-  [ "$ACTAS_MATCHES" = "1" ] || exit 0
+  fi
 fi
 
 # Cooldown check. The marker is hook runtime state, not message storage, so it
@@ -134,9 +134,7 @@ fi
 mkdir -p "$SKILL_DIR/run"
 touch "$MARKER"
 
-# Check for unread messages. Codex Stop hooks only surface a pending notice;
-# they must not acknowledge mail on behalf of the visible task. The explicit
-# official inbox command remains the Codex read boundary.
+# Check for unread messages and mark as read
 DB="$(agmsg_db_path)"
 if [ ! -f "$DB" ]; then exit 0; fi
 
@@ -158,27 +156,10 @@ for team in "${TEAM_LIST[@]}"; do
   # role. That asymmetry is the Codex caveat documented in README — if a
   # Codex session actas'd into <name>, check-inbox is still polling
   # whatever whoami chose first, not <name>.
-  if [ "$TYPE" != "codex" ]; then
-    state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
-    case "$state" in
-      other:*) continue ;;
-    esac
-  fi
-
-  if [ "$TYPE" = "codex" ]; then
-    # The Stop hook is only a visibility nudge. Do not select message ids,
-    # senders, timestamps, or bodies here; the explicit inbox.sh invocation in
-    # the visible task is the sole Codex content-read and acknowledgement path.
-    COUNT=$(agmsg_sqlite "$DB" "
-      SELECT count(*) FROM messages
-      WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL;
-    ")
-    case "$COUNT" in ''|0|*[!0-9]*) ;; *)
-      OUTPUT+="$COUNT unread agmsg message(s) pending for team=$team role=$AGENT."$'\n'
-      ;;
-    esac
-    continue
-  fi
+  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
+  case "$state" in
+    other:*) continue ;;
+  esac
 
   RESULT=$(agmsg_sqlite "$DB" "
     SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
@@ -213,9 +194,6 @@ fi
 
 # New messages found
 if [ -n "$OUTPUT" ]; then
-  if [ "$TYPE" = "codex" ]; then
-    OUTPUT+="Run the official inbox command in this visible Codex task before handling these messages: $SCRIPT_DIR/inbox.sh <team> $AGENT"$'\n'
-  fi
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
   ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
   cat <<ENDJSON

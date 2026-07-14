@@ -1,25 +1,38 @@
 # Codex Monitor Beta
 
-Codex does not expose Claude Code's Monitor tool.
-agmsg therefore uses one authenticated loopback relay to let Codex Desktop and a role bridge share the same app-server.
-An inbound wake starts a turn only in the exact visible Codex task selected by `actas`.
+Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta can
+deliver mail only through an app-server bridge that renders the handling in the
+same visible Codex thread. The last explicit `actas` role is rebound from
+SessionStart after restart or compaction.
 
-> **Experimental beta.** Monitor is active only while the Desktop relay and the exact-thread role bridge both report `ready`.
-> If Desktop, the relay, or the bridge is unavailable, the requested mode remains `monitor`, the current task uses the visible turn fallback, and mail remains unread.
+> ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
+> Monitor mode is active only after a visible app-server bridge attaches to the
+> selected thread. If no bridge is available, agmsg keeps mail unread and changes
+> the effective mode to `turn`. Background `codex exec resume`, cron, heartbeat,
+> and scheduled polling are prohibited because they can process mail without
+> showing the work to the human operator.
 
-## Enable
+## Quick Start
+
+Enable monitor mode in a project:
 
 ```bash
 ~/.agents/skills/agmsg/scripts/delivery.sh set monitor codex "$PWD"
 ```
 
-Then run `agmsg actas <role>` in the Codex task that should receive the role's messages.
-The task must provide an exact `CODEX_THREAD_ID`; agmsg never guesses it from rollout files, a loaded-task list, or a newly created thread.
+The command:
 
-On macOS, enabling monitor mode installs the per-user Desktop relay LaunchAgent.
-Restart Codex Desktop once so it inherits the relay endpoint.
-Until Desktop reconnects, `actas-monitor.sh` reports a visible-turn fallback instead of claiming that monitoring is active.
-Enabling this relay also disarms any lease state left by the earlier heartbeat/watchdog design, so both delivery paths cannot remain active for the same project.
+1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
+   fallback for the project.
+2. Persists the last explicit `actas` role so SessionStart can rebind it.
+3. After `actas` binds a concrete thread, attaches the visible app-server bridge
+   for that exact team/role/thread tuple or downgrades to `turn`.
+4. Prints a shell function that routes interactive `codex` launches through the
+   monitor shim.
+
+The bridge may observe unread count and high-water id, but it does not read
+message bodies or mark messages read. The visible persisted thread owns the
+official inbox read, substantive work, progress reporting, and any reply.
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -29,134 +42,233 @@ The Codex sandbox must allow writes to the installed skill's runtime state:
 ~/.agents/skills/<cmd>/run
 ```
 
-## Architecture
+`install.sh` and `install.sh --update` add these writable roots to
+`~/.codex/config.toml` when that file exists.
+
+Add the printed function to your shell profile. It looks like:
+
+```bash
+codex() {
+  ~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-shim.sh "$@"
+}
+```
+
+Restart the shell, then launch Codex normally:
+
+```bash
+codex
+```
+
+In monitor-mode projects, the function routes interactive Codex launches through
+the bridge. Outside monitor-mode projects, it passes through to the real Codex.
+
+When Codex.app is opened normally, SessionStart restores the last `actas` role.
+If no visible app-server is available, the effective delivery mode becomes
+`turn`; the Stop hook checks the inbox on a later visible assistant turn. agmsg
+does not claim that autonomous monitoring is active in this state.
+
+`mode off`, `mode turn`, `drop`/`reset`, and SessionEnd stop the matching
+receiver and remove its LaunchAgent/runtime files. No cron, heartbeat, or
+scheduled polling automation is created for this path.
+
+## Optional PATH Shim
+
+If you prefer the previous global PATH shim setup, install it explicitly:
+
+```bash
+~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-shim-install.sh install
+```
+
+Then put `~/.agents/bin` before the real Codex binary on PATH:
+
+```bash
+export PATH="$HOME/.agents/bin:$PATH"
+```
+
+If `~/.agents/bin/codex` already exists and is not the agmsg shim, agmsg leaves
+it untouched. You can either move that command aside and run the install command
+again, or launch monitor sessions explicitly:
+
+```bash
+~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-monitor.sh
+```
+
+For custom command names, replace `agmsg` with the installed skill name:
+
+```bash
+~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh
+```
+
+## What The Shim Does
+
+The shell function and optional PATH shim only wrap interactive Codex TUI
+launches:
+
+```bash
+codex
+codex resume
+codex "fix this bug"
+```
+
+Noninteractive subcommands pass through to the real Codex binary:
+
+```bash
+codex exec ...
+codex app-server ...
+codex login
+codex logout
+```
+
+The shim also passes through when the current project is not in Codex monitor
+mode.
+
+## Bridge Mechanics
+
+`codex-monitor.sh` starts (or reuses) an agmsg-managed Codex app-server socket
+under `~/.agents/skills/<cmd>/run/`, starts the out-of-sandbox bridge launcher,
+and then connects the Codex TUI to that socket with `--remote`.
+
+Codex fires the SessionStart hook on the session's **first turn** (the first
+message you send), not the moment the TUI opens — so the bridge does not exist
+until you interact once after a restart.
+
+The SessionStart hook is designed to **not** start the bridge directly — a
+hook-launched process was observed to run inside the Codex sandbox and fail to
+connect to the unix socket (EPERM). Instead:
+
+> Note: this EPERM-avoidance design (the launcher + request-file rendezvous
+> below) is under review — in practice the hook has been seen to launch a
+> detached bridge directly and connect fine, suggesting the launcher layer may
+> be redundant. See #153.
+
+1. `session-start.sh` (the hook) resolves the thread id — `CODEX_THREAD_ID` when
+   set, otherwise the newest Codex rollout whose `session_meta` cwd matches the
+   project (fresh / `codex exec` sessions never export `CODEX_THREAD_ID`) — and
+   writes a **request file** under `run/` (it never touches the socket).
+2. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
+   sandbox, reads the request file and starts `codex-bridge.js`.
+3. The bridge connects to the same app-server over **WebSocket-over-UDS**,
+   resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
+   API (which checks the agmsg DB for unread rows, `read_at IS NULL`).
+4. On unread state it starts a turn on that thread with an instruction to run
+   the official `inbox.sh`. The bridge does not read the message body or mark it
+   read on the normal path. The visible Codex turn owns reading, substantive
+   work, verification, and any reply, then the bridge re-arms after the turn.
+
+Turns are serialized (one per thread): a message that arrives while a turn is
+running stays unread and is delivered after the turn completes. The turn ends
+via `turn/completed`, a `thread/status` idle, or a watchdog (the real app-server
+does not reliably send `turn/completed`); only then is the next `watch-once`
+armed. If a turn does not consume the unread message, the same `max_id` reappears
+and the bridge stops instead of looping.
 
 ```mermaid
-flowchart LR
-  desktop["Visible Codex Desktop"] -->|private desktop capability| relay["loopback Desktop relay"]
-  bridge["exact-thread role bridge"] -->|bridge seed + private role capability| relay
-  relay --> appserver["one stdio app-server"]
-  bridge --> watch["one watch-once process"]
-  watch --> db[("agmsg SQLite")]
-  bridge -->|deterministic wake dispatch| relay
-  relay -->|turn/start with exact thread id| desktop
+flowchart TD
+  user["User runs codex"] --> shim["codex shell function or ~/.agents/bin/codex shim"]
+  shim --> mode{"Project delivery mode?"}
+  mode -- "not monitor / codex exec / --version" --> real["real codex"]
+  mode -- "monitor (interactive)" --> monitor["codex-monitor.sh"]
+
+  monitor --> server{"app-server socket exists?"}
+  server -- "no" --> startServer["codex app-server --listen unix://..."]
+  server -- "yes" --> reuseServer["reuse socket"]
+  monitor --> launcher["codex-bridge-launcher.sh (outside sandbox)"]
+  startServer --> remote["codex --remote unix://..."]
+  reuseServer --> remote
+
+  remote --> hook["SessionStart hook → session-start.sh (in sandbox)"]
+  hook --> thread["resolve thread: CODEX_THREAD_ID || newest matching rollout"]
+  thread --> request["write request file under run/ (no socket — EPERM)"]
+  request -.-> launcher
+  launcher --> bridge["codex-bridge.js → app-server (WebSocket-over-UDS)"]
+  bridge --> watch["arm watch-once.sh (process/spawn)"]
+  watch --> db[("agmsg SQLite DB (read_at IS NULL)")]
+  db --> unread{"Unread message?"}
+  unread -- "no (timeout)" --> watch
+  unread -- "yes" --> turn["turn/start with official inbox instruction"]
+  turn --> tui["Current Codex TUI thread"]
+  tui --> inbox["official inbox.sh reads and marks messages"]
+  inbox --> work["substantive work, verification, and reply"]
+  work --> ended["turn ends: completed / idle / watchdog"]
+  ended --> watch
 ```
 
-The relay listens only on `127.0.0.1`.
-Desktop uses one private capability, while bridges require both a shared bridge seed and a random per-role capability.
-The Desktop capability, bridge seed, role binding, and role endpoint are regular non-symlink `0600` files.
-Capabilities are not written to plists, logs, health files, status output, or public bridge metadata.
+## Worker Guardrails
 
-The role binding fixes the canonical project, type, team, role, exact thread id, and role state key before the relay accepts a bridge connection.
-Possession of the shared bridge seed alone cannot open a role connection.
-Only one bridge may use a role binding at a time.
+> ⚠️ **Never poll agmsg by launching a full Codex/Claude session on a short
+> interval.** Use a shell-only gate first and start the heavy agent only when
+> there is actually something to handle.
 
-The bridge is scoped by that binding.
-It may call only the relay methods needed to resume that thread, dispatch a deterministic wake, and manage its owned `watch-once.sh` process.
-The relay rejects bridge attempts to create a thread, address another thread, override project roots or history, spawn another command, or kill another client's process.
-Approval and other server requests are routed only to the visible Desktop client.
+### Case study: empty-poll OOM (#163)
 
-## Exact-task lease
+A user wired an autonomous worker as a `cron` job (`FREQ=MINUTELY;INTERVAL=3`)
+that launched a **full Codex session every 3 minutes** to check the agmsg inbox,
+git state, GitHub issues, and so on. The approval/away-window had already
+expired, so almost every tick returned `No new messages.` — yet each tick still
+spun up a complete Codex session with a long prompt and project context.
 
-An explicit `actas` stores the project, type, team, role, and exact thread id in a global `(team, role)` Codex seat.
-It also claims the same atomic role-lock namespace used by generic `actas`, so a Claude and a Codex task cannot concurrently own the same inbox role.
-SessionStart restores the role only when the current exact thread id equals the stored id.
-A different or new Codex task cannot take the role implicitly and must run `actas` explicitly.
-If another task still holds the role, that explicit claim is rejected until the original task ends or the role is dropped/reset.
+About 60 Codex sessions were created in under three hours. Codex Desktop keeps a
+transcript / trace / tool-output / local log DB per session, so the no-op runs
+accumulated: `~/.codex/logs_2.sqlite` grew to ~2.2 GB (plus ~1.1 GB WAL), Codex
+memory climbed to ~158 GB, and macOS hit a Low-Memory / jetsam state that forced
+a hard restart.
 
-SessionEnd, `drop`/`reset`, `mode turn`, and `mode off` stop the matching role bridge and release its lease.
-Cleanup derives the launchd label from the project and role, so it still removes a job when a crash has already deleted `.meta` or `.pid`.
-Project mode changes do not stop the global relay; uninstall or an explicit `codex-desktop-relayctl.sh disable` does.
+This is **not** an agmsg transport or SQLite bug. The root cause is the worker
+shape: a short-interval scheduler that runs a heavyweight agent as the poller,
+with no cheap no-op path, so empty inboxes still pay the full cost — and Codex
+Desktop's per-session UI/log accumulation amplifies it.
 
-## Unread and acknowledgement boundary
+### `watch-once.sh` is not a Codex Desktop delivery fallback
 
-The bridge observes only unread count and `max_id` through `watch-once.sh`.
-It does not read message bodies and never updates `read_at`.
-The Codex Stop hook is also peek-only.
-
-Only the official command below, run inside the visible task, acknowledges Codex mail:
-
-```bash
-~/.agents/skills/<cmd>/scripts/inbox.sh <team> <role>
-```
-
-The bridge starts a turn that instructs the visible task to run that command, handle the message, show progress and results in the same task, and send any reply through `send.sh`.
-
-Each role and exact thread has a private `0600` wake-state file.
-The bridge records `observed`, `accepted`, and `ack_confirmed` phases with an atomic rename and a file `fsync`.
-The wake's `clientUserMessageId` is a deterministic SHA-256 marker derived from the role state key, exact thread, and unread `max_id`; it contains none of those raw values.
-
-The relay keeps a separate private, directory-synced dispatch record.
-It writes `dispatching` before `turn/start` and `accepted` after app-server accepts the turn.
-After a relay or Desktop restart, an existing dispatch record permits history reconciliation only; it never permits a blind second `turn/start`.
-
-Before the relay calls `turn/start`, it reads the exact thread history and checks that marker.
-If the first response was lost after app-server accepted the turn, a retry returns only `reconciled`; it never exposes thread history to the bridge and never starts a second turn.
-
-| Condition | Health/status | Automatic action | Unread handling |
-| --- | --- | --- | --- |
-| New `max_id` | `ready` → `observed` internally | Dispatch once with the deterministic marker | Remains unread |
-| Dispatch response or history check is unavailable | `paused_ambiguous_wake` | Retry reconciliation with capped exponential delay and the same marker | Remains unread; no blind resend |
-| The same accepted `max_id` is still unread | `waiting_for_ack` | Re-arm after a bounded delay without another dispatch | Remains unread |
-| `watch-once.sh` reports no unread mail | `ready`; state becomes `ack_confirmed` | Continue watching | The visible task already acknowledged it through `inbox.sh` |
-| Watcher fails below the configured limit | `waiting_watch_retry` | Retry with capped exponential delay | Remains unread |
-| Watcher repeatedly fails | `paused_watch_failure` | Keep the bridge alive and continue bounded retries | Remains unread |
-| app-server or relay connection is lost | `retrying_transient` | Reconnect in-process with capped exponential delay | Remains unread |
-| Exact `thread/resume` is invalid | `terminal_thread_error` | Exit successfully and retain a tombstone | Remains unread |
-
-`paused_ambiguous_wake` is a fail-closed transient state, not permission to resend.
-The bridge stays attached and retries only the history reconciliation path.
-It does not wait for another SessionStart or explicit `actas` to recover.
-
-The role and relay LaunchAgents use `KeepAlive.SuccessfulExit=false`.
-Unexpected crashes are restarted, while terminal thread errors and permanent configuration failures exit successfully so launchd does not loop.
-The relay runner owns capped app-server retry backoff and passes its pid to the relay; if the runner disappears, the relay exits nonzero and reaps its app-server process group before launchd restarts the pair.
-
-## Fallback behavior
-
-Fallback is per task and does not rewrite the project's requested mode from `monitor` to `turn`.
-This matters during the initial Desktop restart: a pre-restart fallback must be able to attach automatically on the next SessionStart of the same task.
-
-Fallback writes a project/role-scoped visible status record and leaves unread rows untouched.
-It never invokes `codex exec resume`, starts a hidden Codex session, creates a new app-server thread, scans rollout files, or schedules polling.
-
-## Status and shutdown
-
-```bash
-~/.agents/skills/agmsg/scripts/delivery.sh status codex "$PWD"
-~/.agents/skills/agmsg/scripts/delivery.sh set turn codex "$PWD"
-~/.agents/skills/agmsg/scripts/delivery.sh set off codex "$PWD"
-~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-desktop-relayctl.sh status
-~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-desktop-relayctl.sh disable
-```
-
-A healthy monitor requires all of the following:
-
-- relay health is `ready`;
-- a visible Desktop client is connected and initialized;
-- the role bridge process and its owned metadata are live;
-- bridge health is `ready` for the stored exact thread;
-- the role's private endpoint matches the relay's current private endpoint.
-
-`mode turn` and `mode off` stop only bridges owned by the selected project.
-Another project's bridge and the shared relay remain running.
-
-## Prohibited worker shape
-
-Do not combine `watch-once.sh` with cron, heartbeat, scheduled automation, or `codex exec resume`.
-That pattern creates heavyweight Codex sessions even when no useful work is visible, can consume mail outside the user's task, and previously caused runaway task and log-database growth.
-
-`watch-once.sh` is only a shell gate used by the exact visible bridge:
+`watch-once.sh` is a shell-only, one-shot inbox oracle. The visible app-server
+bridge uses it to avoid starting a turn on an empty inbox.
 
 ```text
-exit 0  unread inbound exists (status=pending count=<n> max_id=<id>)
-exit 2  nothing pending
-exit 1  configuration or runtime error
+exit 0  unread inbound exists   (prints: status=pending count=<n> max_id=<id>)
+exit 2  nothing pending          (prints: status=timeout)
+exit 1  configuration / runtime error
 ```
 
-## Related files
+Do not combine it with a scheduler and `codex exec` as a substitute for Codex
+Desktop delivery. That path cannot guarantee that the received message,
+progress, reply, and result appear in the user's visible thread.
 
-- [Desktop relay](../scripts/drivers/types/codex/codex-desktop-relay.js)
-- [Relay controller](../scripts/drivers/types/codex/codex-desktop-relayctl.sh)
-- [Role bridge](../scripts/drivers/types/codex/codex-bridge.js)
-- [Role binding](../scripts/drivers/types/codex/actas-monitor.sh)
+### Defense in depth
+
+For a separately authorized non-Desktop worker, layer these on top of the gate:
+
+- **Single-flight lock per `(team, agent)`** so overlapping ticks don't stack
+  concurrent agents:
+  ```bash
+  exec 9>"/tmp/agmsg-worker.myteam.myagent.lock"
+  flock -n 9 || exit 0   # another tick is still running; skip this one
+  ```
+- **Approval / away-window expiry check before launch.** If the worker is only
+  authorized for a window, verify it hasn't expired *before* starting the agent,
+  and disable the worker (or exit) once it has — don't leave it `ACTIVE` past its
+  window.
+- **Exponential backoff on repeated no-ops.** After N consecutive empty gates,
+  widen the interval so an idle worker stops hammering.
+- **Max-run cap.** Bound total runs (e.g. `COUNT` for `cron`) and prefer
+  intervals measured in minutes, not seconds.
+- **Codex Desktop note.** Codex Desktop retains transcript / tool-output / trace
+  per session and a local log DB (`~/.codex/logs_*.sqlite`). Even short no-op
+  sessions accumulate there, so a high-frequency spawner is far heavier than the
+  per-run wall-clock suggests. The shell gate above avoids creating those
+  sessions at all on empty ticks.
+
+### Emergency stop (runaway worker)
+
+1. Make the worker inactive / unschedule the `cron` job so it stops spawning.
+2. Back off delivery: `delivery.sh set turn codex "$PROJECT"` (or `off`) to stop
+   monitor delivery.
+3. Kill stale monitors / spawned sessions and any orphaned bridge
+   (`mode off` tears the bridge down; see #149).
+4. Inspect Codex Desktop log-DB bloat: `~/.codex/logs_*.sqlite` and its WAL.
+
+## Related Details
+
+- [Delivery modes](../README.md#delivery-modes)
+- [Codex bridge implementation](../scripts/drivers/types/codex/codex-bridge.js)
+- [Monitor launcher](../scripts/drivers/types/codex/codex-monitor.sh)
+- [Codex shim](../scripts/drivers/types/codex/codex-shim.sh)
