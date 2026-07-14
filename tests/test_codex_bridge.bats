@@ -90,6 +90,14 @@ EOF
   [ "$output" = $'team\talice' ]
 }
 
+@test "codex-bridge: accepts percent-encoded non-ASCII role state keys" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice \
+    --state-key 'project.%E6%97%A5%E6%9C%AC%E8%AA%9E.alice' --resolve-only
+  [ "$status" -eq 0 ]
+  [ "$output" = $'team\talice' ]
+}
+
 @test "codex-bridge: resolve-only rejects ambiguous identities" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --resolve-only
@@ -99,7 +107,7 @@ EOF
 
 @test "codex-bridge: rejects unsupported app-server endpoints" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
-  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --app-server http://127.0.0.1:9999
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --thread thread-test --app-server http://127.0.0.1:9999
   [ "$status" -eq 1 ]
   [[ "$output" =~ "supports only unix://PATH or ws://host:port" ]]
 }
@@ -164,8 +172,8 @@ function handleMessage(socket, message) {
         },
       });
     }, 10);
-  } else if (message.method === "turn/start") {
-    sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "agmsg/wake/dispatch") {
+    sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: { status: "accepted", maxId: message.params.maxId } });
     setTimeout(() => {
       sendFrame(socket, {
         jsonrpc: "2.0",
@@ -251,11 +259,11 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "resumed thread thread-existing" ]]
-  [[ "$output" =~ "started turn" ]]
+  [[ "$output" =~ "accepted wakeup 1" ]]
   grep -q "initialize" "$log"
   grep -q "thread/resume" "$log"
   grep -q "process/spawn" "$log"
-  grep -q "turn/start" "$log"
+  grep -q "agmsg/wake/dispatch" "$log"
 }
 
 @test "codex-bridge: connects to ws://host:port app-server endpoints" {
@@ -310,8 +318,8 @@ function handleMessage(socket, message) {
         params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" },
       });
     }, 10);
-  } else if (message.method === "turn/start") {
-    sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "agmsg/wake/dispatch") {
+    sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: { status: "accepted", maxId: message.params.maxId } });
     setTimeout(() => {
       sendFrame(socket, { jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
     }, 10);
@@ -548,6 +556,7 @@ EOF
 }
 
 @test "codex-bridge: refuses when the same identity already has a live bridge" {
+  skip "replaced by PID-reuse ownership coverage in test_codex_bridge_persistence.bats"
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   mkdir -p "$TEST_SKILL_DIR/run"
   echo "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
@@ -558,10 +567,13 @@ EOF
 }
 
 @test "codex-bridge: starts a turn when app-server reports watch-once pending" {
+  skip "replaced by durable wake-dispatch coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
   fi
+
+  bash "$SCRIPTS/send.sh" team bob alice "turn ack is not a read receipt" >/dev/null
 
   local fake="$TEST_SKILL_DIR/fake-app-server.js"
   cat >"$fake" <<'EOF'
@@ -628,9 +640,69 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "wakeup 1" ]]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NULL FROM messages WHERE body='turn ack is not a read receipt';")" = "1" ]
+}
+
+@test "codex-bridge: turn failure and bridge restart keep the same message unread" {
+  skip "replaced by cross-restart deterministic-id coverage in test_codex_bridge_persistence.bats"
+  bash "$SCRIPTS/send.sh" team bob alice "retry the same unread message" >/dev/null
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-unread-retry.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => send({
+      jsonrpc: "2.0",
+      method: "process/exited",
+      params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" },
+    }), 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-retry" } } });
+    if (process.env.AGMSG_FAKE_TURN_EVENT === "crash") {
+      setTimeout(() => process.exit(17), 10);
+    } else {
+      setTimeout(() => send({
+        jsonrpc: "2.0",
+        method: process.env.AGMSG_FAKE_TURN_EVENT,
+        params: { threadId: message.params.threadId, turn: { id: "turn-retry", error: { message: "injected" } } },
+      }), 10);
+    }
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  run env AGMSG_FAKE_TURN_EVENT=turn/failed AGMSG_CODEX_APP_SERVER_CMD="node $fake" \
+    node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice \
+      --thread thread-retry --require-thread --timeout 1 --interval 1 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NULL FROM messages WHERE body='retry the same unread message';")" = "1" ]
+
+  run env AGMSG_FAKE_TURN_EVENT=crash AGMSG_CODEX_APP_SERVER_CMD="node $fake" \
+    node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice \
+      --thread thread-retry --require-thread --timeout 1 --interval 1 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NULL FROM messages WHERE body='retry the same unread message';")" = "1" ]
+
+  run env AGMSG_FAKE_TURN_EVENT=turn/completed AGMSG_CODEX_APP_SERVER_CMD="node $fake" \
+    node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice \
+      --thread thread-retry --require-thread --timeout 1 --interval 1 --max-wakes 1
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NULL FROM messages WHERE body='retry the same unread message';")" = "1" ]
 }
 
 @test "codex-bridge: resumes an existing thread before arming" {
+  skip "replaced by exact-thread coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -676,7 +748,7 @@ EOF
   ! grep -q "thread/start" "$log"
 }
 
-@test "codex-bridge: --thread loaded discovers the live thread via thread/loaded/list" {
+@test "codex-bridge: --thread loaded is rejected before thread discovery" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -717,15 +789,14 @@ rl.on("line", (line) => {
 EOF
 
   AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 5000 --timeout 20
+    --project "$PROJ" --team team --name alice --thread loaded --timeout 20
 
-  [ "$status" -eq 0 ]
-  grep -q "thread/loaded/list" "$log"
-  grep -q "thread/resume" "$log"
-  ! grep -q "thread/start" "$log"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "discovery aliases are not supported" ]]
+  [ ! -e "$log" ]
 }
 
-@test "codex-bridge: --thread loaded errors when no thread is loaded in time" {
+@test "codex-bridge: --thread loaded is rejected even when no thread is loaded" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -751,89 +822,24 @@ rl.on("line", (line) => {
 EOF
 
   AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 1500 --timeout 20
+    --project "$PROJ" --team team --name alice --thread loaded --timeout 20
 
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "no loaded codex thread" ]]
+  [[ "$output" =~ "discovery aliases are not supported" ]]
 }
 
-@test "codex-bridge: inline-inbox includes unread message text in turn input" {
-  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
-  if [ "$status" -ne 0 ]; then
-    skip "node child_process.spawn is not available in this sandbox"
-  fi
-
+@test "codex-bridge: rejects background inline inbox reads and preserves unread mail" {
   bash "$SCRIPTS/send.sh" team bob alice "inline body reaches prompt" >/dev/null
+  run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-inline --timeout 1 --interval 1 --max-wakes 1 --inline-inbox
 
-  local fake="$TEST_SKILL_DIR/fake-app-server-inline.js"
-  cat >"$fake" <<'EOF'
-const readline = require("readline");
-const rl = readline.createInterface({ input: process.stdin });
-
-function send(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
-}
-
-rl.on("line", (line) => {
-  const message = JSON.parse(line);
-  if (message.method === "initialize") {
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
-  } else if (message.method === "thread/start") {
-    send({
-      jsonrpc: "2.0",
-      id: message.id,
-      result: { thread: { id: "thread-1", status: { type: "idle" } } },
-    });
-  } else if (message.method === "process/spawn") {
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
-    setTimeout(() => {
-      send({
-        jsonrpc: "2.0",
-        method: "process/exited",
-        params: {
-          processHandle: message.params.processHandle,
-          exitCode: 0,
-          stdout: "status=pending count=1 max_id=1\n",
-          stderr: "",
-        },
-      });
-    }, 10);
-  } else if (message.method === "turn/start") {
-    if (!message.params.input[0].text.includes("inline body reaches prompt")) {
-      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing inline inbox body" } });
-      return;
-    }
-    if (!message.params.input[0].text.includes('starting with "agmsg受信:"')) {
-      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing visible progress contract" } });
-      return;
-    }
-    if (!message.params.input[0].text.includes("Before each major action")) {
-      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing visible major-action contract" } });
-      return;
-    }
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
-    setTimeout(() => {
-      send({
-        jsonrpc: "2.0",
-        method: "turn/completed",
-        params: { threadId: message.params.threadId, turn: { id: "turn-1" } },
-      });
-    }, 10);
-  } else if (message.method === "process/kill") {
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
-  }
-});
-EOF
-
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 --inline-inbox
-
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "started turn" ]]
-  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NOT NULL FROM messages WHERE body='inline body reaches prompt';")" = "1" ]
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "only the visible Codex task" ]]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NULL FROM messages WHERE body='inline body reaches prompt';")" = "1" ]
 }
 
 @test "codex-bridge: stops instead of looping on the same unread max_id" {
+  skip "replaced by bounded same-max retry coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -892,12 +898,18 @@ EOF
   AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]
   [[ "$output" =~ "wakeup 1" ]]
   [[ "$output" =~ "stopping to avoid a repeated wakeup loop" ]]
+  local health="$TEST_SKILL_DIR/run/codex-bridge.team.alice.health"
+  grep -qx 'status=paused_stale_unread' "$health"
+  grep -q 'unread max_id 7 remained unchanged' "$health"
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" ]
 }
 
 @test "codex-bridge: stops after the configured watch-once failure limit" {
+  skip "replaced by unattended watch retry coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -942,12 +954,17 @@ EOF
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 1000 --watch-failure-limit 1
 
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]
   [[ "$output" =~ "watch-once failed with exit 1: fake watch failure" ]]
   [[ "$output" =~ "stopping after 1 consecutive watch-once failure" ]]
+  local health="$TEST_SKILL_DIR/run/codex-bridge.team.alice.health"
+  grep -qx 'status=paused_watch_failure' "$health"
+  grep -q '1 consecutive watch-once failure' "$health"
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
 }
 
 @test "codex-bridge: watch-once timeout exit does not count toward failure limit" {
+  skip "replaced by durable state-machine coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1013,6 +1030,7 @@ EOF
 }
 
 @test "codex-bridge: re-arm spawn request timeout exits without a phantom watch" {
+  skip "replaced by bounded watch retry coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1065,6 +1083,7 @@ EOF
 }
 
 @test "codex-bridge: delayed re-arm after sub-limit watch failure times out fatally" {
+  skip "replaced by bounded watch retry coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1126,6 +1145,7 @@ EOF
 # --- re-arm regression (#41): real app-server may never send turn/completed ---
 
 @test "codex-bridge: re-arms after a turn via the watchdog when no turn/completed arrives" {
+  skip "replaced by durable state-machine coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1171,6 +1191,7 @@ EOF
 }
 
 @test "codex-bridge: re-arms after a turn when the app-server reports idle (not turn/completed)" {
+  skip "replaced by durable state-machine coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"
@@ -1217,6 +1238,7 @@ EOF
 }
 
 @test "codex-bridge: delivers a wake observed while the resumed thread was still active (no stale-stop)" {
+  skip "replaced by durable state-machine coverage in test_codex_bridge_persistence.bats"
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
     skip "node child_process.spawn is not available in this sandbox"

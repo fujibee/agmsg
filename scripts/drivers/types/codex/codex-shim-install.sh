@@ -9,14 +9,15 @@ usage() {
   cat <<EOF
 Usage: codex-shim-install.sh [function|install|remove|status]
 
-Prints the recommended shell function for agmsg Codex monitor mode.
+Prints an optional compatibility shell function.
 With no subcommand, prints the function.
 
 The optional global PATH shim can still be installed at:
   $TARGET
 
-The function and PATH shim both route only interactive Codex launches through
-agmsg's monitor bridge when the current project is in Codex monitor mode.
+The current Desktop monitor does not require this shim.
+Both wrappers pass through to the real Codex command by default.
+Set AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 only for the previous TUI transport.
 EOF
 }
 
@@ -35,7 +36,7 @@ case "$cmd" in
     ;;
   function|print-function|shell-function)
     cat <<EOF
-# agmsg Codex monitor beta: put this in your interactive shell profile.
+# Optional agmsg Codex compatibility wrapper; pass-through by default.
 codex() {
   $(shell_quote "$SCRIPT_DIR/codex-shim.sh") "\$@"
 }
@@ -48,6 +49,8 @@ EOF
       echo "codex-shim-install: move it aside or remove it first" >&2
       exit 1
     fi
+    # shell_quote only formats its argument; this block never reads TARGET.
+    # shellcheck disable=SC2094
     {
       echo "#!/usr/bin/env bash"
       echo "set -euo pipefail"

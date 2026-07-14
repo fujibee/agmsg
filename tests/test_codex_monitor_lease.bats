@@ -29,6 +29,18 @@ arm() {
   [[ "$output" == *"status=active"* ]]
 }
 
+@test "enabling the Desktop monitor disarms a legacy scheduled lease" {
+  arm >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Disabled legacy Codex heartbeat/watchdog lease state"* ]] || return 1
+
+  run bash "$LEASE" heartbeat "$TEST_PROJECT" team alice thread-123 --ttl 60
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=inactive"* ]] || return 1
+}
+
 @test "heartbeat renews an active lease and fallback stays dormant" {
   arm >/dev/null
 

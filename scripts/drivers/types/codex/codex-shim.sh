@@ -4,9 +4,10 @@ set -euo pipefail
 # Optional Codex entrypoint shim for agmsg monitor mode.
 #
 # Install this as ~/.agents/bin/codex before the real Codex binary on PATH.
-# In projects whose Codex delivery mode is `monitor`, interactive Codex TUI
-# launches are routed through codex-monitor.sh. Everything else is passed
-# through to the real Codex command unchanged.
+# The current Desktop monitor does not need this legacy TUI transport. The shim
+# therefore passes through by default; AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 is the
+# explicit compatibility opt-in for routing interactive monitor projects
+# through codex-monitor.sh.
 
 if [ "${AGMSG_CODEX_SHIM_WRAPPER:-}" = "1" ] && [ -n "${AGMSG_CODEX_SHIM_SCRIPT_DIR:-}" ]; then
   SCRIPT_DIR="$AGMSG_CODEX_SHIM_SCRIPT_DIR"
@@ -118,7 +119,8 @@ is_monitor_project() {
 
 real_codex="$(resolve_real_codex)"
 
-if [ "${AGMSG_CODEX_SHIM_DISABLE:-}" = "1" ] || [ "${AGMSG_CODEX_BRIDGE:-}" = "1" ]; then
+if [ "${AGMSG_CODEX_SHIM_DISABLE:-}" = "1" ] || [ "${AGMSG_CODEX_BRIDGE:-}" = "1" ] \
+    || [ "${AGMSG_CODEX_LEGACY_MONITOR_SHIM:-}" != "1" ]; then
   exec "$real_codex" "$@"
 fi
 

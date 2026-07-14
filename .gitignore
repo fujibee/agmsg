@@ -1,6 +1,7 @@
 # Runtime data (created at install destination, not in repo)
 db/
 teams/
+/run/
 .DS_Store
 .codex/
 .claude/

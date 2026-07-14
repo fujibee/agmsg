@@ -46,6 +46,8 @@ RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/hash.sh"
 # shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/type-registry.sh"
 # storage.sh provides agmsg_sqlite_mem (CR-safe sqlite, #180); hooks-json.sh's
 # primitives use it, so source storage first.
@@ -254,6 +256,8 @@ apply_settings() {
   agmsg_delivery_apply "$type" "$project" "$mode"
 }
 
+# Read by the dynamically sourced Codex delivery plug.
+# shellcheck disable=SC2034
 CODEX_MONITOR_DOC_URL="https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
 
 emit_monitor_directive() {
@@ -268,7 +272,7 @@ emit_monitor_directive() {
   # present (older CC, non-CC runtimes).
   local session_id="${CLAUDE_CODE_SESSION_ID:-}"
   if [ -z "$session_id" ]; then
-    session_id="agmsg-$(compat_uuidgen | tr 'A-Z' 'a-z')"
+    session_id="agmsg-$(compat_uuidgen | tr '[:upper:]' '[:lower:]')"
   fi
 
   # Key the watcher on the per-process instance id (#93) so parallel
@@ -326,7 +330,8 @@ EOF
 # codex` and by Codex turn fallback cleanup. The global shim is left alone (it
 # is cross-project). Echoes how many receiver processes were killed.
 wait_for_recorded_pid_exit() {
-  local pid="$1" check=0 state
+  local pid="$1" matcher="$2" check=0 state
+  shift 2
   while [ "$check" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
     state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     case "$state" in Z*) return 0 ;; esac
@@ -334,6 +339,9 @@ wait_for_recorded_pid_exit() {
     check=$((check + 1))
   done
   if kill -0 "$pid" 2>/dev/null; then
+    # Re-prove ownership immediately before escalation. The original process
+    # can exit after TERM and its PID can be recycled during this wait.
+    "$matcher" "$pid" "$@" || return 0
     kill -KILL "$pid" 2>/dev/null || return 1
     check=0
     while [ "$check" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
@@ -346,9 +354,14 @@ wait_for_recorded_pid_exit() {
   ! kill -0 "$pid" 2>/dev/null
 }
 
-bootout_recorded_label() {
-  local label="$1" check=0 domain
-  [ -n "$label" ] || return 0
+bootout_managed_codex_label() {
+  local label="$1" label_suffix check=0 domain
+  case "$label" in
+    com.agmsg.codex-bridge.*) label_suffix="${label#com.agmsg.codex-bridge.}" ;;
+    com.agmsg.codex-app-monitor.*) label_suffix="${label#com.agmsg.codex-app-monitor.}" ;;
+    *) return 0 ;;
+  esac
+  case "$label_suffix" in ""|*[!A-Za-z0-9._%-]*) return 0 ;; esac
   command -v launchctl >/dev/null 2>&1 || return 0
   domain="gui/$(id -u)"
   launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
@@ -358,9 +371,151 @@ bootout_recorded_label() {
   done
 }
 
+codex_bridge_label_for_base() {
+  local base_name="${1##*/}" suffix
+  case "$base_name" in codex-bridge.*) suffix="${base_name#codex-bridge.}" ;; *) return 1 ;; esac
+  case "$suffix" in ""|*[!A-Za-z0-9._%-]*) return 1 ;; esac
+  printf 'com.agmsg.codex-bridge.%s' "$suffix"
+}
+
+codex_app_monitor_label() {
+  local project="$1" team="$2" name="$3" hash safe_team safe_name
+  hash="$(printf '%s' "$(agmsg_canonical_path "$project")" | agmsg_sha1)"
+  safe_team="$(printf '%s' "$team" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+  safe_name="$(printf '%s' "$name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+  [ -n "$hash" ] && [ -n "$safe_team" ] && [ -n "$safe_name" ] || return 1
+  printf 'com.agmsg.codex-app-monitor.%s.%s.%s' "$hash" "$safe_team" "$safe_name"
+}
+
+codex_current_bridge_pid_matches() {
+  local pid="$1" base="$2" project="$3" team="$4" name="$5" thread="$6" state_key cmd expected canonical_project
+  state_key="${base##*/codex-bridge.}"
+  [ -n "$project" ] && [ -n "$state_key" ] && [ -n "$team" ] \
+    && [ -n "$name" ] && [ -n "$thread" ] || return 1
+  case "$state_key" in *[!A-Za-z0-9._%-]*) return 1 ;; esac
+  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  canonical_project="$(agmsg_canonical_path "$project")"
+  [ -n "$canonical_project" ] || return 1
+  expected="$SKILL_DIR/scripts/drivers/types/codex/codex-bridge.js --project $project --type codex --team $team --name $name --state-key $state_key --app-server-file $base.appserver --thread $thread"
+  cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case " $cmd " in *" $expected "*) return 0 ;; esac
+  return 1
+}
+
+codex_legacy_bridge_pid_matches() {
+  local pid="$1" base="$2" project="$3" team="$4" name="$5" thread="$6" cmd prefix canonical_project
+  [ -n "$project" ] && [ -n "$team" ] && [ -n "$name" ] && [ -n "$thread" ] || return 1
+  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  canonical_project="$(agmsg_canonical_path "$project")"
+  [ -n "$canonical_project" ] || return 1
+  prefix="$SKILL_DIR/scripts/drivers/types/codex/codex-bridge.js --project $project --type codex --team $team --name $name --app-server "
+  cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case " $cmd " in *" $prefix"*" --thread $thread "*) return 0 ;; esac
+  return 1
+}
+
+codex_app_monitor_pid_matches() {
+  local pid="$1" _base="$2" project="$3" team="$4" name="$5" thread="$6" cmd expected
+  [ -n "$project" ] && [ -n "$team" ] && [ -n "$name" ] && [ -n "$thread" ] || return 1
+  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  project="$(agmsg_canonical_path "$project")"
+  [ -n "$project" ] || return 1
+  expected="$SKILL_DIR/scripts/drivers/types/codex/codex-app-monitor.sh $project codex $team $name $thread"
+  cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case " $cmd " in *" $expected "*) return 0 ;; esac
+  return 1
+}
+
 stop_codex_bridge() {
   local project="$1"
   local pairs team name pidfile bpid killed=0 app_pidfile app_pid app_meta app_label app_plist
+  local scoped_meta scoped_base scoped_pid scoped_label scoped_project chat scoped_plist
+  local scoped_type scoped_team scoped_name scoped_thread legacy_thread
+  local project_hash seat saved_project saved_type saved_team saved_name saved_thread _saved_at
+
+  project_hash="$(printf '%s' "$project" | agmsg_sha1)"
+  for seat in "$RUN_DIR"/codex-seat.*.tsv; do
+    [ -f "$seat" ] || continue
+    IFS=$'\t' read -r saved_project saved_type saved_team saved_name saved_thread _saved_at < "$seat" || true
+    if [ "$saved_project" = "$project" ] && [ "$saved_type" = "codex" ]; then
+      actas_codex_seat_release "$saved_team" "$saved_name" "$saved_project" "$saved_thread"
+    fi
+  done
+  actas_codex_release_markers "$project"
+
+  # A launchd job can outlive the bridge metadata during a crash/shutdown
+  # window. Plist names are project-hash scoped, so boot out and remove every
+  # deterministically owned job for this project even when .meta/.pid is gone.
+  for scoped_plist in "$RUN_DIR"/codex-bridge."$project_hash".*.plist; do
+    [ -f "$scoped_plist" ] || continue
+    scoped_base="${scoped_plist%.plist}"
+    scoped_label="$(codex_bridge_label_for_base "$scoped_base" 2>/dev/null || true)"
+    [ -n "$scoped_label" ] && bootout_managed_codex_label "$scoped_label"
+    scoped_pid="$(cat "$scoped_base.pid" 2>/dev/null || true)"
+    if [ -n "$scoped_pid" ] && kill -0 "$scoped_pid" 2>/dev/null; then
+      scoped_meta="$scoped_base.meta"
+      scoped_project="$(sed -n 's/^project=//p' "$scoped_meta" 2>/dev/null | head -1)"
+      scoped_type="$(sed -n 's/^type=//p' "$scoped_meta" 2>/dev/null | head -1)"
+      scoped_team="$(sed -n 's/^team=//p' "$scoped_meta" 2>/dev/null | head -1)"
+      scoped_name="$(sed -n 's/^name=//p' "$scoped_meta" 2>/dev/null | head -1)"
+      scoped_thread="$(sed -n 's/^thread=//p' "$scoped_meta" 2>/dev/null | head -1)"
+      if [ -n "$scoped_project" ] && [ "$scoped_type" = "codex" ] \
+          && [ "$(agmsg_canonical_path "$scoped_project")" = "$(agmsg_canonical_path "$project")" ] \
+          && codex_current_bridge_pid_matches "$scoped_pid" "$scoped_base" \
+            "$scoped_project" "$scoped_team" "$scoped_name" "$scoped_thread" \
+          && kill "$scoped_pid" 2>/dev/null; then
+        killed=$((killed + 1))
+        wait_for_recorded_pid_exit "$scoped_pid" codex_current_bridge_pid_matches \
+          "$scoped_base" "$scoped_project" "$scoped_team" "$scoped_name" "$scoped_thread" || return 1
+      fi
+    fi
+    rm -f "$scoped_base.pid" "$scoped_base.meta" "$scoped_base.log" \
+      "$scoped_base.appserver" "$scoped_base.health" "$scoped_base.plist" \
+      "$scoped_base.last-ids" "$scoped_base.binding"
+    rm -f "$scoped_base".wake.*.json "$scoped_base.relay-wake.json"
+  done
+
+  # Current bridges are keyed by project hash + role. Select them by the owned
+  # metadata boundary, not by a team/name filename that can collide across
+  # projects. The global Desktop relay is intentionally not stopped here.
+  for scoped_meta in "$RUN_DIR"/codex-bridge.*.meta; do
+    [ -f "$scoped_meta" ] || continue
+    scoped_project="$(sed -n 's/^project=//p' "$scoped_meta" | head -1)"
+    [ -n "$scoped_project" ] || continue
+    [ "$(agmsg_canonical_path "$scoped_project")" = "$(agmsg_canonical_path "$project")" ] || continue
+    [ "$(sed -n 's/^type=//p' "$scoped_meta" | head -1)" = "codex" ] || continue
+    scoped_base="${scoped_meta%.meta}"
+    scoped_label="$(codex_bridge_label_for_base "$scoped_base" 2>/dev/null || true)"
+    [ -n "$scoped_label" ] || continue
+    bootout_managed_codex_label "$scoped_label"
+    scoped_pid="$(cat "$scoped_base.pid" 2>/dev/null || true)"
+    if [ -n "$scoped_pid" ] && kill -0 "$scoped_pid" 2>/dev/null; then
+      scoped_team="$(sed -n 's/^team=//p' "$scoped_meta" | head -1)"
+      scoped_name="$(sed -n 's/^name=//p' "$scoped_meta" | head -1)"
+      scoped_thread="$(sed -n 's/^thread=//p' "$scoped_meta" | head -1)"
+      if codex_current_bridge_pid_matches "$scoped_pid" "$scoped_base" \
+          "$scoped_project" "$scoped_team" "$scoped_name" "$scoped_thread" \
+          && kill "$scoped_pid" 2>/dev/null; then
+        killed=$((killed + 1))
+        if ! wait_for_recorded_pid_exit "$scoped_pid" codex_current_bridge_pid_matches \
+            "$scoped_base" "$scoped_project" "$scoped_team" "$scoped_name" "$scoped_thread"; then
+          echo "delivery: Codex bridge pid $scoped_pid did not stop; preserving its run files" >&2
+          return 1
+        fi
+      fi
+    fi
+    rm -f "$scoped_base.pid" "$scoped_base.meta" "$scoped_base.log" \
+      "$scoped_base.appserver" "$scoped_base.health" "$scoped_base.plist" \
+      "$scoped_base.last-ids" "$scoped_base.binding"
+    rm -f "$scoped_base".wake.*.json "$scoped_base.relay-wake.json"
+  done
+  for chat in "$RUN_DIR"/codex-chat-visible.*.meta; do
+    [ -f "$chat" ] || continue
+    scoped_project="$(sed -n 's/^project=//p' "$chat" | head -1)"
+    [ "$(agmsg_canonical_path "$scoped_project")" = "$(agmsg_canonical_path "$project")" ] || continue
+    [ "$(sed -n 's/^type=//p' "$chat" | head -1)" = "codex" ] || continue
+    rm -f "$chat"
+  done
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" codex 2>/dev/null || true)
   if [ -n "$pairs" ]; then
     while IFS=$'\t' read -r team name _rest; do
@@ -369,9 +524,21 @@ stop_codex_bridge() {
       if [ -f "$pidfile" ]; then
         bpid=$(cat "$pidfile" 2>/dev/null || true)
         if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
-          if kill "$bpid" 2>/dev/null; then
+          legacy_thread="$(sed -n 's/^thread=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
+          scoped_project="$(sed -n 's/^project=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
+          scoped_type="$(sed -n 's/^type=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
+          scoped_team="$(sed -n 's/^team=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
+          scoped_name="$(sed -n 's/^name=//p' "${pidfile%.pid}.meta" 2>/dev/null | head -1)"
+          if [ -n "$scoped_project" ] && [ "$scoped_type" = "codex" ] \
+              && [ "$scoped_team" = "$team" ] \
+              && [ "$scoped_name" = "$name" ] \
+              && [ "$(agmsg_canonical_path "$scoped_project")" = "$(agmsg_canonical_path "$project")" ] \
+              && codex_legacy_bridge_pid_matches "$bpid" "${pidfile%.pid}" \
+                "$scoped_project" "$team" "$name" "$legacy_thread" \
+              && kill "$bpid" 2>/dev/null; then
             killed=$((killed + 1))
-            if ! wait_for_recorded_pid_exit "$bpid"; then
+            if ! wait_for_recorded_pid_exit "$bpid" codex_legacy_bridge_pid_matches \
+                "${pidfile%.pid}" "$scoped_project" "$team" "$name" "$legacy_thread"; then
               echo "delivery: Codex bridge pid $bpid did not stop; preserving its run files" >&2
               return 1
             fi
@@ -381,25 +548,32 @@ stop_codex_bridge() {
       # .appserver records which app-server URL the bridge was bound to (the
       # launcher's stale-binding guard); drop it with the rest so it cannot
       # mislead a later launcher.
-      rm -f "$pidfile" "${pidfile%.pid}.meta" "${pidfile%.pid}.log" "${pidfile%.pid}.appserver"
+      rm -f "$pidfile" "${pidfile%.pid}.meta" "${pidfile%.pid}.log" \
+        "${pidfile%.pid}.appserver" "${pidfile%.pid}.health"
 
       app_pidfile="$RUN_DIR/codex-app-monitor.$team.$name.pid"
       app_meta="$RUN_DIR/codex-app-monitor.$team.$name.meta"
       app_plist="$RUN_DIR/codex-app-monitor.$team.$name.plist"
-      app_label=""
-      if [ -f "$app_meta" ]; then
-        app_label=$(sed -n 's/^launch_label=//p' "$app_meta" | head -1)
-      fi
-      if [ -z "$app_label" ] && [ -f "$app_plist" ]; then
-        app_label=$(awk '/<key>Label<\/key>/{getline; sub(/^[[:space:]]*<string>/, ""); sub(/<\/string>[[:space:]]*$/, ""); print; exit}' "$app_plist")
-      fi
-      bootout_recorded_label "$app_label"
+      app_label="$(codex_app_monitor_label "$project" "$team" "$name" 2>/dev/null || true)"
+      [ -n "$app_label" ] && bootout_managed_codex_label "$app_label"
       if [ -f "$app_pidfile" ]; then
         app_pid=$(cat "$app_pidfile" 2>/dev/null || true)
         if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
-          if kill "$app_pid" 2>/dev/null; then
+          scoped_project="$(sed -n 's/^project=//p' "$app_meta" 2>/dev/null | head -1)"
+          scoped_type="$(sed -n 's/^type=//p' "$app_meta" 2>/dev/null | head -1)"
+          scoped_team="$(sed -n 's/^team=//p' "$app_meta" 2>/dev/null | head -1)"
+          scoped_name="$(sed -n 's/^name=//p' "$app_meta" 2>/dev/null | head -1)"
+          legacy_thread="$(sed -n 's/^thread=//p' "$app_meta" 2>/dev/null | head -1)"
+          if [ -n "$scoped_project" ] && [ "$scoped_type" = "codex" ] \
+              && [ "$scoped_team" = "$team" ] \
+              && [ "$scoped_name" = "$name" ] \
+              && [ "$(agmsg_canonical_path "$scoped_project")" = "$(agmsg_canonical_path "$project")" ] \
+              && codex_app_monitor_pid_matches "$app_pid" "${app_pidfile%.pid}" \
+                "$scoped_project" "$team" "$name" "$legacy_thread" \
+              && kill "$app_pid" 2>/dev/null; then
             killed=$((killed + 1))
-            if ! wait_for_recorded_pid_exit "$app_pid"; then
+            if ! wait_for_recorded_pid_exit "$app_pid" codex_app_monitor_pid_matches \
+                "${app_pidfile%.pid}" "$scoped_project" "$team" "$name" "$legacy_thread"; then
               echo "delivery: Codex app monitor pid $app_pid did not stop; preserving its run files" >&2
               return 1
             fi
@@ -423,22 +597,13 @@ EOF
 
   # Tear down the project's shared app-server too. It is keyed per project
   # (codex-app-server.<hash>.{pid,port,version}); turning delivery off means no
-  # bridge needs it, and leaving it running keeps a stale port the next launch
-  # would have to recreate anyway. Only kill the recorded pid when its cmdline
-  # confirms it is our app-server (a recycled pid could be unrelated); drop the
-  # record either way.
-  local project_hash server_pidfile server_pid server_cmd
-  project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
+  # bridge needs its stale records. The app-server process itself has no agmsg-owned script
+  # or project/role argv, so a pidfile alone is intentionally insufficient
+  # proof to signal it; remove the project-scoped records without signaling.
+  local server_pidfile
   if [ -n "$project_hash" ]; then
     server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
     if [ -f "$server_pidfile" ]; then
-      server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
-        server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
-        case "$server_cmd" in
-          *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
-        esac
-      fi
       rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
             "$RUN_DIR/codex-app-server.$project_hash.port" \
             "$RUN_DIR/codex-app-server.$project_hash.version" \

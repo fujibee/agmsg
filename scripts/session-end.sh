@@ -28,6 +28,8 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hash.sh"
 
 # Compatibility guard for legacy background-resume processes created before
 # that transport was disabled. Their parent owns cleanup, so this hook must not
@@ -51,8 +53,32 @@ fi
 
 PROJECT="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
 
+codex_current_bridge_pid_matches() {
+  local pid="$1" base="$2" project="$3" type="$4" team="$5" name="$6" thread="$7"
+  local state_key expected cmd
+  state_key="${base##*/codex-bridge.}"
+  [ -n "$project" ] && [ -n "$team" ] && [ -n "$name" ] && [ -n "$thread" ] || return 1
+  case "$state_key" in *[!A-Za-z0-9._%-]*) return 1 ;; esac
+  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  expected="$SKILL_DIR/scripts/drivers/types/codex/codex-bridge.js --project $project --type $type --team $team --name $name --state-key $state_key --app-server-file $base.appserver --thread $thread"
+  cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case " $cmd " in *" $expected "*) return 0 ;; esac
+  return 1
+}
+
+codex_app_monitor_pid_matches() {
+  local pid="$1" project="$2" type="$3" team="$4" name="$5" thread="$6" expected cmd
+  [ -n "$project" ] && [ -n "$team" ] && [ -n "$name" ] && [ -n "$thread" ] || return 1
+  case "$thread" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  expected="$SKILL_DIR/scripts/drivers/types/codex/codex-app-monitor.sh $project $type $team $name $thread"
+  cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+  case " $cmd " in *" $expected "*) return 0 ;; esac
+  return 1
+}
+
 wait_for_codex_receiver_exit() {
-  local pid="$1" check=0 state
+  local pid="$1" matcher="$2" check=0 state
+  shift 2
   while [ "$check" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
     state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     case "$state" in Z*) return 0 ;; esac
@@ -60,6 +86,7 @@ wait_for_codex_receiver_exit() {
     check=$((check + 1))
   done
   if kill -0 "$pid" 2>/dev/null; then
+    "$matcher" "$pid" "$@" || return 0
     kill -KILL "$pid" 2>/dev/null || return 1
     check=0
     while [ "$check" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
@@ -74,7 +101,41 @@ wait_for_codex_receiver_exit() {
 
 stop_codex_thread_receivers() {
   local meta base kind pidfile pid cmd meta_project meta_type meta_thread team name
-  local label plist domain check chat
+  local label plist domain check chat project_hash seat saved_project saved_type
+  local saved_team saved_name saved_thread _saved_at safe_team safe_name state_key
+
+  project_hash="$(printf '%s' "$PROJECT" | agmsg_sha1)"
+  for seat in "$RUN_DIR"/codex-seat.*.tsv; do
+    [ -f "$seat" ] || continue
+    IFS=$'\t' read -r saved_project saved_type saved_team saved_name saved_thread _saved_at < "$seat" || true
+    if [ "$saved_project" = "$PROJECT" ] && [ "$saved_type" = "$TYPE" ] \
+        && [ "$saved_thread" = "$SESSION_ID" ]; then
+      safe_team="$(_actas_lock_encode "$saved_team")"
+      safe_name="$(_actas_lock_encode "$saved_name")"
+      state_key="$project_hash.$safe_team.$safe_name"
+      base="$RUN_DIR/codex-bridge.$state_key"
+      label="com.agmsg.codex-bridge.$state_key"
+      if command -v launchctl >/dev/null 2>&1; then
+        domain="gui/$(id -u)"
+        launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+      fi
+      pid="$(cat "$base.pid" 2>/dev/null || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if codex_current_bridge_pid_matches "$pid" "$base" \
+            "$saved_project" "$saved_type" "$saved_team" "$saved_name" "$saved_thread"; then
+          kill "$pid" 2>/dev/null || true
+          wait_for_codex_receiver_exit "$pid" codex_current_bridge_pid_matches "$base" \
+            "$saved_project" "$saved_type" "$saved_team" "$saved_name" "$saved_thread" || true
+        fi
+      fi
+      rm -f "$base.pid" "$base.meta" "$base.appserver" "$base.log" \
+        "$base.plist" "$base.health" "$base.last-ids" \
+        "$base.binding" "$RUN_DIR/codex-chat-visible.$state_key.meta"
+      rm -f "$base".wake.*.json "$base.relay-wake.json"
+      actas_codex_seat_release "$saved_team" "$saved_name" "$saved_project" "$saved_thread"
+    fi
+  done
+  actas_codex_release_markers "$PROJECT" "$SESSION_ID"
   for meta in "$RUN_DIR"/codex-bridge.*.meta "$RUN_DIR"/codex-app-monitor.*.meta; do
     [ -f "$meta" ] || continue
     meta_project="$(sed -n 's/^project=//p' "$meta" | head -1)"
@@ -88,10 +149,23 @@ stop_codex_thread_receivers() {
     kind="${base##*/}"
     pidfile="$base.pid"
     plist="$base.plist"
-    label="$(sed -n 's/^launch_label=//p' "$meta" | head -1)"
-    if [ -z "$label" ] && [ -f "$plist" ]; then
-      label="$(awk '/<key>Label<\/key>/{getline; sub(/^[[:space:]]*<string>/, ""); sub(/<\/string>[[:space:]]*$/, ""); print; exit}' "$plist")"
-    fi
+    team="$(sed -n 's/^team=//p' "$meta" | head -1)"
+    name="$(sed -n 's/^name=//p' "$meta" | head -1)"
+    label=""
+    case "$kind" in
+      codex-bridge.*)
+        case "${kind#codex-bridge.}" in
+          ""|*[!A-Za-z0-9._%-]*) ;;
+          *) label="com.agmsg.$kind" ;;
+        esac
+        ;;
+      codex-app-monitor.*)
+        safe_team="$(printf '%s' "$team" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+        safe_name="$(printf '%s' "$name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+        [ -n "$safe_team" ] && [ -n "$safe_name" ] \
+          && label="com.agmsg.codex-app-monitor.$project_hash.$safe_team.$safe_name"
+        ;;
+    esac
     if [ -n "$label" ] && command -v launchctl >/dev/null 2>&1; then
       domain="gui/$(id -u)"
       launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
@@ -104,24 +178,36 @@ stop_codex_thread_receivers() {
 
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
-      case "$kind:$cmd" in
-        codex-bridge.*:*codex-bridge.js*|codex-app-monitor.*:*codex-app-monitor.sh*)
-          kill "$pid" 2>/dev/null || true
-          if ! wait_for_codex_receiver_exit "$pid"; then
-            echo "session-end: Codex receiver pid $pid did not stop; preserving its run files" >&2
-            continue
+      case "$kind" in
+        codex-bridge.*)
+          if codex_current_bridge_pid_matches "$pid" "$base" \
+              "$meta_project" "$meta_type" "$team" "$name" "$meta_thread"; then
+            kill "$pid" 2>/dev/null || true
+            if ! wait_for_codex_receiver_exit "$pid" codex_current_bridge_pid_matches "$base" \
+                "$meta_project" "$meta_type" "$team" "$name" "$meta_thread"; then
+              echo "session-end: Codex receiver pid $pid did not stop; preserving its run files" >&2
+              continue
+            fi
+          fi
+          ;;
+        codex-app-monitor.*)
+          if codex_app_monitor_pid_matches "$pid" \
+              "$meta_project" "$meta_type" "$team" "$name" "$meta_thread"; then
+            kill "$pid" 2>/dev/null || true
+            if ! wait_for_codex_receiver_exit "$pid" codex_app_monitor_pid_matches \
+                "$meta_project" "$meta_type" "$team" "$name" "$meta_thread"; then
+              echo "session-end: Codex receiver pid $pid did not stop; preserving its run files" >&2
+              continue
+            fi
           fi
           ;;
       esac
     fi
-
-    team="$(sed -n 's/^team=//p' "$meta" | head -1)"
-    name="$(sed -n 's/^name=//p' "$meta" | head -1)"
     rm -f "$pidfile" "$meta" "$base.appserver" "$base.log" "$plist" \
       "$base.health" "$base.preflight.log" "$base.last-prompt.txt" \
       "$base.last-message.txt" "$base.last-status" "$base.last-ids" \
       "$base.watch-output"
+    rm -f "$base".wake.*.json "$base.relay-wake.json"
     if [ -n "$team" ] && [ -n "$name" ]; then
       rm -f "$RUN_DIR/codex-chat-visible.$team.$name.meta"
     fi

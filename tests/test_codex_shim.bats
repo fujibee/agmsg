@@ -35,10 +35,20 @@ teardown() {
   teardown_test_env
 }
 
-@test "codex shim: monitor project routes resume through codex-monitor" {
+@test "codex shim: monitor project passes through by default" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" resume --last'
+
+  [ "$status" -eq 0 ]
+  grep -q "real-codex <resume> <--last>" "$CALL_LOG"
+  ! grep -q "^monitor" "$CALL_LOG"
+}
+
+@test "codex shim: explicit legacy opt-in routes resume through codex-monitor" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 bash "$TYPES/codex/codex-shim.sh" resume --last'
 
   [ "$status" -eq 0 ]
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <--> <--last>" "$CALL_LOG"
@@ -47,7 +57,7 @@ teardown() {
 @test "codex shim: monitor project routes prompt launches through top-level codex" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
-  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" "fix this"'
+  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 bash "$TYPES/codex/codex-shim.sh" "fix this"'
 
   [ "$status" -eq 0 ]
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <codex> <--> <fix this>" "$CALL_LOG"
@@ -79,6 +89,7 @@ teardown() {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 \
     run bash "$TYPES/codex/codex-shim.sh" --cd "$TEST_PROJECT" resume
 
   [ "$status" -eq 0 ]
@@ -94,6 +105,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"codex() {"* ]]
   [[ "$output" == *"codex-shim.sh"* ]]
+  [[ "$output" == *"pass-through by default"* ]]
   [ ! -e "$HOME/.agents/bin/codex" ]
 }
 
@@ -110,6 +122,7 @@ teardown() {
   chmod +x "$real_bin/codex"
 
   PATH="$HOME/.agents/bin:$real_bin:$PATH" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 \
     run bash -c 'eval "$("$TYPES/codex/codex-shim-install.sh" function)"; cd "$TEST_PROJECT"; codex resume --last'
 
   [ "$status" -eq 0 ]
@@ -125,6 +138,7 @@ teardown() {
   chmod +x "$HOME/.agents/bin/codex"
 
   PATH="$HOME/.agents/bin:$PATH" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
+    AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 \
     run bash -c 'eval "$("$TYPES/codex/codex-shim-install.sh" function)"; cd "$TEST_PROJECT"; codex resume --last'
 
   [ "$status" -eq 0 ]
@@ -138,7 +152,8 @@ teardown() {
   bash "$TYPES/codex/codex-shim-install.sh" install >/dev/null
   [ -x "$HOME/.agents/bin/codex" ]
 
-  PATH="$HOME/.agents/bin:$PATH" run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" codex resume'
+  PATH="$HOME/.agents/bin:$PATH" AGMSG_CODEX_LEGACY_MONITOR_SHIM=1 \
+    run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" codex resume'
 
   [ "$status" -eq 0 ]
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <-->" "$CALL_LOG"

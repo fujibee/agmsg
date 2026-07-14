@@ -60,6 +60,35 @@ actas_lock_path() {
   printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a"
 }
 
+# Durable Codex Desktop seat metadata for (team, agent). Unlike a generic
+# actas owner, a Codex task has no long-lived shell PID that can prove
+# liveness, so its exact visible thread is recorded separately and released by
+# SessionEnd/reset/delivery teardown.
+codex_seat_path() {
+  local team="$1" agent="$2"
+  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  printf '%s/codex-seat.%s.%s.tsv' "$(_actas_lock_dir)" "$t" "$a"
+}
+
+# Generic actas and Codex must still contend on the same atomic role lock.
+# The durable marker is deliberately not PID-backed: its matching seat is
+# owned until an explicit Codex lifecycle boundary releases it.
+actas_codex_owner() {
+  local project="$1" thread="$2"
+  printf 'codex-seat:%s:%s' "$(_actas_lock_encode "$project")" "$(_actas_lock_encode "$thread")"
+}
+
+actas_codex_seat_matches() {
+  local team="$1" agent="$2" project="$3" seat
+  local saved_project saved_type saved_team saved_agent saved_thread _saved_at
+  seat="$(codex_seat_path "$team" "$agent")"
+  [ -f "$seat" ] || return 1
+  IFS=$'\t' read -r saved_project saved_type saved_team saved_agent saved_thread _saved_at < "$seat" || true
+  [ "$saved_project" = "$project" ] && [ "$saved_type" = "codex" ] \
+    && [ "$saved_team" = "$team" ] && [ "$saved_agent" = "$agent" ] \
+    && [ -n "$saved_thread" ]
+}
+
 # Readiness sentinel path for (team, agent). watch.sh creates this when an
 # exclusive (actas) watcher attaches and removes it on exit, so the file is
 # present iff a live watcher is currently receiving for that role. `spawn`
@@ -97,7 +126,61 @@ actas_lock_owner() {
 # so existing callers (gc_stale, watch.sh subscription, session-start GC) need
 # no change. Empty token → not alive.
 actas_lock_sid_alive() {
+  case "$1" in
+    codex-seat:*) return 0 ;;
+  esac
   agmsg_instance_alive "$1"
+}
+
+# Release one exact Codex seat and its shared actas role marker. Callers pass
+# the metadata they already validated; mismatched files are never removed.
+actas_codex_seat_release() {
+  local team="$1" agent="$2" project="$3" thread="$4"
+  local seat saved_project saved_type saved_team saved_agent saved_thread _saved_at owner
+  seat="$(codex_seat_path "$team" "$agent")"
+  owner="$(actas_codex_owner "$project" "$thread")"
+  if [ -f "$seat" ]; then
+    IFS=$'\t' read -r saved_project saved_type saved_team saved_agent saved_thread _saved_at < "$seat" || true
+    if [ "$saved_project" = "$project" ] && [ "$saved_type" = "codex" ] \
+        && [ "$saved_team" = "$team" ] && [ "$saved_agent" = "$agent" ] \
+        && [ "$saved_thread" = "$thread" ]; then
+      rm -f "$seat"
+    fi
+  fi
+  actas_lock_release "$team" "$agent" "$owner"
+}
+
+# Recover marker-only crash windows where the role lock was claimed before
+# the seat metadata link was installed. Project and optional thread matching
+# keep cleanup scoped to the caller's Codex lifecycle boundary.
+actas_codex_release_markers() {
+  local project="$1" thread="${2:-}" dir f owner prefix exact_suffix
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  prefix="codex-seat:$(_actas_lock_encode "$project"):"
+  exact_suffix=""
+  [ -z "$thread" ] || exact_suffix="$(_actas_lock_encode "$thread")"
+  for f in "$dir"/actas.*.session; do
+    [ -f "$f" ] || continue
+    owner="$(head -1 "$f" 2>/dev/null || true)"
+    case "$owner" in
+      "$prefix"*) ;;
+      *) continue ;;
+    esac
+    [ -z "$exact_suffix" ] || [ "$owner" = "$prefix$exact_suffix" ] || continue
+    [ "$(head -1 "$f" 2>/dev/null || true)" = "$owner" ] && rm -f "$f"
+  done
+}
+
+# Release marker-only crash residue for one role without disturbing another
+# Codex role in the same project.
+actas_codex_release_role_marker() {
+  local team="$1" agent="$2" project="$3" owner prefix
+  owner="$(actas_lock_owner "$team" "$agent")"
+  prefix="codex-seat:$(_actas_lock_encode "$project"):"
+  case "$owner" in
+    "$prefix"*) actas_lock_release "$team" "$agent" "$owner" ;;
+  esac
 }
 
 # Internal: attempt one atomic claim. Echoes "ok" on success, "held:<sid>"
@@ -105,10 +188,27 @@ actas_lock_sid_alive() {
 # owner is dead (caller should retry after removing).
 _actas_lock_try_claim() {
   local team="$1" agent="$2" sid="$3"
-  local lock dir tmp existing
+  local lock dir tmp existing seat seat_project seat_type seat_team seat_agent seat_thread _seat_at seat_owner
   lock="$(actas_lock_path "$team" "$agent")"
   dir="$(_actas_lock_dir)"
   mkdir -p "$dir" 2>/dev/null || true
+
+  # A seat written by an earlier Codex version may predate the shared marker.
+  # Treat it as held, except when the exact task is repairing its own marker.
+  seat="$(codex_seat_path "$team" "$agent")"
+  if [ -f "$seat" ]; then
+    IFS=$'\t' read -r seat_project seat_type seat_team seat_agent seat_thread _seat_at < "$seat" || true
+    if [ "$seat_type" = "codex" ] && [ "$seat_team" = "$team" ] \
+        && [ "$seat_agent" = "$agent" ] && [ -n "$seat_project" ] && [ -n "$seat_thread" ]; then
+      seat_owner="$(actas_codex_owner "$seat_project" "$seat_thread")"
+    else
+      seat_owner="codex-seat:malformed"
+    fi
+    if [ "$seat_owner" != "$sid" ]; then
+      printf 'held:%s\n' "$seat_owner"
+      return 0
+    fi
+  fi
 
   tmp="$(mktemp "$dir/.actas-claim.XXXXXX" 2>/dev/null)" || return 1
   printf '%s\n' "$sid" > "$tmp"
@@ -229,7 +329,23 @@ actas_lock_gc_stale() {
 # Echoes one of: free | mine | other:<sid>
 actas_lock_state() {
   local team="$1" agent="$2" sid="$3"
-  local owner
+  local owner seat seat_project seat_type seat_team seat_agent seat_thread _seat_at
+  seat="$(codex_seat_path "$team" "$agent")"
+  if [ -f "$seat" ]; then
+    IFS=$'\t' read -r seat_project seat_type seat_team seat_agent seat_thread _seat_at < "$seat" || true
+    if [ "$seat_type" = "codex" ] && [ "$seat_team" = "$team" ] \
+        && [ "$seat_agent" = "$agent" ] && [ -n "$seat_project" ] && [ -n "$seat_thread" ]; then
+      owner="$(actas_codex_owner "$seat_project" "$seat_thread")"
+    else
+      owner="codex-seat:malformed"
+    fi
+    if [ "$owner" = "$sid" ]; then
+      echo "mine"
+    else
+      printf 'other:%s\n' "$owner"
+    fi
+    return 0
+  fi
   owner="$(actas_lock_owner "$team" "$agent")"
   if [ -z "$owner" ]; then
     echo "free"; return 0
