@@ -64,7 +64,7 @@ agmsg_delivery_runtime_status() {
     fi
     found=1
 
-    local base pidfile metafile pid meta_pid meta_project meta_type meta_ok
+    local base pidfile metafile pid meta_pid meta_project meta_project_norm meta_type meta_ok project_norm
     base="$RUN_DIR/codex-bridge.$team.$name"
     pidfile="$base.pid"
     metafile="$base.meta"
@@ -90,14 +90,21 @@ agmsg_delivery_runtime_status() {
     meta_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
     meta_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
     [ -n "$meta_pid" ] && [ "$meta_pid" != "$pid" ] && meta_ok=0
-    [ -n "$meta_project" ] && [ "$meta_project" != "$project" ] && meta_ok=0
+    if [ -n "$meta_project" ]; then
+      # The native Windows bridge records E:\path while delivery.sh commonly
+      # resolves the same project as /e/path or E:/path. Compare normalized
+      # spellings so a healthy bridge is not reported as a stale mismatch.
+      meta_project_norm=$(agmsg_normalize_project_path "$meta_project" 2>/dev/null || printf '%s' "$meta_project")
+      project_norm=$(agmsg_normalize_project_path "$project" 2>/dev/null || printf '%s' "$project")
+      [ "$meta_project_norm" != "$project_norm" ] && meta_ok=0
+    fi
     [ -n "$meta_type" ] && [ "$meta_type" != "$type" ] && meta_ok=0
     if [ "$meta_ok" -ne 1 ]; then
       echo "Codex bridge: $team/$name stale pidfile (metadata mismatch)"
       continue
     fi
 
-    if kill -0 "$pid" 2>/dev/null; then
+    if _agmsg_pid_alive "$pid"; then
       echo "Codex bridge: $team/$name alive (pid $pid)"
     else
       echo "Codex bridge: $team/$name stale pidfile (pid $pid not running)"

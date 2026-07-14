@@ -83,6 +83,12 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "codex-bridge: recovers when a turn/start acknowledgement times out" {
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts = { appServer: "ws://127.0.0.1:1", inlineInbox: false, project: process.cwd(), threadId: "thread-1", turnTimeout: 0, type: "codex" }; const bridge = new CodexBridge(opts, { team: "team", name: "alice" }); let ended = 0; bridge.client.request = async () => { throw new Error("app-server request '\''turn/start'\'' timed out after 100ms"); }; bridge.onTurnEnded = async () => { ended += 1; bridge.turnActive = false; bridge.threadIdle = true; }; bridge.pendingWake = true; bridge.tryStartTurn().then(() => { if (bridge.pendingWake || ended !== 1 || bridge.turnActive || !bridge.threadIdle) process.exit(1); });' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "turn/start acknowledgement timed out" ]]
+}
+
 @test "codex-bridge: resolve-only prints the selected identity" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
@@ -1151,6 +1157,55 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" =~ "wakeup 1" ]]
   [[ "$output" =~ "wakeup 2" ]]   # proves the watch-once was re-armed without turn/completed
+}
+
+@test "codex-bridge: re-arms when turn/start is accepted but its acknowledgement is lost" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  run node -e 'const r = require("child_process").spawnSync(process.execPath, ["--version"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # The real app-server can execute turn/start without returning its JSON-RPC
+  # response. The bridge must treat that timeout as an ambiguous acceptance and
+  # let the turn watchdog re-arm detection instead of remaining alive but deaf.
+  local fake="$TEST_SKILL_DIR/fake-app-server-lost-turn-ack.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let maxId = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    maxId += 1;
+    const id = maxId;
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    // Deliberately omit the response and completion notifications.
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  local runner
+  runner="$(write_bridge_timeout_runner)"
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$runner" 5000 node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
+    --request-timeout-ms 100 --turn-timeout 1 --max-wakes 2
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "turn/start acknowledgement timed out" ]]
+  [[ "$output" =~ "wakeup 2" ]]
 }
 
 @test "codex-bridge: re-arms after a turn when the app-server reports idle (not turn/completed)" {

@@ -1593,6 +1593,39 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
+@test "delivery status (codex): equivalent project path spelling reports alive" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local native_pid_file="$TEST_SKILL_DIR/native-node.pid"
+  node -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);' "$native_pid_file" &
+  local node_job=$!
+  trap 'kill "$node_job" 2>/dev/null || true' EXIT
+  local bpid=""
+  for _ in $(seq 1 20); do
+    [ -s "$native_pid_file" ] && bpid="$(tr -d '\r\n' < "$native_pid_file")" && break
+    sleep 0.1
+  done
+  [ -n "$bpid" ]
+
+  printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT/
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+
+  kill "$node_job" 2>/dev/null || true
+  trap - EXIT
+}
+
 @test "delivery status (codex): missing bridge metadata is reported as stale" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null

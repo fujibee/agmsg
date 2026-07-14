@@ -788,19 +788,33 @@ class CodexBridge {
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
     }
     if (this.threadId) {
-      const response = await this.client.request("thread/resume", {
-        threadId: this.threadId,
-        cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
-        excludeTurns: true,
-      });
-      if (!response.thread || response.thread.id !== this.threadId) {
-        die("thread/resume did not return the requested thread id");
+      try {
+        const response = await this.client.request("thread/resume", {
+          threadId: this.threadId,
+          cwd: this.opts.project,
+          runtimeWorkspaceRoots: [this.opts.project],
+          excludeTurns: true,
+        });
+        if (!response.thread || response.thread.id !== this.threadId) {
+          die("thread/resume did not return the requested thread id");
+        }
+        const type = response.thread.status && response.thread.status.type;
+        this.threadIdle = type !== "active";
+        this.turnActive = type === "active";
+        console.error(`codex-bridge: resumed thread ${this.threadId}`);
+      } catch (err) {
+        // Codex 0.142+ writes no rollout for --remote sessions, so thread/resume
+        // can fail for a thread that is nonetheless live in the app-server;
+        // turn/start works with just the threadId, so continue as idle. Swallow
+        // only the narrow "thread/rollout is absent" error class.
+        const resumable =
+          /(thread|rollout)[\s\S]{0,80}\b(not found|no such|does not exist|unknown|missing)\b|\b(not found|no such|does not exist|unknown|missing)\b[\s\S]{0,80}(thread|rollout)|\bno[\s\S]{0,30}rollout\b/i
+            .test(err.message || "");
+        if (!resumable) throw err;
+        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        this.threadIdle = true;
+        this.turnActive = false;
       }
-      const type = response.thread.status && response.thread.status.type;
-      this.threadIdle = type !== "active";
-      this.turnActive = type === "active";
-      console.error(`codex-bridge: resumed thread ${this.threadId}`);
       return;
     }
     const response = await this.client.request("thread/start", {
@@ -969,8 +983,18 @@ class CodexBridge {
       }
     }
     const prompt = this.buildPrompt();
+    // Consume the wake before submitting the turn. The app-server can emit an
+    // idle/completed notification before it returns the turn/start JSON-RPC
+    // response. Leaving pendingWake set during that window makes onTurnEnded()
+    // submit the same wake a second time and can strand the bridge awaiting an
+    // acknowledgement that never arrives.
+    this.pendingWake = false;
     this.turnActive = true;
     this.threadIdle = false;
+    // Start the watchdog when the request is submitted, not after its ACK. A
+    // real app-server may accept and execute turn/start but lose the response;
+    // that ambiguous timeout must not leave a live bridge permanently deaf.
+    this.startTurnWatchdog();
     try {
       await this.client.request("turn/start", {
         threadId: this.threadId,
@@ -979,12 +1003,18 @@ class CodexBridge {
         runtimeWorkspaceRoots: [this.opts.project],
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
-      this.pendingWake = false;
-      // Bound how long we treat the turn as active. The real app-server may
-      // never send turn/completed; the watchdog (and thread/status idle) drive
-      // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
-      this.startTurnWatchdog();
     } catch (error) {
+      if (/app-server request 'turn\/start' timed out/.test(error.message || "")) {
+        console.error(
+          `codex-bridge: turn/start acknowledgement timed out; assuming the turn was accepted on thread ${this.threadId}`,
+        );
+        // A completion/idle notification may already have re-armed the watch.
+        // Otherwise the watchdog started above will do so. With an explicitly
+        // disabled watchdog, recover immediately rather than staying deaf.
+        if (!this.opts.turnTimeout && this.turnActive) await this.onTurnEnded();
+        return;
+      }
+      this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
@@ -1232,4 +1262,4 @@ if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { toPosixPath };
+module.exports = { CodexBridge, toPosixPath };
