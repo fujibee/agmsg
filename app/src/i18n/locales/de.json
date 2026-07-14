@@ -170,7 +170,10 @@
     "label": "Sprache"
   },
   "settings": {
-    "title": "Einstellungen"
+    "title": "Einstellungen",
+    "terminalFontSize": {
+      "label": "Terminal-Schriftgröße"
+    }
   },
   "nativeMenu": {
     "about": "Über {{name}}",

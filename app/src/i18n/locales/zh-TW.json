@@ -170,7 +170,10 @@
     "label": "語言"
   },
   "settings": {
-    "title": "設定"
+    "title": "設定",
+    "terminalFontSize": {
+      "label": "終端機字型大小"
+    }
   },
   "nativeMenu": {
     "about": "關於 {{name}}",

@@ -170,7 +170,10 @@
     "label": "Langue"
   },
   "settings": {
-    "title": "Paramètres"
+    "title": "Paramètres",
+    "terminalFontSize": {
+      "label": "Taille de police du terminal"
+    }
   },
   "nativeMenu": {
     "about": "À propos de {{name}}",

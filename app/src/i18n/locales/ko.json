@@ -170,7 +170,10 @@
     "label": "언어"
   },
   "settings": {
-    "title": "설정"
+    "title": "설정",
+    "terminalFontSize": {
+      "label": "터미널 글꼴 크기"
+    }
   },
   "nativeMenu": {
     "about": "{{name}} 정보",

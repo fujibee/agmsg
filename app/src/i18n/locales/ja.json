@@ -170,7 +170,10 @@
     "label": "言語"
   },
   "settings": {
-    "title": "設定"
+    "title": "設定",
+    "terminalFontSize": {
+      "label": "ターミナルのフォントサイズ"
+    }
   },
   "nativeMenu": {
     "about": "{{name}} について",

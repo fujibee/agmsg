@@ -170,7 +170,10 @@
     "label": "语言"
   },
   "settings": {
-    "title": "设置"
+    "title": "设置",
+    "terminalFontSize": {
+      "label": "终端字体大小"
+    }
   },
   "nativeMenu": {
     "about": "关于 {{name}}",

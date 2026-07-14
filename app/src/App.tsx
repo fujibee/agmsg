@@ -97,7 +97,7 @@ type DropPreview = { paneId: string; zone: ReturnType<typeof classifyDrop> };
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
-  | { kind: "appuser" }
+  | { kind: "appuser"; auto: boolean }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
   | { kind: "settings" }
@@ -114,6 +114,22 @@ const ROOM_PAGE_SIZE = 30;
 // enough for now; panes always start fresh each launch anyway (they're
 // live PTYs, not something a restart could restore even if we tried).
 const LAST_TEAM_KEY = "agmsg-app-last-team";
+// Persists the two View menu toggles below. See the seeding useEffect for
+// why restoring these pushes INTO Rust (set_team_room_visible/
+// set_user_chat_visible) rather than reading view_visibility unconditionally.
+const SHOW_TEAM_ROOM_KEY = "agmsg-app-show-team-room";
+const SHOW_USER_CHAT_KEY = "agmsg-app-show-user-chat";
+// Persists the sidebar's icon-only-rail collapse toggle.
+const SIDEBAR_COLLAPSED_KEY = "agmsg-app-sidebar-collapsed";
+// Persists the terminal font size (Settings modal). xterm.js default is 15;
+// this app has always hardcoded 12 (a bit denser), so that's the fallback.
+const TERMINAL_FONT_SIZE_KEY = "agmsg-app-terminal-font-size";
+const DEFAULT_TERMINAL_FONT_SIZE = 12;
+// "Don't show this again" for the auto-triggered app-user prompt (see the
+// team-change effect below) — adding an app-user is always reachable from
+// the chat's "Add one" link, so a user who dismisses the auto-prompt once
+// shouldn't be re-asked on every future team switch.
+const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
 // Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
 // usages below) — a made-up type, not text/plain, so a stray OS file drag
 // or an unrelated drag elsewhere on the page never accidentally matches a
@@ -159,10 +175,19 @@ export default function App() {
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
+  // Terminal font size, adjustable from the Settings modal and persisted
+  // across restarts (see TERMINAL_FONT_SIZE_KEY).
+  const [terminalFontSize, setTerminalFontSize] = useState(() => {
+    const stored = Number(localStorage.getItem(TERMINAL_FONT_SIZE_KEY));
+    return stored > 0 ? stored : DEFAULT_TERMINAL_FONT_SIZE;
+  });
   // Collapses the team sidebar to an icon-only rail so panes get more width.
-  // Session-only (no persistence needed) — spawning/messaging a member isn't
-  // offered from the collapsed rail; expand to get back to the full list.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
+  // messaging a member isn't offered from the collapsed rail; expand to get
+  // back to the full list.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
+  );
   // Popup the collapsed rail's team-icon button opens — team switching, the
   // one thing the full sidebar's team <select> offers that needs a menu
   // instead of a direct icon action at rail width. Settings is a direct
@@ -381,19 +406,37 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
-  // Rust holds the only durable copy of these two flags (see view_visibility
-  // in lib.rs) — seed our state from there on mount rather than guessing
-  // `true`. Without this, a webview remount that doesn't restart the Rust
-  // process (Vite HMR during `tauri dev`, or any future webview reload)
-  // would reset these back to `true` while the native menu checkbox and
-  // Rust's own state kept whatever was last set, silently disagreeing.
+  // Rust holds the only durable-within-process copy of these two flags (see
+  // view_visibility in lib.rs) — it exists so a webview remount that doesn't
+  // restart the Rust process (Vite HMR during `tauri dev`, or any future
+  // webview reload) doesn't reset the frontend back to `true` while Rust
+  // (and the native menu checkbox) still hold whatever was last set.
+  // Across a real restart Rust itself always inits to `true`, so on mount we
+  // restore from localStorage first and PUSH that into Rust via
+  // set_team_room_visible/set_user_chat_visible (also resyncs the native
+  // menu checkbox) — falling back to view_visibility only the first time
+  // there's nothing stored yet.
   useEffect(() => {
-    invoke<{ team_room: boolean; user_chat: boolean }>("view_visibility")
-      .then((v) => {
-        setShowTeamRoom(v.team_room);
-        setShowUserChat(v.user_chat);
-      })
-      .catch(() => {});
+    const storedTeamRoom = localStorage.getItem(SHOW_TEAM_ROOM_KEY);
+    const storedUserChat = localStorage.getItem(SHOW_USER_CHAT_KEY);
+    if (storedTeamRoom !== null) {
+      const v = storedTeamRoom === "true";
+      setShowTeamRoom(v);
+      void invoke("set_team_room_visible", { visible: v });
+    }
+    if (storedUserChat !== null) {
+      const v = storedUserChat === "true";
+      setShowUserChat(v);
+      void invoke("set_user_chat_visible", { visible: v });
+    }
+    if (storedTeamRoom === null || storedUserChat === null) {
+      invoke<{ team_room: boolean; user_chat: boolean }>("view_visibility")
+        .then((v) => {
+          if (storedTeamRoom === null) setShowTeamRoom(v.team_room);
+          if (storedUserChat === null) setShowUserChat(v.user_chat);
+        })
+        .catch(() => {});
+    }
   }, []);
 
   // Native "View > Show Team Room" menu checkbox toggles the room tab itself.
@@ -407,6 +450,21 @@ export default function App() {
     const p = listen<boolean>("toggle-user-chat", (e) => setShowUserChat(e.payload));
     return () => void p.then((u) => u());
   }, []);
+
+  // Persist the two View toggles and the sidebar collapse state across
+  // restarts (see their _KEY constants above).
+  useEffect(() => {
+    localStorage.setItem(SHOW_TEAM_ROOM_KEY, String(showTeamRoom));
+  }, [showTeamRoom]);
+  useEffect(() => {
+    localStorage.setItem(SHOW_USER_CHAT_KEY, String(showUserChat));
+  }, [showUserChat]);
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  useEffect(() => {
+    localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(terminalFontSize));
+  }, [terminalFontSize]);
 
   // Spawnable agent types (for the Add-agent type picker). spawnMember
   // re-fetches this itself right before spawning — see there for why.
@@ -488,8 +546,11 @@ export default function App() {
       .catch(console.error);
     loadMembers(team)
       .then((m) => {
-        if (!m.some((x) => x.types.includes(APP_USER_TYPE))) {
-          setModal((cur) => cur ?? { kind: "appuser" });
+        if (
+          !m.some((x) => x.types.includes(APP_USER_TYPE)) &&
+          localStorage.getItem(SUPPRESS_APPUSER_PROMPT_KEY) !== "true"
+        ) {
+          setModal((cur) => cur ?? { kind: "appuser", auto: true });
         }
       })
       .catch(console.error);
@@ -1752,6 +1813,7 @@ export default function App() {
                     cmd={p.cmd}
                     args={p.args}
                     cwd={p.cwd}
+                    fontSize={terminalFontSize}
                     onAgentState={applyAgentState}
                     onCellSize={handleCellSize}
                   />
@@ -1855,7 +1917,7 @@ export default function App() {
                 {!appUser && team && (
                   <div className="empty">
                     {t("chat.emptyState.noUser")}
-                    <button className="link" onClick={() => setModal({ kind: "appuser" })}>
+                    <button className="link" onClick={() => setModal({ kind: "appuser", auto: false })}>
                       {t("chat.emptyState.addOne")}
                     </button>
                   </div>
@@ -1920,7 +1982,18 @@ export default function App() {
         />
       )}
       {modal?.kind === "appuser" && (
-        <AppUserModal onAdd={onAddAppUser} onClose={() => setModal(null)} browseDir={browseDir} />
+        <AppUserModal
+          onAdd={onAddAppUser}
+          onClose={() => {
+            // Dismissing the auto-prompt (vs. the "Add one" link's manual
+            // open) means the user doesn't want to add one right now — an
+            // app-user is always reachable from the chat link, so don't
+            // re-ask on every future team switch (see SUPPRESS_APPUSER_PROMPT_KEY).
+            if (modal.auto) localStorage.setItem(SUPPRESS_APPUSER_PROMPT_KEY, "true");
+            setModal(null);
+          }}
+          browseDir={browseDir}
+        />
       )}
       {modal?.kind === "agent" && (
         <AgentModal
@@ -1944,7 +2017,13 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal?.kind === "settings" && <SettingsModal onClose={() => setModal(null)} />}
+      {modal?.kind === "settings" && (
+        <SettingsModal
+          onClose={() => setModal(null)}
+          terminalFontSize={terminalFontSize}
+          onTerminalFontSizeChange={setTerminalFontSize}
+        />
+      )}
       {modal?.kind === "closeWindow" &&
         (() => {
           const win = windows.find((w) => w.id === modal.windowId);

@@ -498,6 +498,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Restores the main window's size/position/maximized state on
+        // launch and saves it on move/resize/close — fully automatic, no
+        // frontend involvement needed (unlike zoom/view-visibility, which
+        // are app-specific state the frontend also reads/writes).
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         // Built in English first — the frontend doesn't get a chance to
         // report its actual language until after the webview loads and
         // i18next resolves it, so set_menu_language rebuilds this shortly
