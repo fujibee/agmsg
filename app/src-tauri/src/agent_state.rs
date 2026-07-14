@@ -549,10 +549,18 @@ fn strip_ansi(input: &str) -> (String, Option<String>) {
                             // capture, #384/grok: distinct panel text was
                             // running together with no separator at all —
                             // "response… 0.0s0.0s [stop]ccancl" was really
-                            // three separate lines/regions). A forward row
-                            // jump becomes a newline (there's no real
-                            // screen buffer to overwrite, so "new row" is
-                            // the closest honest representation); the
+                            // three separate lines/regions). ANY row change
+                            // — forward OR backward — gets a single
+                            // separator newline (co1 review: an earlier
+                            // version only handled forward jumps, so an
+                            // animation that repeatedly redraws the same
+                            // upper panel — jump down, jump back up, jump
+                            // down again — glued that panel's redraws back
+                            // together after the first round-trip; there's
+                            // no real screen buffer to overwrite here
+                            // either way, so one newline per distinct row
+                            // is the closest honest representation
+                            // regardless of direction or distance). The
                             // column portion then reuses 'G's logic.
                             'H' | 'f' => {
                                 let mut parts = params.splitn(2, ';');
@@ -566,13 +574,13 @@ fn strip_ansi(input: &str) -> (String, Option<String>) {
                                     .and_then(|p| p.parse().ok())
                                     .unwrap_or(1)
                                     .max(1);
-                                if target_row - 1 > row {
-                                    let rows = (target_row - 1 - row).min(512);
-                                    output.extend(std::iter::repeat_n('\n', rows));
-                                    row = target_row - 1;
+                                let target_row0 = target_row - 1;
+                                if target_row0 != row {
+                                    output.push('\n');
+                                    row = target_row0;
                                     col = 0;
                                 }
-                                if target_row - 1 == row && target_col > col + 1 {
+                                if target_col > col + 1 {
                                     let gap = (target_col - 1 - col).min(512);
                                     output.extend(std::iter::repeat_n(' ', gap));
                                     col = target_col - 1;
@@ -845,6 +853,31 @@ Would you like to proceed?\n\
         let mut same_row = TailBuffer::default();
         same_row.push(b"ab\x1b[1;5Hcd");
         assert_eq!(same_row.detection_tail(), "ab  cd");
+    }
+
+    #[test]
+    fn cursor_position_backward_row_jumps_also_get_a_newline() {
+        // co1 review, PR #395: an earlier version only inserted a newline
+        // for FORWARD row jumps, leaving `row` stale on a backward one —
+        // grok's real "thinking" animation jumps back up to redraw an
+        // earlier panel constantly, and that stale `row` meant the
+        // separator silently stopped firing after the first round-trip
+        // ("response… [stop]ccancl"-style gluing). Minimal repro from the
+        // review: without this fix, "a\x1b[3;1Hb\x1b[1;1Hc" glues "bc".
+        let mut tail = TailBuffer::default();
+        tail.push(b"a\x1b[3;1Hb\x1b[1;1Hc");
+        assert_eq!(tail.detection_tail(), "a b c");
+    }
+
+    #[test]
+    fn cursor_position_survives_a_panel_round_trip() {
+        // Two "panels" (rows) redrawn alternately across several jumps —
+        // down, down, up, down — the shape of grok's real thinking
+        // animation repeatedly updating two status lines. Every redraw
+        // must land as its own separated chunk regardless of direction.
+        let mut tail = TailBuffer::default();
+        tail.push(b"\x1b[1;1Hx1\x1b[2;1Hy1\x1b[1;1Hx2\x1b[2;1Hy2");
+        assert_eq!(tail.detection_tail(), "x1 y1 x2 y2");
     }
 
     #[test]
