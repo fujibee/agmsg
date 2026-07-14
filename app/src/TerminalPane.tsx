@@ -164,7 +164,13 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
       return;
     }
     void invoke("pty_resize", { id: idRef.current, rows: term.rows, cols: term.cols });
-  }, [fontSize]);
+    // A font size change resizes xterm's internal cell geometry without
+    // resizing the .term-pane container itself, so the ResizeObserver in
+    // the main effect above never fires for it — re-report cell size here,
+    // or divider snap/gap sizing (see onCellSize's doc comment) silently
+    // stays pinned to whatever font was active on last container resize.
+    onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
+  }, [fontSize, onCellSize]);
 
   return <div className="term-pane" ref={ref} />;
 }
