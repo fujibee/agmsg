@@ -20,8 +20,11 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
+# shellcheck source=../../../lib/codex-lease.sh
+source "$SCRIPT_DIR/../../../lib/codex-lease.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
+DISABLED_FILE="$RUN_DIR/codex-monitor-disabled.$PROJECT_HASH"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -49,7 +52,7 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
 # actas may register the role a moment after launch, so retry while the parent
 # (codex-monitor.sh) is alive. Proceed only when exactly one identity resolves.
 team="" name=""
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
   ids="$(resolve_identity || true)"
   count="$(printf '%s\n' "$ids" | grep -c . || true)"
   if [ "$count" = "1" ]; then
@@ -63,6 +66,19 @@ EOF
 done
 [ -n "$team" ] && [ -n "$name" ] || exit 0
 
+TUI_GENERATION="$(codex_lease_generation)"
+current_tui_lease=""
+current_appserver_ref=""
+appserver_generation=""
+cleanup_tui_lease() {
+  [ -n "$current_tui_lease" ] && codex_lease_compare_delete "$current_tui_lease" "$TUI_GENERATION"
+  if [ -n "$current_appserver_ref" ] && [ -n "$appserver_generation" ]; then
+    codex_appserver_ref_remove_and_cleanup "$PROJECT_HASH" "$current_appserver_ref" "$appserver_generation" || true
+  fi
+}
+trap cleanup_tui_lease EXIT
+trap 'cleanup_tui_lease; exit 0' INT TERM
+
 pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
 log="$RUN_DIR/codex-bridge.$team.$name.log"
 # Records the app-server URL the live bridge was launched against, so a later
@@ -74,6 +90,7 @@ appserver_file="$RUN_DIR/codex-bridge.$team.$name.appserver"
 # appears for a bridge first launched on "loaded", it is torn down and relaunched
 # on the recorded thread instead of clinging to the ambiguous "loaded" one.
 thread_file="$RUN_DIR/codex-bridge.$team.$name.thread"
+bridge_lease="$(codex_bridge_lease_path "$team" "$name")"
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -84,7 +101,7 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
   # Resolve the app-server URL (and thread) this iteration would launch against
   # FIRST, so the reuse check can compare a live bridge's bound server with the
   # current one. Thread source: a request file (older-codex hook) wins; otherwise
@@ -120,9 +137,24 @@ EOF
     fi
   fi
 
+  # Publish the producer lease before a bridge is started or reused.  When the
+  # resolved thread changes, remove only this launcher's previous generation-
+  # matched file; another live TUI's lease is never touched.
+  next_tui_lease="$(codex_tui_lease_path "$team" "$name" "$thread_id" "$TUI_GENERATION")"
+  if [ -n "$current_tui_lease" ] && [ "$current_tui_lease" != "$next_tui_lease" ]; then
+    codex_lease_compare_delete "$current_tui_lease" "$TUI_GENERATION"
+  fi
+  current_tui_lease="$(codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" "$PROJECT" "$req_app_server" "$PARENT_PID")"
+  appserver_record="$(codex_appserver_record_path "$PROJECT_HASH")"
+  appserver_generation="$(codex_lease_field "$appserver_record" generation 2>/dev/null || true)"
+  if [ -n "$appserver_generation" ]; then
+    ref_name="$(basename "$current_tui_lease")"
+    current_appserver_ref="$(codex_appserver_ref_replace "$PROJECT_HASH" "$current_appserver_ref" "$ref_name" "$appserver_generation")"
+  fi
+
   if [ -f "$pidfile" ]; then
     bridge_pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
+    if [ -n "$bridge_pid" ] && compat_pid_alive_native "$bridge_pid"; then
       # Reuse only when the live bridge is bound to the CURRENT app-server. A
       # codex upgrade makes codex-monitor.sh kill the stale app-server and start a
       # fresh one on a new port (#237); a bridge still bound to the old URL stays
@@ -136,11 +168,13 @@ EOF
       # would keep the wrong-thread bridge alive indefinitely.
       bound_url="$(cat "$appserver_file" 2>/dev/null || true)"
       bound_thread="$(cat "$thread_file" 2>/dev/null || true)"
-      if [ "$bound_url" = "$req_app_server" ] && [ "$bound_thread" = "$thread_id" ]; then
+      bound_generation="$(codex_lease_field "$bridge_lease" bound_generation 2>/dev/null || true)"
+      if [ "$bound_url" = "$req_app_server" ] && [ "$bound_thread" = "$thread_id" ] \
+        && [ "$bound_generation" = "$TUI_GENERATION" ]; then
         sleep 0.3
         continue
       fi
-      kill "$bridge_pid" 2>/dev/null || true
+      codex_pid_kill_domain native "$bridge_pid" || true
       rm -f "$pidfile" "$appserver_file" "$thread_file"
     fi
   fi
@@ -152,6 +186,9 @@ EOF
     --name "$name" \
     --thread "$thread_id" \
     --app-server "$req_app_server" \
+    --tui-lease "$current_tui_lease" \
+    --bridge-lease "$bridge_lease" \
+    --bound-generation "$TUI_GENERATION" \
     --inline-inbox \
     >>"$log" 2>&1 &
   # Record what this bridge is bound to so a later launcher can detect staleness.

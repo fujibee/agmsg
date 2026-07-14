@@ -47,6 +47,10 @@ Options:
                           via thread/loaded/list (codex 0.141+, see #170).
   --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
+  --tui-lease <path>      Generation-specific TUI lease to validate before consumption.
+  --bridge-lease <path>   Bridge lease file maintained by this process.
+  --bound-generation <g>  TUI generation this bridge is allowed to deliver for.
+  --lease-timeout <sec>   Stop when the TUI lease is older than this (default: 5).
   --resolve-only          Print resolved team/name and exit.
   --help                  Show this help.
 
@@ -56,6 +60,16 @@ Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
 function die(message) {
   console.error(`codex-bridge: ${message}`);
   process.exit(1);
+}
+
+function nativeCreationDate(pid) {
+  if (process.platform !== "win32") return "";
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate`],
+    { encoding: "utf8", windowsHide: true },
+  );
+  return result.status === 0 ? (result.stdout || "").trim() : "";
 }
 
 // Convert a native Windows path into the MSYS/Git-Bash POSIX form that agmsg
@@ -86,6 +100,7 @@ function parseArgs(argv) {
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
+    leaseTimeout: Number(process.env.AGMSG_CODEX_LEASE_TIMEOUT || 5),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -126,6 +141,14 @@ function parseArgs(argv) {
       opts.loadedTimeout = Number(argv[++i]);
     } else if (arg === "--inline-inbox") {
       opts.inlineInbox = true;
+    } else if (arg === "--tui-lease") {
+      opts.tuiLease = argv[++i];
+    } else if (arg === "--bridge-lease") {
+      opts.bridgeLease = argv[++i];
+    } else if (arg === "--bound-generation") {
+      opts.boundGeneration = argv[++i];
+    } else if (arg === "--lease-timeout") {
+      opts.leaseTimeout = Number(argv[++i]);
     } else {
       die(`unknown option: ${arg}`);
     }
@@ -150,6 +173,13 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(opts.turnTimeout) || opts.turnTimeout < 0) {
     die("--turn-timeout must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.leaseTimeout) || opts.leaseTimeout <= 0) {
+    die("--lease-timeout must be a positive number");
+  }
+  if ((opts.tuiLease || opts.bridgeLease || opts.boundGeneration)
+      && !(opts.tuiLease && opts.bridgeLease && opts.boundGeneration)) {
+    die("--tui-lease, --bridge-lease, and --bound-generation must be provided together");
   }
   if (opts.threadId === "current") {
     opts.threadId = process.env.CODEX_THREAD_ID || "";
@@ -674,16 +704,31 @@ class CodexBridge {
     this.watchFailureCount = 0;
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
+    this.fetchedMessageIds = [];
+    this.deliveryInFlight = false;
+    this.turnEndedWhileStarting = false;
     this.stopping = false;
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
     this.metafile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.meta`);
+    this.bridgeGeneration = `${Date.now()}-${crypto.randomUUID()}`;
+    this.ownerCreation = nativeCreationDate(process.pid);
+    this.leaseCheckTimer = null;
+    this.bridgeLeaseTimer = null;
   }
 
   async run() {
     fs.mkdirSync(RUN_DIR, { recursive: true });
     this.ensureSingleInstance();
     this.writeMeta();
+    // Publish the generation handshake before thread discovery/connect work;
+    // the launcher polls once per second and must not mistake a slow-starting
+    // but correctly bound bridge for an old generation.
+    this.writeBridgeLease();
     this.installSignals();
+    if (this.opts.tuiLease && !this.checkTuiLease()) {
+      throw new Error("bound TUI lease is missing, stale, or incompatible");
+    }
+    this.startLeaseTimers();
     this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
     this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
@@ -699,6 +744,7 @@ class CodexBridge {
     await this.client.ready?.();
     await this.initialize();
     await this.ensureThread();
+    this.writeBridgeLease();
     await this.armWatch();
   }
 
@@ -723,12 +769,81 @@ class CodexBridge {
       this.metafile,
       [
         `pid=${process.pid}`,
+        "pid_domain=native",
         `project=${this.opts.project}`,
         `team=${this.identity.team}`,
         `name=${this.identity.name}`,
         `type=${this.opts.type}`,
       ].join("\n") + "\n",
     );
+  }
+
+  readLease(file) {
+    try {
+      const result = {};
+      for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+        const index = line.indexOf("=");
+        if (index > 0) result[line.slice(0, index)] = line.slice(index + 1);
+      }
+      return result;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  checkTuiLease() {
+    if (!this.opts.tuiLease) return true;
+    const lease = this.readLease(this.opts.tuiLease);
+    if (!lease || lease.format_version !== "1" || lease.owner_kind !== "tui"
+        || lease.generation !== this.opts.boundGeneration) return false;
+    if (!/^\d+$/.test(lease.updated_at || "")) return false;
+    const age = Math.floor(Date.now() / 1000) - Number(lease.updated_at);
+    return age >= 0 && age <= this.opts.leaseTimeout;
+  }
+
+  atomicWrite(file, content) {
+    const tmp = `${file}.tmp.${process.pid}.${crypto.randomBytes(6).toString("hex")}`;
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, file);
+  }
+
+  writeBridgeLease() {
+    if (!this.opts.bridgeLease) return;
+    this.atomicWrite(this.opts.bridgeLease, [
+      "format_version=1",
+      "owner_kind=bridge",
+      "pid_domain=native",
+      `owner_winpid=${process.pid}`,
+      `owner_creation=${this.ownerCreation}`,
+      `generation=${this.bridgeGeneration}`,
+      `bound_thread_id=${this.threadId || this.opts.threadId || ""}`,
+      `bound_generation=${this.opts.boundGeneration}`,
+      `project=${this.opts.project}`,
+      `app_server=${this.opts.appServer || ""}`,
+      `updated_at=${Math.floor(Date.now() / 1000)}`,
+      "",
+    ].join("\n"));
+  }
+
+  startLeaseTimers() {
+    if (!this.opts.tuiLease) return;
+    this.leaseCheckTimer = setInterval(() => {
+      if (this.stopping || this.checkTuiLease()) return;
+      console.error("codex-bridge: bound TUI lease expired; stopping before consuming more messages");
+      this.shutdown().finally(() => process.exit(0));
+    }, 1000);
+    this.bridgeLeaseTimer = setInterval(() => {
+      if (!this.stopping) this.writeBridgeLease();
+    }, 1000);
+    this.leaseCheckTimer.unref?.();
+    this.bridgeLeaseTimer.unref?.();
+  }
+
+  clearLeaseTimers() {
+    if (this.leaseCheckTimer) clearInterval(this.leaseCheckTimer);
+    if (this.bridgeLeaseTimer) clearInterval(this.bridgeLeaseTimer);
+    this.leaseCheckTimer = null;
+    this.bridgeLeaseTimer = null;
   }
 
   installSignals() {
@@ -830,6 +945,10 @@ class CodexBridge {
   async armWatch() {
     this.clearWatchRearmTimer();
     if (this.stopping || this.watchHandle) return;
+    if (!this.checkTuiLease()) {
+      await this.shutdown();
+      return;
+    }
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
     const command = [
@@ -951,6 +1070,10 @@ class CodexBridge {
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
+    if (this.deliveryInFlight) {
+      this.turnEndedWhileStarting = true;
+      return;
+    }
     if (this.opts.maxWakes && this.wakeCount >= this.opts.maxWakes) {
       await this.shutdown();
       process.exit(0);
@@ -973,14 +1096,24 @@ class CodexBridge {
 
   async tryStartTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (!this.checkTuiLease()) {
+      await this.shutdown();
+      return;
+    }
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
+      const fetched = this.fetchUnreadForPrompt();
+      this.inlineInboxText = fetched.text;
+      this.fetchedMessageIds = fetched.ids;
       if (!this.inlineInboxText.trim()) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
         await this.armWatch();
         return;
       }
+    }
+    if (!this.checkTuiLease()) {
+      await this.shutdown();
+      return;
     }
     const prompt = this.buildPrompt();
     // Consume the wake before submitting the turn. The app-server can emit an
@@ -991,6 +1124,8 @@ class CodexBridge {
     this.pendingWake = false;
     this.turnActive = true;
     this.threadIdle = false;
+    this.deliveryInFlight = true;
+    this.turnEndedWhileStarting = false;
     // Start the watchdog when the request is submitted, not after its ACK. A
     // real app-server may accept and execute turn/start but lose the response;
     // that ambiguous timeout must not leave a live bridge permanently deaf.
@@ -1003,17 +1138,35 @@ class CodexBridge {
         runtimeWorkspaceRoots: [this.opts.project],
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
+      const marked = this.markFetchedRead();
+      if (!marked) this.lastWakeMaxId = 0;
+      this.deliveryInFlight = false;
+      this.fetchedMessageIds = [];
+      if (this.turnEndedWhileStarting) {
+        this.turnEndedWhileStarting = false;
+        await this.onTurnEnded();
+      }
     } catch (error) {
       if (/app-server request 'turn\/start' timed out/.test(error.message || "")) {
         console.error(
           `codex-bridge: turn/start acknowledgement timed out; assuming the turn was accepted on thread ${this.threadId}`,
         );
+        this.deliveryInFlight = false;
+        this.fetchedMessageIds = [];
+        this.lastWakeMaxId = 0;
+        if (this.turnEndedWhileStarting) {
+          this.turnEndedWhileStarting = false;
+          await this.onTurnEnded();
+          return;
+        }
         // A completion/idle notification may already have re-armed the watch.
         // Otherwise the watchdog started above will do so. With an explicitly
         // disabled watchdog, recover immediately rather than staying deaf.
         if (!this.opts.turnTimeout && this.turnActive) await this.onTurnEnded();
         return;
       }
+      this.deliveryInFlight = false;
+      this.fetchedMessageIds = [];
       this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
@@ -1075,30 +1228,63 @@ class CodexBridge {
     ].join("\n");
   }
 
-  readInboxForPrompt() {
-    const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), this.identity.team, this.identity.name], {
+  fetchUnreadForPrompt() {
+    const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "peek-inbox.sh"), this.identity.team, this.identity.name], {
       cwd: this.opts.project,
       encoding: "utf8",
     });
     if (result.error) {
-      console.error(`codex-bridge: inbox.sh failed: ${result.error.message}`);
-      return "";
+      console.error(`codex-bridge: peek-inbox.sh failed: ${result.error.message}`);
+      return { text: "", ids: [] };
     }
     if (result.status !== 0) {
-      console.error(`codex-bridge: inbox.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
-      return "";
+      console.error(`codex-bridge: peek-inbox.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
+      return { text: "", ids: [] };
     }
-    return result.stdout || "";
+    try {
+      const payload = JSON.parse(result.stdout || "{}");
+      if (!Array.isArray(payload.rows)) throw new Error("rows is not an array");
+      const rows = payload.rows.map((row) => {
+        if (!Number.isSafeInteger(row.id) || row.id < 0) throw new Error("invalid message id");
+        return row;
+      });
+      return {
+        ids: rows.map((row) => row.id),
+        text: rows.map((row) => `  [${row.ts}] ${row.from}: ${row.body}`).join("\n"),
+      };
+    } catch (error) {
+      console.error(`codex-bridge: invalid peek-inbox JSON: ${error.message}`);
+      return { text: "", ids: [] };
+    }
+  }
+
+  markFetchedRead() {
+    if (!this.opts.inlineInbox || this.fetchedMessageIds.length === 0) return true;
+    const result = spawnSync(
+      BASH_BIN,
+      [path.join(SCRIPTS_DIR, "mark-read.sh"), this.identity.team, this.identity.name],
+      { cwd: this.opts.project, encoding: "utf8", input: `${this.fetchedMessageIds.join("\n")}\n` },
+    );
+    if (result.error || result.status !== 0) {
+      const detail = result.error ? result.error.message : (result.stderr || "").trim();
+      console.error(`codex-bridge: mark-read.sh failed; leaving messages unread: ${detail}`);
+      return false;
+    }
+    return true;
   }
 
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
+    this.clearLeaseTimers();
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
       try {
-        await this.client.request("process/kill", { processHandle: this.watchHandle });
+        await Promise.race([
+          this.client.request("process/kill", { processHandle: this.watchHandle }),
+          new Promise((resolve) => setTimeout(resolve, 1000)),
+        ]);
       } catch (_) {
         // The app-server may already be gone.
       }
@@ -1132,6 +1318,16 @@ class CodexBridge {
         if (fs.existsSync(file)) fs.unlinkSync(file);
       } catch (_) {
         // Best-effort cleanup.
+      }
+    }
+    if (this.opts.bridgeLease) {
+      const lease = this.readLease(this.opts.bridgeLease);
+      if (lease && lease.generation === this.bridgeGeneration) {
+        try {
+          if (fs.existsSync(this.opts.bridgeLease)) fs.unlinkSync(this.opts.bridgeLease);
+        } catch (_) {
+          // Best-effort compare-and-delete cleanup.
+        }
       }
     }
   }

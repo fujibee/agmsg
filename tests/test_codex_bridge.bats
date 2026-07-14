@@ -89,6 +89,30 @@ EOF
   [[ "$output" =~ "turn/start acknowledgement timed out" ]]
 }
 
+@test "codex-bridge: does not acknowledge when lease expires after peek" {
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts={appServer:"ws://127.0.0.1:1",inlineInbox:true,project:process.cwd(),threadId:"thread-1",turnTimeout:0,type:"codex"}; const b=new CodexBridge(opts,{team:"team",name:"alice"}); let checks=0, turns=0, marks=0, stopped=0; b.checkTuiLease=()=>++checks===1; b.fetchUnreadForPrompt=()=>({text:"message",ids:[1]}); b.client.request=async()=>{turns++}; b.markFetchedRead=()=>{marks++;return true}; b.shutdown=async()=>{stopped++}; b.pendingWake=true; b.tryStartTurn().then(()=>{if(turns!==0||marks!==0||stopped!==1)process.exit(1)})' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: acknowledges exact fetched IDs only after turn ACK" {
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts={appServer:"ws://127.0.0.1:1",inlineInbox:true,project:process.cwd(),threadId:"thread-1",turnTimeout:0,type:"codex"}; const b=new CodexBridge(opts,{team:"team",name:"alice"}); let turns=0, marked=""; b.checkTuiLease=()=>true; b.fetchUnreadForPrompt=()=>({text:"message",ids:[7,9]}); b.client.request=async()=>{turns++}; b.markFetchedRead=()=>{marked=b.fetchedMessageIds.join(",");return true}; b.pendingWake=true; b.tryStartTurn().then(()=>{if(turns!==1||marked!=="7,9")process.exit(1)})' "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "codex-bridge: stale lease timer kills an armed watch before exiting" {
+  local lease="$TEST_SKILL_DIR/stale.lease" bridge_lease="$TEST_SKILL_DIR/bridge.lease"
+  cat >"$lease" <<EOF
+format_version=1
+owner_kind=tui
+generation=generation-a
+updated_at=1
+EOF
+  run node -e 'const { CodexBridge } = require(process.argv[1]); const opts={appServer:"ws://127.0.0.1:1",bridgeLease:process.argv[3],boundGeneration:"generation-a",inlineInbox:false,leaseTimeout:0.1,project:process.cwd(),threadId:"thread-1",turnTimeout:0,tuiLease:process.argv[2],type:"codex"}; const b=new CodexBridge(opts,{team:"team",name:"alice"}); b.watchHandle="watch-1"; b.client.request=async(method)=>{if(method==="process/kill")console.error("killed-watch")}; b.startLeaseTimers(); setTimeout(()=>process.exit(2),3000);' "$TYPES/codex/codex-bridge.js" "$lease" "$bridge_lease"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"killed-watch"* ]]
+  [[ "$output" == *"bound TUI lease expired"* ]]
+}
+
 @test "codex-bridge: resolve-only prints the selected identity" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice --resolve-only
