@@ -146,10 +146,13 @@ EOF
   fi
   current_tui_lease="$(codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" "$PROJECT" "$req_app_server" "$PARENT_PID")"
   appserver_record="$(codex_appserver_record_path "$PROJECT_HASH")"
-  appserver_generation="$(codex_lease_field "$appserver_record" generation 2>/dev/null || true)"
-  if [ -n "$appserver_generation" ]; then
+  next_appserver_generation="$(codex_lease_field "$appserver_record" generation 2>/dev/null || true)"
+  if [ -n "$next_appserver_generation" ]; then
     ref_name="$(basename "$current_tui_lease")"
-    current_appserver_ref="$(codex_appserver_ref_replace "$PROJECT_HASH" "$current_appserver_ref" "$ref_name" "$appserver_generation")"
+    if next_appserver_ref="$(codex_appserver_ref_replace "$PROJECT_HASH" "$current_appserver_ref" "$ref_name" "$next_appserver_generation")"; then
+      current_appserver_ref="$next_appserver_ref"
+      appserver_generation="$next_appserver_generation"
+    fi
   fi
 
   if [ -f "$pidfile" ]; then

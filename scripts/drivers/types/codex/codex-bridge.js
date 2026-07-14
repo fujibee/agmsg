@@ -984,6 +984,7 @@ class CodexBridge {
   }
 
   async onProcessExited(params) {
+    if (this.stopping) return;
     if (params.processHandle !== this.watchHandle) return;
     this.watchHandle = null;
 
@@ -1095,7 +1096,7 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
-    if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle) return;
     if (!this.checkTuiLease()) {
       await this.shutdown();
       return;

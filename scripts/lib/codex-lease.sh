@@ -199,8 +199,15 @@ codex_appserver_ref_add() { # hash ref_name generation
 }
 
 codex_appserver_ref_replace() { # hash old_path ref_name generation
-  local hash="$1" old_path="$2" ref_name="$3" generation="$4" dir path
+  local hash="$1" old_path="$2" ref_name="$3" generation="$4" dir path record current_generation status
   codex_lifecycle_lock_acquire "$hash" || return 1
+  record="$(codex_appserver_record_path "$hash")"
+  status="$(codex_lease_field "$record" status 2>/dev/null || true)"
+  current_generation="$(codex_lease_field "$record" generation 2>/dev/null || true)"
+  if [ "$status" != ready ] || [ -z "$current_generation" ] || [ "$current_generation" != "$generation" ]; then
+    codex_lifecycle_lock_release "$hash"
+    return 1
+  fi
   dir="$(codex_appserver_refs_dir "$hash")"
   mkdir -p "$dir"
   path="$dir/$(codex_lease_encode "$ref_name")"
