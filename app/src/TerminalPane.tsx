@@ -83,17 +83,54 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
       onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
     };
 
+    // Coalesce PTY output into at most one term.write() per animation frame
+    // instead of one per backend event. The Rust reader thread emits an
+    // event per raw PTY read (unbatched, no debounce) — a chatty CLI (issue
+    // #383: Codex's title-escape-driven spinner churns very frequently)
+    // can fire far more of these than the browser can usefully paint
+    // between frames. Unverified hypothesis behind this change: each
+    // term.write() resets xterm's cursor blink phase, so writing many
+    // times within a single frame is a plausible source of the reported
+    // visible flicker/jitter — batching bounds that to once per frame
+    // regardless of how bursty the backend is.
+    let pendingOutput: Uint8Array[] = [];
+    let flushHandle: number | null = null;
+    const flushPendingOutput = () => {
+      flushHandle = null;
+      if (pendingOutput.length === 0) return;
+      const total = pendingOutput.reduce((sum, chunk) => sum + chunk.length, 0);
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of pendingOutput) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      pendingOutput = [];
+      term.write(merged);
+    };
+
     const unlisteners: Array<() => void> = [];
     (async () => {
       // Register listeners BEFORE spawning so no early output is missed.
       unlisteners.push(
         await listen<{ id: string; b64: string }>("pty-output", (e) => {
-          if (e.payload.id === id) term.write(b64ToBytes(e.payload.b64));
+          if (e.payload.id !== id) return;
+          pendingOutput.push(b64ToBytes(e.payload.b64));
+          if (flushHandle === null) flushHandle = requestAnimationFrame(flushPendingOutput);
         }),
       );
       unlisteners.push(
         await listen<{ id: string }>("pty-exit", (e) => {
-          if (e.payload.id === id) term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
+          if (e.payload.id !== id) return;
+          // Flush synchronously first — any output still waiting for its
+          // batched animation-frame write must land before the exit
+          // banner, or the banner could render above the process's own
+          // final lines.
+          if (flushHandle !== null) {
+            cancelAnimationFrame(flushHandle);
+            flushPendingOutput();
+          }
+          term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
         }),
       );
       if (disposed) return;
@@ -133,6 +170,8 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     return () => {
       disposed = true;
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (flushHandle !== null) cancelAnimationFrame(flushHandle);
+      pendingOutput = [];
       ro.disconnect();
       unlisteners.forEach((u) => u());
       void invoke("pty_kill", { id });
