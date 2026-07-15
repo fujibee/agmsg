@@ -58,6 +58,25 @@ SH
   [ "$(agmsg_db_path)" = "$BATS_TEST_TMPDIR/store/messages.db" ]
 }
 
+@test "storage: Windows prefers the sandbox-compatible sqlite3 copy" {
+  local home="$BATS_TEST_TMPDIR/home" blocked="$BATS_TEST_TMPDIR/blocked"
+  mkdir -p "$home/.agents/bin" "$blocked"
+  cat >"$home/.agents/bin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+echo local-sqlite
+SH
+  cat >"$blocked/sqlite3" <<'SH'
+#!/usr/bin/env bash
+echo blocked-sqlite
+SH
+  chmod +x "$home/.agents/bin/sqlite3" "$blocked/sqlite3"
+
+  run env HOME="$home" AGMSG_FORCE_WINDOWS=1 PATH="$blocked:$PATH" \
+    bash -c 'source "'$SCRIPTS'/lib/storage.sh"; sqlite3 :memory: "SELECT 1"'
+  [ "$status" -eq 0 ]
+  [ "$output" = local-sqlite ]
+}
+
 # --- init-db.sh honoring the override ---
 
 @test "storage: init-db creates the db at the overridden path (and makes the dir)" {

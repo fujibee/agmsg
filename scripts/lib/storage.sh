@@ -15,6 +15,30 @@
 # full order is env > config > default. Keep that logic here so call sites
 # stay unchanged.
 
+# Codex's Windows sandbox may allow an executable copied under ~/.agents/bin
+# while denying the same sqlite3.exe in WinGet's package directory. Prefer the
+# installer-managed copy before any script invokes sqlite3 directly. This is a
+# PATH policy (rather than a wrapper function) because several scripts use the
+# sqlite3 CLI for in-memory JSON work as well as the message DB.
+_agmsg_prefer_windows_sandbox_sqlite() {
+  local is_windows=0 agents_bin
+  case "$(uname -s 2>/dev/null || printf unknown)" in
+    MINGW*|MSYS*|CYGWIN*) is_windows=1 ;;
+  esac
+  [ "${AGMSG_FORCE_WINDOWS:-}" = 1 ] && is_windows=1
+  [ "$is_windows" -eq 1 ] || return 0
+
+  agents_bin="${AGMSG_AGENTS_DIR:-$HOME/.agents}/bin"
+  if [ -x "$agents_bin/sqlite3" ] || [ -x "$agents_bin/sqlite3.exe" ]; then
+    case ":$PATH:" in
+      *":$agents_bin:"*) ;;
+      *) PATH="$agents_bin:$PATH"; export PATH ;;
+    esac
+  fi
+}
+_agmsg_prefer_windows_sandbox_sqlite
+unset -f _agmsg_prefer_windows_sandbox_sqlite
+
 # Echo the directory that holds (or will hold) the message store.
 agmsg_storage_dir() {
   if [ -n "${AGMSG_STORAGE_PATH:-}" ]; then

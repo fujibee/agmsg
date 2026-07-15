@@ -158,6 +158,23 @@ install_windows_helpers() {
   if [ "$removed_sqlite_shim" = true ]; then
     rm -f "$AGENTS_DIR/run/sqlite3-shim.cache"
   fi
+
+  # Codex's Windows sandbox can deny execution from WinGet's package directory
+  # even though the same native binary is executable from ~/.agents/bin. Keep a
+  # local copy and let storage.sh prefer that directory on Windows. This is the
+  # installed sqlite executable itself, not the removed compatibility wrapper.
+  local sqlite_source sqlite_target
+  sqlite_source="$(command -v sqlite3 2>/dev/null || true)"
+  sqlite_target="$AGENTS_DIR/bin/sqlite3.exe"
+  if [ -n "$sqlite_source" ] && [ -f "$sqlite_source" ]; then
+    mkdir -p "$AGENTS_DIR/bin"
+    if [ "$sqlite_source" != "$sqlite_target" ] \
+      && { [ ! -f "$sqlite_target" ] || ! cmp -s "$sqlite_source" "$sqlite_target"; }; then
+      cp "$sqlite_source" "$sqlite_target"
+      chmod +x "$sqlite_target"
+      echo "  + installed sandbox-compatible sqlite3 copy (~/.agents/bin/sqlite3.exe)"
+    fi
+  fi
 }
 
 # --- Parse args ---

@@ -454,6 +454,11 @@ which is outside most project workspaces. If the sandbox cannot write there,
 commands that append or update state can fail with errors such as
 `sqlite3.OperationalError: unable to open database file`.
 
+On Windows, the installer also copies the existing system `sqlite3.exe` to
+`~/.agents/bin/sqlite3.exe`. agmsg prefers that copy because Codex may deny
+execution from WinGet's package directory even when the database directories
+are writable. No download is performed; the already-installed binary is copied.
+
 This affects operations such as:
 
 - sending messages (`send.sh` writes to `db/messages.db`)
