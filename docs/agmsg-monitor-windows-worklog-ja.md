@@ -17,7 +17,7 @@
 1. **Codexへの配送先が古いtask/threadを指した。** `hameln/codex1`のseatが現在表示中とは別のCodex threadへ結び付いていたため、bridgeがaliveでも現在画面にはturnが出なかった。
 2. **メッセージ取得と既読化の順序が安全でなかった。** 旧経路では、Codexへの`turn/start`が確実に受理されたと分かる前にメッセージを消費し、失敗時に再配送できない危険があった。
 3. **Windows固有のshell、path、PID、sandbox差で診断・起動・終了判定が壊れた。** bare `bash`がWSL launcherを選ぶ、MSYS PIDとnative Windows PIDを混同する、native `sqlite3.exe`がsandboxから拒否される、といった独立した問題が重なった。
-4. **TUI終了後にバックグラウンドprocessが残った。** Codex側はlease/ref/lifecycleで大幅に対策した。一方Claude Codeの`watch.sh`は、WindowsでClaude本体PIDを解決できずbare UUIDへfallbackした場合、現在も自己終了できない。これは**未解決で再発し得る**。
+4. **TUI終了後にバックグラウンドprocessが残った。** Codex側はlease/ref/lifecycleで大幅に対策した。Claude Code側も今回、MSYS→native二段階ancestor walkとtyped owner livenessをsourceへ実装し、native Claude PIDを持つcomposite watcherがClaude終了後に自己終了することをWindows上の自動testで確認した。CIM等が使えずbare UUIDへfallbackする環境では、誤kill防止のため従来どおり自動回収しない制約が残る。
 
 Codex側では、exact thread routing、TUI lease、shared app-server ref、取得と既読確定の分離、ACK後のexact-ID既読化、at-least-once配送、Windows PID三値判定、health表示、Git Bash固定などをlocal sourceへ実装した。2026-07-15には、既存調査文書の執筆後の追加作業として、そのbranchを`./install.sh --update`でインストール済みagmsgへ反映し、`hameln-hozon`のCodex monitor hookも再登録した。GitHubへのpushやPR作成は行っていない。
 
@@ -32,7 +32,7 @@ Codex側では、exact thread routing、TUI lease、shared app-server ref、取�
 | Codex TUI/app-server終了処理 | 実装済み、既知の狭い制約あり | lease/ref集合とlifecycle lockで管理。複数TUIを保護 |
 | Windows Git Bash / WSL誤起動 | 実装済み | `Git\bin\bash.exe -lc`を標準化し、WSL fallbackを禁止 |
 | Windows sqlite sandbox拒否 | 実装済み | installer管理の`~/.agents/bin/sqlite3.exe`を優先 |
-| Claude watcherのbare UUID孤立 | **未実装・再発可能** | native ancestor helperはあるが`agmsg_agent_pid()`が利用していない |
+| Claude watcherのbare UUID孤立 | **主要経路を実装・Windows自動test済み** | native Claudeを解決できればcomposite化して自己終了。CIM不能時のbare backstopは安全な所有証拠がなく未解決 |
 | 全platform/full suite | 未完 | targeted testは成功。local branchをpushしていないためGitHub Actions未実行 |
 
 ## 2. agmsgの基本的な仕組み
@@ -103,7 +103,7 @@ Git Bashの`$$`や`$!`はMSYS PID、Task ManagerやCIMのPIDはWINPIDであり�
 
 Claude Code watcherのinstance IDは本来`<session UUID>.<Claude PID>`である。しかしWindows実機ではGit Bashの`ps -l -p $$`がPPID 1を返す境界があり、単純なMSYS PPID walkではnative `claude.exe`へ到達できない。
 
-`scripts/lib/compat.sh`には`compat_msys_pid_to_winpid()`と`compat_native_parent_pid()`が実装済みだが、現行`agmsg_agent_pid()`は`compat_get_ppid()`だけを繰り返し、native ancestor walkへ切り替えていない。そのためbare UUIDへのfallbackは現在も起こり得る。
+修正前は`scripts/lib/compat.sh`に`compat_msys_pid_to_winpid()`と`compat_native_parent_pid()`が存在しても、`agmsg_agent_pid()`は`compat_get_ppid()`だけを繰り返し、native ancestor walkへ切り替えていなかった。今回、parentとidentityを同一`Win32_Process` snapshotから取得するPhase 2を接続した。なおCIM等が利用不能ならbare UUID fallback自体は残る。
 
 ### 3.4 native sqlite3とsandbox
 
@@ -126,7 +126,7 @@ Gate G2/G2bでは、実Codex CLIが概ねNode wrapper→native `codex.exe`とい
 | 1回配送後にbridgeが反応しない | `turn/start` ACK欠落とwatchdog/rearm開始時点の問題 | request時にwatchdog開始。idle/completed/watchdogを単一終了経路へ統合 |
 | `bash`失敗後にWSLを試す | skill指示と起動形式がGit Bashを固定していなかった | WSL fallback禁止、Git `bin\bash.exe -lc`固定 |
 | `sqlite3: Permission denied` | sandboxがWinGet package executableを拒否 | installer-managed copyを優先 |
-| TUIを閉じてもbashが残る | Claude watcherがbare UUIDで自己終了guard対象外 | 今回は手動停止。恒久修正は未実装 |
+| TUIを閉じてもbashが残る | Claude watcherがbare UUIDで自己終了guard対象外 | native ancestor walkとtyped owner guardを実装。bare fallbackの安全な自動回収は未実装 |
 | `codex-command-runner`とNodeが残る | 古いCodex App taskのorphan 1系統を確認 | 対象PIDだけ停止。現行Codex App配下は残した |
 
 別teamの既読巻き込みは、今回の実データで独立した再現testを行ったという意味ではない。旧pair生成ロジックに対するコード上の危険として扱い、現在は曖昧identityをfail-closedにする自動testで保護している。
@@ -268,6 +268,7 @@ PowerShellから公式scriptを呼ぶ場合は次の形に統一する。
 - `tests/test_codex_resume.bats`: seat移動、fresh generation thread、old same-cwd rollout拒否。
 - `tests/test_messaging.bats`: peek、exact mark、idempotence、曖昧identity fail-closed。
 - `tests/test_storage.bats`: Windows pathとsandbox-compatible sqlite copy。
+- `tests/test_windows_claude_ancestor.bats`: POSIX互換、MSYS内/境界越えnative ancestor、複数bash中継、非Claude拒否、CIM unknown、cycle/hop上限、WINPID composite、project marker、PID reuse、parallel resume、実WINPID watcher終了、bare fail-closed。
 
 ### 10.2 実行記録として確認できる範囲
 
@@ -282,6 +283,10 @@ PowerShellから公式scriptを呼ぶ場合は次の形に統一する。
 - app-server起動失敗時にplain Codexへfail-openすること。
 - SessionStart hookがapp-serverより先にinstallされること。
 - PowerShell関数がGit Bashを固定し、`usr\bin`を`bin`へ正規化すること。
+
+同日のClaude watcher恒久修正では、`tests/test_windows_claude_ancestor.bats` 16件を実行した。決定論的process-table stubによる12件に加え、`sleep.exe`の使い捨てcopyを`claude.exe`として起動する実WINPID/CIM lifecycle、bare watcher fail-closed、status分類、`delivery set off` cleanupの4件を含む。live owner中のwatcher維持、owner終了後の自動終了とpidfile削除、bare UUID watcherを根拠不足で停止しないことを確認した。managed sandbox内でCIM identityが拒否される場合はunknown/fail-closed testへ切り替え、実WINPID lifecycle caseはCIMを読み取れるWindows実行で成功させた。テスト用processは各caseのteardownで停止・waitし、残存process検索でも対象command lineが無いことを確認した。
+
+関連回帰では`tests/test_instance_id.bats` 41件がexit 0、`tests/test_resolve_project.bats`は既存23件成功後に今回のPID-domain変更で露出したmarker GC 1件を修正・再成功、Windows非対応のworktree path 2件を既存skip方針へ統一した。`tests/test_watch.bats`はWindows非対応process/permission caseをskipし、今回の専用testで同等のnative lifecycleを置き換えた。変更shellの`bash -n`、`shellcheck`、`git diff --check`も成功した。巨大な`test_delivery.bats`全体はWindows上の収集コストが高く完走させず、必要なstatusと`set off` cleanupは専用16件へ移して実行した。
 
 full Batsは完走していない。Windows managed sandboxのnative executable制約と、各testのsetupが非常に遅い問題があった。途中でBatsを「終了した」と誤認した際、実際にはbackgroundで継続して複数bashを残したため、MSYS PIDとcommand lineを確認して、そのtest treeだけを停止した。その後、対象testを1件ずつ実行し、終了までsessionをpollし、残存がないことを確認した。
 
@@ -298,6 +303,7 @@ full Batsは完走していない。Windows managed sandboxのnative executable�
 
 ### 10.4 未検証
 
+- source checkout修正版をinstalled copyへ反映した上での、実Claude Code使い捨てsessionによる起動→正常終了E2E。今回は既存の使用中Claude processを保護し、install更新の事前許可も求めていないため、native `claude.exe` test doubleまでに留めた。
 - Linux/macOSを含むfull suiteの最終green。
 - push後のGitHub Actions。local-onlyのため未実行。
 - 長時間の大量連続message、全sleep/resume/clock-change組合せ。
@@ -327,9 +333,9 @@ statusは`watch processes: 2 alive, 4 stale pidfiles`だった。PowerShellか�
 
 ## 12. 現在も未解決の問題
 
-### 12.1 Claude watcherは再び孤立し得る
+### 12.1 Claude watcherの主要孤立経路は修正済み
 
-実測した2本のwatcherは引数がbare UUIDだった。現行sourceでは次の経路が残っている。
+実測した2本のwatcherは引数がbare UUIDだった。修正前sourceでは次の経路だった。
 
 1. `agmsg_normalize_instance_id()`が`agmsg_agent_pid()`を呼ぶ。
 2. `agmsg_agent_pid()`は`compat_get_ppid()`でMSYS PIDだけを上る。
@@ -338,13 +344,13 @@ statusは`watch processes: 2 alive, 4 stale pidfiles`だった。PowerShellか�
 5. `watch.sh`のliveness guardは`agmsg_instance_is_composite`の場合だけ実行される。
 6. bare watcherは親Claude終了後もpollを続ける。
 
-`compat_native_parent_pid()`は存在するが、`agmsg_agent_pid()`から呼ばれていない。設計書のPhase 2 native ancestor walkは**設計済み・未実装**である。今回の`set off`は既存processのcleanupであり、再発防止ではない。
+今回のsource修正で`agmsg_agent_pid()`を二段階化した。Phase 1は従来のMSYS/POSIX parent walk、Phase 2は境界のMSYS PIDをWINPIDへ変換して`Win32_Process.ParentProcessId`を辿る。Windowsで返すPIDはMSYS内でagentを見つけた場合もWINPIDへ統一し、composite instance ID、`cc-instance`、project marker、owner livenessのPID domainを揃えた。native identityはName/ExecutablePath/CommandLineを一回のCIM queryで取得し、実行主体がClaudeである場合だけ採用する。hop上限、cycle、空値、不正PIDを拒否する。
 
-必要な修正は、MSYS側で辿れる範囲を辿り、境界で現在MSYS PIDをWINPIDへ変換し、CIM `Win32_Process.ParentProcessId`とcommand line検証でnative Claude ancestorを探すことである。CIM失敗は`unknown`としてfail-closedにし、PID reuse対策としてcreation timeまたはgeneration相当の所有証明も必要になる。
+`watch.sh`はtyped owner stateが`dead`の場合だけ終了する。native PIDが存在してもClaude identityと一致しなければPID reuse/mismatchとして終了し、tasklist/CIM照会失敗は`unknown`として継続する。parallel resumeは同じsession UUIDでも異なるnative PIDのcomposite IDになる。PIDが再利用されて同じ数値になった場合も、別commandへのreuseはidentity検証で拒否され、新SessionStartの既存dedupが同じkeyの旧watcherを置き換える。ただし同一UUID・同一再利用PID・同一Claude executableという極端なgeneration衝突をcreation timeまで永続比較するsidecarは今回追加していない。
 
 ### 12.2 bare watcherのbackstop
 
-native ancestor walkが権限・race・policyで失敗する環境は残る。bare watcherを時間だけでkillするとlive sessionを誤停止し得るため、heartbeat単独をkill根拠にする初期案は撤回された。起動時GC、watcher自身のcmdline/owner確認、独立したsession証拠の組合せが必要である。
+native ancestor walkが権限・race・policyで失敗する環境は残る。bare watcherを時間だけでkillするとlive sessionを誤停止し得るため、heartbeat単独をkill根拠にする初期案は撤回された。今回もbare IDはowner stateを`unknown`とし、自動停止・起動時kill GCを追加していない。独立したsession所有証拠をClaude Code側から取得できるまで、安全なbackstopは未解決である。
 
 ### 12.3 Codex側の既知制約
 
@@ -378,6 +384,7 @@ TUIを全て閉じた後は`Codex bridge: not running`、project state `stopped`
 ```text
 mode: off
 watch processes: 0 alive, 0 stale pidfiles
+watch ownership: 0 verified composite, 0 bare weak, 0 owner unknown, 0 owner dead/mismatch
 ```
 
 残存時はinstalled copyやDBを直接編集せず、公式scriptをGit Bash経由で再実行する。
@@ -401,7 +408,7 @@ watch processes: 0 alive, 0 stale pidfiles
 
 | 優先度 | 作業 | 完了条件 |
 |---|---|---|
-| P0 | Claude用Windows native ancestor walkを実装 | 実Claude sessionでcomposite IDになり、終了後watcherが自動終了 |
+| 完了 | Claude用Windows native ancestor walkを実装 | stub matrixと使い捨てnative `claude.exe`自動testでcomposite/liveness/終了を確認。実Claude Code E2Eは別途必要 |
 | P0 | bare watcherの安全なbackstop/GC | live watcherを誤killせず、親消失bare watcherを回収できるtest |
 | P1 | Windows実機回帰matrix | normal exit、resume、window close、sleep/resume、CIM拒否を自動/半自動確認 |
 | P1 | test timeoutとcleanup強化 | Bats中断・timeout後にbash/node/processとtemp artifactが残らない |
@@ -413,7 +420,7 @@ Claude watcher修正では、`compat.sh`にprimitiveを置き、Claude/Codexそ�
 
 ## 15. 変更・外部影響の境界
 
-- 本報告書作成ではsource code、DB、team登録、installed copy、processを変更していない。
+- 今回の追記ではsource codeと自動testを変更した。DB、team登録、installed copyは変更していない。使い捨てtest processだけを起動し、終了・残存なしを確認した。
 - 本件の実装commitはlocal branchにあり、GitHubへpush/PRしていない。
 - 2026-07-15のruntime反映はuser許可のもと`install.sh --update`で行い、DB/team preserveを確認した。
 - Claude watcherと古いrunnerの停止は、command lineとparentを確認したtargeted運用対応である。
