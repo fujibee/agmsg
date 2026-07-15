@@ -329,21 +329,57 @@ EOF
 # shim is left alone (it is cross-project). Echoes how many bridges were killed.
 stop_codex_bridge() {
   local project="$1"
-  local pairs team name pidfile bpid killed=0 bridge_domain
+  local pairs team name pidfile metafile bpid killed=0 bridge_domain project_norm
+  local meta_project meta_project_norm meta_team meta_name meta_type bridge_cmd base live verified bridge_state
+  project_norm="$(agmsg_normalize_project_path "$project" 2>/dev/null || printf '%s' "$project")"
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" codex 2>/dev/null || true)
   if [ -n "$pairs" ]; then
     while IFS=$'\t' read -r team name _rest; do
       [ -n "$team" ] && [ -n "$name" ] || continue
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
       [ -f "$pidfile" ] || continue
+      metafile="${pidfile%.pid}.meta"
       bpid=$(cat "$pidfile" 2>/dev/null || true)
-      bridge_domain="$(awk -F= '/^pid_domain=/{print $2; exit}' "${pidfile%.pid}.meta" 2>/dev/null || true)"
-      if [ -n "$bpid" ] && [ "$bridge_domain" = native ] && compat_pid_alive_native "$bpid"; then
-        codex_pid_kill_domain native "$bpid" && killed=$((killed + 1))
+      meta_project="$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+      meta_project_norm="$(agmsg_normalize_project_path "$meta_project" 2>/dev/null || printf '%s' "$meta_project")"
+      meta_team="$(awk -F= '/^team=/{sub(/^team=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+      meta_name="$(awk -F= '/^name=/{sub(/^name=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+      meta_type="$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+      if [ -z "$meta_project" ] || [ "$meta_project_norm" != "$project_norm" ] \
+        || [ "$meta_team" != "$team" ] || [ "$meta_name" != "$name" ] || [ "$meta_type" != codex ]; then
+        echo "agmsg: kept unverified Codex bridge artifacts for $team/$name (metadata mismatch)" >&2
+        continue
+      fi
+      bridge_domain="$(awk -F= '/^pid_domain=/{print $2; exit}' "$metafile" 2>/dev/null || true)"
+      live=0; verified=0; bridge_state=dead
+      if [ -n "$bpid" ] && [ "$bridge_domain" = native ]; then
+        bridge_state="$(compat_pid_state_native "$bpid")"
+        [ "$bridge_state" = alive ] && live=1
+        if [ "$bridge_state" = unknown ]; then
+          echo "agmsg: kept Codex bridge artifacts for $team/$name (native liveness unknown)" >&2
+          continue
+        fi
+      elif [ -n "$bpid" ] && [ "$bridge_domain" = msys ] && compat_pid_alive_msys "$bpid"; then
+        live=1
       elif [ -n "$bpid" ] && [ -z "$bridge_domain" ] && compat_pid_alive_msys "$bpid"; then
-        codex_pid_kill_domain msys "$bpid" && killed=$((killed + 1))
-      elif [ -n "$bpid" ] && [ -z "$bridge_domain" ] && compat_pid_alive_native "$bpid"; then
-        codex_pid_kill_domain native "$bpid" && killed=$((killed + 1))
+        bridge_domain=msys; live=1
+      elif [ -n "$bpid" ] && [ -z "$bridge_domain" ]; then
+        bridge_state="$(compat_pid_state_native "$bpid")"
+        if [ "$bridge_state" = alive ]; then
+          bridge_domain=native; live=1
+        elif [ "$bridge_state" = unknown ]; then
+          echo "agmsg: kept Codex bridge artifacts for $team/$name (PID domain/liveness unknown)" >&2
+          continue
+        fi
+      fi
+      if [ "$live" -eq 1 ]; then
+        bridge_cmd="$(codex_pid_cmdline_domain "$bridge_domain" "$bpid" 2>/dev/null || true)"
+        case "$bridge_cmd" in *codex-bridge.js*) verified=1 ;; esac
+        if [ "$verified" -ne 1 ] || ! codex_pid_kill_domain "$bridge_domain" "$bpid"; then
+          echo "agmsg: kept live unverified Codex bridge artifacts for $team/$name" >&2
+          continue
+        fi
+        killed=$((killed + 1))
       fi
       # .appserver records which app-server URL the bridge was bound to (the
       # launcher's stale-binding guard); drop it with the rest so it cannot
@@ -356,20 +392,70 @@ $pairs
 EOF
   fi
 
+  # Registration may have been dropped before `mode off`. Recover remaining
+  # bridge artifacts by their metadata project, but kill only a verified
+  # codex-bridge.js process (PID reuse must never target an unrelated Node).
+  for metafile in "$RUN_DIR"/codex-bridge.*.meta; do
+    [ -f "$metafile" ] || continue
+    meta_project="$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+    meta_project_norm="$(agmsg_normalize_project_path "$meta_project" 2>/dev/null || printf '%s' "$meta_project")"
+    [ "$meta_project_norm" = "$project_norm" ] || continue
+    base="${metafile%.meta}"
+    bpid="$(awk -F= '/^pid=/{print $2; exit}' "$metafile" 2>/dev/null || true)"
+    bridge_domain="$(awk -F= '/^pid_domain=/{print $2; exit}' "$metafile" 2>/dev/null || true)"
+    meta_team="$(awk -F= '/^team=/{sub(/^team=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+    meta_name="$(awk -F= '/^name=/{sub(/^name=/, ""); print; exit}' "$metafile" 2>/dev/null || true)"
+    live=0; verified=0; bridge_state=dead
+    if [ -n "$bpid" ] && [ "$bridge_domain" = native ]; then
+      bridge_state="$(compat_pid_state_native "$bpid")"
+      [ "$bridge_state" = alive ] && live=1
+      if [ "$bridge_state" = unknown ]; then
+        echo "agmsg: kept Codex bridge artifacts from $meta_project (native liveness unknown)" >&2
+        continue
+      fi
+    elif [ -n "$bpid" ] && [ "$bridge_domain" = msys ] && compat_pid_alive_msys "$bpid"; then
+      live=1
+    elif [ -n "$bpid" ] && [ -z "$bridge_domain" ] && compat_pid_alive_msys "$bpid"; then
+      bridge_domain=msys; live=1
+    elif [ -n "$bpid" ] && [ -z "$bridge_domain" ]; then
+      bridge_state="$(compat_pid_state_native "$bpid")"
+      if [ "$bridge_state" = alive ]; then
+        bridge_domain=native; live=1
+      elif [ "$bridge_state" = unknown ]; then
+        echo "agmsg: kept Codex bridge artifacts from $meta_project (PID domain/liveness unknown)" >&2
+        continue
+      fi
+    fi
+    if [ "$live" -eq 1 ]; then
+      bridge_cmd="$(codex_pid_cmdline_domain "$bridge_domain" "$bpid" 2>/dev/null || true)"
+      case "$bridge_cmd" in *codex-bridge.js*) verified=1 ;; esac
+      if [ "$verified" -ne 1 ] || ! codex_pid_kill_domain "$bridge_domain" "$bpid"; then
+        echo "agmsg: kept live unverified Codex bridge artifacts from $meta_project" >&2
+        continue
+      fi
+      killed=$((killed + 1))
+    fi
+    rm -f "$base.pid" "$metafile" "$base.log" "$base.appserver" "$base.thread"
+    if [ -n "$meta_team" ] && [ -n "$meta_name" ]; then
+      rm -f "$(codex_bridge_lease_path "$meta_team" "$meta_name")"
+    fi
+  done
+
   # Tear down the project's shared app-server too. It is keyed per project
   # (codex-app-server.<hash>.{pid,port,version}); turning delivery off means no
   # bridge needs it, and leaving it running keeps a stale port the next launch
   # would have to recreate anyway. Only kill the recorded pid when its cmdline
-  # confirms it is our app-server (a recycled pid could be unrelated); drop the
-  # record either way.
-  local project_hash server_pidfile server_pid server_cmd refs record domain generation starter_pid
-  project_hash="$(printf '%s' "$project" | agmsg_sha1 2>/dev/null || true)"
+  # confirms it is our app-server (a recycled pid could be unrelated). Unknown
+  # liveness/identity keeps the record fail-closed instead of creating an orphan.
+  local project_hash project_phys server_pidfile server_pid server_cmd server_state refs record domain generation starter_pid lease lease_project lease_project_norm
+  project_phys="$(agmsg_canonical_path "$project" 2>/dev/null || printf '%s' "$project")"
+  project_hash="$(printf '%s' "$project_phys" | agmsg_sha1 2>/dev/null || true)"
   if [ -n "$project_hash" ]; then
     refs="$(codex_appserver_refs_dir "$project_hash")"
     # Launchers observe the disabled marker and remove their own refs. Give
     # those compare/delete cleanups a short bounded window; unknown/live refs
     # fail closed and prevent a shared server kill.
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 60); do
       find "$refs" -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q . || break
       sleep 0.1
     done
@@ -382,10 +468,29 @@ EOF
       server_cmd="$(codex_pid_cmdline_domain "$domain" "$server_pid" 2>/dev/null || true)"
       if [ -n "$generation" ]; then
         if [ -n "$server_pid" ]; then
-          case "$server_cmd" in *codex*app-server*) codex_pid_kill_domain "$domain" "$server_pid" || true ;; esac
-          rm -f "$record" "$RUN_DIR/codex-app-server.$project_hash.pid" \
-            "$RUN_DIR/codex-app-server.$project_hash.port" \
-            "$RUN_DIR/codex-app-server.$project_hash.version"
+          server_state="$(codex_pid_state_domain "$domain" "$server_pid")"
+          if [ "$server_state" = unknown ]; then
+            echo "agmsg: kept app-server record because process liveness is unknown" >&2
+          elif [ "$server_state" = alive ]; then
+            case "$server_cmd" in
+              *codex*app-server*)
+                if codex_pid_kill_domain "$domain" "$server_pid"; then
+                  rm -f "$record" "$RUN_DIR/codex-app-server.$project_hash.pid" \
+                    "$RUN_DIR/codex-app-server.$project_hash.port" \
+                    "$RUN_DIR/codex-app-server.$project_hash.version"
+                else
+                  echo "agmsg: kept app-server record because its verified process could not be stopped" >&2
+                fi
+                ;;
+              *)
+                echo "agmsg: kept live app-server record because process identity is unknown" >&2
+                ;;
+            esac
+          else
+            rm -f "$record" "$RUN_DIR/codex-app-server.$project_hash.pid" \
+              "$RUN_DIR/codex-app-server.$project_hash.port" \
+              "$RUN_DIR/codex-app-server.$project_hash.version"
+          fi
         else
           starter_pid="$(codex_lease_field "$record" starter_msys_pid 2>/dev/null || true)"
           if [ -z "$starter_pid" ] || ! compat_pid_alive_msys "$starter_pid"; then
@@ -405,14 +510,37 @@ EOF
       if [ -n "$server_pid" ] && compat_pid_alive_msys "$server_pid"; then
         server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
         case "$server_cmd" in
-          *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
+          *codex*app-server*)
+            if ! kill "$server_pid" 2>/dev/null; then
+              echo "agmsg: kept legacy app-server record because its process could not be stopped" >&2
+              server_pid=""
+            fi
+            ;;
+          *)
+            echo "agmsg: kept live legacy app-server record because process identity is unknown" >&2
+            server_pid=""
+            ;;
         esac
       fi
-      rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
-            "$RUN_DIR/codex-app-server.$project_hash.port" \
-            "$RUN_DIR/codex-app-server.$project_hash.version" \
-            "$RUN_DIR/codex-app-server.$project_hash.log"
+      if [ -n "$server_pid" ] || ! compat_pid_alive_msys "$(cat "$server_pidfile" 2>/dev/null || true)"; then
+        rm -f "$RUN_DIR/codex-app-server.$project_hash.pid" \
+              "$RUN_DIR/codex-app-server.$project_hash.port" \
+              "$RUN_DIR/codex-app-server.$project_hash.version" \
+              "$RUN_DIR/codex-app-server.$project_hash.log"
+      fi
     fi
+    # Disabled launchers no longer own these generation-scoped rendezvous and
+    # diagnostics. Remove only this canonical project's artifacts.
+    rm -f "$RUN_DIR"/codex-bridge-request."$project_hash" \
+      "$RUN_DIR"/codex-bridge-request."$project_hash".* \
+      "$RUN_DIR"/codex-monitor-state."$project_hash".* \
+      "$RUN_DIR"/codex-bridge-launcher."$project_hash".*.log
+    for lease in "$RUN_DIR"/codex-tui-lease.*; do
+      [ -f "$lease" ] || continue
+      lease_project="$(codex_lease_field "$lease" project 2>/dev/null || true)"
+      lease_project_norm="$(agmsg_normalize_project_path "$lease_project" 2>/dev/null || printf '%s' "$lease_project")"
+      [ "$lease_project_norm" = "$project_norm" ] && rm -f "$lease"
+    done
   fi
 
   echo "$killed"

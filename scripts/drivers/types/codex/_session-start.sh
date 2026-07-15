@@ -14,17 +14,25 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
-# Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
-# interactive --remote path; fresh and `codex exec` sessions never export it, so
-# fall back to the newest rollout file whose session_meta cwd matches the
-# project. Codex writes that rollout ~1s before SessionStart, so it is already
-# present; a short bounded retry covers the race if it is not. See #41.
+# Resolve the current Codex thread id. Current Codex command hooks provide the
+# authoritative id as the common stdin `session_id` field (parsed by the shared
+# session-start.sh before this plug runs). CODEX_THREAD_ID is retained as a
+# compatibility source; rollout lookup is legacy-only and never authoritative
+# for launcher mode because another same-cwd TUI may own the newest rollout.
 agmsg_resolve_codex_thread() {
   local project="$1"
   if [ -n "${CODEX_THREAD_ID:-}" ]; then
     printf '%s' "$CODEX_THREAD_ID"
     return 0
   fi
+  if [ -n "${HOOK_SESSION_ID:-}" ]; then
+    printf '%s' "$HOOK_SESSION_ID"
+    return 0
+  fi
+  # A rollout from the same cwd is not proof that it belongs to THIS remote
+  # TUI.  The launcher can ask the shared app-server for its loaded set, so in
+  # launcher mode never turn an old rollout into an authoritative route.
+  [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ] && return 0
   local sessions_dir="$HOME/.codex/sessions"
   [ -d "$sessions_dir" ] || return 0
   # Compare PHYSICAL paths. agmsg may open the project via a symlinked/logical
@@ -60,8 +68,15 @@ INNER_EOF
 }
 
 agmsg_session_start() {
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/codex-lease.sh"
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ -n "${HOOK_SESSION_ID:-}" ] \
+    && [ "$CODEX_THREAD_ID" != "$HOOK_SESSION_ID" ]; then
+    [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+      && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" route_identity_conflict
+    exit 0
+  fi
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
-  [ -n "$thread_id" ] || exit 0
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -79,22 +94,72 @@ agmsg_session_start() {
       app_server="unix://$socket_path"
     fi
   fi
-  [ -n "$app_server" ] || exit 0
+  if [ -z "$app_server" ]; then
+    [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+      && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" app_server_missing
+    exit 0
+  fi
 
   pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
-  [ "$pair_count" = "1" ] || exit 0
-  team=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $1; exit }')
-  name=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $2; exit }')
+  team="${AGMSG_CODEX_TEAM:-}"
+  name="${AGMSG_CODEX_NAME:-}"
+  if [ -n "$team" ] || [ -n "$name" ]; then
+    if [ -z "$team" ] || [ -z "$name" ] \
+      || ! printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$team" "$name")"; then
+      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" identity_invalid
+      exit 0
+    fi
+  elif [ -n "$thread_id" ]; then
+    role_record="$(agmsg_role_session_lookup_unique_by_sid "$thread_id" 2>/dev/null || true)"
+    role_team=$(printf '%s\n' "$role_record" | sed -n 's/^team=//p' | head -1)
+    role_name=$(printf '%s\n' "$role_record" | sed -n 's/^agent=//p' | head -1)
+    if [ -n "$role_team" ] && [ -n "$role_name" ] \
+      && printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$role_team" "$role_name")"; then
+      team="$role_team"; name="$role_name"
+    fi
+  fi
+  if [ -z "$team" ] || [ -z "$name" ]; then
+    if [ "$pair_count" = "1" ]; then
+      IFS=$'\t' read -r team name <<EOF
+$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print; exit }')
+EOF
+    else
+      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" identity_ambiguous
+      exit 0
+    fi
+  fi
   [ -n "$team" ] && [ -n "$name" ] || exit 0
 
+  # The hook's session_id (or matching compatibility env) is authoritative for
+  # this live seat. Persist it now so a later resume cannot inherit an older
+  # same-cwd rollout merely because it was the only file on disk.
+  if [ -n "$thread_id" ] && { [ -n "${HOOK_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; }; then
+    agmsg_role_session_reassign "$team" "$name" "$thread_id" "$PROJECT" codex 2>/dev/null || true
+  fi
+
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    request_file="$RUN_DIR/codex-bridge-request.$project_hash"
-    tmp_request="$request_file.$$"
-    mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$TYPE" "$team" "$name" "$thread_id" "$app_server" > "$tmp_request"
-    mv "$tmp_request" "$request_file"
+    request_file="${AGMSG_CODEX_BRIDGE_REQUEST_FILE:-}"
+    tui_generation="${AGMSG_CODEX_TUI_GENERATION:-}"
+    if [ -z "$thread_id" ]; then
+      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" waiting_thread loaded_fallback
+      exit 0
+    fi
+    if [ -z "$request_file" ] || [ -z "$tui_generation" ]; then
+      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" request_contract_missing
+      exit 0
+    fi
+    {
+      printf 'format_version=2\n'
+      printf 'generation=%s\ntype=%s\nteam=%s\nname=%s\n' "$tui_generation" "$TYPE" "$team" "$name"
+      printf 'thread=%s\napp_server=%s\nproject=%s\n' "$thread_id" "$app_server" "$PROJECT"
+      printf 'created_at=%s\n' "$(date +%s)"
+    } | codex_lease_atomic_write "$request_file"
+    [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
+      && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" request_published exact_thread
     exit 0
   fi
 

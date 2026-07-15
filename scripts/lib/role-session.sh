@@ -89,6 +89,37 @@ agmsg_role_session_record() {
   return 0
 }
 
+# Move one exact session to its current role within the same project/type.
+# Codex `actas` changes which seat a conversation embodies; leaving the old
+# role mapped to the same thread makes reverse lookup permanently ambiguous.
+# Records for other projects/types are never touched. Individual writes remain
+# atomic and a crash can only degrade to missing/ambiguous advisory state.
+agmsg_role_session_reassign() {
+  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
+  local dir target f old_sid old_project old_type project_norm old_project_norm
+  dir="$(_actas_lock_dir)"; target="$(_agmsg_role_session_path "$team" "$agent")"
+  project_norm="$project"
+  if command -v agmsg_normalize_project_path >/dev/null 2>&1; then
+    project_norm="$(agmsg_normalize_project_path "$project" 2>/dev/null || printf '%s' "$project")"
+  fi
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$target" ] && continue
+    old_sid="$(_agmsg_role_session_field "$f" session)"
+    [ "$old_sid" = "$bare_sid" ] || continue
+    old_type="$(_agmsg_role_session_field "$f" type)"
+    [ "$old_type" = "$type" ] || continue
+    old_project="$(_agmsg_role_session_field "$f" project)"
+    old_project_norm="$old_project"
+    if command -v agmsg_normalize_project_path >/dev/null 2>&1; then
+      old_project_norm="$(agmsg_normalize_project_path "$old_project" 2>/dev/null || printf '%s' "$old_project")"
+    fi
+    [ "$old_project_norm" = "$project_norm" ] && rm -f "$f" 2>/dev/null || true
+  done
+  agmsg_role_session_record "$team" "$agent" "$bare_sid" "$project" "$type"
+}
+
 # Read a single field from a role's record by (team, agent). Empty if absent.
 # Convenience getter used by consumers that need one field (e.g. the resurrect
 # hook reading `type`); mirrors agmsg_role_session_uuid's read of `session`.
@@ -150,5 +181,24 @@ agmsg_role_session_lookup_by_sid() {
       return 0
     fi
   done
+  return 0
+}
+
+# As above, but return a record only when exactly one role maps to the session.
+# Routing/acknowledgement callers must not let directory iteration order choose
+# a seat when stale or parallel records share a sid.
+agmsg_role_session_lookup_unique_by_sid() {
+  local sid="$1" dir f v found="" count=0
+  [ -n "$sid" ] || return 0
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ "$v" = "$sid" ] || continue
+    found="$f"; count=$((count + 1))
+    [ "$count" -gt 1 ] && return 0
+  done
+  [ "$count" -eq 1 ] && cat "$found" 2>/dev/null || true
   return 0
 }

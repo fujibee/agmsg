@@ -13,11 +13,30 @@ const SKILL_DIR = path.resolve(SCRIPT_DIR, "..", "..", "..", "..");    // skill 
 const SCRIPTS_DIR = path.join(SKILL_DIR, "scripts");       // type-independent engine scripts (identities/inbox/send)
 const RUN_DIR = path.join(SKILL_DIR, "run");
 
-// Git Bash on Windows cannot exec a .sh path directly — spawnSync of the script
-// fails with EFTYPE. Invoke the helper scripts through bash on every platform.
-// bash is always present in agmsg's runtime (the bridge is launched from a bash
-// context); honour the same overrides delivery.sh's windows_wrap uses.
-const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
+// Native Node must never resolve a bare `bash` to Windows' WSL launcher. The
+// monitor wrapper exports the exact Git Bash it is running under; known Git for
+// Windows install locations cover direct and test launches.
+function nativeWindowsPath(value) {
+  const match = /^\/([A-Za-z])\/(.*)$/.exec(value || "");
+  return match ? `${match[1].toUpperCase()}:\\${match[2].replace(/\//g, "\\")}` : value;
+}
+
+function resolveBashBin(platform = process.platform, env = process.env) {
+  const overrides = [env.GIT_BASH, env.AGMSG_BASH].filter(Boolean).map(nativeWindowsPath);
+  if (platform !== "win32") return overrides[0] || "bash";
+  const candidates = [
+    ...overrides,
+    env.ProgramFiles && path.join(env.ProgramFiles, "Git", "bin", "bash.exe"),
+    env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "Git", "bin", "bash.exe"),
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"),
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) die("Git Bash was not found; set GIT_BASH or AGMSG_BASH to Git\\bin\\bash.exe");
+  return found;
+}
+
+const BASH_BIN = resolveBashBin();
 
 function usage() {
   console.log(`Usage: codex-bridge.js --project <path> [--type codex] [--team <team>] [--name <agent>]
@@ -43,14 +62,15 @@ Options:
                           Supports unix://PATH or ws://host:port over WebSocket.
   --thread <id|current|loaded>
                           Resume an existing app-server thread. "current" uses
-                          CODEX_THREAD_ID; "loaded" discovers the live TUI thread
-                          via thread/loaded/list (codex 0.141+, see #170).
+                          legacy CODEX_THREAD_ID; "loaded" requires exactly one
+                          live thread from thread/loaded/list (see #170).
   --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
   --tui-lease <path>      Generation-specific TUI lease to validate before consumption.
   --bridge-lease <path>   Bridge lease file maintained by this process.
   --bound-generation <g>  TUI generation this bridge is allowed to deliver for.
-  --lease-timeout <sec>   Stop when the TUI lease is older than this (default: 5).
+  --monitor-state <path>  Generation-specific lifecycle state for diagnostics/re-resolution.
+  --lease-timeout <sec>   Stop when the TUI lease is older than this (default: 15).
   --resolve-only          Print resolved team/name and exit.
   --help                  Show this help.
 
@@ -60,6 +80,17 @@ Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
 function die(message) {
   console.error(`codex-bridge: ${message}`);
   process.exit(1);
+}
+
+function appServerRequestError(payload) {
+  const rawCode = payload && (payload.code || payload.type) || "request_error";
+  const code = String(rawCode).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "request_error";
+  const error = new Error(`app-server request failed (${code})`);
+  // Routing policy may need to classify a narrow "thread not found" response,
+  // but the raw server message must never be emitted to background diagnostics.
+  error.serverMessage = String(payload && payload.message || "");
+  error.serverCode = code;
+  return error;
 }
 
 function nativeCreationDate(pid) {
@@ -100,7 +131,7 @@ function parseArgs(argv) {
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
-    leaseTimeout: Number(process.env.AGMSG_CODEX_LEASE_TIMEOUT || 5),
+    leaseTimeout: Number(process.env.AGMSG_CODEX_LEASE_TIMEOUT || 15),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -147,6 +178,8 @@ function parseArgs(argv) {
       opts.bridgeLease = argv[++i];
     } else if (arg === "--bound-generation") {
       opts.boundGeneration = argv[++i];
+    } else if (arg === "--monitor-state") {
+      opts.monitorState = argv[++i];
     } else if (arg === "--lease-timeout") {
       opts.leaseTimeout = Number(argv[++i]);
     } else {
@@ -209,11 +242,10 @@ function resolveIdentity(opts) {
 
   const pairs = result.stdout
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
+    .filter((line) => line.length > 0)
     .map((line) => {
-      const parts = line.split(/\s+/);
-      return { team: parts[0], name: parts[1] };
+      const tab = line.indexOf("\t");
+      return tab < 0 ? { team: "", name: "" } : { team: line.slice(0, tab), name: line.slice(tab + 1) };
     })
     .filter((pair) => pair.team && pair.name)
     .filter((pair) => !opts.team || pair.team === opts.team)
@@ -243,6 +275,7 @@ class AppServerClient {
     this.pending = new Map();
     this.handlers = new Map();
     this.child = null;
+    this.stderrNoted = false;
   }
 
   start() {
@@ -267,8 +300,10 @@ class AppServerClient {
       this.pending.clear();
     });
 
-    this.child.stderr.on("data", (chunk) => {
-      process.stderr.write(chunk);
+    this.child.stderr.on("data", () => {
+      if (this.stderrNoted) return;
+      this.stderrNoted = true;
+      console.error("codex-bridge: app-server emitted stderr (payload suppressed)");
     });
 
     const lines = readline.createInterface({ input: this.child.stdout });
@@ -285,7 +320,7 @@ class AppServerClient {
     try {
       message = JSON.parse(line);
     } catch (error) {
-      console.error(`codex-bridge: ignoring non-json app-server line: ${line}`);
+      console.error("codex-bridge: ignoring a non-json app-server message");
       return;
     }
 
@@ -294,7 +329,7 @@ class AppServerClient {
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        pending.reject(appServerRequestError(message.error));
       } else {
         pending.resolve(message.result);
       }
@@ -553,7 +588,10 @@ class WebSocketAppServerClient {
       if (opcode === 0x1) {
         this.handleLine(payload.toString("utf8"));
       } else if (opcode === 0x8) {
-        this.stop();
+        // Peer-initiated close: leave intentionalStop false so the socket close
+        // handler terminates this now-unusable bridge and the launcher reconnects.
+        this.connected = false;
+        if (this.socket && !this.socket.destroyed) this.socket.destroy();
         return;
       } else if (opcode === 0x9) {
         this.sendFrame(0x0a, payload);
@@ -567,7 +605,9 @@ class WebSocketAppServerClient {
     try {
       message = JSON.parse(line);
     } catch (_) {
-      console.error(`codex-bridge: ignoring non-json app-server message: ${line}`);
+      // App-server output is diagnostic transport data and may contain user or
+      // model text. Keep background logs useful without copying that payload.
+      console.error("codex-bridge: ignoring a non-json app-server message");
       return;
     }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
@@ -575,7 +615,7 @@ class WebSocketAppServerClient {
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        pending.reject(appServerRequestError(message.error));
       } else {
         pending.resolve(message.result);
       }
@@ -714,6 +754,8 @@ class CodexBridge {
     this.ownerCreation = nativeCreationDate(process.pid);
     this.leaseCheckTimer = null;
     this.bridgeLeaseTimer = null;
+    this.phase = "starting";
+    this.lastErrorCode = "";
   }
 
   async run() {
@@ -742,8 +784,10 @@ class CodexBridge {
 
     this.client.start();
     await this.client.ready?.();
+    this.phase = "connected";
     await this.initialize();
     await this.ensureThread();
+    this.phase = "thread_bound";
     this.writeBridgeLease();
     await this.armWatch();
   }
@@ -807,6 +851,19 @@ class CodexBridge {
     fs.renameSync(tmp, file);
   }
 
+  writeMonitorState(phase, detail = "") {
+    if (!this.opts.monitorState) return;
+    const safePhase = String(phase).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
+    const safeDetail = String(detail).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120);
+    this.atomicWrite(this.opts.monitorState, [
+      "format_version=1",
+      `phase=${safePhase}`,
+      `detail=${safeDetail}`,
+      `updated_at=${Math.floor(Date.now() / 1000)}`,
+      "",
+    ].join("\n"));
+  }
+
   writeBridgeLease() {
     if (!this.opts.bridgeLease) return;
     this.atomicWrite(this.opts.bridgeLease, [
@@ -820,6 +877,8 @@ class CodexBridge {
       `bound_generation=${this.opts.boundGeneration}`,
       `project=${this.opts.project}`,
       `app_server=${this.opts.appServer || ""}`,
+      `phase=${this.phase}`,
+      `last_error_code=${this.lastErrorCode}`,
       `updated_at=${Math.floor(Date.now() / 1000)}`,
       "",
     ].join("\n"));
@@ -875,20 +934,17 @@ class CodexBridge {
   }
 
   async resolveLoadedThread() {
-    // codex 0.141+ does not export CODEX_THREAD_ID to hooks and writes no rollout
-    // for --remote sessions, so the thread id cannot be resolved out-of-band.
-    // Ask the app-server which thread the live TUI has loaded instead. See #170.
+    // Before SessionStart publishes its stdin session_id, ask the app-server
+    // which thread the live TUI has loaded. This fallback is safe only when
+    // exactly one thread is present. See #170.
     const deadline = Date.now() + (this.opts.loadedTimeout || 30000);
     for (;;) {
       const response = await this.client.request("thread/loaded/list", {});
       const ids = response && Array.isArray(response.data) ? response.data : [];
-      if (ids.length > 0) {
-        if (ids.length > 1) {
-          console.error(
-            `codex-bridge: ${ids.length} threads loaded; attaching to the first (${ids[0]})`,
-          );
-        }
-        return ids[0];
+      if (ids.length === 1) return ids[0];
+      if (ids.length > 1) {
+        this.writeMonitorState("thread_ambiguous", `loaded_count_${ids.length}`);
+        die(`thread route is ambiguous: ${ids.length} threads are loaded; refusing to choose one`);
       }
       if (Date.now() >= deadline) {
         die("no loaded codex thread found via thread/loaded/list");
@@ -924,9 +980,17 @@ class CodexBridge {
         // only the narrow "thread/rollout is absent" error class.
         const resumable =
           /(thread|rollout)[\s\S]{0,80}\b(not found|no such|does not exist|unknown|missing)\b|\b(not found|no such|does not exist|unknown|missing)\b[\s\S]{0,80}(thread|rollout)|\bno[\s\S]{0,30}rollout\b/i
-            .test(err.message || "");
+            .test(err.serverMessage || err.message || "");
         if (!resumable) throw err;
-        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        const loaded = await this.client.request("thread/loaded/list", {});
+        const loadedIds = loaded && Array.isArray(loaded.data) ? loaded.data : [];
+        if (!loadedIds.includes(this.threadId)) {
+          this.writeMonitorState("route_invalid", "requested_thread_not_loaded");
+          throw new Error(`requested thread ${this.threadId} is not loaded; refusing stale routing`);
+        }
+        console.error(
+          `codex-bridge: thread/resume failed (${err.message}), but the exact thread is loaded; proceeding`,
+        );
         this.threadIdle = true;
         this.turnActive = false;
       }
@@ -981,6 +1045,8 @@ class CodexBridge {
       throw error;
     }
     console.error(`codex-bridge: armed ${this.identity.team}/${this.identity.name}`);
+    this.phase = "watch_armed";
+    this.writeBridgeLease();
   }
 
   async onProcessExited(params) {
@@ -1056,7 +1122,11 @@ class CodexBridge {
   async onTurnCompleted(params = {}) {
     if (params.threadId && params.threadId !== this.threadId) return;
     if (params.turn && params.turn.error) {
-      console.error(`codex-bridge: turn completed with error: ${JSON.stringify(params.turn.error)}`);
+      const rawCode = params.turn.error.code || params.turn.error.type || "turn_error";
+      const code = String(rawCode).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "turn_error";
+      this.lastErrorCode = code;
+      this.writeBridgeLease();
+      console.error(`codex-bridge: turn completed with error (${code})`);
     } else {
       console.error(`codex-bridge: turn completed on thread ${this.threadId}`);
     }
@@ -1126,6 +1196,8 @@ class CodexBridge {
     this.turnActive = true;
     this.threadIdle = false;
     this.deliveryInFlight = true;
+    this.phase = "delivering";
+    this.writeBridgeLease();
     this.turnEndedWhileStarting = false;
     // Start the watchdog when the request is submitted, not after its ACK. A
     // real app-server may accept and execute turn/start but lose the response;
@@ -1172,6 +1244,14 @@ class CodexBridge {
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
+      // A rejected turn/start is not proof that the hook-supplied thread id is
+      // stale. Preserve the exact route so the launcher can restart this bridge
+      // and retry the unread rows. ensureThread() performs the narrower loaded-
+      // thread validation and publishes route_invalid only when it has evidence.
+      this.phase = "delivery_failed";
+      this.lastErrorCode = "turn_start_failed";
+      this.writeBridgeLease();
+      this.writeMonitorState("delivery_failed", "bridge_restart_retry");
       throw error;
     }
   }
@@ -1200,12 +1280,17 @@ class CodexBridge {
 
   onServerError(params) {
     if (params.threadId && params.threadId !== this.threadId) return;
-    console.error(`codex-bridge: server error: ${JSON.stringify(params)}`);
+    const rawCode = params.code || (params.error && params.error.code) || "server_error";
+    this.lastErrorCode = String(rawCode).replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "server_error";
+    this.writeBridgeLease();
+    console.error(`codex-bridge: server error (${this.lastErrorCode})`);
   }
 
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
-    process.stderr.write(params.delta);
+    // The bridge is background infrastructure. Do not copy model output (which
+    // may quote an inbox message) into diagnostic logs; the TUI already renders
+    // the turn. Health logs contain only fixed phases/error codes.
   }
 
   buildPrompt() {
@@ -1459,4 +1544,4 @@ if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { CodexBridge, toPosixPath };
+module.exports = { CodexBridge, WebSocketAppServerClient, resolveBashBin, toPosixPath };

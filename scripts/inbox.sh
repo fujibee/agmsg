@@ -26,11 +26,13 @@ _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 TEAM_SQL="$(_agmsg_sqlesc "$TEAM")"
 AGENT_SQL="$(_agmsg_sqlesc "$AGENT")"
 
-# Get unread messages — escape newlines/tabs in body to keep one record per line
+# Get unread messages — include the exact id set that was displayed.  A later
+# message may arrive between this SELECT and the acknowledgement; acknowledging
+# by id keeps that message unread instead of silently consuming it.
 UNREAD=$(agmsg_sqlite "$DB" "
-  SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+  SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
   FROM messages WHERE team='$TEAM_SQL' AND to_agent='$AGENT_SQL' AND read_at IS NULL
-  ORDER BY created_at ASC;
+  ORDER BY id ASC;
 ")
 
 if [ -z "$UNREAD" ]; then
@@ -43,10 +45,13 @@ fi
 COUNT=$(echo "$UNREAD" | wc -l | tr -d ' ')
 echo "$COUNT new message(s):"
 echo ""
-while IFS=$'\x1f' read -r from body ts; do
+IDS=""
+while IFS=$'\x1f' read -r id from body ts; do
   echo "  [$ts] $from: $body"
+  IDS+="$id"$'\n'
 done <<< "$UNREAD"
 echo ""
 
-# Mark as read (non-fatal — may fail in sandboxed environments)
-agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$TEAM_SQL' AND to_agent='$AGENT_SQL' AND read_at IS NULL;" 2>/dev/null || true
+# Mark only the rows displayed above (non-fatal — a failed acknowledgement
+# deliberately leaves them unread, allowing at-least-once redelivery).
+printf '%s' "$IDS" | "$SCRIPT_DIR/mark-read.sh" "$TEAM" "$AGENT" >/dev/null 2>&1 || true

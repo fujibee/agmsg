@@ -4,8 +4,8 @@ set -euo pipefail
 # Launch Codex with agmsg's app-server bridge enabled.
 #
 # This is a beta convenience wrapper: it hides the shared app-server socket and
-# lets session-start.sh launch codex-bridge.js in the background once Codex
-# exposes CODEX_THREAD_ID to hooks.
+# lets SessionStart publish its stdin session_id to the out-of-sandbox launcher
+# as the exact app-server thread route.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -22,10 +22,12 @@ SOCKET_PATH=""
 CODEX_COMMAND="resume"
 CODEX_ARGS=()
 REAL_CODEX="${AGMSG_REAL_CODEX:-codex}"
+IDENTITY_TEAM="${AGMSG_CODEX_TEAM:-}"
+IDENTITY_NAME="${AGMSG_CODEX_NAME:-}"
 
 usage() {
   cat <<EOF
-Usage: codex-monitor.sh [--project <path>] [--codex-command <codex|resume>] [-- <args...>]
+Usage: codex-monitor.sh [--project <path>] [--team <team> --name <agent>] [--codex-command <codex|resume>] [-- <args...>]
 
 Starts/reuses an agmsg-managed Codex app-server on a loopback ws:// port,
 enables agmsg Codex bridge delivery for this project, then execs:
@@ -54,6 +56,14 @@ while [ "$#" -gt 0 ]; do
       CODEX_COMMAND="${2:?--codex-command requires codex or resume}"
       shift 2
       ;;
+    --team)
+      IDENTITY_TEAM="${2:?--team requires a team}"
+      shift 2
+      ;;
+    --name)
+      IDENTITY_NAME="${2:?--name requires an agent name}"
+      shift 2
+      ;;
     --)
       shift
       CODEX_ARGS=("$@")
@@ -74,7 +84,13 @@ case "$CODEX_COMMAND" in
     ;;
 esac
 
-PROJECT="$(cd "$PROJECT" && pwd)"
+if { [ -n "$IDENTITY_TEAM" ] && [ -z "$IDENTITY_NAME" ]; } \
+  || { [ -z "$IDENTITY_TEAM" ] && [ -n "$IDENTITY_NAME" ]; }; then
+  echo "codex-monitor: --team and --name must be provided together" >&2
+  exit 1
+fi
+
+PROJECT="$(cd "$PROJECT" && pwd -P)"
 
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the
@@ -107,6 +123,7 @@ SERVER_RECORD="$(codex_appserver_record_path "$PROJECT_HASH")"
 CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
 
 mkdir -p "$RUN_DIR"
+codex_appserver_ref_gc "$PROJECT_HASH" || true
 
 # codex 0.141+ accepts only ws:// (not unix://) for the TUI's --remote, so the
 # shared app-server listens on a loopback ws port instead of a unix socket. The
@@ -157,9 +174,22 @@ for lifecycle_attempt in 1 2 3 4; do
     record_port="$(codex_lease_field "$SERVER_RECORD" port 2>/dev/null || true)"
     record_creation="$(codex_lease_field "$SERVER_RECORD" pid_creation 2>/dev/null || true)"
     current_creation="$(codex_pid_creation_domain "$record_domain" "$record_pid" 2>/dev/null || true)"
+    record_pid_state="$(codex_pid_state_domain "$record_domain" "$record_pid")"
     record_cmd="$(codex_pid_cmdline_domain "$record_domain" "$record_pid" 2>/dev/null || true)"
+    if [ -n "$record_pid" ] && [ "$record_pid_state" = unknown ]; then
+      codex_lifecycle_lock_release "$PROJECT_HASH"
+      echo "codex-monitor: app-server liveness is unknown; keeping its record and refusing a duplicate" >&2
+      exec_plain_codex
+    fi
     if [ -n "$record_pid" ] && [ -n "$record_port" ] \
-      && codex_pid_alive_domain "$record_domain" "$record_pid" && port_alive "$record_port" \
+      && [ "$record_pid_state" = alive ] && port_alive "$record_port" \
+      && { { [ -n "$record_creation" ] && [ -z "$current_creation" ]; } || [ -z "$record_cmd" ]; }; then
+      codex_lifecycle_lock_release "$PROJECT_HASH"
+      echo "codex-monitor: app-server identity is unknown; keeping its record and refusing a duplicate" >&2
+      exec_plain_codex
+    fi
+    if [ -n "$record_pid" ] && [ -n "$record_port" ] \
+      && [ "$record_pid_state" = alive ] && port_alive "$record_port" \
       && { [ -z "$record_creation" ] || { [ -n "$current_creation" ] && [ "$record_creation" = "$current_creation" ]; }; } \
       && { [ -z "$CODEX_VERSION" ] || [ "$record_version" = "$CODEX_VERSION" ]; }; then
       case "$record_cmd" in
@@ -302,14 +332,52 @@ if ! port_alive "$PORT"; then
 fi
 SOCKET_URL="ws://127.0.0.1:$PORT"
 
-"$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
+release_unclaimed_appserver() {
+  # No TUI ref has been published yet. The normal last-ref cleanup is safe here:
+  # it leaves a server used by another TUI alone and removes only this matching
+  # generation when the immutable ref set is empty.
+  codex_appserver_ref_remove_and_cleanup "$PROJECT_HASH" \
+    "$(codex_appserver_refs_dir "$PROJECT_HASH")/.unclaimed-$$" "$SERVER_GENERATION" || true
+}
+
+if ! "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null; then
+  echo "codex-monitor: could not install/confirm monitor hooks for this project" >&2
+  release_unclaimed_appserver
+  exec_plain_codex
+fi
 
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
+TUI_GENERATION="$(codex_lease_generation)"
+REQUEST_FILE="$(codex_monitor_request_path "$PROJECT_HASH" "$TUI_GENERATION")"
+STATE_FILE="$(codex_monitor_state_path "$PROJECT_HASH" "$TUI_GENERATION")"
+PROVISIONAL_REF_NAME="codex-startup-ref.$TUI_GENERATION"
+if ! PROVISIONAL_REF="$(codex_appserver_ref_add_provisional \
+  "$PROJECT_HASH" "$PROVISIONAL_REF_NAME" "$SERVER_GENERATION" "$TUI_GENERATION" "$$")"; then
+  echo "codex-monitor: could not reserve the ready app-server for this TUI" >&2
+  release_unclaimed_appserver
+  exec_plain_codex
+fi
+export AGMSG_CODEX_TUI_GENERATION="$TUI_GENERATION"
+export AGMSG_CODEX_BRIDGE_REQUEST_FILE="$REQUEST_FILE"
+export AGMSG_CODEX_MONITOR_STATE_FILE="$STATE_FILE"
+export AGMSG_CODEX_TEAM="$IDENTITY_TEAM"
+export AGMSG_CODEX_NAME="$IDENTITY_NAME"
+
+# Native Node cannot execute an MSYS /usr/bin/bash path and a bare `bash` may
+# resolve to Windows' WSL launcher.  Publish the exact Git Bash executable used
+# by this wrapper so every bridge helper stays in the same runtime.
+if [ -z "${GIT_BASH:-}" ] && [ -z "${AGMSG_BASH:-}" ] && command -v cygpath >/dev/null 2>&1; then
+  AGMSG_BASH="$(cygpath -w "$(command -v bash)" 2>/dev/null || true)"
+  export AGMSG_BASH
+fi
+codex_monitor_state_write "$STATE_FILE" waiting_first_turn
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
-"$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" >/dev/null 2>&1 &
+launcher_log="$RUN_DIR/codex-bridge-launcher.$PROJECT_HASH.$TUI_GENERATION.log"
+"$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" "$TUI_GENERATION" "$REQUEST_FILE" \
+  "$IDENTITY_TEAM" "$IDENTITY_NAME" "$STATE_FILE" "$PROVISIONAL_REF" >>"$launcher_log" 2>&1 &
 
 cd "$PROJECT"
 # Guard the array expansion: under bash 3.2 + `set -u`, "${CODEX_ARGS[@]}" on an

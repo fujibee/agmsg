@@ -14,12 +14,11 @@
 # THIS session's codex thread, never another's: a resume mis-fire (resuming the
 # wrong conversation) is worse than a fresh boot. So resolution is deliberately
 # conservative and biased toward recording NOTHING when unsure (fresh = zero harm):
-#   1. Prefer $CODEX_THREAD_ID -- exported on the interactive/--remote path, which
-#      is exactly the spawned-codex case this feature targets. Unambiguous.
-#   2. Else fall back to a rollout whose session_meta cwd matches the project, but
-#      ONLY when that match is UNIQUE among recent rollouts. If two or more recent
-#      rollouts share this cwd (concurrent codex sessions in the same directory),
-#      we cannot tell which is ours -> record nothing.
+#   1. Prefer $CODEX_THREAD_ID when available. Unambiguous.
+#   2. In monitor mode, accept only the exact thread bound to this TUI generation
+#      by its fresh bridge/TUI leases. Never fall back to a project-wide rollout.
+#   3. Outside monitor mode, fall back only to a recently updated rollout whose
+#      session_meta cwd matches and whose id is unique among other recent matches.
 # Always best-effort: every failure path is a silent no-op (exit 0).
 set -uo pipefail
 
@@ -36,10 +35,30 @@ export SKILL_DIR
 . "$SKILL_DIR/scripts/lib/storage.sh"
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/role-session.sh"
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/codex-lease.sh"
 
 thread=""
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   thread="$CODEX_THREAD_ID"
+elif [ -n "${AGMSG_CODEX_TUI_GENERATION:-}" ]; then
+  bridge_lease="$(codex_bridge_lease_path "$TEAM" "$AGENT")"
+  # actas can run in the same first turn that starts the bridge. Wait briefly
+  # for that bridge to publish its generation-bound exact thread.
+  for _ in $(seq 1 30); do
+    bound_generation="$(codex_lease_field "$bridge_lease" bound_generation 2>/dev/null || true)"
+    bound_thread="$(codex_lease_field "$bridge_lease" bound_thread_id 2>/dev/null || true)"
+    if [ "$bound_generation" = "$AGMSG_CODEX_TUI_GENERATION" ] \
+      && [ -n "$bound_thread" ] && [ "$bound_thread" != loaded ] \
+      && codex_tui_generation_fresh "$TEAM" "$AGENT" "$bound_generation"; then
+      thread="$bound_thread"
+      break
+    fi
+    sleep 0.1
+  done
+  # A monitor launch has an exact generation contract. A same-cwd rollout is
+  # weaker evidence and could bind this role to another TUI, so fail closed.
+  [ -n "$thread" ] || exit 0
 else
   # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
   # dir check below fails -> fresh), not an unbound-variable abort (co1 nit).
@@ -61,6 +80,11 @@ else
       find "$sessions_dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort -r | head -40 \
       | while IFS= read -r f; do
           [ -f "$f" ] || continue
+          mtime="$(compat_file_mtime "$f" 2>/dev/null || true)"
+          now="$(date +%s)"
+          case "$mtime" in ''|*[!0-9]*) continue ;; esac
+          age=$((now - mtime))
+          [ "$age" -ge 0 ] && [ "$age" -le "${AGMSG_CODEX_ROLLOUT_MAX_AGE:-300}" ] || continue
           first="$(head -1 "$f" 2>/dev/null)"
           case "$first" in *'"session_meta"'*) ;; *) continue ;; esac
           esc="$(printf '%s' "$first" | sed "s/'/''/g")"
@@ -81,5 +105,5 @@ fi
 
 [ -n "$thread" ] || exit 0
 # codex thread ids are already bare UUIDs (no composite pid form), so record as-is.
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$PROJECT" codex || true
+agmsg_role_session_reassign "$TEAM" "$AGENT" "$thread" "$PROJECT" codex || true
 exit 0

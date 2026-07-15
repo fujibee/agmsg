@@ -7,7 +7,7 @@ TARGET="$AGENTS_BIN/codex"
 
 usage() {
   cat <<EOF
-Usage: codex-shim-install.sh [function|install|remove|status]
+Usage: codex-shim-install.sh [function|powershell-function|install|remove|status]
 
 Prints the recommended shell function for agmsg Codex monitor mode.
 With no subcommand, prints the function.
@@ -28,6 +28,10 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+powershell_quote() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
 cmd="${1:-function}"
 case "$cmd" in
   -h|--help)
@@ -38,6 +42,20 @@ case "$cmd" in
 # agmsg Codex monitor beta: put this in your interactive shell profile.
 codex() {
   $(shell_quote "$SCRIPT_DIR/codex-shim.sh") "\$@"
+}
+EOF
+    ;;
+  powershell-function|pwsh-function)
+    git_bash="${GIT_BASH:-${AGMSG_BASH:-}}"
+    if [ -z "$git_bash" ] && command -v cygpath >/dev/null 2>&1; then
+      git_bash="$(cygpath -w "$(command -v bash)" 2>/dev/null || true)"
+    fi
+    [ -n "$git_bash" ] || git_bash='C:\Program Files\Git\bin\bash.exe'
+    cat <<EOF
+# agmsg Codex monitor beta: put this in your PowerShell profile.
+# Uses Git for Windows explicitly; it never resolves the Windows WSL bash launcher.
+function codex {
+    & '$(powershell_quote "$git_bash")' -lc 'exec "\$1" "\${@:2}"' -- '$(powershell_quote "$SCRIPT_DIR/codex-shim.sh")' @args
 }
 EOF
     ;;

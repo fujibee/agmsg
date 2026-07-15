@@ -112,7 +112,9 @@ first_non_option() {
 is_monitor_project() {
   local project="$1"
   local status
-  status="$("$SCRIPT_DIR/../../../delivery.sh" status codex "$project" 2>/dev/null || true)"
+  if ! status="$("$SCRIPT_DIR/../../../delivery.sh" status codex "$project" 2>/dev/null)"; then
+    return 2
+  fi
   printf '%s\n' "$status" | grep -qx "mode: monitor"
 }
 
@@ -125,7 +127,12 @@ fi
 project="$(project_from_args "$@")"
 command_name="$(first_non_option "$@" || true)"
 
-if ! is_monitor_project "$project"; then
+monitor_state=0
+is_monitor_project "$project" || monitor_state=$?
+if [ "$monitor_state" -ne 0 ]; then
+  if [ "$monitor_state" -eq 2 ]; then
+    echo "agmsg codex shim: could not read delivery status; launching plain Codex with monitor OFF for this session" >&2
+  fi
   exec "$real_codex" "$@"
 fi
 
