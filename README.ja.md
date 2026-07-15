@@ -315,7 +315,7 @@ $agmsg
 ### シェル（任意のエージェント）
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>"
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -325,7 +325,7 @@ $agmsg
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` はちょうど4つの位置引数を取る: `<team> <from> <to> "<message>"`。シェルが1つの引数として認識するようメッセージはクォートすること — クォートされていないスペース入りメッセージは誤って分割される。
+`send.sh` は4つの位置引数 `<team> <from> <to> "<message>"` に加えて、末尾に任意で `--force` を取る。シェルが1つの引数として認識するようメッセージはクォートすること — クォートされていないスペース入りメッセージは誤って分割される。`from`・`to` はどちらも `<team>` に事前登録済みである必要があり、未登録の名前は(登録済み一覧を添えて)エラーになる — 意図的な事前登録前送信をしたい場合のみ `--force` でこのチェックを迂回できる。
 
 ## FAQ / 設計メモ
 

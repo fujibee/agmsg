@@ -58,8 +58,8 @@ Do NOT manually edit config files. Always use join.sh.
 # Check inbox (marks messages as read) — DEFAULT action
 ~/.agents/skills/agmsg/scripts/inbox.sh <team> <agent_id>
 
-# Send a message
-~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>"
+# Send a message (from/to must already be registered in <team>; add --force to bypass)
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>" [--force]
 
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
