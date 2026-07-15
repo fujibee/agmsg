@@ -325,20 +325,6 @@ select:focus {
 .modal select {
   width: 100%;
 }
-/* The native number-input spinner (up/down arrows) renders as unstyled
- * browser chrome that doesn't pick up the app's dark theme — hide it.
- * (This field also sets step="any" for free decimal typing, so keyboard
- * ArrowUp/ArrowDown stepping is UA-dependent regardless of this rule —
- * typing/pasting a value is the guaranteed path either way.) */
-.modal input[type="number"] {
-  -moz-appearance: textfield;
-  appearance: textfield;
-}
-.modal input[type="number"]::-webkit-inner-spin-button,
-.modal input[type="number"]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
 .path-row {
   display: flex;
   gap: 6px;

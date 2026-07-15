@@ -438,6 +438,17 @@ export function SettingsModal(props: {
   // field). Free typing (including decimals, an empty field mid-edit) is
   // always shown; only a complete, valid, in-range value is committed.
   const [fontSizeText, setFontSizeText] = useState(() => String(props.terminalFontSize));
+  // A ref, not state — read/written synchronously inside the same tick as
+  // composition/change events, no re-render needed for it on its own.
+  const isComposingFontSize = useRef(false);
+  const commitFontSizeText = (raw: string) => {
+    const text = sanitizeNumberDraft(raw);
+    setFontSizeText(text);
+    const n = Number(text);
+    if (text.trim() !== "" && Number.isFinite(n) && n >= MIN_TERMINAL_FONT_SIZE && n <= MAX_TERMINAL_FONT_SIZE) {
+      props.onTerminalFontSizeChange(n);
+    }
+  };
   // Computed once per modal open, not on every keystroke — the full zone
   // list (400+ IANA names) doesn't change while the dropdown is open.
   const [timeZones] = useState(listTimeZones);
@@ -484,18 +495,57 @@ export function SettingsModal(props: {
       <label>
         {t("settings.terminalFontSize.label")}
         <input
-          type="number"
-          step="any"
-          min={MIN_TERMINAL_FONT_SIZE}
-          max={MAX_TERMINAL_FONT_SIZE}
+          // Not type="number": per spec, a number input's .value is forced
+          // to "" the instant its content doesn't parse as a number (the
+          // "bad input" state) — but the browser can keep showing the
+          // invalid text it actually rendered regardless, and a React
+          // controlled re-render doesn't reliably win against that native
+          // display state. inputMode="decimal" still hints a numeric
+          // keyboard on touch without any of that native sanitization
+          // fighting our own (sanitizeNumberDraft + the range check below
+          // already do full validation manually).
+          type="text"
+          inputMode="decimal"
           value={fontSizeText}
           onChange={(e) => {
-            const text = sanitizeNumberDraft(e.target.value);
-            setFontSizeText(text);
-            const n = Number(text);
-            if (text.trim() !== "" && Number.isFinite(n) && n >= MIN_TERMINAL_FONT_SIZE && n <= MAX_TERMINAL_FONT_SIZE) {
-              props.onTerminalFontSizeChange(n);
+            // While an IME composition is in progress (e.g. typing romaji
+            // that's live-converting to hiragana), the browser owns the
+            // field's displayed text and won't let a controlled re-render
+            // override it — sanitizing here would have no visible effect
+            // until composition ends anyway, so just mirror it as-is and
+            // let onCompositionEnd below do the real filtering once there's
+            // a final value to filter.
+            if (isComposingFontSize.current) {
+              setFontSizeText(e.target.value);
+              return;
             }
+            commitFontSizeText(e.target.value);
+          }}
+          onCompositionStart={() => {
+            isComposingFontSize.current = true;
+          }}
+          onCompositionEnd={(e) => {
+            isComposingFontSize.current = false;
+            commitFontSizeText(e.currentTarget.value);
+          }}
+          onBlur={(e) => {
+            // Defensive catch-all: if focus leaves the field while a
+            // composition is somehow still open (or any other path
+            // resulted in unsanitized text reaching fontSizeText),
+            // losing focus is the last chance to clean it up.
+            isComposingFontSize.current = false;
+            commitFontSizeText(e.currentTarget.value);
+          }}
+          onKeyDown={(e) => {
+            // type="number" gave ArrowUp/ArrowDown stepping for free;
+            // type="text" doesn't, so re-implement it (step 1, clamped).
+            if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+            e.preventDefault();
+            const current = Number(fontSizeText);
+            const base = Number.isFinite(current) ? current : props.terminalFontSize;
+            const next = e.key === "ArrowUp" ? base + 1 : base - 1;
+            const clamped = Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, next));
+            commitFontSizeText(String(clamped));
           }}
         />
       </label>
