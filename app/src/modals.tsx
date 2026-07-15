@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
-import { AUTO_TIMEZONE, detectTimeZone, listTimeZones } from "./time";
+import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
 
 type BrowseDir = (current: string) => Promise<string | null>;
 
@@ -382,6 +382,16 @@ export function SettingsModal(props: {
   // Computed once per modal open, not on every keystroke — the full zone
   // list (400+ IANA names) doesn't change while the dropdown is open.
   const [timeZones] = useState(listTimeZones);
+  // A plain <select> with 400+ flat IANA names is nearly unusable: a native
+  // select's keyboard jump only matches the START of an option ("Asia/Tokyo"
+  // never matches typing "Tokyo"). A text input + <datalist> keeps this
+  // dependency-free while getting the browser's own substring-matching
+  // suggestion filtering. Local draft text so a still-typing/partial value
+  // can be shown without committing an invalid zone to app state.
+  const autoLabel = t("settings.timezone.auto", { zone: detectTimeZone() });
+  const [timezoneText, setTimezoneText] = useState(() =>
+    props.timezone === AUTO_TIMEZONE ? autoLabel : props.timezone,
+  );
   return (
     <Modal title={t("modal.settings.title")} onClose={props.onClose}>
       <label>
@@ -414,14 +424,26 @@ export function SettingsModal(props: {
       </label>
       <label>
         {t("settings.timezone.label")}
-        <select value={props.timezone} onChange={(e) => props.onTimezoneChange(e.target.value)}>
-          <option value={AUTO_TIMEZONE}>{t("settings.timezone.auto", { zone: detectTimeZone() })}</option>
+        <input
+          type="text"
+          list="settings-timezone-options"
+          value={timezoneText}
+          onChange={(e) => {
+            const v = e.target.value;
+            setTimezoneText(v);
+            // Only commit a complete, valid entry — mid-typing text (e.g.
+            // "Tokyo" before the datalist suggestion is picked) shouldn't
+            // overwrite the persisted timezone with something invalid.
+            if (v === autoLabel) props.onTimezoneChange(AUTO_TIMEZONE);
+            else if (isValidTimeZone(v)) props.onTimezoneChange(v);
+          }}
+        />
+        <datalist id="settings-timezone-options">
+          <option value={autoLabel} />
           {timeZones.map((zone) => (
-            <option key={zone} value={zone}>
-              {zone}
-            </option>
+            <option key={zone} value={zone} />
           ))}
-        </select>
+        </datalist>
       </label>
       <div className="modal-actions">
         <button type="button" className="primary" onClick={props.onClose}>
