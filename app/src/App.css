@@ -771,6 +771,7 @@ body.resizing-row {
 .agent-status-dot.status-working {
   background: #e0af68;
   animation: agent-status-pulse 1.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
 }
 .agent-status-dot.status-idle { background: var(--green); }
 
@@ -1224,6 +1225,7 @@ body.resizing-row {
   height: 7px;
   border-radius: 50%;
   animation: monitor-pulse 2.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
 }
 .monitor-dot.native::before {
   background: var(--green);

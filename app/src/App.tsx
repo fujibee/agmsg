@@ -47,6 +47,7 @@ import {
   type PaneRect,
   type SplitNode,
 } from "./paneTree";
+import { PulseDot } from "./pulseSync";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
@@ -1495,7 +1496,14 @@ export default function App() {
                         />
                       ) : (
                         <span className="member-check-slot">
-                          {status && <span className={`agent-status-dot status-${status}`} title={status} />}
+                          {status && (
+                            <PulseDot
+                              periodMs={1200}
+                              active={status === "working"}
+                              className={`agent-status-dot status-${status}`}
+                              title={status}
+                            />
+                          )}
                         </span>
                       )}
                       <button
@@ -1832,13 +1840,16 @@ export default function App() {
                     >
                       {p.label}
                     </button>
-                    <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
+                    <PulseDot
+                      periodMs={2200}
+                      className={p.native ? "monitor-dot native" : "monitor-dot app"}
+                    >
                       <span className="monitor-tip">
                         {p.native
                           ? t("pane.monitorTip.native")
                           : t("pane.monitorTip.app")}
                       </span>
-                    </span>
+                    </PulseDot>
                     <button
                       className="pane-header-close"
                       onClick={() => setModal({ kind: "closePane", paneId: p.id })}
