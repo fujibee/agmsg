@@ -1,6 +1,6 @@
 # Windows版agmsg monitor障害 — 調査・設計・実装・検証の統合報告
 
-最終更新: 2026-07-15  
+最終更新: 2026-07-16
 対象: `E:\Project\agmsg`、Windows / PowerShell 7 / Git for Windows、agmsg 1.1.7  
 対象branch: `codex/monitor-teardown`（`v1.1.7` / `baa064e`以後のlocal stack）
 
@@ -17,9 +17,9 @@
 1. **Codexへの配送先が古いtask/threadを指した。** `hameln/codex1`のseatが現在表示中とは別のCodex threadへ結び付いていたため、bridgeがaliveでも現在画面にはturnが出なかった。
 2. **メッセージ取得と既読化の順序が安全でなかった。** 旧経路では、Codexへの`turn/start`が確実に受理されたと分かる前にメッセージを消費し、失敗時に再配送できない危険があった。
 3. **Windows固有のshell、path、PID、sandbox差で診断・起動・終了判定が壊れた。** bare `bash`がWSL launcherを選ぶ、MSYS PIDとnative Windows PIDを混同する、native `sqlite3.exe`がsandboxから拒否される、といった独立した問題が重なった。
-4. **TUI終了後にバックグラウンドprocessが残った。** Codex側はlease/ref/lifecycleで大幅に対策した。Claude Code側も今回、MSYS→native二段階ancestor walkとtyped owner livenessをsourceへ実装し、native Claude PIDを持つcomposite watcherがClaude終了後に自己終了することをWindows上の自動testで確認した。CIM等が使えずbare UUIDへfallbackする環境では、誤kill防止のため従来どおり自動回収しない制約が残る。
+4. **TUI終了後にバックグラウンドprocessが残った。** Codex側はlease/ref/lifecycleで大幅に対策した。Claude Code側も今回、MSYS→native二段階ancestor walkとtyped owner livenessをsourceへ実装し、native Claude PIDを持つcomposite watcherがClaude終了後に自己終了することをWindows上の自動testとinstalled copy上の実Claude Code E2Eで確認した。CIM等が使えずbare UUIDへfallbackする環境では、誤kill防止のため従来どおり自動回収しない制約が残る。
 
-Codex側では、exact thread routing、TUI lease、shared app-server ref、取得と既読確定の分離、ACK後のexact-ID既読化、at-least-once配送、Windows PID三値判定、health表示、Git Bash固定などをlocal sourceへ実装した。2026-07-15には、既存調査文書の執筆後の追加作業として、そのbranchを`./install.sh --update`でインストール済みagmsgへ反映し、`hameln-hozon`のCodex monitor hookも再登録した。GitHubへのpushやPR作成は行っていない。
+Codex側では、exact thread routing、TUI lease、shared app-server ref、取得と既読確定の分離、ACK後のexact-ID既読化、at-least-once配送、Windows PID三値判定、health表示、Git Bash固定などをlocal sourceへ実装した。2026-07-15には、既存調査文書の執筆後の追加作業として、そのbranchを`./install.sh --update`でインストール済みagmsgへ反映し、`hameln-hozon`のCodex monitor hookも再登録した。2026-07-16にはClaude watcher修正版も同じ公式installerで反映し、使い捨て実Claude Code sessionの起動・live維持・正常終了後の自動終了まで確認した。GitHubへのpushやPR作成は行っていない。
 
 実機では`claude1`から`hameln/codex1`への自動配送と、`codex1`から`claude1`への公式`send.sh`送信を確認した。また、閉じたClaude Code session由来のwatcher 2本と、古いCodex sandbox runner 1系統を特定・停止した。ただしprocessの手動整理は運用上の復旧であり、Claude watcherの再発防止実装ではない。
 
@@ -32,7 +32,7 @@ Codex側では、exact thread routing、TUI lease、shared app-server ref、取�
 | Codex TUI/app-server終了処理 | 実装済み、既知の狭い制約あり | lease/ref集合とlifecycle lockで管理。複数TUIを保護 |
 | Windows Git Bash / WSL誤起動 | 実装済み | `Git\bin\bash.exe -lc`を標準化し、WSL fallbackを禁止 |
 | Windows sqlite sandbox拒否 | 実装済み | installer管理の`~/.agents/bin/sqlite3.exe`を優先 |
-| Claude watcherのbare UUID孤立 | **主要経路を実装・Windows自動test済み** | native Claudeを解決できればcomposite化して自己終了。CIM不能時のbare backstopは安全な所有証拠がなく未解決 |
+| Claude watcherのbare UUID孤立 | **主要経路を実装・Windows自動test・実Claude E2E済み** | native Claudeを解決できればcomposite化して自己終了。CIM不能時のbare backstopは安全な所有証拠がなく未解決 |
 | 全platform/full suite | 未完 | targeted testは成功。local branchをpushしていないためGitHub Actions未実行 |
 
 ## 2. agmsgの基本的な仕組み
@@ -195,8 +195,12 @@ Claudeは主に仮説の反証、Gate G1/G2/G2b、lease/ref/ACK設計、§22の�
 | `228fb84` | native Claude watcher修正の根本原因、test結果、実Claude E2E未実施をworklogへ反映 | docsのみ |
 | `fb78fe2` | grok-buildをMSYS PID domainへ戻し、Claude ownerへCreationDate generation sidecarを追加 | PID reuse、unknown、grok lifecycle、successor-safe cleanupをWindows testで確認 |
 | `5b03de7` | generation hardening、hop上限12/20の区別、残存制約をworklogへ反映 | docsのみ |
+| `5d4582d` | CreationDate世代交代retireを共有helperへ集約し、umask局所化、`RUN_DIR`統一、dead code削除を実施 | `session-start.sh`/`delivery.sh`の実process retire・温存・dedup経路をproduction matcher込みで追加test |
+| `ff6e67a` | review追随のtest実績、commit台帳、ShellCheck未実施、TOCTOU制約をworklogへ反映 | docsのみ。本commit時点ではinstalled copy反映・実Claude E2Eは未実施 |
 
-`b4d9744`自身を1件目として`07fefab`、`c660590`、`20958a2`、`2d2955c`、`82035c8`、`d04d13d`までの連続7 commitは、2026-07-15に`./install.sh --update`でinstalled agmsgへ反映した。DBとteam設定はinstaller出力上preserveされ、`hameln-hozon`のCodex monitor hookを再登録した。これは既存の[Windows障害の調査・修正記録](agmsg-codex-monitor-windows-investigation-ja.md) §16.5が「今回の作業では実施していない」と記録した時点より**後の追加作業**であり、同文書は当時のsnapshot、本書はその後まで含む統合記録である。`acac20c`以降のClaude watcher関連commitはsource checkout上のlocal commitであり、installed copyへは未反映である。source commitとinstalled copyの反映は別操作であり、今後もinstalled copyを直接patchしてはならない。
+`b4d9744`自身を1件目として`07fefab`、`c660590`、`20958a2`、`2d2955c`、`82035c8`、`d04d13d`までの連続7 commitは、2026-07-15に`./install.sh --update`でinstalled agmsgへ反映した。DBとteam設定はinstaller出力上preserveされ、`hameln-hozon`のCodex monitor hookを再登録した。これは既存の[Windows障害の調査・修正記録](agmsg-codex-monitor-windows-investigation-ja.md) §16.5が「今回の作業では実施していない」と記録した時点より**後の追加作業**であり、同文書は当時のsnapshot、本書はその後まで含む統合記録である。
+
+その後、`acac20c`自身を1件目として`ff6e67a`までのClaude watcher関連7 commitをreview済み基準とし、2026-07-16（JST）にそのHEADのinstalled対象scripts/templatesをsource checkoutから同じ公式`./install.sh --update`でinstalled agmsgへ反映した。installed skillは直接patchしていない。更新前後で`db/config.yaml`、`db/messages.db`、既存4 team（`hameln`、`kemono-arc`、`umamusume`、`yugioh`）の`config.json`のSHA-256が一致し、source/installed間で`watch.sh`、`delivery.sh`、`session-start.sh`、`instance-id.sh`、`resolve-project.sh`、`compat.sh`がbyte-for-byte一致した。repository docs commit自体をinstalled copyへ複製したという意味ではない。source commitとinstalled copyの反映は別操作であり、今後もinstalled copyを直接patchしてはならない。
 
 ## 7. GitHub PRとの関係
 
@@ -304,11 +308,22 @@ full Batsは完走していない。Windows managed sandboxのnative executable�
 - watchdog後にbridgeが次のwatchへrearmする経路を確認した。
 - `./install.sh --update`後もDB/teamがpreserveされたinstaller出力を確認した。
 
+2026-07-16には、既存projectを使わず、使い捨てproject `/e/Project/agmsg/.e2e-claude-monitor-20260716-003812`、使い捨てteam `agmsg-e2e-20260716-003812`、固定session UUID `348e3c87-b359-479d-917c-f4f85b72404e`で実Claude Code E2Eを行った。team登録と解除はinstalled copyの公式`join.sh`/`leave.sh`、hook設定と解除は公式`delivery.sh set monitor`/`set off`を使い、DB、既存team config、installed scriptを直接編集していない。
+
+- Claude Codeはversion `2.1.210`、実行pathは`C:\Users\shiratori\.local\bin\claude.exe`だった。Git Bashから見たMSYS PIDは`552`、native WINPIDは`18372`、native Nameは`claude.exe`、ExecutablePathとCommandLineのargv[0]はいずれも同pathだった。native parent WINPIDは`16492`、CreationDate tokenは`639197268543624030`だった。
+- SessionStartのnative ancestor walkは実Claudeへ到達し、Monitor commandは`348e3c87-b359-479d-917c-f4f85b72404e.18372`を使用した。watcherはMSYS PID `1056`（WINPID `31880`）で、argvはinstalled copyの`watch.sh`、同composite ID、E2E project、`claude-code`、同CreationDate tokenを含んだ。
+- owner sidecarは`watcher_pid=1056`、`type=claude-code`、`domain=native`、`creation=639197268543624030`で、production helperが同WINPIDから再取得したtokenと一致した。owner stateは`alive`だった。
+- default poll interval 5秒に対し、12秒後（2 poll超）もClaude/watcherはliveで、pidfileとsidecarはいずれもwatcher PID `1056`を指した。関連pidfile/sidecarは各1件だけでduplicate watcherはなかった。CIM照会可能な権限での`delivery.sh status`は`1 alive, 0 stale pidfiles`、`1 verified composite`だった。Codex managed sandbox内の通常statusはCIM access deniedにより`owner unknown`となったが、watcherをdead扱いせず維持するfail-closed挙動だった。
+- Claude Codeの標準`/exit`から「Move to background and exit」を選び、MonitorへTaskStopや手動killを行わずCLIを正常終了した。選択後の最初のpoll（計測開始から0.6秒）でClaude WINPID `18372`とwatcher WINPID `31880`はいずれも消滅し、pidfileとowner sidecarも既に削除されていた。poll周期境界に近かった可能性があるため、これは厳密な終了所要時間ではなく「最初の観測で0.6秒以内」という上限記録である。
+- 終了後statusは`0 alive, 0 stale pidfiles`、ownership全分類0だった。bare UUID watcherは生成されなかった。Claudeの「Move to background and exit」はSessionEnd hookをcancelしたため、`cc-instance.18372`、watermark、project markerは自動削除されなかった。公式`set off`/`leave.sh`後、対象WINPID死亡、UUID、project内容を再確認してこのE2E専用3 artifactだけを限定削除した。E2E project/team/hook/process/artifactは最終的に残存0となった。
+- installer前後とE2E cleanup後で上記DB/既存team configのSHA-256は一致した。baselineのClaude Desktop root PID `40048`、Codex App PID `74932`、Codex app-server PID `71860`は同じCreationDateのままliveで、既存processを停止していない。installed scriptの`bash -n`、sourceとの一致、`git diff --check`を確認した。ShellCheckは実行ファイル不在のため引き続き未実施である。
+
 メッセージ本文や資格情報は本書へ記録しない。
 
 ### 10.4 未検証
 
-- source checkout修正版をinstalled copyへ反映した上での、実Claude Code使い捨てsessionによる起動→正常終了E2E。今回は既存の使用中Claude processを保護し、install更新の事前許可も求めていないため、native `claude.exe` test doubleまでに留めた。
+- 実Claude Codeの同一session内で`/compact`等によりSessionStartを再発火するdedup E2E。今回の使い捨てsessionを不安定にしないため実施していない。production経路の自動testは実施済みである。
+- 実Claude Codeでのwindow close、sleep/resume、CIM policy拒否後の復旧、parallel `--continue`/`--resume`の複合E2E。今回確認したのは独立1 sessionの正常`/exit`である。
 - Linux/macOSを含むfull suiteの最終green。
 - push後のGitHub Actions。local-onlyのため未実行。
 - 長時間の大量連続message、全sleep/resume/clock-change組合せ。
@@ -356,6 +371,8 @@ statusは`watch processes: 2 alive, 4 stale pidfiles`だった。PowerShellか�
 sidecar writeは呼出し元のumaskへ波及しないsubshell内で`umask 077`を設定し、同じrun directory内のtmp→`mv`でatomic publishする。通常cleanupは記録されたwatcher PIDが自分と一致する場合だけ削除する。ただし`agmsg_watch_owner_remove_if_watcher()`の「内容を読む→pathを削除する」はshell filesystem操作だけでは単一のcompare-and-deleteにならず、その間にsuccessorが同じpathを置換する微小TOCTOUは残る。全write/deleteを跨ぐlock導入はadvisory sidecarに対して過大なため今回は追加しない。race時の影響はsidecarの一時消失に限定され、後続判定はowner `unknown`となって既存watcherを停止しないfail-closed方向である。
 
 reviewで判明したgrok-build回帰も同時に修正した。grok-buildのcomposite IDが保持するPIDはMSYS domainなので、Windowsでも`compat_pid_alive_msys()`で判定し、tasklist/CIMへ渡さない。native identity/CreationDate検証は`agmsg_agent_pid()`がWINPIDを返すtypeに限定した。Phase 1のMSYS PID→WINPID変換や候補再検証が一時的に失敗した場合は、domainが確定している現在のMSYS PIDからPhase 2を試し、変換不能ならbareへfail-closedする。
+
+2026-07-16のinstalled-copy実Claude E2Eでも、この主要経路を確認した。SessionStartはMSYS PID `552`からnative WINPID `18372`の実`claude.exe`へ到達し、composite IDとCreationDate sidecarを生成した。2 poll超のlive中はverified ownerとして維持され、Claude正常終了後はwatcherを手動停止せずpidfile/sidecarとともに消滅した。したがって、当初の「実Claudeではnode wrapper等によりidentity matchが空振りするかもしれない」という未検証点は、この端末のClaude Code `2.1.210`については解消した。ただしversion・install形態が異なる全環境を保証するものではない。
 
 ### 12.2 bare watcherのbackstop
 
@@ -417,7 +434,7 @@ watch ownership: 0 verified composite, 0 bare weak, 0 owner unknown, 0 owner dea
 
 | 優先度 | 作業 | 完了条件 |
 |---|---|---|
-| 完了 | Claude用Windows native ancestor walkを実装 | stub matrixと使い捨てnative `claude.exe`自動testでcomposite/liveness/終了を確認。実Claude Code E2Eは別途必要 |
+| 完了 | Claude用Windows native ancestor walkを実装 | stub matrix、使い捨てnative `claude.exe`自動test、installed copy上の実Claude Code `2.1.210` E2Eでcomposite/liveness/正常終了後の自動終了を確認 |
 | 完了 | watcher owner generationとgrok PID domainをhardening | CreationDate sidecarのatomic/compare cleanup、同一WINPID reuse、grok MSYS lifecycleをWindows自動testで確認 |
 | P0 | bare watcherの安全なbackstop/GC | live watcherを誤killせず、親消失bare watcherを回収できるtest |
 | P1 | Windows実機回帰matrix | normal exit、resume、window close、sleep/resume、CIM拒否を自動/半自動確認 |
@@ -430,7 +447,7 @@ Claude watcher修正では、`compat.sh`にprimitiveを置き、Claude/Codexそ�
 
 ## 15. 変更・外部影響の境界
 
-- 今回の追記ではsource codeと自動testを変更した。DB、team登録、installed copyは変更していない。使い捨てtest processだけを起動し、終了・残存なしを確認した。
+- 2026-07-16の追記ではsource codeと自動testを変更せず、公式`install.sh --update`でinstalled copyへ反映し、使い捨てteam/project/sessionで実Claude E2Eを行った。E2E専用team登録とhookは公式scriptで作成・解除し、最終的に残存なし。DBと既存team configは更新前後・cleanup後でhash一致した。
 - 本件の実装commitはlocal branchにあり、GitHubへpush/PRしていない。
 - 2026-07-15のruntime反映はuser許可のもと`install.sh --update`で行い、DB/team preserveを確認した。
 - Claude watcherと古いrunnerの停止は、command lineとparentを確認したtargeted運用対応である。
