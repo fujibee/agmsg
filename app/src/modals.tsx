@@ -12,6 +12,16 @@ function Modal(props: {
   children: React.ReactNode;
   onClose?: () => void;
 }) {
+  const { onClose } = props;
+  useEffect(() => {
+    if (!onClose) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
