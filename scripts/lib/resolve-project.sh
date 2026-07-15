@@ -239,7 +239,7 @@ _agmsg_agent_binaries() {
 agmsg_pid_is_agent() {
   local pid="$1" type="$2"
   [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
+  compat_pid_alive_msys "$pid" || return 1
   local binaries comm first base bin
   binaries=$(_agmsg_agent_binaries "$type")
   comm=$(compat_get_comm "$pid" 2>/dev/null || true)
@@ -250,6 +250,99 @@ agmsg_pid_is_agent() {
     [ "$base" = "$bin" ] && return 0
   done
   return 1
+}
+
+# Classify a native Windows PID as match / no-match / unknown for <type>.
+# A PID being present is not sufficient: PID reuse must not make a watcher or
+# project marker attach to an unrelated process. CIM failure is deliberately
+# `unknown`, never `no-match`, because callers may use the result for teardown.
+agmsg_native_pid_agent_state() {
+  local pid="$1" type="$2" state identity exe name cmd
+  state="$(compat_pid_state_native "$pid" 2>/dev/null || printf unknown)"
+  case "$state" in
+    dead) echo no-match; return 0 ;;
+    alive) ;;
+    *) echo unknown; return 0 ;;
+  esac
+
+  identity="$(compat_native_identity "$pid" 2>/dev/null)" \
+    || { echo unknown; return 0; }
+  IFS=$'\x1f' read -r name exe cmd <<< "$identity"
+
+  _agmsg_native_identity_fields_state "$type" "$name" "$exe" "$cmd"
+}
+
+_agmsg_native_identity_fields_state() {
+  local type="$1" name="$2" exe="$3" cmd="$4"
+  local binaries first base bin
+  binaries="$(_agmsg_agent_binaries "$type")"
+  base="$(basename -- "${exe:-}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+  base="${base%.exe}"
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+  name="${name%.exe}"
+  # CommandLine is used only for argv[0], not a loose substring search. A shell
+  # whose later arguments merely mention `claude` is not an agent owner.
+  first="$(printf '%s\n' "$cmd" | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ -n "$first" ] || first="${cmd%%[[:space:]]*}"
+  first="$(basename -- "$first" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+  first="${first%.exe}"
+  for bin in $binaries; do
+    case "$base" in "$bin"|"$bin"-*) echo match; return 0 ;; esac
+    case "$name" in "$bin"|"$bin"-*) echo match; return 0 ;; esac
+    case "$first" in "$bin"|"$bin"-*) echo match; return 0 ;; esac
+  done
+  echo no-match
+}
+
+# Inspect identity and parent from one Win32_Process snapshot. Prints
+# "<match|no-match|unknown><TAB><parent>". Phase 2 uses this to avoid a second
+# PowerShell startup per hop and to keep identity/parent internally consistent.
+agmsg_native_pid_inspect() {
+  local pid="$1" type="$2" state record parent name exe cmd identity_state
+  state="$(compat_pid_state_native "$pid" 2>/dev/null || printf unknown)"
+  case "$state" in
+    dead) printf 'no-match\t'; return 0 ;;
+    alive) ;;
+    *) printf 'unknown\t'; return 0 ;;
+  esac
+  record="$(compat_native_process_record "$pid" 2>/dev/null)" \
+    || { printf 'unknown\t'; return 0; }
+  IFS=$'\x1f' read -r parent name exe cmd <<< "$record"
+  identity_state="$(_agmsg_native_identity_fields_state "$type" "$name" "$exe" "$cmd")"
+  case "$parent" in ''|*[!0-9]*) parent="" ;; esac
+  printf '%s\t%s' "$identity_state" "$parent"
+}
+
+agmsg_native_pid_is_agent() {
+  [ "$(agmsg_native_pid_agent_state "$1" "$2")" = match ]
+}
+
+# Validate a PID returned by agmsg_agent_pid. Unlike Phase 1's MSYS probe, the
+# resolved PID is a WINPID on Windows and a normal POSIX PID elsewhere.
+agmsg_resolved_pid_is_agent() {
+  _agmsg_detect_platform
+  if [ "$_agmsg_platform" = msys ]; then
+    agmsg_native_pid_is_agent "$1" "$2"
+  else
+    agmsg_pid_is_agent "$1" "$2"
+  fi
+}
+
+# Three-state liveness for a PID returned by agmsg_agent_pid. Windows validates
+# both existence and agent identity; query failures stay unknown. POSIX keeps
+# the established kill/ps liveness behavior.
+agmsg_resolved_pid_owner_state() {
+  local pid="$1" type="$2"
+  _agmsg_detect_platform
+  if [ "$_agmsg_platform" = msys ]; then
+    case "$(agmsg_native_pid_agent_state "$pid" "$type")" in
+      match) echo alive ;;
+      no-match) echo dead ;;
+      *) echo unknown ;;
+    esac
+  else
+    compat_pid_state_native "$pid"
+  fi
 }
 
 # Walk the process tree from $$ upward, echoing the PID of the nearest ancestor
@@ -273,15 +366,59 @@ agmsg_agent_pid() {
       *) printf '%s' "$AGMSG_AGENT_PID"; return 0 ;;
     esac
   fi
-  local pid="$$" hops=0
-  while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do
-    pid=$(compat_get_ppid "$pid" 2>/dev/null || true)
-    [ -z "$pid" ] && return 1
-    [ "$pid" = "0" ] && return 1
-    if agmsg_pid_is_agent "$pid" "$type"; then
-      printf '%s' "$pid"
+  local pid="$$" hops=0 max_hops="${AGMSG_AGENT_PID_MAX_HOPS:-20}"
+  local platform seen="|" ppid winpid nseen="|" agent_state inspection
+  case "$max_hops" in ''|*[!0-9]*) max_hops=20 ;; esac
+  _agmsg_detect_platform
+  platform="$_agmsg_platform"
+
+  # Phase 1: the ordinary MSYS/POSIX parent chain. On Windows a matched MSYS
+  # process is converted and re-validated, and the returned identity is always
+  # a WINPID. Thus composite ids, cc-instance files, project markers and
+  # liveness checks all consume one PID domain.
+  while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt "$max_hops" ]; do
+    case "$seen" in *"|$pid|"*) return 1 ;; esac
+    seen="$seen$pid|"
+    ppid="$(compat_get_ppid "$pid" 2>/dev/null || true)"
+    case "$ppid" in ''|*[!0-9]*|0) break ;; esac
+    [ "$ppid" -gt 1 ] || break
+    if agmsg_pid_is_agent "$ppid" "$type"; then
+      if [ "$platform" = msys ]; then
+        winpid="$(compat_msys_pid_to_winpid "$ppid" 2>/dev/null || true)"
+        case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
+        agmsg_native_pid_is_agent "$winpid" "$type" || return 1
+        printf '%s' "$winpid"
+      else
+        printf '%s' "$ppid"
+      fi
       return 0
     fi
+    pid="$ppid"
+    hops=$((hops + 1))
+    [ "$pid" -gt 1 ] || break
+  done
+
+  [ "$platform" = msys ] || return 1
+  [ "$hops" -lt "$max_hops" ] || return 1
+
+  # Phase 2: cross the MSYS->native boundary at the last observable MSYS PID,
+  # then follow Win32_Process.ParentProcessId. Invalid values, cycles and the
+  # shared hop limit terminate the walk. Unknown CIM identity never becomes a
+  # match and therefore degrades to the bare-id fallback.
+  winpid="$(compat_msys_pid_to_winpid "$pid" 2>/dev/null || true)"
+  case "$winpid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  while [ "$winpid" -gt 1 ] && [ "$hops" -lt "$max_hops" ]; do
+    case "$nseen" in *"|$winpid|"*) return 1 ;; esac
+    nseen="$nseen$winpid|"
+    inspection="$(agmsg_native_pid_inspect "$winpid" "$type")"
+    agent_state="${inspection%%$'\t'*}"
+    ppid="${inspection#*$'\t'}"
+    if [ "$agent_state" = match ]; then
+      printf '%s' "$winpid"
+      return 0
+    fi
+    case "$ppid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    winpid="$ppid"
     hops=$((hops + 1))
   done
   return 1
@@ -304,7 +441,7 @@ agmsg_read_project_marker() {
   local pid="$1" type="$2" f
   f="$(agmsg_project_marker_path "$pid")"
   [ -f "$f" ] || return 1
-  agmsg_pid_is_agent "$pid" "$type" || return 1
+  agmsg_resolved_pid_is_agent "$pid" "$type" || return 1
   head -1 "$f" 2>/dev/null
 }
 
@@ -319,8 +456,9 @@ agmsg_marker_gc_stale() {
     [ -f "$f" ] || continue
     pid=${f##*/proj.}; pid=${pid%.project}
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || rm -f "$f"
+    [ "$(compat_pid_state_native "$pid")" = dead ] && rm -f "$f"
   done
+  return 0
 }
 
 # List distinct registered project paths for <type>, one per line. An optional

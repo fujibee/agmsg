@@ -121,7 +121,10 @@ _compat_cim_property() {
   local winpid="$1" property="$2" output status
   [ -n "$winpid" ] || return 1
   case "$winpid" in *[!0-9]*) return 1 ;; esac
-  case "$property" in CommandLine|CreationDate|ParentProcessId|ProcessId) ;; *) return 1 ;; esac
+  case "$property" in
+    CommandLine|CreationDate|ExecutablePath|Name|ParentProcessId|ProcessId) ;;
+    *) return 1 ;;
+  esac
   [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
   _agmsg_detect_platform
   [ "$_agmsg_platform" = "msys" ] || return 1
@@ -151,6 +154,51 @@ compat_native_creation_date() {
 
 compat_native_parent_pid() {
   _compat_cim_property "$1" ParentProcessId
+}
+
+# Native-Windows identity fields. These accept WINPIDs only. Callers must keep
+# them separate from compat_get_{cmdline,comm}, whose arguments are MSYS PIDs
+# on Git for Windows.
+compat_native_cmdline() {
+  _compat_cim_property "$1" CommandLine | tr '\\' '/'
+}
+
+compat_native_executable() {
+  _compat_cim_property "$1" ExecutablePath | tr '\\' '/'
+}
+
+compat_native_name() {
+  _compat_cim_property "$1" Name
+}
+
+# Fetch parent + native identity fields in one CIM round-trip. PowerShell startup is
+# noticeably expensive in managed Windows sandboxes; ancestor walks and the
+# watcher's poll guard must not pay it repeatedly per hop. Output is
+# parent<US>name<US>executable<US>command-line; Unit Separator is not valid in
+# Windows paths/argv.
+compat_native_process_record() {
+  local winpid="$1" output status
+  [ -n "$winpid" ] || return 1
+  case "$winpid" in *[!0-9]*) return 1 ;; esac
+  [ -z "${_AGMSG_COMPAT_NO_CIM:-}" ] || return 1
+  _agmsg_detect_platform
+  [ "$_agmsg_platform" = msys ] || return 1
+  if output="$(powershell.exe -NoProfile -Command \
+    "\$ErrorActionPreference='Stop'; \$p=Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\" -ErrorAction Stop; if (\$null -eq \$p) { exit 3 }; [Console]::Write([string]\$p.ParentProcessId); [Console]::Write([char]31); [Console]::Write([string]\$p.Name); [Console]::Write([char]31); [Console]::Write([string]\$p.ExecutablePath); [Console]::Write([char]31); [Console]::Write([string]\$p.CommandLine)" \
+    2>/dev/null)"; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s' "$output" | tr '\\' '/'
+}
+
+compat_native_identity() {
+  local record parent name exe cmd
+  record="$(compat_native_process_record "$1")" || return 1
+  IFS=$'\x1f' read -r parent name exe cmd <<< "$record"
+  printf '%s\x1f%s\x1f%s' "$name" "$exe" "$cmd"
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>

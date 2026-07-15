@@ -125,7 +125,7 @@ for f in "$RUN_DIR"/cc-instance.*; do
   [ -f "$f" ] || continue
   pid=${f##*.}
   case "$pid" in ''|*[!0-9]*) continue ;; esac
-  if kill -0 "$pid" 2>/dev/null; then
+  if [ "$(agmsg_resolved_pid_owner_state "$pid" "$TYPE")" = alive ]; then
     s=$(cat "$f" 2>/dev/null || true)
     [ -n "$s" ] && live_sids="$live_sids|$s"
   fi
@@ -137,7 +137,8 @@ for f in "$RUN_DIR"/cc-instance.*; do
   [ -f "$f" ] || continue
   pid=${f##*.}
   case "$pid" in ''|*[!0-9]*) continue ;; esac
-  kill -0 "$pid" 2>/dev/null && continue
+  _cc_state="$(agmsg_resolved_pid_owner_state "$pid" "$TYPE")"
+  [ "$_cc_state" != dead ] && continue
   dead_sid=$(cat "$f" 2>/dev/null || true)
   if [ -n "$dead_sid" ] \
       && ! printf '%s\n' "$live_sids" | tr '|' '\n' | grep -Fxq "$dead_sid"; then

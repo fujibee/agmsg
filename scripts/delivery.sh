@@ -223,18 +223,35 @@ agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
 
 agmsg_delivery_runtime_status_default() {
   if [ -d "$RUN_DIR" ]; then
-    local alive=0 dead=0
+    local alive=0 dead=0 verified=0 bare=0 owner_unknown=0 owner_dead=0
     for f in "$RUN_DIR"/watch.*.pid; do
       [ -f "$f" ] || continue
       local pid
       pid=$(cat "$f" 2>/dev/null || echo "")
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         alive=$((alive + 1))
+        if [ "${1:-}" = claude-code ]; then
+          local token owner_state
+          token=${f##*/watch.}; token=${token%.pid}
+          if agmsg_instance_is_composite "$token"; then
+            owner_state="$(agmsg_instance_owner_state "$token" "$1")"
+            case "$owner_state" in
+              alive) verified=$((verified + 1)) ;;
+              dead) owner_dead=$((owner_dead + 1)) ;;
+              *) owner_unknown=$((owner_unknown + 1)) ;;
+            esac
+          else
+            bare=$((bare + 1))
+          fi
+        fi
       else
         dead=$((dead + 1))
       fi
     done
     echo "watch processes: $alive alive, $dead stale pidfiles"
+    if [ "${1:-}" = claude-code ]; then
+      echo "watch ownership: $verified verified composite, $bare bare weak, $owner_unknown owner unknown, $owner_dead owner dead/mismatch"
+    fi
   fi
 }
 agmsg_delivery_runtime_status() { agmsg_delivery_runtime_status_default "$@"; }

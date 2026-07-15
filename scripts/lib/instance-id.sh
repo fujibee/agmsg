@@ -313,3 +313,15 @@ agmsg_instance_alive() {
   done
   return 1
 }
+
+# Three-state owner check for a typed composite instance:
+#   alive   PID exists and, on Windows, still identifies the expected agent
+#   dead    PID is gone or was reused by an unrelated executable
+#   unknown native process inspection failed; never authorizes teardown
+# Bare ids have no trustworthy owner signal and are always unknown.
+agmsg_instance_owner_state() {
+  local token="$1" type="$2" pid
+  agmsg_instance_is_composite "$token" || { echo unknown; return 0; }
+  pid="${token##*.}"
+  agmsg_resolved_pid_owner_state "$pid" "$type"
+}

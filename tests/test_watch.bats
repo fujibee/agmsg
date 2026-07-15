@@ -263,6 +263,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: cleanup leaves a sentinel that a successor session re-owned" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-old" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
@@ -412,6 +413,7 @@ _wait_pidfile() {
 # native sqlite3.exe / Git Bash /c/ path mismatch, or bad perms) must surface a
 # loud error rather than spin silently delivering nothing.
 @test "watch: surfaces an unopenable DB once instead of spinning silently (#197)" {
+  skip_on_windows "chmod 000 does not deny native Windows sqlite access"
   [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
   local DB="$TEST_SKILL_DIR/db/messages.db"
   [ -f "$DB" ]                # init-db.sh created it in setup_test_env

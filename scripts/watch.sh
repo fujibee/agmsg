@@ -319,8 +319,12 @@ while true; do
   # composite instance id is portable (Git Bash falls back to tasklist; see
   # _agmsg_pid_alive). Gated on a composite id only: a bare id (degraded, no
   # resolved agent pid) keeps the prior behavior and is not liveness-gated.
-  if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
-    exit 0
+  if agmsg_instance_is_composite "$SESSION_ID"; then
+    _owner_state="$(agmsg_instance_owner_state "$SESSION_ID" "$AGENT_TYPE")"
+    # `unknown` is intentionally fail-closed: tasklist/CIM policy failures must
+    # not terminate a live session. `dead` includes PID reuse by an unrelated
+    # command because Windows owner validation checks the executable/argv[0].
+    [ "$_owner_state" = dead ] && exit 0
   fi
   if [ -f "$DB" ]; then
     ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "

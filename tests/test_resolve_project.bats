@@ -187,7 +187,7 @@ JSON
   local markroot="$(mktemp -d)"
   # Force a marker lookup that succeeds for a synthetic pid.
   agmsg_agent_pid() { printf '%s' 4242; }
-  agmsg_pid_is_agent() { return 0; }
+  agmsg_resolved_pid_is_agent() { return 0; }
   agmsg_write_project_marker 4242 "$markroot"
 
   result="$(agmsg_resolve_project "$ROOT/sub/deep" claude-code)"
@@ -198,15 +198,22 @@ JSON
 # --- marker GC ---
 
 @test "marker-gc: removes markers for dead pids, keeps live ones" {
+  local live_pid="$$"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) live_pid="$(compat_msys_pid_to_winpid "$$")" ;;
+  esac
   agmsg_write_project_marker 999999 "/some/dead"   # pid 999999 ~ never alive
-  agmsg_write_project_marker "$$" "/some/live"     # this bats process is alive
+  agmsg_write_project_marker "$live_pid" "/some/live" # this bats process is alive
   [ -f "$(agmsg_project_marker_path 999999)" ]
-  [ -f "$(agmsg_project_marker_path "$$")" ]
+  [ -f "$(agmsg_project_marker_path "$live_pid")" ]
 
+  # Deterministic across managed Windows sandboxes where both tasklist and CIM
+  # may be denied (that production case is `unknown` and must be preserved).
+  compat_pid_state_native() { [ "$1" = 999999 ] && echo dead || echo alive; }
   agmsg_marker_gc_stale
 
   [ ! -f "$(agmsg_project_marker_path 999999)" ]
-  [ -f "$(agmsg_project_marker_path "$$")" ]
+  [ -f "$(agmsg_project_marker_path "$live_pid")" ]
 }
 
 # --- pid-recycling guard ---
@@ -313,6 +320,7 @@ setup_git_repo() {
 }
 
 @test "resolve: nested worktree under a registered parent uses ancestor, not git-common-dir" {
+  skip_on_windows "git worktree path normalization under Git Bash (#182)"
   command -v git >/dev/null 2>&1 || skip "git not available"
   local base; base="$(setup_git_repo)"
   mkdir -p "$base/parent/repo"

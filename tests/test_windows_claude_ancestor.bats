@@ -1,0 +1,224 @@
+#!/usr/bin/env bats
+
+# Windows Claude owner resolution. Most cases use deterministic process-table
+# stubs so boundary, cycle and failure behavior runs on every platform. The
+# final lifecycle cases use real WINPIDs when the suite runs under Git Bash.
+
+load test_helper
+
+setup() {
+  setup_test_env
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  export RUN_DIR="$SKILL_DIR/run"
+  export PROJ="/tmp/agmsg-windows-claude-owner"
+  mkdir -p "$RUN_DIR"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/compat.sh"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/resolve-project.sh"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/instance-id.sh"
+  OWNER_MSYS_PID=""
+  WATCH_PID=""
+}
+
+teardown() {
+  if [ -n "${WATCH_PID:-}" ]; then
+    kill "$WATCH_PID" 2>/dev/null || true
+    wait "$WATCH_PID" 2>/dev/null || true
+  fi
+  if [ -n "${OWNER_MSYS_PID:-}" ]; then
+    kill "$OWNER_MSYS_PID" 2>/dev/null || true
+    wait "$OWNER_MSYS_PID" 2>/dev/null || true
+  fi
+  teardown_test_env
+}
+
+force_platform() { _agmsg_platform="$1"; }
+
+@test "agent pid: POSIX PPID walk is unchanged" {
+  force_platform linux
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 20 ;; *) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { [ "$1" = 20 ] && [ "$2" = claude-code ]; }
+  run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = 20 ]
+}
+
+@test "agent pid: Windows finds Claude inside the MSYS chain and returns WINPID" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 20 ;; *) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { [ "$1" = 20 ]; }
+  compat_msys_pid_to_winpid() { [ "$1" = 20 ] && echo 2020; }
+  agmsg_native_pid_is_agent() { [ "$1" = 2020 ] && [ "$2" = claude-code ]; }
+  run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = 2020 ]
+}
+
+@test "agent pid: Windows crosses the boundary and finds a native Claude ancestor" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { return 1; }
+  compat_msys_pid_to_winpid() { [ "$1" = 10 ] && echo 1010; }
+  compat_pid_state_native() { echo alive; }
+  compat_native_process_record() { case "$1" in 1010) printf '2000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1fclaude.exe\x1fC:/tools/claude.exe\x1fC:/tools/claude.exe' ;; esac; }
+  run agmsg_agent_pid claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = 3000 ]
+}
+
+@test "agent pid: multiple native bash relays do not hide Claude" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { return 1; }
+  compat_msys_pid_to_winpid() { echo 1000; }
+  compat_pid_state_native() { echo alive; }
+  compat_native_process_record() { case "$1" in 1000) printf '2000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 4000) printf '5000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 5000) printf '6000\x1fclaude.exe\x1fC:/Claude/claude.exe\x1fC:/Claude/claude.exe' ;; esac; }
+  [ "$(agmsg_agent_pid claude-code)" = 5000 ]
+}
+
+@test "agent pid: native command line that is not Claude is rejected" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { return 1; }
+  compat_msys_pid_to_winpid() { echo 1000; }
+  compat_pid_state_native() { echo alive; }
+  compat_native_process_record() { case "$1" in 1000) printf '2000\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe notes-about-claude.txt' ;; 2000) printf '1\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe' ;; esac; }
+  run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "owner state: CIM failure is unknown and cannot authorize teardown" {
+  force_platform msys
+  compat_pid_state_native() { echo unknown; }
+  run agmsg_instance_owner_state sess.4242 claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = unknown ]
+}
+
+@test "agent pid: native cycle and hop limit terminate" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { return 1; }
+  compat_msys_pid_to_winpid() { echo 1000; }
+  agmsg_native_pid_inspect() { case "$1" in 1000) printf 'no-match\t2000' ;; 2000) printf 'no-match\t1000' ;; esac; }
+  run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+
+  agmsg_native_pid_inspect() { printf 'no-match\t%s' "$(($1 + 1))"; }
+  AGMSG_AGENT_PID_MAX_HOPS=3 run agmsg_agent_pid claude-code
+  [ "$status" -ne 0 ]
+}
+
+@test "instance id: native Claude WINPID produces a composite id" {
+  agmsg_agent_pid() { echo 4242; }
+  [ "$(agmsg_instance_id uuid claude-code)" = uuid.4242 ]
+}
+
+@test "project marker: resolved Windows WINPID is validated in native domain" {
+  force_platform msys
+  agmsg_native_pid_is_agent() { [ "$1" = 4242 ] && [ "$2" = claude-code ]; }
+  printf 'E:/Project/example\n' > "$(agmsg_project_marker_path 4242)"
+  [ "$(agmsg_read_project_marker 4242 claude-code)" = E:/Project/example ]
+}
+
+@test "project marker GC: unknown native liveness is preserved" {
+  agmsg_write_project_marker 4242 E:/Project/unknown-owner
+  compat_pid_state_native() { echo unknown; }
+  agmsg_marker_gc_stale
+  [ -f "$(agmsg_project_marker_path 4242)" ]
+}
+
+@test "owner state: live Claude is alive, PID reuse by another command is dead" {
+  force_platform msys
+  compat_pid_state_native() { echo alive; }
+  agmsg_native_pid_agent_state() { echo match; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code)" = alive ]
+  agmsg_native_pid_agent_state() { echo no-match; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code)" = dead ]
+}
+
+@test "parallel resume: same sid with different native PIDs stays distinct" {
+  [ "$(agmsg_instance_id_from_pid shared 7001)" = shared.7001 ]
+  [ "$(agmsg_instance_id_from_pid shared 7002)" = shared.7002 ]
+  [ "$(agmsg_instance_id_from_pid shared 7001)" != "$(agmsg_instance_id_from_pid shared 7002)" ]
+}
+
+@test "Windows watcher: live Claude owner is kept and owner exit stops it" {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
+  cp /usr/bin/sleep.exe "$TEST_SKILL_DIR/claude.exe"
+  "$TEST_SKILL_DIR/claude.exe" 30 & OWNER_MSYS_PID=$!
+  local owner_winpid
+  owner_winpid="$(compat_msys_pid_to_winpid "$OWNER_MSYS_PID")"
+  case "$owner_winpid" in ''|*[!0-9]*) false ;; esac
+  # Some managed sandboxes allow tasklist but deny Win32_Process details. That
+  # environment is covered by the unknown/fail-closed unit case above; the real
+  # lifecycle assertion needs executable identity and is run where CIM is
+  # available (including the elevated Windows verification job).
+  if ! compat_native_identity "$owner_winpid" >/dev/null 2>&1; then
+    kill "$OWNER_MSYS_PID" 2>/dev/null || true
+    wait "$OWNER_MSYS_PID" 2>/dev/null || true
+    OWNER_MSYS_PID=""
+    skip "Win32_Process identity query is unavailable"
+  fi
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  local watcher_log="$TEST_SKILL_DIR/live-watcher.log"
+  AGMSG_RESOLVE_PROJECT=0 AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "live.$owner_winpid" "$PROJ" claude-code >"$watcher_log" 2>&1 3>&- & WATCH_PID=$!
+  local pf="$RUN_DIR/watch.live.$owner_winpid.pid" i
+  for i in $(seq 1 50); do [ -f "$pf" ] && break; sleep 0.1; done
+  [ -f "$pf" ] || { cat "$watcher_log"; false; }
+  sleep 2
+  kill -0 "$WATCH_PID" 2>/dev/null
+
+  kill "$OWNER_MSYS_PID" 2>/dev/null || true
+  wait "$OWNER_MSYS_PID" 2>/dev/null || true
+  OWNER_MSYS_PID=""
+  for i in $(seq 1 50); do kill -0 "$WATCH_PID" 2>/dev/null || break; sleep 0.1; done
+  ! kill -0 "$WATCH_PID" 2>/dev/null
+  wait "$WATCH_PID" 2>/dev/null || true
+  WATCH_PID=""
+  [ ! -e "$pf" ]
+}
+
+@test "Windows watcher: bare UUID is not killed without owner evidence" {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  AGMSG_RESOLVE_PROJECT=0 AGMSG_AGENT_PID="" AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" bare-uuid "$PROJ" claude-code >/dev/null 2>&1 3>&- & WATCH_PID=$!
+  local pf="$RUN_DIR/watch.bare-uuid.pid" i
+  for i in $(seq 1 50); do [ -f "$pf" ] && break; sleep 0.1; done
+  [ -f "$pf" ]
+  sleep 2
+  kill -0 "$WATCH_PID" 2>/dev/null
+}
+
+@test "delivery status: distinguishes bare weak watcher from stale pidfile" {
+  sleep 30 & OWNER_MSYS_PID=$!
+  echo "$OWNER_MSYS_PID" > "$RUN_DIR/watch.bare-status.pid"
+  echo 2147483647 > "$RUN_DIR/watch.stale-status.pid"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJ"
+  kill "$OWNER_MSYS_PID" 2>/dev/null || true
+  wait "$OWNER_MSYS_PID" 2>/dev/null || true
+  OWNER_MSYS_PID=""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"watch processes: 1 alive, 1 stale pidfiles"* ]]
+  [[ "$output" == *"1 bare weak"* ]]
+}
+
+@test "delivery set off: existing project-scoped watcher cleanup still works" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  AGMSG_RESOLVE_PROJECT=0 AGMSG_AGENT_PID="" AGMSG_WATCH_INTERVAL=30 \
+    bash "$SCRIPTS/watch.sh" cleanup-sid "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  WATCH_PID=$!
+  local pf="$RUN_DIR/watch.cleanup-sid.pid" i
+  for i in $(seq 1 80); do [ -f "$pf" ] && break; sleep 0.1; done
+  [ -f "$pf" ]
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  for i in $(seq 1 80); do kill -0 "$WATCH_PID" 2>/dev/null || break; sleep 0.1; done
+  ! kill -0 "$WATCH_PID" 2>/dev/null
+  wait "$WATCH_PID" 2>/dev/null || true
+  WATCH_PID=""
+  [ ! -e "$pf" ]
+}
