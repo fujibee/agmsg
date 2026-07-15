@@ -951,9 +951,9 @@ class CodexBridge {
   }
 
   async resolveLoadedThread() {
-    // Before SessionStart publishes its stdin session_id, ask the app-server
-    // which thread the live TUI has loaded. This fallback is safe only when
-    // exactly one thread is present. See #170.
+    // Legacy/manual --thread loaded mode only. The monitor launcher does not use
+    // this project-wide guess; it binds a serialized before/after loaded delta.
+    // Keep the legacy mode fail-closed unless exactly one thread is present.
     const deadline = Date.now() + (this.opts.loadedTimeout || 30000);
     for (;;) {
       const response = await this.client.request("thread/loaded/list", {});

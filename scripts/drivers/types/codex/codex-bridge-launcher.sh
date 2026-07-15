@@ -4,10 +4,10 @@ set -euo pipefail
 # Runs outside Codex's tool sandbox and owns the app-server connection: it starts
 # codex-bridge.js for this project's single codex identity.
 #
-# Before the first turn there is no SessionStart payload. The launcher waits
-# instead of guessing from the app-server's project-wide loaded set, which may
-# contain an older same-project task. On the first turn, current Codex hooks
-# provide stdin session_id as a generation-scoped exact route. See #170, #41.
+# The monitor publishes a generation-scoped exact route: new TUI launches use a
+# serialized loaded-set delta, while resume compatibility uses SessionStart's
+# stdin session_id. The launcher never guesses from the pre-existing loaded set,
+# which may contain an older same-project task. See #170, #41.
 
 TYPE="${1:?Usage: codex-bridge-launcher.sh <type> <project_path> <app_server> <parent_pid> [generation request_file team name state_file provisional_ref]}"
 PROJECT="${2:?Missing project_path}"

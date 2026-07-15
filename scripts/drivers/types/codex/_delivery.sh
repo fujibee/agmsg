@@ -41,7 +41,8 @@ agmsg_delivery_on_enable() {
     echo "  monitor delivery will NOT start until Node is installed (or set AGMSG_NODE)."
   fi
   echo "Restart your Codex session (quit and relaunch \`codex\`). The launcher starts"
-  echo "  with the TUI; the first turn lets SessionStart publish its exact session/thread id."
+  echo "  with the TUI and binds the single thread created by that serialized launch."
+  echo "  No first prompt is required for a new session; resume uses SessionStart compatibility."
   echo "  On first use, run /hooks in Codex and trust the agmsg SessionStart/SessionEnd"
   echo "  definitions. Codex skips new or changed project hooks until you approve them."
   echo "  Already-running sessions stay unmonitored until they restart."
