@@ -422,6 +422,25 @@ export function sanitizeNumberDraft(raw: string): string {
   return result;
 }
 
+// ArrowUp/ArrowDown stepping for the font-size field, extracted as a pure
+// function so its clamping/fallback logic is unit-testable independent of
+// the composition-guarded DOM event handler that calls it (see the
+// onKeyDown below — the IME-composition check itself isn't something this
+// helper can or should own).
+export function stepFontSize(
+  draftText: string,
+  fallback: number,
+  direction: 1 | -1,
+  min: number,
+  max: number,
+): number {
+  // Number("") is 0, not NaN — without the trim/empty check an empty draft
+  // would step from 0 instead of falling back to the last committed value.
+  const current = draftText.trim() === "" ? NaN : Number(draftText);
+  const base = Number.isFinite(current) ? current : fallback;
+  return Math.min(max, Math.max(min, base + direction));
+}
+
 export function SettingsModal(props: {
   onClose: () => void;
   terminalFontSize: number;
@@ -540,12 +559,20 @@ export function SettingsModal(props: {
             // type="number" gave ArrowUp/ArrowDown stepping for free;
             // type="text" doesn't, so re-implement it (step 1, clamped).
             if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+            // Never hijack IME candidate navigation — during composition,
+            // ArrowUp/ArrowDown move the IME's own conversion-candidate
+            // selection, not this field's value. isComposingFontSize.current
+            // and e.nativeEvent.isComposing cover the standard case;
+            // keyCode 229 is the legacy fallback some engines still report
+            // for a composition keydown where isComposing isn't reliably set.
+            if (isComposingFontSize.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
             e.preventDefault();
-            const current = Number(fontSizeText);
-            const base = Number.isFinite(current) ? current : props.terminalFontSize;
-            const next = e.key === "ArrowUp" ? base + 1 : base - 1;
-            const clamped = Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, next));
-            commitFontSizeText(String(clamped));
+            const direction = e.key === "ArrowUp" ? 1 : -1;
+            commitFontSizeText(
+              String(
+                stepFontSize(fontSizeText, props.terminalFontSize, direction, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE),
+              ),
+            );
           }}
         />
       </label>

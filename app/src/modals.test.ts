@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeNumberDraft, shouldCloseOnEscape } from "./modals";
+import { sanitizeNumberDraft, shouldCloseOnEscape, stepFontSize } from "./modals";
 
 function esc(overrides: Partial<{ isComposing: boolean; keyCode: number; defaultPrevented: boolean }> = {}) {
   return {
@@ -69,5 +69,33 @@ describe("sanitizeNumberDraft", () => {
 
   it("passes an already-empty string through unchanged", () => {
     expect(sanitizeNumberDraft("")).toBe("");
+  });
+});
+
+describe("stepFontSize", () => {
+  it("steps up by 1 from a valid draft", () => {
+    expect(stepFontSize("12", 12, 1, 8, 24)).toBe(13);
+  });
+
+  it("steps down by 1 from a valid draft", () => {
+    expect(stepFontSize("12", 12, -1, 8, 24)).toBe(11);
+  });
+
+  it("falls back to the committed value when the draft doesn't parse (e.g. empty, mid-edit)", () => {
+    expect(stepFontSize("", 12, 1, 8, 24)).toBe(13);
+    expect(stepFontSize("-", 12, 1, 8, 24)).toBe(13);
+    expect(stepFontSize(".", 12, -1, 8, 24)).toBe(11);
+  });
+
+  it("clamps at the maximum", () => {
+    expect(stepFontSize("24", 24, 1, 8, 24)).toBe(24);
+  });
+
+  it("clamps at the minimum", () => {
+    expect(stepFontSize("8", 8, -1, 8, 24)).toBe(8);
+  });
+
+  it("steps from a decimal draft and can land on a non-integer", () => {
+    expect(stepFontSize("12.5", 12.5, 1, 8, 24)).toBe(13.5);
   });
 });
