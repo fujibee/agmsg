@@ -9,7 +9,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 # hook (`session-start.sh`), but also works standalone as `tail -f` for
 # inbox: any agent runtime that can read stdout can consume it.
 #
-# Usage: watch.sh <session_id> <project_path> <agent_type> [active_name]
+# Usage: watch.sh <session_id> <project_path> <agent_type> [active_name] [owner_creation]
 #
 # Behavior:
 #   - Resolves (team, agent) pairs for (project_path, agent_type) via
@@ -41,6 +41,7 @@ SESSION_ID="${1:-}"
 PROJECT_PATH="${2:?Missing project_path}"
 AGENT_TYPE="${3:?Missing agent_type}"
 ACTIVE_NAME="${4:-}"
+OWNER_CREATION="${5-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -95,6 +96,15 @@ SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$AGENT_TYPE")"
 DB="$(agmsg_db_path)"
 RUN_DIR="$SKILL_DIR/run"
 PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
+OWNER_DOMAIN=posix
+_agmsg_detect_platform
+if [ "$_agmsg_platform" = msys ]; then
+  if [ "$AGENT_TYPE" = grok-build ]; then OWNER_DOMAIN=msys; else OWNER_DOMAIN=native; fi
+fi
+if [ "$OWNER_DOMAIN" = native ] && agmsg_instance_is_composite "$SESSION_ID" \
+   && [ -z "$OWNER_CREATION" ]; then
+  OWNER_CREATION="$(agmsg_resolved_pid_creation_token "${SESSION_ID##*.}" "$AGENT_TYPE" 2>/dev/null || true)"
+fi
 
 # Resolve poll interval. Env var wins over config, default 5s.
 INTERVAL="${AGMSG_WATCH_INTERVAL:-}"
@@ -129,6 +139,7 @@ if [ -f "$PIDFILE" ]; then
 fi
 
 echo $$ > "$PIDFILE"
+agmsg_watch_owner_write "$SESSION_ID" "$$" "$AGENT_TYPE" "$OWNER_DOMAIN" "$OWNER_CREATION" 2>/dev/null || true
 # Readiness sentinels this watcher created (see #108). Populated once the
 # subscription is resolved; removed on exit so the file is present iff a live
 # watcher is currently receiving for that role.
@@ -141,6 +152,7 @@ cleanup() {
   local pidfile_pid=""
   [ -f "$PIDFILE" ] && IFS= read -r pidfile_pid < "$PIDFILE" || true
   [ "$pidfile_pid" = "$$" ] && rm -f "$PIDFILE"
+  agmsg_watch_owner_remove_if_watcher "$SESSION_ID" "$$"
   if [ -n "$READY_FILES" ]; then
     while IFS= read -r _rf; do
       [ -z "$_rf" ] && continue
@@ -315,12 +327,17 @@ while true; do
   # that closed silently — printf '' raises no EPIPE, and macOS buffers a final
   # write into an already-dead reader — so a quiet watcher whose session died
   # would otherwise spin forever (the macOS-runner 33-min stall; #210's job
-  # timeout only caps the symptom). `kill -0` on the agent pid embedded in the
-  # composite instance id is portable (Git Bash falls back to tasklist; see
-  # _agmsg_pid_alive). Gated on a composite id only: a bare id (degraded, no
-  # resolved agent pid) keeps the prior behavior and is not liveness-gated.
+  # timeout only caps the symptom). Typed owner state keeps PID domains
+  # separate: native Claude owners require identity + CreationDate, while
+  # grok-build owners use their MSYS PID. Native inspection failures are
+  # unknown and never authorize teardown. Gated on a composite id only: a bare
+  # id keeps the prior behavior and is not liveness-gated.
   if agmsg_instance_is_composite "$SESSION_ID"; then
-    _owner_state="$(agmsg_instance_owner_state "$SESSION_ID" "$AGENT_TYPE")"
+    if [ "$OWNER_DOMAIN" = native ]; then
+      _owner_state="$(agmsg_instance_owner_state "$SESSION_ID" "$AGENT_TYPE" "$OWNER_CREATION")"
+    else
+      _owner_state="$(agmsg_instance_owner_state "$SESSION_ID" "$AGENT_TYPE")"
+    fi
     # `unknown` is intentionally fail-closed: tasklist/CIM policy failures must
     # not terminate a live session. `dead` includes PID reuse by an unrelated
     # command because Windows owner validation checks the executable/argv[0].

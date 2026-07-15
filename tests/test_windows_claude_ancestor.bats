@@ -62,7 +62,7 @@ force_platform() { _agmsg_platform="$1"; }
   agmsg_pid_is_agent() { return 1; }
   compat_msys_pid_to_winpid() { [ "$1" = 10 ] && echo 1010; }
   compat_pid_state_native() { echo alive; }
-  compat_native_process_record() { case "$1" in 1010) printf '2000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1fclaude.exe\x1fC:/tools/claude.exe\x1fC:/tools/claude.exe' ;; esac; }
+  compat_native_process_record() { case "$1" in 1010) printf '2000\x1f101\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1f102\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1f103\x1fclaude.exe\x1fC:/tools/claude.exe\x1fC:/tools/claude.exe' ;; esac; }
   run agmsg_agent_pid claude-code
   [ "$status" -eq 0 ]
   [ "$output" = 3000 ]
@@ -74,7 +74,7 @@ force_platform() { _agmsg_platform="$1"; }
   agmsg_pid_is_agent() { return 1; }
   compat_msys_pid_to_winpid() { echo 1000; }
   compat_pid_state_native() { echo alive; }
-  compat_native_process_record() { case "$1" in 1000) printf '2000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 4000) printf '5000\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 5000) printf '6000\x1fclaude.exe\x1fC:/Claude/claude.exe\x1fC:/Claude/claude.exe' ;; esac; }
+  compat_native_process_record() { case "$1" in 1000) printf '2000\x1f101\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 2000) printf '3000\x1f102\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 3000) printf '4000\x1f103\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 4000) printf '5000\x1f104\x1fbash.exe\x1fC:/Git/bash.exe\x1fC:/Git/bash.exe' ;; 5000) printf '6000\x1f105\x1fclaude.exe\x1fC:/Claude/claude.exe\x1fC:/Claude/claude.exe' ;; esac; }
   [ "$(agmsg_agent_pid claude-code)" = 5000 ]
 }
 
@@ -84,7 +84,7 @@ force_platform() { _agmsg_platform="$1"; }
   agmsg_pid_is_agent() { return 1; }
   compat_msys_pid_to_winpid() { echo 1000; }
   compat_pid_state_native() { echo alive; }
-  compat_native_process_record() { case "$1" in 1000) printf '2000\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe notes-about-claude.txt' ;; 2000) printf '1\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe' ;; esac; }
+  compat_native_process_record() { case "$1" in 1000) printf '2000\x1f101\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe notes-about-claude.txt' ;; 2000) printf '1\x1f102\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe' ;; esac; }
   run agmsg_agent_pid claude-code
   [ "$status" -ne 0 ]
   [ -z "$output" ]
@@ -134,10 +134,44 @@ force_platform() { _agmsg_platform="$1"; }
 @test "owner state: live Claude is alive, PID reuse by another command is dead" {
   force_platform msys
   compat_pid_state_native() { echo alive; }
-  agmsg_native_pid_agent_state() { echo match; }
-  [ "$(agmsg_instance_owner_state sid.7000 claude-code)" = alive ]
-  agmsg_native_pid_agent_state() { echo no-match; }
-  [ "$(agmsg_instance_owner_state sid.7000 claude-code)" = dead ]
+  compat_native_process_record() { printf '1\x1f12345\x1fclaude.exe\x1fC:/Claude/claude.exe\x1f"C:/Claude/claude.exe" --resume x'; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code 12345)" = alive ]
+  compat_native_process_record() { printf '1\x1f12345\x1fnotepad.exe\x1fC:/Windows/notepad.exe\x1fC:/Windows/notepad.exe claude'; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code 12345)" = dead ]
+}
+
+@test "native matcher: identity fields recognize Claude but not a trailing argument" {
+  [ "$(_agmsg_native_identity_fields_state claude-code claude.exe C:/Windows/notepad.exe 'C:/Node/node.exe wrapper.js')" = match ]
+  [ "$(_agmsg_native_identity_fields_state claude-code node.exe C:/Claude/claude.exe 'C:/Node/node.exe wrapper.js')" = match ]
+  [ "$(_agmsg_native_identity_fields_state claude-code node.exe C:/Node/node.exe '"C:/Claude/claude.exe" --resume x')" = match ]
+  [ "$(_agmsg_native_identity_fields_state claude-code node.exe C:/Node/node.exe 'C:/Node/node.exe wrapper.js claude')" = no-match ]
+}
+
+@test "owner generation: same WINPID and Claude identity with different CreationDate is dead" {
+  force_platform msys
+  compat_pid_state_native() { echo alive; }
+  compat_native_process_record() { printf '1\x1f99999\x1fclaude.exe\x1fC:/Claude/claude.exe\x1fC:/Claude/claude.exe'; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code 12345)" = dead ]
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code 99999)" = alive ]
+}
+
+@test "owner generation: missing CreationDate is unknown" {
+  force_platform msys
+  compat_pid_state_native() { echo alive; }
+  compat_native_process_record() { printf '1\x1f\x1fclaude.exe\x1fC:/Claude/claude.exe\x1fC:/Claude/claude.exe'; }
+  [ "$(agmsg_instance_owner_state sid.7000 claude-code 12345)" = unknown ]
+}
+
+@test "agent pid: Phase 1 conversion or revalidation failure safely continues Phase 2" {
+  force_platform msys
+  compat_get_ppid() { case "$1" in "$$") echo 10 ;; 10) echo 20 ;; *) echo 1 ;; esac; }
+  agmsg_pid_is_agent() { [ "$1" = 20 ]; }
+  compat_msys_pid_to_winpid() { case "$1" in 20) echo 2020 ;; 10) echo 1010 ;; esac; }
+  agmsg_native_pid_is_agent() { return 1; }
+  agmsg_native_pid_inspect() { case "$1" in 1010) printf 'no-match\t3030\t101' ;; 3030) printf 'match\t1\t102' ;; esac; }
+  [ "$(agmsg_agent_pid claude-code)" = 3030 ]
+  compat_msys_pid_to_winpid() { [ "$1" = 10 ] && echo 1010; }
+  [ "$(agmsg_agent_pid claude-code)" = 3030 ]
 }
 
 @test "parallel resume: same sid with different native PIDs stays distinct" {
@@ -146,10 +180,21 @@ force_platform() { _agmsg_platform="$1"; }
   [ "$(agmsg_instance_id_from_pid shared 7001)" != "$(agmsg_instance_id_from_pid shared 7002)" ]
 }
 
+@test "owner sidecar: successor record survives old watcher cleanup" {
+  agmsg_watch_owner_write sid.7000 111 claude-code native 12345
+  [ "$(agmsg_watch_owner_creation sid.7000 111 claude-code)" = 12345 ]
+  agmsg_watch_owner_write sid.7000 222 claude-code native 67890
+  agmsg_watch_owner_remove_if_watcher sid.7000 111
+  [ "$(agmsg_watch_owner_creation sid.7000 222 claude-code)" = 67890 ]
+  ! compgen -G "$RUN_DIR/watch.sid.7000.owner.*.tmp" >/dev/null
+  agmsg_watch_owner_remove_if_watcher sid.7000 222
+  [ ! -e "$RUN_DIR/watch.sid.7000.owner" ]
+}
+
 @test "Windows watcher: live Claude owner is kept and owner exit stops it" {
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
   cp /usr/bin/sleep.exe "$TEST_SKILL_DIR/claude.exe"
-  "$TEST_SKILL_DIR/claude.exe" 30 & OWNER_MSYS_PID=$!
+  "$TEST_SKILL_DIR/claude.exe" 120 & OWNER_MSYS_PID=$!
   local owner_winpid
   owner_winpid="$(compat_msys_pid_to_winpid "$OWNER_MSYS_PID")"
   case "$owner_winpid" in ''|*[!0-9]*) false ;; esac
@@ -171,6 +216,9 @@ force_platform() { _agmsg_platform="$1"; }
   [ -f "$pf" ] || { cat "$watcher_log"; false; }
   sleep 2
   kill -0 "$WATCH_PID" 2>/dev/null
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 verified composite"* ]]
 
   kill "$OWNER_MSYS_PID" 2>/dev/null || true
   wait "$OWNER_MSYS_PID" 2>/dev/null || true
@@ -191,6 +239,43 @@ force_platform() { _agmsg_platform="$1"; }
   [ -f "$pf" ]
   sleep 2
   kill -0 "$WATCH_PID" 2>/dev/null
+}
+
+@test "Windows watcher: native inspection unknown does not exit watch.sh" {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
+  cp /usr/bin/sleep.exe "$TEST_SKILL_DIR/claude.exe"
+  "$TEST_SKILL_DIR/claude.exe" 120 & OWNER_MSYS_PID=$!
+  local owner_winpid
+  owner_winpid="$(compat_msys_pid_to_winpid "$OWNER_MSYS_PID")"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  _AGMSG_COMPAT_NO_CIM=1 AGMSG_RESOLVE_PROJECT=0 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "unknown.$owner_winpid" "$PROJ" claude-code "" 12345 >/dev/null 2>&1 3>&- & WATCH_PID=$!
+  local pf="$RUN_DIR/watch.unknown.$owner_winpid.pid" i
+  for i in $(seq 1 50); do [ -f "$pf" ] && break; sleep 0.1; done
+  [ -f "$pf" ]
+  sleep 2
+  kill -0 "$WATCH_PID" 2>/dev/null
+}
+
+@test "Windows grok watcher: MSYS owner is kept and owner exit stops it" {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
+  sleep 30 & OWNER_MSYS_PID=$!
+  bash "$SCRIPTS/join.sh" team grok grok-build "$PROJ" >/dev/null
+  AGMSG_RESOLVE_PROJECT=0 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "grok.$OWNER_MSYS_PID" "$PROJ" grok-build >/dev/null 2>&1 3>&- & WATCH_PID=$!
+  local pf="$RUN_DIR/watch.grok.$OWNER_MSYS_PID.pid" i
+  for i in $(seq 1 50); do [ -f "$pf" ] && break; sleep 0.1; done
+  [ -f "$pf" ]
+  sleep 2
+  kill -0 "$WATCH_PID" 2>/dev/null
+  kill "$OWNER_MSYS_PID" 2>/dev/null || true
+  wait "$OWNER_MSYS_PID" 2>/dev/null || true
+  OWNER_MSYS_PID=""
+  for i in $(seq 1 50); do kill -0 "$WATCH_PID" 2>/dev/null || break; sleep 0.1; done
+  ! kill -0 "$WATCH_PID" 2>/dev/null
+  wait "$WATCH_PID" 2>/dev/null || true
+  WATCH_PID=""
+  [ ! -e "$pf" ]
 }
 
 @test "delivery status: distinguishes bare weak watcher from stale pidfile" {

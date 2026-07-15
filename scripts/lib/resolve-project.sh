@@ -294,23 +294,25 @@ _agmsg_native_identity_fields_state() {
   echo no-match
 }
 
-# Inspect identity and parent from one Win32_Process snapshot. Prints
-# "<match|no-match|unknown><TAB><parent>". Phase 2 uses this to avoid a second
+# Inspect identity, parent and process generation from one Win32_Process
+# snapshot. Prints "<match|no-match|unknown><TAB><parent><TAB><creation>".
+# Phase 2 uses this to avoid a second
 # PowerShell startup per hop and to keep identity/parent internally consistent.
 agmsg_native_pid_inspect() {
-  local pid="$1" type="$2" state record parent name exe cmd identity_state
+  local pid="$1" type="$2" state record parent creation name exe cmd identity_state
   state="$(compat_pid_state_native "$pid" 2>/dev/null || printf unknown)"
   case "$state" in
-    dead) printf 'no-match\t'; return 0 ;;
+    dead) printf 'no-match\t\t'; return 0 ;;
     alive) ;;
-    *) printf 'unknown\t'; return 0 ;;
+    *) printf 'unknown\t\t'; return 0 ;;
   esac
   record="$(compat_native_process_record "$pid" 2>/dev/null)" \
-    || { printf 'unknown\t'; return 0; }
-  IFS=$'\x1f' read -r parent name exe cmd <<< "$record"
+    || { printf 'unknown\t\t'; return 0; }
+  IFS=$'\x1f' read -r parent creation name exe cmd <<< "$record"
   identity_state="$(_agmsg_native_identity_fields_state "$type" "$name" "$exe" "$cmd")"
   case "$parent" in ''|*[!0-9]*) parent="" ;; esac
-  printf '%s\t%s' "$identity_state" "$parent"
+  case "$creation" in ''|*[!0-9]*) creation="" ;; esac
+  printf '%s\t%s\t%s' "$identity_state" "$parent" "$creation"
 }
 
 agmsg_native_pid_is_agent() {
@@ -332,17 +334,55 @@ agmsg_resolved_pid_is_agent() {
 # both existence and agent identity; query failures stay unknown. POSIX keeps
 # the established kill/ps liveness behavior.
 agmsg_resolved_pid_owner_state() {
-  local pid="$1" type="$2"
+  local pid="$1" type="$2" expected_creation="${3-}" strict=0
+  [ "$#" -ge 3 ] && strict=1
   _agmsg_detect_platform
   if [ "$_agmsg_platform" = msys ]; then
-    case "$(agmsg_native_pid_agent_state "$pid" "$type")" in
-      match) echo alive ;;
-      no-match) echo dead ;;
-      *) echo unknown ;;
+    # grok-build discovers its owner with ps/pgrep in the MSYS PID domain.
+    # Never feed that PID to tasklist/CIM as if it were a WINPID.
+    if [ "$type" = grok-build ]; then
+      compat_pid_alive_msys "$pid" && echo alive || echo dead
+      return 0
+    fi
+    local state record _parent creation name exe cmd identity_state
+    state="$(compat_pid_state_native "$pid" 2>/dev/null || printf unknown)"
+    case "$state" in
+      dead) echo dead; return 0 ;;
+      alive) ;;
+      *) echo unknown; return 0 ;;
     esac
+    record="$(compat_native_process_record "$pid" 2>/dev/null)" \
+      || { echo unknown; return 0; }
+    IFS=$'\x1f' read -r _parent creation name exe cmd <<< "$record"
+    identity_state="$(_agmsg_native_identity_fields_state "$type" "$name" "$exe" "$cmd")"
+    case "$identity_state" in
+      no-match) echo dead; return 0 ;;
+      match) ;;
+      *) echo unknown; return 0 ;;
+    esac
+    if [ "$strict" -eq 1 ]; then
+      case "$creation" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+      case "$expected_creation" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+      [ "$creation" = "$expected_creation" ] || { echo dead; return 0; }
+    fi
+    echo alive
   else
     compat_pid_state_native "$pid"
   fi
+}
+
+# Snapshot the native owner generation used by a watcher. Only agent types
+# whose resolved owner is a WINPID have a CreationDate token.
+agmsg_resolved_pid_creation_token() {
+  local pid="$1" type="$2" record _parent creation name exe cmd
+  _agmsg_detect_platform
+  [ "$_agmsg_platform" = msys ] || return 1
+  [ "$type" != grok-build ] || return 1
+  record="$(compat_native_process_record "$pid" 2>/dev/null)" || return 1
+  IFS=$'\x1f' read -r _parent creation name exe cmd <<< "$record"
+  [ "$(_agmsg_native_identity_fields_state "$type" "$name" "$exe" "$cmd")" = match ] || return 1
+  case "$creation" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$creation"
 }
 
 # Walk the process tree from $$ upward, echoing the PID of the nearest ancestor
@@ -385,13 +425,20 @@ agmsg_agent_pid() {
     if agmsg_pid_is_agent "$ppid" "$type"; then
       if [ "$platform" = msys ]; then
         winpid="$(compat_msys_pid_to_winpid "$ppid" 2>/dev/null || true)"
-        case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
-        agmsg_native_pid_is_agent "$winpid" "$type" || return 1
-        printf '%s' "$winpid"
+        case "$winpid" in
+          ''|*[!0-9]*) break ;;
+          *)
+            if agmsg_native_pid_is_agent "$winpid" "$type"; then
+              printf '%s' "$winpid"
+              return 0
+            fi
+            break
+            ;;
+        esac
       else
         printf '%s' "$ppid"
+        return 0
       fi
-      return 0
     fi
     pid="$ppid"
     hops=$((hops + 1))
@@ -413,6 +460,7 @@ agmsg_agent_pid() {
     inspection="$(agmsg_native_pid_inspect "$winpid" "$type")"
     agent_state="${inspection%%$'\t'*}"
     ppid="${inspection#*$'\t'}"
+    ppid="${ppid%%$'\t'*}"
     if [ "$agent_state" = match ]; then
       printf '%s' "$winpid"
       return 0

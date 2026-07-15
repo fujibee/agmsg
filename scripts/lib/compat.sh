@@ -174,8 +174,10 @@ compat_native_name() {
 # Fetch parent + native identity fields in one CIM round-trip. PowerShell startup is
 # noticeably expensive in managed Windows sandboxes; ancestor walks and the
 # watcher's poll guard must not pay it repeatedly per hop. Output is
-# parent<US>name<US>executable<US>command-line; Unit Separator is not valid in
-# Windows paths/argv.
+# parent<US>creation-ticks<US>name<US>executable<US>command-line.  The creation
+# token is taken from the same Win32_Process snapshot as the identity fields;
+# this lets a caller distinguish a recycled WINPID without a second query.
+# Unit Separator is not valid in Windows paths/argv.
 compat_native_process_record() {
   local winpid="$1" output status
   [ -n "$winpid" ] || return 1
@@ -184,7 +186,7 @@ compat_native_process_record() {
   _agmsg_detect_platform
   [ "$_agmsg_platform" = msys ] || return 1
   if output="$(powershell.exe -NoProfile -Command \
-    "\$ErrorActionPreference='Stop'; \$p=Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\" -ErrorAction Stop; if (\$null -eq \$p) { exit 3 }; [Console]::Write([string]\$p.ParentProcessId); [Console]::Write([char]31); [Console]::Write([string]\$p.Name); [Console]::Write([char]31); [Console]::Write([string]\$p.ExecutablePath); [Console]::Write([char]31); [Console]::Write([string]\$p.CommandLine)" \
+    "\$ErrorActionPreference='Stop'; \$p=Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\" -ErrorAction Stop; if (\$null -eq \$p) { exit 3 }; \$c=if (\$null -eq \$p.CreationDate) { '' } else { \$p.CreationDate.ToUniversalTime().Ticks.ToString() }; [Console]::Write([string]\$p.ParentProcessId); [Console]::Write([char]31); [Console]::Write(\$c); [Console]::Write([char]31); [Console]::Write([string]\$p.Name); [Console]::Write([char]31); [Console]::Write([string]\$p.ExecutablePath); [Console]::Write([char]31); [Console]::Write([string]\$p.CommandLine)" \
     2>/dev/null)"; then
     status=0
   else
@@ -195,10 +197,18 @@ compat_native_process_record() {
 }
 
 compat_native_identity() {
-  local record parent name exe cmd
+  local record _parent _creation name exe cmd
   record="$(compat_native_process_record "$1")" || return 1
-  IFS=$'\x1f' read -r parent name exe cmd <<< "$record"
+  IFS=$'\x1f' read -r _parent _creation name exe cmd <<< "$record"
   printf '%s\x1f%s\x1f%s' "$name" "$exe" "$cmd"
+}
+
+compat_native_creation_token() {
+  local record _parent creation _rest
+  record="$(compat_native_process_record "$1")" || return 1
+  IFS=$'\x1f' read -r _parent creation _rest <<< "$record"
+  case "$creation" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$creation"
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>

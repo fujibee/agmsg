@@ -323,5 +323,60 @@ agmsg_instance_owner_state() {
   local token="$1" type="$2" pid
   agmsg_instance_is_composite "$token" || { echo unknown; return 0; }
   pid="${token##*.}"
-  agmsg_resolved_pid_owner_state "$pid" "$type"
+  if [ "$#" -ge 3 ]; then
+    agmsg_resolved_pid_owner_state "$pid" "$type" "$3"
+  else
+    agmsg_resolved_pid_owner_state "$pid" "$type"
+  fi
+}
+
+# The watcher owns this generation record, not the agent process. Recording
+# watcher_pid makes both replacement and cleanup successor-safe: an exiting old
+# watcher cannot remove a sidecar already replaced by its successor.
+agmsg_watch_owner_path() {
+  printf '%s/run/watch.%s.owner' "$SKILL_DIR" "$1"
+}
+
+agmsg_watch_owner_write() {
+  local token="$1" watcher_pid="$2" type="$3" domain="$4" creation="${5-}"
+  local path tmp
+  path="$(agmsg_watch_owner_path "$token")"
+  tmp="$path.$$.tmp"
+  umask 077
+  {
+    printf 'watcher_pid=%s\n' "$watcher_pid"
+    printf 'type=%s\n' "$type"
+    printf 'domain=%s\n' "$domain"
+    printf 'creation=%s\n' "$creation"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+}
+
+agmsg_watch_owner_field() {
+  local token="$1" field="$2" path
+  case "$field" in watcher_pid|type|domain|creation) ;; *) return 1 ;; esac
+  path="$(agmsg_watch_owner_path "$token")"
+  [ -f "$path" ] || return 1
+  sed -n "s/^${field}=//p" "$path" 2>/dev/null | head -n 1
+}
+
+# Print the expected CreationDate only when the record is demonstrably owned
+# by this watcher/type and is a native-Windows record. Missing or malformed
+# metadata remains unknown and must not authorize teardown.
+agmsg_watch_owner_creation() {
+  local token="$1" watcher_pid="$2" type="$3" wp wt domain creation
+  wp="$(agmsg_watch_owner_field "$token" watcher_pid 2>/dev/null || true)"
+  wt="$(agmsg_watch_owner_field "$token" type 2>/dev/null || true)"
+  domain="$(agmsg_watch_owner_field "$token" domain 2>/dev/null || true)"
+  creation="$(agmsg_watch_owner_field "$token" creation 2>/dev/null || true)"
+  [ "$wp" = "$watcher_pid" ] && [ "$wt" = "$type" ] && [ "$domain" = native ] || return 1
+  case "$creation" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$creation"
+}
+
+agmsg_watch_owner_remove_if_watcher() {
+  local token="$1" watcher_pid="$2" path recorded
+  path="$(agmsg_watch_owner_path "$token")"
+  recorded="$(agmsg_watch_owner_field "$token" watcher_pid 2>/dev/null || true)"
+  [ "$recorded" = "$watcher_pid" ] && rm -f "$path" 2>/dev/null || true
 }

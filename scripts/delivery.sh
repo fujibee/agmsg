@@ -231,10 +231,15 @@ agmsg_delivery_runtime_status_default() {
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         alive=$((alive + 1))
         if [ "${1:-}" = claude-code ]; then
-          local token owner_state
+          local token owner_state owner_creation
           token=${f##*/watch.}; token=${token%.pid}
           if agmsg_instance_is_composite "$token"; then
-            owner_state="$(agmsg_instance_owner_state "$token" "$1")"
+            owner_creation="$(agmsg_watch_owner_creation "$token" "$pid" "$1" 2>/dev/null || true)"
+            if [ -n "$owner_creation" ]; then
+              owner_state="$(agmsg_instance_owner_state "$token" "$1" "$owner_creation")"
+            else
+              owner_state=unknown
+            fi
             case "$owner_state" in
               alive) verified=$((verified + 1)) ;;
               dead) owner_dead=$((owner_dead + 1)) ;;
@@ -295,6 +300,10 @@ emit_monitor_directive() {
   # composite into the directive matches SessionStart and makes the pidfile
   # liveness check below see the real watcher (idempotent in watch.sh).
   session_id="$(agmsg_normalize_instance_id "$session_id" "$type")"
+  local owner_creation=""
+  if agmsg_instance_is_composite "$session_id"; then
+    owner_creation="$(agmsg_resolved_pid_creation_token "${session_id##*.}" "$type" 2>/dev/null || true)"
+  fi
 
   # Skip the directive when this CC session already has a live watcher —
   # invoking Monitor again would just spawn a duplicate and orphan the
@@ -304,12 +313,25 @@ emit_monitor_directive() {
     local existing
     existing=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
-      cat <<EOF
+      local existing_creation
+      existing_creation="$(agmsg_watch_owner_creation "$session_id" "$existing" "$type" 2>/dev/null || true)"
+      if [ -n "$owner_creation" ] && [ -n "$existing_creation" ] \
+         && [ "$owner_creation" != "$existing_creation" ]; then
+        local existing_cmd
+        existing_cmd="$(compat_get_cmdline "$existing" 2>/dev/null || true)"
+        case "$existing_cmd" in
+          *"$SKILL_DIR/scripts/watch.sh"*) kill "$existing" 2>/dev/null || true ;;
+        esac
+        rm -f "$pidfile"
+        agmsg_watch_owner_remove_if_watcher "$session_id" "$existing"
+      else
+        cat <<EOF
 
 A watch.sh is already streaming into this session (pid $existing). No
 action needed — the existing watcher is the active one.
 EOF
-      return 0
+        return 0
+      fi
     fi
   fi
 
@@ -317,7 +339,7 @@ EOF
   # with spaces or apostrophes intact; a plain '...' wrap breaks on /o'brien/...
   # (#188).
   local watch_command
-  watch_command="$(printf '%q %q %q %q' "$watch" "$session_id" "$project" "$type")"
+  watch_command="$(printf '%q %q %q %q %q %q' "$watch" "$session_id" "$project" "$type" "" "$owner_creation")"
   cat <<EOF
 
 AGMSG-DIRECTIVE: For this running session, invoke the Monitor tool now with:
@@ -664,8 +686,9 @@ kill_all_watchers() {
   if [ -d "$RUN_DIR" ]; then
     for f in "$RUN_DIR"/watch.*.pid; do
       [ -f "$f" ] || continue
-      local pid cmd
+      local pid cmd token
       pid=$(cat "$f" 2>/dev/null || echo "")
+      token=${f##*/watch.}; token=${token%.pid}
       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         # Defensive: only kill if the pid's command line still looks like
         # our watch.sh. Defends against pid recycling — a stale pidfile
@@ -686,6 +709,7 @@ kill_all_watchers() {
           *) ;;  # not our watcher; leave it
         esac
       fi
+      agmsg_watch_owner_remove_if_watcher "$token" "$pid"
       rm -f "$f"
     done
   fi

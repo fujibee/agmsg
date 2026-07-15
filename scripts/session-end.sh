@@ -66,6 +66,7 @@ if [ -f "$PIDFILE" ]; then
     esac
   fi
   rm -f "$PIDFILE"
+  agmsg_watch_owner_remove_if_watcher "$INSTANCE_ID" "$pid"
 fi
 
 # Drop the per-session stream watermark (see #107) — the session is ending, so

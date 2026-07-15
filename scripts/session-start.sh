@@ -103,6 +103,10 @@ mkdir -p "$RUN_DIR" 2>/dev/null || true
 # Empty when no agent ancestor is found (detached / sandboxed) — in that case
 # the instance id degrades to the bare session_id and the dedup step is skipped.
 CC_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
+CC_CREATION=""
+if [ -n "$CC_PID" ]; then
+  CC_CREATION="$(agmsg_resolved_pid_creation_token "$CC_PID" "$TYPE" 2>/dev/null || true)"
+fi
 
 # Per-process instance id (see instance-id.sh): "<session_id>.<cc_pid>", or the
 # bare session_id when cc_pid is unresolved. This — not the bare session_id — is
@@ -172,7 +176,11 @@ for f in "$RUN_DIR"/watch.*.pid; do
     rm -f "$f"
     continue
   fi
-  kill -0 "$pid" 2>/dev/null || rm -f "$f"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    stale_token=${f##*/watch.}; stale_token=${stale_token%.pid}
+    agmsg_watch_owner_remove_if_watcher "$stale_token" "$pid"
+    rm -f "$f"
+  fi
 done
 
 # Garbage-collect actas exclusivity locks whose owner session_id no longer
@@ -240,11 +248,25 @@ WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
   if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
-    cat <<EOF
+    existing_creation="$(agmsg_watch_owner_creation "$INSTANCE_ID" "$existing" "$TYPE" 2>/dev/null || true)"
+    # Same token can recur only after a WINPID wraps/reuses. If both process
+    # generations are known and differ, retire only the verified old watcher;
+    # missing metadata is fail-closed and preserves the incumbent.
+    if [ -n "$CC_CREATION" ] && [ -n "$existing_creation" ] \
+       && [ "$CC_CREATION" != "$existing_creation" ]; then
+      existing_cmd=$(compat_get_cmdline "$existing" 2>/dev/null || true)
+      case "$existing_cmd" in
+        *"$SKILL_DIR/scripts/watch.sh"*) kill "$existing" 2>/dev/null || true ;;
+      esac
+      rm -f "$WATCHER_PIDFILE"
+      agmsg_watch_owner_remove_if_watcher "$INSTANCE_ID" "$existing"
+    else
+      cat <<EOF
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
 EOF
-    exit 0
+      exit 0
+    fi
   fi
 fi
 
@@ -276,7 +298,7 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 # (/Users/o'brien/...); printf %q escapes spaces, quotes and other metacharacters
 # safely for shell re-execution (#188). A resumed role adds the 4th <agent> arg.
 if [ -n "$ROLE_NAME" ]; then
-  WATCH_COMMAND="$(printf '%q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "$ROLE_NAME")"
+  WATCH_COMMAND="$(printf '%q %q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "$ROLE_NAME" "$CC_CREATION")"
   cat <<EOF
 AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`): this
 session was recorded as that role's seat, so invoke the Monitor tool now with the
@@ -300,7 +322,7 @@ EOF
   exit 0
 fi
 
-WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
+WATCH_COMMAND="$(printf '%q %q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "" "$CC_CREATION")"
 
 cat <<EOF
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
