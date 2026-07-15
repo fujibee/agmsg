@@ -190,8 +190,13 @@ Claudeは主に仮説の反証、Gate G1/G2/G2b、lease/ref/ACK設計、§22の�
 | `2d2955c` | Windows sandboxで実行可能な`sqlite3.exe`をinstaller管理copyとして優先 | install/storage testsを追加 |
 | `82035c8` | skillにWSL禁止を明記、monitor identityをapp-server起動前にexport、Codexの遅いMSYS ancestor probeをskip、Windows dispatcherの古いmonitor拒否を削除 | resolve/dispatch/monitor static testsと実PowerShell確認 |
 | `d04d13d` | PowerShell関数が`Git\usr\bin\bash.exe`を検出しても`Git\bin\bash.exe`へ正規化 | shim Batsでbackslash/normalized両方を確認 |
+| `acac20c` | Windows monitor調査、teardown設計、実装・検証結果を本統合worklogへ集約 | docsのみ。過去の観測と未検証事項を区別 |
+| `6b1817e` | Claude owner探索をMSYS→nativeの二段階walkへ拡張し、WINPID identityでcomposite watcherをbind | Windows ancestor/lifecycle testを新設。CIM不能時のbare fallbackは残存 |
+| `228fb84` | native Claude watcher修正の根本原因、test結果、実Claude E2E未実施をworklogへ反映 | docsのみ |
+| `fb78fe2` | grok-buildをMSYS PID domainへ戻し、Claude ownerへCreationDate generation sidecarを追加 | PID reuse、unknown、grok lifecycle、successor-safe cleanupをWindows testで確認 |
+| `5b03de7` | generation hardening、hop上限12/20の区別、残存制約をworklogへ反映 | docsのみ |
 
-`b4d9744`以後の7 commitは、2026-07-15に`./install.sh --update`でinstalled agmsgへ反映した。DBとteam設定はinstaller出力上preserveされ、`hameln-hozon`のCodex monitor hookを再登録した。これは既存の[Windows障害の調査・修正記録](agmsg-codex-monitor-windows-investigation-ja.md) §16.5が「今回の作業では実施していない」と記録した時点より**後の追加作業**であり、同文書は当時のsnapshot、本書はその後まで含む統合記録である。source commitとinstalled copyの反映は別操作であり、今後もinstalled copyを直接patchしてはならない。
+`b4d9744`自身を1件目として`07fefab`、`c660590`、`20958a2`、`2d2955c`、`82035c8`、`d04d13d`までの連続7 commitは、2026-07-15に`./install.sh --update`でinstalled agmsgへ反映した。DBとteam設定はinstaller出力上preserveされ、`hameln-hozon`のCodex monitor hookを再登録した。これは既存の[Windows障害の調査・修正記録](agmsg-codex-monitor-windows-investigation-ja.md) §16.5が「今回の作業では実施していない」と記録した時点より**後の追加作業**であり、同文書は当時のsnapshot、本書はその後まで含む統合記録である。`acac20c`以降のClaude watcher関連commitはsource checkout上のlocal commitであり、installed copyへは未反映である。source commitとinstalled copyの反映は別操作であり、今後もinstalled copyを直接patchしてはならない。
 
 ## 7. GitHub PRとの関係
 
@@ -284,9 +289,9 @@ PowerShellから公式scriptを呼ぶ場合は次の形に統一する。
 - SessionStart hookがapp-serverより先にinstallされること。
 - PowerShell関数がGit Bashを固定し、`usr\bin`を`bin`へ正規化すること。
 
-同日のClaude watcher恒久修正とreview追随では、`tests/test_windows_claude_ancestor.bats`を23件へ拡張した。決定論的process-table stubでproduction identity matcher、後続引数に`claude`があるだけのprocess拒否、Phase 1からPhase 2への安全な継続、CreationDate一致/不一致/取得不能、atomic sidecarのsuccessor-safe cleanupを検証した。さらに`sleep.exe`の使い捨てcopyを`claude.exe`として起動する実WINPID/CIM lifecycle、実`watch.sh`のCIM unknown継続、grok-buildのMSYS PID lifecycle、bare watcher fail-closed、status分類、`delivery set off` cleanupを含む。live owner中のwatcher維持、owner終了後の自動終了とpidfile削除、bare UUID watcherを根拠不足で停止しないことをWindows上で確認した。長いsuiteは全体timeout前に成功したcaseを記録し、残りをfilter分割して全23件を完了した。テスト用processは各caseのteardownで停止・waitし、最後に今回起動したbash/sleep/claude test doubleの残存がないことを確認した。
+同日のClaude watcher恒久修正とreview追随では、`tests/test_windows_claude_ancestor.bats`を27件へ拡張し、Windowsで27 pass・0 skip、exit 0を通し確認した。決定論的process-table stubでproduction identity matcher、後続引数に`claude`があるだけのprocess拒否、Phase 1からPhase 2への安全な継続、CreationDate一致/不一致/取得不能、atomic sidecarのsuccessor-safe cleanupを検証した。追加した世代交代testは共有retire helper、`session-start.sh`、`delivery.sh`のproduction経路を通り、CreationDate不一致かつcmdlineが対象`watch.sh`の場合だけ旧watcherを停止して新directiveを出す。creation欠落、同一generation、cmdline不一致では既存watcher・pidfile・sidecarを温存し、duplicate directiveを抑止する。さらに`sleep.exe`の使い捨てcopyを`claude.exe`として起動する実WINPID/CIM lifecycle、実`watch.sh`のCIM unknown継続、grok-buildのMSYS PID lifecycle、bare watcher fail-closed、status分類、`delivery set off` cleanupを含む。テスト用processは各caseのteardownで停止・waitした。
 
-関連回帰では`tests/test_instance_id.bats` 41件がexit 0、`tests/test_resolve_project.bats`は既存23件成功後に今回のPID-domain変更で露出したmarker GC 1件を修正・再成功、Windows非対応のworktree path 2件を既存skip方針へ統一した。`tests/test_watch.bats`はWindows非対応process/permission caseをskipし、今回の専用testで同等のnative lifecycleを置き換えた。変更shellの`bash -n`、`shellcheck`、`git diff --check`も成功した。巨大な`test_delivery.bats`全体はWindows上の収集コストが高く完走させず、必要なstatusと`set off` cleanupは専用16件へ移して実行した。
+今回のreview追随回帰では、`tests/test_instance_id.bats`は全41件を処理して37 pass・Windows既知skip 4、`tests/test_resolve_project.bats`は全25件を処理して23 pass・Windows既知skip 2、いずれもexit 0だった。`tests/test_watch.bats`はsession/dedup関連5件をfilter実行して1 pass・Windows既知skip 4、`tests/test_delivery.bats`はMonitor directive/dedup/`set off`関連10件をfilter実行して9 pass・Windows既知skip 1、いずれもexit 0だった。statusと`set off`の実process cleanupは27件のWindows専用suiteにも含めて成功した。変更shellの`bash -n`と`git diff --check`は成功した。ShellCheck実行ファイルはこの端末に存在せず、network禁止のため導入せず、今回の変更には**未実施**である。
 
 full Batsは完走していない。Windows managed sandboxのnative executable制約と、各testのsetupが非常に遅い問題があった。途中でBatsを「終了した」と誤認した際、実際にはbackgroundで継続して複数bashを残したため、MSYS PIDとcommand lineを確認して、そのtest treeだけを停止した。その後、対象testを1件ずつ実行し、終了までsessionをpollし、残存がないことを確認した。
 
@@ -346,7 +351,9 @@ statusは`watch processes: 2 alive, 4 stale pidfiles`だった。PowerShellか�
 
 今回のsource修正で`agmsg_agent_pid()`を二段階化した。Phase 1は従来のMSYS/POSIX parent walk、Phase 2は境界のMSYS PIDをWINPIDへ変換して`Win32_Process.ParentProcessId`を辿る。Windowsで返すPIDはMSYS内でagentを見つけた場合もWINPIDへ統一し、composite instance ID、`cc-instance`、project marker、owner livenessのPID domainを揃えた。native identityはName/ExecutablePath/CommandLineを一回のCIM queryで取得し、実行主体がClaudeである場合だけ採用する。hop上限、cycle、空値、不正PIDを拒否する。
 
-`watch.sh`はtyped owner stateが`dead`の場合だけ終了する。native PIDが存在してもClaude identityと一致しなければPID reuse/mismatchとして終了し、tasklist/CIM/CreationDate照会失敗は`unknown`として継続する。起動時に同じ`Win32_Process` snapshotのCreationDate ticksを取得し、`watch.<instance>.owner`へwatcher PID・type・PID domainとともにatomic writeする。poll時はWINPID、Claude identity、CreationDateがすべて一致した場合だけ`alive`であり、同一UUID・同一WINPID・同じ`claude.exe`でもCreationDateが違えば旧ownerとして`dead`になる。sidecar cleanupは記録されたwatcher PIDが自分と一致する場合だけ行い、successorのrecordを旧watcherが消さない。
+`watch.sh`はtyped owner stateが`dead`の場合だけ終了する。native PIDが存在してもClaude identityと一致しなければPID reuse/mismatchとして終了し、tasklist/CIM/CreationDate照会失敗は`unknown`として継続する。起動時に同じ`Win32_Process` snapshotのCreationDate ticksを取得し、`watch.<instance>.owner`へwatcher PID・type・PID domainとともにatomic writeする。poll時はWINPID、Claude identity、CreationDateがすべて一致した場合だけ`alive`であり、同一UUID・同一WINPID・同じ`claude.exe`でもCreationDateが違えば旧ownerとして`dead`になる。世代交代時の明示retireも、両CreationDateが有効かつ不一致で、pidfileのprocess command lineが対象`watch.sh`と確認でき、TERMが成功した場合だけ成立する。それ以外は既存watcherとartifactを温存する。
+
+sidecar writeは呼出し元のumaskへ波及しないsubshell内で`umask 077`を設定し、同じrun directory内のtmp→`mv`でatomic publishする。通常cleanupは記録されたwatcher PIDが自分と一致する場合だけ削除する。ただし`agmsg_watch_owner_remove_if_watcher()`の「内容を読む→pathを削除する」はshell filesystem操作だけでは単一のcompare-and-deleteにならず、その間にsuccessorが同じpathを置換する微小TOCTOUは残る。全write/deleteを跨ぐlock導入はadvisory sidecarに対して過大なため今回は追加しない。race時の影響はsidecarの一時消失に限定され、後続判定はowner `unknown`となって既存watcherを停止しないfail-closed方向である。
 
 reviewで判明したgrok-build回帰も同時に修正した。grok-buildのcomposite IDが保持するPIDはMSYS domainなので、Windowsでも`compat_pid_alive_msys()`で判定し、tasklist/CIMへ渡さない。native identity/CreationDate検証は`agmsg_agent_pid()`がWINPIDを返すtypeに限定した。Phase 1のMSYS PID→WINPID変換や候補再検証が一時的に失敗した場合は、domainが確定している現在のMSYS PIDからPhase 2を試し、変換不能ならbareへfail-closedする。
 
