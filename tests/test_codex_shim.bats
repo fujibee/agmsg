@@ -53,6 +53,15 @@ teardown() {
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <codex> <--> <fix this>" "$CALL_LOG"
 }
 
+@test "codex shim: monitor project forwards a flags-only launch to codex-monitor (#386)" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" --yolo'
+
+  [ "$status" -eq 0 ]
+  grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <codex> <--> <--yolo>" "$CALL_LOG"
+}
+
 @test "codex shim: non-monitor project passes through to real codex" {
   bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
 

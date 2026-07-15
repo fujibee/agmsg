@@ -133,7 +133,7 @@ monitor_cmd="${AGMSG_CODEX_MONITOR_CMD:-$SCRIPT_DIR/codex-monitor.sh}"
 
 case "$command_name" in
   "")
-    AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex --
+    AGMSG_REAL_CODEX="$real_codex" exec "$monitor_cmd" --project "$project" --codex-command codex -- "$@"
     ;;
   resume)
     monitor_args=()
