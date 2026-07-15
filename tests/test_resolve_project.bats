@@ -69,6 +69,13 @@ reg() {
   [ "$result" = "$ROOT/sub" ]   # no codex registration → unchanged
 }
 
+@test "resolve: codex skips the unreliable agent-pid marker path" {
+  agmsg_agent_pid() { echo "codex marker path must not run" >&2; return 99; }
+  agmsg_ancestor_project() { printf '%s' "$ROOT"; }
+  result="$(agmsg_resolve_project "$ROOT/sub" codex)"
+  [ "$result" = "$ROOT" ]
+}
+
 # --- #357: over-reach of the ancestor walk (poison registrations) ---
 
 # Inject a registration directly into a team's config, bypassing join.sh's guard

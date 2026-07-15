@@ -25,8 +25,8 @@ SOCKET_PATH=""
 CODEX_COMMAND="resume"
 CODEX_ARGS=()
 REAL_CODEX="${AGMSG_REAL_CODEX:-codex}"
-IDENTITY_TEAM="${AGMSG_CODEX_TEAM:-}"
-IDENTITY_NAME="${AGMSG_CODEX_NAME:-}"
+IDENTITY_TEAM="${AGMSG_CODEX_TEAM:-${AGMSG_TEAM:-}}"
+IDENTITY_NAME="${AGMSG_CODEX_NAME:-${AGMSG_AGENT:-}}"
 
 usage() {
   cat <<EOF
@@ -136,6 +136,23 @@ if ! "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null;
   echo "codex-monitor: could not install/confirm monitor hooks for this project" >&2
   exec_plain_codex
 fi
+
+# Resolve a single implicit identity before the shared app-server starts. Tool
+# calls for a remote TUI are spawned by that server, so exporting the identity
+# later would make every `$agmsg` invocation repeat the slow Windows whoami/CIM
+# path. Multiple identities remain fail-closed and require explicit env values.
+if [ -z "$IDENTITY_TEAM" ] && [ -z "$IDENTITY_NAME" ]; then
+  monitor_pairs="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" codex 2>/dev/null || true)"
+  if [ "$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { c++ } END { print c + 0 }')" = 1 ]; then
+    IFS=$'\t' read -r IDENTITY_TEAM IDENTITY_NAME <<EOF
+$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { print $1 "\t" $2; exit }')
+EOF
+  fi
+fi
+export AGMSG_CODEX_TEAM="$IDENTITY_TEAM"
+export AGMSG_CODEX_NAME="$IDENTITY_NAME"
+export AGMSG_TEAM="$IDENTITY_TEAM"
+export AGMSG_AGENT="$IDENTITY_NAME"
 
 # codex 0.141+ accepts only ws:// (not unix://) for the TUI's --remote, so the
 # shared app-server listens on a loopback ws port instead of a unix socket. The
@@ -387,17 +404,6 @@ codex_monitor_state_write "$STATE_FILE" waiting_first_turn
 PENDING_FILE="$(codex_monitor_pending_write "$PROJECT_HASH" "$TUI_GENERATION" "$PROJECT" \
   "$SERVER_GENERATION" "$SOCKET_URL" "$REQUEST_FILE" "$STATE_FILE" "$PROVISIONAL_REF" \
   "$IDENTITY_TEAM" "$IDENTITY_NAME" "$$")"
-
-# Resolve a single implicit identity before route discovery. SessionStart
-# remains the compatibility path for resume flows and ambiguous projects.
-if [ "$CODEX_COMMAND" = codex ] && [ -z "$IDENTITY_TEAM" ] && [ -z "$IDENTITY_NAME" ]; then
-  monitor_pairs="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" codex 2>/dev/null || true)"
-  if [ "$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { c++ } END { print c + 0 }')" = 1 ]; then
-    IFS=$'\t' read -r IDENTITY_TEAM IDENTITY_NAME <<EOF
-$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { print $1 "\t" $2; exit }')
-EOF
-  fi
-fi
 
 ROUTE_DISCOVERY_PID=""
 ROUTE_LOCK_HASH="${PROJECT_HASH}.tui-route"

@@ -420,9 +420,15 @@ agmsg_resolve_project() {
   fi
   # 1) Per-process SessionStart marker (precise). Written only by session-start
   #    (cc monitor/both); codex never installs it, so codex relies on 2)/3).
-  if pid="$(agmsg_agent_pid "$type")" && [ -n "$pid" ]; then
-    if marker="$(agmsg_read_project_marker "$pid" "$type")" && [ -n "$marker" ]; then
-      printf '%s' "$marker"; return 0
+  # Codex does not rely on per-process project markers: its native/MSYS process
+  # boundary makes the ancestor probe both slow and unreliable on Windows. Its
+  # registered-ancestor and git-common fallbacks below are the authoritative
+  # paths. Claude Code still uses the precise SessionStart marker first.
+  if [ "$type" != codex ]; then
+    if pid="$(agmsg_agent_pid "$type")" && [ -n "$pid" ]; then
+      if marker="$(agmsg_read_project_marker "$pid" "$type")" && [ -n "$marker" ]; then
+        printf '%s' "$marker"; return 0
+      fi
     fi
   fi
   # 2) Nearest registered ancestor of pwd (git-independent; covers nested

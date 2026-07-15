@@ -5,6 +5,35 @@ description: Cross-agent messaging via SQLite. Send messages between Claude Code
 
 Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
 
+## Windows execution (mandatory)
+
+On native Windows, **never** invoke bare `bash`, `sh`, `wsl`, `wsl.exe`, or
+`C:\Windows\System32\bash.exe`. Do not use
+`C:\Program Files\Git\usr\bin\bash.exe --noprofile --norc`: that combination
+omits Git Bash's `/usr/bin` from PATH, so a nested `bash` can resolve to the WSL
+launcher. Never retry a failed Git Bash command through WSL.
+
+Run every script mentioned below through profile-loaded Git for Windows Bash:
+
+```powershell
+$b = $env:GIT_BASH
+if (-not $b) { $b = $env:AGMSG_BASH }
+if (-not $b) { $b = 'C:\Program Files\Git\bin\bash.exe' }
+& $b -lc 'exec "$@"' -- <script-in-/c/path-form> <args...>
+```
+
+For example, identity lookup from `E:\Project\hameln-hozon` is:
+
+```powershell
+& $b -lc 'exec "$@"' -- '/c/Users/shiratori/.agents/skills/__SKILL_NAME__/scripts/whoami.sh' 'E:/Project/hameln-hozon' codex
+```
+
+Use `/c/Users/...` for the script path and `E:/Project/...` (or `/e/Project/...`)
+for project arguments. A Git Bash call that fails or exceeds 60 seconds is an
+error to report, not a reason to try WSL. If `AGMSG_TEAM` and `AGMSG_AGENT` (or
+`AGMSG_CODEX_TEAM` and `AGMSG_CODEX_NAME`) are already set, treat them as the
+known identity and skip the `whoami.sh` call.
+
 ## Identity
 
 If you already know your AGENT and TEAMS from a previous `$__SKILL_NAME__` call in this session, skip to **Execute** below.
@@ -113,7 +142,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
 5. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm). This is what lets a later `spawn <role>` bring the role back into this conversation.
-6. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. The resume seat now points to this exact Codex thread. If this session uses monitor mode and was launched for a different seat, restart it with explicit `--team <team> --name <name>` so automatic receive also moves to `<name>`."
+6. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. The resume seat now points to this exact Codex thread. If this monitor session was launched for a different seat, restart it after setting `AGMSG_CODEX_TEAM=<team>` and `AGMSG_CODEX_NAME=<name>` so automatic receive also moves to `<name>`."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
@@ -124,7 +153,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
 1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
-   - spawn.sh pre-joins `<name>`, then opens a tmux pane/window (when this session is inside tmux) or a new OS terminal, and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt.
+   - spawn.sh pre-joins `<name>`, then opens a tmux pane/window (when this session is inside tmux) or a new OS terminal, and launches the target CLI with the target type's command prefix (`$__SKILL_NAME__ actas <name>` for Codex, `/__SKILL_NAME__ actas <name>` for Claude Code).
    - By default it BLOCKS until a spawned claude-code agent's watcher attaches (`status=ready`); `status=timeout` + exit 3 if not ready within `--ready-timeout` (default 90s). `--no-wait` for fire-and-forget. Spawning a codex agent skips the wait (codex has no Monitor).
    - It refuses early if `<name>` is already held by another live session, if the target CLI is not installed, or if there is no tmux and no usable terminal (headless).
 3. Show the script's output.

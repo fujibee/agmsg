@@ -150,6 +150,32 @@ seed_abandoned_starting_server() {
   [ "$(grep -c 'delivery.sh.*set monitor codex' "$monitor")" -eq 1 ]
 }
 
+@test "codex-monitor: exports its resolved identity before app-server startup" {
+  # The app-server owns tool subprocesses for a remote TUI. It must inherit the
+  # seat identity or every agmsg call performs another slow Windows discovery.
+  local monitor="$TYPES/codex/codex-monitor.sh" identity_line export_line server_line
+  identity_line="$(grep -n 'monitor_pairs=.*identities.sh' "$monitor" | head -1 | cut -d: -f1)"
+  export_line="$(grep -n 'export AGMSG_TEAM=' "$monitor" | head -1 | cut -d: -f1)"
+  server_line="$(grep -n '"$REAL_CODEX" app-server --listen' "$monitor" | head -1 | cut -d: -f1)"
+  [ -n "$identity_line" ]
+  [ -n "$export_line" ]
+  [ -n "$server_line" ]
+  [ "$identity_line" -lt "$server_line" ]
+  [ "$export_line" -lt "$server_line" ]
+  grep -Fq 'IDENTITY_TEAM="${AGMSG_CODEX_TEAM:-${AGMSG_TEAM:-}}"' "$monitor"
+  grep -Fq 'IDENTITY_NAME="${AGMSG_CODEX_NAME:-${AGMSG_AGENT:-}}"' "$monitor"
+}
+
+@test "codex skill: native Windows commands never fall back to WSL" {
+  local template="$TYPES/codex/template.md"
+  grep -Fq 'C:\Program Files\Git\bin\bash.exe' "$template"
+  grep -Fq -- "-lc 'exec \"\$@\"'" "$template"
+  grep -Fq 'never** invoke bare `bash`, `sh`, `wsl`, `wsl.exe`' "$template"
+  grep -Fq 'Never retry a failed Git Bash command through WSL.' "$template"
+  grep -Fq 'skip the `whoami.sh` call' "$template"
+  ! grep -Fq 'restart it with explicit `--team' "$template"
+}
+
 @test "codex-monitor: discovers the exact thread created by the serialized TUI launch" {
   local monitor="$TYPES/codex/codex-monitor.sh"
   grep -Fq -- '--list-loaded-only' "$monitor"

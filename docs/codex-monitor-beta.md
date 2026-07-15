@@ -291,7 +291,17 @@ For PowerShell → Git Bash → Codex, the supported entry point is the printed
 PowerShell function or an explicit Git Bash invocation. The monitor exports the
 native path of the Git Bash executable to the Node bridge. On Windows the bridge
 never falls back to a bare `bash`, because that can invoke WSL instead of Git for
-Windows.
+Windows. Use Git for Windows' entry point
+`C:\Program Files\Git\bin\bash.exe -lc`; do not substitute
+`C:\Program Files\Git\usr\bin\bash.exe --noprofile --norc`. The latter omits
+Git Bash's `/usr/bin` from `PATH`, so a nested bare `bash` can resolve to the
+Windows WSL launcher. A failed Git Bash command must be reported rather than
+retried through WSL.
+
+The monitor also resolves a single registered Codex identity before starting
+the shared app-server and exports `AGMSG_TEAM` / `AGMSG_AGENT` (plus their
+Codex-specific equivalents). Consequently, agmsg tool calls in that TUI should
+use the inherited seat instead of repeating Windows process-tree discovery.
 
 `SessionStart: 1`, `SessionEnd: 1`, `Stop: 0` is the expected hook shape for
 Codex monitor mode, but it proves only that configuration was installed. A new
