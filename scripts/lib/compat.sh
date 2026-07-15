@@ -203,14 +203,6 @@ compat_native_identity() {
   printf '%s\x1f%s\x1f%s' "$name" "$exe" "$cmd"
 }
 
-compat_native_creation_token() {
-  local record _parent creation _rest
-  record="$(compat_native_process_record "$1")" || return 1
-  IFS=$'\x1f' read -r _parent creation _rest <<< "$record"
-  case "$creation" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s' "$creation"
-}
-
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
 compat_get_cmdline() {
   local pid="$1"

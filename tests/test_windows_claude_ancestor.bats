@@ -12,6 +12,7 @@ setup() {
   export RUN_DIR="$SKILL_DIR/run"
   export PROJ="/tmp/agmsg-windows-claude-owner"
   mkdir -p "$RUN_DIR"
+  AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/compat.sh"
   # shellcheck disable=SC1090
@@ -20,6 +21,7 @@ setup() {
   source "$SKILL_DIR/scripts/lib/instance-id.sh"
   OWNER_MSYS_PID=""
   WATCH_PID=""
+  EXTRA_PIDS=""
 }
 
 teardown() {
@@ -31,10 +33,44 @@ teardown() {
     kill "$OWNER_MSYS_PID" 2>/dev/null || true
     wait "$OWNER_MSYS_PID" 2>/dev/null || true
   fi
+  local p
+  for p in ${EXTRA_PIDS:-}; do
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
   teardown_test_env
 }
 
 force_platform() { _agmsg_platform="$1"; }
+
+start_native_claude_owner() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "requires Git Bash on Windows" ;; esac
+  cp /usr/bin/sleep.exe "$TEST_SKILL_DIR/claude.exe"
+  "$TEST_SKILL_DIR/claude.exe" 180 & OWNER_MSYS_PID=$!
+  OWNER_WINPID="$(compat_msys_pid_to_winpid "$OWNER_MSYS_PID")"
+  case "$OWNER_WINPID" in ''|*[!0-9]*) false ;; esac
+  OWNER_CREATION="$(agmsg_resolved_pid_creation_token "$OWNER_WINPID" claude-code 2>/dev/null || true)"
+  if [ -z "$OWNER_CREATION" ]; then
+    kill "$OWNER_MSYS_PID" 2>/dev/null || true
+    wait "$OWNER_MSYS_PID" 2>/dev/null || true
+    OWNER_MSYS_PID=""
+    skip "Win32_Process CreationDate query is unavailable"
+  fi
+}
+
+start_watch_standin() {
+  bash -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' "$SCRIPTS/watch.sh" &
+  STANDIN_PID=$!
+  EXTRA_PIDS="${EXTRA_PIDS:+$EXTRA_PIDS }$STANDIN_PID"
+}
+
+track_pid() { EXTRA_PIDS="${EXTRA_PIDS:+$EXTRA_PIDS }$1"; }
+
+wait_for_pid_exit() {
+  local pid="$1" i
+  for i in $(seq 1 80); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+  return 1
+}
 
 @test "agent pid: POSIX PPID walk is unchanged" {
   force_platform linux
@@ -181,7 +217,11 @@ force_platform() { _agmsg_platform="$1"; }
 }
 
 @test "owner sidecar: successor record survives old watcher cleanup" {
+  local original_umask
+  original_umask="$(umask)"
+  ( unset RUN_DIR; [ "$(agmsg_watch_owner_path fallback)" = "$SKILL_DIR/run/watch.fallback.owner" ] )
   agmsg_watch_owner_write sid.7000 111 claude-code native 12345
+  [ "$(umask)" = "$original_umask" ]
   [ "$(agmsg_watch_owner_creation sid.7000 111 claude-code)" = 12345 ]
   agmsg_watch_owner_write sid.7000 222 claude-code native 67890
   agmsg_watch_owner_remove_if_watcher sid.7000 111
@@ -189,6 +229,106 @@ force_platform() { _agmsg_platform="$1"; }
   ! compgen -G "$RUN_DIR/watch.sid.7000.owner.*.tmp" >/dev/null
   agmsg_watch_owner_remove_if_watcher sid.7000 222
   [ ! -e "$RUN_DIR/watch.sid.7000.owner" ]
+}
+
+@test "retire helper: missing metadata, equal generation, and cmdline mismatch preserve incumbent" {
+  start_native_claude_owner
+  local iid="retire-safe.$OWNER_WINPID" pf="$RUN_DIR/watch.retire-safe.$OWNER_WINPID.pid"
+
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native ""
+  ! agmsg_watch_retire_if_generation_changed "$iid" "$STANDIN_PID" claude-code "$OWNER_CREATION" "$SCRIPTS/watch.sh"
+  kill -0 "$STANDIN_PID" 2>/dev/null
+  [ -f "$pf" ]
+  kill "$STANDIN_PID" 2>/dev/null || true; wait "$STANDIN_PID" 2>/dev/null || true
+
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native "$OWNER_CREATION"
+  ! agmsg_watch_retire_if_generation_changed "$iid" "$STANDIN_PID" claude-code "$OWNER_CREATION" "$SCRIPTS/watch.sh"
+  ! agmsg_watch_retire_if_generation_changed "$iid" "$STANDIN_PID" claude-code "" "$SCRIPTS/watch.sh"
+  kill -0 "$STANDIN_PID" 2>/dev/null
+  kill "$STANDIN_PID" 2>/dev/null || true; wait "$STANDIN_PID" 2>/dev/null || true
+
+  sleep 180 &
+  local unrelated=$!
+  track_pid "$unrelated"
+  echo "$unrelated" > "$pf"
+  agmsg_watch_owner_write "$iid" "$unrelated" claude-code native "${OWNER_CREATION}0"
+  ! agmsg_watch_retire_if_generation_changed "$iid" "$unrelated" claude-code "$OWNER_CREATION" "$SCRIPTS/watch.sh"
+  kill -0 "$unrelated" 2>/dev/null
+  [ "$(agmsg_watch_owner_creation "$iid" "$unrelated" claude-code)" = "${OWNER_CREATION}0" ]
+}
+
+@test "session-start retire: generation mismatch kills verified watcher and emits replacement directive" {
+  start_native_claude_owner
+  local iid="retire-session.$OWNER_WINPID" pf="$RUN_DIR/watch.retire-session.$OWNER_WINPID.pid"
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native "${OWNER_CREATION}0"
+
+  run env AGMSG_AGENT_PID="$OWNER_WINPID" AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"retire-session"}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invoke the Monitor tool"* ]]
+  [[ "$output" == *"$OWNER_CREATION"* ]]
+  wait_for_pid_exit "$STANDIN_PID"
+  [ ! -e "$pf" ]
+  [ ! -e "$(agmsg_watch_owner_path "$iid")" ]
+}
+
+@test "session-start dedup: missing, equal, or unverified owner keeps watcher and suppresses directive" {
+  start_native_claude_owner
+  local iid="keep-session.$OWNER_WINPID" pf="$RUN_DIR/watch.keep-session.$OWNER_WINPID.pid" out
+
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native ""
+  out="$(env AGMSG_AGENT_PID="$OWNER_WINPID" AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"keep-session"}')"
+  [[ "$out" == *"already streaming"* ]]
+  [[ "$out" != *"invoke the Monitor tool"* ]]
+  kill -0 "$STANDIN_PID" 2>/dev/null
+  kill "$STANDIN_PID" 2>/dev/null || true; wait "$STANDIN_PID" 2>/dev/null || true
+
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native "$OWNER_CREATION"
+  out="$(env AGMSG_AGENT_PID="$OWNER_WINPID" AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"keep-session"}')"
+  [[ "$out" == *"already streaming"* ]]
+  kill -0 "$STANDIN_PID" 2>/dev/null
+  kill "$STANDIN_PID" 2>/dev/null || true; wait "$STANDIN_PID" 2>/dev/null || true
+
+  sleep 180 &
+  local unrelated=$!
+  track_pid "$unrelated"
+  echo "$unrelated" > "$pf"
+  agmsg_watch_owner_write "$iid" "$unrelated" claude-code native "${OWNER_CREATION}0"
+  out="$(env AGMSG_AGENT_PID="$OWNER_WINPID" AGMSG_RESOLVE_PROJECT=0 \
+    bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< '{"session_id":"keep-session"}')"
+  [[ "$out" == *"already streaming"* ]]
+  [[ "$out" != *"invoke the Monitor tool"* ]]
+  kill -0 "$unrelated" 2>/dev/null
+  [ -f "$pf" ]
+}
+
+@test "delivery retire: generation mismatch kills verified watcher and emits Monitor directive" {
+  start_native_claude_owner
+  local iid="retire-delivery.$OWNER_WINPID" pf="$RUN_DIR/watch.retire-delivery.$OWNER_WINPID.pid"
+  start_watch_standin
+  echo "$STANDIN_PID" > "$pf"
+  agmsg_watch_owner_write "$iid" "$STANDIN_PID" claude-code native "${OWNER_CREATION}0"
+
+  run env AGMSG_AGENT_PID="$OWNER_WINPID" CLAUDE_CODE_SESSION_ID=retire-delivery \
+    bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AGMSG-DIRECTIVE"* ]]
+  [[ "$output" == *"$OWNER_CREATION"* ]]
+  wait_for_pid_exit "$STANDIN_PID"
+  [ ! -e "$pf" ]
+  [ ! -e "$(agmsg_watch_owner_path "$iid")" ]
 }
 
 @test "Windows watcher: live Claude owner is kept and owner exit stops it" {

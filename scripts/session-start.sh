@@ -248,18 +248,12 @@ WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
   if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
-    existing_creation="$(agmsg_watch_owner_creation "$INSTANCE_ID" "$existing" "$TYPE" 2>/dev/null || true)"
     # Same token can recur only after a WINPID wraps/reuses. If both process
     # generations are known and differ, retire only the verified old watcher;
     # missing metadata is fail-closed and preserves the incumbent.
-    if [ -n "$CC_CREATION" ] && [ -n "$existing_creation" ] \
-       && [ "$CC_CREATION" != "$existing_creation" ]; then
-      existing_cmd=$(compat_get_cmdline "$existing" 2>/dev/null || true)
-      case "$existing_cmd" in
-        *"$SKILL_DIR/scripts/watch.sh"*) kill "$existing" 2>/dev/null || true ;;
-      esac
+    if agmsg_watch_retire_if_generation_changed \
+         "$INSTANCE_ID" "$existing" "$TYPE" "$CC_CREATION" "$SKILL_DIR/scripts/watch.sh"; then
       rm -f "$WATCHER_PIDFILE"
-      agmsg_watch_owner_remove_if_watcher "$INSTANCE_ID" "$existing"
     else
       cat <<EOF
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).

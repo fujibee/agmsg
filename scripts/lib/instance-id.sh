@@ -334,10 +334,11 @@ agmsg_instance_owner_state() {
 # watcher_pid makes both replacement and cleanup successor-safe: an exiting old
 # watcher cannot remove a sidecar already replaced by its successor.
 agmsg_watch_owner_path() {
-  printf '%s/run/watch.%s.owner' "$SKILL_DIR" "$1"
+  local run_dir="${RUN_DIR:-$SKILL_DIR/run}"
+  printf '%s/watch.%s.owner' "$run_dir" "$1"
 }
 
-agmsg_watch_owner_write() {
+agmsg_watch_owner_write() (
   local token="$1" watcher_pid="$2" type="$3" domain="$4" creation="${5-}"
   local path tmp
   path="$(agmsg_watch_owner_path "$token")"
@@ -350,7 +351,7 @@ agmsg_watch_owner_write() {
     printf 'creation=%s\n' "$creation"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
   mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
-}
+)
 
 agmsg_watch_owner_field() {
   local token="$1" field="$2" path
@@ -379,4 +380,21 @@ agmsg_watch_owner_remove_if_watcher() {
   path="$(agmsg_watch_owner_path "$token")"
   recorded="$(agmsg_watch_owner_field "$token" watcher_pid 2>/dev/null || true)"
   [ "$recorded" = "$watcher_pid" ] && rm -f "$path" 2>/dev/null || true
+}
+
+# Retire a watcher only when a native owner generation definitely changed and
+# the recorded process still identifies our watch.sh. Missing metadata,
+# matching generations, command-line inspection failure, or kill failure all
+# preserve the incumbent (fail-closed). Returns 0 only after a successful TERM.
+agmsg_watch_retire_if_generation_changed() {
+  local token="$1" watcher_pid="$2" type="$3" current_creation="$4" watch_path="$5"
+  local existing_creation cmd
+  case "$current_creation" in ''|*[!0-9]*) return 1 ;; esac
+  existing_creation="$(agmsg_watch_owner_creation "$token" "$watcher_pid" "$type" 2>/dev/null || true)"
+  [ -n "$existing_creation" ] && [ "$current_creation" != "$existing_creation" ] || return 1
+  cmd="$(compat_get_cmdline "$watcher_pid" 2>/dev/null || true)"
+  case "$cmd" in *"$watch_path"*) ;; *) return 1 ;; esac
+  kill "$watcher_pid" 2>/dev/null || return 1
+  agmsg_watch_owner_remove_if_watcher "$token" "$watcher_pid"
+  return 0
 }

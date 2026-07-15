@@ -313,17 +313,9 @@ emit_monitor_directive() {
     local existing
     existing=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
-      local existing_creation
-      existing_creation="$(agmsg_watch_owner_creation "$session_id" "$existing" "$type" 2>/dev/null || true)"
-      if [ -n "$owner_creation" ] && [ -n "$existing_creation" ] \
-         && [ "$owner_creation" != "$existing_creation" ]; then
-        local existing_cmd
-        existing_cmd="$(compat_get_cmdline "$existing" 2>/dev/null || true)"
-        case "$existing_cmd" in
-          *"$SKILL_DIR/scripts/watch.sh"*) kill "$existing" 2>/dev/null || true ;;
-        esac
+      if agmsg_watch_retire_if_generation_changed \
+           "$session_id" "$existing" "$type" "$owner_creation" "$SKILL_DIR/scripts/watch.sh"; then
         rm -f "$pidfile"
-        agmsg_watch_owner_remove_if_watcher "$session_id" "$existing"
       else
         cat <<EOF
 
