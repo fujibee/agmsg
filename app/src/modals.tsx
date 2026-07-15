@@ -379,6 +379,14 @@ export function SettingsModal(props: {
   onTimezoneChange: (timezone: string) => void;
 }) {
   const { t, i18n } = useTranslation();
+  // Local draft text, not a number bound directly to props.terminalFontSize
+  // — a controlled input that only accepts values already in [MIN, MAX]
+  // rejects every keystroke of a multi-digit entry whose intermediate value
+  // falls outside that range (e.g. typing "20" from scratch: "2" alone is
+  // < MIN and would otherwise be silently dropped, visually reverting the
+  // field). Free typing (including decimals, an empty field mid-edit) is
+  // always shown; only a complete, valid, in-range value is committed.
+  const [fontSizeText, setFontSizeText] = useState(() => String(props.terminalFontSize));
   // Computed once per modal open, not on every keystroke — the full zone
   // list (400+ IANA names) doesn't change while the dropdown is open.
   const [timeZones] = useState(listTimeZones);
@@ -426,12 +434,15 @@ export function SettingsModal(props: {
         {t("settings.terminalFontSize.label")}
         <input
           type="number"
+          step="any"
           min={MIN_TERMINAL_FONT_SIZE}
           max={MAX_TERMINAL_FONT_SIZE}
-          value={props.terminalFontSize}
+          value={fontSizeText}
           onChange={(e) => {
-            const n = Number(e.target.value);
-            if (n >= MIN_TERMINAL_FONT_SIZE && n <= MAX_TERMINAL_FONT_SIZE) {
+            const text = e.target.value;
+            setFontSizeText(text);
+            const n = Number(text);
+            if (text.trim() !== "" && Number.isFinite(n) && n >= MIN_TERMINAL_FONT_SIZE && n <= MAX_TERMINAL_FONT_SIZE) {
               props.onTerminalFontSizeChange(n);
             }
           }}
