@@ -6,6 +6,7 @@ setup() {
   setup_test_env
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
+  export AGMSG_TEST_CODEX_THREAD_ID="00000000-0000-4000-8000-000000000001"
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
@@ -113,6 +114,69 @@ seed_abandoned_starting_server() {
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command resume --
   [ "$status" -eq 0 ]
   grep -qx 'plain-codex <resume>' "$CALL_LOG"
+}
+
+@test "codex-monitor: keeps a foreground wrapper instead of execing the native TUI" {
+  # The launcher watches codex-monitor.sh's MSYS pid. Replacing that process
+  # with npm/node/native Codex makes kill -0 unreliable across the Windows
+  # process-domain boundary and can tear down the shared app-server under a
+  # still-running TUI. Keep an explicit post-command status path so bash must
+  # remain as the foreground wrapper until the child exits.
+  local monitor="$TYPES/codex/codex-monitor.sh"
+  ! grep -Eq 'exec[[:space:]]+"\$REAL_CODEX"[[:space:]]+(resume[[:space:]]+)?--remote' "$monitor"
+  grep -Fq '"$REAL_CODEX" --remote "$SOCKET_URL"' "$monitor"
+  grep -Fq '"$REAL_CODEX" resume --remote "$SOCKET_URL"' "$monitor"
+  grep -Fq 'exit "$tui_status"' "$monitor"
+}
+
+@test "codex bridge launcher stops its Windows lease heartbeat gracefully" {
+  local launcher="$TYPES/codex/codex-bridge-launcher.sh"
+  grep -Fq 'heartbeat_stop_file=' "$launcher"
+  grep -Fq ': >"$heartbeat_stop_file"' "$launcher"
+  grep -Fq '[ ! -f "$heartbeat_stop_file" ]' "$launcher"
+  ! grep -Fq 'kill "$tui_heartbeat_pid"' "$launcher"
+}
+
+@test "codex-monitor: installs SessionStart hooks before app-server startup" {
+  # The remote app-server snapshots project hook configuration at startup. If
+  # delivery.sh runs after the lifecycle loop, the first TUI never publishes
+  # its exact hook session and monitor remains in waiting_first_turn.
+  local monitor="$TYPES/codex/codex-monitor.sh" hook_line server_line
+  hook_line="$(grep -n 'delivery.sh.*set monitor codex' "$monitor" | head -1 | cut -d: -f1)"
+  server_line="$(grep -n '"$REAL_CODEX" app-server --listen' "$monitor" | head -1 | cut -d: -f1)"
+  [ -n "$hook_line" ]
+  [ -n "$server_line" ]
+  [ "$hook_line" -lt "$server_line" ]
+  [ "$(grep -c 'delivery.sh.*set monitor codex' "$monitor")" -eq 1 ]
+}
+
+@test "codex-monitor: discovers the exact thread created by the serialized TUI launch" {
+  local monitor="$TYPES/codex/codex-monitor.sh"
+  grep -Fq -- '--list-loaded-only' "$monitor"
+  grep -Fq 'codex_lifecycle_lock_acquire "$ROUTE_LOCK_HASH"' "$monitor"
+  grep -Fq 'comm -13' "$monitor"
+  grep -Fq 'thread=%s\napp_server=%s\nproject=%s\n' "$monitor"
+  grep -Fq '"$REAL_CODEX" --remote "$SOCKET_URL"' "$monitor"
+  grep -Fq 'request_published tui_loaded_delta' "$monitor"
+  grep -Fq 'thread_ambiguous "loaded_delta_$new_count"' "$monitor"
+}
+
+@test "codex launcher waits for the bridge generation handshake before respawn" {
+  local launcher="$TYPES/codex/codex-bridge-launcher.sh"
+  grep -Fq 'bridge_spawn_ready=0' "$launcher"
+  grep -Fq 'spawned_lease_pid' "$launcher"
+  grep -Fq 'spawned_generation' "$launcher"
+  grep -Fq 'bridge_starting handshake_pending' "$launcher"
+  grep -Fq 'tui_heartbeat_pid' "$launcher"
+  grep -Fq 'AGMSG_CODEX_BRIDGE_START_POLLS:-450' "$launcher"
+}
+
+@test "codex lifecycle lock records native Windows ownership" {
+  local lease="$SCRIPTS/lib/codex-lease.sh"
+  grep -Fq "printf 'format_version=2\\nowner_msys_pid=%s\\n'" "$lease"
+  grep -Fq 'owner_winpid' "$lease"
+  grep -Fq 'owner_creation' "$lease"
+  grep -Fq 'compat_pid_state_native "$owner_winpid"' "$lease"
 }
 
 # --- reuse health check (B-lite) ---

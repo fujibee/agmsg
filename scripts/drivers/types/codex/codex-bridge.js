@@ -72,6 +72,9 @@ Options:
   --monitor-state <path>  Generation-specific lifecycle state for diagnostics/re-resolution.
   --lease-timeout <sec>   Stop when the TUI lease is older than this (default: 15).
   --resolve-only          Print resolved team/name and exit.
+  --start-thread-only     Start one thread on --app-server, print its exact id,
+                          and exit without reading the agmsg inbox.
+  --list-loaded-only      Print loaded thread ids and exit without reading inbox.
   --help                  Show this help.
 
 Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
@@ -140,6 +143,10 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === "--resolve-only") {
       opts.resolveOnly = true;
+    } else if (arg === "--start-thread-only") {
+      opts.startThreadOnly = true;
+    } else if (arg === "--list-loaded-only") {
+      opts.listLoadedOnly = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
     } else if (arg === "--type") {
@@ -188,6 +195,7 @@ function parseArgs(argv) {
   }
 
   if (opts.help) return opts;
+  if (opts.startThreadOnly && !opts.appServer) die("--start-thread-only requires --app-server");
   if (!opts.project) die("--project is required");
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) die("--timeout must be a positive number");
   if (!Number.isFinite(opts.interval) || opts.interval <= 0) die("--interval must be a positive number");
@@ -768,7 +776,7 @@ class CodexBridge {
     this.writeBridgeLease();
     this.installSignals();
     if (this.opts.tuiLease && !this.checkTuiLease()) {
-      throw new Error("bound TUI lease is missing, stale, or incompatible");
+      throw new Error(`bound TUI lease rejected (${this.tuiLeaseFailureReason()})`);
     }
     this.startLeaseTimers();
     this.client.on("process/exited", this.clientHandler("process/exited", (params) => this.onProcessExited(params)));
@@ -836,13 +844,20 @@ class CodexBridge {
   }
 
   checkTuiLease() {
-    if (!this.opts.tuiLease) return true;
+    return this.tuiLeaseFailureReason() === "";
+  }
+
+  tuiLeaseFailureReason() {
+    if (!this.opts.tuiLease) return "";
     const lease = this.readLease(this.opts.tuiLease);
-    if (!lease || lease.format_version !== "1" || lease.owner_kind !== "tui"
-        || lease.generation !== this.opts.boundGeneration) return false;
-    if (!/^\d+$/.test(lease.updated_at || "")) return false;
+    if (!lease) return "missing";
+    if (lease.format_version !== "1" || lease.owner_kind !== "tui") return "format";
+    if (lease.generation !== this.opts.boundGeneration) return "generation";
+    if (!/^\d+$/.test(lease.updated_at || "")) return "timestamp";
     const age = Math.floor(Date.now() / 1000) - Number(lease.updated_at);
-    return age >= 0 && age <= this.opts.leaseTimeout;
+    if (age < 0) return "future_timestamp";
+    if (age > this.opts.leaseTimeout) return "expired";
+    return "";
   }
 
   atomicWrite(file, content) {
@@ -888,7 +903,9 @@ class CodexBridge {
     if (!this.opts.tuiLease) return;
     this.leaseCheckTimer = setInterval(() => {
       if (this.stopping || this.checkTuiLease()) return;
-      console.error("codex-bridge: bound TUI lease expired; stopping before consuming more messages");
+      console.error(
+        `codex-bridge: bound TUI lease rejected (${this.tuiLeaseFailureReason()}); stopping before consuming more messages`,
+      );
       this.shutdown().finally(() => process.exit(0));
     }, 1000);
     this.bridgeLeaseTimer = setInterval(() => {
@@ -1027,6 +1044,7 @@ class CodexBridge {
       this.identity.team,
       "--name",
       this.identity.name,
+      "--resolved-pair",
       "--timeout",
       String(this.opts.timeout),
       "--interval",
@@ -1423,7 +1441,26 @@ class CodexBridge {
     if (!existing) return;
     try {
       process.kill(existing, 0);
-      die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
+      if (existingBridgeMatches({
+        pid: existing,
+        metafile: this.metafile,
+        bridgeLease: this.opts.bridgeLease,
+        opts: this.opts,
+        identity: this.identity,
+      })) {
+        die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
+      }
+      // A live PID alone is not bridge identity on Windows: native PIDs are
+      // routinely reused. Reclaim only the stale artifacts; never signal the
+      // unrelated live process that happens to own the old number.
+      for (const file of [this.pidfile, this.metafile, this.opts.bridgeLease]) {
+        try {
+          if (file && fs.existsSync(file)) fs.unlinkSync(file);
+        } catch (_) {
+          // Best-effort stale cleanup.
+        }
+      }
+      return;
     } catch (error) {
       if (error && error.code === "ESRCH") {
         for (const file of [this.pidfile, this.metafile]) {
@@ -1518,6 +1555,34 @@ function readPid(file) {
   }
 }
 
+function readRecord(file) {
+  try {
+    const result = {};
+    for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+      const index = line.indexOf("=");
+      if (index > 0) result[line.slice(0, index)] = line.slice(index + 1);
+    }
+    return result;
+  } catch (_) {
+    return null;
+  }
+}
+
+function existingBridgeMatches({ pid, metafile, bridgeLease, opts, identity, creationDate = nativeCreationDate }) {
+  const meta = readRecord(metafile);
+  const lease = bridgeLease ? readRecord(bridgeLease) : null;
+  if (!meta || !lease) return false;
+  if (meta.pid !== String(pid) || meta.pid_domain !== "native"
+      || meta.project !== opts.project || meta.team !== identity.team
+      || meta.name !== identity.name || meta.type !== opts.type) return false;
+  if (lease.format_version !== "1" || lease.owner_kind !== "bridge"
+      || lease.pid_domain !== "native" || lease.owner_winpid !== String(pid)
+      || lease.project !== opts.project
+      || lease.bound_generation !== opts.boundGeneration) return false;
+  const currentCreation = creationDate(pid);
+  return Boolean(currentCreation && lease.owner_creation && currentCreation === lease.owner_creation);
+}
+
 function parseMaxId(stdout) {
   const match = String(stdout || "").match(/\bmax_id=([0-9]+)/);
   return match ? Number(match[1]) : 0;
@@ -1527,6 +1592,38 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     usage();
+    return;
+  }
+
+  if (opts.startThreadOnly || opts.listLoadedOnly) {
+    const client = createAppServerClient(opts);
+    try {
+      client.start();
+      await client.ready?.();
+      await client.request("initialize", {
+        clientInfo: { name: "agmsg-codex-monitor", title: "agmsg Codex monitor", version: readVersion() },
+        capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: [] },
+      });
+      client.notify("initialized");
+      if (opts.listLoadedOnly) {
+        const response = await client.request("thread/loaded/list", {});
+        const ids = response && Array.isArray(response.data) ? response.data : [];
+        for (const id of ids) {
+          if (typeof id === "string" && id) console.log(id);
+        }
+        return;
+      }
+      const response = await client.request("thread/start", {
+        cwd: opts.project,
+        runtimeWorkspaceRoots: [opts.project],
+        ephemeral: false,
+      });
+      const id = response && response.thread && response.thread.id;
+      if (!id || typeof id !== "string") die("thread/start did not return an exact thread id");
+      console.log(id);
+    } finally {
+      client.stop();
+    }
     return;
   }
 
@@ -1544,4 +1641,10 @@ if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { CodexBridge, WebSocketAppServerClient, resolveBashBin, toPosixPath };
+module.exports = {
+  CodexBridge,
+  WebSocketAppServerClient,
+  existingBridgeMatches,
+  resolveBashBin,
+  toPosixPath,
+};

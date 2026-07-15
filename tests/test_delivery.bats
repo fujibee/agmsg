@@ -1540,6 +1540,104 @@ EOF
   [ "$(agmsg_role_session_uuid team alice)" = "hook-current-thread" ]
 }
 
+@test "session-start.sh discovers one live pending TUI from managed app-server env" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash app_generation tui_generation request state ref pending
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  app_generation="managed-app-generation"
+  tui_generation="managed-tui-generation"
+  export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+  unset _AGMSG_CODEX_LEASE_SH
+  source "$SCRIPTS/lib/codex-lease.sh"
+  codex_record_write_ready "$hash" "$app_generation" version msys "$$" 4123
+  state="$(codex_monitor_state_path "$hash" "$tui_generation")"
+  request="$(codex_monitor_request_path "$hash" "$tui_generation")"
+  codex_monitor_state_write "$state" waiting_first_turn exact_hook_session_required
+  ref="$(codex_appserver_ref_add_provisional "$hash" "codex-startup-ref.$tui_generation" \
+    "$app_generation" "$tui_generation" "$$")"
+  pending="$(codex_monitor_pending_write "$hash" "$tui_generation" "$TEST_PROJECT" \
+    "$app_generation" 'ws://127.0.0.1:4123' "$request" "$state" "$ref" '' '' "$$")"
+  [ -f "$pending" ]
+
+  printf '%s' '{"session_id":"managed-hook-thread"}' \
+    | env -u CODEX_THREAD_ID -u AGMSG_CODEX_BRIDGE_LAUNCHER \
+      -u AGMSG_CODEX_BRIDGE_REQUEST_FILE -u AGMSG_CODEX_TUI_GENERATION \
+      -u AGMSG_CODEX_MONITOR_STATE_FILE \
+      AGMSG_CODEX_APP_SERVER_GENERATION="$app_generation" \
+      AGMSG_CODEX_APP_SERVER_PROJECT_HASH="$hash" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  grep -qx 'thread=managed-hook-thread' "$request"
+  grep -qx "generation=$tui_generation" "$request"
+  grep -qx 'phase=request_published' "$state"
+}
+
+@test "session-start.sh uses a validated pending identity when sandbox DB lookup is unavailable" {
+  # Do not join any identity: PAIRS is intentionally empty, matching a Windows
+  # Codex hook sandbox where the external sqlite3 binary cannot execute. The
+  # out-of-sandbox monitor contract remains sufficient and generation-scoped.
+  local hash app_generation tui_generation request state ref pending
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  app_generation="sandbox-app-generation"
+  tui_generation="sandbox-tui-generation"
+  export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+  unset _AGMSG_CODEX_LEASE_SH
+  source "$SCRIPTS/lib/codex-lease.sh"
+  codex_record_write_ready "$hash" "$app_generation" version msys "$$" 4123
+  state="$(codex_monitor_state_path "$hash" "$tui_generation")"
+  request="$(codex_monitor_request_path "$hash" "$tui_generation")"
+  codex_monitor_state_write "$state" waiting_first_turn exact_hook_session_required
+  ref="$(codex_appserver_ref_add_provisional "$hash" "codex-startup-ref.$tui_generation" \
+    "$app_generation" "$tui_generation" "$$")"
+  pending="$(codex_monitor_pending_write "$hash" "$tui_generation" "$TEST_PROJECT" \
+    "$app_generation" 'ws://127.0.0.1:4123' "$request" "$state" "$ref" team alice "$$")"
+  [ -f "$pending" ]
+
+  printf '%s' '{"session_id":"sandbox-hook-thread"}' \
+    | env -u CODEX_THREAD_ID -u AGMSG_CODEX_BRIDGE_LAUNCHER \
+      -u AGMSG_CODEX_BRIDGE_REQUEST_FILE -u AGMSG_CODEX_TUI_GENERATION \
+      -u AGMSG_CODEX_MONITOR_STATE_FILE \
+      AGMSG_CODEX_APP_SERVER_GENERATION="$app_generation" \
+      AGMSG_CODEX_APP_SERVER_PROJECT_HASH="$hash" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  grep -qx 'team=team' "$request"
+  grep -qx 'name=alice' "$request"
+  grep -qx 'thread=sandbox-hook-thread' "$request"
+  grep -qx 'phase=request_published' "$state"
+}
+
+@test "session-start.sh fails closed when a managed app-server has two pending TUIs" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash app_generation generation state request ref
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  app_generation="shared-app-generation"
+  export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+  unset _AGMSG_CODEX_LEASE_SH
+  source "$SCRIPTS/lib/codex-lease.sh"
+  codex_record_write_ready "$hash" "$app_generation" version msys "$$" 4123
+  for generation in pending-one pending-two; do
+    state="$(codex_monitor_state_path "$hash" "$generation")"
+    request="$(codex_monitor_request_path "$hash" "$generation")"
+    codex_monitor_state_write "$state" waiting_first_turn exact_hook_session_required
+    ref="$(codex_appserver_ref_add_provisional "$hash" "codex-startup-ref.$generation" \
+      "$app_generation" "$generation" "$$")"
+    codex_monitor_pending_write "$hash" "$generation" "$TEST_PROJECT" \
+      "$app_generation" 'ws://127.0.0.1:4123' "$request" "$state" "$ref" '' '' "$$" >/dev/null
+  done
+
+  printf '%s' '{"session_id":"must-not-route"}' \
+    | env -u CODEX_THREAD_ID -u AGMSG_CODEX_BRIDGE_LAUNCHER \
+      AGMSG_CODEX_APP_SERVER_GENERATION="$app_generation" \
+      AGMSG_CODEX_APP_SERVER_PROJECT_HASH="$hash" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ ! -e "$(codex_monitor_request_path "$hash" pending-one)" ]
+  [ ! -e "$(codex_monitor_request_path "$hash" pending-two)" ]
+  grep -qx 'phase=request_ambiguous' "$(codex_monitor_state_path "$hash" pending-one)"
+  grep -qx 'phase=request_ambiguous' "$(codex_monitor_state_path "$hash" pending-two)"
+}
+
 @test "session-start.sh for codex fails closed when env and hook thread ids disagree" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local hash generation request state
@@ -1610,6 +1708,7 @@ EOF
   [[ "$output" == *"codex-shim.sh"* ]]
   [[ "$output" == *"launch with codex"* ]]
   [[ "$output" == *"Optional global PATH shim is still available"* ]]
+  [[ "$output" == *"run /hooks in Codex and trust the agmsg SessionStart/SessionEnd"* ]]
   [[ "$output" == *"For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"* ]]
   [[ "$output" != *"Monitor tool"* ]]
   [ ! -e "$HOME/.agents/bin/codex" ]
@@ -1820,6 +1919,22 @@ EOF
   [[ "$output" == *"mode: monitor"* ]]
   [[ "$output" == *"Codex bridge: team/alice not running"* ]]
   [[ "$output" != *"watch processes:"* ]]
+}
+
+@test "delivery status (codex): waiting first turn explains hook trust" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  local hash state
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.test-generation"
+  SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run" bash -c \
+    'source "$1/lib/codex-lease.sh"; codex_monitor_state_write "$2" waiting_first_turn exact_hook_session_required' \
+    _ "$SCRIPTS" "$state"
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"waiting_first_turn (exact_hook_session_required)"* ]]
+  [[ "$output" == *"run /hooks and trust the agmsg SessionStart/SessionEnd hooks"* ]]
 }
 
 @test "delivery status (codex): multiple identities are enumerated independently" {

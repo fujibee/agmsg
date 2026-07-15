@@ -30,6 +30,7 @@ STATE_FILE="${9:-$(codex_monitor_state_path "$PROJECT_HASH" "$TUI_GENERATION")}"
 PROVISIONAL_REF="${10:-}"
 DISABLED_FILE="$RUN_DIR/codex-monitor-disabled.$PROJECT_HASH"
 EXPECTED_REQUEST_FILE="$(codex_monitor_request_path "$PROJECT_HASH" "$TUI_GENERATION")"
+PENDING_FILE="$(codex_monitor_pending_path "$PROJECT_HASH" "$TUI_GENERATION")"
 if [ "$REQUEST_FILE" != "$EXPECTED_REQUEST_FILE" ]; then
   codex_monitor_state_write "$STATE_FILE" request_invalid path_mismatch
   exit 1
@@ -57,6 +58,9 @@ current_tui_lease=""
 current_appserver_ref=""
 appserver_generation=""
 resolved_request_thread=""
+tui_heartbeat_pid=""
+tui_heartbeat_lease=""
+heartbeat_stop_file="$RUN_DIR/codex-tui-heartbeat-stop.$PROJECT_HASH.$TUI_GENERATION"
 if [ -n "$PROVISIONAL_REF" ]; then
   expected_refs_dir="$(codex_appserver_refs_dir "$PROJECT_HASH")"
   case "$PROVISIONAL_REF" in "$expected_refs_dir"/*) ;; *) PROVISIONAL_REF="" ;; esac
@@ -72,7 +76,16 @@ if [ -n "$PROVISIONAL_REF" ]; then
 fi
 
 cleanup_tui_lease() {
+  if [ -n "$tui_heartbeat_pid" ]; then
+    # Let the MSYS subshell exit normally. Killing a Git Bash subshell while it
+    # waits on a native sleep can leave an unregistered bash.exe behind on
+    # Windows even though `wait` reports completion.
+    : >"$heartbeat_stop_file"
+    wait "$tui_heartbeat_pid" 2>/dev/null || true
+    rm -f "$heartbeat_stop_file"
+  fi
   codex_lease_compare_delete "$REQUEST_FILE" "$TUI_GENERATION"
+  codex_lease_compare_delete "$PENDING_FILE" "$TUI_GENERATION"
   [ -n "$current_tui_lease" ] && codex_lease_compare_delete "$current_tui_lease" "$TUI_GENERATION"
   if [ -n "$current_appserver_ref" ] && [ -n "$appserver_generation" ]; then
     codex_appserver_ref_remove_and_cleanup "$PROJECT_HASH" "$current_appserver_ref" "$appserver_generation" || true
@@ -174,6 +187,7 @@ while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
     && [ "$(request_field team)" = "$team" ] && [ "$(request_field name)" = "$name" ]; then
     resolved_request_thread="$(request_field thread)"
     codex_lease_compare_delete "$REQUEST_FILE" "$TUI_GENERATION"
+    codex_lease_compare_delete "$PENDING_FILE" "$TUI_GENERATION"
     codex_monitor_state_write "$STATE_FILE" route_resolved exact_request
   elif [ -f "$REQUEST_FILE" ]; then
     codex_monitor_state_write "$STATE_FILE" request_invalid rejected
@@ -197,6 +211,27 @@ while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
     codex_lease_compare_delete "$current_tui_lease" "$TUI_GENERATION"
   fi
   current_tui_lease="$(codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" "$PROJECT" "$req_app_server" "$PARENT_PID")"
+  if [ "$tui_heartbeat_lease" != "$current_tui_lease" ]; then
+    if [ -n "$tui_heartbeat_pid" ]; then
+      : >"$heartbeat_stop_file"
+      wait "$tui_heartbeat_pid" 2>/dev/null || true
+      rm -f "$heartbeat_stop_file"
+    fi
+    # Lease freshness must not depend on the control loop completing Windows
+    # CIM/cmdline validation in under fifteen seconds. This child performs only
+    # an atomic refresh; it never reads the inbox and never decides liveness.
+    rm -f "$heartbeat_stop_file"
+    (
+      while kill -0 "$PARENT_PID" 2>/dev/null \
+        && [ ! -f "$DISABLED_FILE" ] && [ ! -f "$heartbeat_stop_file" ]; do
+        codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" \
+          "$PROJECT" "$req_app_server" "$PARENT_PID" >/dev/null || exit 0
+        sleep 2
+      done
+    ) &
+    tui_heartbeat_pid="$!"
+    tui_heartbeat_lease="$current_tui_lease"
+  fi
   appserver_record="$(codex_appserver_record_path "$PROJECT_HASH")"
   next_appserver_generation="$(codex_lease_field "$appserver_record" generation 2>/dev/null || true)"
   if [ -n "$next_appserver_generation" ]; then
@@ -275,6 +310,10 @@ while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
     fi
   fi
 
+  # The ref/old-bridge validation above can exceed the lease timeout on
+  # Windows. Refresh at the actual consume-capable process boundary so the new
+  # bridge never starts from a lease that was fresh only before slow CIM work.
+  current_tui_lease="$(codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" "$PROJECT" "$req_app_server" "$PARENT_PID")"
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --type "$TYPE" \
@@ -292,5 +331,37 @@ while kill -0 "$PARENT_PID" 2>/dev/null && [ ! -f "$DISABLED_FILE" ]; do
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
-  sleep 1
+  # Native Node startup can exceed one second on Windows (virus scanning and
+  # PowerShell/CIM creation-date checks are common contributors). Do not loop
+  # back and spawn a duplicate merely because the bridge has not published its
+  # pidfile/lease yet. Wait boundedly for the generation handshake; the next
+  # loop will perform the full pid/cmdline/metadata validation.
+  bridge_spawn_ready=0
+  # identities.sh plus native CreationDate validation regularly takes more
+  # than ten seconds on Git Bash/Windows. Stay in this single-spawn handshake
+  # long enough to observe its pidfile/lease instead of launching competitors.
+  bridge_start_polls="${AGMSG_CODEX_BRIDGE_START_POLLS:-450}"
+  case "$bridge_start_polls" in ''|*[!0-9]*) bridge_start_polls=450 ;; esac
+  for startup_poll in $(seq 1 "$bridge_start_polls"); do
+    spawned_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    spawned_lease_pid="$(codex_lease_field "$bridge_lease" owner_winpid 2>/dev/null || true)"
+    spawned_generation="$(codex_lease_field "$bridge_lease" bound_generation 2>/dev/null || true)"
+    if [ -n "$spawned_pid" ] && [ "$spawned_lease_pid" = "$spawned_pid" ] \
+      && [ "$spawned_generation" = "$TUI_GENERATION" ]; then
+      bridge_spawn_ready=1
+      break
+    fi
+    kill -0 "$PARENT_PID" 2>/dev/null || break
+    [ -f "$DISABLED_FILE" ] && break
+    # Keep the producer lease fresh while native Node/CIM startup is still in
+    # progress. On Windows this bounded handshake can consume most of the
+    # default lease timeout; without this refresh a correctly started bridge
+    # can arm its watcher and then immediately stop on an already-stale lease.
+    if [ $((startup_poll % 10)) -eq 0 ]; then
+      current_tui_lease="$(codex_write_tui_lease "$team" "$name" "$thread_id" "$TUI_GENERATION" "$PROJECT" "$req_app_server" "$PARENT_PID")"
+    fi
+    sleep 0.1
+  done
+  [ "$bridge_spawn_ready" -eq 1 ] \
+    || codex_monitor_state_write "$STATE_FILE" bridge_starting handshake_pending
 done

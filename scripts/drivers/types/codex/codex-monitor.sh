@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Launch Codex with agmsg's app-server bridge enabled.
 #
-# This is a beta convenience wrapper: it hides the shared app-server socket and
-# lets SessionStart publish its stdin session_id to the out-of-sandbox launcher
-# as the exact app-server thread route.
+# This is a beta convenience wrapper: it hides the shared app-server socket.
+# For a new TUI it serializes startup and binds the one thread newly reported by
+# thread/loaded/list; SessionStart remains the exact-id compatibility path for
+# resume flows.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -14,6 +15,8 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 # shellcheck source=../../../lib/compat.sh
 source "$SCRIPT_DIR/../../../lib/compat.sh"
+# shellcheck source=../../../lib/node.sh
+source "$SCRIPT_DIR/../../../lib/node.sh"
 # shellcheck source=../../../lib/codex-lease.sh
 source "$SCRIPT_DIR/../../../lib/codex-lease.sh"
 
@@ -125,6 +128,15 @@ CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
 mkdir -p "$RUN_DIR"
 codex_appserver_ref_gc "$PROJECT_HASH" || true
 
+# Install/confirm hooks before starting the shared app-server. Codex loads the
+# project's hook configuration when the app-server starts. New launches use the
+# serialized loaded-set delta below, while resume compatibility still relies on
+# SessionStart's authoritative session_id.
+if ! "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null; then
+  echo "codex-monitor: could not install/confirm monitor hooks for this project" >&2
+  exec_plain_codex
+fi
+
 # codex 0.141+ accepts only ws:// (not unix://) for the TUI's --remote, so the
 # shared app-server listens on a loopback ws port instead of a unix socket. The
 # port is recorded per project so a second monitor reuses a live server. See #170.
@@ -136,9 +148,9 @@ PORT=""
 SERVER_GENERATION=""
 SERVER_LOG=""
 
-publish_ready_record() { # generation pid-domain pid port
-  local generation="$1" domain="$2" pid="$3" port="$4"
-  codex_record_write_ready "$PROJECT_HASH" "$generation" "$CODEX_VERSION" "$domain" "$pid" "$port"
+publish_ready_record() { # generation pid-domain pid port [monitor-protocol]
+  local generation="$1" domain="$2" pid="$3" port="$4" protocol="${5:-$CODEX_APP_SERVER_MONITOR_PROTOCOL}"
+  codex_record_write_ready "$PROJECT_HASH" "$generation" "$CODEX_VERSION" "$domain" "$pid" "$port" "$protocol"
   printf '%s' "$pid" >"$SERVER_PID"
   printf '%s' "$port" >"$PORT_FILE"
   printf '%s' "$CODEX_VERSION" >"$VERSION_FILE"
@@ -159,7 +171,7 @@ for lifecycle_attempt in 1 2 3 4; do
       && compat_pid_alive_msys "$legacy_pid" && port_alive "$legacy_port" \
       && [ -z "$CODEX_VERSION" -o "$legacy_version" = "$CODEX_VERSION" ]; then
       case "$legacy_cmd" in
-        *codex*app-server*) publish_ready_record "legacy-$legacy_pid" msys "$legacy_pid" "$legacy_port" ;;
+        *codex*app-server*) publish_ready_record "legacy-$legacy_pid" msys "$legacy_pid" "$legacy_port" legacy ;;
       esac
     fi
   fi
@@ -167,6 +179,7 @@ for lifecycle_attempt in 1 2 3 4; do
   status="$(codex_lease_field "$SERVER_RECORD" status 2>/dev/null || true)"
   record_generation="$(codex_lease_field "$SERVER_RECORD" generation 2>/dev/null || true)"
   record_version="$(codex_lease_field "$SERVER_RECORD" version 2>/dev/null || true)"
+  record_protocol="$(codex_lease_field "$SERVER_RECORD" monitor_protocol 2>/dev/null || true)"
 
   if [ "$status" = ready ]; then
     record_pid="$(codex_lease_field "$SERVER_RECORD" pid 2>/dev/null || true)"
@@ -191,7 +204,8 @@ for lifecycle_attempt in 1 2 3 4; do
     if [ -n "$record_pid" ] && [ -n "$record_port" ] \
       && [ "$record_pid_state" = alive ] && port_alive "$record_port" \
       && { [ -z "$record_creation" ] || { [ -n "$current_creation" ] && [ "$record_creation" = "$current_creation" ]; }; } \
-      && { [ -z "$CODEX_VERSION" ] || [ "$record_version" = "$CODEX_VERSION" ]; }; then
+      && { [ -z "$CODEX_VERSION" ] || [ "$record_version" = "$CODEX_VERSION" ]; } \
+      && [ "$record_protocol" = "$CODEX_APP_SERVER_MONITOR_PROTOCOL" ]; then
       case "$record_cmd" in
         *codex*app-server*)
           PORT="$record_port"; SERVER_GENERATION="$record_generation"
@@ -221,7 +235,8 @@ for lifecycle_attempt in 1 2 3 4; do
       SERVER_GENERATION="$record_generation"
     else
       marker="$(codex_appserver_marker_path "$PROJECT_HASH" "$record_generation")"
-      if [ -f "$marker" ] && { [ -z "$CODEX_VERSION" ] || [ "$record_version" = "$CODEX_VERSION" ]; }; then
+      if [ -f "$marker" ] && { [ -z "$CODEX_VERSION" ] || [ "$record_version" = "$CODEX_VERSION" ]; } \
+        && [ "$record_protocol" = "$CODEX_APP_SERVER_MONITOR_PROTOCOL" ]; then
         mode=adopt
         SERVER_GENERATION="$record_generation"
         # Claim the abandoned reservation without changing generation. A
@@ -289,7 +304,9 @@ for lifecycle_attempt in 1 2 3 4; do
 
   SERVER_LOG="$RUN_DIR/codex-app-server.$PROJECT_HASH.$SERVER_GENERATION.log"
   : >"$SERVER_LOG"
-  "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 &
+  AGMSG_CODEX_APP_SERVER_GENERATION="$SERVER_GENERATION" \
+  AGMSG_CODEX_APP_SERVER_PROJECT_HASH="$PROJECT_HASH" \
+    "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 &
   server_bg="$!"
   codex_marker_write "$PROJECT_HASH" "$SERVER_GENERATION" msys "$server_bg" "$SERVER_LOG"
   for _ in $(seq 1 100); do
@@ -340,12 +357,6 @@ release_unclaimed_appserver() {
     "$(codex_appserver_refs_dir "$PROJECT_HASH")/.unclaimed-$$" "$SERVER_GENERATION" || true
 }
 
-if ! "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null; then
-  echo "codex-monitor: could not install/confirm monitor hooks for this project" >&2
-  release_unclaimed_appserver
-  exec_plain_codex
-fi
-
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
@@ -373,20 +384,100 @@ if [ -z "${GIT_BASH:-}" ] && [ -z "${AGMSG_BASH:-}" ] && command -v cygpath >/de
   export AGMSG_BASH
 fi
 codex_monitor_state_write "$STATE_FILE" waiting_first_turn
+PENDING_FILE="$(codex_monitor_pending_write "$PROJECT_HASH" "$TUI_GENERATION" "$PROJECT" \
+  "$SERVER_GENERATION" "$SOCKET_URL" "$REQUEST_FILE" "$STATE_FILE" "$PROVISIONAL_REF" \
+  "$IDENTITY_TEAM" "$IDENTITY_NAME" "$$")"
+
+# Resolve a single implicit identity before route discovery. SessionStart
+# remains the compatibility path for resume flows and ambiguous projects.
+if [ "$CODEX_COMMAND" = codex ] && [ -z "$IDENTITY_TEAM" ] && [ -z "$IDENTITY_NAME" ]; then
+  monitor_pairs="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" codex 2>/dev/null || true)"
+  if [ "$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { c++ } END { print c + 0 }')" = 1 ]; then
+    IFS=$'\t' read -r IDENTITY_TEAM IDENTITY_NAME <<EOF
+$(printf '%s\n' "$monitor_pairs" | awk 'NF >= 2 { print $1 "\t" $2; exit }')
+EOF
+  fi
+fi
+
+ROUTE_DISCOVERY_PID=""
+ROUTE_LOCK_HASH="${PROJECT_HASH}.tui-route"
+ROUTE_LOCK_OWNED=0
+ROUTE_BASELINE=""
+NODE_BIN=""
+if [ "$CODEX_COMMAND" = codex ] && [ -n "$IDENTITY_TEAM" ] && [ -n "$IDENTITY_NAME" ]; then
+  NODE_BIN="$(agmsg_resolve_node)"
+  if ! codex_lifecycle_lock_acquire "$ROUTE_LOCK_HASH"; then
+    codex_monitor_state_write "$STATE_FILE" route_lock_failed
+  else
+    ROUTE_LOCK_OWNED=1
+    ROUTE_BASELINE="$("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js" \
+      --project "$PROJECT" --app-server "$SOCKET_URL" --list-loaded-only \
+      --connect-timeout-ms 10000 --request-timeout-ms 30000 2>>"$SERVER_LOG" | sort -u)" || ROUTE_BASELINE=""
+  fi
+fi
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
 launcher_log="$RUN_DIR/codex-bridge-launcher.$PROJECT_HASH.$TUI_GENERATION.log"
 "$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" "$TUI_GENERATION" "$REQUEST_FILE" \
   "$IDENTITY_TEAM" "$IDENTITY_NAME" "$STATE_FILE" "$PROVISIONAL_REF" >>"$launcher_log" 2>&1 &
 
+if [ -n "$NODE_BIN" ] && [ "$ROUTE_LOCK_OWNED" -eq 1 ]; then
+  (
+    trap 'codex_lifecycle_lock_release "$ROUTE_LOCK_HASH"' EXIT
+    route_deadline=$(( $(date +%s) + ${AGMSG_CODEX_ROUTE_TIMEOUT:-60} ))
+    while kill -0 "$$" 2>/dev/null && [ "$(date +%s)" -lt "$route_deadline" ]; do
+      current_ids="$("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js" \
+        --project "$PROJECT" --app-server "$SOCKET_URL" --list-loaded-only \
+        --connect-timeout-ms 10000 --request-timeout-ms 30000 2>>"$SERVER_LOG" | sort -u)" || current_ids=""
+      new_ids="$(comm -13 <(printf '%s\n' "$ROUTE_BASELINE") <(printf '%s\n' "$current_ids") | grep -E '^[A-Za-z0-9-]+$' || true)"
+      new_count="$(printf '%s\n' "$new_ids" | grep -c . || true)"
+      if [ "$new_count" = 1 ]; then
+        discovered_thread="$(printf '%s\n' "$new_ids" | head -n 1)"
+        {
+          printf 'format_version=2\n'
+          printf 'generation=%s\ntype=codex\nteam=%s\nname=%s\n' \
+            "$TUI_GENERATION" "$IDENTITY_TEAM" "$IDENTITY_NAME"
+          printf 'thread=%s\napp_server=%s\nproject=%s\n' \
+            "$discovered_thread" "$SOCKET_URL" "$PROJECT"
+          printf 'created_at=%s\n' "$(date +%s)"
+        } | codex_lease_atomic_write "$REQUEST_FILE"
+        codex_monitor_state_write "$STATE_FILE" request_published tui_loaded_delta
+        exit 0
+      fi
+      if [ "$new_count" -gt 1 ]; then
+        codex_monitor_state_write "$STATE_FILE" thread_ambiguous "loaded_delta_$new_count"
+        exit 1
+      fi
+      sleep 0.2
+    done
+    codex_monitor_state_write "$STATE_FILE" waiting_first_turn loaded_delta_timeout
+  ) &
+  ROUTE_DISCOVERY_PID="$!"
+fi
+
 cd "$PROJECT"
 # Guard the array expansion: under bash 3.2 + `set -u`, "${CODEX_ARGS[@]}" on an
 # empty array errors with "unbound variable" (a no-arg `codex`/`codex resume`).
+#
+# Do not exec the TUI here. The bridge launcher intentionally watches this
+# wrapper's MSYS pid. On Windows the real Codex command crosses from Git Bash
+# through npm/node into a native codex.exe; after an exec, kill -0 on the old
+# MSYS pid can become false while the native TUI is still alive. Keeping this
+# wrapper in the foreground gives the launcher a stable, wait-based lifetime
+# signal. The immutable app-server ref set still decides whether cleanup may
+# stop a server shared by another TUI.
+tui_status=0
 case "$CODEX_COMMAND" in
   codex)
-    exec "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
+    "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} || tui_status=$?
     ;;
   resume)
-    exec "$REAL_CODEX" resume --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
+    "$REAL_CODEX" resume --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} || tui_status=$?
     ;;
 esac
+if [ -n "$ROUTE_DISCOVERY_PID" ]; then
+  kill "$ROUTE_DISCOVERY_PID" 2>/dev/null || true
+  wait "$ROUTE_DISCOVERY_PID" 2>/dev/null || true
+  codex_lifecycle_lock_release "$ROUTE_LOCK_HASH"
+fi
+exit "$tui_status"

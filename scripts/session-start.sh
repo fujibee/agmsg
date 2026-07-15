@@ -66,9 +66,16 @@ SESSION_ID="$HOOK_SESSION_ID"
 # Fallback so non-Codex directives remain actionable outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
 
-# Identity sanity check — no point launching a watcher with an empty pair set.
+# Identity sanity check. Codex launcher mode can continue without a DB lookup:
+# on Windows the Codex hook sandbox may deny execution of the external sqlite3
+# binary, while the out-of-sandbox monitor has already written a validated,
+# generation-scoped pending contract containing the exact identity. The Codex
+# plug accepts that contract only after its app-server/generation/owner checks.
+# Other drivers still require the normal identity result before dispatch.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
-[ -n "$PAIRS" ] || exit 0
+if [ -z "$PAIRS" ] && [ "$TYPE" != codex ]; then
+  exit 0
+fi
 
 # Type-specific SessionStart behaviour (Template Method). A type may ship
 # scripts/drivers/types/<type>/_session-start.sh defining agmsg_session_start to override the

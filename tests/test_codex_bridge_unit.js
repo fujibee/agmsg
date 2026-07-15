@@ -8,7 +8,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const bridgeModule = path.resolve(__dirname, "../scripts/drivers/types/codex/codex-bridge.js");
-const { CodexBridge, resolveBashBin } = require(bridgeModule);
+const { CodexBridge, existingBridgeMatches, resolveBashBin } = require(bridgeModule);
 
 function deliveryBridge(requestImpl, monitorState = "") {
   const bridge = new CodexBridge({
@@ -148,4 +148,72 @@ test("peer WebSocket close terminates the bridge client for launcher reconnect",
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stderr, /connection closed \(unit-peer-close\)/);
   assert.match(result.stderr, /fresh bridge can attach/);
+});
+
+test("single-instance validation rejects a recycled live PID with stale ownership", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agmsg-bridge-owner-"));
+  const meta = path.join(dir, "bridge.meta");
+  const lease = path.join(dir, "bridge.lease");
+  fs.writeFileSync(meta, [
+    "pid=1234", "pid_domain=native", "project=C:/work", "team=team", "name=alice", "type=codex", "",
+  ].join("\n"));
+  fs.writeFileSync(lease, [
+    "format_version=1", "owner_kind=bridge", "pid_domain=native", "owner_winpid=1234",
+    "owner_creation=old-process", "project=C:/work", "bound_generation=tui-1", "",
+  ].join("\n"));
+
+  assert.equal(existingBridgeMatches({
+    pid: 1234,
+    metafile: meta,
+    bridgeLease: lease,
+    opts: { project: "C:/work", type: "codex", boundGeneration: "tui-1" },
+    identity: { team: "team", name: "alice" },
+    creationDate: () => "reused-process",
+  }), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("single-instance validation accepts only the exact live bridge owner", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agmsg-bridge-owner-"));
+  const meta = path.join(dir, "bridge.meta");
+  const lease = path.join(dir, "bridge.lease");
+  fs.writeFileSync(meta, [
+    "pid=1234", "pid_domain=native", "project=C:/work", "team=team", "name=alice", "type=codex", "",
+  ].join("\n"));
+  fs.writeFileSync(lease, [
+    "format_version=1", "owner_kind=bridge", "pid_domain=native", "owner_winpid=1234",
+    "owner_creation=created-1234", "project=C:/work", "bound_generation=tui-1", "",
+  ].join("\n"));
+
+  assert.equal(existingBridgeMatches({
+    pid: 1234,
+    metafile: meta,
+    bridgeLease: lease,
+    opts: { project: "C:/work", type: "codex", boundGeneration: "tui-1" },
+    identity: { team: "team", name: "alice" },
+    creationDate: () => "created-1234",
+  }), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("bridge watch reuses its already-resolved identity without project rescans", async () => {
+  const bridge = new CodexBridge({
+    project: process.cwd(),
+    type: "codex",
+    timeout: 300,
+    interval: 2,
+  }, { team: "team", name: "alice" });
+  bridge.checkTuiLease = () => true;
+  bridge.writeBridgeLease = () => {};
+  let request;
+  bridge.client = { request: async (method, params) => { request = { method, params }; } };
+
+  await bridge.armWatch();
+
+  assert.equal(request.method, "process/spawn");
+  assert.ok(request.params.command.includes("--resolved-pair"));
+  assert.deepEqual(
+    request.params.command.slice(request.params.command.indexOf("--team"), request.params.command.indexOf("--timeout")),
+    ["--team", "team", "--name", "alice", "--resolved-pair"],
+  );
 });

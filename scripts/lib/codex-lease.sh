@@ -13,6 +13,7 @@ RUN_DIR="${RUN_DIR:-$SKILL_DIR/run}"
 . "$SKILL_DIR/scripts/lib/hash.sh"
 
 CODEX_LEASE_FORMAT_VERSION=1
+CODEX_APP_SERVER_MONITOR_PROTOCOL=2
 
 codex_lease_encode() {
   printf '%s' "$1" | LC_ALL=C awk '
@@ -54,12 +55,109 @@ codex_monitor_state_path() { # project_hash tui_generation
   printf '%s/codex-monitor-state.%s.%s\n' "$RUN_DIR" "$1" "$(codex_lease_encode "$2")"
 }
 
+codex_monitor_pending_path() { # project_hash tui_generation
+  printf '%s/codex-monitor-pending.%s.%s\n' "$RUN_DIR" "$1" "$(codex_lease_encode "$2")"
+}
+
 codex_monitor_state_write() { # path phase [detail]
   local path="$1" phase="$2" detail="${3:-}"
   {
     printf 'format_version=1\nphase=%s\n' "$phase"
     printf 'detail=%s\nupdated_at=%s\n' "$detail" "$(date +%s)"
   } | codex_lease_atomic_write "$path"
+}
+
+codex_monitor_pending_write() { # hash tui_generation project app_generation app_server request state ref team name owner_msys_pid
+  local hash="$1" generation="$2" project="$3" app_generation="$4" app_server="$5"
+  local request="$6" state="$7" ref="$8" team="$9" name="${10}" owner_msys="${11}"
+  local path owner_winpid=""
+  path="$(codex_monitor_pending_path "$hash" "$generation")"
+  owner_winpid="$(compat_msys_pid_to_winpid "$owner_msys" 2>/dev/null || true)"
+  {
+    printf 'format_version=1\nkind=monitor_pending\n'
+    printf 'generation=%s\nproject=%s\nproject_hash=%s\n' "$generation" "$project" "$hash"
+    printf 'appserver_generation=%s\napp_server=%s\n' "$app_generation" "$app_server"
+    printf 'request_file=%s\nstate_file=%s\nprovisional_ref=%s\n' "$request" "$state" "$ref"
+    printf 'team=%s\nname=%s\n' "$team" "$name"
+    printf 'owner_msys_pid=%s\nowner_winpid=%s\ncreated_at=%s\n' \
+      "$owner_msys" "$owner_winpid" "$(date +%s)"
+  } | codex_lease_atomic_write "$path"
+  printf '%s\n' "$path"
+}
+
+codex_monitor_thread_has_fresh_lease() { # project thread app_server
+  local project="$1" thread="$2" app_server="$3" file
+  for file in "$RUN_DIR"/codex-tui-lease.*; do
+    [ -f "$file" ] || continue
+    codex_tui_lease_file_fresh "$file" || continue
+    [ "$(codex_lease_field "$file" project 2>/dev/null || true)" = "$project" ] || continue
+    [ "$(codex_lease_field "$file" thread 2>/dev/null || true)" = "$thread" ] || continue
+    [ "$(codex_lease_field "$file" app_server 2>/dev/null || true)" = "$app_server" ] || continue
+    return 0
+  done
+  return 1
+}
+
+# Print validated pending contracts for one managed app-server as tab-separated:
+# pending, generation, request, state, app_server, team, name. The caller must
+# accept only exactly one line.
+codex_monitor_pending_candidates() { # project_hash project appserver_generation
+  local hash="$1" project="$2" app_generation="$3"
+  local record record_generation record_protocol record_port expected_url prefix pending
+  local format kind generation pending_project pending_hash pending_app_generation app_server
+  local request state ref team name owner_msys state_phase state_updated now age expected refs_dir
+  record="$(codex_appserver_record_path "$hash")"
+  [ "$(codex_lease_field "$record" status 2>/dev/null || true)" = ready ] || return 0
+  record_generation="$(codex_lease_field "$record" generation 2>/dev/null || true)"
+  record_protocol="$(codex_lease_field "$record" monitor_protocol 2>/dev/null || true)"
+  record_port="$(codex_lease_field "$record" port 2>/dev/null || true)"
+  [ "$record_generation" = "$app_generation" ] || return 0
+  [ "$record_protocol" = "$CODEX_APP_SERVER_MONITOR_PROTOCOL" ] || return 0
+  case "$record_port" in ''|*[!0-9]*) return 0 ;; esac
+  expected_url="ws://127.0.0.1:$record_port"
+  prefix="$RUN_DIR/codex-monitor-pending.$hash."
+  refs_dir="$(codex_appserver_refs_dir "$hash")"
+  now="$(date +%s)"
+  for pending in "$prefix"*; do
+    [ -f "$pending" ] || continue
+    format="$(codex_lease_field "$pending" format_version 2>/dev/null || true)"
+    kind="$(codex_lease_field "$pending" kind 2>/dev/null || true)"
+    generation="$(codex_lease_field "$pending" generation 2>/dev/null || true)"
+    pending_project="$(codex_lease_field "$pending" project 2>/dev/null || true)"
+    pending_hash="$(codex_lease_field "$pending" project_hash 2>/dev/null || true)"
+    pending_app_generation="$(codex_lease_field "$pending" appserver_generation 2>/dev/null || true)"
+    app_server="$(codex_lease_field "$pending" app_server 2>/dev/null || true)"
+    request="$(codex_lease_field "$pending" request_file 2>/dev/null || true)"
+    state="$(codex_lease_field "$pending" state_file 2>/dev/null || true)"
+    ref="$(codex_lease_field "$pending" provisional_ref 2>/dev/null || true)"
+    team="$(codex_lease_field "$pending" team 2>/dev/null || true)"
+    name="$(codex_lease_field "$pending" name 2>/dev/null || true)"
+    owner_msys="$(codex_lease_field "$pending" owner_msys_pid 2>/dev/null || true)"
+    [ "$format" = 1 ] && [ "$kind" = monitor_pending ] || continue
+    [ -n "$generation" ] || continue
+    expected="$(codex_monitor_pending_path "$hash" "$generation")"
+    [ "$pending" = "$expected" ] || continue
+    [ "$pending_project" = "$project" ] && [ "$pending_hash" = "$hash" ] || continue
+    [ "$pending_app_generation" = "$app_generation" ] && [ "$app_server" = "$expected_url" ] || continue
+    [ "$request" = "$(codex_monitor_request_path "$hash" "$generation")" ] || continue
+    [ "$state" = "$(codex_monitor_state_path "$hash" "$generation")" ] || continue
+    case "$ref" in "$refs_dir"/*) ;; *) continue ;; esac
+    [ -f "$ref" ] || continue
+    [ "$(codex_lease_field "$ref" ref_kind 2>/dev/null || true)" = startup ] || continue
+    [ "$(codex_lease_field "$ref" lease_generation 2>/dev/null || true)" = "$generation" ] || continue
+    [ "$(codex_lease_field "$ref" generation 2>/dev/null || true)" = "$app_generation" ] || continue
+    [ "$(codex_lease_field "$ref" owner_msys_pid 2>/dev/null || true)" = "$owner_msys" ] || continue
+    case "$owner_msys" in ''|*[!0-9]*) continue ;; esac
+    compat_pid_alive_msys "$owner_msys" || continue
+    state_phase="$(codex_lease_field "$state" phase 2>/dev/null || true)"
+    case "$state_phase" in waiting_first_turn|waiting_thread) ;; *) continue ;; esac
+    state_updated="$(codex_lease_field "$state" updated_at 2>/dev/null || true)"
+    case "$state_updated" in ''|*[!0-9]*) continue ;; esac
+    age=$((now - state_updated))
+    [ "$age" -ge 0 ] && [ "$age" -le "${AGMSG_CODEX_LEASE_TIMEOUT:-15}" ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$pending" "$generation" "$request" "$state" "$app_server" "$team" "$name"
+  done
 }
 
 codex_tui_generation_fresh() { # team name generation [timeout]
@@ -157,20 +255,22 @@ codex_record_write_starting() { # hash generation version starter_msys_pid
   winpid="$(compat_msys_pid_to_winpid "$starter_pid" 2>/dev/null || true)"
   {
     printf 'format_version=1\nstatus=starting\n'
-    printf 'generation=%s\nversion=%s\n' "$generation" "$version"
+    printf 'generation=%s\nversion=%s\nmonitor_protocol=%s\n' \
+      "$generation" "$version" "$CODEX_APP_SERVER_MONITOR_PROTOCOL"
     printf 'starter_pid_domain=msys\nstarter_msys_pid=%s\nstarter_winpid=%s\n' "$starter_pid" "$winpid"
     printf 'pid=\nport=\nupdated_at=%s\n' "$(date +%s)"
   } | codex_lease_atomic_write "$path"
 }
 
-codex_record_write_ready() { # hash generation version pid_domain pid port
+codex_record_write_ready() { # hash generation version pid_domain pid port [monitor_protocol]
   local hash="$1" generation="$2" version="$3" pid_domain="$4" pid="$5" port="$6"
-  local path creation=""
+  local protocol="${7:-$CODEX_APP_SERVER_MONITOR_PROTOCOL}" path creation=""
   path="$(codex_appserver_record_path "$hash")"
   creation="$(codex_pid_creation_domain "$pid_domain" "$pid" 2>/dev/null || true)"
   {
     printf 'format_version=1\nstatus=ready\n'
-    printf 'generation=%s\nversion=%s\n' "$generation" "$version"
+    printf 'generation=%s\nversion=%s\nmonitor_protocol=%s\n' \
+      "$generation" "$version" "$protocol"
     printf 'starter_pid_domain=\nstarter_msys_pid=\nstarter_winpid=\n'
     printf 'pid_domain=%s\npid=%s\npid_creation=%s\nport=%s\nupdated_at=%s\n' \
       "$pid_domain" "$pid" "$creation" "$port" "$(date +%s)"
@@ -401,13 +501,36 @@ codex_appserver_ref_remove_and_cleanup() { # hash ref_path expected_generation
 }
 
 codex_lifecycle_lock_acquire() {
-  local project_hash="$1" lock attempts=0 owner mtime now
+  local project_hash="$1" lock attempts=0 owner mtime now format owner_msys owner_winpid owner_creation
+  local native_state current_creation reclaim winpid creation
   lock="$(codex_appserver_lock_dir "$project_hash")"
   while ! mkdir "$lock" 2>/dev/null; do
     attempts=$((attempts + 1))
     [ "$attempts" -lt "${AGMSG_CODEX_LOCK_ATTEMPTS:-100}" ] || return 1
     owner="$(cat "$lock/owner" 2>/dev/null || true)"
-    if [ -n "$owner" ] && ! compat_pid_alive_msys "$owner"; then
+    format="$(codex_lease_field "$lock/owner" format_version 2>/dev/null || true)"
+    reclaim=0
+    if [ "$format" = 2 ]; then
+      owner_msys="$(codex_lease_field "$lock/owner" owner_msys_pid 2>/dev/null || true)"
+      owner_winpid="$(codex_lease_field "$lock/owner" owner_winpid 2>/dev/null || true)"
+      owner_creation="$(codex_lease_field "$lock/owner" owner_creation 2>/dev/null || true)"
+      if [ -n "$owner_winpid" ]; then
+        native_state="$(compat_pid_state_native "$owner_winpid")"
+        if [ "$native_state" = dead ]; then
+          reclaim=1
+        elif [ "$native_state" = alive ] && [ -n "$owner_creation" ]; then
+          current_creation="$(compat_native_creation_date "$owner_winpid" 2>/dev/null \
+            | tr -d '\r\n' || true)"
+          [ -n "$current_creation" ] && [ "$current_creation" != "$owner_creation" ] && reclaim=1
+        fi
+      elif [ -n "$owner_msys" ] && ! compat_pid_alive_msys "$owner_msys"; then
+        reclaim=1
+      fi
+    elif [ -n "$owner" ] && ! compat_pid_alive_msys "$owner"; then
+      # Legacy numeric owner written by pre-v2 installations.
+      reclaim=1
+    fi
+    if [ "$reclaim" -eq 1 ]; then
       rm -f "$lock/owner" 2>/dev/null || true
       rmdir "$lock" 2>/dev/null || true
     elif [ -z "$owner" ]; then
@@ -422,7 +545,15 @@ codex_lifecycle_lock_acquire() {
     fi
     sleep 0.05
   done
-  printf '%s\n' "$$" >"$lock/owner"
+  winpid="$(compat_msys_pid_to_winpid "$$" 2>/dev/null || true)"
+  creation=""
+  [ -n "$winpid" ] && creation="$(compat_native_creation_date "$winpid" 2>/dev/null \
+    | tr -d '\r\n' || true)"
+  {
+    printf 'format_version=2\nowner_msys_pid=%s\n' "$$"
+    printf 'owner_winpid=%s\nowner_creation=%s\ncreated_at=%s\n' \
+      "$winpid" "$creation" "$(date +%s)"
+  } >"$lock/owner"
 }
 
 codex_lifecycle_lock_release() {

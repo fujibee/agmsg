@@ -42,6 +42,8 @@ agmsg_delivery_on_enable() {
   fi
   echo "Restart your Codex session (quit and relaunch \`codex\`). The launcher starts"
   echo "  with the TUI; the first turn lets SessionStart publish its exact session/thread id."
+  echo "  On first use, run /hooks in Codex and trust the agmsg SessionStart/SessionEnd"
+  echo "  definitions. Codex skips new or changed project hooks until you approve them."
   echo "  Already-running sessions stay unmonitored until they restart."
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }
@@ -96,6 +98,9 @@ agmsg_delivery_runtime_status() {
         state_phase="$(codex_lease_field "$latest_state" phase 2>/dev/null || true)"
         state_detail="$(codex_lease_field "$latest_state" detail 2>/dev/null || true)"
         [ -n "$state_phase" ] && echo "Codex monitor (project): $state_phase${state_detail:+ ($state_detail)}"
+        if [ "$state_phase" = waiting_first_turn ]; then
+          echo "  Hint: send one ordinary prompt. If you already did, run /hooks and trust the agmsg SessionStart/SessionEnd hooks, then restart Codex."
+        fi
         state_reported=1
       fi
       continue

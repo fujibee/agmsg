@@ -77,7 +77,56 @@ agmsg_session_start() {
     exit 0
   fi
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
+  launcher_mode=0
+  managed_appserver_hook=0
+  existing_monitor_route=0
+  request_file="${AGMSG_CODEX_BRIDGE_REQUEST_FILE:-}"
+  tui_generation="${AGMSG_CODEX_TUI_GENERATION:-}"
+  state_file="${AGMSG_CODEX_MONITOR_STATE_FILE:-}"
+  pending_file=""
+  contract_team=""
+  contract_name=""
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
+  if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = 1 ]; then
+    launcher_mode=1
+  elif [ -n "${AGMSG_CODEX_APP_SERVER_GENERATION:-}" ] \
+    && [ -n "${AGMSG_CODEX_APP_SERVER_PROJECT_HASH:-}" ]; then
+    # In remote mode hooks run under the shared app-server, not under the TUI,
+    # so they cannot inherit the TUI-generation environment. The managed
+    # app-server supplies only its own generation/project proof. Resolve a TUI
+    # contract only when exactly one fresh, live pending generation exists.
+    managed_appserver_hook=1
+    project_hash="$(printf '%s' "$PROJECT" | agmsg_sha1)"
+    if [ "$project_hash" = "$AGMSG_CODEX_APP_SERVER_PROJECT_HASH" ]; then
+      record="$(codex_appserver_record_path "$project_hash")"
+      record_port="$(codex_lease_field "$record" port 2>/dev/null || true)"
+      case "$record_port" in
+        ''|*[!0-9]*) app_server="" ;;
+        *) app_server="ws://127.0.0.1:$record_port" ;;
+      esac
+      if [ -n "$thread_id" ] && [ -n "$app_server" ] \
+        && codex_monitor_thread_has_fresh_lease "$PROJECT" "$thread_id" "$app_server"; then
+        existing_monitor_route=1
+      else
+        pending_candidates="$(codex_monitor_pending_candidates "$project_hash" "$PROJECT" \
+          "$AGMSG_CODEX_APP_SERVER_GENERATION")"
+        pending_count="$(printf '%s\n' "$pending_candidates" | awk 'NF { c++ } END { print c + 0 }')"
+        if [ "$pending_count" = 1 ]; then
+          IFS=$'\t' read -r pending_file tui_generation request_file state_file app_server contract_team contract_name <<EOF
+$pending_candidates
+EOF
+          launcher_mode=1
+        elif [ "$pending_count" -gt 1 ]; then
+          while IFS=$'\t' read -r _pending _generation _request candidate_state _rest; do
+            [ -n "$candidate_state" ] \
+              && codex_monitor_state_write "$candidate_state" request_ambiguous multiple_waiting_tuis
+          done <<EOF
+$pending_candidates
+EOF
+        fi
+      fi
+    fi
+  fi
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
     if [ -n "$agent_pid" ]; then
@@ -101,11 +150,13 @@ agmsg_session_start() {
   fi
 
   pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
-  team="${AGMSG_CODEX_TEAM:-}"
-  name="${AGMSG_CODEX_NAME:-}"
+  team="${AGMSG_CODEX_TEAM:-$contract_team}"
+  name="${AGMSG_CODEX_NAME:-$contract_name}"
   if [ -n "$team" ] || [ -n "$name" ]; then
     if [ -z "$team" ] || [ -z "$name" ] \
-      || ! printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$team" "$name")"; then
+      || { [ -n "$PAIRS" ] \
+        && ! printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$team" "$name")"; } \
+      || { [ -z "$PAIRS" ] && [ "$launcher_mode" != 1 ]; }; then
       [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
         && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" identity_invalid
       exit 0
@@ -139,17 +190,20 @@ EOF
     agmsg_role_session_reassign "$team" "$name" "$thread_id" "$PROJECT" codex 2>/dev/null || true
   fi
 
-  if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    request_file="${AGMSG_CODEX_BRIDGE_REQUEST_FILE:-}"
-    tui_generation="${AGMSG_CODEX_TUI_GENERATION:-}"
+  [ "$existing_monitor_route" = 1 ] && exit 0
+  # A hook proven to belong to an agmsg-managed app-server must never fall back
+  # to legacy bridge startup when no unique pending TUI can be proven.
+  [ "$managed_appserver_hook" = 1 ] && [ "$launcher_mode" = 0 ] && exit 0
+
+  if [ "$launcher_mode" = "1" ]; then
     if [ -z "$thread_id" ]; then
-      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
-        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" waiting_thread loaded_fallback
+      [ -n "$state_file" ] \
+        && codex_monitor_state_write "$state_file" waiting_thread loaded_fallback
       exit 0
     fi
     if [ -z "$request_file" ] || [ -z "$tui_generation" ]; then
-      [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
-        && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" request_contract_missing
+      [ -n "$state_file" ] \
+        && codex_monitor_state_write "$state_file" request_contract_missing
       exit 0
     fi
     {
@@ -158,8 +212,8 @@ EOF
       printf 'thread=%s\napp_server=%s\nproject=%s\n' "$thread_id" "$app_server" "$PROJECT"
       printf 'created_at=%s\n' "$(date +%s)"
     } | codex_lease_atomic_write "$request_file"
-    [ -n "${AGMSG_CODEX_MONITOR_STATE_FILE:-}" ] \
-      && codex_monitor_state_write "$AGMSG_CODEX_MONITOR_STATE_FILE" request_published exact_thread
+    [ -n "$state_file" ] \
+      && codex_monitor_state_write "$state_file" request_published exact_thread
     exit 0
   fi
 

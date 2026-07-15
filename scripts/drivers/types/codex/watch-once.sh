@@ -23,6 +23,7 @@ ACTIVE_NAME=""
 TEAM_FILTER=""
 TIMEOUT="${AGMSG_WATCH_ONCE_TIMEOUT:-300}"
 INTERVAL="${AGMSG_WATCH_ONCE_INTERVAL:-}"
+RESOLVED_PAIR=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -30,6 +31,7 @@ while [ "$#" -gt 0 ]; do
     --team) TEAM_FILTER="${2:?--team needs a team name}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
     --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
+    --resolved-pair) RESOLVED_PAIR=1; shift ;;
     -h|--help)
       echo "Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--timeout <sec>] [--interval <sec>]"
       exit 0
@@ -55,12 +57,23 @@ source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../../../lib/subscription.sh"
 
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 DB="$(agmsg_db_path)"
 
-PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "" "$ACTIVE_NAME")" || exit 1
-if [ -n "$TEAM_FILTER" ]; then
-  PAIRS=$(printf '%s\n' "$PAIRS" | awk -v t="$TEAM_FILTER" -F'\t' 'NF >= 2 && $1 == t')
+if [ "$RESOLVED_PAIR" -eq 1 ]; then
+  if [ -z "$TEAM_FILTER" ] || [ -z "$ACTIVE_NAME" ]; then
+    echo "watch-once: --resolved-pair requires --team and --name" >&2
+    exit 1
+  fi
+  # The bridge already resolved this exact registered pair before it asks the
+  # app-server to spawn watch-once. Avoid repeating Windows ancestor discovery
+  # and all-team identity enumeration on every re-arm.
+  PAIRS="${TEAM_FILTER}"$'\t'"${ACTIVE_NAME}"
+else
+  PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+  PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "" "$ACTIVE_NAME")" || exit 1
+  if [ -n "$TEAM_FILTER" ]; then
+    PAIRS=$(printf '%s\n' "$PAIRS" | awk -v t="$TEAM_FILTER" -F'\t' 'NF >= 2 && $1 == t')
+  fi
 fi
 
 if [ -z "$PAIRS" ]; then

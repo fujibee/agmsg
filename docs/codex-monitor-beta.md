@@ -10,10 +10,11 @@ approximates the same experience by launching Codex through an app-server bridge
 > else it passes straight through. **Only enable this if you are comfortable with
 > the `codex` command being intercepted in that shell.** It also depends on Codex
 > app-server behavior and may break as Codex changes. Known rough edges:
-> enabling monitor takes effect only after you **restart Codex**. The launcher
-> starts with the TUI but deliberately waits for the first-turn SessionStart
-> hook, which supplies its official stdin `session_id` as the exact-thread
-> binding. It never guesses from a possibly old loaded thread. An
+> enabling monitor takes effect only after you **restart Codex**. A new TUI
+> launch is serialized per project and binds only the single thread added to the
+> app-server's loaded set by that launch. It never chooses an already-loaded
+> same-project thread. Resume flows retain the first-turn SessionStart
+> `session_id` compatibility path. An
 > already-running session stays unmonitored until you restart it (#151); the
 > teardown after an abruptly closed terminal is lease-timeout based when the TUI
 > process actually exits; if Windows leaves the native Codex process alive but
@@ -131,13 +132,37 @@ mode.
 `codex-monitor.sh` starts (or reuses) an agmsg-managed Codex app-server socket
 under `~/.agents/skills/<cmd>/run/`, starts the out-of-sandbox bridge launcher,
 and then connects the Codex TUI to that socket with `--remote`.
+It installs the project SessionStart/SessionEnd hooks before a new app-server
+is started, because the app-server snapshots hook configuration at startup.
+The hooks provide teardown and resume compatibility; new TUI routing does not
+wait for a user-entered first prompt.
 
-Codex fires the SessionStart hook on the session's **first turn** (the first
-message you send), not the moment the TUI opens. The out-of-sandbox launcher is
-already running at TUI startup but remains in `waiting_first_turn`; the hook
-publishes an exact generation-scoped request from Codex's common hook-input
-`session_id`. `CODEX_THREAD_ID` remains only a compatibility source; if both
-are present but disagree, routing fails closed.
+On Windows, `codex-monitor.sh` remains as a foreground Git Bash wrapper and
+waits for the npm/node/native Codex child to exit. The launcher monitors that
+stable wrapper PID rather than relying on an MSYS PID surviving an `exec`
+across the native-process boundary. App-server shutdown still requires the
+immutable reference-file set to be empty, so closing one of several TUIs does
+not stop the server used by the others.
+
+For a new TUI, `codex-monitor.sh` holds a project route lock, snapshots
+`thread/loaded/list`, launches the TUI, and accepts only one newly loaded UUID as
+that generation's route. Zero new IDs times out without consuming inbox rows;
+multiple new IDs are ambiguous and fail closed. This delta is safe only because
+the lock serializes monitor TUI startup for the project—it is not a guess from
+the existing loaded set.
+
+Codex fires SessionStart on the session's **first turn**, not when the TUI
+opens. That hook remains a compatibility route for resume flows and publishes
+the common hook-input `session_id`. `CODEX_THREAD_ID` remains only a
+compatibility source; if both are present but disagree, routing fails closed.
+
+Codex requires review and trust for new or changed project command hooks. On
+first setup (and whenever an agmsg update changes the hook definition), open
+`/hooks` in the TUI and trust the agmsg SessionStart/SessionEnd entries. Until
+then Codex deliberately skips them; the TUI itself still answers ordinary
+prompts, while agmsg remains in `waiting_first_turn`. Do not use
+`--dangerously-bypass-hook-trust` as the normal fix because it bypasses review
+for every enabled hook in that invocation.
 
 The SessionStart hook is designed to **not** start the bridge directly — a
 hook-launched process was observed to run inside the Codex sandbox and fail to
@@ -150,28 +175,41 @@ connect to the unix socket (EPERM). Instead:
 
 1. `codex-monitor.sh` creates one TUI generation, reserves the ready shared
    app-server with a provisional ref, and creates a request path unique to that
-   generation. This pre-turn ref closes the lifecycle gap where a TUI could be
-   opened and closed before SessionStart had supplied a thread. The path,
-   app-server URL, and optional explicit identity are inherited by the TUI and
-   its hooks.
-2. The shared `session-start.sh` reads hook stdin **before** invoking the Codex
-   plug. The plug publishes the current `session_id` as the exact thread. A
+   generation. This pre-route ref closes the lifecycle gap where a TUI could be
+   opened and closed before routing completed. A
+   generation-scoped pending contract records the path, app-server URL, owner
+   PID, and optional explicit identity before the TUI starts.
+2. For a new launch, the monitor takes a separate project route lock, records
+   the loaded-thread baseline, starts the TUI, and polls for the set difference.
+   Exactly one new UUID publishes the generation-scoped request. No delta keeps
+   messages unread; more than one delta fails closed as `thread_ambiguous`.
+3. For resume compatibility, the shared `session-start.sh` reads hook stdin
+   **before** invoking the Codex
+   plug. Hooks execute under the shared app-server rather than inheriting the
+   TUI generation directly, so the managed app-server generation resolves the
+   request only when exactly one fresh, live pending TUI contract exists. The
+   plug then publishes the current `session_id` as the exact thread. Multiple
+   candidates fail closed instead of guessing. On Windows the hook sandbox may
+   be unable to execute the external `sqlite3` binary; launcher mode therefore
+   does not require a second DB identity lookup after the pending contract has
+   passed its generation, path, app-server, owner-PID, and provisional-ref
+   checks. The out-of-sandbox launcher still requires the request identity to
+   match the identity it owns. A
    same-cwd rollout is **not** accepted as proof for a remote TUI: it may
    describe an older task. The request includes generation, type, `(team,
    agent)`, project, app-server, thread, and creation time.
-3. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
+4. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
    sandbox, accepts only its own fresh request with every routing field matching,
    consumes it once, and starts `codex-bridge.js`. Project-global requests from
    older versions are ignored.
-4. If no exact request is possible, the launcher stays in
-   `waiting_first_turn`/`waiting_thread`; agmsg messages stay unread. It never
-   selects a thread from `thread/loaded/list`, because even one loaded thread
-   can be an old same-project task. The bridge only uses that API to confirm an
-   exact ID after a recoverable `thread/resume` response.
-5. The bridge connects to the same app-server over loopback **WebSocket**,
+5. If no exact request is possible, the launcher stays in a waiting/error state
+   and agmsg messages stay unread. It never selects an ID from the baseline
+   loaded set. The bridge may use the loaded API only to confirm its already
+   bound exact ID after a recoverable `thread/resume` response.
+6. The bridge connects to the same app-server over loopback **WebSocket**,
    resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
    API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
-6. On an unread message it peeks the exact rows without changing `read_at`,
+7. On an unread message it peeks the exact rows without changing `read_at`,
    validates the TUI generation lease again, and inlines the text into a
    `turn/start`. Only a successful request acknowledgement marks those exact
    message IDs read. An ambiguous timeout leaves them unread, so delivery is
@@ -221,14 +259,16 @@ flowchart TD
   monitor --> server{"ready app-server record exists?"}
   server -- "no" --> startServer["lifecycle lock → starting → app-server"]
   server -- "yes" --> reuseServer["validate generation / PID / version / port"]
-  monitor --> startupRef["reserve provisional TUI ref before first turn"]
+  monitor --> startupRef["reserve provisional TUI ref before route binding"]
+  monitor --> baseline["route lock → snapshot loaded thread IDs"]
   monitor --> launcher["codex-bridge-launcher.sh (outside sandbox)"]
   startServer --> remote["codex --remote ws://127.0.0.1:port"]
   reuseServer --> remote
 
-  remote --> hook["SessionStart hook → session-start.sh (in sandbox)"]
-  hook --> thread["exact stdin session_id (CODEX_THREAD_ID compatibility check)"]
-  thread --> request["write generation-scoped request under run/ (no socket — EPERM)"]
+  remote --> delta["one new loaded thread under the same route lock"]
+  delta --> request["write generation-scoped exact-thread request"]
+  remote -. "resume compatibility" .-> hook["SessionStart session_id"]
+  hook -.-> request
   request -.-> launcher
   startupRef --> launcher
   launcher --> lease["replace provisional ref with TUI lease/ref"]
@@ -254,8 +294,8 @@ never falls back to a bare `bash`, because that can invoke WSL instead of Git fo
 Windows.
 
 `SessionStart: 1`, `SessionEnd: 1`, `Stop: 0` is the expected hook shape for
-Codex monitor mode, but it proves only that configuration was installed. Send
-one first turn, then inspect:
+Codex monitor mode, but it proves only that configuration was installed. A new
+monitor launch should bind without typing a first prompt. Inspect:
 
 ```bash
 ~/.agents/skills/<cmd>/scripts/delivery.sh status codex "$PWD"
@@ -277,17 +317,20 @@ is intentionally less convenient than losing process ownership or targeting an
 unrelated recycled PID.
 
 When the bridge has not started, the latest monitor state explains common
-stages such as `waiting_first_turn`, `waiting_identity`, `identity_ambiguous`,
-`waiting_thread`, `request_invalid`, `route_identity_conflict`, and
+stages such as `waiting_first_turn`, `route_lock_failed`, `thread_ambiguous`,
+`waiting_identity`, `identity_ambiguous`, `waiting_thread`, `request_invalid`,
+`route_identity_conflict`, and
 `identity_conflict`. Launcher logs are
 generation-specific under `run/codex-bridge-launcher.<project>.<generation>.log`;
 they contain routing/error codes and IDs, not message bodies.
 
-Immediately after opening the TUI, `waiting_first_turn
-(exact_hook_session_required)` is normal. Send one ordinary first prompt. A
-healthy launch then progresses through `request_published`/`bridge_starting` to
-`healthy`; remaining in `waiting_first_turn` means SessionStart did not deliver
-its payload and should be diagnosed rather than bypassed with a thread guess.
+Immediately after opening a new TUI, a short `waiting_first_turn` interval is
+normal while the loaded-set delta is discovered. It should progress through
+`request_published (tui_loaded_delta)`/`bridge_starting` to `healthy` without a
+manual prompt. `loaded_delta_timeout` means no unique new TUI thread appeared;
+`thread_ambiguous` means more than one appeared and routing was intentionally
+refused. For resume-specific failures, run `/hooks` and confirm that the agmsg
+hooks are trusted. Never bypass either failure by choosing an old loaded thread.
 
 ## Source update, verification, and rollback
 
