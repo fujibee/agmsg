@@ -49,6 +49,13 @@ export function createWriteBatcher(options: WriteBatcherOptions): WriteBatcher {
   let pendingBytes = 0;
   let frameHandle: number | null = null;
   let timerHandle: ReturnType<typeof setTimeout> | null = null;
+  // Permanent, not a "reset": once disposed, push/flushNow must stay no-ops
+  // forever. Without this, a push() arriving after teardown (a real race —
+  // see TerminalPane.tsx, where Tauri listener registration is async and
+  // can resolve after the owning effect's cleanup already ran) would
+  // resurrect scheduling and eventually call onFlush again, writing into
+  // whatever the caller tore down (e.g. a disposed xterm instance).
+  let disposed = false;
 
   function cancelScheduled() {
     if (frameHandle !== null) {
@@ -62,6 +69,7 @@ export function createWriteBatcher(options: WriteBatcherOptions): WriteBatcher {
   }
 
   function flushNow() {
+    if (disposed) return;
     cancelScheduled();
     if (pending.length === 0) return;
     const merged = new Uint8Array(pendingBytes);
@@ -76,6 +84,7 @@ export function createWriteBatcher(options: WriteBatcherOptions): WriteBatcher {
   }
 
   function schedule() {
+    if (disposed) return;
     if (frameHandle !== null || timerHandle !== null) return;
     frameHandle = requestFrame(() => {
       frameHandle = null;
@@ -88,6 +97,7 @@ export function createWriteBatcher(options: WriteBatcherOptions): WriteBatcher {
   }
 
   function push(chunk: Uint8Array) {
+    if (disposed) return;
     pending.push(chunk);
     pendingBytes += chunk.length;
     if (pendingBytes >= maxPendingBytes) {
@@ -98,6 +108,7 @@ export function createWriteBatcher(options: WriteBatcherOptions): WriteBatcher {
   }
 
   function dispose() {
+    disposed = true;
     cancelScheduled();
     pending = [];
     pendingBytes = 0;

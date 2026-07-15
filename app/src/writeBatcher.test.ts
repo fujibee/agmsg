@@ -119,12 +119,22 @@ describe("createWriteBatcher", () => {
     expect(s.cancelFrame).toHaveBeenCalledTimes(1);
     expect(s.clearTimer).toHaveBeenCalledTimes(1);
     expect(onFlush).not.toHaveBeenCalled();
-    // A push after dispose should behave like a fresh batcher, not resurrect
-    // dropped data.
-    batcher.push(bytes("new"));
-    s.fireFrame();
-    expect(onFlush).toHaveBeenCalledTimes(1);
-    expect(text(onFlush.mock.calls[0][0])).toBe("new");
+  });
+
+  it("dispose is permanent — a push() arriving after dispose (e.g. a Tauri listener that resolved late, after its owning component already tore down) must not resurrect scheduling or flush", () => {
+    const s = fakeSchedulers();
+    const onFlush = vi.fn();
+    const batcher = createWriteBatcher({ onFlush, ...s });
+    batcher.dispose();
+    s.requestFrame.mockClear();
+    s.setTimer.mockClear();
+    batcher.push(bytes("late arrival"));
+    expect(s.requestFrame).not.toHaveBeenCalled();
+    expect(s.setTimer).not.toHaveBeenCalled();
+    expect(onFlush).not.toHaveBeenCalled();
+    // Even an explicit flushNow() call must stay inert post-dispose.
+    batcher.flushNow();
+    expect(onFlush).not.toHaveBeenCalled();
   });
 
   it("flushNow flushes and cancels scheduling on demand (e.g. before writing an exit banner)", () => {

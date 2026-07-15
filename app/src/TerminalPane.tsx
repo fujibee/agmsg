@@ -101,22 +101,42 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     const unlisteners: Array<() => void> = [];
     (async () => {
       // Register listeners BEFORE spawning so no early output is missed.
-      unlisteners.push(
-        await listen<{ id: string; b64: string }>("pty-output", (e) => {
-          if (e.payload.id === id) writeBatcher.push(b64ToBytes(e.payload.b64));
-        }),
-      );
-      unlisteners.push(
-        await listen<{ id: string }>("pty-exit", (e) => {
-          if (e.payload.id !== id) return;
-          // Flush synchronously first — any output still waiting for its
-          // batched write must land before the exit banner, or the banner
-          // could render above the process's own final lines.
-          writeBatcher.flushNow();
-          term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
-        }),
-      );
-      if (disposed) return;
+      // `listen()` is async — if this effect's cleanup runs while one of
+      // these awaits is still in flight (a fast unmount/remount, or React
+      // re-running the effect), the listener resolves into a component
+      // that's already torn down. Each registration below checks `disposed`
+      // right after its own await and, if already torn down, unregisters
+      // itself immediately instead of joining `unlisteners` — otherwise the
+      // Tauri listener would keep firing this closure's stale term/
+      // writeBatcher forever (a real listener leak), and — before
+      // writeBatcher.dispose() became permanent (see writeBatcher.ts) —
+      // could even resurrect its scheduling after teardown. The `disposed`
+      // check inside each callback body is defense in depth for an event
+      // already queued at the moment unlisten() runs.
+      const unlistenOutput = await listen<{ id: string; b64: string }>("pty-output", (e) => {
+        if (disposed) return;
+        if (e.payload.id === id) writeBatcher.push(b64ToBytes(e.payload.b64));
+      });
+      if (disposed) {
+        unlistenOutput();
+        return;
+      }
+      unlisteners.push(unlistenOutput);
+
+      const unlistenExit = await listen<{ id: string }>("pty-exit", (e) => {
+        if (disposed) return;
+        if (e.payload.id !== id) return;
+        // Flush synchronously first — any output still waiting for its
+        // batched write must land before the exit banner, or the banner
+        // could render above the process's own final lines.
+        writeBatcher.flushNow();
+        term.write(`\r\n\x1b[90m${t("terminal.processExited")}\x1b[0m\r\n`);
+      });
+      if (disposed) {
+        unlistenExit();
+        return;
+      }
+      unlisteners.push(unlistenExit);
       term.onData((data) => void invoke("pty_write", { id, data }));
       fitNow(); // size the PTY to the pane if it's already laid out
       try {
