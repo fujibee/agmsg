@@ -141,7 +141,7 @@ Claude watcherについても、当初は`agmsg_pid_is_agent()`内の素の`kill
 
 ### 5.2 Gate G1: Claude Code実process tree
 
-Claude Code session自身から読み取り専用でprocess treeを観測し、Git Bash中継を二段挟んでnative `claude.exe`へ到達する構造を確認した。Win32_Processの`ParentProcessId`を使うnative walkなら到達でき、設計上のhop上限12で十分だった。ただし親が先に死亡すると`ParentProcessId` chainを後から完全復元できない窓がある。
+Claude Code session自身から読み取り専用でprocess treeを観測し、Git Bash中継を二段挟んでnative `claude.exe`へ到達する構造を確認した。Win32_Processの`ParentProcessId`を使うnative walkなら到達でき、Gate G1当時に検討していたhop上限12でも十分な観測結果だった。現行実装の既定上限は20であり、12は現行値ではない。ただし親が先に死亡すると`ParentProcessId` chainを後から完全復元できない窓がある。
 
 ### 5.3 Gate G2: Codex app-server実バイナリ
 
@@ -268,7 +268,7 @@ PowerShellから公式scriptを呼ぶ場合は次の形に統一する。
 - `tests/test_codex_resume.bats`: seat移動、fresh generation thread、old same-cwd rollout拒否。
 - `tests/test_messaging.bats`: peek、exact mark、idempotence、曖昧identity fail-closed。
 - `tests/test_storage.bats`: Windows pathとsandbox-compatible sqlite copy。
-- `tests/test_windows_claude_ancestor.bats`: POSIX互換、MSYS内/境界越えnative ancestor、複数bash中継、非Claude拒否、CIM unknown、cycle/hop上限、WINPID composite、project marker、PID reuse、parallel resume、実WINPID watcher終了、bare fail-closed。
+- `tests/test_windows_claude_ancestor.bats`: POSIX互換、MSYS内/境界越えnative ancestor、Phase 1 fallback、複数bash中継、production identity matcher、CIM/CreationDate unknown、cycle/hop上限、WINPID composite、同一Claude PID generation reuse、parallel resume、実WINPID watcher終了、grok-build MSYS owner、bare fail-closed、status/`set off` cleanup。
 
 ### 10.2 実行記録として確認できる範囲
 
@@ -284,7 +284,7 @@ PowerShellから公式scriptを呼ぶ場合は次の形に統一する。
 - SessionStart hookがapp-serverより先にinstallされること。
 - PowerShell関数がGit Bashを固定し、`usr\bin`を`bin`へ正規化すること。
 
-同日のClaude watcher恒久修正では、`tests/test_windows_claude_ancestor.bats` 16件を実行した。決定論的process-table stubによる12件に加え、`sleep.exe`の使い捨てcopyを`claude.exe`として起動する実WINPID/CIM lifecycle、bare watcher fail-closed、status分類、`delivery set off` cleanupの4件を含む。live owner中のwatcher維持、owner終了後の自動終了とpidfile削除、bare UUID watcherを根拠不足で停止しないことを確認した。managed sandbox内でCIM identityが拒否される場合はunknown/fail-closed testへ切り替え、実WINPID lifecycle caseはCIMを読み取れるWindows実行で成功させた。テスト用processは各caseのteardownで停止・waitし、残存process検索でも対象command lineが無いことを確認した。
+同日のClaude watcher恒久修正とreview追随では、`tests/test_windows_claude_ancestor.bats`を23件へ拡張した。決定論的process-table stubでproduction identity matcher、後続引数に`claude`があるだけのprocess拒否、Phase 1からPhase 2への安全な継続、CreationDate一致/不一致/取得不能、atomic sidecarのsuccessor-safe cleanupを検証した。さらに`sleep.exe`の使い捨てcopyを`claude.exe`として起動する実WINPID/CIM lifecycle、実`watch.sh`のCIM unknown継続、grok-buildのMSYS PID lifecycle、bare watcher fail-closed、status分類、`delivery set off` cleanupを含む。live owner中のwatcher維持、owner終了後の自動終了とpidfile削除、bare UUID watcherを根拠不足で停止しないことをWindows上で確認した。長いsuiteは全体timeout前に成功したcaseを記録し、残りをfilter分割して全23件を完了した。テスト用processは各caseのteardownで停止・waitし、最後に今回起動したbash/sleep/claude test doubleの残存がないことを確認した。
 
 関連回帰では`tests/test_instance_id.bats` 41件がexit 0、`tests/test_resolve_project.bats`は既存23件成功後に今回のPID-domain変更で露出したmarker GC 1件を修正・再成功、Windows非対応のworktree path 2件を既存skip方針へ統一した。`tests/test_watch.bats`はWindows非対応process/permission caseをskipし、今回の専用testで同等のnative lifecycleを置き換えた。変更shellの`bash -n`、`shellcheck`、`git diff --check`も成功した。巨大な`test_delivery.bats`全体はWindows上の収集コストが高く完走させず、必要なstatusと`set off` cleanupは専用16件へ移して実行した。
 
@@ -346,7 +346,9 @@ statusは`watch processes: 2 alive, 4 stale pidfiles`だった。PowerShellか�
 
 今回のsource修正で`agmsg_agent_pid()`を二段階化した。Phase 1は従来のMSYS/POSIX parent walk、Phase 2は境界のMSYS PIDをWINPIDへ変換して`Win32_Process.ParentProcessId`を辿る。Windowsで返すPIDはMSYS内でagentを見つけた場合もWINPIDへ統一し、composite instance ID、`cc-instance`、project marker、owner livenessのPID domainを揃えた。native identityはName/ExecutablePath/CommandLineを一回のCIM queryで取得し、実行主体がClaudeである場合だけ採用する。hop上限、cycle、空値、不正PIDを拒否する。
 
-`watch.sh`はtyped owner stateが`dead`の場合だけ終了する。native PIDが存在してもClaude identityと一致しなければPID reuse/mismatchとして終了し、tasklist/CIM照会失敗は`unknown`として継続する。parallel resumeは同じsession UUIDでも異なるnative PIDのcomposite IDになる。PIDが再利用されて同じ数値になった場合も、別commandへのreuseはidentity検証で拒否され、新SessionStartの既存dedupが同じkeyの旧watcherを置き換える。ただし同一UUID・同一再利用PID・同一Claude executableという極端なgeneration衝突をcreation timeまで永続比較するsidecarは今回追加していない。
+`watch.sh`はtyped owner stateが`dead`の場合だけ終了する。native PIDが存在してもClaude identityと一致しなければPID reuse/mismatchとして終了し、tasklist/CIM/CreationDate照会失敗は`unknown`として継続する。起動時に同じ`Win32_Process` snapshotのCreationDate ticksを取得し、`watch.<instance>.owner`へwatcher PID・type・PID domainとともにatomic writeする。poll時はWINPID、Claude identity、CreationDateがすべて一致した場合だけ`alive`であり、同一UUID・同一WINPID・同じ`claude.exe`でもCreationDateが違えば旧ownerとして`dead`になる。sidecar cleanupは記録されたwatcher PIDが自分と一致する場合だけ行い、successorのrecordを旧watcherが消さない。
+
+reviewで判明したgrok-build回帰も同時に修正した。grok-buildのcomposite IDが保持するPIDはMSYS domainなので、Windowsでも`compat_pid_alive_msys()`で判定し、tasklist/CIMへ渡さない。native identity/CreationDate検証は`agmsg_agent_pid()`がWINPIDを返すtypeに限定した。Phase 1のMSYS PID→WINPID変換や候補再検証が一時的に失敗した場合は、domainが確定している現在のMSYS PIDからPhase 2を試し、変換不能ならbareへfail-closedする。
 
 ### 12.2 bare watcherのbackstop
 
@@ -409,6 +411,7 @@ watch ownership: 0 verified composite, 0 bare weak, 0 owner unknown, 0 owner dea
 | 優先度 | 作業 | 完了条件 |
 |---|---|---|
 | 完了 | Claude用Windows native ancestor walkを実装 | stub matrixと使い捨てnative `claude.exe`自動testでcomposite/liveness/終了を確認。実Claude Code E2Eは別途必要 |
+| 完了 | watcher owner generationとgrok PID domainをhardening | CreationDate sidecarのatomic/compare cleanup、同一WINPID reuse、grok MSYS lifecycleをWindows自動testで確認 |
 | P0 | bare watcherの安全なbackstop/GC | live watcherを誤killせず、親消失bare watcherを回収できるtest |
 | P1 | Windows実機回帰matrix | normal exit、resume、window close、sleep/resume、CIM拒否を自動/半自動確認 |
 | P1 | test timeoutとcleanup強化 | Bats中断・timeout後にbash/node/processとtemp artifactが残らない |
