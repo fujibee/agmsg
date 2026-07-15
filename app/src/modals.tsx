@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { SUPPORTED_LANGUAGES } from "./i18n";
@@ -392,6 +392,21 @@ export function SettingsModal(props: {
   const [timezoneText, setTimezoneText] = useState(() =>
     props.timezone === AUTO_TIMEZONE ? autoLabel : props.timezone,
   );
+  // Switching language mid-modal recomputes autoLabel (it's translated) but
+  // wouldn't otherwise touch this draft, leaving it showing the old
+  // language's "Auto (...)" text. Only re-sync when the draft still equals
+  // the PREVIOUS autoLabel and the committed timezone is still auto — never
+  // clobbers a custom zone name the user is typing/has typed.
+  const lastAutoLabelRef = useRef(autoLabel);
+  useEffect(() => {
+    if (props.timezone === AUTO_TIMEZONE && timezoneText === lastAutoLabelRef.current) {
+      setTimezoneText(autoLabel);
+    }
+    lastAutoLabelRef.current = autoLabel;
+    // Deliberately scoped to autoLabel changes only (see comment above) —
+    // timezoneText/props.timezone are read via closure, not deps, so this
+    // doesn't re-fire on every keystroke or timezone change.
+  }, [autoLabel]);
   return (
     <Modal title={t("modal.settings.title")} onClose={props.onClose}>
       <label>
