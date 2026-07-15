@@ -91,6 +91,7 @@ line3"
 
 @test "check-inbox: a team name containing a quote still delivers without a SQL error (#87)" {
   local project; project="$(mktemp -d)"
+  bash "$SCRIPTS/join.sh" "te'am" alice claude-code /tmp/project-a
   bash "$SCRIPTS/join.sh" "te'am" carol claude-code "$project"
   bash "$SCRIPTS/send.sh" "te'am" alice carol "quoted team delivery"
   run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"

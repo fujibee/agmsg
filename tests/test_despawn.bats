@@ -19,6 +19,7 @@ teardown() {
 
 @test "despawn: graceful — ctrl:despawn makes the member drop its role" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   # Make the member session look alive so the leader sees a live lock to wait on.
   setup_live_owner "$RUN" sess-m
 
@@ -71,6 +72,7 @@ teardown() {
 
 @test "despawn: times out (exit 3) when the member never drops" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   setup_live_owner "$RUN" sess-m
   printf 'sess-m\n' > "$RUN/actas.team__alice.session"   # held live, no watcher to act
 
@@ -86,6 +88,7 @@ teardown() {
   # take down the leader session. A broad watcher must skip the control message.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team boss claude-code "$PROJ" >/dev/null
 
   # Broad watcher (no actas arg) — subscribes to both alice and leader.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-broad "$PROJ" claude-code \

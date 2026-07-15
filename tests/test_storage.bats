@@ -70,6 +70,8 @@ SH
 # --- end-to-end roundtrip through the override ---
 
 @test "storage: send and inbox share the overridden db" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
   bash "$SCRIPTS/send.sh" testteam alice bob "hi via override"
   [ -f "$AGMSG_STORAGE_PATH/messages.db" ]
@@ -85,6 +87,7 @@ SH
 
   # Register an agent so check-inbox can resolve identity via whoami.
   bash "$SCRIPTS/join.sh" testteam alice claude-code "$project"
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/agmsg-storage-test-bob
 
   # A message addressed to alice lives only in the overridden store.
   AGMSG_STORAGE_PATH="$store" bash "$SCRIPTS/send.sh" testteam bob alice "via override store"
@@ -102,6 +105,8 @@ SH
 @test "storage: default db is untouched when the override is set" {
   # The default store was initialized in setup; writing through an override
   # must not add rows to it.
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
+  bash "$SCRIPTS/join.sh" testteam bob claude-code /tmp/project-b
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
   bash "$SCRIPTS/send.sh" testteam alice bob "isolated"
 
@@ -136,7 +141,7 @@ SH
   # sends silently drop. With the wrapper they wait and all land. See #114.
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
   done
   wait
   local n
@@ -152,7 +157,7 @@ SH
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/freshstore"
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
   done
   wait
   local n
