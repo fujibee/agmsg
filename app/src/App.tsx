@@ -1447,7 +1447,9 @@ export default function App() {
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
                     >
-                      <span className={`team-status-dot status-${status}`} />
+                      <span className="team-status-slot">
+                        <span className={`team-status-dot status-${status}`} />
+                      </span>
                       <span className="team-status-name">{teamName}</span>
                     </button>
                   );

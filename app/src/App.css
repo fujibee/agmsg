@@ -646,17 +646,17 @@ body.resizing-row {
 .team-status-rail {
   display: flex;
   flex-direction: column;
+  gap: 3px;
   border-bottom: 1px solid var(--border);
   padding: 3px 6px;
 }
 .team-status-row {
-  height: 20px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
-  padding: 0 4px;
+  padding: 6px 4px;
   background: none;
   border: none;
   border-radius: 3px;
@@ -674,6 +674,13 @@ body.resizing-row {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-status-slot {
+  flex-shrink: 0;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .team-status-dot {
   flex: 0 0 auto;
   width: 7px;
@@ -684,6 +691,7 @@ body.resizing-row {
 .team-status-dot.status-blocked { background: #f7768e; }
 .team-status-dot.status-working { background: #e0af68; }
 .team-status-dot.status-idle { background: var(--green); }
+.team-status-dot.status-unknown { background: var(--green); }
 .collapsed-team-status {
   width: 28px;
   padding: 2px;
@@ -693,7 +701,7 @@ body.resizing-row {
 .collapsed-team-status .team-status-row {
   justify-content: center;
   gap: 0;
-  padding: 0;
+  padding: 6px 0;
 }
 .language-switcher {
   font-size: 11px;
@@ -788,6 +796,7 @@ body.resizing-row {
   animation-delay: var(--pulse-delay, 0s);
 }
 .agent-status-dot.status-idle { background: var(--green); }
+.agent-status-dot.status-unknown { background: var(--green); }
 
 @keyframes agent-status-pulse {
   50% { opacity: 0.35; transform: scale(0.8); }
