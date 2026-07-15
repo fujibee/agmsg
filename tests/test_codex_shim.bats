@@ -97,6 +97,18 @@ teardown() {
   [ ! -e "$HOME/.agents/bin/codex" ]
 }
 
+@test "codex shim install: Windows PowerShell function pins Git Bash and forwards arguments" {
+  run env GIT_BASH='C:\Program Files\Git\bin\bash.exe' \
+    bash "$TYPES/codex/codex-shim-install.sh" powershell-function
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"function codex {"* ]]
+  [[ "$output" == *"C:\Program Files\Git\bin\bash.exe"* ]]
+  [[ "$output" == *"-lc 'exec"* ]]
+  [[ "$output" == *"codex-shim.sh' @args"* ]]
+  [[ "$output" == *"not WSL"* ]]
+}
+
 @test "codex shim function: existing agmsg PATH wrapper is skipped when resolving real codex" {
   export HOME="$TEST_PROJECT/home"
   mkdir -p "$HOME"

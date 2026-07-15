@@ -78,6 +78,52 @@ recorded_uuid() {
   [ "$(agmsg_role_session_get team alice type)" = "codex" ]
 }
 
+@test "codex record: moving one thread to a new role removes its old same-project seat" {
+  local proj; proj="$(mktemp -d)"
+  CODEX_THREAD_ID="shared-thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  CODEX_THREAD_ID="shared-thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team reviewer "$proj"
+
+  [ -z "$(recorded_uuid team alice)" ]
+  [ "$(recorded_uuid team reviewer)" = "shared-thread" ]
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  local record
+  record="$(agmsg_role_session_lookup_unique_by_sid shared-thread)"
+  [[ "$record" == *$'agent=reviewer'* ]]
+}
+
+@test "codex record: monitor mode uses only its fresh generation-bound bridge thread" {
+  local proj; proj="$(mktemp -d)"
+  local generation="record-generation" tui bridge
+  tui="$(SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$RUN_DIR" bash -c \
+    '. "$1/lib/codex-lease.sh"; codex_write_tui_lease team alice exact-monitor-thread "$2" "$3" ws://127.0.0.1:1 $$' \
+    _ "$SCRIPTS" "$generation" "$proj")"
+  bridge="$(SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$RUN_DIR" bash -c \
+    '. "$1/lib/codex-lease.sh"; codex_bridge_lease_path team alice' _ "$SCRIPTS")"
+  cat >"$bridge" <<EOF
+format_version=1
+owner_kind=bridge
+bound_thread_id=exact-monitor-thread
+bound_generation=$generation
+updated_at=$(date +%s)
+EOF
+
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 AGMSG_CODEX_TUI_GENERATION="$generation" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "exact-monitor-thread" ]
+  [ -f "$tui" ]
+}
+
+@test "codex record: monitor mode never substitutes an old same-cwd rollout" {
+  local proj; proj="$(mktemp -d)"
+  make_rollout "wrong-old-thread" "$proj"
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 AGMSG_CODEX_TUI_GENERATION="missing-generation" \
+    AGMSG_CODEX_ROLLOUT_MAX_AGE=999999 \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
 @test "codex record: falls back to the unique matching-cwd rollout when env is unset" {
   local proj; proj="$(mktemp -d)"
   make_rollout "fallback-uuid" "$proj"
@@ -90,6 +136,15 @@ recorded_uuid() {
   make_rollout "uuid-A" "$proj" "2026/07/05" "2026-07-05T10-00-00"
   make_rollout "uuid-B" "$proj" "2026/07/05" "2026-07-05T11-00-00"
   ( unset CODEX_THREAD_ID; bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: ignores a unique but stale same-cwd rollout" {
+  local proj; proj="$(mktemp -d)"
+  make_rollout "stale-uuid" "$proj"
+  find "$CODEX_SESSIONS" -type f -name '*stale-uuid*' -exec touch -t 200001010000 {} \;
+  ( unset CODEX_THREAD_ID; AGMSG_CODEX_ROLLOUT_MAX_AGE=300 \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
   [ -z "$(recorded_uuid team alice)" ]
 }
 

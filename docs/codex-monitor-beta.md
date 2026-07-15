@@ -10,13 +10,16 @@ approximates the same experience by launching Codex through an app-server bridge
 > else it passes straight through. **Only enable this if you are comfortable with
 > the `codex` command being intercepted in that shell.** It also depends on Codex
 > app-server behavior and may break as Codex changes. Known rough edges:
-> enabling monitor takes effect only after you **restart Codex and send your
-> first message** — the SessionStart hook fires on the first turn, not the
-> moment Codex opens, so the bridge is absent until you interact once; an
+> enabling monitor takes effect only after you **restart Codex**. The launcher
+> starts with the TUI but deliberately waits for the first-turn SessionStart
+> hook, which supplies its official stdin `session_id` as the exact-thread
+> binding. It never guesses from a possibly old loaded thread. An
 > already-running session stays unmonitored until you restart it (#151); the
-> teardown after an abruptly closed terminal is lease-timeout based rather than
-> instantaneous; and projects with multiple Codex identities still require an
-> unambiguous active role (#150).
+> teardown after an abruptly closed terminal is lease-timeout based when the TUI
+> process actually exits; if Windows leaves the native Codex process alive but
+> inaccessible after a console-window crash, it cannot be distinguished safely
+> from a live TUI and may require explicit cleanup. Projects with multiple Codex
+> identities require an explicit active role (#150).
 
 ## Quick Start
 
@@ -50,6 +53,18 @@ codex() {
   ~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-shim.sh "$@"
 }
 ```
+
+On Windows, the enable command also prints a PowerShell-profile alternative.
+You can reproduce it at any time from Git Bash with:
+
+```bash
+~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh powershell-function
+```
+
+It pins the current Git for Windows `bash.exe` path, starts its login-shell
+environment, and then execs `codex-shim.sh` with the original argument array.
+PowerShell therefore never resolves the Windows WSL `bash` launcher by
+accident, while Git's `usr/bin` tools remain available to the shim.
 
 Restart the shell, then launch Codex normally:
 
@@ -118,8 +133,11 @@ under `~/.agents/skills/<cmd>/run/`, starts the out-of-sandbox bridge launcher,
 and then connects the Codex TUI to that socket with `--remote`.
 
 Codex fires the SessionStart hook on the session's **first turn** (the first
-message you send), not the moment the TUI opens — so the bridge does not exist
-until you interact once after a restart.
+message you send), not the moment the TUI opens. The out-of-sandbox launcher is
+already running at TUI startup but remains in `waiting_first_turn`; the hook
+publishes an exact generation-scoped request from Codex's common hook-input
+`session_id`. `CODEX_THREAD_ID` remains only a compatibility source; if both
+are present but disagree, routing fails closed.
 
 The SessionStart hook is designed to **not** start the bridge directly — a
 hook-launched process was observed to run inside the Codex sandbox and fail to
@@ -130,29 +148,60 @@ connect to the unix socket (EPERM). Instead:
 > detached bridge directly and connect fine, suggesting the launcher layer may
 > be redundant. See #153.
 
-1. `session-start.sh` (the hook) resolves the thread id — `CODEX_THREAD_ID` when
-   set, otherwise the newest Codex rollout whose `session_meta` cwd matches the
-   project (fresh / `codex exec` sessions never export `CODEX_THREAD_ID`) — and
-   writes a **request file** under `run/` (it never touches the socket).
-2. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
-   sandbox, reads the request file and starts `codex-bridge.js`.
-3. The bridge connects to the same app-server over loopback **WebSocket**,
+1. `codex-monitor.sh` creates one TUI generation, reserves the ready shared
+   app-server with a provisional ref, and creates a request path unique to that
+   generation. This pre-turn ref closes the lifecycle gap where a TUI could be
+   opened and closed before SessionStart had supplied a thread. The path,
+   app-server URL, and optional explicit identity are inherited by the TUI and
+   its hooks.
+2. The shared `session-start.sh` reads hook stdin **before** invoking the Codex
+   plug. The plug publishes the current `session_id` as the exact thread. A
+   same-cwd rollout is **not** accepted as proof for a remote TUI: it may
+   describe an older task. The request includes generation, type, `(team,
+   agent)`, project, app-server, thread, and creation time.
+3. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
+   sandbox, accepts only its own fresh request with every routing field matching,
+   consumes it once, and starts `codex-bridge.js`. Project-global requests from
+   older versions are ignored.
+4. If no exact request is possible, the launcher stays in
+   `waiting_first_turn`/`waiting_thread`; agmsg messages stay unread. It never
+   selects a thread from `thread/loaded/list`, because even one loaded thread
+   can be an old same-project task. The bridge only uses that API to confirm an
+   exact ID after a recoverable `thread/resume` response.
+5. The bridge connects to the same app-server over loopback **WebSocket**,
    resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
    API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
-4. On an unread message it peeks the exact rows without changing `read_at`,
+6. On an unread message it peeks the exact rows without changing `read_at`,
    validates the TUI generation lease again, and inlines the text into a
    `turn/start`. Only a successful request acknowledgement marks those exact
    message IDs read. An ambiguous timeout leaves them unread, so delivery is
    at-least-once and may duplicate rather than silently lose data.
 
-The launcher publishes a generation-specific TUI lease before starting the
-bridge. The bridge checks it before arming, before fetching, immediately before
-`turn/start`, and from an independent timer while `watch-once` is blocked. A
-normal TUI exit deletes its lease immediately; an abruptly closed terminal
-stops refreshing it, so the bridge kills its outstanding watch and exits after
-the bounded stale timeout. Shared app-servers are protected by per-TUI ref
-files and a project lifecycle lock, and are stopped only after the ref set is
-empty.
+The launcher atomically replaces the provisional ref with a
+generation-specific TUI lease/ref before starting the bridge. The bridge checks
+that lease before arming, before fetching, immediately before `turn/start`, and
+from an independent timer while `watch-once` is blocked. A normal TUI exit
+deletes its lease/ref immediately—even before the first turn—and an abruptly
+closed terminal stops refreshing it when the owning Codex process exits. The
+bridge then kills its outstanding watch and exits after the bounded stale
+timeout (15 seconds by default, configurable with
+`AGMSG_CODEX_LEASE_TIMEOUT`). Shared app-servers are protected by the immutable
+per-TUI ref set and a project lifecycle lock, and are stopped only after that
+set is empty.
+
+If two TUI generations target the same `(team, agent)`, a fresh generation that
+already owns the bridge is not killed by the other launcher. The second TUI is
+reported as `identity_conflict`; if the owner becomes stale, a surviving TUI may
+take over. Different identities in one project are supported when selected
+explicitly:
+
+```bash
+~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh \
+  --team hameln --name codex1 --project "$PWD" --codex-command codex --
+```
+
+The equivalent environment variables are `AGMSG_CODEX_TEAM` and
+`AGMSG_CODEX_NAME`.
 
 Turns are serialized (one per thread): a message that arrives while a turn is
 running stays unread and is delivered after the turn completes. The turn ends
@@ -172,15 +221,17 @@ flowchart TD
   monitor --> server{"ready app-server record exists?"}
   server -- "no" --> startServer["lifecycle lock → starting → app-server"]
   server -- "yes" --> reuseServer["validate generation / PID / version / port"]
+  monitor --> startupRef["reserve provisional TUI ref before first turn"]
   monitor --> launcher["codex-bridge-launcher.sh (outside sandbox)"]
   startServer --> remote["codex --remote ws://127.0.0.1:port"]
   reuseServer --> remote
 
   remote --> hook["SessionStart hook → session-start.sh (in sandbox)"]
-  hook --> thread["resolve thread: CODEX_THREAD_ID || newest matching rollout"]
-  thread --> request["write request file under run/ (no socket — EPERM)"]
+  hook --> thread["exact stdin session_id (CODEX_THREAD_ID compatibility check)"]
+  thread --> request["write generation-scoped request under run/ (no socket — EPERM)"]
   request -.-> launcher
-  launcher --> lease["publish generation-specific TUI lease"]
+  startupRef --> launcher
+  launcher --> lease["replace provisional ref with TUI lease/ref"]
   lease --> bridge["codex-bridge.js → loopback WebSocket app-server"]
   bridge --> watch["arm watch-once.sh (process/spawn)"]
   watch --> db[("agmsg SQLite DB (read_at IS NULL)")]
@@ -193,6 +244,98 @@ flowchart TD
   tui --> ended["turn ends: completed / idle / watchdog"]
   ended --> watch
 ```
+
+## Windows readiness and diagnosis
+
+For PowerShell → Git Bash → Codex, the supported entry point is the printed
+PowerShell function or an explicit Git Bash invocation. The monitor exports the
+native path of the Git Bash executable to the Node bridge. On Windows the bridge
+never falls back to a bare `bash`, because that can invoke WSL instead of Git for
+Windows.
+
+`SessionStart: 1`, `SessionEnd: 1`, `Stop: 0` is the expected hook shape for
+Codex monitor mode, but it proves only that configuration was installed. Send
+one first turn, then inspect:
+
+```bash
+~/.agents/skills/<cmd>/scripts/delivery.sh status codex "$PWD"
+```
+
+`Codex route: ... healthy` requires all of the following, not just a live PID:
+
+- the bridge heartbeat is fresh;
+- its bound thread is an exact UUID, not unresolved `loaded`;
+- a fresh TUI lease with the same generation exists;
+- the shared app-server record is `ready` and its process is alive;
+- the bridge phase is `watch_armed` or `delivering`.
+
+Windows native PID checks are three-valued: `alive`, `dead`, or `unknown`.
+`tasklist`/CIM failure is `unknown`, never proof of death. Startup ref GC,
+launcher replacement, and `mode off` keep leases/records and refuse duplicate
+startup or killing when identity cannot be verified. A retained unknown record
+is intentionally less convenient than losing process ownership or targeting an
+unrelated recycled PID.
+
+When the bridge has not started, the latest monitor state explains common
+stages such as `waiting_first_turn`, `waiting_identity`, `identity_ambiguous`,
+`waiting_thread`, `request_invalid`, `route_identity_conflict`, and
+`identity_conflict`. Launcher logs are
+generation-specific under `run/codex-bridge-launcher.<project>.<generation>.log`;
+they contain routing/error codes and IDs, not message bodies.
+
+Immediately after opening the TUI, `waiting_first_turn
+(exact_hook_session_required)` is normal. Send one ordinary first prompt. A
+healthy launch then progresses through `request_published`/`bridge_starting` to
+`healthy`; remaining in `waiting_first_turn` means SessionStart did not deliver
+its payload and should be diagnosed rather than bypassed with a thread guess.
+
+## Source update, verification, and rollback
+
+Do not patch `~/.agents/skills/<cmd>` directly. Make and test changes in the
+agmsg source checkout; the installed copy contains runtime DB/team state and a
+manual edit is both hard to reproduce and easy to overwrite.
+
+After the source branch is committed and only with the user's explicit approval,
+update the installed scripts from Git Bash:
+
+```bash
+cd /path/to/agmsg-source
+./install.sh --update
+```
+
+`--update` preserves DB and team data. It may refresh the owned optional shim
+and Codex writable-root configuration, so inspect its output. Then use a newly
+opened profile-loaded PowerShell and verify in this order:
+
+1. `Get-Command codex` resolves the intended function/shim.
+2. `delivery.sh status codex <project>` says `mode: monitor`.
+3. Open `codex`, send one ordinary first prompt, and wait for
+   `Codex route: ... healthy` with an exact thread ID.
+4. Send one uniquely identifiable test message from another agent. Confirm one
+   automatic turn appears in this task, the exact row becomes read only after
+   `turn/start` acknowledgement, and no other team/agent inbox changes.
+5. Repeat with app-server disconnect/reconnect, a second same-project TUI, and a
+   normal TUI exit. `identity_conflict`/fail-closed is acceptable; a wrong task
+   receiving the message or an unread row disappearing is not.
+6. Close a disposable console window abruptly and inspect status/processes.
+   Windows may keep the native Codex process genuinely alive; do not auto-kill
+   that residual unless PID, creation time, metadata, and cmdline all match.
+
+Rollback immediately if a message is acknowledged without a turn, an old task
+receives a turn, duplicate bridges appear, or `mode off` targets an unrelated
+process:
+
+```bash
+~/.agents/skills/<cmd>/scripts/delivery.sh set off codex /path/to/project
+cd /path/to/agmsg-source-at-known-good-commit
+./install.sh --update
+```
+
+For this development line, `a1fdcc6` is the local checkpoint immediately before
+the Windows routing/health hardening described here. Reinstalling from a clean
+checkout/worktree at that commit restores the prior scripts while preserving
+DB/team data. Removing the printed PowerShell function or optional PATH shim is
+separate and is never done automatically.
 
 ## Worker Guardrails
 

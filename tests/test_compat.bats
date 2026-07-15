@@ -100,3 +100,25 @@ teardown() {
   result=$(compat_get_comm "$_STUB_PID")
   [ "$result" = "bash" ]
 }
+
+@test "compat Windows native PID state reports tasklist failure as unknown, never dead" {
+  local fake_bin="$TEST_SKILL_DIR/fake-bin"
+  mkdir -p "$fake_bin"
+  printf '#!/usr/bin/env bash\necho tasklist-unavailable >&2\nexit 5\n' >"$fake_bin/tasklist.exe"
+  chmod +x "$fake_bin/tasklist.exe"
+
+  local state
+  state="$(PATH="$fake_bin:$PATH" _AGMSG_COMPAT_NO_CIM=1 compat_pid_state_native 424242)"
+  [ "$state" = unknown ]
+  ! PATH="$fake_bin:$PATH" _AGMSG_COMPAT_NO_CIM=1 compat_pid_alive_native 424242
+}
+
+@test "compat Windows native PID state falls back to CIM when tasklist is blocked" {
+  local fake_bin="$TEST_SKILL_DIR/fake-bin"
+  mkdir -p "$fake_bin"
+  printf '#!/usr/bin/env bash\nexit 5\n' >"$fake_bin/tasklist.exe"
+  chmod +x "$fake_bin/tasklist.exe"
+  _compat_cim_property() { [ "$2" = ProcessId ] && printf '%s\n' "$1"; }
+
+  [ "$(PATH="$fake_bin:$PATH" compat_pid_state_native 424242)" = alive ]
+}

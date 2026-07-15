@@ -15,6 +15,67 @@ teardown() {
   teardown_test_env
 }
 
+@test "codex-bridge: Windows bash resolver uses an explicit Git Bash path instead of PATH bash" {
+  local fake_bash="$TEST_SKILL_DIR/fake-git-bash.exe"
+  local native_fake
+  : >"$fake_bash"
+  native_fake="$(cygpath -w "$fake_bash" 2>/dev/null || printf '%s' "$fake_bash")"
+  run node - "$TYPES/codex/codex-bridge.js" "$native_fake" <<'EOF'
+const bridgePath = process.argv[2];
+const fake = process.argv[3];
+const { resolveBashBin } = require(bridgePath);
+const resolved = resolveBashBin("win32", { GIT_BASH: fake, PATH: "C:\\Windows\\System32" });
+if (resolved !== fake) throw new Error(`resolved ${resolved}`);
+process.stdout.write(resolved);
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = "$native_fake" ]
+}
+
+@test "codex-bridge: peer websocket close exits so the launcher can reconnect" {
+  run node - "$TYPES/codex/codex-bridge.js" <<'EOF'
+const crypto = require("crypto");
+const net = require("net");
+const { WebSocketAppServerClient } = require(process.argv[2]);
+
+const server = net.createServer((socket) => {
+  let header = Buffer.alloc(0);
+  socket.on("data", (chunk) => {
+    header = Buffer.concat([header, chunk]);
+    const end = header.indexOf("\r\n\r\n");
+    if (end < 0) return;
+    const text = header.slice(0, end).toString("utf8");
+    const match = text.match(/Sec-WebSocket-Key: (.*)\r\n/i);
+    const accept = crypto.createHash("sha1")
+      .update(`${match[1].trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write(Buffer.concat([
+      Buffer.from(["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`, "", ""].join("\r\n")),
+      Buffer.from([0x88, 0x00]),
+    ]));
+  });
+});
+
+server.listen(0, "127.0.0.1", async () => {
+  const client = new WebSocketAppServerClient(
+    { host: "127.0.0.1", port: server.address().port },
+    "peer-close-test",
+    { connectTimeoutMs: 1000, requestTimeoutMs: 1000 },
+  );
+  await client.start();
+});
+setTimeout(() => {
+  console.error("bridge lingered after peer close");
+  process.exit(124);
+}, 3000).unref();
+EOF
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"app-server connection closed (peer-close-test)"* ]]
+  [[ "$output" == *"fresh bridge can attach"* ]]
+}
+
 write_bridge_timeout_runner() {
   local runner="$TEST_SKILL_DIR/run-with-timeout.js"
   cat >"$runner" <<'EOF'
@@ -868,6 +929,65 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ "$output" =~ "no loaded codex thread" ]]
+}
+
+@test "codex-bridge: --thread loaded fails closed when more than one thread is loaded" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) process.exit(1);'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-ambiguous-loaded.js" state="$TEST_SKILL_DIR/ambiguous.state"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} })}\n`);
+  } else if (message.method === "thread/loaded/list") {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { data: ["thread-a", "thread-b"] } })}\n`);
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread loaded --loaded-timeout 1000 --timeout 20 \
+    --monitor-state "$state"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"thread route is ambiguous"* ]]
+  [[ "$output" == *"refusing to choose one"* ]]
+  grep -qx 'phase=thread_ambiguous' "$state"
+}
+
+@test "codex-bridge: stale explicit thread is rejected unless that exact id is loaded" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) process.exit(1);'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-stale-thread.js" state="$TEST_SKILL_DIR/stale.state"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: {} });
+  else if (message.method === "thread/resume") send({ jsonrpc: "2.0", id: message.id, error: { message: "thread rollout not found" } });
+  else if (message.method === "thread/loaded/list") send({ jsonrpc: "2.0", id: message.id, result: { data: ["different-thread"] } });
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread stale-thread --timeout 20 \
+    --monitor-state "$state"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"requested thread stale-thread is not loaded"* ]]
+  [[ "$output" == *"refusing stale routing"* ]]
+  grep -qx 'phase=route_invalid' "$state"
 }
 
 @test "codex-bridge: inline-inbox includes unread message text in turn input" {

@@ -50,6 +50,27 @@ teardown() {
   [[ "$output" =~ "No new messages" ]]
 }
 
+@test "inbox: acknowledges only the rows it displayed when a newer message arrives" {
+  bash "$SCRIPTS/send.sh" testteam alice bob "displayed" >/dev/null
+  mv "$SCRIPTS/mark-read.sh" "$SCRIPTS/mark-read-real.sh"
+  cat >"$SCRIPTS/mark-read.sh" <<EOF
+#!/usr/bin/env bash
+bash "$SCRIPTS/send.sh" testteam alice bob "arrived-during-ack" >/dev/null
+exec bash "$SCRIPTS/mark-read-real.sh" "\$@"
+EOF
+  chmod +x "$SCRIPTS/mark-read.sh"
+
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"displayed"* ]]
+  [[ "$output" != *"arrived-during-ack"* ]]
+
+  run bash "$SCRIPTS/peek-inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'"body":"displayed"'* ]]
+  [[ "$output" == *'"body":"arrived-during-ack"'* ]]
+}
+
 @test "peek-inbox: returns stable JSON without marking messages read" {
   bash "$SCRIPTS/send.sh" testteam alice bob "first" >/dev/null
   bash "$SCRIPTS/send.sh" testteam alice bob "second" >/dev/null
@@ -137,6 +158,45 @@ line3"
   run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "quoted team delivery" ]]
+}
+
+@test "check-inbox: multiple project identities fail closed without consuming any pair" {
+  local project; project="$(mktemp -d)"
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$project"
+  bash "$SCRIPTS/join.sh" secondteam bob claude-code "$project"
+  bash "$SCRIPTS/join.sh" secondteam sender claude-code /tmp/sender-project
+  bash "$SCRIPTS/send.sh" testteam bob alice "keep-alice" >/dev/null
+  bash "$SCRIPTS/send.sh" secondteam sender bob "keep-bob" >/dev/null
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run bash "$SCRIPTS/peek-inbox.sh" testteam alice
+  [[ "$output" == *'"body":"keep-alice"'* ]]
+  run bash "$SCRIPTS/peek-inbox.sh" secondteam bob
+  [[ "$output" == *'"body":"keep-bob"'* ]]
+}
+
+@test "check-inbox: role-session selects one exact pair from multiple identities" {
+  local project; project="$(mktemp -d)"
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$project"
+  bash "$SCRIPTS/join.sh" secondteam bob claude-code "$project"
+  bash "$SCRIPTS/join.sh" secondteam sender claude-code /tmp/sender-project
+  bash "$SCRIPTS/send.sh" testteam bob alice "for-alice" >/dev/null
+  bash "$SCRIPTS/send.sh" secondteam sender bob "for-bob" >/dev/null
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c \
+    ". '$SCRIPTS/lib/role-session.sh'; agmsg_role_session_record secondteam bob role-sid '$project' claude-code"
+
+  run bash -c "printf '%s' '{\"session_id\":\"role-sid\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"for-bob"* ]]
+  [[ "$output" != *"for-alice"* ]]
+
+  run bash "$SCRIPTS/peek-inbox.sh" testteam alice
+  [[ "$output" == *'"body":"for-alice"'* ]]
+  run bash "$SCRIPTS/peek-inbox.sh" secondteam bob
+  [[ "$output" != *'"body":"for-bob"'* ]]
 }
 
 @test "history: handles multiline message body" {

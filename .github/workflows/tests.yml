@@ -136,7 +136,7 @@ jobs:
   # Windows coverage for the native helpers shipped in #103 (Git Bash runner,
   # sqlite3 compatibility shim, cygpath normalization). The POSIX-assuming suite
   # is not fully green on Windows yet, so this is staged (#125): a single focused
-  # leg targeting the Windows-relevant install tests. Not a required check yet —
+  # leg targeting Windows-relevant install and Codex-monitor tests. Not a required check yet —
   # promote it to required once it is reliably green. The required checks stay
   # bats (ubuntu/macos).
   #
@@ -157,12 +157,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Focused leg: the install-side native Windows helpers (#103). These
-          # are green on windows-latest today and are the candidate to promote
-          # to a required check.
-          - leg: install helpers
+          # Focused native-Windows leg: install helpers plus the Codex monitor's
+          # Git Bash/PID-domain probes. The standalone Node suite below covers
+          # ACK/retry and WebSocket reconnect without POSIX process assumptions.
+          - leg: windows helpers
             filter: "[Ww]indows"
-            target: tests/test_install.bats
+            target: tests/test_install.bats tests/test_compat.bats tests/test_codex_bridge.bats tests/test_codex_shim.bats
     defaults:
       run:
         # bats is bash; on Windows runners `shell: bash` is Git Bash, the same
@@ -209,6 +209,11 @@ jobs:
           else
             bats --print-output-on-failure ${{ matrix.target }}
           fi
+
+      - name: Run Codex monitor bridge unit tests
+        if: needs.changes.outputs.docs_only != 'true'
+        shell: pwsh
+        run: node --test tests/test_codex_bridge_unit.js
 
   # The desktop app (app/**) is Rust + TypeScript — the bats suite never
   # reads it, and the full Tauri build only runs on app-v* release tags via

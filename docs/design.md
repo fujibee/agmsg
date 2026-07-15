@@ -107,8 +107,9 @@ three signals, none needing a stable `session_id` (Codex doesn't expose one):
    it walks the ppid chain to the agent PID and reads the marker back. Trust is
    gated on the PID still being a live agent process (recycling guard); stale
    markers are GC'd at SessionStart/SessionEnd. **Claude Code monitor/both
-   only** — Codex rejects monitor mode (no Monitor tool), so it never installs
-   `session-start.sh` and writes no marker; Codex relies on signals 2–3.
+   only** — Codex monitor installs `session-start.sh`, but its type plug exits
+   after publishing the exact bridge route and does not reach this generic
+   marker path; Codex command resolution therefore relies on signals 2–3.
 2. **Ancestor walk.** Failing a marker, the nearest ancestor of pwd that is a
    registered project for the type wins. Git-independent — covers nested
    subdirs and worktrees that live *under* the registered project, on cc and

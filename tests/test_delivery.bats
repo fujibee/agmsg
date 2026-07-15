@@ -1492,6 +1492,116 @@ EOF
   [ ! -f "$log" ]
 }
 
+@test "session-start.sh for codex publishes only its generation-scoped exact thread request" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash generation request state
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="tui-generation-1"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$hash.$generation"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.$generation"
+
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:4123" \
+  AGMSG_CODEX_TUI_GENERATION="$generation" \
+  AGMSG_CODEX_BRIDGE_REQUEST_FILE="$request" \
+  AGMSG_CODEX_MONITOR_STATE_FILE="$state" \
+  CODEX_THREAD_ID="exact-thread-123" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ -f "$request" ]
+  grep -qx 'format_version=2' "$request"
+  grep -qx "generation=$generation" "$request"
+  grep -qx 'team=team' "$request"
+  grep -qx 'name=alice' "$request"
+  grep -qx 'thread=exact-thread-123' "$request"
+  grep -qx 'app_server=ws://127.0.0.1:4123' "$request"
+  grep -qx 'phase=request_published' "$state"
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge-request.$hash" ]
+}
+
+@test "session-start.sh for codex uses hook session_id as the exact current thread" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash generation request state
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="hook-session-generation"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$hash.$generation"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.$generation"
+
+  printf '%s' '{"session_id":"hook-current-thread","hook_event_name":"SessionStart","source":"startup"}' \
+    | env -u CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+      AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:4123" \
+      AGMSG_CODEX_TUI_GENERATION="$generation" AGMSG_CODEX_BRIDGE_REQUEST_FILE="$request" \
+      AGMSG_CODEX_MONITOR_STATE_FILE="$state" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  grep -qx 'thread=hook-current-thread' "$request"
+  grep -qx 'phase=request_published' "$state"
+  source "$SCRIPTS/lib/role-session.sh"
+  [ "$(agmsg_role_session_uuid team alice)" = "hook-current-thread" ]
+}
+
+@test "session-start.sh for codex fails closed when env and hook thread ids disagree" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash generation request state
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="conflicting-session-generation"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$hash.$generation"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.$generation"
+
+  printf '%s' '{"session_id":"hook-thread"}' \
+    | CODEX_THREAD_ID="env-thread" AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+      AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:4123" \
+      AGMSG_CODEX_TUI_GENERATION="$generation" AGMSG_CODEX_BRIDGE_REQUEST_FILE="$request" \
+      AGMSG_CODEX_MONITOR_STATE_FILE="$state" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ ! -e "$request" ]
+  grep -qx 'phase=route_identity_conflict' "$state"
+}
+
+@test "session-start.sh for codex launcher never routes from an old cwd rollout" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local hash generation request state rollout_dir
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="tui-generation-2"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$hash.$generation"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.$generation"
+  rollout_dir="$HOME/.codex/sessions/2026/07/14"; mkdir -p "$rollout_dir"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"old-thread\",\"cwd\":\"$TEST_PROJECT\"}}" \
+    >"$rollout_dir/rollout-old.jsonl"
+
+  HOME="$HOME" AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:4123" \
+  AGMSG_CODEX_TUI_GENERATION="$generation" \
+  AGMSG_CODEX_BRIDGE_REQUEST_FILE="$request" \
+  AGMSG_CODEX_MONITOR_STATE_FILE="$state" \
+    env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ ! -e "$request" ]
+  grep -qx 'phase=waiting_thread' "$state"
+  grep -qx 'detail=loaded_fallback' "$state"
+}
+
+@test "session-start.sh for codex uses explicit team/name in a multi-identity project" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" other bob codex "$TEST_PROJECT" >/dev/null
+  local hash generation request state
+  hash="$(printf '%s' "$TEST_PROJECT" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="tui-generation-3"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$hash.$generation"
+  state="$TEST_SKILL_DIR/run/codex-monitor-state.$hash.$generation"
+
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 AGMSG_CODEX_TEAM=other AGMSG_CODEX_NAME=bob \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:4123" \
+  AGMSG_CODEX_TUI_GENERATION="$generation" AGMSG_CODEX_BRIDGE_REQUEST_FILE="$request" \
+  AGMSG_CODEX_MONITOR_STATE_FILE="$state" CODEX_THREAD_ID="bob-thread" \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  grep -qx 'team=other' "$request"
+  grep -qx 'name=bob' "$request"
+  grep -qx 'thread=bob-thread' "$request"
+}
+
 @test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
@@ -1540,9 +1650,70 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
   [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
+  [[ "$output" == *"Codex route: team/alice degraded (missing bridge lease)"* ]]
   [[ "$output" != *"watch processes:"* ]]
 
   kill "$bpid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (codex): healthy requires bridge heartbeat, exact thread, TUI lease, and app-server" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local native_pid_file="$TEST_SKILL_DIR/healthy-node.pid"
+  node -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);' \
+    "$native_pid_file" codex app-server &
+  local node_job=$!
+  trap 'kill "$node_job" 2>/dev/null || true' EXIT
+  local bpid=""
+  for _ in $(seq 1 30); do
+    [ -s "$native_pid_file" ] && bpid="$(tr -d '\r\n' <"$native_pid_file")" && break
+    sleep 0.1
+  done
+  [ -n "$bpid" ]
+
+  printf '%s\n' "$bpid" >"$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat >"$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  local project_phys hash generation tui bridge
+  project_phys="$(cd "$TEST_PROJECT" && pwd -P)"
+  hash="$(printf '%s' "$project_phys" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  generation="healthy-tui-generation"
+  tui="$(SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run" bash -c \
+    '. "$1/lib/codex-lease.sh"; codex_write_tui_lease team alice exact-thread "$2" "$3" ws://127.0.0.1:4321 $$' \
+    _ "$SCRIPTS" "$generation" "$TEST_PROJECT")"
+  [ -f "$tui" ]
+  SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run" bash -c \
+    '. "$1/lib/codex-lease.sh"; codex_record_write_ready "$2" server-generation test native "$3" 4321' \
+    _ "$SCRIPTS" "$hash" "$bpid"
+  bridge="$TEST_SKILL_DIR/run/codex-bridge-lease.team.alice"
+  cat >"$bridge" <<EOF
+format_version=1
+owner_kind=bridge
+pid_domain=native
+owner_winpid=$bpid
+generation=bridge-generation
+bound_thread_id=exact-thread
+bound_generation=$generation
+project=$TEST_PROJECT
+app_server=ws://127.0.0.1:4321
+phase=watch_armed
+updated_at=$(date +%s)
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex route: team/alice healthy (thread exact-thread, phase watch_armed)"* ]]
+
+  kill "$node_job" 2>/dev/null || true
   trap - EXIT
 }
 
@@ -1733,11 +1904,27 @@ EOF
 @test "delivery set off (codex): stops the bridge, cleans run files, notes shell profile cleanup" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  # Stand in for a live bridge with a real process we can check kill -0 against.
-  sleep 60 &
-  local bpid=$!
+  # Stand in for a native bridge with a command line that can be verified. A
+  # bare/stale PID is deliberately not enough to authorize killing a process.
+  local native_pid_file="$TEST_SKILL_DIR/off-bridge.pid"
+  node -e 'require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);' \
+    "$native_pid_file" codex-bridge.js &
+  local node_job=$!
+  local bpid=""
+  for _ in $(seq 1 30); do
+    [ -s "$native_pid_file" ] && bpid="$(tr -d '\r\n' <"$native_pid_file")" && break
+    sleep 0.1
+  done
+  [ -n "$bpid" ]
   echo "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
-  echo "pid=$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta"
+  cat >"$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+pid_domain=native
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
   : > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.log"
   # The launcher's stale-binding sidecar + the project's shared app-server record
   # must be torn down too. Use a non-codex pid for the server record so the
@@ -1748,19 +1935,55 @@ EOF
   echo 2147483647 > "$TEST_SKILL_DIR/run/codex-app-server.$h.pid"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.port"
   : > "$TEST_SKILL_DIR/run/codex-app-server.$h.version"
+  : > "$TEST_SKILL_DIR/run/codex-bridge-request.$h.test-generation"
+  : > "$TEST_SKILL_DIR/run/codex-monitor-state.$h.test-generation"
+  : > "$TEST_SKILL_DIR/run/codex-bridge-launcher.$h.test-generation.log"
+  local tui_lease
+  tui_lease="$(SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run" bash -c \
+    '. "$1/lib/codex-lease.sh"; codex_write_tui_lease team alice exact-thread test-generation "$2" ws://127.0.0.1:1 $$' \
+    _ "$SCRIPTS" "$TEST_PROJECT")"
+  [ -f "$tui_lease" ]
 
   run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Stopped 1 Codex bridge"* ]]
   [[ "$output" == *"shim"* ]]
-  ! kill -0 "$bpid" 2>/dev/null
+  ! kill -0 "$node_job" 2>/dev/null
   [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.appserver" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.pid" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.port" ]
   [ ! -f "$TEST_SKILL_DIR/run/codex-app-server.$h.version" ]
-  kill "$bpid" 2>/dev/null || true
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge-request.$h.test-generation" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-monitor-state.$h.test-generation" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge-launcher.$h.test-generation.log" ]
+  [ ! -e "$tui_lease" ]
+  kill "$node_job" 2>/dev/null || true
+}
+
+@test "delivery set off (codex): never kills an unrelated process from a stale pidfile" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 60 & local unrelated=$!
+  trap 'kill "$unrelated" 2>/dev/null || true' EXIT
+  printf '%s\n' "$unrelated" >"$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat >"$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$unrelated
+pid_domain=msys
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  kill -0 "$unrelated" 2>/dev/null
+  [ -f "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" ]
+
+  kill "$unrelated" 2>/dev/null || true
+  trap - EXIT
 }
 
 # --- hermes (manual-only: delivery_modes=off, no automatic hook) ---

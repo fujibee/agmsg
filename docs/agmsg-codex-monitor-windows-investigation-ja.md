@@ -1,10 +1,14 @@
 # agmsg / Codex monitor Windows障害の調査・修正記録
 
-最終更新: 2026-07-14
+最終更新: 2026-07-15
 
 対象環境: Windows、Git Bash、Codex Desktop / CLI、`hameln-hozon`、`hameln/codex1`
 
-基準ソース: agmsg `v1.1.7` (`baa064e`) + 未コミットのローカル修正
+基準ソース: agmsg `v1.1.7` (`baa064e`) + `codex/monitor-teardown` のローカルcommit stack + 2026-07-15 hardening差分
+
+> 更新注記: §6〜§15には2026-07-14までの調査時系列を意図的に残している。
+> その中の「現在」「未コミット4ファイル」「次に実装する」という記述は、
+> 2026-07-15の実装後状態をまとめた§16が上書きする。
 
 ## 1. 先に結論
 
@@ -16,10 +20,14 @@
 4. `hameln/codex1` の配送先seatが古いCodex taskを指し、メッセージが現在の画面ではなく古いtaskに配送された。
 5. seatを直した後にも、Codex app-serverの `turn/start` が実行済みにもかかわらず応答だけ返らない場合、bridgeが再監視に戻れない問題があった。
 6. bridgeが正常でも、Windowsパス表記とネイティブNode PIDの判定差によって `delivery status` が誤ってstale/off相当に見える問題があった。
+7. 旧bridgeはinbox取得時に既読を進め得たため、`turn/start`失敗時にhistoryには残るが再配送できないサイレントロス経路があった。
+8. 共通`session-start.sh`がCodex plugを呼んだ後でstdinを読んでおり、公式hookの正確な`session_id`を捨てて古いloaded/rollout taskを推測していた。
+9. `check-inbox.sh`がagent一覧とteam一覧を独立に扱い、存在しない組合せを作って別team/seatの未読を既読化し得た。
+10. TUI、bridge、app-serverの所有権と終了順が弱く、最初のturn前や異常終了時にbackground process/refが残る経路があった。
 
 添付メモの「古いseatが原因で、現在のtaskへ記録し直したら届いた」という説明は、その時点の障害と復旧確認については正しい。ただし、一連の作業全体を説明する結論として「原因はseatだけ」「agmsg本体は変更していない」とすると不完全である。その後、このリポジトリのbridge本体、Windows状態判定、テストにもローカル修正を加えている。
 
-現在は `monitor` のまま、自己宛てメッセージが現在のtaskに届くこと、メッセージ処理後にwatchdogで再監視へ戻ることまで確認できている。ただしローカル修正はまだコミットされておらず、全テストスイートも完走していない。
+2026-07-14には `monitor` のまま自己宛てメッセージが当時の現在taskに届き、watchdogで再監視へ戻るところまで確認した。2026-07-15には、それを運用上のseat再記録に依存させないsource-level hardeningまで進めた。今回の最終差分はsource checkoutだけで、installed copy、実DB、team登録、実行中process、remote GitHubは変更していない。全Bats実行はmanaged sandboxがnative `sqlite3.exe`を拒否するため未完であり、独立Node test、shell/JS構文、test discovery、manual helper testまでをローカルで実施した。
 
 ## 2. この文書での確度の表し方
 
@@ -458,7 +466,77 @@ Codexの表示名は変更され得るため、後からlogを追えるようtas
 
 この表は担当者の所有権を示すものではなく、診断事実がどのtaskに残っているかを探すための索引である。
 
-## 16. 参照資料
+## 16. 2026-07-15 hardening実装の追補
+
+### 16.1 役割分担とbranch/commitの整理
+
+Claudeは主に障害仮説の反証、Windows実process treeのGate G1/G2/G2b、lease/ref/ACK設計、§22引き継ぎ仕様、Codex実装差分のレビューを担当した。Codexはsource checkout上で実装、test追加、失敗経路の再監査、local commitを担当した。会話担当名はGit authorや個々の行の著作者を証明しないため、帰属は会話記録とGit履歴で確認できる範囲に限定する。
+
+`v1.1.7`以後のlocal stackは次のとおり。
+
+| commit | 意味 |
+|---|---|
+| `acb0b83` | ACK timeout/rearm等、既存local fixの保全branch |
+| `91b0e81` | monitor leaseとpeek/mark-read primitive |
+| `5a60f5a` | bridge deliveryをlive TUI leaseへbind |
+| `f6d5186` | shared app-server teardown lifecycle |
+| `54f7cd3` | teardown実装状態の文書化 |
+| `d69d76d` | teardown race windowの追加修正 |
+| `a1fdcc6` | lifecycle race test。今回のhardening直前rollback checkpoint |
+| `b4d9744` | exact hook routing、ACK、Windows health、PowerShell/Git Bash、lease/ref/teardown hardening実装 |
+
+これらはlocal branch上のcommitであり、相手のrepositoryへpush/cherry-pick/PRしたものではない。`v1.1.7`に含まれるupstream PRは§8.1〜§8.2のとおりで、今回のstackを「upstreamへ取り込まれたPR」と表現してはいけない。
+
+### 16.2 今回追加したsource-level修正
+
+| 領域 | 以前の問題 | 今回の実装 |
+|---|---|---|
+| exact routing | hook stdinを読む前にCodex plugを実行し、loaded/rollout/古いseatを推測 | stdin `session_id`を先に読み、TUI generation固有requestとして一度だけaccept。envとhook ID不一致はfail-closed |
+| wrong task防止 | 同じcwdの古いloaded taskを選び得た | launcherはexact requestが来るまで`waiting_first_turn`。loaded listはexact IDの検証以外に使わない |
+| inbox ACK | 取得と既読化が一体、または「その時点の全未読」をUPDATE | `peek-inbox.sh`→`turn/start` ACK→`mark-read.sh`。取得済みの正確なID集合だけを既読化 |
+| failure semantics | 明示失敗でもrowを失う、ACK timeoutでbridge停止 | 明示失敗は未読のままbridge再起動/retry。ACK timeoutは未読保持のat-least-onceで重複を許容 |
+| team/agent scope | team一覧×agent一覧のcross-product | role-sessionまたは唯一の登録pairを一つだけ選び、曖昧なら配送せず未読保持 |
+| seat更新 | 同じthreadが旧roleにも残りreverse lookupが曖昧 | 同一project/type/threadの旧seatを外して現在roleへreassign |
+| lifecycle | 最初のturn前はapp-server refがなく、正常終了でも残り得た | TUI起動直後にprovisional refを予約し、exact thread確定時にTUI lease/refへatomic replace |
+| multi-TUI | 後発TUIが同一identity bridgeをkill/stealし得た | fresh generation所有者を保護し、後発は`identity_conflict`。ref集合が空の時だけshared server停止 |
+| PID | native PIDを`kill -0`でdead扱い、照会失敗とdeadを混同 | MSYS/native domainを分離し、`alive/dead/unknown`三値。tasklist→CIM、両方失敗はunknownでkill/duplicate startup禁止 |
+| health | bridge PID aliveだけ | exact thread、bridge heartbeat/phase、matching TUI lease、ready app-server、PID/creation/cmdline/portをまとめて表示 |
+| Git Bash | native NodeやPowerShellがbare `bash`を解決しWSLへ行く | bridgeはGit Bash実体のみ。PowerShell profile用関数を生成し、`bash.exe -lc`へargvを位置引数で安全に渡す |
+| diagnostics | app-server/model/message本文がbackground logへ出得た | phaseとsanitized error codeだけを記録。本文・model delta・raw server payloadを抑止 |
+
+### 16.3 起動時に正常とみなす状態
+
+`.codex/hooks.json`の`SessionStart: 1 / SessionEnd: 1 / Stop: 0`はinstall確認であり、runtime healthの証明ではない。新TUIを開いた直後は`waiting_first_turn (exact_hook_session_required)`が正常で、最初の通常prompt後に`request_published`、`bridge_starting`、`healthy`へ進む。`healthy`はbridge PIDだけでなく、exact thread、同じgenerationのfresh TUI lease、ready app-server、`watch_armed|delivering`を満たす。
+
+PowerShellでは生成された関数をprofileへ置く。これはGit Bashを絶対pathで指定し、login shellを初期化してからshimをexecするため、bare `bash`→WSLの探索を行わない。
+
+### 16.4 検証済み範囲
+
+- 変更したshell script全件の`bash -n`
+- `codex-bridge.js`と独立testの`node --check`
+- `tests/test_codex_bridge_unit.js`: ACK成功、明示失敗、ACK不明、log redaction、Git Bash固定、WebSocket切断の6件
+- `npm test`
+- Bats test discovery: 全699件、Windows focus filter 7件を認識
+- `git diff --check`
+- PID照会不能時の`unknown` fail-closed manual test
+- provisional refの保持、atomic write失敗時の旧ref保持、last-ref cleanupのmanual test
+- 生成PowerShell関数を実際のPowerShell→Git Bashで起動し、login shellとargv forwardingを確認
+
+full Bats実行は未完である。managed sandbox内のnative `sqlite3.exe`実行が拒否され、権限昇格も利用上限で拒否されたためで、別runtimeを勝手にdownload/installする回避はしていない。CIにはWindows focus Batsと独立Node suiteを登録したが、pushしていないためGitHub Actionsはまだ実行されていない。
+
+### 16.5 未解決・受容する制約
+
+1. Windowsがconsole crash後もnative Codex/node processを本当に生存させた場合、PID・cmdline上はlive TUIと区別できない。誤killを避けるため自動停止しない。
+2. app-server spawn成功からspawning marker書込み前までの極短い未追跡窓は残る。
+3. Codex app-serverはexperimental APIであり、CLI更新時はexact routing/ACK/loaded validationを実機再確認する。
+4. full Batsとinstalled-copy E2Eは、userの明示許可後にclean source commitから`install.sh --update`して行う。今回の作業では実施していない。
+5. at-least-onceはサイレントロスを防ぐ代わりに、ACK不明時に同じmessageから重複turnが起き得る。
+
+### 16.6 導入・rollback境界
+
+sourceをcommitしてもinstalled agmsgには反映されない。検証後、userが明示許可した場合だけsource checkoutから`./install.sh --update`する。installed skillを直接編集しない。異常時は`delivery.sh set off codex <project>`でlauncherを止め、clean checkout/worktreeの`a1fdcc6`から再度`./install.sh --update`する。DB/team stateは保持し、push/PRは別の明示依頼があるまで行わない。
+
+## 17. 参照資料
 
 - [agmsg README](../README.md)
 - [Codex monitor betaの内部設計](codex-monitor-beta.md)
