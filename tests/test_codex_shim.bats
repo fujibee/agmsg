@@ -109,6 +109,15 @@ teardown() {
   [[ "$output" == *"not WSL"* ]]
 }
 
+@test "codex shim install: PowerShell function normalizes Git usr bin to bin" {
+  run env GIT_BASH='C:\Program Files\Git\usr\bin\bash.exe' \
+    bash "$TYPES/codex/codex-shim-install.sh" powershell-function
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"C:/Program Files/Git/bin/bash.exe"* ]]
+  [[ "$output" != *"/usr/bin/bash.exe"* ]]
+}
+
 @test "codex shim function: existing agmsg PATH wrapper is skipped when resolving real codex" {
   export HOME="$TEST_PROJECT/home"
   mkdir -p "$HOME"

@@ -32,6 +32,23 @@ powershell_quote() {
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
+normalize_git_bash_entrypoint() {
+  # Git Bash exposes its own executable as /usr/bin/bash. That binary can run
+  # scripts, but publishing it as the Windows entry point encourages callers to
+  # combine it with --noprofile/--norc, which drops /usr/bin from PATH and lets
+  # a nested bare bash resolve to the WSL launcher. Always advertise Git's
+  # supported bin/bash.exe entry point instead.
+  local original="$1" normalized
+  normalized="$(printf '%s' "$original" | tr '\\' '/')"
+  case "$normalized" in
+    */usr/bin/bash.exe)
+      printf '%s' "${normalized%/usr/bin/bash.exe}/bin/bash.exe"
+      return
+      ;;
+  esac
+  printf '%s' "$original"
+}
+
 cmd="${1:-function}"
 case "$cmd" in
   -h|--help)
@@ -51,9 +68,10 @@ EOF
       git_bash="$(cygpath -w "$(command -v bash)" 2>/dev/null || true)"
     fi
     [ -n "$git_bash" ] || git_bash='C:\Program Files\Git\bin\bash.exe'
+    git_bash="$(normalize_git_bash_entrypoint "$git_bash")"
     cat <<EOF
 # agmsg Codex monitor beta: put this in your PowerShell profile.
-# Uses Git for Windows explicitly; it never resolves the Windows WSL bash launcher.
+# Uses Git for Windows explicitly, not WSL; it never resolves the Windows WSL bash launcher.
 function codex {
     & '$(powershell_quote "$git_bash")' -lc 'exec "\$1" "\${@:2}"' -- '$(powershell_quote "$SCRIPT_DIR/codex-shim.sh")' @args
 }
