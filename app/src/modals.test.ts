@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldCloseOnEscape } from "./modals";
+import { sanitizeNumberDraft, shouldCloseOnEscape } from "./modals";
 
 function esc(overrides: Partial<{ isComposing: boolean; keyCode: number; defaultPrevented: boolean }> = {}) {
   return {
@@ -30,5 +30,44 @@ describe("shouldCloseOnEscape", () => {
 
   it("does not close when a child already consumed the event", () => {
     expect(shouldCloseOnEscape(esc({ defaultPrevented: true }))).toBe(false);
+  });
+});
+
+describe("sanitizeNumberDraft", () => {
+  it("passes plain digits through unchanged", () => {
+    expect(sanitizeNumberDraft("12")).toBe("12");
+  });
+
+  it("strips letters and symbols WKWebView can let slip into a number input", () => {
+    expect(sanitizeNumberDraft("1a2b")).toBe("12");
+    expect(sanitizeNumberDraft("1e5")).toBe("15");
+    expect(sanitizeNumberDraft("!@#12$%")).toBe("12");
+  });
+
+  it("keeps a single leading minus sign", () => {
+    expect(sanitizeNumberDraft("-12")).toBe("-12");
+  });
+
+  it("drops a minus sign anywhere but the first character", () => {
+    expect(sanitizeNumberDraft("1-2")).toBe("12");
+    expect(sanitizeNumberDraft("12-")).toBe("12");
+    expect(sanitizeNumberDraft("--12")).toBe("-12");
+  });
+
+  it("keeps only the first decimal point", () => {
+    expect(sanitizeNumberDraft("1.2.3")).toBe("1.23");
+    expect(sanitizeNumberDraft("1..2")).toBe("1.2");
+  });
+
+  it("allows a bare decimal point mid-edit (e.g. typing '12.' before the fraction)", () => {
+    expect(sanitizeNumberDraft("12.")).toBe("12.");
+  });
+
+  it("returns an empty string for entirely non-numeric input", () => {
+    expect(sanitizeNumberDraft("abc")).toBe("");
+  });
+
+  it("passes an already-empty string through unchanged", () => {
+    expect(sanitizeNumberDraft("")).toBe("");
   });
 });

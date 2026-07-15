@@ -399,6 +399,29 @@ export function ConfirmModal(props: {
 export const MIN_TERMINAL_FONT_SIZE = 8;
 export const MAX_TERMINAL_FONT_SIZE = 24;
 
+// type="number" doesn't reliably block non-numeric characters in every
+// webview engine (koit's real-hardware report: WKWebView on macOS let them
+// through into the field). Strips anything that isn't a digit, a leading
+// "-", or the first "." — applied to the DRAFT text itself before it's
+// shown, not just before committing, so a rejected character never
+// visibly lands in the field even for a frame.
+export function sanitizeNumberDraft(raw: string): string {
+  let result = "";
+  let seenDot = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "-" && i === 0) {
+      result += ch;
+    } else if (ch === "." && !seenDot) {
+      seenDot = true;
+      result += ch;
+    } else if (ch >= "0" && ch <= "9") {
+      result += ch;
+    }
+  }
+  return result;
+}
+
 export function SettingsModal(props: {
   onClose: () => void;
   terminalFontSize: number;
@@ -467,7 +490,7 @@ export function SettingsModal(props: {
           max={MAX_TERMINAL_FONT_SIZE}
           value={fontSizeText}
           onChange={(e) => {
-            const text = e.target.value;
+            const text = sanitizeNumberDraft(e.target.value);
             setFontSizeText(text);
             const n = Number(text);
             if (text.trim() !== "" && Number.isFinite(n) && n >= MIN_TERMINAL_FONT_SIZE && n <= MAX_TERMINAL_FONT_SIZE) {
