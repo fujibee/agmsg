@@ -664,6 +664,7 @@ body.resizing-row {
 .team-status-dot.status-working { background: #e0af68; }
 .team-status-dot.status-idle { background: var(--green); }
 .team-status-dot.status-unknown { background: var(--green); }
+.team-status-dot.status-empty { background: var(--muted); }
 .collapsed-team-status {
   width: 28px;
   padding: 2px;
