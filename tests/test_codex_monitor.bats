@@ -128,6 +128,54 @@ teardown() {
   [ "$(cat "$pidf")" = "$first_pid" ]
 }
 
+# --- port discovery vs colorized banner (codex 0.144+) ---
+
+@test "codex-monitor: discovers the port when codex colorizes the banner (0.144+)" {
+  run node -e 'const net = require("net"); if (!net) process.exit(1);'
+  if [ "$status" -ne 0 ]; then
+    skip "node net module is not available in this sandbox"
+  fi
+
+  # codex 0.144.1 writes ANSI SGR sequences into the banner even when stdout is
+  # a redirected file (NO_COLOR is ignored), so this fake reproduces the
+  # colorized "listening on:" line verbatim. The python fake above prints a
+  # plain banner and can never catch a color regression; this one uses a node
+  # listener so it also runs on the Windows runner where the python fake skips.
+  local ansi_codex="$TEST_PROJECT/ansi-codex"
+  cat > "$ansi_codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.144.1"; exit 0 ;;
+  app-server)
+    node - <<'JS'
+const net = require('net');
+const s = net.createServer((c) => c.destroy());
+s.listen(0, '127.0.0.1', () => {
+  const e = '\x1b';
+  console.log(e + '[36;1mcodex app-server (WebSockets)' + e + '[0m');
+  console.log('  ' + e + '[2mlistening on:' + e + '[0m ' + e + '[32mws://127.0.0.1:' + s.address().port + e + '[0m');
+});
+setTimeout(() => process.exit(0), 60000); // bound the listener if teardown misses it
+JS
+    ;;
+  *)
+    printf 'plain-codex' >> "$CALL_LOG"
+    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
+    printf '\n' >> "$CALL_LOG"
+    ;;
+esac
+EOF
+  chmod +x "$ansi_codex"
+
+  run env AGMSG_REAL_CODEX="$ansi_codex" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  # The port was parsed out of the colorized banner: the handoff must be the
+  # BRIDGED form (--remote ws://...), not the plain-codex fail-open.
+  grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  [[ "$output" != *"did not report a listening port"* ]]
+}
+
 @test "codex-monitor: never kills a non-codex process recorded under a reused pid" {
   skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
 

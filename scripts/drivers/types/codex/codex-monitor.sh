@@ -162,8 +162,11 @@ if [ -z "$PORT" ]; then
   "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 &
   server_bg="$!"
   echo "$server_bg" > "$SERVER_PID"
+  # codex 0.144+ colorizes this banner even when stdout is a redirected file
+  # (NO_COLOR is ignored), so strip ANSI SGR sequences before matching.
+  ansi_esc="$(printf '\033')"
   for _ in $(seq 1 100); do
-    PORT="$(sed -n 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SERVER_LOG" | head -1)"
+    PORT="$(sed -n -e "s/${ansi_esc}\[[0-9;]*m//g" -e 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SERVER_LOG" | head -1)"
     [ -n "$PORT" ] && break
     # Stop waiting the moment the app-server exits (e.g. a codex release dropped
     # `app-server --listen ws://`): no point burning the full timeout before we
