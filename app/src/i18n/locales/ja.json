@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "サイドバーを折りたたむ",
+    "expand": "サイドバーを展開",
     "newMenu": {
       "trigger": "＋ 新規 ▾",
       "team": "チーム…",
       "agent": "エージェント…"
     },
+    "team": {
+      "title": "チーム",
+      "new": "新規チーム"
+    },
     "title": "エージェント",
+    "newAgent": "新規エージェント",
     "filter": {
       "all": "すべて",
       "none": "なし"
@@ -35,7 +42,7 @@
       "titleRunning": "実行中 — クリックしてフォーカス",
       "titleSpawn": "PTYペインで起動",
       "noTypes": "—",
-      "emptyState": "エージェントはまだありません。＋ 新規 → エージェント から追加してください。"
+      "emptyState": "エージェントはまだありません。上の＋ボタンから追加してください。"
     },
     "user": {
       "title": "{{team}} のapp-user"
@@ -60,6 +67,10 @@
     "swapTitle": "クリックしてから、このタブ内の別のペインをクリックすると位置を入れ替えます"
   },
   "chat": {
+    "title": "チャット",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "元に戻す",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "として",
+    "asLabel": "{{appUser}} として",
     "targetPlaceholder": "宛先…",
     "messagePlaceholder": "メッセージ",
     "sendButton": "送信",
@@ -148,6 +159,12 @@
       "layoutVertical": "縦",
       "layoutHorizontal": "横",
       "layoutTile": "タイル"
+    },
+    "room": {
+      "hide": "チームルームを非表示"
+    },
+    "chat": {
+      "hide": "自分のチャットを非表示"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "言語"
   },
   "settings": {
-    "title": "設定"
+    "title": "設定",
+    "terminalFontSize": {
+      "label": "ターミナルのフォントサイズ"
+    },
+    "timezone": {
+      "label": "タイムゾーン",
+      "auto": "自動 ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "{{name}} について",
@@ -175,6 +199,7 @@
     "paste": "ペースト",
     "selectAll": "すべてを選択",
     "viewMenu": "表示",
+    "showTeamRoom": "チームルームを表示",
     "showUserChat": "自分のチャットを表示",
     "paneLayout": "ペインレイアウト",
     "paneLayoutVertical": "縦",
@@ -196,5 +221,8 @@
     "updateFailed": "アップデートに失敗しました: {{error}}",
     "upToDate": "最新バージョンです。",
     "noUpdatesTitle": "アップデートなし"
+  },
+  "stage": {
+    "emptyHint": "左のメンバーをクリックしてエージェントを起動してください。"
   }
 }

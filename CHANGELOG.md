@@ -4,6 +4,49 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-07-15
+
+### Added
+- Sidebar per-section + buttons, replacing the New dropdown (#407)
+- Green status-unknown default, roomier team-status-rail rows (#406)
+- Phase-lock agent-status and monitor pulse dots to wall clock (#403)
+- Detect grok/grok-build agent status (#395)
+- Persist UI settings across restarts (#391)
+- Snap pane dividers to terminal cell units, herdr-style gaps (#390)
+- Show agent and team status (#385)
+
+### Fixed
+- Filter non-numeric characters out of the font-size draft (#405)
+- Reject unregistered from/to agents (#409)
+- Resolve Codex leftovers and delivery_modes mismatch (#408)
+- Forward args on a flags-only monitored launch (#404)
+- Clean up the Settings font-size input (#401)
+- Display chat timestamps in local time, not raw UTC (#394)
+- Normalise Windows backslash paths before handing to bash/curl (#392)
+
+### Performance
+- Batch pty-output writes to one term.write() per animation frame (#402)
+
+## [app-v0.1.5] - 2026-07-13
+
+### Added
+- 0.1.5 UI polish — sidebar collapse, chat pane min/max, Team Room toggle, About version, lucide icons (#377)
+
+### Fixed
+- Authenticode-sign Windows binaries during tauri build (#354)
+
+## [1.1.7] - 2026-07-13
+
+### Added
+- Role-to-session affinity: named sessions, resume-by-role boot, tmux-resurrect (#339) (#344)
+
+### Fixed
+- Wrap boot script with bash -l for psmux on Windows (#335) (#363)
+- Guard '/'-prefixed boot prompt against MSYS path conversion on Git Bash (#358)
+- Stop ancestor project resolution from over-reaching to $HOME / other teams (#357) (#359)
+- Bind the bridge to the role's recorded thread, not "loaded" (#350) (#353)
+- Detect the real GEMINI_CLI env var, not GOOGLE_GEMINI_CLI (#351)
+
 ## [1.1.6] - 2026-07-05
 
 ### Added
@@ -233,6 +276,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.8]: https://github.com/fujibee/agmsg/compare/app-v0.1.5...v1.1.8
+[app-v0.1.5]: https://github.com/fujibee/agmsg/compare/v1.1.7...app-v0.1.5
+[1.1.7]: https://github.com/fujibee/agmsg/compare/app-v0.1.4...v1.1.7
 [1.1.6]: https://github.com/fujibee/agmsg/compare/app-v0.1.3...v1.1.6
 [app-v0.1.3]: https://github.com/fujibee/agmsg/compare/app-v0.1.2...app-v0.1.3
 [app-v0.1.2]: https://github.com/fujibee/agmsg/compare/app-v0.1.1...app-v0.1.2

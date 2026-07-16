@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Contraer barra lateral",
+    "expand": "Expandir barra lateral",
     "newMenu": {
       "trigger": "＋ Nuevo ▾",
       "team": "Equipo…",
       "agent": "Agente…"
     },
+    "team": {
+      "title": "Equipo",
+      "new": "Nuevo equipo"
+    },
     "title": "Agentes",
+    "newAgent": "Nuevo agente",
     "filter": {
       "all": "todos",
       "none": "ninguno"
@@ -35,7 +42,7 @@
       "titleRunning": "ya está en ejecución — haga clic para enfocar",
       "titleSpawn": "iniciar en un panel PTY",
       "noTypes": "—",
-      "emptyState": "Aún no hay agentes. Use ＋ Nuevo → Agente."
+      "emptyState": "Aún no hay agentes. Use el botón ＋ de arriba para añadir uno."
     },
     "user": {
       "title": "app-user en {{team}}"
@@ -60,6 +67,10 @@
     "swapTitle": "Haz clic y luego haz clic en otro panel de esta pestaña para intercambiar posiciones"
   },
   "chat": {
+    "title": "Chat",
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "como",
+    "asLabel": "como {{appUser}}",
     "targetPlaceholder": "para…",
     "messagePlaceholder": "mensaje",
     "sendButton": "enviar",
@@ -148,6 +159,12 @@
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Mosaico"
+    },
+    "room": {
+      "hide": "Ocultar sala de equipo"
+    },
+    "chat": {
+      "hide": "Ocultar mi chat"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "Idioma"
   },
   "settings": {
-    "title": "Configuración"
+    "title": "Configuración",
+    "terminalFontSize": {
+      "label": "Tamaño de fuente de la terminal"
+    },
+    "timezone": {
+      "label": "Zona horaria",
+      "auto": "Automático ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "Acerca de {{name}}",
@@ -175,6 +199,7 @@
     "paste": "Pegar",
     "selectAll": "Seleccionar todo",
     "viewMenu": "Ver",
+    "showTeamRoom": "Mostrar sala de equipo",
     "showUserChat": "Mostrar mi chat",
     "paneLayout": "Diseño de paneles",
     "paneLayoutVertical": "Vertical",
@@ -196,5 +221,8 @@
     "updateFailed": "Error al actualizar: {{error}}",
     "upToDate": "Tienes la última versión.",
     "noUpdatesTitle": "Sin actualizaciones"
+  },
+  "stage": {
+    "emptyHint": "Haz clic en un miembro de la izquierda para iniciar un agente."
   }
 }

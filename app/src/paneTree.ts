@@ -207,6 +207,21 @@ export function collectDividers(node: SplitNode, rect: PaneRect = FULL_RECT, pat
   return [...thisSeam, ...collectDividers(node.a, rectA, [...path, "a"]), ...collectDividers(node.b, rectB, [...path, "b"])];
 }
 
+/**
+ * A divider's identity across a grid-segment transpose (co1 review, PR
+ * #390): grabbing a grid-segment divider transposes its aligned grid at
+ * drag-start (see transposeGrid's own doc), and for 3+ segment grids that
+ * changes collectDividers' shape from "grid" divider keys to "single"
+ * ones — a DOM node keyed on the pre-transpose divider gets unmounted
+ * mid-drag. `[...basePath, ...segmentPath]` (or `path` directly for an
+ * already-single divider) stays the correct path to the same split node on
+ * both sides of that transpose, so App.tsx keys its drag-highlight off
+ * this instead of a captured DOM reference.
+ */
+export function dividerDragKey(d: DividerInfo): string {
+  return (d.kind === "single" ? d.path : [...d.basePath, ...d.segmentPath]).join(".") || "root";
+}
+
 function zipPairs(a: SplitNode, b: SplitNode, pairAxis: SplitAxis, pairRatio: number): SplitNode {
   if (a.kind === "leaf" && b.kind === "leaf") {
     return { kind: "split", axis: pairAxis, ratio: pairRatio, a, b };

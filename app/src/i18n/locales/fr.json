@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Réduire la barre latérale",
+    "expand": "Développer la barre latérale",
     "newMenu": {
       "trigger": "＋ Nouveau ▾",
       "team": "Équipe…",
       "agent": "Agent…"
     },
+    "team": {
+      "title": "Équipe",
+      "new": "Nouvelle équipe"
+    },
     "title": "Agents",
+    "newAgent": "Nouvel agent",
     "filter": {
       "all": "tous",
       "none": "aucun"
@@ -35,7 +42,7 @@
       "titleRunning": "déjà en cours — cliquer pour afficher",
       "titleSpawn": "démarrer dans un panneau PTY",
       "noTypes": "—",
-      "emptyState": "Aucun agent pour l'instant. Utilisez ＋ Nouveau → Agent."
+      "emptyState": "Aucun agent pour l'instant. Utilisez le bouton ＋ ci-dessus pour en ajouter un."
     },
     "user": {
       "title": "app-user dans {{team}}"
@@ -60,6 +67,10 @@
     "swapTitle": "Cliquez, puis cliquez sur un autre panneau de cet onglet pour échanger les positions"
   },
   "chat": {
+    "title": "Discussion",
+    "minimize": "Réduire",
+    "maximize": "Agrandir",
+    "restore": "Restaurer",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "en tant que",
+    "asLabel": "en tant que {{appUser}}",
     "targetPlaceholder": "à…",
     "messagePlaceholder": "message",
     "sendButton": "envoyer",
@@ -148,6 +159,12 @@
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Mosaïque"
+    },
+    "room": {
+      "hide": "Masquer la salle d'équipe"
+    },
+    "chat": {
+      "hide": "Masquer mon chat"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "Langue"
   },
   "settings": {
-    "title": "Paramètres"
+    "title": "Paramètres",
+    "terminalFontSize": {
+      "label": "Taille de police du terminal"
+    },
+    "timezone": {
+      "label": "Fuseau horaire",
+      "auto": "Auto ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "À propos de {{name}}",
@@ -175,6 +199,7 @@
     "paste": "Coller",
     "selectAll": "Tout sélectionner",
     "viewMenu": "Présentation",
+    "showTeamRoom": "Afficher la salle d'équipe",
     "showUserChat": "Afficher mon chat",
     "paneLayout": "Disposition des volets",
     "paneLayoutVertical": "Vertical",
@@ -196,5 +221,8 @@
     "updateFailed": "Échec de la mise à jour : {{error}}",
     "upToDate": "Vous avez la dernière version.",
     "noUpdatesTitle": "Aucune mise à jour"
+  },
+  "stage": {
+    "emptyHint": "Cliquez sur un membre à gauche pour démarrer un agent."
   }
 }

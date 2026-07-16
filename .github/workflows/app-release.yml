@@ -23,10 +23,13 @@ name: app release
 #   (the signing identity itself is hardcoded in tauri.conf.json, not a
 #   secret — don't set APPLE_SIGNING_IDENTITY as a step env var unless it's
 #   actually populated, an empty override breaks codesign)
-#   Windows codesign (azure/artifact-signing-action, OIDC federated via
-#   azure/login — no client secret. Account: agmsg-artifact-signing, East US,
-#   endpoint https://eus.codesigning.azure.net/, certificate profile
-#   agmsg-app-signing (Public Trust, CN=Koichi Fujikawa). App registration:
+#   Windows codesign (Azure Trusted Signing via the TrustedSigning PowerShell
+#   module, wired into `tauri build` through bundle.windows.signCommand ->
+#   app/scripts/sign-windows.ps1 so signing happens BEFORE cab packing and
+#   updater .sig generation (#333). OIDC federated via azure/login — no
+#   client secret. Account: agmsg-artifact-signing, East US, endpoint
+#   https://eus.codesigning.azure.net/, certificate profile agmsg-app-signing
+#   (Public Trust, CN=Koichi Fujikawa). App registration:
 #   agmsg-github-actions, federated for the main branch):
 #     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
 #   Auto-updater artifact signing (keypair already generated locally, see
@@ -186,12 +189,13 @@ jobs:
         working-directory: .
         shell: bash
 
-      - name: Build
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
-
+      # Login BEFORE the build: Authenticode signing now happens inside
+      # `tauri build` (bundle > windows > signCommand -> sign-windows.ps1), so
+      # the Azure CLI credential must already exist when the bundler runs.
+      # Signing binaries after the build (the old post-build signing step,
+      # since removed) mutated bytes the updater's minisign .sig had already been
+      # computed over — every 0.1.4 update failed signature verification, and
+      # the in-place pass also corrupted the MSI's embedded cabinet (#333).
       - name: Azure login (OIDC)
         if: ${{ env.HAS_AZURE_CREDS == 'true' }}
         uses: azure/login@v3
@@ -200,19 +204,44 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign Windows binaries (Azure Trusted Signing)
+      - name: Install TrustedSigning PowerShell module
         if: ${{ env.HAS_AZURE_CREDS == 'true' }}
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: https://eus.codesigning.azure.net/
-          signing-account-name: agmsg-artifact-signing
-          certificate-profile-name: agmsg-app-signing
-          files-folder: ${{ github.workspace }}/app/src-tauri/target/release/bundle
-          files-folder-filter: exe,msi
-          files-folder-recurse: true
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+        shell: pwsh
+        run: Install-Module -Name TrustedSigning -Force -Scope CurrentUser -Repository PSGallery
+
+      - name: Build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          # With Azure creds, sign each artifact during bundling: the app exe
+          # is signed before it is packed into the MSI cab / NSIS installer,
+          # and the updater .sig is generated over the final signed bytes.
+          # Feature branches build unsigned (federated identity trusts main
+          # only, so there is no credential to sign with).
+          if [ "$HAS_AZURE_CREDS" = "true" ]; then
+            sign_script="${GITHUB_WORKSPACE//\\//}/app/scripts/sign-windows.ps1"
+            config="$(jq -cn --arg cmd "pwsh -NoProfile -ExecutionPolicy Bypass -File $sign_script %1" '{bundle: {windows: {signCommand: $cmd}}}')"
+            pnpm tauri build --config "$config"
+          else
+            pnpm tauri build
+          fi
+
+      - name: Verify Authenticode signatures
+        if: ${{ env.HAS_AZURE_CREDS == 'true' }}
+        shell: pwsh
+        run: |
+          $shipped = Get-ChildItem -Path src-tauri/target/release/bundle/msi/*.msi, src-tauri/target/release/bundle/nsis/*.exe
+          if ($shipped.Count -eq 0) { Write-Error "no shipped artifacts found to verify"; exit 1 }
+          foreach ($f in $shipped) {
+            $sig = Get-AuthenticodeSignature -FilePath $f.FullName
+            if ($sig.Status -ne 'Valid') {
+              Write-Error "$($f.Name): Authenticode status $($sig.Status) — signCommand did not run or failed silently"
+              exit 1
+            }
+            Write-Output "OK: $($f.Name) signed by $($sig.SignerCertificate.Subject)"
+          }
 
       - uses: actions/upload-artifact@v4
         with:

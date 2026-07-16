@@ -1446,6 +1446,31 @@ JSON
   [ "$count" -eq 1 ]
 }
 
+@test "antigravity supports off mode: removes rule file" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  run bash "$SCRIPTS/delivery.sh" set off antigravity "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+}
+
+# #399: type.conf previously advertised delivery_modes=monitor turn both off,
+# but antigravity has no Monitor tool or bridge equivalent — the manifest must
+# match what the template actually offers (turn/off only, like cursor/gemini).
+@test "antigravity rejects monitor mode" {
+  run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+}
+
+@test "antigravity rejects both mode" {
+  run bash "$SCRIPTS/delivery.sh" set both antigravity "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not supported" ]]
+  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+}
+
 # --- Codex monitor bridge (#41) ---
 @test "session-start.sh for codex starts bridge when monitor launcher env is present" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null

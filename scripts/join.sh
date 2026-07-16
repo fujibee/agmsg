@@ -43,7 +43,14 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
-PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
+# Scope resolution to the join target team (#357): a poison registration in an
+# unrelated team must not steer this join's ancestor/git-common fallback.
+# Registering a project AT $HOME or / is deliberately allowed -- both claude and
+# codex support sessions whose cwd is $HOME, so starting a project there is a
+# legitimate use case. The #357 protection is on the resolution side: the
+# ancestor walk never LANDS on $HOME/`/`, so such a registration only ever
+# matches its exact path and cannot silently vacuum up sessions beneath it.
+PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE" "$TEAM")"
 PROJECT_PATH="$(agmsg_normalize_project_path "$PROJECT_PATH")"
 
 TEAM_CONFIG="$TEAMS_DIR/$TEAM/config.json"

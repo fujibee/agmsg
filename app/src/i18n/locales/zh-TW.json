@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "收合側邊欄",
+    "expand": "展開側邊欄",
     "newMenu": {
       "trigger": "＋ 新增 ▾",
       "team": "團隊…",
       "agent": "代理…"
     },
+    "team": {
+      "title": "團隊",
+      "new": "新增團隊"
+    },
     "title": "代理",
+    "newAgent": "新增代理",
     "filter": {
       "all": "全部",
       "none": "無"
@@ -35,7 +42,7 @@
       "titleRunning": "已在執行中 — 點選以切換至該面板",
       "titleSpawn": "在 PTY 面板中啟動",
       "noTypes": "—",
-      "emptyState": "尚無代理。請使用「＋ 新增 → 代理」新增。"
+      "emptyState": "尚無代理。請使用上方的「＋」按鈕新增。"
     },
     "user": {
       "title": "{{team}} 的 app-user"
@@ -60,6 +67,10 @@
     "swapTitle": "點擊後再點擊此分頁中的另一個面板即可交換位置"
   },
   "chat": {
+    "title": "聊天",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "還原",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "以",
+    "asLabel": "以 {{appUser}} 身分",
     "targetPlaceholder": "傳送給…",
     "messagePlaceholder": "訊息",
     "sendButton": "傳送",
@@ -148,6 +159,12 @@
       "layoutVertical": "縱向",
       "layoutHorizontal": "橫向",
       "layoutTile": "平鋪"
+    },
+    "room": {
+      "hide": "隱藏團隊聊天室"
+    },
+    "chat": {
+      "hide": "隱藏我的聊天"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "語言"
   },
   "settings": {
-    "title": "設定"
+    "title": "設定",
+    "terminalFontSize": {
+      "label": "終端機字型大小"
+    },
+    "timezone": {
+      "label": "時區",
+      "auto": "自動 ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "關於 {{name}}",
@@ -175,6 +199,7 @@
     "paste": "貼上",
     "selectAll": "全選",
     "viewMenu": "顯示",
+    "showTeamRoom": "顯示團隊聊天室",
     "showUserChat": "顯示我的聊天",
     "paneLayout": "窗格版面配置",
     "paneLayoutVertical": "縱向",
@@ -196,5 +221,8 @@
     "updateFailed": "更新失敗：{{error}}",
     "upToDate": "目前已是最新版本。",
     "noUpdatesTitle": "沒有可用更新"
+  },
+  "stage": {
+    "emptyHint": "點擊左側的成員以啟動代理。"
   }
 }

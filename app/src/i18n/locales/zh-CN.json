@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "折叠侧边栏",
+    "expand": "展开侧边栏",
     "newMenu": {
       "trigger": "＋ 新建 ▾",
       "team": "团队…",
       "agent": "智能体…"
     },
+    "team": {
+      "title": "团队",
+      "new": "新建团队"
+    },
     "title": "智能体",
+    "newAgent": "新建智能体",
     "filter": {
       "all": "全部",
       "none": "无"
@@ -35,7 +42,7 @@
       "titleRunning": "已在运行 — 点击以聚焦",
       "titleSpawn": "在 PTY 面板中启动",
       "noTypes": "—",
-      "emptyState": "暂无智能体。使用 ＋ 新建 → 智能体。"
+      "emptyState": "暂无智能体。使用上方的 ＋ 按钮添加。"
     },
     "user": {
       "title": "{{team}} 中的 app-user"
@@ -60,6 +67,10 @@
     "swapTitle": "点击后再点击此标签页中的另一个面板即可交换位置"
   },
   "chat": {
+    "title": "聊天",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "以",
+    "asLabel": "以 {{appUser}} 身份",
     "targetPlaceholder": "发送至…",
     "messagePlaceholder": "消息",
     "sendButton": "发送",
@@ -148,6 +159,12 @@
       "layoutVertical": "纵向",
       "layoutHorizontal": "横向",
       "layoutTile": "平铺"
+    },
+    "room": {
+      "hide": "隐藏团队聊天室"
+    },
+    "chat": {
+      "hide": "隐藏我的聊天"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "语言"
   },
   "settings": {
-    "title": "设置"
+    "title": "设置",
+    "terminalFontSize": {
+      "label": "终端字体大小"
+    },
+    "timezone": {
+      "label": "时区",
+      "auto": "自动 ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "关于 {{name}}",
@@ -175,6 +199,7 @@
     "paste": "粘贴",
     "selectAll": "全选",
     "viewMenu": "显示",
+    "showTeamRoom": "显示团队聊天室",
     "showUserChat": "显示我的聊天",
     "paneLayout": "面板布局",
     "paneLayoutVertical": "纵向",
@@ -196,5 +221,8 @@
     "updateFailed": "更新失败：{{error}}",
     "upToDate": "当前已是最新版本。",
     "noUpdatesTitle": "没有可用更新"
+  },
+  "stage": {
+    "emptyHint": "点击左侧的成员以启动代理。"
   }
 }

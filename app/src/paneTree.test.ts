@@ -5,6 +5,7 @@ import {
   clampRatio,
   collectDividers,
   computeRects,
+  dividerDragKey,
   insertAsNewLeaf,
   insertBeside,
   leaves,
@@ -653,5 +654,33 @@ describe("transposeGrid", () => {
     expect(rects.get("3")!.height).toBeCloseTo(20, 6);
     expect(rects.get("2")!.height).toBeCloseTo(50, 6);
     expect(rects.get("4")!.height).toBeCloseTo(50, 6);
+  });
+});
+
+describe("dividerDragKey", () => {
+  it("stays the same across a grid-segment transpose (regression, co1 review PR #390)", () => {
+    // A 3-column aligned grid: transposing a grid-segment divider from one
+    // of these turns the OTHER segments' dividers from "grid-segment" into
+    // "single" (a 2x2 grid stays grid-shaped either way — this needed 3+
+    // columns to reproduce). App.tsx keys its drag-highlight off this
+    // identity precisely because the divider's own DOM node can get
+    // unmounted by that shape change mid-drag.
+    const row = (leftId: string, rest: SplitNode) => split("col", 0.4, leaf(leftId), rest);
+    const tree = split(
+      "row",
+      0.5,
+      row("1", split("col", 0.6, leaf("2"), leaf("3"))),
+      row("4", split("col", 0.6, leaf("5"), leaf("6"))),
+    );
+    const before = collectDividers(tree);
+    const grabbed = before.find((d) => d.kind === "grid-segment")!;
+    expect(grabbed.kind).toBe("grid-segment");
+    const keyBefore = dividerDragKey(grabbed);
+
+    // Mirrors startPaneDividerDrag: transpose at the grabbed divider's own
+    // basePath, exactly as grabbing it does.
+    const transposed = applyAtPath(tree, (grabbed as Extract<DividerInfo, { kind: "grid-segment" }>).basePath, transposeGrid);
+    const after = collectDividers(transposed);
+    expect(after.some((d) => dividerDragKey(d) === keyBefore)).toBe(true);
   });
 });

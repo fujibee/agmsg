@@ -329,7 +329,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ### Shell (any agent)
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>"
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -339,7 +339,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` takes exactly four positional arguments: `<team> <from> <to> "<message>"`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed.
+`send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
 ## FAQ / Design notes
 

@@ -20,12 +20,19 @@
   },
   "sidebar": {
     "logoAlt": "agmsg",
+    "collapse": "Seitenleiste einklappen",
+    "expand": "Seitenleiste ausklappen",
     "newMenu": {
       "trigger": "＋ Neu ▾",
       "team": "Team…",
       "agent": "Agent…"
     },
+    "team": {
+      "title": "Team",
+      "new": "Neues Team"
+    },
     "title": "Agenten",
+    "newAgent": "Neuer Agent",
     "filter": {
       "all": "alle",
       "none": "keine"
@@ -35,7 +42,7 @@
       "titleRunning": "läuft bereits — klicken zum Fokussieren",
       "titleSpawn": "in einem PTY-Bereich starten",
       "noTypes": "—",
-      "emptyState": "Noch keine Agenten. ＋ Neu → Agent verwenden."
+      "emptyState": "Noch keine Agenten. Mit der ＋-Schaltfläche oben einen hinzufügen."
     },
     "user": {
       "title": "app-user in {{team}}"
@@ -60,6 +67,10 @@
     "swapTitle": "Klicken, dann auf ein anderes Panel in diesem Tab klicken, um die Positionen zu tauschen"
   },
   "chat": {
+    "title": "Chat",
+    "minimize": "Minimieren",
+    "maximize": "Maximieren",
+    "restore": "Wiederherstellen",
     "peer": {
       "to": "→ {{to}}",
       "from": "{{from}} →"
@@ -71,7 +82,7 @@
     }
   },
   "composer": {
-    "asPrefix": "als",
+    "asLabel": "als {{appUser}}",
     "targetPlaceholder": "an…",
     "messagePlaceholder": "Nachricht",
     "sendButton": "senden",
@@ -148,6 +159,12 @@
       "layoutVertical": "Vertikal",
       "layoutHorizontal": "Horizontal",
       "layoutTile": "Kacheln"
+    },
+    "room": {
+      "hide": "Team-Raum ausblenden"
+    },
+    "chat": {
+      "hide": "Meinen Chat ausblenden"
     }
   },
   "terminal": {
@@ -158,7 +175,14 @@
     "label": "Sprache"
   },
   "settings": {
-    "title": "Einstellungen"
+    "title": "Einstellungen",
+    "terminalFontSize": {
+      "label": "Terminal-Schriftgröße"
+    },
+    "timezone": {
+      "label": "Zeitzone",
+      "auto": "Automatisch ({{zone}})"
+    }
   },
   "nativeMenu": {
     "about": "Über {{name}}",
@@ -175,6 +199,7 @@
     "paste": "Einsetzen",
     "selectAll": "Alles auswählen",
     "viewMenu": "Darstellung",
+    "showTeamRoom": "Team-Raum anzeigen",
     "showUserChat": "Meinen Chat anzeigen",
     "paneLayout": "Bereichslayout",
     "paneLayoutVertical": "Vertikal",
@@ -196,5 +221,8 @@
     "updateFailed": "Aktualisierung fehlgeschlagen: {{error}}",
     "upToDate": "Sie verwenden die neueste Version.",
     "noUpdatesTitle": "Keine Updates"
+  },
+  "stage": {
+    "emptyHint": "Klicke links auf ein Mitglied, um einen Agenten zu starten."
   }
 }

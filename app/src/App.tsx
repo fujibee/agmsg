@@ -3,11 +3,24 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  Maximize2,
+  Minimize2,
+  Minus,
+  PanelLeftClose,
+  RectangleHorizontal,
+  Settings,
+  Users,
+} from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
+import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
+import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
   RenameModal,
   SettingsModal,
@@ -18,6 +31,7 @@ import {
   clampRatio,
   collectDividers,
   computeRects,
+  dividerDragKey,
   insertAsNewLeaf,
   insertBeside,
   leaves,
@@ -33,6 +47,7 @@ import {
   type PaneRect,
   type SplitNode,
 } from "./paneTree";
+import { PulseDot } from "./pulseSync";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
@@ -86,7 +101,7 @@ type DropPreview = { paneId: string; zone: ReturnType<typeof classifyDrop> };
 type Modal =
   | { kind: "team"; firstRun: boolean }
   | { kind: "agent" }
-  | { kind: "appuser" }
+  | { kind: "appuser"; auto: boolean }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
   | { kind: "settings" }
@@ -103,6 +118,26 @@ const ROOM_PAGE_SIZE = 30;
 // enough for now; panes always start fresh each launch anyway (they're
 // live PTYs, not something a restart could restore even if we tried).
 const LAST_TEAM_KEY = "agmsg-app-last-team";
+// Persists the two View menu toggles below. See the seeding useEffect for
+// why restoring these pushes INTO Rust (set_team_room_visible/
+// set_user_chat_visible) rather than reading view_visibility unconditionally.
+const SHOW_TEAM_ROOM_KEY = "agmsg-app-show-team-room";
+const SHOW_USER_CHAT_KEY = "agmsg-app-show-user-chat";
+// Persists the sidebar's icon-only-rail collapse toggle.
+const SIDEBAR_COLLAPSED_KEY = "agmsg-app-sidebar-collapsed";
+// Persists the terminal font size (Settings modal). xterm.js default is 15;
+// this app has always hardcoded 12 (a bit denser), so that's the fallback.
+const TERMINAL_FONT_SIZE_KEY = "agmsg-app-terminal-font-size";
+const DEFAULT_TERMINAL_FONT_SIZE = 12;
+// "Don't show this again" for the auto-triggered app-user prompt (see the
+// team-change effect below) — adding an app-user is always reachable from
+// the chat's "Add one" link, so a user who dismisses the auto-prompt once
+// shouldn't be re-asked on every future team switch.
+const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
+// Persists the Settings modal's timezone choice (see time.ts) — defaults to
+// AUTO_TIMEZONE, which tracks the OS timezone live rather than freezing
+// whatever was detected at first launch.
+const TIMEZONE_KEY = "agmsg-app-timezone";
 // Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
 // usages below) — a made-up type, not text/plain, so a stray OS file drag
 // or an unrelated drag elsewhere on the page never accidentally matches a
@@ -137,6 +172,7 @@ export default function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
+  const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
   const [active, setActive] = useState<string>("room");
   const [target, setTarget] = useState<string>("");
@@ -147,8 +183,68 @@ export default function App() {
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
-  // Toggled from the native "View > Show User Chat" menu item.
-  const [showUserChat, setShowUserChat] = useState(true);
+  // Terminal font size, adjustable from the Settings modal and persisted
+  // across restarts (see TERMINAL_FONT_SIZE_KEY). Validated against the same
+  // range the Settings <input> enforces — a stray/corrupted localStorage
+  // value (NaN, Infinity, out of range) would otherwise reach xterm as-is
+  // and persist itself right back on the next write.
+  const [terminalFontSize, setTerminalFontSize] = useState(() => {
+    const stored = Number(localStorage.getItem(TERMINAL_FONT_SIZE_KEY));
+    return Number.isFinite(stored) && stored >= MIN_TERMINAL_FONT_SIZE && stored <= MAX_TERMINAL_FONT_SIZE
+      ? stored
+      : DEFAULT_TERMINAL_FONT_SIZE;
+  });
+  // Timezone used to display chat/team-room timestamps (see time.ts and
+  // TIMEZONE_KEY) — "auto" (the default) tracks the OS timezone live. A
+  // corrupted/no-longer-recognized stored zone falls back to "auto" here
+  // too, so the Settings <select> always has a matching option instead of
+  // rendering blank.
+  const [timezone, setTimezone] = useState(() => {
+    const stored = localStorage.getItem(TIMEZONE_KEY);
+    if (!stored || stored === AUTO_TIMEZONE) return AUTO_TIMEZONE;
+    return isValidTimeZone(stored) ? stored : AUTO_TIMEZONE;
+  });
+  // Collapses the team sidebar to an icon-only rail so panes get more width.
+  // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
+  // messaging a member isn't offered from the collapsed rail; expand to get
+  // back to the full list.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
+  );
+  // Popup the collapsed rail's team-icon button opens — team switching, the
+  // one thing the full sidebar's team <select> offers that needs a menu
+  // instead of a direct icon action at rail width. Settings is a direct
+  // button in the rail (same as the full view's gear icon), no popup needed.
+  const [railTeamMenu, setRailTeamMenu] = useState(false);
+  // Toggled from the native "View > Show Team Room" menu item — when off,
+  // the room tab itself disappears from the tab bar (not just its
+  // content), matching Show User Chat's own toggle just below it.
+  // Lazily restored from localStorage (see SHOW_TEAM_ROOM_KEY) rather than
+  // always starting `true` and correcting via an effect — the mount-time
+  // seeding effect below still exists, but only to push this already-
+  // correct initial value INTO Rust, not to setState a second time (that
+  // would race the persist effect just below it: a persist effect keyed on
+  // [showTeamRoom] captures the value AS OF THE RENDER IT WAS DECLARED IN,
+  // so if this state started `true` and got corrected by a later setState,
+  // the initial-render persist effect would already have fired and written
+  // the stale `true` back to localStorage before the correction landed).
+  const [showTeamRoom, setShowTeamRoom] = useState(
+    () => localStorage.getItem(SHOW_TEAM_ROOM_KEY) !== "false",
+  );
+  // Toggled from the native "View > Show User Chat" menu item. See
+  // showTeamRoom just above for why this is lazily restored.
+  const [showUserChat, setShowUserChat] = useState(
+    () => localStorage.getItem(SHOW_USER_CHAT_KEY) !== "false",
+  );
+  // The app-user chat pane's 3 states (session-only, like sidebarCollapsed):
+  // "normal" (today's layout), "minimized" (collapses the history away,
+  // leaving just the composer row — the team room becomes the only log,
+  // fixing the double-log fatigue real users reported), "maximized" (the
+  // chat pane fills the whole content area, hiding the team room/agent
+  // panes — a focused 1:1 view). Windows-style min/max header buttons
+  // toggle these; clicking maximize while minimized (or vice versa) jumps
+  // straight to the other state, same as real OS window controls.
+  const [chatPaneState, setChatPaneState] = useState<"normal" | "minimized" | "maximized">("normal");
   // Team-room member filter: names the user has UN-checked (default: all shown).
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   // Team-room history paging: whether an older page exists, and whether one
@@ -170,6 +266,46 @@ export default function App() {
   const [windowMenu, setWindowMenu] = useState<{ windowId: string; x: number; y: number } | null>(
     null,
   );
+  // Right-click context menu over the Team Room tab itself: { x, y }. Just
+  // one action (Hide Team Room) — no per-window data needed, unlike windowMenu.
+  const [roomMenu, setRoomMenu] = useState<{ x: number; y: number } | null>(null);
+  // Same idea, over the app-user chat pane's own header: { x, y }.
+  const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // Closes every context/dropdown menu (koit: opening a second one while a
+  // first is still open used to stack both — right-clicking a different
+  // target, or clicking a different trigger button, never went through the
+  // background click-away handler that normally closes these, since it's
+  // a completely separate element being interacted with). Every
+  // menu-opening handler below calls this first.
+  const closeAllMenus = useCallback(() => {
+    setNewMenu(false);
+    setMemberMenu(null);
+    setPaneMenu(null);
+    setWindowMenu(null);
+    setRoomMenu(null);
+    setChatMenu(null);
+    setRailTeamMenu(false);
+  }, []);
+  // The two menus opened by clicking a trigger button (rather than
+  // right-clicking somewhere) toggle themselves off on a second click of
+  // their OWN button — closeAllMenus alone would fight that (it'd close
+  // then the plain !v toggle would immediately reopen it), so these check
+  // "is it already open" first and only close-all-others when opening fresh.
+  const toggleNewMenu = useCallback(() => {
+    if (newMenu) setNewMenu(false);
+    else {
+      closeAllMenus();
+      setNewMenu(true);
+    }
+  }, [newMenu, closeAllMenus]);
+  const toggleRailTeamMenu = useCallback(() => {
+    if (railTeamMenu) setRailTeamMenu(false);
+    else {
+      closeAllMenus();
+      setRailTeamMenu(true);
+    }
+  }, [railTeamMenu, closeAllMenus]);
   // Swap two panes' positions by name: click one pane's name to "pick it
   // up" (its id goes here), then click another pane's name in the same
   // window to swap. Click the same name again to cancel. Also doubles as
@@ -227,6 +363,29 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  const applyAgentState = useCallback((paneId: string, state: RawState) => {
+    setPaneStatus((current) => applyStateChange(current, paneId, state));
+  }, []);
+
+  // Cell size in CSS px. The ref is for snapping a divider drag to whole
+  // terminal rows/cols — read once at drag-start, doesn't need a re-render
+  // on every fit. The state twin drives the gap BETWEEN panes below (koit:
+  // should be a full terminal cell per axis, herdr-style, not an arbitrary
+  // fixed px value) — that one has to be real React state since it feeds
+  // rendered CSS. Every pane uses the same fixed font today, so any one of
+  // them reporting is representative of them all.
+  const cellSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const [cellSize, setCellSize] = useState<{ w: number; h: number } | null>(null);
+  const handleCellSize = useCallback((w: number, h: number) => {
+    cellSizeRef.current = { w, h };
+    setCellSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+  }, []);
+
+  // Which divider (by dividerDragKey, below) is currently being dragged —
+  // state, not a captured DOM element, so the highlight survives a
+  // grid-segment transpose remounting the divider mid-drag (co1 review,
+  // PR #390).
+  const [draggingDividerKey, setDraggingDividerKey] = useState<string | null>(null);
 
   // The app user = the member registered with the agmsg-app type (one per team).
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
@@ -284,11 +443,68 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // showTeamRoom/showUserChat are already correctly seeded from localStorage
+  // by their useState initializers above — this effect's only job is to
+  // PUSH that initial value into Rust (set_team_room_visible/
+  // set_user_chat_visible, which also resyncs the native menu checkbox), so
+  // Rust doesn't sit at its own process-default `true` while the frontend
+  // shows something else. No setState here: doing so would re-introduce the
+  // write-then-correct race this replaced (a persist effect below, keyed on
+  // showTeamRoom/showUserChat, would capture the stale initial-render value
+  // and write it back to localStorage before a corrective setState's
+  // re-render could fix it).
+  //
+  // Falls back to Rust's own view_visibility only when localStorage has
+  // nothing stored yet (true first run) — this also covers a webview
+  // remount that doesn't restart the Rust process (Vite HMR during
+  // `tauri dev`), where Rust may hold a value localStorage hasn't caught
+  // up to yet.
+  useEffect(() => {
+    const storedTeamRoom = localStorage.getItem(SHOW_TEAM_ROOM_KEY);
+    const storedUserChat = localStorage.getItem(SHOW_USER_CHAT_KEY);
+    if (storedTeamRoom !== null) void invoke("set_team_room_visible", { visible: storedTeamRoom === "true" });
+    if (storedUserChat !== null) void invoke("set_user_chat_visible", { visible: storedUserChat === "true" });
+    if (storedTeamRoom === null || storedUserChat === null) {
+      invoke<{ team_room: boolean; user_chat: boolean }>("view_visibility")
+        .then((v) => {
+          if (storedTeamRoom === null) setShowTeamRoom(v.team_room);
+          if (storedUserChat === null) setShowUserChat(v.user_chat);
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  // Native "View > Show Team Room" menu checkbox toggles the room tab itself.
+  useEffect(() => {
+    const p = listen<boolean>("toggle-team-room", (e) => setShowTeamRoom(e.payload));
+    return () => void p.then((u) => u());
+  }, []);
+
   // Native "View > Show User Chat" menu checkbox toggles the chat/composer panel.
   useEffect(() => {
     const p = listen<boolean>("toggle-user-chat", (e) => setShowUserChat(e.payload));
     return () => void p.then((u) => u());
   }, []);
+
+  // Persist the two View toggles and the sidebar collapse state across
+  // restarts (see their _KEY constants above).
+  useEffect(() => {
+    localStorage.setItem(SHOW_TEAM_ROOM_KEY, String(showTeamRoom));
+  }, [showTeamRoom]);
+  useEffect(() => {
+    localStorage.setItem(SHOW_USER_CHAT_KEY, String(showUserChat));
+  }, [showUserChat]);
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  useEffect(() => {
+    localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(terminalFontSize));
+  }, [terminalFontSize]);
+  useEffect(() => {
+    localStorage.setItem(TIMEZONE_KEY, timezone);
+  }, [timezone]);
+  // Resolved once per render for both message-time display sites below.
+  const effectiveTimeZone = resolveTimeZone(timezone);
 
   // Spawnable agent types (for the Add-agent type picker). spawnMember
   // re-fetches this itself right before spawning — see there for why.
@@ -370,8 +586,11 @@ export default function App() {
       .catch(console.error);
     loadMembers(team)
       .then((m) => {
-        if (!m.some((x) => x.types.includes(APP_USER_TYPE))) {
-          setModal((cur) => cur ?? { kind: "appuser" });
+        if (
+          !m.some((x) => x.types.includes(APP_USER_TYPE)) &&
+          localStorage.getItem(SUPPRESS_APPUSER_PROMPT_KEY) !== "true"
+        ) {
+          setModal((cur) => cur ?? { kind: "appuser", auto: true });
         }
       })
       .catch(console.error);
@@ -409,6 +628,24 @@ export default function App() {
     });
     return () => void p.then((u) => u());
   }, [team, cmdName]);
+
+  useEffect(() => {
+    const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
+      applyAgentState(event.payload.id, event.payload.state);
+    });
+    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
+      setPaneStatus((current) => {
+        if (!(event.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[event.payload.id];
+        return next;
+      });
+    });
+    return () => {
+      void stateListener.then((unlisten) => unlisten());
+      void exitListener.then((unlisten) => unlisten());
+    };
+  }, [applyAgentState]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
   // loaded message and prepend it, restoring the scroll position afterward
@@ -688,6 +925,28 @@ export default function App() {
   // teams' windows stay mounted with their PTYs alive, just not listed
   // here or offered as spawn/move targets.
   const teamWindows = useMemo(() => windows.filter((w) => w.team === team), [windows, team]);
+  const teamStatusByName = useMemo(() => {
+    return Object.fromEntries(
+      teams.map((teamName) => {
+        const paneIds = windows
+          .filter((window) => window.team === teamName)
+          .flatMap((window) => leaves(window.root));
+        const statuses = paneIds.map((paneId) => paneStatus[paneId] ?? { state: "unknown" as const });
+        return [teamName, aggregateTeamStatus(statuses)];
+      }),
+    );
+  }, [teams, windows, paneStatus]);
+
+  // If Show Team Room gets switched off while it's the active tab, land on
+  // whichever pane tab exists instead — the room tab itself is about to
+  // disappear from the bar, so "active" can't keep pointing at it. If there
+  // are no pane tabs either, there's genuinely nothing to switch to yet;
+  // the stage below shows a hint in that case rather than a blank area.
+  useEffect(() => {
+    if (!showTeamRoom && active === "room" && teamWindows.length > 0) {
+      setActive(teamWindows[0].id);
+    }
+  }, [showTeamRoom, active, teamWindows]);
 
   // Every window's leaf rects, computed once per render rather than per-pane
   // (computeRects walks the whole tree) — looked up by window id, then pane
@@ -809,8 +1068,12 @@ export default function App() {
       e.preventDefault();
       const startX = e.clientX;
       const startW = sidebarWidth;
+      // 180, not 140 — narrower than that wraps the brand-row's + New
+      // button and the sidebar-title row's All/None filter links onto a
+      // second line (koit). Full collapse (the rail toggle) is the way to
+      // go narrower than a usable full sidebar now anyway.
       const onMove = (ev: MouseEvent) =>
-        setSidebarWidth(Math.max(140, Math.min(520, startW + ev.clientX - startX)));
+        setSidebarWidth(Math.max(180, Math.min(520, startW + ev.clientX - startX)));
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
@@ -843,6 +1106,16 @@ export default function App() {
     },
     [chatHeight],
   );
+
+  // Chat pane min/max: clicking one while the OTHER state is active jumps
+  // straight there (minimize while maximized goes directly to minimized,
+  // not back through normal first) — same as real OS window controls.
+  const toggleChatMinimized = useCallback(() => {
+    setChatPaneState((s) => (s === "minimized" ? "normal" : "minimized"));
+  }, []);
+  const toggleChatMaximized = useCallback(() => {
+    setChatPaneState((s) => (s === "maximized" ? "normal" : "maximized"));
+  }, []);
 
   // Draggable pane dividers (issue #317). Same document-level drag-tracking
   // pattern as startSidebarDrag/startChatDrag above, but the ratio being
@@ -889,10 +1162,18 @@ export default function App() {
     // own doc).
     const MIN_PANE_PX = 120;
     const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
+    // koit: prefers the divider snapping to whole terminal cells over a
+    // free pixel drag (herdr-inspired, though herdr itself had nothing
+    // reusable here — this is agmsg's own design). Every pane shares the
+    // same fixed font, so one representative cell size (captured by any
+    // TerminalPane's fit) is enough regardless of which panes flank this
+    // specific divider.
+    const cellPx = axis === "col" ? cellSizeRef.current?.w : cellSizeRef.current?.h;
     const onMove = (ev: MouseEvent) => {
       const totalPx = axis === "col" ? parentPx.width : parentPx.height;
       const raw = axis === "col" ? (ev.clientX - parentPx.left) / totalPx : (ev.clientY - parentPx.top) / totalPx;
-      const ratio = clampRatio(raw, MIN_PANE_PX, totalPx);
+      const snapped = cellPx ? (Math.round((raw * totalPx) / cellPx) * cellPx) / totalPx : raw;
+      const ratio = clampRatio(snapped, MIN_PANE_PX, totalPx);
       setWindows((prev) =>
         prev.map((w) => (w.id === windowId ? { ...w, root: updateRatioAtPath(w.root, dragPath, ratio) } : w)),
       );
@@ -901,21 +1182,22 @@ export default function App() {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.classList.remove(cursorClass);
+      setDraggingDividerKey(null);
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    // dragPath.join(".") is this divider's identity on BOTH sides of the
+    // grid-segment transpose queued above (see dividerDragKey's doc) — key
+    // off that, not a captured DOM element, so the highlight survives even
+    // if this transpose swaps in a differently-shaped divider set.
+    setDraggingDividerKey(dragPath.join(".") || "root");
     document.body.classList.add(cursorClass);
   }, []);
 
   return (
     <div
       className="app"
-      onClick={() => {
-        setNewMenu(false);
-        setMemberMenu(null);
-        setPaneMenu(null);
-        setWindowMenu(null);
-      }}
+      onClick={closeAllMenus}
       onDragOverCapture={(e) => {
         // WebKit doesn't reliably show a "no-drop" cursor just from
         // dropEffect = "none" — it only trusts that value once something in
@@ -986,28 +1268,182 @@ export default function App() {
         </div>
       )}
       <div className="body">
-        <aside className="sidebar" style={{ width: sidebarWidth }}>
-          <div className="sidebar-head" data-tauri-drag-region>
-            <div className="brand-row">
-              <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
-              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
-              <button className="new-btn" onClick={() => setNewMenu((v) => !v)}>
-                {t("sidebar.newMenu.trigger")}
+        <aside
+          className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}
+          style={{ width: sidebarCollapsed ? undefined : sidebarWidth }}
+        >
+          {/* Collapse toggle — level with the traffic lights, expanded state
+              only (koit: it looked fine there, "closing is perfect"). At
+              44px wide the collapsed sidebar sits entirely under the
+              traffic-light cluster, so ANY button in this same slim strip
+              would overlap them there — collapsed state expands via the
+              agmsg mark itself instead (below), not a dedicated button. */}
+          {!sidebarCollapsed && (
+            <div className="sidebar-toggle-row" data-tauri-drag-region>
+              <button
+                className="sidebar-collapse-toggle"
+                title={t("sidebar.collapse")}
+                onClick={() => setSidebarCollapsed(true)}
+              >
+                <PanelLeftClose size={16} />
               </button>
-              {newMenu && (
-                <div className="new-menu">
-                  <button
-                    onClick={() => {
-                      setNewMenu(false);
-                      setModal({ kind: "team", firstRun: false });
-                    }}
-                  >
-                    {t("sidebar.newMenu.team")}
+            </div>
+          )}
+          {sidebarCollapsed ? (
+            // Icon-only rail (koit design): the agmsg mark (click to
+            // expand) → + (new team/agent, same menu as full view) → team
+            // icon (click opens a team-switch popup, replacing the
+            // <select>) → spacer → the app-user avatar + a settings button
+            // at the bottom. No running-dot / member list — spawning/
+            // messaging isn't offered from here at all. Icons are lucide
+            // (koit: prefer a real icon set over ad-hoc unicode
+            // glyphs/hand-drawn SVGs).
+            <div className="sidebar-collapsed-rail">
+              <button
+                className="rail-logo-mark-btn"
+                title={t("sidebar.expand")}
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <img className="rail-logo-mark" src="/agmsg-mark.png" alt={t("sidebar.logoAlt")} />
+              </button>
+
+              <div className="new-wrap" onClick={(e) => e.stopPropagation()}>
+                <button className="rail-icon-btn" title={t("sidebar.newMenu.trigger")} onClick={toggleNewMenu}>
+                  +
+                </button>
+                {newMenu && (
+                  <div className="new-menu rail-popup">
+                    <button
+                      onClick={() => {
+                        setNewMenu(false);
+                        setModal({ kind: "team", firstRun: false });
+                      }}
+                    >
+                      {t("sidebar.newMenu.team")}
+                    </button>
+                    <button
+                      disabled={!team}
+                      onClick={() => {
+                        setNewMenu(false);
+                        setModal({ kind: "agent" });
+                        invoke<AgentType[]>("agmsg_spawnable_types")
+                          .then(setSpawnTypes)
+                          .catch(() => {});
+                      }}
+                    >
+                      {t("sidebar.newMenu.agent")}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {team && (
+                <div className="rail-menu-wrap" onClick={(e) => e.stopPropagation()}>
+                  <button className="rail-icon-btn" title={team} onClick={toggleRailTeamMenu}>
+                    <Users size={16} />
                   </button>
+                  {railTeamMenu && (
+                    <div className="ctx-menu rail-popup">
+                      {teams.map((teamName) => (
+                        <button
+                          key={teamName}
+                          className={teamName === team ? "active" : undefined}
+                          onClick={() => {
+                            setTeam(teamName);
+                            setRailTeamMenu(false);
+                          }}
+                        >
+                          {teamName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="team-status-rail collapsed-team-status" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className={`team-status-dot status-${status}`} />
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="rail-spacer" />
+
+              {appUser && (
+                <button
+                  className="rail-avatar-btn"
+                  title={t("sidebar.expand")}
+                  onClick={() => setSidebarCollapsed(false)}
+                >
+                  <span className="avatar" title={t("sidebar.user.title", { team })} />
+                </button>
+              )}
+              <button
+                className="rail-icon-btn"
+                title={t("settings.title")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setModal({ kind: "settings" });
+                }}
+              >
+                <Settings size={16} />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="sidebar-head" data-tauri-drag-region>
+                <div className="brand-row">
+                  <img className="logo" src="/agmsg-logo.png" alt={t("sidebar.logoAlt")} />
+                </div>
+              </div>
+              <div className="sidebar-title">
+                <span className="sidebar-title-label">
+                  {t("sidebar.team.title")}
                   <button
+                    className="section-add-btn"
+                    title={t("sidebar.team.new")}
+                    onClick={() => setModal({ kind: "team", firstRun: false })}
+                  >
+                    +
+                  </button>
+                </span>
+              </div>
+              <div className="team-status-rail" aria-label="Open pane status">
+                {teams.map((teamName) => {
+                  const status = teamStatusByName[teamName] ?? "unknown";
+                  return (
+                    <button
+                      key={teamName}
+                      className={teamName === team ? "team-status-row active" : "team-status-row"}
+                      title={`${teamName}: ${status} (open panes)`}
+                      onClick={() => setTeam(teamName)}
+                    >
+                      <span className="team-status-slot">
+                        <span className={`team-status-dot status-${status}`} />
+                      </span>
+                      <span className="team-status-name">{teamName}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="sidebar-title">
+                <span className="sidebar-title-label">
+                  {t("sidebar.title")}
+                  <button
+                    className="section-add-btn"
+                    title={t("sidebar.newAgent")}
                     disabled={!team}
                     onClick={() => {
-                      setNewMenu(false);
                       setModal({ kind: "agent" });
                       // Refresh in case spawn-options.yaml or a new type
                       // manifest showed up since app start.
@@ -1016,104 +1452,123 @@ export default function App() {
                         .catch(() => {});
                     }}
                   >
-                    {t("sidebar.newMenu.agent")}
+                    +
+                  </button>
+                </span>
+                {active === "room" && others.length > 0 && (
+                  <span className="filter-actions">
+                    <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
+                    <span>·</span>
+                    <button onClick={selectNoMembers}>{t("sidebar.filter.none")}</button>
+                  </span>
+                )}
+              </div>
+              <ul className="members">
+                {others.map((m) => {
+                  const pane = panes.find(
+                    (candidate) =>
+                      candidate.label === m.name &&
+                      windows.some(
+                        (window) =>
+                          window.team === team && leaves(window.root).includes(candidate.id),
+                      ),
+                  );
+                  const status = pane ? (paneStatus[pane.id]?.state ?? "unknown") : null;
+                  return (
+                    <li
+                      key={m.name}
+                      className="member-row"
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
+                      }}
+                    >
+                      {active === "room" ? (
+                        <input
+                          type="checkbox"
+                          className="member-check"
+                          title={t("sidebar.member.checkboxTitle")}
+                          checked={!deselected.has(m.name)}
+                          onChange={() => toggleMember(m.name)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="member-check-slot">
+                          {status && (
+                            <PulseDot
+                              periodMs={1200}
+                              active={status === "working"}
+                              className={`agent-status-dot status-${status}`}
+                              title={status}
+                            />
+                          )}
+                        </span>
+                      )}
+                      <button
+                        className="member"
+                        onClick={() => spawnMember(m)}
+                        title={
+                          pane
+                            ? t("sidebar.member.titleRunning")
+                            : t("sidebar.member.titleSpawn")
+                        }
+                      >
+                        <span className="member-name">{m.name}</span>
+                        <span className="member-types">
+                          {m.types.join(", ") || t("sidebar.member.noTypes")}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+                {others.length === 0 && (
+                  <li className="empty">{t("sidebar.member.emptyState")}</li>
+                )}
+              </ul>
+              {appUser && (
+                <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
+                  <span className="avatar" />
+                  <div className="su-meta">
+                    <span className="su-name">{appUser}</span>
+                    <span className="su-team">{team}</span>
+                  </div>
+                  <button
+                    className="settings-btn"
+                    title={t("settings.title")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModal({ kind: "settings" });
+                    }}
+                  >
+                    <Settings size={15} />
                   </button>
                 </div>
               )}
-              </div>
-            </div>
-            <select value={team} onChange={(e) => setTeam(e.target.value)}>
-              {teams.map((teamName) => (
-                <option key={teamName} value={teamName}>
-                  {teamName}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="sidebar-title">
-            <span>{t("sidebar.title")}</span>
-            {active === "room" && others.length > 0 && (
-              <span className="filter-actions">
-                <button onClick={selectAllMembers}>{t("sidebar.filter.all")}</button>
-                <span>·</span>
-                <button onClick={selectNoMembers}>{t("sidebar.filter.none")}</button>
-              </span>
-            )}
-          </div>
-          <ul className="members">
-            {others.map((m) => (
-              <li
-                key={m.name}
-                className="member-row"
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setMemberMenu({ member: m, x: e.clientX, y: e.clientY });
-                }}
-              >
-                {active === "room" && (
-                  <input
-                    type="checkbox"
-                    className="member-check"
-                    title={t("sidebar.member.checkboxTitle")}
-                    checked={!deselected.has(m.name)}
-                    onChange={() => toggleMember(m.name)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                )}
-                <button
-                  className="member"
-                  onClick={() => spawnMember(m)}
-                  title={
-                    panes.some((p) => p.label === m.name)
-                      ? t("sidebar.member.titleRunning")
-                      : t("sidebar.member.titleSpawn")
-                  }
-                >
-                  <span className="member-name">
-                    {m.name}
-                    {panes.some((p) => p.label === m.name) && <span className="running-dot" />}
-                  </span>
-                  <span className="member-types">
-                    {m.types.join(", ") || t("sidebar.member.noTypes")}
-                  </span>
-                </button>
-              </li>
-            ))}
-            {others.length === 0 && (
-              <li className="empty">{t("sidebar.member.emptyState")}</li>
-            )}
-          </ul>
-          {appUser && (
-            <div className="sidebar-user" title={t("sidebar.user.title", { team })}>
-              <span className="avatar" />
-              <div className="su-meta">
-                <span className="su-name">{appUser}</span>
-                <span className="su-team">{team}</span>
-              </div>
-              <button
-                className="settings-btn"
-                title={t("settings.title")}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setModal({ kind: "settings" });
-                }}
-              >
-                ⚙
-              </button>
-            </div>
+            </>
           )}
         </aside>
 
-        <div className="divider-v" onMouseDown={startSidebarDrag} />
+        {!sidebarCollapsed && <div className="divider-v" onMouseDown={startSidebarDrag} />}
 
         <main className="main">
-          <nav className="tabs" data-tauri-drag-region>
-            <span className={active === "room" ? "tab active" : "tab"}>
-              <button className="tab-label" onClick={() => setActive("room")}>
-                {t("tabs.roomLabel")}
-              </button>
-            </span>
+          <nav className="tabs" data-tauri-drag-region hidden={showUserChat && chatPaneState === "maximized"}>
+            {showTeamRoom && (
+              <span
+                className={active === "room" ? "tab active" : "tab"}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  closeAllMenus();
+                  setRoomMenu({ x: e.clientX, y: e.clientY });
+                }}
+              >
+                <button className="tab-label" onClick={() => setActive("room")}>
+                  {t("tabs.roomLabel")}
+                </button>
+              </span>
+            )}
             {teamWindows.map((w) => (
               <span
                 key={w.id}
@@ -1126,6 +1581,7 @@ export default function App() {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
+                  closeAllMenus();
                   setWindowMenu({ windowId: w.id, x: e.clientX, y: e.clientY });
                 }}
                 onDragOver={(e) => {
@@ -1204,10 +1660,10 @@ export default function App() {
             />
           </nav>
 
-          <section className="stage">
+          <section className="stage" hidden={showUserChat && chatPaneState === "maximized"}>
             <div
               className="room"
-              hidden={active !== "room"}
+              hidden={active !== "room" || !showTeamRoom}
               ref={feedRef}
               onScroll={(e) => {
                 if (e.currentTarget.scrollTop < 60) void loadOlderMessages();
@@ -1220,7 +1676,7 @@ export default function App() {
                     <b className="mf">{g.from}</b>
                     <span className="arrow">→</span>
                     <b className="mt">{g.to}</b>
-                    <span className="grp-time">{g.items[0].created_at.slice(11, 19)}</span>
+                    <span className="grp-time">{formatMessageTime(g.items[0].created_at, effectiveTimeZone)}</span>
                   </div>
                   {g.items.map((m) => (
                     <div className="grp-body" key={m.id}>
@@ -1231,6 +1687,13 @@ export default function App() {
               ))}
               {messages.length === 0 && <div className="empty">{t("room.emptyState")}</div>}
             </div>
+
+            {/* Show Team Room is off AND no pane tabs exist yet — the stage
+                would otherwise be entirely blank (no room, nothing else to
+                switch "active" to). */}
+            {!showTeamRoom && teamWindows.length === 0 && (
+              <div className="stage-empty-hint">{t("stage.emptyHint")}</div>
+            )}
 
             {/* Every pane is a permanent, flat child of .stage — its window only
                 decides WHERE it's positioned (computeRects, from its split
@@ -1262,6 +1725,17 @@ export default function App() {
                     top: `${rect.top}%`,
                     width: `${rect.width}%`,
                     height: `${rect.height}%`,
+                    // The gap between two adjacent panes is each side's own
+                    // padding added together, so half a cell per side makes
+                    // a full terminal cell of gap at the shared seam
+                    // (koit/herdr: the gap should read as "one cell", not
+                    // an arbitrary fixed px value — falls back to the old
+                    // fixed padding before any pane has fit and reported
+                    // its real cell size).
+                    paddingLeft: cellSize ? cellSize.w / 2 : undefined,
+                    paddingRight: cellSize ? cellSize.w / 2 : undefined,
+                    paddingTop: cellSize ? cellSize.h / 2 : undefined,
+                    paddingBottom: cellSize ? cellSize.h / 2 : undefined,
                   }}
                   onDragOver={(e) => {
                     // Gate on dataTransfer.types, NOT React state: dragover
@@ -1316,6 +1790,7 @@ export default function App() {
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      closeAllMenus();
                       setPaneMenu({ paneId: p.id, windowId: win.id, x: e.clientX, y: e.clientY });
                     }}
                   >
@@ -1365,13 +1840,16 @@ export default function App() {
                     >
                       {p.label}
                     </button>
-                    <span className={p.native ? "monitor-dot native" : "monitor-dot app"}>
+                    <PulseDot
+                      periodMs={2200}
+                      className={p.native ? "monitor-dot native" : "monitor-dot app"}
+                    >
                       <span className="monitor-tip">
                         {p.native
                           ? t("pane.monitorTip.native")
                           : t("pane.monitorTip.app")}
                       </span>
-                    </span>
+                    </PulseDot>
                     <button
                       className="pane-header-close"
                       onClick={() => setModal({ kind: "closePane", paneId: p.id })}
@@ -1380,100 +1858,168 @@ export default function App() {
                       ×
                     </button>
                   </div>
-                  <TerminalPane id={p.id} cmd={p.cmd} args={p.args} cwd={p.cwd} />
+                  <TerminalPane
+                    id={p.id}
+                    cmd={p.cmd}
+                    args={p.args}
+                    cwd={p.cwd}
+                    fontSize={terminalFontSize}
+                    onAgentState={applyAgentState}
+                    onCellSize={handleCellSize}
+                  />
                 </div>
               );
             })}
 
             {active !== "room" &&
-              activeDividers.map((d) => (
-                <div
-                  key={
-                    d.kind === "single"
-                      ? `single:${d.path.join(".") || "root"}`
-                      : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
-                  }
-                  className={d.axis === "col" ? "pane-divider-v" : "pane-divider-h"}
-                  style={{
-                    left: `${d.rect.left}%`,
-                    top: `${d.rect.top}%`,
-                    width: `${d.rect.width}%`,
-                    height: `${d.rect.height}%`,
-                  }}
-                  onMouseDown={(e) => startPaneDividerDrag(e, active, d)}
-                />
-              ))}
+              activeDividers.map((d) => {
+                const isDragging = draggingDividerKey !== null && dividerDragKey(d) === draggingDividerKey;
+                return (
+                  <div
+                    key={
+                      d.kind === "single"
+                        ? `single:${d.path.join(".") || "root"}`
+                        : `grid:${d.basePath.join(".") || "root"}:${d.segmentPath.join(".")}`
+                    }
+                    className={[
+                      d.axis === "col" ? "pane-divider-v" : "pane-divider-h",
+                      isDragging && "pane-divider-dragging",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    style={{
+                      left: `${d.rect.left}%`,
+                      top: `${d.rect.top}%`,
+                      width: `${d.rect.width}%`,
+                      height: `${d.rect.height}%`,
+                    }}
+                    onMouseDown={(e) => startPaneDividerDrag(e, active, d)}
+                  />
+                );
+              })}
           </section>
 
-          {showUserChat && <div className="divider-h" onMouseDown={startChatDrag} />}
+          {showUserChat && chatPaneState === "normal" && (
+            <div className="divider-h" onMouseDown={startChatDrag} />
+          )}
 
           {/* App-user chat: the human's own send/receive thread + composer.
-              Hidden via View > Show User Chat (native menu checkbox). Clicking
-              the history jumps focus to the composer input below — the
-              history itself has nothing to focus (nothing to type into), so
-              without this the border-on-focus feedback here was invisible in
-              normal use. */}
+              Hidden via View > Show User Chat (native menu checkbox).
+              min/max header buttons toggle chatPaneState between normal,
+              minimized (history collapsed away — just the composer row,
+              fixing the "my own messages show twice" fatigue real users
+              reported once the room already shows everything), and
+              maximized (fills the whole content area, hiding the team
+              room/agent panes — a focused 1:1 view). Clicking the history
+              jumps focus to the composer input below — the history itself
+              has nothing to focus (nothing to type into), so without this
+              the border-on-focus feedback here was invisible in normal use. */}
           <div
-            className="appuser-chat"
-            ref={chatRef}
-            style={{ height: chatHeight }}
+            className={`appuser-chat-wrap state-${chatPaneState}`}
+            style={chatPaneState === "normal" ? { height: chatHeight } : undefined}
             hidden={!showUserChat}
-            onClick={() => composerInputRef.current?.focus()}
           >
-            {myThread.map((m) => (
-              <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
-                <span className="chat-time">{m.created_at.slice(11, 19)}</span>
-                <span className="chat-peer">
-                  {m.from === appUser
-                    ? t("chat.peer.to", { to: m.to })
-                    : t("chat.peer.from", { from: m.from })}
-                </span>
-                <span className="chat-body">{m.body}</span>
-              </div>
-            ))}
-            {appUser && myThread.length === 0 && (
-              <div className="empty">{t("chat.emptyState.withUser", { appUser })}</div>
-            )}
-            {!appUser && team && (
-              <div className="empty">
-                {t("chat.emptyState.noUser")}
-                <button className="link" onClick={() => setModal({ kind: "appuser" })}>
-                  {t("chat.emptyState.addOne")}
+            <div
+              className="appuser-chat-header"
+              data-tauri-drag-region
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeAllMenus();
+                setChatMenu({ x: e.clientX, y: e.clientY });
+              }}
+            >
+              <span className="appuser-chat-title">{t("chat.title")}</span>
+              <div className="appuser-chat-controls">
+                <button
+                  className="chat-ctrl-btn"
+                  title={chatPaneState === "minimized" ? t("chat.restore") : t("chat.minimize")}
+                  onClick={toggleChatMinimized}
+                >
+                  {chatPaneState === "minimized" ? <RectangleHorizontal size={14} /> : <Minus size={14} />}
+                </button>
+                <button
+                  className="chat-ctrl-btn"
+                  title={chatPaneState === "maximized" ? t("chat.restore") : t("chat.maximize")}
+                  onClick={toggleChatMaximized}
+                >
+                  {chatPaneState === "maximized" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                 </button>
               </div>
-            )}
-          </div>
+            </div>
 
-          <footer className="composer" hidden={!showUserChat}>
-            {appUser ? (
-              <>
-                <span className="as">
-                  {t("composer.asPrefix")} <b>{appUser}</b>
-                </span>
-                <select value={target} onChange={(e) => setTarget(e.target.value)}>
-                  <option value="">{t("composer.targetPlaceholder")}</option>
-                  {others.map((m) => (
-                    <option key={m.name} value={m.name}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  ref={composerInputRef}
-                  value={draft}
-                  placeholder={t("composer.messagePlaceholder")}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => isSubmitEnter(e) && send()}
-                  {...imeCompositionProps}
-                />
-                <button onClick={send} disabled={!draft.trim() || !target}>
-                  {t("composer.sendButton")}
-                </button>
-              </>
-            ) : (
-              <span className="as">{t("composer.noAppUser")}</span>
+            {chatPaneState !== "minimized" && (
+              <div className="appuser-chat" ref={chatRef} onClick={() => composerInputRef.current?.focus()}>
+                {myThread.map((m) => (
+                  <div className={m.from === appUser ? "chat-line out" : "chat-line in"} key={m.id}>
+                    <span className="chat-time">{formatMessageTime(m.created_at, effectiveTimeZone)}</span>
+                    <span className="chat-peer">
+                      {m.from === appUser
+                        ? t("chat.peer.to", { to: m.to })
+                        : t("chat.peer.from", { from: m.from })}
+                    </span>
+                    <span className="chat-body">{m.body}</span>
+                  </div>
+                ))}
+                {appUser && myThread.length === 0 && (
+                  <div className="empty">{t("chat.emptyState.withUser", { appUser })}</div>
+                )}
+                {!appUser && team && (
+                  <div className="empty">
+                    {t("chat.emptyState.noUser")}
+                    <button className="link" onClick={() => setModal({ kind: "appuser", auto: false })}>
+                      {t("chat.emptyState.addOne")}
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
-          </footer>
+
+            <footer className="composer">
+              {appUser ? (
+                <>
+                  <span className="as">
+                    {/* Word order around the name varies by language (English
+                        "as X" puts it after; Japanese "X として" puts it
+                        before) — asLabel is the whole template with a literal
+                        "{{appUser}}" placeholder, split here so only the name
+                        itself renders bold, wherever the translation puts it. */}
+                    {(() => {
+                      const [before, after] = t("composer.asLabel").split("{{appUser}}");
+                      return (
+                        <>
+                          {before}
+                          <b>{appUser}</b>
+                          {after}
+                        </>
+                      );
+                    })()}
+                  </span>
+                  <select value={target} onChange={(e) => setTarget(e.target.value)}>
+                    <option value="">{t("composer.targetPlaceholder")}</option>
+                    {others.map((m) => (
+                      <option key={m.name} value={m.name}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    ref={composerInputRef}
+                    value={draft}
+                    placeholder={t("composer.messagePlaceholder")}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => isSubmitEnter(e) && send()}
+                    {...imeCompositionProps}
+                  />
+                  <button onClick={send} disabled={!draft.trim() || !target}>
+                    {t("composer.sendButton")}
+                  </button>
+                </>
+              ) : (
+                <span className="as">{t("composer.noAppUser")}</span>
+              )}
+            </footer>
+          </div>
         </main>
       </div>
 
@@ -1486,7 +2032,18 @@ export default function App() {
         />
       )}
       {modal?.kind === "appuser" && (
-        <AppUserModal onAdd={onAddAppUser} onClose={() => setModal(null)} browseDir={browseDir} />
+        <AppUserModal
+          onAdd={onAddAppUser}
+          onClose={() => {
+            // Dismissing the auto-prompt (vs. the "Add one" link's manual
+            // open) means the user doesn't want to add one right now — an
+            // app-user is always reachable from the chat link, so don't
+            // re-ask on every future team switch (see SUPPRESS_APPUSER_PROMPT_KEY).
+            if (modal.auto) localStorage.setItem(SUPPRESS_APPUSER_PROMPT_KEY, "true");
+            setModal(null);
+          }}
+          browseDir={browseDir}
+        />
       )}
       {modal?.kind === "agent" && (
         <AgentModal
@@ -1510,7 +2067,15 @@ export default function App() {
           onClose={() => setModal(null)}
         />
       )}
-      {modal?.kind === "settings" && <SettingsModal onClose={() => setModal(null)} />}
+      {modal?.kind === "settings" && (
+        <SettingsModal
+          onClose={() => setModal(null)}
+          terminalFontSize={terminalFontSize}
+          onTerminalFontSizeChange={setTerminalFontSize}
+          timezone={timezone}
+          onTimezoneChange={setTimezone}
+        />
+      )}
       {modal?.kind === "closeWindow" &&
         (() => {
           const win = windows.find((w) => w.id === modal.windowId);
@@ -1696,6 +2261,40 @@ export default function App() {
             </div>
           );
         })()}
+
+      {roomMenu && (
+        <div className="ctx-menu" style={{ left: roomMenu.x, top: roomMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => {
+              setShowTeamRoom(false);
+              setRoomMenu(null);
+              // Keeps the native View > Show Team Room checkbox in sync —
+              // it's not the surface that changed this, so Rust's own copy
+              // of the toggle state would otherwise go stale.
+              void invoke("set_team_room_visible", { visible: false });
+            }}
+          >
+            {t("ctxMenu.room.hide")}
+          </button>
+        </div>
+      )}
+
+      {chatMenu && (
+        <div className="ctx-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => {
+              setShowUserChat(false);
+              setChatMenu(null);
+              // Keeps the native View > Show User Chat checkbox in sync —
+              // it's not the surface that changed this, so Rust's own copy
+              // of the toggle state would otherwise go stale.
+              void invoke("set_user_chat_visible", { visible: false });
+            }}
+          >
+            {t("ctxMenu.chat.hide")}
+          </button>
+        </div>
+      )}
 
       {windowMenu &&
         (() => {

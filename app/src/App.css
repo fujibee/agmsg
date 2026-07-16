@@ -3,6 +3,11 @@
   --panel: #11151f;
   --panel-2: #161b27;
   --border: #232a3a;
+  /* One step brighter than --border, specifically for the pane frame
+     (koit: --border alone was too faint to read as a visible box at
+     rest). Its own variable, not a --border change, so the other 27
+     places --border is used elsewhere in the UI stay as-is. */
+  --pane-border: #3a4660;
   --fg: #c5c8c6;
   --muted: #6b7280;
   --accent: #7aa2f7;
@@ -155,20 +160,10 @@ select:focus {
   border-color: var(--accent);
 }
 
-/* + New menu */
+/* + New menu (collapsed-rail only — the expanded sidebar has its own
+   direct + buttons per section instead, see .section-add-btn) */
 .new-wrap {
   position: relative;
-}
-.new-btn {
-  background: var(--panel-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 10px;
-  cursor: pointer;
-}
-.new-btn:hover {
-  border-color: var(--accent);
 }
 .new-menu {
   position: absolute;
@@ -270,12 +265,15 @@ select:focus {
   font-size: 12px;
   color: var(--muted);
 }
-/* Marks the tab's current layout in the Layout ▸ submenu. */
-.submenu button.active {
+/* Marks the current choice in a menu (e.g. the collapsed sidebar rail's
+   team-switch popup — see .rail-popup below). */
+.submenu button.active,
+.ctx-menu button.active {
   color: var(--accent);
   font-weight: 600;
 }
-.submenu button.active::before {
+.submenu button.active::before,
+.ctx-menu button.active::before {
   content: "✓ ";
 }
 
@@ -474,14 +472,130 @@ body.resizing-row {
   display: flex;
   flex-direction: column;
 }
+/* Collapsed to an icon-only rail (issue #317 backlog — koit) so panes get
+   more width; a fixed width overrides the draggable one from full size.
+   Spawning/messaging a member isn't offered from here at all — just +
+   (new team/agent), the current team (click to switch), and the app-user
+   avatar at the bottom (click for settings). */
+.sidebar.collapsed {
+  width: 44px;
+}
+/* Collapse/expand toggle — its own slim strip, level with the overlaid
+   macOS traffic lights (koit: not a tall empty row below them, and not
+   crowded into brand-row either — its own row, just short and right by the
+   lights rather than adding real vertical space). */
+.sidebar-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  height: 28px;
+  padding: 0 6px;
+}
+.sidebar-collapse-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sidebar-collapse-toggle:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.sidebar-collapsed-rail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  /* No .sidebar-toggle-row above this in the collapsed state (it would
+     overlap the traffic lights at only 44px wide) — this provides its own
+     traffic-light clearance directly. */
+  padding: 34px 0 12px;
+}
+.rail-logo-mark-btn {
+  background: none;
+  border: none;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+}
+.rail-logo-mark-btn:hover {
+  background: var(--panel-2);
+}
+.rail-logo-mark {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+.rail-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.rail-icon-btn:hover {
+  background: var(--panel-2);
+}
+.rail-menu-wrap {
+  position: relative;
+}
+.rail-spacer {
+  flex: 1;
+}
+/* Clicking the avatar also expands the sidebar (koit) — same action as the
+   agmsg mark button above it, since it had no action at all before. */
+.rail-avatar-btn {
+  background: none;
+  border: none;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+}
+.rail-avatar-btn:hover {
+  background: var(--panel-2);
+}
+.sidebar-collapsed-rail .avatar {
+  width: 24px;
+  height: 24px;
+}
+/* Popups the rail's + / team buttons open — anchored to their own trigger
+   button (position: relative on .rail-menu-wrap / .new-wrap) rather than
+   the click-coordinate positioning .ctx-menu normally uses elsewhere
+   (member/pane/tab right-click menus), since these always open from the
+   same fixed rail position. */
+.rail-popup {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 4px;
+  z-index: 30;
+}
 /* Sidebar header: brand + New + team selector (moved out of a top bar). */
 .sidebar-head {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  /* Top padding clears the overlaid macOS traffic lights. */
-  padding: 34px 12px 12px;
+  /* Traffic-light clearance now lives on .sidebar-toggle-row above this
+     (same slot in both states) — this only needs its own small gap below
+     that row, not a second full clearance. */
+  padding: 4px 12px 12px;
   border-bottom: 1px solid var(--border);
 }
 .brand-row {
@@ -495,14 +609,71 @@ body.resizing-row {
   width: auto;
   display: block;
 }
-.brand-row .new-wrap {
-  margin-left: auto;
-}
 .sidebar-head .brand {
   font-size: 15px;
 }
 .sidebar-head select {
   width: 100%;
+}
+.team-status-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+}
+.team-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 4px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  color: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+.team-status-row:hover,
+.team-status-row.active {
+  background: var(--panel-2);
+}
+.team-status-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-status-slot {
+  flex-shrink: 0;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.team-status-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.team-status-dot.status-blocked { background: #f7768e; }
+.team-status-dot.status-working { background: #e0af68; }
+.team-status-dot.status-idle { background: var(--green); }
+.team-status-dot.status-unknown { background: var(--green); }
+.collapsed-team-status {
+  width: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.collapsed-team-status .team-status-row {
+  justify-content: center;
+  gap: 0;
+  padding: 6px 0;
 }
 .language-switcher {
   font-size: 11px;
@@ -516,6 +687,35 @@ body.resizing-row {
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
+  white-space: nowrap;
+}
+.sidebar-title-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.section-add-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.section-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .filter-actions {
   display: flex;
@@ -523,6 +723,7 @@ body.resizing-row {
   gap: 4px;
   text-transform: none;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 .filter-actions button {
   background: none;
@@ -551,6 +752,14 @@ body.resizing-row {
   cursor: pointer;
   margin-left: 4px;
 }
+.member-check-slot {
+  flex-shrink: 0;
+  width: 13px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .member {
   flex: 1;
   min-width: 0;
@@ -572,15 +781,25 @@ body.resizing-row {
 .member-name {
   font-weight: 600;
 }
-/* Green dot marks a member that already has a live pane. */
-.running-dot {
+.agent-status-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--muted);
   vertical-align: middle;
+}
+.agent-status-dot.status-blocked { background: #f7768e; }
+.agent-status-dot.status-working {
+  background: #e0af68;
+  animation: agent-status-pulse 1.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
+}
+.agent-status-dot.status-idle { background: var(--green); }
+.agent-status-dot.status-unknown { background: var(--green); }
+
+@keyframes agent-status-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
 }
 .member-types {
   font-size: 11px;
@@ -595,7 +814,9 @@ body.resizing-row {
   padding: 10px 12px;
   border-top: 1px solid var(--border);
 }
-.sidebar-user .avatar {
+/* Base look shared with the collapsed rail's own (smaller) avatar — see
+   .sidebar-collapsed-rail .avatar's size override below. */
+.avatar {
   width: 26px;
   height: 26px;
   border-radius: 50%;
@@ -603,13 +824,14 @@ body.resizing-row {
   background: linear-gradient(135deg, var(--accent), #5566c4);
 }
 .settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin-left: auto;
   flex-shrink: 0;
   background: none;
   border: none;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1;
   cursor: pointer;
   padding: 4px;
   border-radius: 4px;
@@ -653,6 +875,13 @@ body.resizing-row {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+}
+/* `hidden` alone loses to our `display: flex` above (same issue as
+   .appuser-chat[hidden] below) — spelled out for the chat pane's maximize
+   state, which hides the tab strip so the chat pane can fill the content
+   area. */
+.tabs[hidden] {
+  display: none;
 }
 .tabs-drag-spacer {
   flex: 1;
@@ -774,6 +1003,19 @@ body.resizing-row {
   padding: 20px;
 }
 
+/* Show Team Room off + no pane tabs yet — the stage would otherwise be
+   entirely blank. */
+.stage-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  padding: 20px;
+  text-align: center;
+}
+
 .term-pane {
   width: 100%;
   height: 100%;
@@ -816,7 +1058,7 @@ body.resizing-row {
   font-size: 11px;
   color: var(--muted);
   background: var(--panel);
-  border: 1px solid var(--border);
+  border: 1px solid var(--pane-border);
   border-bottom: none;
   border-radius: 6px 6px 0 0;
 }
@@ -910,7 +1152,11 @@ body.resizing-row {
 .pane-divider-h::before {
   content: "";
   position: absolute;
-  background: var(--border);
+  /* Invisible at rest now that the gap itself is a full terminal cell
+     (koit) — a static hairline sitting in the middle of that gap read as
+     a redundant, always-on divider line. Shows only on hover/while
+     actively dragging (below), same as before. */
+  background: transparent;
 }
 .pane-divider-v::before {
   top: 0;
@@ -926,13 +1172,15 @@ body.resizing-row {
   height: 1px;
   transform: translateY(-50%);
 }
-.pane-divider-v:hover::before {
+.pane-divider-v:hover::before,
+.pane-divider-v.pane-divider-dragging::before {
   left: 0;
   width: 100%;
   transform: none;
   background: var(--accent);
 }
-.pane-divider-h:hover::before {
+.pane-divider-h:hover::before,
+.pane-divider-h.pane-divider-dragging::before {
   top: 0;
   height: 100%;
   transform: none;
@@ -1000,6 +1248,7 @@ body.resizing-row {
   height: 7px;
   border-radius: 50%;
   animation: monitor-pulse 2.2s ease-in-out infinite;
+  animation-delay: var(--pulse-delay, 0s);
 }
 .monitor-dot.native::before {
   background: var(--green);
@@ -1055,14 +1304,72 @@ body.resizing-row {
   min-height: 0;
   width: 100%;
   height: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--pane-border);
   border-top: none;
 }
 
-/* App-user chat (you ↔ others), sits above the composer */
-.appuser-chat {
-  height: 160px;
+/* App-user chat: header (min/max controls) + history + composer, all one
+   flex column so the 3 states (issue #317 backlog — koit) just resize
+   which pieces are visible/how much space they get, no separate hidden
+   toggles per piece anymore (see the JSX — only the wrap itself is hidden
+   via View > Show User Chat). */
+.appuser-chat-wrap {
+  display: flex;
+  flex-direction: column;
   flex-shrink: 0;
+}
+/* `hidden` alone loses to our `display: flex` above (same issue as .tabs
+   above) — spelled out for View > Show User Chat. */
+.appuser-chat-wrap[hidden] {
+  display: none;
+}
+/* Maximized: fill whatever space .main has left (the tab strip and stage
+   are hidden in this state — see their own [hidden] handling). Minimized:
+   shrink to just the header + composer's own content height, not the
+   chatHeight the normal state's inline style sets. */
+.appuser-chat-wrap.state-maximized {
+  flex: 1;
+  min-height: 0;
+}
+.appuser-chat-wrap.state-minimized {
+  flex-shrink: 0;
+}
+.appuser-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 4px 8px 4px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.appuser-chat-controls {
+  display: flex;
+  gap: 2px;
+}
+.chat-ctrl-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.chat-ctrl-btn:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.appuser-chat {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 8px 12px;
   background: var(--panel-2);
@@ -1070,13 +1377,6 @@ body.resizing-row {
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-/* `hidden` alone loses to our `display: flex` (author styles beat the UA
-   stylesheet's [hidden] rule), so spell it out for the panels View > Show
-   User Chat toggles. */
-.appuser-chat[hidden],
-.composer[hidden] {
-  display: none;
 }
 .chat-line {
   display: flex;

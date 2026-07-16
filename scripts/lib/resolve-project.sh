@@ -194,10 +194,25 @@ agmsg_project_sql_in_list() {
 }
 
 agmsg_find_registered_project_variant() {
-  local projects="$1" path="$2" candidate match
+  local projects="$1" path="$2" candidate match match_norm home_norm
+  # #357: never resolve to `/` or $HOME. They are ancestors of nearly every
+  # directory, so one stray registration there (even in another team, or a
+  # leftover) would capture unrelated sessions -- the ancestor walk climbs
+  # through them and would otherwise MATCH them, silently rewriting a project to
+  # $HOME. The walk may still ASCEND through these dirs; it just must not land on
+  # one. (marker resolution, step 1, is unaffected.)
+  #
+  # The exclusion compares NORMALIZED paths, so a registration stored with a
+  # trailing/duplicate slash ("$HOME/", "//") -- which raw string compare would
+  # miss -- is still excluded (agmsg_normalize_project_path collapses/strips
+  # those). Normalization is logical, not symlink-resolving; see the PR notes.
+  home_norm="$(agmsg_normalize_project_path "${HOME:-}" 2>/dev/null || true)"
   while IFS= read -r candidate; do
     match=$(printf '%s\n' "$projects" | grep -Fx -- "$candidate" | head -n 1 || true)
     if [ -n "$match" ]; then
+      match_norm="$(agmsg_normalize_project_path "$match" 2>/dev/null || printf '%s' "$match")"
+      case "$match_norm" in "/"|""|[A-Za-z]:|[A-Za-z]:/) continue ;; esac
+      { [ -n "$home_norm" ] && [ "$match_norm" = "$home_norm" ]; } && continue
       printf '%s' "$match"
       return 0
     fi
@@ -308,16 +323,26 @@ agmsg_marker_gc_stale() {
   done
 }
 
-# List distinct registered project paths for <type>, one per line.
+# List distinct registered project paths for <type>, one per line. An optional
+# <team> scopes the scan to that team's config only (#357): a poison registration
+# in an unrelated team must not leak into this team's resolution. Omitting <team>
+# keeps the legacy all-teams scan for callers that don't know the target team
+# (whoami/actas/watch) — a deliberate phased migration.
 agmsg_registered_projects() {
-  local type="$1" teams_dir="$SKILL_DIR/teams" config_file cfg_sql type_sql
+  local type="$1" team="${2:-}" teams_dir="$SKILL_DIR/teams" config_file cfg_sql type_sql
   [ -d "$teams_dir" ] || return 0
   # Read config.json inside SQL via readfile() rather than binding it through a
   # `.param set` dot-command — the sqlite3 shell tokenizer doesn't honour SQL ''
   # escaping, so a config value with a single quote breaks the bind (#112). The
   # path and type are interpolated as SQL string literals with '' doubling.
   type_sql=$(printf '%s' "$type" | sed "s/'/''/g")
-  for config_file in "$teams_dir"/*/config.json; do
+  local -a configs
+  if [ -n "$team" ]; then
+    configs=("$teams_dir/$team/config.json")
+  else
+    configs=("$teams_dir"/*/config.json)
+  fi
+  for config_file in ${configs[@]+"${configs[@]}"}; do
     [ -f "$config_file" ] || continue
     cfg_sql=$(agmsg_sql_readfile_path "$config_file")
     sqlite3 :memory: "
@@ -345,7 +370,7 @@ agmsg_registered_projects() {
 # dir (the git checkout itself is then unregistered, so we decline and let the
 # ancestor walk handle it). return 1 when git is absent or nothing matches.
 agmsg_gitcommon_project() {
-  local start="$1" type="$2" common main projects match
+  local start="$1" type="$2" team="${3:-}" common main projects match
   command -v git >/dev/null 2>&1 || return 1
   [ -d "$start" ] || return 1
   common=$(cd "$start" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 1
@@ -353,7 +378,7 @@ agmsg_gitcommon_project() {
   # --git-common-dir may be relative to <start>; make it absolute.
   case "$common" in /*) ;; *) common="$start/$common" ;; esac
   main=$(cd "$(dirname "$common")" 2>/dev/null && pwd) || return 1
-  projects="$(agmsg_registered_projects "$type")"
+  projects="$(agmsg_registered_projects "$type" "$team")"
   [ -n "$projects" ] || return 1
   match="$(agmsg_find_registered_project_variant "$projects" "$main")" || return 1
   printf '%s' "$match"
@@ -362,8 +387,8 @@ agmsg_gitcommon_project() {
 # Echo the nearest ancestor of <start> (inclusive) that is a registered project
 # for <type>. return 1 when none matches.
 agmsg_ancestor_project() {
-  local start="$1" type="$2" projects d next match
-  projects="$(agmsg_registered_projects "$type")"
+  local start="$1" type="$2" team="${3:-}" projects d next match
+  projects="$(agmsg_registered_projects "$type" "$team")"
   [ -n "$projects" ] || return 1
   d="$(agmsg_normalize_project_path "$start")"
   while [ -n "$d" ] && [ "$d" != "." ]; do
@@ -381,9 +406,14 @@ agmsg_ancestor_project() {
 }
 
 # Resolve the real project root for a slash-command invocation.
-# Usage: agmsg_resolve_project <pwd_path> <type>
+# Usage: agmsg_resolve_project <pwd_path> <type> [team]
+# An optional <team> scopes the registry-based fallbacks (ancestor / git-common)
+# to that team, so a poison registration in another team can't capture this
+# resolution (#357). join.sh passes it (the join target team is known);
+# team-agnostic callers (whoami/actas/watch/reset) omit it and keep the legacy
+# all-teams behavior.
 agmsg_resolve_project() {
-  local pwd_path="$1" type="$2" pid marker anc gitc
+  local pwd_path="$1" type="$2" team="${3:-}" pid marker anc gitc
   # Explicit opt-out: caller passed a deliberate, possibly-unregistered path.
   if [ "${AGMSG_RESOLVE_PROJECT:-1}" = "0" ]; then
     printf '%s' "$pwd_path"; return 0
@@ -397,12 +427,12 @@ agmsg_resolve_project() {
   fi
   # 2) Nearest registered ancestor of pwd (git-independent; covers nested
   #    subdirs and worktrees that live under the registered project).
-  if anc="$(agmsg_ancestor_project "$pwd_path" "$type")" && [ -n "$anc" ]; then
+  if anc="$(agmsg_ancestor_project "$pwd_path" "$type" "$team")" && [ -n "$anc" ]; then
     printf '%s' "$anc"; return 0
   fi
   # 3) Registered main checkout of pwd's git repo (recovers a SIBLING worktree
   #    the ancestor walk cannot reach). Validated against the registry.
-  if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type")" && [ -n "$gitc" ]; then
+  if gitc="$(agmsg_gitcommon_project "$pwd_path" "$type" "$team")" && [ -n "$gitc" ]; then
     printf '%s' "$gitc"; return 0
   fi
   # 4) Unchanged fallback.

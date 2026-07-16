@@ -38,6 +38,8 @@ teardown() {
 
 @test "install: --update restores scripts/lib even if it went missing" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-update-projA
+  bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-update-projB
   rm -rf "$SK/scripts/lib"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   [ -f "$SK/scripts/lib/storage.sh" ]
@@ -109,6 +111,8 @@ teardown() {
 
 @test "install: AGMSG_STORAGE_PATH override works against the installed skill" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-override-projA
+  bash "$SK/scripts/join.sh" demo bob   claude-code /tmp/install-override-projB
   local store="$FAKE_HOME/override-store"
   AGMSG_STORAGE_PATH="$store" bash "$SK/scripts/send.sh" demo alice bob "via override"
   [ -f "$store/messages.db" ]

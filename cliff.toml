@@ -69,6 +69,8 @@ commit_parsers = [
   { message = "(?i)native windows", group = "<!-- 0 -->Added" },
   { message = "(?i)powershell launcher", group = "<!-- 0 -->Added" },
   { message = "(?i)sandboxed bash tool", group = "<!-- 1 -->Fixed" },
+  { message = "^Role-to-session affinity", group = "<!-- 0 -->Added" },
+  { message = "^Stop ancestor project resolution", group = "<!-- 1 -->Fixed" },
   # Everything else (merges, initial commit, misc) is intentionally dropped.
   { message = ".*", skip = true },
 ]
