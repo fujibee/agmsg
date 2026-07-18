@@ -96,8 +96,12 @@ fi
 # receives the sub-session's completion notification (#367). The sub-session
 # is also not normally an agmsg team member in its own right, so a watcher
 # has little value there anyway. cwd may arrive as forward slashes or
-# JSON-escaped backslashes depending on platform, so match on the substring
-# regardless of separator.
+# JSON-escaped backslashes depending on platform (a single escaped backslash
+# decodes to two raw '\' bytes in the captured substring), so normalize both
+# to '/' and squeeze doubled separators before matching. Match the exact
+# ".claude/worktrees" PATH SEGMENT sequence, not a loose substring — a naive
+# `*.claude*worktrees*` glob would also skip an unrelated project merely
+# named e.g. ".claude-tools/my-worktrees-app".
 HOOK_CWD=""
 if [ -n "$INPUT" ]; then
   HOOK_CWD=$(printf '%s' "$INPUT" \
@@ -105,8 +109,9 @@ if [ -n "$INPUT" ]; then
     | head -1)
 fi
 [ -z "$HOOK_CWD" ] && HOOK_CWD="${PWD:-}"
-case "$HOOK_CWD" in
-  *.claude*worktrees*) exit 0 ;;
+HOOK_CWD_NORM=$(printf '%s' "$HOOK_CWD" | tr '\\' '/' | sed 's#//*#/#g')
+case "$HOOK_CWD_NORM" in
+  */.claude/worktrees|*/.claude/worktrees/*|.claude/worktrees|.claude/worktrees/*) exit 0 ;;
 esac
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true

@@ -479,6 +479,17 @@ JSON
   [[ "$output" =~ "invoke the Monitor tool" ]]
 }
 
+@test "session-start: does NOT skip a project whose path merely contains 'claude' and 'worktrees' loosely" {
+  # Regression guard: a naive *.claude*worktrees* glob would also match
+  # unrelated project names like .claude-tools/my-worktrees-app, which don't
+  # form the actual .claude/worktrees path segment sequence.
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local decoy_cwd="$TEST_PROJECT/.claude-tools/my-worktrees-app"
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-decoy\",\"cwd\":\"$decoy_cwd\"}"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+}
+
 # --- session-start.sh dedup across /clear ---
 
 @test "session-start.sh kills previous watcher when called with new session_id in same cc-instance" {
