@@ -45,10 +45,10 @@ After this runs once, `~/.agents/skills/agmsg/` is populated and you can skip St
 Ask the user for a team name. If it's an existing team, run `team.sh <team>` first to see the current roster and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. For a brand-new team, skip the roster check and just ask. Then run:
 
 ```bash
-~/.agents/skills/agmsg/scripts/join.sh <team> <agent_name> <type> "$(pwd)"
+~/.agents/skills/agmsg/scripts/join.sh <team> <agent_name> <type> "$(pwd)" [--force]
 ```
 
-Do NOT manually edit config files. Always use join.sh.
+Do NOT manually edit config files. Always use join.sh. If the name was recently renamed away with `rename.sh`, join.sh refuses to revive it (printing the new name it maps to) instead of silently re-registering it — this guards against a CLI slash-command history resubmitting `actas <old_name>` after a rename. Pass `--force` only for a deliberate, unrelated reuse of that exact name.
 
 ### Step 2b: If already in a team — execute command
 

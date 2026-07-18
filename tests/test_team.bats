@@ -323,6 +323,106 @@ teardown() {
   [[ "$output" =~ "same" ]]
 }
 
+# --- rename.sh (agent rename) ---
+
+@test "rename: renames an agent, preserving its registration" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  run bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Renamed claude → claude-orchestrator" ]]
+  run bash "$SCRIPTS/team.sh" myteam
+  [[ "$output" =~ "claude-orchestrator" ]]
+  [[ ! "$output" =~ "claude " ]]
+}
+
+@test "rename: migrates messages to the new agent name" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob    claude-code /tmp/proj-b
+  bash "$SCRIPTS/send.sh" myteam claude bob "hello"
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  run bash "$SCRIPTS/inbox.sh" myteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "hello" ]]
+  [[ "$output" =~ "claude-orchestrator" ]]
+}
+
+@test "rename: fails when old agent is missing" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/rename.sh" myteam nope newname
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Agent nope not in team" ]]
+}
+
+@test "rename: fails when new agent already exists" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob   claude-code /tmp/proj-b
+  run bash "$SCRIPTS/rename.sh" myteam alice bob
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Agent bob already exists" ]]
+}
+
+# --- rename.sh tombstone / actas revive guard (#360) ---
+
+@test "rename: leaves a tombstone recording old -> new" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  run sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/myteam/config.json")'), '\$.renamed[0].from') || ' -> ' || json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/myteam/config.json")'), '\$.renamed[0].to');"
+  [ "$output" = "claude -> claude-orchestrator" ]
+}
+
+@test "join: refuses to silently revive a name that was just renamed away" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "was renamed to 'claude-orchestrator'" ]]
+  run bash "$SCRIPTS/team.sh" myteam
+  [[ ! "$output" =~ "claude " ]]
+}
+
+@test "join: --force still revives a renamed-away name when explicitly requested" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj --force
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Joined team myteam as claude" ]]
+  run bash "$SCRIPTS/team.sh" myteam
+  [[ "$output" =~ "claude-orchestrator" ]]
+  [[ "$output" =~ "claude " ]]
+}
+
+@test "join: joining the new name after a rename succeeds normally" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  run bash "$SCRIPTS/join.sh" myteam claude-orchestrator claude-code /tmp/proj2
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Joined team myteam as claude-orchestrator" ]]
+}
+
+@test "join: the tombstone guard does not break on an agent name containing a quote (#87-class)" {
+  # Exercises join.sh's new lookup directly against a hand-authored tombstone
+  # (rather than going through rename.sh, which has its own pre-existing,
+  # unrelated quote-handling gap in its old/new-exists checks — #360 doesn't
+  # touch those) to isolate that THIS guard's json_each+WHERE value compare
+  # is quote-safe, unlike a raw '$.renamed.<name>' path segment would be.
+  local agent="al'ice"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<EOF
+{
+  "name": "myteam",
+  "agents": {},
+  "renamed": [
+    {"from": "$agent", "to": "bob", "at": "2026-01-01T00:00:00Z"}
+  ]
+}
+EOF
+  run bash "$SCRIPTS/join.sh" myteam "$agent" claude-code /tmp/proj
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "was renamed to 'bob'" ]]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+}
+
 @test "join: rejects unknown agent type" {
   run bash "$SCRIPTS/join.sh" myteam alice claude /tmp/proj
   [ "$status" -ne 0 ]

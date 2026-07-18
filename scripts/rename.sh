@@ -55,6 +55,28 @@ fi
 # Rename: set new key with old value, remove old key
 UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
   "SELECT json_remove(json_set(:json, '$.agents.$NEW_NAME', json_extract(:json, '$.agents.$OLD_NAME')), '$.agents.$OLD_NAME');")
+
+# Tombstone the old name so a later join/actas can't silently revive it (#360):
+# a CLI's slash-command history can resubmit `/agmsg actas <old_name>` well
+# after this rename, and without this record join.sh would happily
+# re-materialize <old_name>, rolling the rename back with no warning.
+# Stored as an array of {from,to,at} entries (rather than keying an object by
+# the old name) so a name containing a single quote can't break the JSON path
+# expression the way `$.agents.$OLD_NAME` above requires it not to — from/to
+# are bound as ordinary SQL string values, never spliced into a path.
+OLD_NAME_SQL=$(_agmsg_sqlesc "$OLD_NAME")
+NEW_NAME_SQL=$(_agmsg_sqlesc "$NEW_NAME")
+RENAMED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+UPDATED_ESCAPED=$(printf '%s' "$UPDATED" | sed "s/'/''/g")
+UPDATED=$(agmsg_sqlite_mem ".param set :json '$UPDATED_ESCAPED'" \
+  "SELECT json_set(:json, '\$.renamed',
+     json_insert(
+       CASE WHEN json_type(json_extract(:json, '\$.renamed')) = 'array'
+            THEN json_extract(:json, '\$.renamed') ELSE json('[]') END,
+       '\$[#]', json_object('from', '$OLD_NAME_SQL', 'to', '$NEW_NAME_SQL', 'at', '$RENAMED_AT')
+     )
+   );")
+
 agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
 
 # --- Update messages in DB ---
