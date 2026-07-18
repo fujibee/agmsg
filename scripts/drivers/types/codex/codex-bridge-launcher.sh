@@ -187,9 +187,9 @@ EOF
   # cwd has run more than one codex thread, so a co-resident thread can capture
   # this role's messages. The role-session record (#339) stores this role's own
   # thread deterministically; use it when present AND recorded for THIS project.
-  # A request-file thread (above) still wins; no record -- or a record for a
-  # different project -- falls back to "loaded" (fail-open for roles predating the
-  # record). Freshness holds because a role re-runs actas on resume (#339), which
+  # A request-file thread (above) still wins; roles with no record fall back to
+  # "loaded". A foreign-project record was filtered out before launch (#150).
+  # Freshness holds because a role re-runs actas on resume (#339), which
   # rewrites the record with its current thread.
   if [ "$thread_id" = "loaded" ] && [ "$(printf '%s\n' "$ids" | grep -c . || true)" = "1" ]; then
     IFS="$TAB" read -r team name <<EOF
