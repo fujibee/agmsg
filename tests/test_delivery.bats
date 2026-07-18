@@ -1712,6 +1712,46 @@ EOF
   grep -q -- "--thread rollout-thread-999" "$log"
 }
 
+@test "session-start.sh for codex resolves the rollout by real mtime, not filename order (#416)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local fake="$TEST_SKILL_DIR/fake-codex-bridge"
+  local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  cat >"$fake" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
+EOF
+  chmod +x "$fake"
+
+  # `ls -t "$dir"/*/*/*/rollout-*.jsonl` was flaky on Windows/Git Bash --
+  # intermittently returned an empty/truncated list with no filesystem
+  # changes in between, so agmsg_resolve_codex_thread got starved of any
+  # candidate and the SessionStart hook silently no-opped (#416). The fix
+  # replaced it with find + a portable per-file mtime sort. Prove it is a
+  # real mtime sort and not an accidental filename-lexical sort: one rollout
+  # has an OLDER-looking filename timestamp but its actual mtime is touched
+  # to be the newest of the two, matching this project's cwd. A find+sort-
+  # by-name "fix" would pick the wrong (stale) rollout here.
+  local rollout_dir="$TEST_SKILL_DIR/home/.codex/sessions/2026/06/17"
+  mkdir -p "$rollout_dir"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"stale-by-name-uuid\",\"cwd\":\"$TEST_PROJECT\"}}" \
+    > "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"newer-by-name-uuid\",\"cwd\":\"$TEST_PROJECT\"}}" \
+    > "$rollout_dir/rollout-2026-06-17T00-00-00-newer-by-name-uuid.jsonl"
+  sleep 1
+  touch "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
+
+  HOME="$TEST_SKILL_DIR/home" \
+  AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
+  AGMSG_CODEX_BRIDGE_CMD="$fake" \
+  AGMSG_TEST_LOG="$log" \
+    env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  for _ in {1..20}; do [ -f "$log" ] && break; sleep 0.1; done
+  [ -f "$log" ]
+  grep -q -- "--thread stale-by-name-uuid" "$log"
+}
+
 @test "delivery set monitor (codex): warns loudly when Node is missing" {
   # Node preflight: the bridge is a Node program; enabling monitor without Node
   # must flag it rather than silently never starting. AGMSG_CODEX_NODE points the

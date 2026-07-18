@@ -14,6 +14,24 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
+# Newest-N rollout files under $sessions_dir, sorted by mtime descending.
+# `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
+# reported to intermittently return an empty/truncated list with no
+# filesystem changes in between (root cause unconfirmed, possibly an
+# MSYS2 glob/large-arglist interaction), which silently starves
+# agmsg_resolve_codex_thread of any candidate: the SessionStart hook just
+# no-ops and the bridge never launches, with no error output at all. `find`
+# is reported reliable there; do the mtime sort ourselves with the existing
+# portable compat_file_mtime, since `find -printf` is GNU-only (no
+# `-printf` on macOS/BSD find, which this repo also has to support). See #416.
+agmsg_newest_rollout_files() {
+  local dir="$1" limit="$2" f mtime
+  find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
+    mtime=$(compat_file_mtime "$f")
+    printf '%s\t%s\n' "${mtime:-0}" "$f"
+  done | sort -t "$(printf '\t')" -k1,1rn | head -n "$limit" | cut -f2-
+}
+
 # Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
 # interactive --remote path; fresh and `codex exec` sessions never export it, so
 # fall back to the newest rollout file whose session_meta cwd matches the
@@ -50,7 +68,7 @@ agmsg_resolve_codex_thread() {
         return 0
       fi
     done <<INNER_EOF
-$(ls -t "$sessions_dir"/*/*/*/rollout-*.jsonl 2>/dev/null | head -20)
+$(agmsg_newest_rollout_files "$sessions_dir" 20)
 INNER_EOF
     [ "$waited" -ge 2 ] && break
     waited=$((waited + 1))
