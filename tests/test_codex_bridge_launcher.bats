@@ -116,10 +116,15 @@ run_launcher() {
 
 @test "launcher: role record update keeps child scoped to the same pair" {
   put_record team alice thread-before "$PROJ" codex
-  sleep 4 3>&- & local p=$!
+  sleep 6 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" $'team\talice' >/dev/null 2>&1 3>&- &
   local launcher_pid=$!
-  sleep 1
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE"
   put_record team alice thread-after "$PROJ" codex
   wait "$launcher_pid" 2>/dev/null || true
   wait "$p" 2>/dev/null || true
