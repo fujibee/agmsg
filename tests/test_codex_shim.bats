@@ -152,3 +152,39 @@ teardown() {
   [ "$status" -eq 0 ]
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <-->" "$CALL_LOG"
 }
+
+@test "codex shim: a raw symlink install still resolves its own script location (#387)" {
+  # Installing codex-shim.sh directly as a symlink (ln -s .../codex-shim.sh
+  # ~/.agents/bin/codex) is a documented install method -- the header comment
+  # says exactly this. Before #387, dirname "$0" resolved to the symlink's
+  # OWN directory rather than the real script's, so the relative delivery.sh
+  # lookup pointed nowhere and the shim silently fell through to plain codex
+  # with zero signal, in every monitor-mode project, unconditionally.
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME/.agents/bin"
+  ln -s "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  PATH="$HOME/.agents/bin:$PATH" run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" codex resume'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"cannot find delivery.sh"* ]]
+  grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <-->" "$CALL_LOG"
+}
+
+@test "codex shim: a broken install (missing delivery.sh) warns loudly instead of silently passing through (#387)" {
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME/.agents/bin"
+  # A shim copied somewhere with no skill tree above it at all -- SCRIPT_DIR
+  # resolves fine, but the relative delivery.sh three levels up genuinely
+  # does not exist. This must be reported, not treated as "not a monitor
+  # project".
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  PATH="$HOME/.agents/bin:$PATH" run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" codex'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "cannot find delivery.sh" ]]
+  grep -q "real-codex" "$CALL_LOG"
+}

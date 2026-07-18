@@ -48,10 +48,50 @@ agmsg_delivery_on_disable() {
   echo "    # then drop any agmsg Codex function or ~/.agents/bin PATH entry you added for monitor"
 }
 
+agmsg_codex_shim_path_warning() {
+  # "mode: monitor" only means a project is CONFIGURED for monitor delivery;
+  # it says nothing about whether `codex` on PATH actually reaches the shim
+  # right now. A PATH-based install (codex-shim-install.sh install, or a raw
+  # symlink) that loses to the real Codex binary in PATH order launches
+  # completely unmonitored sessions with no other signal at all -- delivery
+  # status kept reporting "monitor" throughout. See #387/#397.
+  #
+  # Scoped to the case we can actually verify from here: a PATH-based shim
+  # install exists at all. The shell-function install method is invisible to
+  # this script (functions from an interactive profile aren't inherited by a
+  # fresh, non-interactive `bash delivery.sh status` invocation), so silently
+  # skip when no PATH-based install is present rather than false-alarming on
+  # every function-only setup.
+  local marker="Optional Codex entrypoint shim for agmsg monitor mode"
+  local shim_bin="$HOME/.agents/bin/codex"
+  [ -f "$shim_bin" ] && grep -q "$marker" "$shim_bin" 2>/dev/null || return 0
+
+  local resolved
+  resolved="$(command -v codex 2>/dev/null || true)"
+  if [ -z "$resolved" ]; then
+    echo "WARNING: delivery mode is monitor and the agmsg codex shim is installed at $shim_bin, but 'codex' does not resolve on PATH here -- check that \$HOME/.agents/bin is on PATH."
+  elif [ "$resolved" != "$shim_bin" ] && ! (grep -q "$marker" "$resolved" 2>/dev/null); then
+    echo "WARNING: delivery mode is monitor and the agmsg codex shim is installed at $shim_bin, but 'codex' on PATH resolves to $resolved instead -- Codex launches may bypass the bridge entirely. Put \$HOME/.agents/bin earlier in PATH."
+  fi
+}
+
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
+
+  # Capture the FULL output rather than piping into `head -1`: head closing
+  # its read end after one line while agmsg_delivery_status_default is still
+  # writing more would SIGPIPE it, and under this script's set -euo
+  # pipefail that aborts the whole `delivery.sh status` call outright --
+  # the same class of bug fixed in #423 (sort | head under pipefail), now
+  # avoided here by never piping into an early-closing reader at all.
+  local full_status mode_line
+  full_status="$(agmsg_delivery_status_default "$type" "$project" 2>/dev/null || true)"
+  mode_line="${full_status%%$'\n'*}"
+  case "$mode_line" in
+    "mode: monitor"|"mode: both") agmsg_codex_shim_path_warning ;;
+  esac
 
   if [ -z "$pairs" ]; then
     echo "Codex bridge: no identities registered for this project"

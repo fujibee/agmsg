@@ -1686,6 +1686,53 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
+@test "delivery status (codex): warns when the installed shim loses to a different codex on PATH (#387)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  # A different, non-agmsg codex earlier on PATH -- exactly the "PATH order
+  # loses" shape from #387/#397: mode stays "monitor" but launches never
+  # actually reach the shim.
+  local other_bin="$TEST_SKILL_DIR/other-bin"
+  mkdir -p "$other_bin"
+  printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
+  chmod +x "$other_bin/codex"
+
+  PATH="$other_bin:$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: delivery mode is monitor"* ]]
+  [[ "$output" == *"$other_bin/codex"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch warning when the shim correctly wins PATH order (#387)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  PATH="$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"WARNING:"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch warning when no PATH-based shim is installed (#387)" {
+  # The shell-function-only install method is invisible to this script (a
+  # function from an interactive profile isn't inherited by a fresh
+  # `bash delivery.sh status` invocation) -- must not false-alarm here.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"WARNING:"* ]]
+}
+
 @test "delivery status (codex): multiple identities are enumerated independently" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
