@@ -101,7 +101,13 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
 done <<< "$ids"
 ids="$safe_ids"
-[ -n "$ids" ] || exit 0
+# A role record may be written by actas later in this same first turn. An empty
+# safe set is therefore transient, not terminal: retry while the parent lives.
+if [ -z "$ids" ]; then
+  kill -0 "$PARENT_PID" 2>/dev/null || exit 0
+  sleep 0.3
+  exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID"
+fi
 
 bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
 bridge_pairs=()
