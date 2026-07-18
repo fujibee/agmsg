@@ -36,8 +36,16 @@ agmsg_newest_rollout_files() {
   # different mechanism. awk reads its input through to EOF regardless of
   # `n` (only *printing* stops early), so `sort` is always fully drained and
   # never SIGPIPEd.
+  # `|| true` on the mtime lookup: under set -e, a plain `var=$(cmd)`
+  # assignment DOES abort on cmd's failure (unlike a substitution used inside
+  # a test/conditional). A rollout that `find` listed but that Codex deletes
+  # or rotates before `stat` runs on it (a real possibility across the ~1-2s
+  # this loop can take with hundreds of files) would otherwise abort this
+  # whole while-loop subshell -- another way to reintroduce the "no
+  # candidate found" failure the ${mtime:-0} fallback below already exists to
+  # avoid.
   find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
-    mtime=$(compat_file_mtime "$f")
+    mtime=$(compat_file_mtime "$f" || true)
     printf '%s\t%s\n' "${mtime:-0}" "$f"
   done | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
 }
