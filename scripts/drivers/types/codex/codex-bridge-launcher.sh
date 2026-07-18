@@ -55,6 +55,7 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
+registered_ids="$ids"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -115,6 +116,17 @@ else
 fi
 
 while kill -0 "$PARENT_PID" 2>/dev/null; do
+  # actas can join a second role after SessionStart. Re-exec through the same
+  # safety filter when the registration set changes, replacing the old bridge
+  # so the new role is actually subscribed instead of being stranded.
+  latest_ids="$(resolve_identity || true)"
+  if [ "$latest_ids" != "$registered_ids" ]; then
+    if [ -f "$pidfile" ]; then
+      old_pid="$(cat "$pidfile" 2>/dev/null || true)"
+      [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+    fi
+    exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID"
+  fi
   # Resolve the app-server URL (and thread) this iteration would launch against
   # FIRST, so the reuse check can compare a live bridge's bound server with the
   # current one. Thread source: a request file (older-codex hook) wins; otherwise

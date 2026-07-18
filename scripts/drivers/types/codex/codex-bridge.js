@@ -1048,8 +1048,20 @@ class CodexBridge {
   }
 
   readInboxForPrompt() {
+    // Re-resolve locks immediately before reading. watch-once only tells us
+    // that *some* eligible identity woke; ownership can change before this
+    // turn starts, so never let a stale bridge membership mark another
+    // session's messages read.
+    const eligible = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type,
+      ...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`])], { cwd: this.opts.project, encoding: "utf8" });
+    if (eligible.error || eligible.status !== 0) {
+      console.error("codex-bridge: could not resolve eligible identities before reading inbox");
+      return "";
+    }
+    const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
     const sections = [];
     for (const pair of this.identities) {
+      if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
       const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
       if ((result.stdout || "").trim()) sections.push(`Messages addressed to ${pair.team}/${pair.name}:\n${result.stdout.trim()}`);
