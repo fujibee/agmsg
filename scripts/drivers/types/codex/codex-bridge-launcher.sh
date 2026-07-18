@@ -74,7 +74,9 @@ if [ -z "$ROLE_PAIR" ]; then
       [ -n "$child_team" ] || continue
       child_pair="$child_team"$'\t'"$child_name"
       printf '%s\n' "$known_pairs" | grep -Fxq "$child_pair" && continue
-      nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$child_pair" >/dev/null 2>&1 &
+      # Close bats' result fd when present; a detached child must not keep the
+      # test harness pipe open after its test has completed.
+      nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$child_pair" >/dev/null 2>&1 3>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
     done <<< "$current_pairs"
     sleep 0.3
@@ -249,7 +251,7 @@ EOF
     --thread "$thread_id" \
     --app-server "$req_app_server" \
     --inline-inbox \
-    >>"$log" 2>&1 &
+    >>"$log" 2>&1 3>&- &
   launched_pid=$!
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     wait "$launched_pid" 2>/dev/null || true
