@@ -36,6 +36,13 @@ put_record() {
     _ "$SCRIPTS" "$@"
 }
 
+write_request() {
+  local thread="$1" hash
+  hash=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c \
+    'source "$1/lib/hash.sh"; printf "%s" "$2" | agmsg_sha1' _ "$SCRIPTS" "$PROJ")
+  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
+}
+
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
@@ -93,4 +100,31 @@ run_launcher() {
   [ "$lines" -ge 2 ]
   grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: project request thread never overrides per-role recorded threads (#150 phase 2)" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  write_request thread-bob
+  run_launcher
+
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+  ! grep -q -- $'--pair team\talice --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: role record update keeps child scoped to the same pair" {
+  put_record team alice thread-before "$PROJ" codex
+  sleep 4 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" $'team\talice' >/dev/null 2>&1 3>&- &
+  local launcher_pid=$!
+  sleep 1
+  put_record team alice thread-after "$PROJ" codex
+  wait "$launcher_pid" 2>/dev/null || true
+  wait "$p" 2>/dev/null || true
+
+  grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE"
+  grep -q -- $'--pair team\talice --thread thread-after' "$CAPTURE"
+  ! grep -q -- '--pair team bob' "$CAPTURE"
 }
