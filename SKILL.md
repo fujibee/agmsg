@@ -42,7 +42,11 @@ After this runs once, `~/.agents/skills/agmsg/` is populated and you can skip St
 
 ### Step 2a: If not in a team — join one
 
-Ask the user for a team name and agent name, then run:
+Ask the user for a team name. If it's an existing team, run `team.sh <team>` first to see
+the current roster and note the names already in use, then propose 2-3 unused,
+short, role-descriptive identity names (not a bare tool-type label like
+`codex`/`cc`) before asking for the agent name. For a brand-new team, skip the
+roster check and just ask. Then run:
 
 ```bash
 ~/.agents/skills/agmsg/scripts/join.sh <team> <agent_name> <type> "$(pwd)"
