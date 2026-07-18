@@ -83,7 +83,7 @@ export type Pane = {
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
 // (issue #317) both need real nested structure, which a flat list + layout
 // enum couldn't represent (see the design doc on that issue for why).
-type Window = {
+export type Window = {
   id: string;
   root: SplitNode;
   /** User-set tab name (Rename); falls back to the joined pane labels. */
@@ -117,6 +117,23 @@ export type LoginShellInfo = { cmd: string; args: string[]; home: string };
 export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: string, cwd: string | undefined): Pane | null {
   if (!info) return null;
   return { id, label, cmd: info.cmd, args: info.args, cwd, native: false, shell: true };
+}
+
+// Whether openShellTab's new window should still be committed after its
+// getLoginShell await — false if the user switched teams while it was in
+// flight. Committing anyway would silently add a window under the stale
+// team (hidden — only the current team's windows render) while `active`
+// pointed at it (co1, PR #431).
+export function shellTabStillValid(currentTeam: string, requestedTeam: string): boolean {
+  return currentTeam === requestedTeam;
+}
+
+// Whether openShellInWindow's target tab is still open after its
+// getLoginShell await — false if the user closed it while in flight.
+// Committing anyway would leave an orphaned pane (no window references it)
+// and `active` pointing at a window id that no longer exists (co1, PR #431).
+export function shellWindowStillOpen(windows: ReadonlyArray<Pick<Window, "id">>, windowId: string): boolean {
+  return windows.some((w) => w.id === windowId);
 }
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
@@ -414,6 +431,12 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  // The stale-context guard openShellTab/openShellInWindow re-check after
+  // their getLoginShell await (see below) — a real gap now that login_shell
+  // resolution can take real time, during which the user can switch teams
+  // or close the target tab (co1, PR #431).
+  const teamRef = useRef<string>("");
+  teamRef.current = team;
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -968,13 +991,20 @@ export default function App() {
   }, [getLoginShell, t, teamProject]);
 
   // The "+" tab at the end of the tab bar. Same new-Pane-plus-new-Window
-  // shape as spawnMember's no-targetWindowId branch and moveToNewWindow above.
+  // shape as spawnMember's no-targetWindowId branch and moveToNewWindow
+  // above. buildShellPane's getLoginShell await is a real gap now (not just
+  // a microtask) — the user can switch teams while it's in flight, which
+  // would otherwise add the new window under the STALE `team` closed over
+  // at click time (hidden, since only the current team's windows render)
+  // while `active` still points at it (co1, PR #431). Bail out rather than
+  // create an orphaned, invisible tab if the team moved on.
   const openShellTab = useCallback(async () => {
+    const requestedTeam = team;
     const pane = await buildShellPane();
-    if (!pane) return;
+    if (!pane || !shellTabStillValid(teamRef.current, requestedTeam)) return;
     setPanes((prev) => [...prev, pane]);
     const winId = `w-${seq.current++}`;
-    setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team }]);
+    setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team: requestedTeam }]);
     setActive(winId);
   }, [buildShellPane, team]);
 
@@ -982,10 +1012,14 @@ export default function App() {
   // whatever's already in that tab. The symmetric counterpart of spawning an
   // agent beside an open shell pane (see windowHasShellPane/spawnMember
   // below): either direction, shell and agent end up split in the same tab.
+  // Same stale-context concern as openShellTab: the target tab can be
+  // closed while getLoginShell's await is in flight, which would otherwise
+  // leave an orphaned pane (windows never referencing it) and `active`
+  // pointing at a window id that no longer exists (co1, PR #431).
   const openShellInWindow = useCallback(
     async (windowId: string) => {
       const pane = await buildShellPane();
-      if (!pane) return;
+      if (!pane || !shellWindowStillOpen(windowsRef.current, windowId)) return;
       setPanes((prev) => [...prev, pane]);
       setWindows((prev) =>
         prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { shellPaneFrom, shouldShowOutdatedBanner, type LoginShellInfo } from "./App";
+import {
+  shellPaneFrom,
+  shellTabStillValid,
+  shellWindowStillOpen,
+  shouldShowOutdatedBanner,
+  type LoginShellInfo,
+} from "./App";
 
 describe("shouldShowOutdatedBanner", () => {
   it("shows when outdated, not updating, and not dismissed", () => {
@@ -44,5 +50,35 @@ describe("shellPaneFrom", () => {
   it("passes cwd through as-is, including undefined", () => {
     const info: LoginShellInfo = { cmd: "/bin/bash", args: ["-il"], home: "/home/koit" };
     expect(shellPaneFrom(info, "shell-2", "Shell", undefined)?.cwd).toBeUndefined();
+  });
+});
+
+describe("shellTabStillValid", () => {
+  it("stays valid when the team hasn't changed while getLoginShell was in flight", () => {
+    expect(shellTabStillValid("teamA", "teamA")).toBe(true);
+  });
+
+  it("goes invalid when the user switched teams during the await", () => {
+    // Regression: openShellTab used to commit the new window under the
+    // stale (closed-over) team regardless, silently hiding it since only
+    // the current team's windows render (co1, PR #431).
+    expect(shellTabStillValid("teamB", "teamA")).toBe(false);
+  });
+});
+
+describe("shellWindowStillOpen", () => {
+  it("stays true when the target window is still open", () => {
+    expect(shellWindowStillOpen([{ id: "w-1" }, { id: "w-2" }], "w-1")).toBe(true);
+  });
+
+  it("goes false when the target window was closed during the await", () => {
+    // Regression: openShellInWindow used to commit anyway, leaving an
+    // orphaned pane and `active` pointing at a nonexistent window id (co1,
+    // PR #431).
+    expect(shellWindowStillOpen([{ id: "w-2" }], "w-1")).toBe(false);
+  });
+
+  it("goes false against an empty window list", () => {
+    expect(shellWindowStillOpen([], "w-1")).toBe(false);
   });
 });
