@@ -10,6 +10,36 @@ teardown() {
   teardown_test_env
 }
 
+# Auto-detect tests must not depend on the actual runtime this suite itself
+# happens to run under (#142): when bats runs from inside a real Codex/
+# Gemini/etc session, ambient env vars and the real process tree can make
+# detect_cli_type see a signal the test never set, masking the fallback (or
+# a different env var's) path under test.
+clear_autodetect_env() {
+  unset CLAUDE_CODE_SESSION_ID CODEX_SANDBOX CODEX_THREAD_ID \
+    GEMINI_CLI GEMINI_API_KEY GROK_SESSION_ID 2>/dev/null || true
+}
+
+# Prepend a fake `ps` to PATH so detect_cli_type's process-tree walk
+# (compat_get_comm -> `ps -o comm= -p <pid>`, compat_get_ppid -> `ps -o
+# ppid= -p <pid>`) can never match a real ancestor process name (e.g.
+# `codex` when this suite itself runs under a live Codex session) --
+# reports no process name and an immediate top-of-tree, so the walk always
+# falls through to the default.
+mock_no_agent_ps() {
+  local bindir="$TEST_SKILL_DIR/mock-ps-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-o ppid="*) echo 1 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$bindir/ps"
+  export PATH="$bindir:$PATH"
+}
+
 # --- join.sh ---
 
 @test "join: creates team and adds agent" {
@@ -189,6 +219,7 @@ teardown() {
 
 @test "whoami: auto-detects claude-code from CLAUDE_CODE_SESSION_ID env" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
   CLAUDE_CODE_SESSION_ID=test-session run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
@@ -197,10 +228,12 @@ teardown() {
 
 @test "whoami: auto-detects codex from CODEX_SANDBOX env" {
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
-  # Unset CLAUDE_CODE_SESSION_ID: bats can run under a CC session that
-  # already exports it, which would shadow the codex signal under the
-  # CLAUDE_CODE_SESSION_ID-first detection order.
-  unset CLAUDE_CODE_SESSION_ID
+  # Clear ALL ambient auto-detect vars, not just CLAUDE_CODE_SESSION_ID --
+  # bats can run under a real Codex session that already exports
+  # CODEX_THREAD_ID too, which would still land on codex here (so this
+  # particular assertion happens to survive it) but masks whether
+  # CODEX_SANDBOX specifically is what's being exercised.
+  clear_autodetect_env
   CODEX_SANDBOX=seatbelt run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=bob" ]]
@@ -209,7 +242,7 @@ teardown() {
 
 @test "whoami: auto-detects codex from CODEX_THREAD_ID env" {
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
-  unset CLAUDE_CODE_SESSION_ID
+  clear_autodetect_env
   CODEX_THREAD_ID=some-thread run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=bob" ]]
@@ -218,6 +251,8 @@ teardown() {
 
 @test "whoami: defaults to claude-code when no env vars set" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  clear_autodetect_env
+  mock_no_agent_ps
   run bash "$SCRIPTS/whoami.sh" /tmp/proj
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
@@ -227,6 +262,7 @@ teardown() {
 @test "whoami: explicit type overrides auto-detection" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   bash "$SCRIPTS/join.sh" myteam bob codex /tmp/proj
+  clear_autodetect_env
   CODEX_SANDBOX=test run bash "$SCRIPTS/whoami.sh" /tmp/proj claude-code
   [ "$status" -eq 0 ]
   [[ "$output" =~ "agent=alice" ]]
