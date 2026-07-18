@@ -95,12 +95,12 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   if [ -n "$candidate_thread" ]; then
     candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-    # A foreign-project record is irrelevant here and falls back to the live
-    # thread. A lone role keeps #350's legacy recorded-thread affinity even
+    # A record for another project proves this role's current seat is elsewhere:
+    # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
     # before a concrete request thread is available; multiplexed roles require
     # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" = "$PROJECT_PHYS" ] \
-       && { { [ "$thread_hint" = "loaded" ] && [ "$raw_identity_count" != "1" ]; } \
+    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] \
+       || { { [ "$thread_hint" = "loaded" ] && [ "$raw_identity_count" != "1" ]; } \
             || { [ "$thread_hint" != "loaded" ] && [ "$candidate_thread" != "$thread_hint" ]; }; }; then
       continue
     fi

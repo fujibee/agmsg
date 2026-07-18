@@ -59,12 +59,10 @@ run_launcher() {
   grep -q -- "--thread loaded" "$CAPTURE"
 }
 
-@test "launcher: falls back to 'loaded' when the record is for a different project (#350)" {
+@test "launcher: leaves a role with a foreign-project record unsubscribed (#150)" {
   put_record team alice other-thread "/some/other/project" codex
   run_launcher
-  [ -f "$CAPTURE" ]
-  grep -q -- "--thread loaded" "$CAPTURE"
-  ! grep -q -- "--thread other-thread" "$CAPTURE"
+  [ ! -f "$CAPTURE" ]
 }
 
 @test "launcher: writes the bound-thread file so a later launcher can rebind (#350)" {
