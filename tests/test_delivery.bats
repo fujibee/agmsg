@@ -445,6 +445,40 @@ JSON
   [ ! -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
 }
 
+# --- session-start.sh: skip worktree sub-sessions (#367) ---
+
+@test "session-start: skips the Monitor directive when hook cwd is under .claude/worktrees/" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local sub_cwd="$TEST_PROJECT/.claude/worktrees/bg-task-1"
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-sub\",\"cwd\":\"$sub_cwd\"}"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ ! "$output" =~ "invoke the Monitor tool" ]]
+}
+
+@test "session-start: skips when hook cwd uses escaped-backslash (Windows JSON) separators" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< '{"session_id":"sid-sub-win","cwd":"C:\\proj\\.claude\\worktrees\\bg-1"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-start: falls back to \$PWD for the worktree check when the hook input has no cwd" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local sub_cwd="$TEST_PROJECT/.claude/worktrees/bg-task-2"
+  mkdir -p "$sub_cwd"
+  run env AGMSG_RESOLVE_PROJECT=0 bash -c "cd '$sub_cwd' && bash '$SCRIPTS/session-start.sh' claude-code '$TEST_PROJECT' <<< '{\"session_id\":\"sid-sub-nocwd\"}'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-start: still emits the Monitor directive for a normal (non-worktree) cwd" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-normal\",\"cwd\":\"$TEST_PROJECT\"}"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+}
+
 # --- session-start.sh dedup across /clear ---
 
 @test "session-start.sh kills previous watcher when called with new session_id in same cc-instance" {
