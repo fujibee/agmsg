@@ -158,6 +158,36 @@ run_launcher() {
   wait "$parent_b" 2>/dev/null || true
 }
 
+@test "launcher: stale dispatcher reclamation remains singleton under contention" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=8
+  local hash lock
+  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  lock="$RUN_DIR/codex-bridge-dispatcher.$hash.lock"
+  mkdir "$lock"
+  printf '%s\n' 99999999 > "$lock/pid"
+  sleep 10 3>&- & local parent_a=$!
+  sleep 10 3>&- & local parent_b=$!
+
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
+  local launcher_a=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
+  local launcher_b=$!
+
+  local i
+  for i in {1..50}; do
+    [ -f "$CAPTURE" ] && break
+    sleep 0.1
+  done
+  [ -f "$CAPTURE" ]
+  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
+
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+  wait "$parent_a" 2>/dev/null || true
+  wait "$parent_b" 2>/dev/null || true
+}
+
 @test "launcher: project request thread never overrides per-role recorded threads (#150 phase 2)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
