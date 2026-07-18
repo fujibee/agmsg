@@ -172,6 +172,66 @@ teardown() {
   grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <-->" "$CALL_LOG"
 }
 
+@test "codex shim: _agmsg_resolve_self follows a relative-target symlink (#387)" {
+  # A direct unit test of the resolution helper (extracted verbatim from the
+  # shipped script via awk, so this exercises the real implementation) rather
+  # than a full shim invocation -- avoids needing to fabricate a whole
+  # relative skill-tree layout just to get a relative `ln -s` target that
+  # still resolves to a real delivery.sh. Covers the non-absolute branch of
+  # its target-reconstruction (`ln -s ../real/target.sh link`, as opposed to
+  # an absolute target).
+  local helper="$TEST_PROJECT/resolve-self.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    awk '/^_agmsg_resolve_self\(\)/,/^}/' "$TYPES/codex/codex-shim.sh"
+    echo '_agmsg_resolve_self "$1"'
+  } > "$helper"
+
+  mkdir -p "$TEST_PROJECT/real/deep" "$TEST_PROJECT/bin"
+  : > "$TEST_PROJECT/real/deep/target.sh"
+  ln -s "../real/deep/target.sh" "$TEST_PROJECT/bin/link"
+
+  run bash "$helper" "$TEST_PROJECT/bin/link"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$TEST_PROJECT/real/deep/target.sh" ]
+}
+
+@test "codex shim: _agmsg_resolve_self follows a multi-hop symlink chain (#387)" {
+  local helper="$TEST_PROJECT/resolve-self.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    awk '/^_agmsg_resolve_self\(\)/,/^}/' "$TYPES/codex/codex-shim.sh"
+    echo '_agmsg_resolve_self "$1"'
+  } > "$helper"
+
+  mkdir -p "$TEST_PROJECT/real" "$TEST_PROJECT/hop" "$TEST_PROJECT/bin"
+  : > "$TEST_PROJECT/real/target.sh"
+  ln -s "$TEST_PROJECT/real/target.sh" "$TEST_PROJECT/hop/hop1"
+  ln -s "$TEST_PROJECT/hop/hop1" "$TEST_PROJECT/bin/link"
+
+  run bash "$helper" "$TEST_PROJECT/bin/link"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$TEST_PROJECT/real/target.sh" ]
+}
+
+@test "codex shim: a multi-hop symlink chain still resolves its own script location (#387)" {
+  # symlink -> symlink -> real script. _agmsg_resolve_self's while loop must
+  # keep following until it reaches a non-symlink.
+  export HOME="$TEST_PROJECT/home"
+  mkdir -p "$HOME/.agents/bin" "$HOME/intermediate"
+  ln -s "$TYPES/codex/codex-shim.sh" "$HOME/intermediate/codex-hop1"
+  ln -s "$HOME/intermediate/codex-hop1" "$HOME/.agents/bin/codex"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  PATH="$HOME/.agents/bin:$PATH" run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" codex resume'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"cannot find delivery.sh"* ]]
+  grep -q "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <resume> <-->" "$CALL_LOG"
+}
+
 @test "codex shim: a broken install (missing delivery.sh) warns loudly instead of silently passing through (#387)" {
   export HOME="$TEST_PROJECT/home"
   mkdir -p "$HOME/.agents/bin"
