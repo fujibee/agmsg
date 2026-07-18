@@ -212,6 +212,7 @@ class AppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
+    this.requestHandlers = new Map();
     this.child = null;
   }
 
@@ -249,6 +250,14 @@ class AppServerClient {
     this.handlers.set(method, handler);
   }
 
+  // Register a handler for a REQUEST the app-server sends us (a message with
+  // both `method` and `id`, expecting a reply) -- as opposed to `on()`, which
+  // only ever sees notifications (no `id`). Approval/elicitation prompts are
+  // requests: see dispatchRequest() and #299.
+  onRequest(method, handler) {
+    this.requestHandlers.set(method, handler);
+  }
+
   handleLine(line) {
     if (!line.trim()) return;
     let message;
@@ -261,12 +270,23 @@ class AppServerClient {
 
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-      } else {
-        pending.resolve(message.result);
+      if (pending) {
+        this.pending.delete(message.id);
+        if (message.error) {
+          pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        } else {
+          pending.resolve(message.result);
+        }
+        return;
+      }
+      // Not a reply to one of our own requests -- a server-initiated request
+      // awaiting an answer (e.g. an approval/elicitation prompt). Before #299
+      // this branch returned here unconditionally, silently dropping any such
+      // request before method dispatch ever ran: the app-server (and whatever
+      // real-world action was waiting on it, like a shell command) then hung
+      // forever with no reply ever sent.
+      if (message.method) {
+        this.dispatchRequest(message.id, message.method, message.params || {});
       }
       return;
     }
@@ -274,6 +294,30 @@ class AppServerClient {
     if (message.method && this.handlers.has(message.method)) {
       this.dispatch(message.method, message.params || {});
     }
+  }
+
+  dispatchRequest(id, method, params) {
+    const handler = this.requestHandlers.get(method);
+    if (!handler) {
+      console.error(`codex-bridge: no handler for app-server request '${method}'; replying with method-not-found`);
+      this.respondError(id, -32601, `Method not found: ${method}`);
+      return;
+    }
+    Promise.resolve()
+      .then(() => handler(params))
+      .then((result) => this.respond(id, result === undefined ? null : result))
+      .catch((error) => {
+        console.error(`codex-bridge: ${method} request handler failed: ${error.message}`);
+        this.respondError(id, -32000, error.message || String(error));
+      });
+  }
+
+  respond(id, result) {
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  }
+
+  respondError(id, code, message) {
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
   }
 
   request(method, params) {
@@ -349,6 +393,7 @@ class WebSocketAppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
+    this.requestHandlers = new Map();
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.connected = false;
@@ -442,6 +487,14 @@ class WebSocketAppServerClient {
 
   on(method, handler) {
     this.handlers.set(method, handler);
+  }
+
+  // Register a handler for a REQUEST the app-server sends us (a message with
+  // both `method` and `id`, expecting a reply) -- as opposed to `on()`, which
+  // only ever sees notifications (no `id`). Approval/elicitation prompts are
+  // requests: see dispatchRequest() and #299.
+  onRequest(method, handler) {
+    this.requestHandlers.set(method, handler);
   }
 
   handleData(chunk, resolveStart, rejectStart) {
@@ -542,18 +595,51 @@ class WebSocketAppServerClient {
     }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-      } else {
-        pending.resolve(message.result);
+      if (pending) {
+        this.pending.delete(message.id);
+        if (message.error) {
+          pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        } else {
+          pending.resolve(message.result);
+        }
+        return;
+      }
+      // Not a reply to one of our own requests -- a server-initiated request
+      // awaiting an answer (e.g. an approval/elicitation prompt). Before #299
+      // this branch returned here unconditionally, silently dropping any such
+      // request before method dispatch ever ran.
+      if (message.method) {
+        this.dispatchRequest(message.id, message.method, message.params || {});
       }
       return;
     }
     if (message.method && this.handlers.has(message.method)) {
       this.dispatch(message.method, message.params || {});
     }
+  }
+
+  dispatchRequest(id, method, params) {
+    const handler = this.requestHandlers.get(method);
+    if (!handler) {
+      console.error(`codex-bridge: no handler for app-server request '${method}'; replying with method-not-found`);
+      this.respondError(id, -32601, `Method not found: ${method}`);
+      return;
+    }
+    Promise.resolve()
+      .then(() => handler(params))
+      .then((result) => this.respond(id, result === undefined ? null : result))
+      .catch((error) => {
+        console.error(`codex-bridge: ${method} request handler failed: ${error.message}`);
+        this.respondError(id, -32000, error.message || String(error));
+      });
+  }
+
+  respond(id, result) {
+    this.sendJson({ jsonrpc: "2.0", id, result });
+  }
+
+  respondError(id, code, message) {
+    this.sendJson({ jsonrpc: "2.0", id, error: { code, message } });
   }
 
   request(method, params) {
@@ -691,9 +777,28 @@ class CodexBridge {
     this.client.on("turn/started", this.clientHandler("turn/started", () => {
       this.turnActive = true;
       this.threadIdle = false;
+      // This turn was not started by tryStartTurn() -- e.g. a TUI-driven turn
+      // on a thread the bridge shares -- so nothing else will arm a watchdog
+      // for it. Without one, a turn that never reports completion (the app
+      // -server does not reliably send turn/completed, see #41) leaves
+      // turnActive stuck true and every later wake deferred forever. See #299.
+      this.startTurnWatchdog();
     }));
     this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
     this.client.on("turn/failed", this.clientHandler("turn/failed", () => this.onTurnCompleted()));
+
+    // A headless bridge must never leave a prompt only a human can answer
+    // unanswered -- an unanswered approval/elicitation request wedges the
+    // thread in "waitingOnApproval" forever, with no watchdog able to save it
+    // (see #299). Auto-decline everything: a denied command/patch/permission
+    // still lets the turn finish normally instead of hanging.
+    this.client.onRequest("item/commandExecution/requestApproval", () => this.denyApproval());
+    this.client.onRequest("item/fileChange/requestApproval", () => this.denyApproval());
+    this.client.onRequest("item/permissions/requestApproval", () => this.denyPermissions());
+    this.client.onRequest("mcpServer/elicitation/request", () => this.denyElicitation());
+    // Legacy (pre-v2) app-server protocol names, kept as a safety net.
+    this.client.onRequest("execCommandApproval", () => this.denyLegacyApproval());
+    this.client.onRequest("applyPatchApproval", () => this.denyLegacyApproval());
 
     this.client.start();
     await this.client.ready?.();
@@ -800,6 +905,11 @@ class CodexBridge {
       const type = response.thread.status && response.thread.status.type;
       this.threadIdle = type !== "active";
       this.turnActive = type === "active";
+      // The thread can already be active on resume (e.g. a stuck approval
+      // predating this bridge, or a co-resident TUI turn) with no bridge-owned
+      // turn/start to hang a watchdog off of. Arm one here too so a pending
+      // wake never waits on it forever. See #299.
+      if (this.turnActive) this.startTurnWatchdog();
       console.error(`codex-bridge: resumed thread ${this.threadId}`);
       return;
     }
@@ -907,6 +1017,10 @@ class CodexBridge {
     if (type === "active") {
       this.turnActive = true;
       this.threadIdle = false;
+      // See the identical comment on the "turn/started" handler in run() --
+      // this transition can also happen without tryStartTurn() ever calling
+      // startTurnWatchdog() itself. See #299.
+      this.startTurnWatchdog();
       return;
     }
     if (type === "idle") {
@@ -1017,6 +1131,29 @@ class CodexBridge {
   onServerError(params) {
     if (params.threadId && params.threadId !== this.threadId) return;
     console.error(`codex-bridge: server error: ${JSON.stringify(params)}`);
+  }
+
+  // Response shapes below are the app-server's actual v2/legacy approval
+  // protocol (codex-rs app-server-protocol ServerRequest), not guesses.
+  denyApproval() {
+    console.error("codex-bridge: auto-declining an approval request (headless bridge, see #299)");
+    return { decision: "decline" };
+  }
+
+  denyLegacyApproval() {
+    console.error("codex-bridge: auto-denying a legacy approval request (headless bridge, see #299)");
+    return { decision: "denied" };
+  }
+
+  denyPermissions() {
+    // No optional grant fields set = no additional permissions granted.
+    console.error("codex-bridge: auto-declining a permissions request (headless bridge, see #299)");
+    return { permissions: {}, scope: "turn" };
+  }
+
+  denyElicitation() {
+    console.error("codex-bridge: auto-declining an MCP elicitation request (headless bridge, see #299)");
+    return { action: "decline", content: null, _meta: null };
   }
 
   onAgentMessageDelta(params) {
