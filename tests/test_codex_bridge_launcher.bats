@@ -48,7 +48,7 @@ write_request() {
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
 run_launcher() {
-  sleep 4 3>&- & local p=$!
+  sleep 6 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
   wait "$p" 2>/dev/null || true
   # The launcher starts the mock through nohup. Its bound-thread metadata is
@@ -164,8 +164,10 @@ run_launcher() {
   local hash lock
   hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
   lock="$RUN_DIR/codex-bridge-dispatcher.$hash.lock"
-  mkdir "$lock"
-  printf '%s\n' 99999999 > "$lock/pid"
+  ln -s 99999999 "$lock"
+  # A crash from the former two-directory implementation could leave this
+  # behind forever. The owner-in-link protocol must not depend on that reaper.
+  mkdir "$RUN_DIR/codex-bridge-dispatcher.$hash.reap"
   sleep 10 3>&- & local parent_a=$!
   sleep 10 3>&- & local parent_b=$!
 

@@ -29,7 +29,6 @@ source "$SCRIPT_DIR/../../../lib/hash.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 DISPATCHER_LOCK="$RUN_DIR/codex-bridge-dispatcher.$PROJECT_HASH.lock"
-DISPATCHER_REAPER="$RUN_DIR/codex-bridge-dispatcher.$PROJECT_HASH.reap"
 SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
 
 # shellcheck source=../../../lib/node.sh
@@ -63,52 +62,38 @@ fi
 
 release_dispatcher_lock() {
   local owner=""
-  owner="$(cat "$DISPATCHER_LOCK/pid" 2>/dev/null || true)"
+  owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
   [ "$owner" = "$$" ] || return 0
-  rm -f "$DISPATCHER_LOCK/pid"
-  rmdir "$DISPATCHER_LOCK" 2>/dev/null || true
+  rm -f "$DISPATCHER_LOCK"
 }
 
 acquire_dispatcher_lock() {
   local owner="" attempt
   for attempt in {1..20}; do
-    # A stale-owner reaper has exclusive authority over the main lock. Never
-    # race it by creating or deleting the main directory while it is active.
-    if [ -d "$DISPATCHER_REAPER" ]; then
-      sleep 0.05
-      continue
-    fi
-    if mkdir "$DISPATCHER_LOCK" 2>/dev/null; then
-      printf '%s\n' "$$" > "$DISPATCHER_LOCK/pid"
+    # The symlink target publishes the owner in the same atomic operation that
+    # creates the lock, so contenders can never mistake a live lock for an
+    # ownerless stale directory. A forced stale replacement is followed by an
+    # ownership check: only the process whose target remains installed wins.
+    if ln -s "$$" "$DISPATCHER_LOCK" 2>/dev/null; then
       trap release_dispatcher_lock EXIT
       trap 'exit 0' INT TERM
       return 0
     fi
-    owner="$(cat "$DISPATCHER_LOCK/pid" 2>/dev/null || true)"
+    owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
       return 1
     fi
-    if ! mkdir "$DISPATCHER_REAPER" 2>/dev/null; then
-      sleep 0.05
-      continue
-    fi
-    # Re-read under the reaper lock: another process may have replaced the
-    # stale owner before we acquired exclusive cleanup authority.
-    owner="$(cat "$DISPATCHER_LOCK/pid" 2>/dev/null || true)"
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-      rmdir "$DISPATCHER_REAPER" 2>/dev/null || true
-      return 1
-    fi
-    rm -f "$DISPATCHER_LOCK/pid"
-    rmdir "$DISPATCHER_LOCK" 2>/dev/null || true
-    if mkdir "$DISPATCHER_LOCK" 2>/dev/null; then
-      printf '%s\n' "$$" > "$DISPATCHER_LOCK/pid"
-      rmdir "$DISPATCHER_REAPER" 2>/dev/null || true
+    ln -sfn "$$" "$DISPATCHER_LOCK" 2>/dev/null || true
+    owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
+    if [ "$owner" = "$$" ]; then
       trap release_dispatcher_lock EXIT
       trap 'exit 0' INT TERM
       return 0
     fi
-    rmdir "$DISPATCHER_REAPER" 2>/dev/null || true
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
   done
   return 1
 }
@@ -141,7 +126,8 @@ safety_fingerprint() {
 if [ -z "$ROLE_PAIR" ]; then
   acquire_dispatcher_lock || exit 0
   known_pairs=""
-  while kill -0 "$LIFETIME_PID" 2>/dev/null; do
+  while [ "$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)" = "$$" ] \
+    && kill -0 "$LIFETIME_PID" 2>/dev/null; do
     current_pairs="$(resolve_identity || true)"
     while IFS="$TAB" read -r child_team child_name; do
       [ -n "$child_team" ] || continue
