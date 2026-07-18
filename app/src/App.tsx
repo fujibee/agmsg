@@ -19,12 +19,14 @@ import {
   AgentModal,
   AppUserModal,
   ConfirmModal,
+  DiagCaptureModal,
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
   RenameModal,
   SettingsModal,
 } from "./modals";
+import { scanEscapes, type EscapeEvent } from "./escapeCapture";
 import {
   applyAtPath,
   classifyDrop,
@@ -105,6 +107,7 @@ type Modal =
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
   | { kind: "settings" }
+  | { kind: "diagCapture" }
   | { kind: "closeWindow"; windowId: string }
   | { kind: "closePane"; paneId: string }
   | null;
@@ -138,6 +141,15 @@ const SUPPRESS_APPUSER_PROMPT_KEY = "agmsg-app-suppress-appuser-prompt";
 // AUTO_TIMEZONE, which tracks the OS timezone live rather than freezing
 // whatever was detected at first launch.
 const TIMEZONE_KEY = "agmsg-app-timezone";
+// Diagnostic-only (issue #383, Windows Codex CLI cursor flicker): two
+// Settings toggles for the reporter to A/B, both defaulting to today's
+// existing behavior. Not part of any normal release plan — see the
+// diag/383-cursor-flicker branch this ships on.
+const CURSOR_BLINK_KEY = "agmsg-app-diag-383-cursor-blink";
+const HIDE_CURSOR_WHILE_WORKING_KEY = "agmsg-app-diag-383-hide-cursor-while-working";
+// Cap on the diagnostic escape-event ring buffer (see diagEventsRef below)
+// — bounds memory for a long-running session without needing a UI control.
+const MAX_DIAG_EVENTS = 2000;
 // Custom drag-and-drop MIME type for pane-swap drags (see PANE_DRAG_MIME
 // usages below) — a made-up type, not text/plain, so a stray OS file drag
 // or an unrelated drag elsewhere on the page never accidentally matches a
@@ -204,6 +216,32 @@ export default function App() {
     if (!stored || stored === AUTO_TIMEZONE) return AUTO_TIMEZONE;
     return isValidTimeZone(stored) ? stored : AUTO_TIMEZONE;
   });
+  // Diagnostic-only (#383, see CURSOR_BLINK_KEY): defaults to `true`, today's
+  // existing hardcoded xterm behavior.
+  const [cursorBlinkEnabled, setCursorBlinkEnabled] = useState(
+    () => localStorage.getItem(CURSOR_BLINK_KEY) !== "false",
+  );
+  // Diagnostic-only (#383, see HIDE_CURSOR_WHILE_WORKING_KEY): defaults to
+  // `false` — hiding the cursor while an agent is working is new behavior,
+  // not today's default.
+  const [hideCursorWhileWorking, setHideCursorWhileWorking] = useState(
+    () => localStorage.getItem(HIDE_CURSOR_WHILE_WORKING_KEY) === "true",
+  );
+  // Diagnostic-only (#383): a ring buffer of captured escape events (see
+  // escapeCapture.ts), fed by every TerminalPane's onRawOutput. A ref, not
+  // state — chunks can arrive many times a second (issue #383 is literally
+  // about a chatty CLI), so re-rendering App on every one would defeat the
+  // whole point. The diagCapture modal reads this ref fresh each time it's
+  // opened (or Cleared — see diagEventsVersion) rather than subscribing.
+  const diagEventsRef = useRef<EscapeEvent[]>([]);
+  // Only ever setState'd to force a re-render after Clear mutates the ref
+  // above directly — the version number itself is never read.
+  const [, forceDiagEventsRerender] = useState(0);
+  const handleRawOutput = useCallback((chunk: string) => {
+    const found = scanEscapes(chunk);
+    if (found.length === 0) return;
+    diagEventsRef.current = [...diagEventsRef.current, ...found].slice(-MAX_DIAG_EVENTS);
+  }, []);
   // Collapses the team sidebar to an icon-only rail so panes get more width.
   // Persisted across restarts (see SIDEBAR_COLLAPSED_KEY) — spawning/
   // messaging a member isn't offered from the collapsed rail; expand to get
@@ -503,6 +541,12 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(TIMEZONE_KEY, timezone);
   }, [timezone]);
+  useEffect(() => {
+    localStorage.setItem(CURSOR_BLINK_KEY, String(cursorBlinkEnabled));
+  }, [cursorBlinkEnabled]);
+  useEffect(() => {
+    localStorage.setItem(HIDE_CURSOR_WHILE_WORKING_KEY, String(hideCursorWhileWorking));
+  }, [hideCursorWhileWorking]);
   // Resolved once per render for both message-time display sites below.
   const effectiveTimeZone = resolveTimeZone(timezone);
 
@@ -1864,8 +1908,11 @@ export default function App() {
                     args={p.args}
                     cwd={p.cwd}
                     fontSize={terminalFontSize}
+                    cursorBlink={cursorBlinkEnabled}
+                    hideCursor={hideCursorWhileWorking && paneStatus[p.id]?.state === "working"}
                     onAgentState={applyAgentState}
                     onCellSize={handleCellSize}
+                    onRawOutput={handleRawOutput}
                   />
                 </div>
               );
@@ -2074,6 +2121,27 @@ export default function App() {
           onTerminalFontSizeChange={setTerminalFontSize}
           timezone={timezone}
           onTimezoneChange={setTimezone}
+          cursorBlinkEnabled={cursorBlinkEnabled}
+          onCursorBlinkEnabledChange={setCursorBlinkEnabled}
+          hideCursorWhileWorking={hideCursorWhileWorking}
+          onHideCursorWhileWorkingChange={setHideCursorWhileWorking}
+          onOpenDiagCapture={() => setModal({ kind: "diagCapture" })}
+        />
+      )}
+      {modal?.kind === "diagCapture" && (
+        // diagEventsRef mutates outside React state, so it alone can't
+        // trigger a re-render — reading it here always gets the current
+        // value at render time, but Clear (which only mutates the ref)
+        // needs diagEventsVersion's setState to actually force that render.
+        <DiagCaptureModal
+          onClose={() => setModal(null)}
+          events={diagEventsRef.current}
+          cursorBlinkEnabled={cursorBlinkEnabled}
+          hideCursorWhileWorking={hideCursorWhileWorking}
+          onClear={() => {
+            diagEventsRef.current = [];
+            forceDiagEventsRerender((v) => v + 1);
+          }}
         />
       )}
       {modal?.kind === "closeWindow" &&

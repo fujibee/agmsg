@@ -373,6 +373,56 @@ select:focus {
   cursor: default;
 }
 
+/* Diagnostic-only (#383): Settings modal's cursor-flicker toggle section.
+   Not part of any normal release. */
+.settings-diag-383 {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px 12px;
+  margin: 0 0 12px;
+}
+.settings-diag-383 legend {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 4px;
+}
+/* Beats .modal label's column layout (0,1,1) via a two-class selector
+   (0,2,0) rather than !important. */
+.modal .settings-diag-383-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+}
+.settings-diag-383-checkbox input {
+  width: auto;
+  padding: 0;
+}
+.settings-diag-383 > button {
+  margin-top: 4px;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Diagnostic-only (#383): the diag-capture modal's copyable report. */
+.diag-capture-report {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 11px;
+  resize: vertical;
+  margin-bottom: 12px;
+}
+
 .link {
   background: none;
   border: none;
@@ -1020,6 +1070,15 @@ body.resizing-row {
 .term-pane {
   width: 100%;
   height: 100%;
+}
+
+/* Diagnostic-only (#383): hides xterm's cursor DOM element while the
+   working-cursor-hide Settings toggle is on for a pane whose agent status is
+   "working" (see TerminalPane's hideCursor prop). Targets xterm's own
+   dynamically-added .xterm-cursor class, not a static element this repo
+   owns. */
+.term-pane-cursor-hidden .xterm-cursor {
+  visibility: hidden;
 }
 
 /* Every pane is a permanent flat child of .stage, positioned by its window's

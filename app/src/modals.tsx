@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { SUPPORTED_LANGUAGES } from "./i18n";
 import { AUTO_TIMEZONE, detectTimeZone, isValidTimeZone, listTimeZones } from "./time";
+import { formatDiagnosticReport, summarizeEscapes, type EscapeEvent } from "./escapeCapture";
 
 type BrowseDir = (current: string) => Promise<string | null>;
 
@@ -447,6 +449,14 @@ export function SettingsModal(props: {
   onTerminalFontSizeChange: (size: number) => void;
   timezone: string;
   onTimezoneChange: (timezone: string) => void;
+  // Diagnostic-only (issue #383, Windows Codex CLI cursor flicker): this
+  // whole section only ships on the diag/383-cursor-flicker branch, not a
+  // normal release — see App.tsx's CURSOR_BLINK_KEY.
+  cursorBlinkEnabled: boolean;
+  onCursorBlinkEnabledChange: (enabled: boolean) => void;
+  hideCursorWhileWorking: boolean;
+  onHideCursorWhileWorkingChange: (enabled: boolean) => void;
+  onOpenDiagCapture: () => void;
 }) {
   const { t, i18n } = useTranslation();
   // Local draft text, not a number bound directly to props.terminalFontSize
@@ -599,7 +609,92 @@ export function SettingsModal(props: {
           ))}
         </datalist>
       </label>
+      {/* Diagnostic-only (#383): toggles both take effect immediately on
+          already-running panes (see TerminalPane's cursorBlink/hideCursor
+          props) — no restart needed, so the reporter can A/B against a live
+          Codex flicker without relaunching. */}
+      <fieldset className="settings-diag-383">
+        <legend>{t("settings.diag383.legend")}</legend>
+        <label className="settings-diag-383-checkbox">
+          <input
+            type="checkbox"
+            checked={props.cursorBlinkEnabled}
+            onChange={(e) => props.onCursorBlinkEnabledChange(e.target.checked)}
+          />
+          {t("settings.diag383.cursorBlink.label")}
+        </label>
+        <label className="settings-diag-383-checkbox">
+          <input
+            type="checkbox"
+            checked={props.hideCursorWhileWorking}
+            onChange={(e) => props.onHideCursorWhileWorkingChange(e.target.checked)}
+          />
+          {t("settings.diag383.hideCursorWhileWorking.label")}
+        </label>
+        <button type="button" onClick={props.onOpenDiagCapture}>
+          {t("settings.diag383.viewCapture.button")}
+        </button>
+      </fieldset>
       <div className="modal-actions">
+        <button type="button" className="primary" onClick={props.onClose}>
+          {t("common.close")}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Diagnostic-only (issue #383): shows the captured escape-sequence summary
+ * (see escapeCapture.ts) as a single copyable text block, self-describing
+ * (toggle states + app version + capture time embedded — see
+ * formatDiagnosticReport) so a pasted report doesn't depend on the reporter
+ * separately noting which run/setting it came from.
+ */
+export function DiagCaptureModal(props: {
+  onClose: () => void;
+  events: EscapeEvent[];
+  cursorBlinkEnabled: boolean;
+  hideCursorWhileWorking: boolean;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation();
+  // Freezes "captured at" to when the modal opened, not a live clock — a
+  // pasted report should describe one snapshot, not keep ticking while the
+  // reporter is still looking at it.
+  const [capturedAt] = useState(() => new Date().toISOString());
+  const [appVersion, setAppVersion] = useState("…");
+  useEffect(() => {
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("unknown"));
+  }, []);
+  const [copied, setCopied] = useState(false);
+  const report = formatDiagnosticReport({
+    summary: summarizeEscapes(props.events),
+    cursorBlinkEnabled: props.cursorBlinkEnabled,
+    hideCursorWhileWorking: props.hideCursorWhileWorking,
+    appVersion,
+    capturedAt,
+  });
+  return (
+    <Modal title={t("modal.diagCapture.title")} onClose={props.onClose}>
+      <textarea className="diag-capture-report" readOnly value={report} rows={16} />
+      <div className="modal-actions">
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard.writeText(report).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            });
+          }}
+        >
+          {copied ? t("modal.diagCapture.copied") : t("modal.diagCapture.copyButton")}
+        </button>
+        <button type="button" onClick={props.onClear}>
+          {t("modal.diagCapture.clearButton")}
+        </button>
         <button type="button" className="primary" onClick={props.onClose}>
           {t("common.close")}
         </button>

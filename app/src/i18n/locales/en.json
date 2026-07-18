@@ -14,6 +14,18 @@
     "timezone": {
       "label": "Timezone",
       "auto": "Auto ({{zone}})"
+    },
+    "diag383": {
+      "legend": "Cursor flicker diagnostics (issue #383)",
+      "cursorBlink": {
+        "label": "Terminal cursor blink"
+      },
+      "hideCursorWhileWorking": {
+        "label": "Hide cursor while agent is working"
+      },
+      "viewCapture": {
+        "button": "View escape capture"
+      }
     }
   },
   "startupError": {
@@ -135,6 +147,12 @@
     },
     "settings": {
       "title": "Settings"
+    },
+    "diagCapture": {
+      "title": "Cursor flicker diagnostic capture",
+      "copyButton": "Copy",
+      "copied": "Copied!",
+      "clearButton": "Clear"
     },
     "closeWindow": {
       "title": "Close this tab?",

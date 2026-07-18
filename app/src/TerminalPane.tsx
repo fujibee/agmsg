@@ -14,10 +14,21 @@ type Props = {
   args?: string[];
   cwd?: string;
   fontSize?: number;
+  /** xterm's own default is `false`; this app has always forced `true`. See
+   * the #383 diagnostic Settings toggle in App.tsx. */
+  cursorBlink?: boolean;
+  /** Diagnostic-only (#383): CSS-hides the terminal cursor while true,
+   * without touching xterm's own blink state — see the .term-pane-cursor-
+   * hidden rule in App.css. */
+  hideCursor?: boolean;
   onAgentState?: (id: string, state: "idle" | "working" | "blocked" | "unknown") => void;
   /** Reported on every fit — the pane's current cell size in CSS px, so a
    * divider drag elsewhere can snap to whole terminal rows/cols. */
   onCellSize?: (widthPx: number, heightPx: number) => void;
+  /** Diagnostic-only (#383): every decoded PTY output chunk, before it's
+   * written to xterm — feeds the escape-sequence capture (see
+   * escapeCapture.ts). Not used by any normal-release code path. */
+  onRawOutput?: (chunk: string) => void;
 };
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -31,7 +42,18 @@ function b64ToBytes(b64: string): Uint8Array {
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
  */
-export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentState, onCellSize }: Props) {
+export function TerminalPane({
+  id,
+  cmd,
+  args = [],
+  cwd,
+  fontSize = 12,
+  cursorBlink = true,
+  hideCursor = false,
+  onAgentState,
+  onCellSize,
+  onRawOutput,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   // Live handles to the current terminal/fit addon, for the font-size effect
   // below to reach — that effect must NOT be a dependency of the main effect
@@ -48,7 +70,7 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     const term = new Terminal({
       fontSize,
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-      cursorBlink: true,
+      cursorBlink,
       theme: { background: "#0b0e14", foreground: "#c5c8c6" },
     });
     termRef.current = term;
@@ -97,6 +119,12 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     // this isn't just a bare requestAnimationFrame (it stalls in a
     // backgrounded/occluded webview, and agmsg mounts panes while hidden).
     const writeBatcher = createWriteBatcher({ onFlush: (data) => term.write(data) });
+    // Diagnostic-only (#383): decodes each raw chunk for onRawOutput's
+    // escape-sequence capture. A single reused decoder without stream mode
+    // — escape sequences are all-ASCII, so a chunk split mid multi-byte
+    // UTF-8 glyph elsewhere in the same read only mangles that glyph, never
+    // the sequences this capture is looking for.
+    const rawOutputDecoder = new TextDecoder();
 
     const unlisteners: Array<() => void> = [];
     (async () => {
@@ -115,7 +143,10 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
       // already queued at the moment unlisten() runs.
       const unlistenOutput = await listen<{ id: string; b64: string }>("pty-output", (e) => {
         if (disposed) return;
-        if (e.payload.id === id) writeBatcher.push(b64ToBytes(e.payload.b64));
+        if (e.payload.id !== id) return;
+        const bytes = b64ToBytes(e.payload.b64);
+        writeBatcher.push(bytes);
+        onRawOutput?.(rawOutputDecoder.decode(bytes));
       });
       if (disposed) {
         unlistenOutput();
@@ -181,7 +212,14 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [id, cmd, cwd, onAgentState, onCellSize]);
+  }, [id, cmd, cwd, onAgentState, onCellSize, onRawOutput]);
+
+  // Apply a cursorBlink change live — unlike fontSize, this needs no re-fit
+  // or PTY resize (xterm.js supports updating this option on a running
+  // terminal). Diagnostic-only (#383): see the Settings toggle in App.tsx.
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.cursorBlink = cursorBlink;
+  }, [cursorBlink]);
 
   // Apply a fontSize change live, without recreating the terminal (which
   // would kill and respawn the PTY). Skips its very first run — at that
@@ -213,5 +251,5 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, onAgentSt
     onCellSize?.(el.offsetWidth / term.cols, el.offsetHeight / term.rows);
   }, [fontSize, onCellSize]);
 
-  return <div className="term-pane" ref={ref} />;
+  return <div className={hideCursor ? "term-pane term-pane-cursor-hidden" : "term-pane"} ref={ref} />;
 }
