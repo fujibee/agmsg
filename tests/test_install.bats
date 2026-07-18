@@ -47,6 +47,31 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "install: --update retires stale Codex Desktop relay artifacts" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local relay_dir="$SK/scripts/drivers/types/codex"
+  local launch_agents="$FAKE_HOME/Library/LaunchAgents"
+  mkdir -p "$relay_dir" "$SK/run" "$launch_agents"
+  touch \
+    "$relay_dir/codex-desktop-relay-run.sh" \
+    "$relay_dir/codex-desktop-relayctl.sh" \
+    "$relay_dir/codex-desktop-relay.js" \
+    "$SK/run/codex-desktop-relay.pid" \
+    "$SK/run/codex-desktop-relay.desktop-token" \
+    "$launch_agents/com.agmsg.codex-desktop-relay.plist" \
+    "$launch_agents/com.agmsg.codex-chatgpt-restart-once.plist"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --update
+
+  [ ! -e "$relay_dir/codex-desktop-relay-run.sh" ]
+  [ ! -e "$relay_dir/codex-desktop-relayctl.sh" ]
+  [ ! -e "$relay_dir/codex-desktop-relay.js" ]
+  [ ! -e "$SK/run/codex-desktop-relay.pid" ]
+  [ ! -e "$SK/run/codex-desktop-relay.desktop-token" ]
+  [ ! -e "$launch_agents/com.agmsg.codex-desktop-relay.plist" ]
+  [ ! -e "$launch_agents/com.agmsg.codex-chatgpt-restart-once.plist" ]
+}
+
 @test "install: ships an executable uninstall.sh so npx/curl installs have one to run later" {
   # setup.sh's temp checkout is deleted right after install, so a copy inside
   # the skill dir is the only uninstaller npx/curl-installed users ever have.
@@ -97,6 +122,14 @@ teardown() {
   [[ "$actas_block" == *"delivery.sh status"* ]]
   [[ "$drop_block" == *"delivery mode is"*"monitor"*"both"* ]]
   [[ "$drop_block" == *"delivery.sh status"* ]]
+}
+
+@test "install: Codex skill ships the native Scheduled monitor workflow" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  grep -q 'scheduled start' "$SK/SKILL.md"
+  grep -q 'kind=heartbeat' "$SK/SKILL.md"
+  grep -q 'targetThreadId' "$SK/SKILL.md"
+  grep -q 'Never use Desktop relay' "$SK/scripts/drivers/types/codex/codex-scheduled-monitor.sh"
 }
 
 @test "install: --update warns to re-register delivery hooks (#133)" {

@@ -26,6 +26,8 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/compat.sh"
 
 # Resolve the session's real project root (see #92) so a drop issued from a
 # subdir/worktree clears the registration on the project the session lives in.
@@ -64,6 +66,84 @@ fi
 REMOVED=0
 TOUCHED_TEAMS=0
 LOCK_FAILED=0
+
+wait_for_codex_receiver_exit() {
+  local pid="$1" check=0 state
+  while [ "$check" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    case "$state" in Z*) return 0 ;; esac
+    sleep 0.1
+    check=$((check + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || return 1
+    check=0
+    while [ "$check" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+      state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+      case "$state" in Z*) return 0 ;; esac
+      sleep 0.1
+      check=$((check + 1))
+    done
+  fi
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+stop_codex_role_receiver() {
+  local team="$1" name="$2" kind base pidfile metafile pid cmd label thread plist check domain
+  [ "$AGENT_TYPE" = "codex" ] || return 0
+
+  for kind in codex-bridge codex-app-monitor; do
+    base="$SKILL_DIR/run/$kind.$team.$name"
+    pidfile="$base.pid"
+    metafile="$base.meta"
+    plist="$base.plist"
+    label=""
+    if [ "$kind" = "codex-app-monitor" ]; then
+      if [ -f "$metafile" ]; then
+        label="$(sed -n 's/^launch_label=//p' "$metafile" | head -1)"
+      fi
+      if [ -z "$label" ] && [ -f "$plist" ]; then
+        label="$(awk '/<key>Label<\/key>/{getline; sub(/^[[:space:]]*<string>/, ""); sub(/<\/string>[[:space:]]*$/, ""); print; exit}' "$plist")"
+      fi
+      if [ -n "$label" ] && command -v launchctl >/dev/null 2>&1; then
+        domain="gui/$(id -u)"
+        launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+        check=0
+        while [ "$check" -lt 20 ] && launchctl print "$domain/$label" >/dev/null 2>&1; do
+          sleep 0.1
+          check=$((check + 1))
+        done
+      fi
+    fi
+    if [ -f "$pidfile" ]; then
+      pid="$(cat "$pidfile" 2>/dev/null || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+        case "$kind:$cmd" in
+          codex-bridge:*codex-bridge.js*|codex-app-monitor:*codex-app-monitor.sh*)
+            kill "$pid" 2>/dev/null || true
+            if ! wait_for_codex_receiver_exit "$pid"; then
+              echo "reset: Codex receiver pid $pid did not stop; preserving its run files" >&2
+              return 1
+            fi
+            ;;
+        esac
+      fi
+    fi
+    if [ "$kind" = "codex-app-monitor" ] && [ -f "$metafile" ]; then
+      thread="$(sed -n 's/^thread=//p' "$metafile" | head -1)"
+      if [ -n "$thread" ]; then
+        "$SCRIPT_DIR/drivers/types/codex/codex-monitor-lease.sh" disarm \
+          "$PROJECT_PATH" "$team" "$name" "$thread" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$pidfile" "$metafile" "$base.appserver" "$base.log" "$plist" \
+      "$base.health" "$base.preflight.log" "$base.last-prompt.txt" \
+      "$base.last-message.txt" "$base.last-status" "$base.last-ids" \
+      "$base.watch-output"
+  done
+  rm -f "$SKILL_DIR/run/codex-chat-visible.$team.$name.meta"
+}
 
 for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   [ -f "$TEAM_CONFIG" ] || continue
@@ -159,6 +239,11 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   REMOVED=$((REMOVED + MATCH_COUNT))
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
   echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
+
+  # A dropped Codex role must stop receiving immediately. Mode-level teardown
+  # handles whole projects; reset is role-scoped, so remove only this role's
+  # bridge/background receiver and leave peer identities untouched.
+  stop_codex_role_receiver "$TEAM_NAME" "$TARGET_AGENT"
 
   # Release the actas lock for this (team, agent) pair so peer sessions can
   # claim it without waiting for owner-session-end / stale GC.

@@ -601,6 +601,14 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing wakeup prompt" } });
       return;
     }
+    if (!message.params.input[0].text.includes("first tool call must be this official inbox command")) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing official inbox ownership" } });
+      return;
+    }
+    if (!message.params.input[0].text.includes("ACK-only")) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing ping-pong guard" } });
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     setTimeout(() => {
       send({
@@ -795,6 +803,14 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing inline inbox body" } });
       return;
     }
+    if (!message.params.input[0].text.includes('starting with "agmsg受信:"')) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing visible progress contract" } });
+      return;
+    }
+    if (!message.params.input[0].text.includes("Before each major action")) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "missing visible major-action contract" } });
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     setTimeout(() => {
       send({
@@ -814,6 +830,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "started turn" ]]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT read_at IS NOT NULL FROM messages WHERE body='inline body reaches prompt';")" = "1" ]
 }
 
 @test "codex-bridge: stops instead of looping on the same unread max_id" {

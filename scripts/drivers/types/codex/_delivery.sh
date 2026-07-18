@@ -3,14 +3,59 @@
 #
 # codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
 # enable/disable side effects (print the monitor shim setup on enable, stop the
-# bridge on disable) and replaces the runtime status summary with Codex bridge
-# liveness. Sourced into delivery.sh's context, so SKILL_DIR, SCRIPT_DIR,
-# RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL and stop_codex_bridge are
-# in scope.
+# receiver on disable) and replaces the runtime status summary with Codex
+# receiver liveness. Monitor mode may use only a visible app-server bridge;
+# turn/off and visible-turn fallback never start a background receiver.
+# Sourced into delivery.sh's context,
+# so SKILL_DIR, SCRIPT_DIR, RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL
+# and stop_codex_bridge are in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
+# Codex monitor mode always includes the visible Stop-hook fallback. The
+# SessionStart hook preserves/rebinds the monitor after restart; the Stop hook
+# is the safe path when no app-server can inject into the visible thread.
+agmsg_delivery_apply() {
+  local type="$1" project="$2" mode="$3"
+  # Native Scheduled monitoring is mutually exclusive with hook/bridge modes.
+  # Invalidate its local state before enabling any of those modes; the next
+  # native run sees status=inactive and pauses itself.
+  if [ "$mode" != "off" ]; then
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+      stop-project "$project" >/dev/null 2>&1 || true
+  fi
+  if [ "$mode" = "monitor" ]; then
+    agmsg_delivery_apply_default "$type" "$project" both
+  else
+    agmsg_delivery_apply_default "$type" "$project" "$mode"
+  fi
+}
+
+# `monitor` is the user-facing mode name even though Codex installs both hook
+# types internally. Keep status stable for callers and existing automation.
+agmsg_delivery_status() {
+  local type="$1" project="$2" hook_status scheduled_status
+  hook_status="$(agmsg_delivery_status_default "$type" "$project" | sed '1s/^mode: both$/mode: monitor/')"
+  scheduled_status="$("$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+    status-project "$project" 2>/dev/null || true)"
+  if printf '%s\n' "$scheduled_status" | grep -q '^status=active '; then
+    if printf '%s\n' "$hook_status" | grep -q '^mode: off$'; then
+      printf '%s\n' "$hook_status" | sed '1s/^mode: off$/mode: scheduled/'
+    else
+      printf '%s\n' "$hook_status"
+      echo "WARNING: native Scheduled monitoring and Codex delivery hooks are both active."
+    fi
+    printf 'Codex Scheduled monitor: %s\n' \
+      "$(printf '%s\n' "$scheduled_status" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  else
+    printf '%s\n' "$hook_status"
+  fi
+}
+
 agmsg_delivery_on_enable() {
-  echo "Codex monitor beta is enabled."
+  echo "Codex visible monitor beta is enabled."
+  echo "After actas binds a role, only a visible app-server bridge may deliver unread mail."
+  echo "If the bridge cannot attach, mail stays unread until the next visible Codex turn."
+  echo "Background codex exec resume handling is prohibited."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
     echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."
@@ -29,23 +74,51 @@ agmsg_delivery_on_enable() {
     echo "WARNING: Node.js ('$codex_node') was not found. The Codex bridge needs Node —"
     echo "  monitor delivery will NOT start until Node is installed (or set AGMSG_NODE)."
   fi
-  echo "Restart your Codex session (quit and relaunch \`codex\`), then send your first"
-  echo "  message — the bridge starts on your first turn, not the moment Codex opens."
-  echo "  Already-running sessions stay unmonitored until they restart."
+  echo "Run agmsg actas <role> in the intended Codex task to bind the receiver now."
+  echo "SessionStart rebinds the last role after a later restart."
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }
 
 agmsg_delivery_on_disable() {
   local project="$2"
-  local stopped
+  local stopped lease_cleanup scheduled_cleanup
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then
     echo "Stopped $stopped Codex bridge process(es) for this project and cleaned their run files."
   fi
+  # Remove any legacy scheduled-receiver lease left by pre-event-driven builds.
+  lease_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
+    disarm-project "$project" 2>/dev/null || true)
+  [ -n "$lease_cleanup" ] && printf '%s\n' "$lease_cleanup"
+  # Turning delivery off must also invalidate native Scheduled runs. The next
+  # unattended run sees status=inactive and pauses itself; no local process is
+  # started to enforce that transition.
+  scheduled_cleanup=$("$SKILL_DIR/scripts/drivers/types/codex/codex-scheduled-monitor.sh" \
+    stop-project "$project" 2>/dev/null || true)
+  [ -n "$scheduled_cleanup" ] && printf 'Codex Scheduled monitor: %s\n' "$scheduled_cleanup"
   echo "Note: shell profile functions are not changed automatically."
   echo "  If you installed the optional global shim and no other project uses monitor mode, remove it:"
   echo "    $SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh remove"
   echo "    # then drop any agmsg Codex function or ~/.agents/bin PATH entry you added for monitor"
+}
+
+agmsg_delivery_stop_directive() {
+  local project="${PROJECT:-}"
+  local mode="${MODE:-}"
+  if [ "$mode" = "turn" ] && [ -n "$project" ]; then
+    # Let a failing receiver finish writing fallback health and chat-visible
+    # metadata before it exits on its own.
+    if [ "${AGMSG_CODEX_PRESERVE_CURRENT_MONITOR:-}" = "1" ]; then
+      return 0
+    fi
+    local stopped
+    stopped=$(stop_codex_bridge "$project")
+    if [ "${stopped:-0}" -gt 0 ]; then
+      echo "Stopped $stopped Codex bridge/app monitor process(es) for this project and cleaned their run files."
+    fi
+    "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-lease.sh" \
+      disarm-project "$project" 2>/dev/null || true
+  fi
 }
 
 agmsg_delivery_runtime_status() {
@@ -64,13 +137,53 @@ agmsg_delivery_runtime_status() {
     fi
     found=1
 
+    local healthfile health_status health_failures health_error health_updated
+    healthfile="$RUN_DIR/codex-app-monitor.$team.$name.health"
+    if [ -f "$healthfile" ]; then
+      health_status=$(awk -F= '/^status=/{sub(/^status=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_failures=$(awk -F= '/^consecutive_failures=/{sub(/^consecutive_failures=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_error=$(awk -F= '/^last_error=/{sub(/^last_error=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      health_updated=$(awk -F= '/^updated_at=/{sub(/^updated_at=/, ""); print; exit}' "$healthfile" 2>/dev/null || true)
+      echo "Codex monitor health: $team/$name status=${health_status:-unknown} failures=${health_failures:-unknown} last_error=${health_error:-unknown} updated=${health_updated:-unknown}"
+    fi
+
     local base pidfile metafile pid meta_pid meta_project meta_type meta_ok
     base="$RUN_DIR/codex-bridge.$team.$name"
     pidfile="$base.pid"
     metafile="$base.meta"
 
+    local app_base app_pidfile app_metafile app_pid app_thread app_transport
+    app_base="$RUN_DIR/codex-app-monitor.$team.$name"
+    app_pidfile="$app_base.pid"
+    app_metafile="$app_base.meta"
+
+    local chat_metafile chat_project chat_type chat_transport chat_status chat_updated
+    chat_metafile="$RUN_DIR/codex-chat-visible.$team.$name.meta"
+
     if [ ! -f "$pidfile" ]; then
-      echo "Codex bridge: $team/$name not running"
+      if [ -f "$app_pidfile" ] && [ -f "$app_metafile" ]; then
+        app_pid=$(cat "$app_pidfile" 2>/dev/null || true)
+        app_thread=$(awk -F= '/^thread=/{sub(/^thread=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
+        app_transport=$(awk -F= '/^transport=/{sub(/^transport=/, ""); print; exit}' "$app_metafile" 2>/dev/null || true)
+        if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+          echo "Codex app monitor: $team/$name alive (pid $app_pid, thread $app_thread, transport ${app_transport:-codex-background-thread-resume})"
+        else
+          echo "Codex app monitor: $team/$name stale pidfile (pid ${app_pid:-empty} not running)"
+        fi
+      elif [ -f "$chat_metafile" ]; then
+        chat_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_transport=$(awk -F= '/^transport=/{sub(/^transport=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_status=$(awk -F= '/^status=/{sub(/^status=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        chat_updated=$(awk -F= '/^updated_at=/{sub(/^updated_at=/, ""); print; exit}' "$chat_metafile" 2>/dev/null || true)
+        if [ "$chat_project" = "$project" ] && [ "$chat_type" = "$type" ]; then
+          echo "Codex chat-visible turn: $team/$name armed (transport ${chat_transport:-codex-chat-visible-turn}, status ${chat_status:-waiting_for_chat_turn}, updated ${chat_updated:-unknown})"
+        else
+          echo "Codex chat-visible turn: $team/$name stale metadata"
+        fi
+      else
+        echo "Codex bridge: $team/$name not running"
+      fi
       continue
     fi
 

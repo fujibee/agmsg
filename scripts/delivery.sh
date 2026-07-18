@@ -320,28 +320,102 @@ by this command.
 EOF
 }
 
-# Stop the Codex monitor bridge(s) for a project and remove their run artifacts,
-# then tear down the project's shared app-server record too (it is keyed per
-# project, so `off` should not leave it running). Used by `set off codex` (and
-# the manual counterpart to the not-yet-wired auto teardown, #149). The global
-# shim is left alone (it is cross-project). Echoes how many bridges were killed.
+# Stop the Codex monitor receiver(s) for a project and remove their run
+# artifacts, then tear down the project's shared app-server record too (it is
+# keyed per project, so `off` should not leave it running). Used by `set off
+# codex` and by Codex turn fallback cleanup. The global shim is left alone (it
+# is cross-project). Echoes how many receiver processes were killed.
+wait_for_recorded_pid_exit() {
+  local pid="$1" check=0 state
+  while [ "$check" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    case "$state" in Z*) return 0 ;; esac
+    sleep 0.1
+    check=$((check + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || return 1
+    check=0
+    while [ "$check" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+      state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+      case "$state" in Z*) return 0 ;; esac
+      sleep 0.1
+      check=$((check + 1))
+    done
+  fi
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+bootout_recorded_label() {
+  local label="$1" check=0 domain
+  [ -n "$label" ] || return 0
+  command -v launchctl >/dev/null 2>&1 || return 0
+  domain="gui/$(id -u)"
+  launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+  while [ "$check" -lt 20 ] && launchctl print "$domain/$label" >/dev/null 2>&1; do
+    sleep 0.1
+    check=$((check + 1))
+  done
+}
+
 stop_codex_bridge() {
   local project="$1"
-  local pairs team name pidfile bpid killed=0
+  local pairs team name pidfile bpid killed=0 app_pidfile app_pid app_meta app_label app_plist
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" codex 2>/dev/null || true)
   if [ -n "$pairs" ]; then
     while IFS=$'\t' read -r team name _rest; do
       [ -n "$team" ] && [ -n "$name" ] || continue
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
-      [ -f "$pidfile" ] || continue
-      bpid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
-        kill "$bpid" 2>/dev/null && killed=$((killed + 1))
+      if [ -f "$pidfile" ]; then
+        bpid=$(cat "$pidfile" 2>/dev/null || true)
+        if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
+          if kill "$bpid" 2>/dev/null; then
+            killed=$((killed + 1))
+            if ! wait_for_recorded_pid_exit "$bpid"; then
+              echo "delivery: Codex bridge pid $bpid did not stop; preserving its run files" >&2
+              return 1
+            fi
+          fi
+        fi
       fi
       # .appserver records which app-server URL the bridge was bound to (the
       # launcher's stale-binding guard); drop it with the rest so it cannot
       # mislead a later launcher.
       rm -f "$pidfile" "${pidfile%.pid}.meta" "${pidfile%.pid}.log" "${pidfile%.pid}.appserver"
+
+      app_pidfile="$RUN_DIR/codex-app-monitor.$team.$name.pid"
+      app_meta="$RUN_DIR/codex-app-monitor.$team.$name.meta"
+      app_plist="$RUN_DIR/codex-app-monitor.$team.$name.plist"
+      app_label=""
+      if [ -f "$app_meta" ]; then
+        app_label=$(sed -n 's/^launch_label=//p' "$app_meta" | head -1)
+      fi
+      if [ -z "$app_label" ] && [ -f "$app_plist" ]; then
+        app_label=$(awk '/<key>Label<\/key>/{getline; sub(/^[[:space:]]*<string>/, ""); sub(/<\/string>[[:space:]]*$/, ""); print; exit}' "$app_plist")
+      fi
+      bootout_recorded_label "$app_label"
+      if [ -f "$app_pidfile" ]; then
+        app_pid=$(cat "$app_pidfile" 2>/dev/null || true)
+        if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+          if kill "$app_pid" 2>/dev/null; then
+            killed=$((killed + 1))
+            if ! wait_for_recorded_pid_exit "$app_pid"; then
+              echo "delivery: Codex app monitor pid $app_pid did not stop; preserving its run files" >&2
+              return 1
+            fi
+          fi
+        fi
+      fi
+      rm -f "$app_pidfile" "$app_meta" "$app_plist" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.log" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.health" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.preflight.log" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.watch-output" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.last-prompt.txt" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.last-message.txt" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.last-status" \
+            "$RUN_DIR/codex-app-monitor.$team.$name.last-ids" \
+            "$RUN_DIR/codex-chat-visible.$team.$name.meta"
     done <<EOF
 $pairs
 EOF

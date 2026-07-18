@@ -674,6 +674,8 @@ class CodexBridge {
     this.watchFailureCount = 0;
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
+    this.inlineInboxIdsFile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.last-ids`);
+    this.deliveredInboxPending = false;
     this.stopping = false;
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
     this.metafile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.meta`);
@@ -818,6 +820,7 @@ class CodexBridge {
     if (this.stopping || this.watchHandle) return;
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
+    const ownerId = `agmsg-codex-bridge-${process.pid}.${process.pid}`;
     const command = [
       BASH_BIN,
       path.join(SCRIPT_DIR, "watch-once.sh"),
@@ -830,6 +833,9 @@ class CodexBridge {
       this.identity.team,
       "--name",
       this.identity.name,
+      "--owner",
+      ownerId,
+      "--claim",
       "--timeout",
       String(this.opts.timeout),
       "--interval",
@@ -937,6 +943,7 @@ class CodexBridge {
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
+    this.markDeliveredInboxRead();
     if (this.opts.maxWakes && this.wakeCount >= this.opts.maxWakes) {
       await this.shutdown();
       process.exit(0);
@@ -980,6 +987,10 @@ class CodexBridge {
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       this.pendingWake = false;
+      if (this.opts.inlineInbox && fs.existsSync(this.inlineInboxIdsFile)) {
+        const ids = fs.readFileSync(this.inlineInboxIdsFile, "utf8").trim();
+        this.deliveredInboxPending = Boolean(ids);
+      }
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
@@ -1027,6 +1038,23 @@ class CodexBridge {
   buildPrompt() {
     const inbox = path.join(SCRIPTS_DIR, "inbox.sh");
     const send = path.join(SCRIPTS_DIR, "send.sh");
+    const autonomousHandlingContract = [
+      "Autonomous handling contract:",
+      `1. Your first tool call must be this official inbox command: ${inbox} ${this.identity.team} ${this.identity.name}`,
+      "2. Do not read the agmsg database or team files directly. The resumed Codex task alone owns message reading and acknowledgement through inbox.sh.",
+      "3. For a substantive request, new evidence, correction, or blocker, continue the in-scope work through verification and send an evidence-backed reply with the official send.sh command below. Do not stop after an ACK or status-only reply.",
+      "4. Do not reply to ACK-only, thanks-only, or status-only mail that contains no new request, evidence, correction, or blocker. This prevents autonomous ping-pong.",
+      "5. Preserve existing approval, production, customer-data, credential, and destructive-action boundaries. Stop and report a real blocker when new authority is required.",
+    ].join("\n");
+    const visibleUiRequirement = [
+      "Visible UI requirement:",
+      '1. Before the inbox tool call, post "agmsg受信を検知しました。内容を確認します。" in the visible Codex thread.',
+      '2. Immediately after inbox.sh and before any other tool call, post a Japanese update starting with "agmsg受信:" and include sender, received body or safe summary, planned action, and whether you will reply.',
+      "3. Keep substantive work in the visible thread. Before each major action, post a short Japanese progress update; never complete the task in an unreported background worker.",
+      "4. After handling the message, post a final Japanese status update with: sender, received instruction, action taken, reply target, reply summary, remaining blocker, and next step.",
+      "5. If you do not reply, state why in the visible status. ACK-only mail still requires a visible receipt notice.",
+      "6. Do not treat inbox consumption, DB writes, monitor delivery, send.sh, or a successful process exit as complete unless the handling result is visible in the Codex thread UI.",
+    ].join("\n");
     if (this.opts.inlineInbox) {
       return [
         `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
@@ -1035,18 +1063,38 @@ class CodexBridge {
         "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
         `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+        "",
+        autonomousHandlingContract,
+        "",
+        visibleUiRequirement,
       ].join("\n");
     }
     return [
       `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
-      `Run: ${inbox} ${this.identity.team} ${this.identity.name}`,
-      "Read the messages and continue the conversation. If a reply is needed, send it with:",
+      "The bridge did not read or acknowledge their contents.",
+      "Continue the conversation in this same Codex thread. If a reply is needed, send it with:",
       `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+      "",
+      autonomousHandlingContract,
+      "",
+      visibleUiRequirement,
     ].join("\n");
   }
 
   readInboxForPrompt() {
-    const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), this.identity.team, this.identity.name], {
+    try {
+      fs.writeFileSync(this.inlineInboxIdsFile, "");
+    } catch (_) {
+      // Best effort. inbox-peek will report an error if the path cannot be used.
+    }
+    const result = spawnSync(BASH_BIN, [
+      path.join(SCRIPTS_DIR, "inbox-peek.sh"),
+      this.identity.team,
+      this.identity.name,
+      "--quiet",
+      "--ids-file",
+      this.inlineInboxIdsFile,
+    ], {
       cwd: this.opts.project,
       encoding: "utf8",
     });
@@ -1059,6 +1107,28 @@ class CodexBridge {
       return "";
     }
     return result.stdout || "";
+  }
+
+  markDeliveredInboxRead() {
+    if (!this.opts.inlineInbox || !this.deliveredInboxPending) return;
+    this.deliveredInboxPending = false;
+    const result = spawnSync(BASH_BIN, [
+      path.join(SCRIPTS_DIR, "mark-read.sh"),
+      this.identity.team,
+      this.identity.name,
+      "--ids-file",
+      this.inlineInboxIdsFile,
+    ], {
+      cwd: this.opts.project,
+      encoding: "utf8",
+    });
+    if (result.error) {
+      console.error(`codex-bridge: mark-read.sh failed: ${result.error.message}`);
+      return;
+    }
+    if (result.status !== 0) {
+      console.error(`codex-bridge: mark-read.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
+    }
   }
 
   async shutdown() {

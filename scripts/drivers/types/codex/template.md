@@ -52,18 +52,24 @@ Four possible outputs:
        2) off     — No automatic delivery
                     Manual $__SKILL_NAME__ only.
 
-       3) monitor — Real-time push (BETA, advanced)
-                    Prints a `codex` shell function that routes launches through an
-                    app-server bridge. Opt in ONLY if you accept experimental behavior.
-                    See docs/codex-monitor-beta.md.
+       3) monitor — Visible app-server delivery (BETA)
+                    Requires a bridge attached to this Codex task. If the
+                    bridge is unavailable, delivery safely degrades to turn.
+
+       4) scheduled — Native ChatGPT Scheduled task
+                    Returns to this task. Starts every 2 minutes, then backs
+                    off to 15 minutes and 1 hour when no message arrives.
 
      [1]:
      ```
 
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`, `3`→`monitor`) and run:
+     - Map `1`→`turn`, `2`→`off`, and `3`→`monitor`, then run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-     - If monitor is chosen, tell the user: "Codex monitor is a BETA that changes how `codex` starts — it prints a shell function to add to your shell profile. Add the printed function, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+     - For `4`, follow the `scheduled start` flow below instead of enabling a hook or bridge.
+     - If monitor is chosen, immediately bind the newly joined role by running:
+       `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <agent_name> "${CODEX_THREAD_ID:-}"`
+     - If monitor is chosen, report whether the visible app-server bridge attached. If it did not, say that the effective mode was downgraded to `turn`.
 
   6. Then check inbox for the newly joined team.
 
@@ -81,10 +87,45 @@ Four possible outputs:
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
 
+### Codex visible monitor invariant
+
+`mode monitor` may deliver mail only through an app-server bridge that inserts
+the handling into the same visible Codex thread.
+
+1. A shell watcher may detect unread state, but it must not read the body, mark
+   it read, start substantive work, or reply by itself.
+2. Before `inbox.sh`, show a short visible notice that agmsg mail was detected.
+3. Immediately after `inbox.sh`, show the sender, body or safe summary, planned
+   action, and whether a reply is needed before any other tool call.
+4. Keep progress, decisions, blockers, replies, and the final result visible in
+   the same Codex thread. ACK-only mail still requires a visible receipt notice.
+5. Background `codex exec resume` delivery is prohibited.
+6. If a visible bridge cannot attach, keep mail unread, change the effective
+   mode to `turn`, and fall back to the next visible turn.
+7. Do not create cron, launchd, shell heartbeat, or background polling jobs for
+   Codex delivery. The only allowed schedule is the native ChatGPT Scheduled
+   task created by the `scheduled start` flow below.
+
+### Codex native Scheduled monitor invariant
+
+`scheduled start` may use only one native ChatGPT Scheduled task that returns
+to the current task and runs in the local project directory.
+
+1. Start at two-minute intervals. The checked-in state machine changes the
+   cadence to 15 minutes after 30 minutes and one hour after four hours.
+2. A new unread message addressed to the selected role resets the cycle to two
+   minutes. The metadata check must not read the body or mark it read.
+3. Empty, waiting, and not-due runs produce no user notification.
+4. At 24 hours, or after `scheduled stop` / `mode off`, pause the same Scheduled
+   task. Do not create a replacement task.
+5. Never use Desktop relay, `CODEX_APP_SERVER_WS_URL`, app restart, launchd,
+   cron, a background receiver, or `codex exec resume`.
+
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. Do NOT ask the user what to do — just run the inbox check.
-3. If there are messages, read and respond appropriately. To reply:
+2. If the active AGENT name starts with `codex-pro-`, route unread messages through Oracle GPT-5.5 Pro by running `~/.agents/skills/__SKILL_NAME__/scripts/oracle-pro-reply.sh $TEAM $AGENT` instead of answering them directly. Use `ORACLE_PRO_DRY_RUN=1` only when the user asks to preview the browser run.
+3. Do NOT ask the user what to do — just run the inbox check.
+4. If there are messages for a normal agent, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
 If argument is "history":
@@ -112,12 +153,14 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" codex` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm). This is what lets a later `spawn <role>` bring the role back into this conversation.
-6. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Codex has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+5. Rebind the receive side by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. In monitor/both mode, allow only a visible app-server bridge. If it cannot attach, keep mail unread and downgrade to `turn`. Never start a background receiver.
+6. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
+7. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
+8. Otherwise tell the user: "Now acting as `<name>`. Sends and receive are bound to `<name>`."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex <name>` to remove that role's registration.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" codex <name>` to remove that role's registration and stop its receiver.
 3. If the session's active FROM was `<name>`, clear that state.
 4. Tell the user: "Dropped role `<name>` from this project."
 
@@ -141,10 +184,42 @@ If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status codex "$(pwd)"`
 2. Show the output to the user.
 
+If argument starts with "scheduled start" (optionally followed by an agent name):
+1. Resolve the selected Codex role and its team with `identities.sh`. Prefer the
+   active `actas` role. If multiple roles remain and none was specified, ask the
+   user which role to monitor.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off codex "$(pwd)"`
+   so no hook or bridge remains active.
+3. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh prepare "$(pwd)" <team> <name>`.
+4. Create or update one native ChatGPT automation with `kind=heartbeat` and
+   `targetThreadId` set to this current task. Use the emitted prompt verbatim,
+   the local project directory, and a two-minute recurrence. Do not use a
+   worktree.
+5. If native Scheduled-task creation is unavailable, run `stop-identity` for
+   the same project/team/name and report the limitation. Do not claim that the
+   monitor is active.
+
+If argument starts with "scheduled status" (optionally followed by an agent name):
+1. Resolve the role and team as in `scheduled start`.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh status-identity "$(pwd)" <team> <name>`.
+3. Report the native Scheduled task's status too when that capability is available.
+
+If argument starts with "scheduled stop" (optionally followed by an agent name):
+1. Resolve the role and team as in `scheduled start`.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-scheduled-monitor.sh stop-identity "$(pwd)" <team> <name>`.
+3. Pause the same native Scheduled task. If direct pause is unavailable, the
+   next run will see `status=inactive` and pause itself.
+
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
-1. Parse the mode. Codex supports `monitor` (beta bridge), `turn`, and `off` — reject `both` with: "Codex bridge beta supports `monitor`, `turn`, or `off`; `both` is not supported yet."
-2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor`, tell the user: "Codex monitor beta is enabled. Add the printed shell function to your shell profile, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+1. Parse the mode. Codex supports `monitor`, `turn`, `both`, `scheduled`, and `off`.
+   `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
+2. If the mode is `scheduled`, follow `scheduled start` above and stop this flow.
+3. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
+4. If mode is `monitor` or `both` and an active role can be resolved, run `actas-monitor.sh` for that role and concrete thread id.
+5. If mode is `turn` or `off`, confirm that the background receiver stopped.
+   Also pause the native Scheduled task when possible; switching to any
+   hook/bridge mode disarms its local state even if direct pause is unavailable.
+6. If mode is `monitor` or `both`, report whether a visible app-server bridge attached. If it did not attach, report that the effective mode was downgraded to `turn`. Never describe visible-turn fallback as an active monitor.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

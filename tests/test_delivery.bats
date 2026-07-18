@@ -1498,7 +1498,8 @@ EOF
   grep -q -- "--project $TEST_PROJECT" "$log"
   grep -q -- "--thread thread-123" "$log"
   grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
-  grep -q -- "--inline-inbox" "$log"
+  run grep -q -- "--inline-inbox" "$log"
+  [ "$status" -ne 0 ]
 }
 
 @test "session-start.sh for codex stays quiet without monitor launcher env" {
@@ -1517,7 +1518,7 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
+@test "delivery set monitor (codex): installs persistent SessionStart plus visible Stop fallback" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex monitor beta is enabled"* ]]
@@ -1531,14 +1532,45 @@ EOF
   local hook_file="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hook_file" ]
   grep -q "session-start.sh" "$hook_file"
+  grep -q "check-inbox.sh" "$hook_file"
 }
 
-@test "delivery set both (codex): rejected by the delivery_modes gate" {
-  # codex's manifest omits 'both' (delivery_modes=monitor turn off), so the
-  # central gate in delivery.sh rejects it before any file is touched.
+@test "delivery set both (codex): accepted as explicit persistent visible mode" {
   run bash "$SCRIPTS/delivery.sh" set both codex "$TEST_PROJECT"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"not supported for codex"* ]]
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.codex/hooks.json"
+  grep -q "session-start.sh" "$hook_file"
+  grep -q "check-inbox.sh" "$hook_file"
+}
+
+@test "delivery status (codex): native Scheduled state is reported without hooks" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local scheduled="$TYPES/codex/codex-scheduled-monitor.sh"
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-delivery" \
+    bash "$scheduled" prepare "$TEST_PROJECT" team alice --now 1000 >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: scheduled"* ]]
+  [[ "$output" == *"identity=team/alice"* ]]
+  [[ "$output" == *"status=active count=1"* ]]
+
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stopped=1 schedule_action=pause"* ]]
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: off"* ]]
+  [[ "$output" != *"mode: scheduled"* ]]
+
+  AGMSG_CODEX_SCHEDULED_OWNER="owner-delivery-turn" \
+    bash "$scheduled" prepare "$TEST_PROJECT" team alice --now 2000 >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  run bash "$scheduled" status-project "$TEST_PROJECT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=inactive count=0"* ]]
 }
 
 @test "delivery status (codex): live bridge reports alive and suppresses watch count" {

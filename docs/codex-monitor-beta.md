@@ -1,22 +1,18 @@
 # Codex Monitor Beta
 
-Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
-approximates the same experience by launching Codex through an app-server bridge.
+Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta can
+deliver mail only through an app-server bridge that renders the handling in the
+same visible Codex thread. The last explicit `actas` role is rebound from
+SessionStart after restart or compaction.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
-> Enabling monitor mode prints a shell function that makes `codex` route through
-> agmsg's monitor shim in your interactive shell. In monitor-mode projects the
-> shim re-routes interactive launches through an app-server bridge; everywhere
-> else it passes straight through. **Only enable this if you are comfortable with
-> the `codex` command being intercepted in that shell.** It also depends on Codex
-> app-server behavior and may break as Codex changes. Known rough edges:
-> enabling monitor takes effect only after you **restart Codex and send your
-> first message** — the SessionStart hook fires on the first turn, not the
-> moment Codex opens, so the bridge is absent until you interact once; an
-> already-running session stays unmonitored until you restart it (#151); the
-> bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149); and only one Codex identity per project
-> is supported (#150).
+> Monitor mode is active only after a visible app-server bridge attaches to the
+> selected thread. If no bridge is available, agmsg keeps mail unread and changes
+> the effective mode to `turn`. Background `codex exec resume`, cron, heartbeat,
+> and ad hoc scheduled polling are prohibited because they can process mail
+> without showing the work to the human operator. The separate native ChatGPT
+> Scheduled path returns to the same task and is documented in
+> [codex-scheduled-monitor.md](codex-scheduled-monitor.md).
 
 ## Quick Start
 
@@ -28,9 +24,17 @@ Enable monitor mode in a project:
 
 The command:
 
-1. Enables agmsg's Codex SessionStart/SessionEnd hooks for the project.
-2. Prints a shell function that routes interactive `codex` launches through the
+1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
+   fallback for the project.
+2. Persists the last explicit `actas` role so SessionStart can rebind it.
+3. After `actas` binds a concrete thread, attaches the visible app-server bridge
+   for that exact team/role/thread tuple or downgrades to `turn`.
+4. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
+
+The bridge may observe unread count and high-water id, but it does not read
+message bodies or mark messages read. The visible persisted thread owns the
+official inbox read, substantive work, progress reporting, and any reply.
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -59,6 +63,15 @@ codex
 
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
+
+When Codex.app is opened normally, SessionStart restores the last `actas` role.
+If no visible app-server is available, the effective delivery mode becomes
+`turn`; the Stop hook checks the inbox on a later visible assistant turn. agmsg
+does not claim that autonomous monitoring is active in this state.
+
+`mode off`, `mode turn`, `drop`/`reset`, and SessionEnd stop the matching
+receiver and remove its LaunchAgent/runtime files. No cron, heartbeat, or
+scheduled polling automation is created for this path.
 
 ## Optional PATH Shim
 
@@ -138,9 +151,11 @@ connect to the unix socket (EPERM). Instead:
    sandbox, reads the request file and starts `codex-bridge.js`.
 3. The bridge connects to the same app-server over **WebSocket-over-UDS**,
    resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
-   API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
-4. On an unread message it inlines the text into a `turn/start` on that thread —
-   surfacing it in the live Codex TUI — then re-arms after the turn ends.
+   API (which checks the agmsg DB for unread rows, `read_at IS NULL`).
+4. On unread state it starts a turn on that thread with an instruction to run
+   the official `inbox.sh`. The bridge does not read the message body or mark it
+   read on the normal path. The visible Codex turn owns reading, substantive
+   work, verification, and any reply, then the bridge re-arms after the turn.
 
 Turns are serialized (one per thread): a message that arrives while a turn is
 running stays unread and is delivered after the turn completes. The turn ends
@@ -172,10 +187,11 @@ flowchart TD
   watch --> db[("agmsg SQLite DB (read_at IS NULL)")]
   db --> unread{"Unread message?"}
   unread -- "no (timeout)" --> watch
-  unread -- "yes" --> inbox["inline unread inbox text"]
-  inbox --> turn["turn/start on the thread"]
+  unread -- "yes" --> turn["turn/start with official inbox instruction"]
   turn --> tui["Current Codex TUI thread"]
-  tui --> ended["turn ends: completed / idle / watchdog"]
+  tui --> inbox["official inbox.sh reads and marks messages"]
+  inbox --> work["substantive work, verification, and reply"]
+  work --> ended["turn ends: completed / idle / watchdog"]
   ended --> watch
 ```
 
@@ -204,12 +220,10 @@ shape: a short-interval scheduler that runs a heavyweight agent as the poller,
 with no cheap no-op path, so empty inboxes still pay the full cost — and Codex
 Desktop's per-session UI/log accumulation amplifies it.
 
-### Gate with `watch-once.sh`, launch the agent only on a hit
+### `watch-once.sh` is not a Codex Desktop delivery fallback
 
-agmsg already ships the cheap gate this needs. `watch-once.sh` is a shell-only,
-one-shot inbox oracle — no agent, no Codex turn. It is the same primitive the
-Codex monitor bridge uses (see [Bridge Mechanics](#bridge-mechanics)) to avoid
-starting a turn on an empty inbox.
+`watch-once.sh` is a shell-only, one-shot inbox oracle. The visible app-server
+bridge uses it to avoid starting a turn on an empty inbox.
 
 ```text
 exit 0  unread inbound exists   (prints: status=pending count=<n> max_id=<id>)
@@ -217,27 +231,13 @@ exit 2  nothing pending          (prints: status=timeout)
 exit 1  configuration / runtime error
 ```
 
-Two-stage worker — the shell gate decides whether the expensive agent runs:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-SKILL=~/.agents/skills/agmsg/scripts
-PROJECT="/path/to/project"
-
-# 1. Cheap shell-only check. --timeout 0 makes it a single poll, then exit.
-#    --team/--name scope the gate to one identity (matches the single-flight
-#    key below, and disambiguates when the same agent name exists in two teams).
-if "$SKILL/watch-once.sh" "$PROJECT" codex --team myteam --name myagent --timeout 0; then
-  # 2. Unread exists — only now pay for a full Codex/Claude session.
-  codex exec "Handle the new agmsg messages for this project."
-fi
-# exit 2 (nothing pending) falls through and the worker ends cheaply.
-```
+Do not combine it with a scheduler and `codex exec` as a substitute for Codex
+Desktop delivery. That path cannot guarantee that the received message,
+progress, reply, and result appear in the user's visible thread.
 
 ### Defense in depth
 
-For an unattended worker, layer these on top of the gate:
+For a separately authorized non-Desktop worker, layer these on top of the gate:
 
 - **Single-flight lock per `(team, agent)`** so overlapping ticks don't stack
   concurrent agents:
@@ -263,7 +263,7 @@ For an unattended worker, layer these on top of the gate:
 
 1. Make the worker inactive / unschedule the `cron` job so it stops spawning.
 2. Back off delivery: `delivery.sh set turn codex "$PROJECT"` (or `off`) to stop
-   monitor-driven launches.
+   monitor delivery.
 3. Kill stale monitors / spawned sessions and any orphaned bridge
    (`mode off` tears the bridge down; see #149).
 4. Inspect Codex Desktop log-DB bloat: `~/.codex/logs_*.sqlite` and its WAL.

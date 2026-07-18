@@ -60,8 +60,40 @@ INNER_EOF
 }
 
 agmsg_session_start() {
+  # Compatibility guard for rollouts created by older background receivers.
+  # Current builds prohibit that transport, but must not duplicate a legacy
+  # parent receiver during an in-flight upgrade.
+  if [ "${AGMSG_CODEX_BACKGROUND_RESUME:-}" = "1" ]; then
+    exit 0
+  fi
+
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
+
+  # Prefer the last explicit `agmsg actas` role. A project can register many
+  # Codex identities, so picking the first row after restart would bind sends
+  # and receives to different agents. Fall back to the single registered pair
+  # only when no valid actas state exists.
+  team=""; name=""
+  project_hash="$(printf '%s' "$PROJECT" | agmsg_sha1)"
+  actas_state="$RUN_DIR/codex-last-actas.$project_hash.tsv"
+  if [ -f "$actas_state" ]; then
+    IFS=$'\t' read -r saved_project saved_type saved_team saved_name _saved_at < "$actas_state" || true
+    if [ "$saved_project" = "$PROJECT" ] \
+        && [ "$saved_type" = "$TYPE" ] \
+        && printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$saved_team" "$saved_name")"; then
+      team="$saved_team"
+      name="$saved_name"
+    fi
+  fi
+  if [ -z "$team" ] || [ -z "$name" ]; then
+    pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
+    [ "$pair_count" = "1" ] || exit 0
+    team=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $1; exit }')
+    name=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $2; exit }')
+  fi
+  [ -n "$team" ] && [ -n "$name" ] || exit 0
+
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -79,13 +111,15 @@ agmsg_session_start() {
       app_server="unix://$socket_path"
     fi
   fi
-  [ -n "$app_server" ] || exit 0
-
-  pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
-  [ "$pair_count" = "1" ] || exit 0
-  team=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $1; exit }')
-  name=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $2; exit }')
-  [ -n "$team" ] && [ -n "$name" ] || exit 0
+  if [ -z "$app_server" ]; then
+    # Ordinary Codex.app has no externally reachable app-server endpoint.
+    # actas-monitor.sh records visible-turn fallback and downgrades monitor to
+    # turn instead of starting an invisible background receiver.
+    log="$RUN_DIR/codex-actas-restore.log"
+    "$SKILL_DIR/scripts/drivers/types/codex/actas-monitor.sh" \
+      "$PROJECT" "$TYPE" "$name" "$thread_id" >>"$log" 2>&1 || true
+    exit 0
+  fi
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
     project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
@@ -124,7 +158,6 @@ agmsg_session_start() {
     --name "$name" \
     --thread "$thread_id" \
     --app-server "$app_server" \
-    --inline-inbox \
     >>"$log" 2>&1 &
   exit 0
 }
