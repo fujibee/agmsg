@@ -147,6 +147,19 @@ const PANE_DRAG_MIME = "application/x-agmsg-pane";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
+// Whether the outdated-CLI banner should render. A pure function (rather
+// than an inline JSX condition) purely so it's unit-testable — pinning down
+// that "Update now" already in flight (updatingCore) and a session-only ×
+// dismiss both independently suppress the banner, on top of the base
+// coreOutdated !== null check.
+export function shouldShowOutdatedBanner<T>(
+  coreOutdated: T,
+  updatingCore: boolean,
+  dismissed: boolean,
+): coreOutdated is NonNullable<T> {
+  return coreOutdated != null && !updatingCore && !dismissed;
+}
+
 export default function App() {
   const { t } = useTranslation();
   // Set when a startup call that the whole app depends on (loading teams)
@@ -163,6 +176,11 @@ export default function App() {
   // install still passes agmsg_is_installed(), so this is a separate check.
   // Never updated automatically: only ever from the user clicking Update.
   const [coreOutdated, setCoreOutdated] = useState<{ installed: string | null; pinned: string } | null>(null);
+  // The outdated banner's own × dismiss — deliberately session-only, not
+  // persisted (no localStorage key): a user who dismisses it once still
+  // hasn't actually updated the CLI, so the warning should come back on the
+  // next launch rather than staying silenced forever.
+  const [coreOutdatedDismissed, setCoreOutdatedDismissed] = useState(false);
   const [updatingCore, setUpdatingCore] = useState(false);
   // The version just updated to, shown as a confirmation banner — Update now
   // otherwise completes silently (the outdated banner just disappears),
@@ -1245,7 +1263,7 @@ export default function App() {
           <span>{t("startupError.installing")}</span>
         </div>
       )}
-      {coreOutdated && !updatingCore && (
+      {shouldShowOutdatedBanner(coreOutdated, updatingCore, coreOutdatedDismissed) && (
         <div className="startup-outdated-banner">
           <span>
             {t("startupError.coreOutdated", {
@@ -1253,25 +1271,34 @@ export default function App() {
               pinned: coreOutdated.pinned,
             })}
           </span>
-          <button
-            onClick={async () => {
-              const targetVersion = coreOutdated.pinned;
-              setUpdatingCore(true);
-              try {
-                await invoke("agmsg_update_core");
-                setCoreOutdated(null);
-                setCoreUpdateSucceeded(targetVersion);
-                await loadTeams();
-              } catch (err) {
-                console.error(err);
-                setStartupError(t("startupError.updateFailed", { error: String(err) }));
-              } finally {
-                setUpdatingCore(false);
-              }
-            }}
-          >
-            {t("startupError.updateNow")}
-          </button>
+          <div className="startup-outdated-banner-actions">
+            <button
+              onClick={async () => {
+                const targetVersion = coreOutdated.pinned;
+                setUpdatingCore(true);
+                try {
+                  await invoke("agmsg_update_core");
+                  setCoreOutdated(null);
+                  setCoreUpdateSucceeded(targetVersion);
+                  await loadTeams();
+                } catch (err) {
+                  console.error(err);
+                  setStartupError(t("startupError.updateFailed", { error: String(err) }));
+                } finally {
+                  setUpdatingCore(false);
+                }
+              }}
+            >
+              {t("startupError.updateNow")}
+            </button>
+            <button
+              className="startup-outdated-banner-dismiss"
+              onClick={() => setCoreOutdatedDismissed(true)}
+              title={t("startupError.dismiss")}
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
       {updatingCore && (

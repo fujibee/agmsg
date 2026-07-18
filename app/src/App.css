@@ -88,6 +88,26 @@ body,
   cursor: pointer;
   flex-shrink: 0;
 }
+.startup-outdated-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* Deliberately unobtrusive — a way out for someone who really wants the
+   warning gone, not a peer action to "Update now". Two-class selector
+   (0,2,0) beats .startup-outdated-banner button's (0,1,1) without
+   !important. */
+.startup-outdated-banner .startup-outdated-banner-dismiss {
+  border: none;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.6;
+}
+.startup-outdated-banner .startup-outdated-banner-dismiss:hover {
+  opacity: 1;
+}
 
 .startup-success-banner {
   display: flex;
