@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   shellPaneFrom,
+  shellSplitStillValid,
   shellTabStillValid,
-  shellWindowStillOpen,
   shouldShowOutdatedBanner,
   type LoginShellInfo,
 } from "./App";
@@ -66,19 +66,33 @@ describe("shellTabStillValid", () => {
   });
 });
 
-describe("shellWindowStillOpen", () => {
-  it("stays true when the target window is still open", () => {
-    expect(shellWindowStillOpen([{ id: "w-1" }, { id: "w-2" }], "w-1")).toBe(true);
+describe("shellSplitStillValid", () => {
+  const windows = [
+    { id: "w-1", team: "teamA" },
+    { id: "w-2", team: "teamA" },
+  ];
+
+  it("stays valid when the target window is open and the team hasn't changed", () => {
+    expect(shellSplitStillValid(windows, "w-1", "teamA", "teamA")).toBe(true);
   });
 
   it("goes false when the target window was closed during the await", () => {
     // Regression: openShellInWindow used to commit anyway, leaving an
     // orphaned pane and `active` pointing at a nonexistent window id (co1,
     // PR #431).
-    expect(shellWindowStillOpen([{ id: "w-2" }], "w-1")).toBe(false);
+    expect(shellSplitStillValid([{ id: "w-2", team: "teamA" }], "w-1", "teamA", "teamA")).toBe(false);
   });
 
   it("goes false against an empty window list", () => {
-    expect(shellWindowStillOpen([], "w-1")).toBe(false);
+    expect(shellSplitStillValid([], "w-1", "teamA", "teamA")).toBe(false);
+  });
+
+  it("goes false when the team switched even though the window is still open", () => {
+    // Regression (2nd co1 round): the target window can survive the await
+    // untouched but now belong to the team the user navigated away from —
+    // it's a hidden tab at that point, so splitting into it and activating
+    // it reproduces the same hidden-active bug shellTabStillValid guards
+    // against on the new-tab path (co1, PR #431).
+    expect(shellSplitStillValid(windows, "w-1", "teamB", "teamA")).toBe(false);
   });
 });

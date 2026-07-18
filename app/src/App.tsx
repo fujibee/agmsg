@@ -128,12 +128,24 @@ export function shellTabStillValid(currentTeam: string, requestedTeam: string): 
   return currentTeam === requestedTeam;
 }
 
-// Whether openShellInWindow's target tab is still open after its
-// getLoginShell await — false if the user closed it while in flight.
-// Committing anyway would leave an orphaned pane (no window references it)
-// and `active` pointing at a window id that no longer exists (co1, PR #431).
-export function shellWindowStillOpen(windows: ReadonlyArray<Pick<Window, "id">>, windowId: string): boolean {
-  return windows.some((w) => w.id === windowId);
+// Whether openShellInWindow's target tab is still a valid split target
+// after its getLoginShell await — false if the user closed it (no window
+// references it, and `active` would point at a nonexistent id), OR just
+// switched teams while it was in flight: the target window can still exist
+// but now belong to the team the user navigated away from, in which case
+// splitting into it and setting `active` there produces the same
+// hidden-active bug openShellTab's shellTabStillValid guards against — a
+// window's `team` never changes after creation, so if the current team no
+// longer matches `requestedTeam` the window can't be a live tab regardless
+// of whether it's still present in `windows` (co1, PR #431).
+export function shellSplitStillValid(
+  windows: ReadonlyArray<Pick<Window, "id" | "team">>,
+  windowId: string,
+  currentTeam: string,
+  requestedTeam: string,
+): boolean {
+  if (currentTeam !== requestedTeam) return false;
+  return windows.some((w) => w.id === windowId && w.team === requestedTeam);
 }
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
@@ -1012,21 +1024,24 @@ export default function App() {
   // whatever's already in that tab. The symmetric counterpart of spawning an
   // agent beside an open shell pane (see windowHasShellPane/spawnMember
   // below): either direction, shell and agent end up split in the same tab.
-  // Same stale-context concern as openShellTab: the target tab can be
-  // closed while getLoginShell's await is in flight, which would otherwise
-  // leave an orphaned pane (windows never referencing it) and `active`
-  // pointing at a window id that no longer exists (co1, PR #431).
+  // Same stale-context concern as openShellTab, in two shapes: the target
+  // tab can be closed while getLoginShell's await is in flight (orphaned
+  // pane, `active` pointing at a dead id), or the team can just switch
+  // while the window itself stays open — it's now a hidden tab under the
+  // team the user navigated away from, so splitting into it and activating
+  // it reproduces the same hidden-active bug (co1, PR #431).
   const openShellInWindow = useCallback(
     async (windowId: string) => {
+      const requestedTeam = team;
       const pane = await buildShellPane();
-      if (!pane || !shellWindowStillOpen(windowsRef.current, windowId)) return;
+      if (!pane || !shellSplitStillValid(windowsRef.current, windowId, teamRef.current, requestedTeam)) return;
       setPanes((prev) => [...prev, pane]);
       setWindows((prev) =>
         prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),
       );
       setActive(windowId);
     },
-    [buildShellPane],
+    [buildShellPane, team],
   );
 
   // True when `windowId`'s tab currently has a free-shell pane in it — the
