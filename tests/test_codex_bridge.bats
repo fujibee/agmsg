@@ -676,6 +676,90 @@ EOF
   ! grep -q "thread/start" "$log"
 }
 
+@test "codex-bridge: falls back to idle instead of dying when thread/resume itself fails (#276)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Codex 0.142+'s --remote sessions may not create a rollout, so the
+  # thread/resume request itself can fail outright (not merely return a
+  # mismatched thread). turn/start only needs threadId, so the bridge should
+  # keep running in idle state instead of die()ing.
+  local fake="$TEST_SKILL_DIR/fake-app-server-resume-fails.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, error: { message: "no rollout for this thread" } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({
+        jsonrpc: "2.0",
+        method: "process/exited",
+        params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" },
+      });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-no-rollout \
+    --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "thread/resume failed" ]]
+  [[ "$output" =~ "proceeding without resume" ]]
+  [[ "$output" =~ "started turn" ]]
+}
+
+@test "codex-bridge: still dies when thread/resume succeeds but returns the wrong thread id (#276)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # This is a DISTINCT failure mode from the request itself erroring -- the
+  # request succeeded but the app-server handed back a different thread. The
+  # #276 fallback must not swallow it: the try/catch added there wraps only
+  # the request, not this validation.
+  local fake="$TEST_SKILL_DIR/fake-app-server-resume-wrong-id.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "some-other-thread", status: { type: "idle" } } } });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-expected --timeout 20
+
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "did not return the requested thread id" ]]
+  [[ "$output" != *"proceeding without resume"* ]]
+}
+
 @test "codex-bridge: --thread loaded discovers the live thread via thread/loaded/list" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
