@@ -409,6 +409,41 @@ PS1
   [ "$output" = "$(cat "$SK/VERSION")" ]
 }
 
+@test "install: recorded VERSION uses the core tag lineage, not a co-located app-v* tag" {
+  # agmsg-core and the desktop app share one repo/tag namespace (v1.2.3 core
+  # releases alongside app-v0.2.0 app releases). Unrestricted `git describe
+  # --tags` matches whichever lineage is closer in history -- when an app-v*
+  # tag landed after the last core v* tag, installs recorded provenance like
+  # "app-v0.2.0-26-gHASH" instead of "v1.1.8-27-gHASH", which the desktop
+  # app's own version comparison can't parse as semver and treats as
+  # unconditionally outdated. See aggie/koit bug report.
+  # Resolve to the PHYSICAL path: on macOS $BATS_TEST_TMPDIR lands under
+  # /var/folders/... which is itself a symlink to /private/var/folders/....
+  # install.sh's SCRIPT_DIR uses plain `pwd` (logical, follows the symlink
+  # form actually cd'd into), while `git rev-parse --show-toplevel` always
+  # returns the physical path -- agmsg_source_version()'s toplevel-equality
+  # check would then never match on a logical-path synth dir, skipping
+  # `git describe` entirely regardless of tags. Unrelated pre-existing
+  # quirk, not something this fix touches -- work around it in the fixture.
+  local synth
+  mkdir -p "$BATS_TEST_TMPDIR/synth-agmsg"
+  synth="$(cd "$BATS_TEST_TMPDIR/synth-agmsg" && pwd -P)"
+  cp -R "$REPO_ROOT/." "$synth/"
+  rm -rf "$synth/.git"
+  git -C "$synth" init -q
+  git -C "$synth" -c user.email=t@e -c user.name=t add -A
+  git -C "$synth" -c user.email=t@e -c user.name=t commit -q -m "core release"
+  git -C "$synth" tag v1.0.0
+  git -C "$synth" -c user.email=t@e -c user.name=t commit -q --allow-empty -m "app release"
+  git -C "$synth" tag app-v9.9.9
+  git -C "$synth" -c user.email=t@e -c user.name=t commit -q --allow-empty -m "one more commit"
+
+  HOME="$FAKE_HOME" bash "$synth/install.sh" --cmd agmsg
+  run cat "$SK/VERSION"
+  [[ "$output" =~ ^v1\.0\.0- ]]
+  [[ "$output" != app-v9.9.9* ]]
+}
+
 @test "install: --update refreshes the recorded VERSION" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   echo "stale-marker" > "$SK/VERSION"

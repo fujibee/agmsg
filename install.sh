@@ -40,9 +40,17 @@ agmsg_source_version() {
   # git repo would otherwise record that PARENT repo's describe instead of
   # agmsg's canonical VERSION. Requiring the toplevel to equal SCRIPT_DIR also
   # works for agmsg's own worktrees (install.sh sits at the worktree root).
+  #
+  # --match "v[0-9]*" restricts `describe` to core release tags (v1.1.8, ...);
+  # unrestricted --tags also matches the co-located app-v* tag lineage
+  # (app-v0.2.0, ...), and whichever lineage is closer in history wins. When
+  # an app-v* tag was the most recent, installs recorded provenance like
+  # "app-v0.2.0-26-g95d01ca" instead of "v1.1.8-27-g95d01ca" -- a string the
+  # app's own version comparison (agmsg_core_version_status in agmsg.rs)
+  # can't parse as semver, which it then treats as "outdated" unconditionally.
   top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
   if [ -n "$top" ] && [ "$top" = "$SCRIPT_DIR" ] \
-      && v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 2>/dev/null)" \
+      && v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 --match 'v[0-9]*' 2>/dev/null)" \
       && [ -n "$v" ]; then
     printf '%s' "$v"
   elif [ -f "$SCRIPT_DIR/VERSION" ]; then
