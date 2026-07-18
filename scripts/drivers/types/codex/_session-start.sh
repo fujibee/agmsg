@@ -188,6 +188,6 @@ EOF
     --thread "$thread_id" \
     --app-server "$app_server" \
     --inline-inbox \
-    >>"$log" 2>&1 &
+    >>"$log" 2>&1 3>&- &
   exit 0
 }
