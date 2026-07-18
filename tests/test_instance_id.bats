@@ -93,6 +93,21 @@ teardown() { teardown_test_env; }
   ! agmsg_instance_alive "sess.2147483647"
 }
 
+@test "instance_alive: composite is not alive when cc-instance.<pid> now names a different token (#349)" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
+  # Simulates a shared pid (Claude Code 2.1.x daemon) whose cc-instance record
+  # was overwritten by a newer session attaching to the same pid — the pid is
+  # still alive, but this token is no longer the one it currently names.
+  echo "newsess.$$" > "$RUN_DIR/cc-instance.$$"
+  ! agmsg_instance_alive "oldsess.$$"
+}
+
+@test "instance_alive: composite is alive when cc-instance.<pid> still names this exact token (#349)" {
+  skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
+  echo "sess.$$" > "$RUN_DIR/cc-instance.$$"
+  agmsg_instance_alive "sess.$$"
+}
+
 @test "instance_alive: bare sid with a live cc-instance is alive" {
   skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
   echo "barex" > "$RUN_DIR/cc-instance.$$"
