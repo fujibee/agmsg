@@ -26,10 +26,20 @@
 # `-printf` on macOS/BSD find, which this repo also has to support). See #416.
 agmsg_newest_rollout_files() {
   local dir="$1" limit="$2" f mtime
+  # `head -n "$limit"` here would close its read end after $limit lines while
+  # `sort` may still be writing -- under this caller's `set -euo pipefail`,
+  # that SIGPIPEs `sort` (status 141) and pipefail surfaces it as the whole
+  # pipeline's status even though head/cut both still exit 0. With enough
+  # rollout files to exceed the pipe buffer (confirmed at ~20k candidate
+  # lines in review), that silently starves the caller of a result -- the
+  # exact class of bug this function exists to fix, reintroduced by a
+  # different mechanism. awk reads its input through to EOF regardless of
+  # `n` (only *printing* stops early), so `sort` is always fully drained and
+  # never SIGPIPEd.
   find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
     mtime=$(compat_file_mtime "$f")
     printf '%s\t%s\n' "${mtime:-0}" "$f"
-  done | sort -t "$(printf '\t')" -k1,1rn | head -n "$limit" | cut -f2-
+  done | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
 }
 
 # Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
