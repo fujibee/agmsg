@@ -947,7 +947,8 @@ EOF
   # issue's own FIFO repro. A plain `sleep N | check-inbox.sh` does NOT
   # reproduce this: bash waits for every pipeline member, so it looks like a
   # hang even when the hook itself exits immediately.
-  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; sleep 300; } > "$fifo" &
+  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; sleep 300; } \
+    3>&- 4>&- > "$fifo" &
   local writer_pid="$!"
 
   local newpath="$bindir:$PATH"

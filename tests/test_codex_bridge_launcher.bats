@@ -54,7 +54,7 @@ run_launcher() {
   # written synchronously, but the mock's capture can land just after the
   # parent exits, especially now that a per-role child launcher is involved.
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in {1..30}; do
     [ -f "$CAPTURE" ] && break
     sleep 0.1
   done
@@ -101,8 +101,10 @@ run_launcher() {
   run_launcher
 
   local i lines=0
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    lines=$(wc -l < "$CAPTURE" 2>/dev/null | tr -d ' ' || true)
+  for i in {1..30}; do
+    if [ -f "$CAPTURE" ]; then
+      lines=$(wc -l < "$CAPTURE" | tr -d ' ')
+    fi
     [ "$lines" -ge 2 ] && break
     sleep 0.1
   done
@@ -129,7 +131,7 @@ run_launcher() {
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" $'team\talice' >/dev/null 2>&1 3>&- &
   local launcher_pid=$!
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  for i in {1..50}; do
     grep -q -- $'--pair team\talice --thread thread-before' "$CAPTURE" 2>/dev/null && break
     sleep 0.1
   done
