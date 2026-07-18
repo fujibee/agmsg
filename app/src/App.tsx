@@ -1295,6 +1295,7 @@ export default function App() {
               className="startup-outdated-banner-dismiss"
               onClick={() => setCoreOutdatedDismissed(true)}
               title={t("startupError.dismiss")}
+              aria-label={t("startupError.dismiss")}
             >
               ×
             </button>
