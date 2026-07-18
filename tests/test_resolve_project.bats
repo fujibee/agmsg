@@ -222,14 +222,18 @@ JSON
   [ "$status" -ne 0 ]
 }
 
-@test "pid-is-agent: excludes a --bg-spare process even though argv0 matches" {
+@test "pid-is-agent: accepts the real session shape (version-named binary + --bg-spare)" {
   skip_on_windows "process argv faking via exec -a (#349)"
-  bash -c 'exec -a "claude --bg-spare" sleep 5' &
+  # --bg-spare appears on the REAL per-session binary too (per #349's report),
+  # so it must NOT be an exclusion signal on its own — only "daemon run"
+  # identifies the daemon. This is the actual reported shape:
+  # ".../claude/versions/2.1.199 --bg-spare ...".
+  bash -c 'exec -a "2.1.199 --bg-spare" sleep 5' &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" claude-code
   kill "$p" 2>/dev/null || true
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 0 ]
 }
 
 @test "pid-is-agent: accepts a version-named claude-code session binary" {

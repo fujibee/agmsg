@@ -238,14 +238,17 @@ _agmsg_agent_binaries() {
 # a recycled pid pointing at an unrelated process must not hijack resolution.
 #
 # Claude Code 2.1.x daemon architecture (#349): sessions run as version-named
-# binaries (e.g. ".../claude/versions/2.1.199 --bg-spare ..."), parented by a
-# long-lived `claude daemon run ...` process. Matching plain comm/argv0
-# "claude" against that daemon would resolve the SAME shared pid as "the
-# enclosing agent" for every daemon-hosted session — reintroducing the #93
-# collision class (cross-session watcher kills, immortal orphan watchers).
-# Two adjustments: never trust the daemon process itself, and additionally
-# recognize the version-named session binary so the walk stops at the real
-# per-session process instead of continuing past it to the (excluded) daemon.
+# binaries carrying a `--bg-spare` flag (e.g. ".../claude/versions/2.1.199
+# --bg-spare ..."), parented by a long-lived `claude daemon run ...` process.
+# `--bg-spare` appears on the real per-session binary too, so it is NOT a safe
+# exclusion signal — only "daemon run" identifies the daemon itself. Matching
+# plain comm/argv0 "claude" against the daemon would resolve the SAME shared
+# pid as "the enclosing agent" for every daemon-hosted session — reintroducing
+# the #93 collision class (cross-session watcher kills, immortal orphan
+# watchers). Two adjustments: never trust the daemon process itself, and
+# additionally recognize the version-named session binary so the walk stops
+# at the real per-session process instead of continuing past it to the
+# (excluded) daemon.
 agmsg_pid_is_agent() {
   local pid="$1" type="$2"
   [ -n "$pid" ] || return 1
@@ -255,7 +258,7 @@ agmsg_pid_is_agent() {
   comm=$(compat_get_comm "$pid" 2>/dev/null || true)
   cmdline=$(compat_get_cmdline "$pid" 2>/dev/null || true)
   case "$cmdline" in
-    *"daemon run"*|*"--bg-spare"*) return 1 ;;
+    *"daemon run"*) return 1 ;;
   esac
   first=$(printf '%s' "$cmdline" | awk '{print $1}' || true)
   base=$(basename -- "${first:-}" 2>/dev/null || true)
