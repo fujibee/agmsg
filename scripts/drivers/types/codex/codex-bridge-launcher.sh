@@ -27,6 +27,9 @@ REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
 NODE_BIN="$(agmsg_resolve_node)"
+# shellcheck source=../../../lib/storage.sh
+source "$SCRIPT_DIR/../../../lib/storage.sh"
+STORAGE_DIR="$(agmsg_storage_dir)"
 TAB="$(printf '\t')"
 
 # role-session record (#350): the bridge prefers this role's RECORDED codex thread
@@ -246,6 +249,9 @@ EOF
 
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
+    --workspace-root "$STORAGE_DIR" \
+    --workspace-root "$SKILL_DIR/teams" \
+    --workspace-root "$SKILL_DIR/run" \
     --type "$TYPE" \
     "${bridge_pairs[@]}" \
     --thread "$thread_id" \

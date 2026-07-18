@@ -1573,6 +1573,7 @@ EOF
   chmod +x "$fake"
 
   AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store" \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
   AGMSG_TEST_LOG="$log" \
@@ -1586,6 +1587,7 @@ EOF
 
   [ -f "$log" ]
   grep -q -- "--project $TEST_PROJECT" "$log"
+  grep -q -- "--workspace-root $TEST_SKILL_DIR/custom-store" "$log"
   grep -q -- "--thread thread-123" "$log"
   grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
   grep -q -- "--inline-inbox" "$log"

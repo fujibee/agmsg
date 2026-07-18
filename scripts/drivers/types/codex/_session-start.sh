@@ -181,8 +181,13 @@ EOF
   else
     bridge_run=("$(agmsg_resolve_node)" "$SKILL_DIR/scripts/drivers/types/codex/codex-bridge.js")
   fi
+  local storage_dir
+  storage_dir="$(agmsg_storage_dir)"
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
+    --workspace-root "$storage_dir" \
+    --workspace-root "$SKILL_DIR/teams" \
+    --workspace-root "$SKILL_DIR/run" \
     --type "$TYPE" \
     "${bridge_pairs[@]}" \
     --thread "$thread_id" \

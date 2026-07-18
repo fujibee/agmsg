@@ -68,6 +68,15 @@ run_launcher() {
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
 
+@test "launcher: passes the active storage override as a workspace root" {
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store"
+  put_record team alice rec-thread-1 "$PROJ" codex
+  run_launcher
+
+  grep -q -- "--workspace-root $AGMSG_STORAGE_PATH" "$CAPTURE"
+  ! grep -q -- "--workspace-root $TEST_SKILL_DIR/db" "$CAPTURE"
+}
+
 @test "launcher: leaves a role without a recorded live thread unsubscribed (#150)" {
   run_launcher
   [ ! -f "$CAPTURE" ]

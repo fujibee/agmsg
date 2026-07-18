@@ -26,6 +26,8 @@ Beta Codex app-server bridge for agmsg pseudo-monitoring.
 
 Options:
   --project <path>        Project path to monitor.
+  --workspace-root <path> Additional writable root to retain on bridge turns.
+                          Repeat for multiple roots.
   --type <agent_type>     Agent type for identity resolution (default: codex).
   --team <team>           Limit wakeups to one team.
   --name <agent>          Limit wakeups to one agent name.
@@ -86,6 +88,7 @@ function parseArgs(argv) {
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
     pairs: [],
+    workspaceRoots: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
   };
 
@@ -97,6 +100,8 @@ function parseArgs(argv) {
       opts.resolveOnly = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
+    } else if (arg === "--workspace-root") {
+      opts.workspaceRoots.push(argv[++i]);
     } else if (arg === "--type") {
       opts.type = argv[++i];
     } else if (arg === "--team") {
@@ -138,6 +143,8 @@ function parseArgs(argv) {
 
   if (opts.help) return opts;
   if (!opts.project) die("--project is required");
+  if (opts.workspaceRoots.some((root) => !root)) die("--workspace-root requires a path");
+  opts.workspaceRoots = [...new Set([opts.project, ...opts.workspaceRoots])];
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) die("--timeout must be a positive number");
   if (!Number.isFinite(opts.interval) || opts.interval <= 0) die("--interval must be a positive number");
   if (!Number.isFinite(opts.maxWakes) || opts.maxWakes < 0) die("--max-wakes must be a non-negative number");
@@ -915,7 +922,7 @@ class CodexBridge {
         response = await this.client.request("thread/resume", {
           threadId: this.threadId,
           cwd: this.opts.project,
-          runtimeWorkspaceRoots: [this.opts.project],
+          runtimeWorkspaceRoots: this.opts.workspaceRoots,
           excludeTurns: true,
         });
       } catch (err) {
@@ -948,7 +955,7 @@ class CodexBridge {
     }
     const response = await this.client.request("thread/start", {
       cwd: this.opts.project,
-      runtimeWorkspaceRoots: [this.opts.project],
+      runtimeWorkspaceRoots: this.opts.workspaceRoots,
       ephemeral: false,
     });
     this.threadId = response.thread && response.thread.id;
@@ -1120,7 +1127,7 @@ class CodexBridge {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
+        runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       this.pendingWake = false;
