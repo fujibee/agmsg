@@ -46,6 +46,20 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
     | sort -u
 }
 
+# Any change here can change the safe subscription set. Include the request
+# thread plus each role's recorded session/project, not merely registrations:
+# actas/resume rewrites a role record without changing identities.sh output.
+safety_fingerprint() {
+  local request="" team name rec rec_project
+  [ -f "$REQUEST_FILE" ] && request="$(cat "$REQUEST_FILE" 2>/dev/null || true)"
+  printf 'request=%s\n' "$request"
+  resolve_identity | while IFS="$TAB" read -r team name; do
+    rec="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+    rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
+    printf '%s\t%s\t%s\t%s\n' "$team" "$name" "$rec" "$rec_project"
+  done
+}
+
 # actas may register the role a moment after launch, so retry while the parent
 # (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
 ids=""
@@ -55,7 +69,7 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
-registered_ids="$ids"
+safety_state="$(safety_fingerprint)"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -119,8 +133,8 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  latest_ids="$(resolve_identity || true)"
-  if [ "$latest_ids" != "$registered_ids" ]; then
+  latest_state="$(safety_fingerprint)"
+  if [ "$latest_state" != "$safety_state" ]; then
     if [ -f "$pidfile" ]; then
       old_pid="$(cat "$pidfile" 2>/dev/null || true)"
       [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
