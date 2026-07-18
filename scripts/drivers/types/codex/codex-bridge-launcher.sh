@@ -28,6 +28,8 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
+DISPATCHER_LOCK="$RUN_DIR/codex-bridge-dispatcher.$PROJECT_HASH.lock"
+SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -48,6 +50,42 @@ source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
 
 mkdir -p "$RUN_DIR"
+
+# The app-server is shared by every Codex TUI in a project. Bind dispatcher and
+# role-child lifetime to that shared process rather than whichever TUI happened
+# to start first. Tests/older launchers without the sidecar retain parent-PID
+# fallback behavior.
+LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
+if [ -z "$LIFETIME_PID" ] || ! kill -0 "$LIFETIME_PID" 2>/dev/null; then
+  LIFETIME_PID="$PARENT_PID"
+fi
+
+release_dispatcher_lock() {
+  local owner=""
+  owner="$(cat "$DISPATCHER_LOCK/pid" 2>/dev/null || true)"
+  [ "$owner" = "$$" ] || return 0
+  rm -f "$DISPATCHER_LOCK/pid"
+  rmdir "$DISPATCHER_LOCK" 2>/dev/null || true
+}
+
+acquire_dispatcher_lock() {
+  local owner="" attempt
+  for attempt in 1 2; do
+    if mkdir "$DISPATCHER_LOCK" 2>/dev/null; then
+      printf '%s\n' "$$" > "$DISPATCHER_LOCK/pid"
+      trap release_dispatcher_lock EXIT
+      trap 'exit 0' INT TERM
+      return 0
+    fi
+    owner="$(cat "$DISPATCHER_LOCK/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      return 1
+    fi
+    rm -f "$DISPATCHER_LOCK/pid"
+    rmdir "$DISPATCHER_LOCK" 2>/dev/null || true
+  done
+  return 1
+}
 
 resolve_identity() {  # prints "team<TAB>name" lines for the project's codex roles
   "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null \
@@ -75,8 +113,9 @@ safety_fingerprint() {
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
+  acquire_dispatcher_lock || exit 0
   known_pairs=""
-  while kill -0 "$PARENT_PID" 2>/dev/null; do
+  while kill -0 "$LIFETIME_PID" 2>/dev/null; do
     current_pairs="$(resolve_identity || true)"
     while IFS="$TAB" read -r child_team child_name; do
       [ -n "$child_team" ] || continue
@@ -84,7 +123,7 @@ if [ -z "$ROLE_PAIR" ]; then
       printf '%s\n' "$known_pairs" | grep -Fxq "$child_pair" && continue
       # Close bats' result fd when present; a detached child must not keep the
       # test harness pipe open after its test has completed.
-      nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$child_pair" >/dev/null 2>&1 3>&- &
+      nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$LIFETIME_PID" "$child_pair" >/dev/null 2>&1 3>&- &
       known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
     done <<< "$current_pairs"
     sleep 0.3
@@ -249,6 +288,8 @@ EOF
       fi
       kill "$bridge_pid" 2>/dev/null || true
       rm -f "$pidfile" "$appserver_file" "$thread_file"
+    else
+      rm -f "$pidfile" "$appserver_file" "$thread_file"
     fi
   fi
 
@@ -264,8 +305,11 @@ EOF
     --inline-inbox \
     >>"$log" 2>&1 3>&- &
   launched_pid=$!
+  printf '%s\n' "$launched_pid" > "$pidfile"
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
     wait "$launched_pid" 2>/dev/null || true
+    recorded_pid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ "$recorded_pid" != "$launched_pid" ] || rm -f "$pidfile"
   fi
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"

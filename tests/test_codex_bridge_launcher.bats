@@ -20,6 +20,7 @@ setup() {
   cat > "$MOCK" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
+[ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
   chmod +x "$MOCK"
@@ -94,6 +95,25 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
 }
 
+@test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=3
+  printf '%s\n' 99999999 > "$RUN_DIR/codex-bridge.team.alice.pid"
+  run_launcher & local driver_pid=$!
+
+  local i recorded=""
+  for i in {1..30}; do
+    recorded="$(cat "$RUN_DIR/codex-bridge.team.alice.pid" 2>/dev/null || true)"
+    [ -n "$recorded" ] && [ "$recorded" != 99999999 ] && break
+    sleep 0.1
+  done
+  [ -n "$recorded" ]
+  [ "$recorded" != 99999999 ]
+  kill -0 "$recorded"
+
+  wait "$driver_pid" 2>/dev/null || true
+}
+
 @test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
   bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
   put_record team alice thread-alice "$PROJ" codex
@@ -111,6 +131,31 @@ run_launcher() {
   [ "$lines" -ge 2 ]
   grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: only one dispatcher runs per project" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=8
+  sleep 10 3>&- & local parent_a=$!
+  sleep 10 3>&- & local parent_b=$!
+
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
+  local launcher_a=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
+  local launcher_b=$!
+
+  local i
+  for i in {1..50}; do
+    [ -f "$CAPTURE" ] && break
+    sleep 0.1
+  done
+  [ -f "$CAPTURE" ]
+  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
+
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+  wait "$parent_a" 2>/dev/null || true
+  wait "$parent_b" 2>/dev/null || true
 }
 
 @test "launcher: project request thread never overrides per-role recorded threads (#150 phase 2)" {
