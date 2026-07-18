@@ -111,7 +111,15 @@ agmsg_session_start() {
   fi
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
+  if [ "$pair_count" = "1" ]; then
+    IFS=$'\t' read -r key_team key_name <<EOF
+$PAIRS
+EOF
+    bridge_key="$key_team.$key_name"
+  else
+    bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  fi
   bridge_pairs=()
   while IFS=$'\t' read -r candidate_team candidate_name; do
     bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")

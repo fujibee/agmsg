@@ -88,13 +88,20 @@ EOF
   fi
 fi
 safe_ids=""
+raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
 while IFS="$TAB" read -r candidate_team candidate_name; do
   [ -n "$candidate_team" ] || continue
   candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
   if [ -n "$candidate_thread" ]; then
     candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] || [ "$thread_hint" = "loaded" ] || [ "$candidate_thread" != "$thread_hint" ]; then
+    # A foreign-project record is irrelevant here and falls back to the live
+    # thread. A lone role keeps #350's legacy recorded-thread affinity even
+    # before a concrete request thread is available; multiplexed roles require
+    # proof and are excluded while the hint is only `loaded`.
+    if [ "$candidate_project_phys" = "$PROJECT_PHYS" ] \
+       && { { [ "$thread_hint" = "loaded" ] && [ "$raw_identity_count" != "1" ]; } \
+            || { [ "$thread_hint" != "loaded" ] && [ "$candidate_thread" != "$thread_hint" ]; }; }; then
       continue
     fi
   fi
@@ -109,7 +116,15 @@ if [ -z "$ids" ]; then
   exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID"
 fi
 
-bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
+identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
+if [ "$identity_count" = "1" ]; then
+  IFS="$TAB" read -r key_team key_name <<EOF
+$ids
+EOF
+  bridge_key="$key_team.$key_name"
+else
+  bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
+fi
 bridge_pairs=()
 while IFS="$TAB" read -r candidate_team candidate_name; do
   bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")

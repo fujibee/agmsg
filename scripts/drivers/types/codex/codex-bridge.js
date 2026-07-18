@@ -681,7 +681,9 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
     this.stopping = false;
-    const key = crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
+    const key = identities.length === 1
+      ? `${identities[0].team}.${identities[0].name}`
+      : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${key}.pid`);
     this.metafile = path.join(RUN_DIR, `codex-bridge.${key}.meta`);
   }
