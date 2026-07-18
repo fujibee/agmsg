@@ -1,22 +1,24 @@
 # Codex Monitor Beta
 
 Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
-approximates the same experience by launching Codex through an app-server bridge.
+uses a visible app-server bridge when available and a visible Stop-hook fallback
+for ordinary Codex.app sessions. It records the last explicit `actas` role and
+rebinds that role from SessionStart after restart or compaction.
 
 > ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
 > Enabling monitor mode prints a shell function that makes `codex` route through
 > agmsg's monitor shim in your interactive shell. In monitor-mode projects the
 > shim re-routes interactive launches through an app-server bridge; everywhere
 > else it passes straight through. **Only enable this if you are comfortable with
-> the `codex` command being intercepted in that shell.** It also depends on Codex
+> the `codex` command being intercepted in that shell.** Ordinary Codex.app does
+> not require the shim; it uses the visible Stop-hook fallback. It also depends on Codex
 > app-server behavior and may break as Codex changes. Known rough edges:
 > enabling monitor takes effect only after you **restart Codex and send your
 > first message** — the SessionStart hook fires on the first turn, not the
-> moment Codex opens, so the bridge is absent until you interact once; an
-> already-running session stays unmonitored until you restart it (#151); the
+> moment Codex opens, so the bridge is absent until you interact once; the
 > bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149); and only one Codex identity per project
-> is supported (#150).
+> or `mode off`/manual kill, see #149). Multiple registered identities are
+> supported by restoring the most recent explicit `actas` role.
 
 ## Quick Start
 
@@ -28,9 +30,19 @@ Enable monitor mode in a project:
 
 The command:
 
-1. Enables agmsg's Codex SessionStart/SessionEnd hooks for the project.
-2. Prints a shell function that routes interactive `codex` launches through the
+1. Enables Codex SessionStart/SessionEnd hooks plus the visible Stop-hook
+   fallback for the project.
+2. Persists the last explicit `actas` role so SessionStart can rebind it.
+3. Prints a shell function that routes interactive `codex` launches through the
    monitor shim.
+
+Headless `codex exec resume` handling is disabled by default because it can
+consume and answer messages outside the visible Codex thread. It remains
+available only as a legacy explicit opt-in:
+
+```bash
+export AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1
+```
 
 The Codex sandbox must allow writes to the installed skill's runtime state:
 
@@ -59,6 +71,11 @@ codex
 
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
+
+When Codex.app is opened normally, SessionStart restores the last `actas` role.
+If no visible app-server is available, the Stop hook checks that role's inbox at
+turn boundaries. Unread messages remain unread until the visible turn displays
+them.
 
 ## Optional PATH Shim
 

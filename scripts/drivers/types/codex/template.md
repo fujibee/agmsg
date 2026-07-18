@@ -52,10 +52,10 @@ Four possible outputs:
        2) off     — No automatic delivery
                     Manual $__SKILL_NAME__ only.
 
-       3) monitor — Real-time push (BETA, advanced)
-                    Prints a `codex` shell function that routes launches through an
-                    app-server bridge. Opt in ONLY if you accept experimental behavior.
-                    See docs/codex-monitor-beta.md.
+       3) monitor — Persistent visible delivery (BETA)
+                    SessionStart rebinds the last actas role after restart.
+                    An app-server provides real-time visible turns; otherwise
+                    the Stop hook pulls visibly. Headless handling stays off.
 
      [1]:
      ```
@@ -63,7 +63,7 @@ Four possible outputs:
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
      - Map the chosen number to a mode (`1`→`turn`, `2`→`off`, `3`→`monitor`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-     - If monitor is chosen, tell the user: "Codex monitor is a BETA that changes how `codex` starts — it prints a shell function to add to your shell profile. Add the printed function, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+     - If monitor is chosen, tell the user: "Codex monitor is a BETA. It persists the last `actas` role and rebinds it at SessionStart. When a visible app-server bridge is available, incoming messages become visible turns. Ordinary Codex.app sessions use the visible Stop-hook fallback and never start headless `codex exec resume` unless `AGMSG_CODEX_ALLOW_HEADLESS_APP_MONITOR=1` is explicitly set."
 
   6. Then check inbox for the newly joined team.
 
@@ -83,8 +83,9 @@ Four possible outputs:
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
-2. Do NOT ask the user what to do — just run the inbox check.
-3. If there are messages, read and respond appropriately. To reply:
+2. If the active AGENT name starts with `codex-pro-`, route unread messages through Oracle GPT-5.5 Pro by running `~/.agents/skills/__SKILL_NAME__/scripts/oracle-pro-reply.sh $TEAM $AGENT` instead of answering them directly. Use `ORACLE_PRO_DRY_RUN=1` only when the user asks to preview the browser run.
+3. Do NOT ask the user what to do — just run the inbox check.
+4. If there are messages for a normal agent, read and respond appropriately. To reply:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
 If argument is "history":
@@ -112,8 +113,10 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" codex` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> codex "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm). This is what lets a later `spawn <role>` bring the role back into this conversation.
-6. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Codex has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+5. Rebind the receive-side monitor by running `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/actas-monitor.sh "$(pwd)" codex <name> "${CODEX_THREAD_ID:-}"`. Prefer the visible app-server bridge. If no visible bridge is available, preserve unread messages and arm chat-visible turn delivery; do not start a headless worker unless the operator explicitly opts in.
+6. Record this session as the role's seat so it can be resumed later (best-effort): determine which team `<name>` belongs to (from the identities output / the join above), then run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-record-session.sh <team> <name> "$(pwd)"`. It writes the record only when this session's codex thread id is unambiguous; otherwise it records nothing and the role simply boots fresh next time (no harm).
+7. If `<name>` starts with `codex-pro-`, tell the user: "Now acting as `<name>`. This role is an Oracle GPT-5.5 Pro consult route; run `$__SKILL_NAME__` to process its unread inbox through `oracle-pro-reply.sh`. Real runs may control the signed-in ChatGPT browser."
+8. Otherwise tell the user: "Now acting as `<name>`. Sends and visible receive are bound to `<name>`."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
@@ -142,9 +145,9 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
-1. Parse the mode. Codex supports `monitor` (beta bridge), `turn`, and `off` — reject `both` with: "Codex bridge beta supports `monitor`, `turn`, or `off`; `both` is not supported yet."
+1. Parse the mode. Codex supports `monitor`, `turn`, `both`, and `off`. `monitor` already installs the visible turn fallback; `both` is an explicit equivalent for diagnostics.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor`, tell the user: "Codex monitor beta is enabled. Add the printed shell function to your shell profile, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+3. If mode is `monitor` or `both`, tell the user: "Persistent visible Codex delivery is enabled. SessionStart rebinds the last `actas` role after restart. The app-server bridge is used when available; otherwise the Stop hook pulls messages in the visible thread. Headless `codex exec resume` remains disabled unless explicitly opted in."
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

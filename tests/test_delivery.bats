@@ -1517,7 +1517,7 @@ EOF
   [ ! -f "$log" ]
 }
 
-@test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
+@test "delivery set monitor (codex): installs persistent SessionStart plus visible Stop fallback" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex monitor beta is enabled"* ]]
@@ -1531,14 +1531,15 @@ EOF
   local hook_file="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hook_file" ]
   grep -q "session-start.sh" "$hook_file"
+  grep -q "check-inbox.sh" "$hook_file"
 }
 
-@test "delivery set both (codex): rejected by the delivery_modes gate" {
-  # codex's manifest omits 'both' (delivery_modes=monitor turn off), so the
-  # central gate in delivery.sh rejects it before any file is touched.
+@test "delivery set both (codex): accepted as explicit persistent visible mode" {
   run bash "$SCRIPTS/delivery.sh" set both codex "$TEST_PROJECT"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"not supported for codex"* ]]
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.codex/hooks.json"
+  grep -q "session-start.sh" "$hook_file"
+  grep -q "check-inbox.sh" "$hook_file"
 }
 
 @test "delivery status (codex): live bridge reports alive and suppresses watch count" {

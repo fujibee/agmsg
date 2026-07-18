@@ -18,6 +18,8 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"  # agmsg_agent_pid, for instance-id derivation
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hash.sh"
 
 # Some Stop-hook runtimes (codex, copilot) want an explicit JSON status object
 # even when there is nothing to deliver; others (claude-code) stay silent. This
@@ -90,6 +92,25 @@ if [ -z "$AGENT" ] || [ -z "$TEAMS" ]; then
   exit 0
 fi
 
+# Codex actas changes the visible role for sends. In turn delivery, use that
+# same role for receives so a chat-visible fallback does not keep polling the
+# first registered identity for the project.
+if [ "$TYPE" = "codex" ]; then
+  PROJECT_RESOLVED="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
+  PROJECT_HASH="$(printf '%s' "$PROJECT_RESOLVED" | agmsg_sha1)"
+  ACTAS_STATE="$SKILL_DIR/run/codex-last-actas.$PROJECT_HASH.tsv"
+  if [ -f "$ACTAS_STATE" ]; then
+    IFS=$'\t' read -r ACTAS_PROJECT ACTAS_TYPE ACTAS_TEAM ACTAS_NAME _ACTAS_TS < "$ACTAS_STATE" || true
+    if [ "$ACTAS_PROJECT" = "$PROJECT_RESOLVED" ] \
+        && [ "$ACTAS_TYPE" = "$TYPE" ] \
+        && [ -n "${ACTAS_TEAM:-}" ] \
+        && [ -n "${ACTAS_NAME:-}" ]; then
+      AGENT="$ACTAS_NAME"
+      TEAMS="$ACTAS_TEAM"
+    fi
+  fi
+fi
+
 # Cooldown check. The marker is hook runtime state, not message storage, so it
 # lives in the skill's run dir — independent of AGMSG_STORAGE_PATH. Keeping it
 # out of the store means an overridden/sandboxed store still gets delivery even
@@ -141,19 +162,27 @@ for team in "${TEAM_LIST[@]}"; do
   esac
 
   RESULT=$(agmsg_sqlite "$DB" "
-    SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+    SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
     ORDER BY created_at ASC;
   ")
   if [ -n "$RESULT" ]; then
     COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
     OUTPUT+="$COUNT new message(s) in $team:"$'\n'
-    while IFS=$'\x1f' read -r from body ts; do
+    IDS=""
+    while IFS=$'\x1f' read -r id from body ts; do
       OUTPUT+="  [$ts] $from: $body"$'\n'
+      case "$id" in
+        ''|*[!0-9]*) ;; # defensive: never splice a non-numeric value into SQL
+        *) IDS="${IDS:+$IDS,}$id" ;;
+      esac
     done <<< "$RESULT"
     OUTPUT+=$'\n'
-    # Mark as read
-    agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL;" 2>/dev/null || true
+    # Mark as read — only the ids displayed above (upstream PR #361): a blanket
+    # "WHERE read_at IS NULL" would swallow messages arriving between SELECT and UPDATE.
+    if [ -n "$IDS" ]; then
+      agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN ($IDS);" 2>/dev/null || true
+    fi
   fi
 done
 
