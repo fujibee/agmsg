@@ -90,12 +90,11 @@ EOF
   [ "$output" = $'team\talice' ]
 }
 
-@test "codex-bridge: resolve-only lists all identities when unfiltered" {
+@test "codex-bridge: resolve-only rejects multiple identities without a role pair" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --resolve-only
-  [ "$status" -eq 0 ]
-  [[ "$output" == *$'team\talice'* ]]
-  [[ "$output" == *$'team\tbob'* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "launch one bridge per --pair" ]]
 }
 
 @test "codex-bridge: explicit --pair keeps a single identity" {

@@ -40,9 +40,17 @@ put_record() {
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
 run_launcher() {
-  sleep 2 3>&- & local p=$!
+  sleep 4 3>&- & local p=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
   wait "$p" 2>/dev/null || true
+  # The launcher starts the mock through nohup. Its bound-thread metadata is
+  # written synchronously, but the mock's capture can land just after the
+  # parent exits, especially now that a per-role child launcher is involved.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$CAPTURE" ] && break
+    sleep 0.1
+  done
 }
 
 @test "launcher: binds the recorded thread when the record's project matches (#350)" {
@@ -53,10 +61,9 @@ run_launcher() {
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
 
-@test "launcher: falls back to 'loaded' when no record exists (#350)" {
+@test "launcher: leaves a role without a recorded live thread unsubscribed (#150)" {
   run_launcher
-  [ -f "$CAPTURE" ]
-  grep -q -- "--thread loaded" "$CAPTURE"
+  [ ! -f "$CAPTURE" ]
 }
 
 @test "launcher: leaves a role with a foreign-project record unsubscribed (#150)" {
@@ -69,4 +76,21 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
+}
+
+@test "launcher: starts one bridge per recorded role and thread (#150 phase 2)" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-alice "$PROJ" codex
+  put_record team bob thread-bob "$PROJ" codex
+  run_launcher
+
+  local i lines=0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    lines=$(wc -l < "$CAPTURE" 2>/dev/null | tr -d ' ' || true)
+    [ "$lines" -ge 2 ] && break
+    sleep 0.1
+  done
+  [ "$lines" -ge 2 ]
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 }

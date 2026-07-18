@@ -206,6 +206,7 @@ function resolveIdentities(opts) {
   }
 
   if (deduped.length === 0) die("no matching codex identity; run actas or pass --team/--name");
+  if (deduped.length > 1) die("multiple identities match; launch one bridge per --pair");
   return deduped;
 }
 
@@ -1195,18 +1196,19 @@ class CodexBridge {
     const send = path.join(SCRIPTS_DIR, "send.sh");
     if (this.opts.inlineInbox) {
       return [
-        "agmsg delivered the following unread messages. Each section names the identity to use when replying:",
+        `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
         "",
         this.inlineInboxText.trim(),
         "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
-        this.identities.map((p) => `${send} ${p.team} ${p.name} <to> <message>  # reply as ${p.team}/${p.name}`).join("\n"),
+        `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
       ].join("\n");
     }
     return [
-      `agmsg has unread messages for ${this.identities.map((p) => `${p.team}/${p.name}`).join(", ")}.`,
+      `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
+      `Run: ${inbox} ${this.identity.team} ${this.identity.name}`,
       "Read the messages and continue the conversation. If a reply is needed, send it with:",
-      this.identities.map((p) => `${send} ${p.team} ${p.name} <to> <message>`).join("\n"),
+      `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
     ].join("\n");
   }
 
@@ -1227,7 +1229,7 @@ class CodexBridge {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
       const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
-      if ((result.stdout || "").trim()) sections.push(`Messages addressed to ${pair.team}/${pair.name}:\n${result.stdout.trim()}`);
+      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
     }
     return sections.join("\n\n");
   }

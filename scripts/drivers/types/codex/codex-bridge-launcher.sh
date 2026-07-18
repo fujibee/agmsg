@@ -14,6 +14,7 @@ TYPE="${1:?Usage: codex-bridge-launcher.sh <type> <project_path> <app_server> <p
 PROJECT="${2:?Missing project_path}"
 APP_SERVER="${3:?Missing app_server}"
 PARENT_PID="${4:?Missing parent_pid}"
+ROLE_PAIR="${5:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -43,6 +44,7 @@ mkdir -p "$RUN_DIR"
 resolve_identity() {  # prints "team<TAB>name" lines for the project's codex roles
   "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null \
     | awk -v t="$TAB" 'NF >= 2 { print $1 t $2 }' \
+    | { if [ -n "$ROLE_PAIR" ]; then grep -Fx "$ROLE_PAIR" || true; else cat; fi; } \
     | sort -u
 }
 
@@ -62,6 +64,24 @@ safety_fingerprint() {
 
 # actas may register the role a moment after launch, so retry while the parent
 # (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
+# The parent only dispatches. Every role receives an independent child launcher
+# and therefore an independent bridge bound to its own recorded thread.
+if [ -z "$ROLE_PAIR" ]; then
+  known_pairs=""
+  while kill -0 "$PARENT_PID" 2>/dev/null; do
+    current_pairs="$(resolve_identity || true)"
+    while IFS="$TAB" read -r child_team child_name; do
+      [ -n "$child_team" ] || continue
+      child_pair="$child_team"$'\t'"$child_name"
+      printf '%s\n' "$known_pairs" | grep -Fxq "$child_pair" && continue
+      nohup "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$child_pair" >/dev/null 2>&1 &
+      known_pairs="${known_pairs:+$known_pairs$'\n'}$child_pair"
+    done <<< "$current_pairs"
+    sleep 0.3
+  done
+  exit 0
+fi
+
 ids=""
 while kill -0 "$PARENT_PID" 2>/dev/null; do
   ids="$(resolve_identity || true)"
@@ -99,11 +119,12 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
     # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
     # before a concrete request thread is available; multiplexed roles require
     # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] \
-       || { { [ "$thread_hint" = "loaded" ] && [ "$raw_identity_count" != "1" ]; } \
-            || { [ "$thread_hint" != "loaded" ] && [ "$candidate_thread" != "$thread_hint" ]; }; }; then
+    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
       continue
     fi
+  else
+    # A role without a recorded seat has no live TUI to receive its turn.
+    continue
   fi
   safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
 done <<< "$ids"
@@ -236,6 +257,10 @@ EOF
     --app-server "$req_app_server" \
     --inline-inbox \
     >>"$log" 2>&1 &
+  launched_pid=$!
+  if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    wait "$launched_pid" 2>/dev/null || true
+  fi
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"
