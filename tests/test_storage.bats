@@ -155,6 +155,15 @@ SH
   [ -z "$(agmsg_runtime_lock_owner "$resource")" ]
 }
 
+@test "storage: runtime lock initializes a fresh store before send" {
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/lock-first-store"
+  source "$SCRIPTS/lib/storage.sh"
+
+  [ "$(agmsg_runtime_lock_acquire codex-dispatcher:test 111)" = 111 ]
+  bash "$SCRIPTS/send.sh" team alice bob "after lock init" --force
+  [ "$(agmsg_sqlite "$(agmsg_db_path)" "SELECT COUNT(*) FROM messages WHERE body = 'after lock init';")" = 1 ]
+}
+
 @test "send: concurrent fan-out to N recipients all land (no SQLITE_BUSY)" {
   # Without a busy_timeout, concurrent writers fail with SQLITE_BUSY(5) and the
   # sends silently drop. With the wrapper they wait and all land. See #114.

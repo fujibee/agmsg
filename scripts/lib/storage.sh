@@ -103,11 +103,18 @@ _agmsg_runtime_lock_resource_sql() {
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
+agmsg_storage_ensure_initialized() {
+  local lib_dir init_script
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  init_script="$lib_dir/../internal/init-db.sh"
+  AGMSG_STORAGE_PATH="$(agmsg_storage_dir)" bash "$init_script" >/dev/null
+}
+
 agmsg_runtime_lock_acquire() {
   local resource owner_pid expected_owner db resource_sql
   resource="$1"; owner_pid="$2"; expected_owner="${3:-}"
   case "$owner_pid:$expected_owner" in *[!0-9:]*) return 1 ;; esac
-  mkdir -p "$(agmsg_storage_dir)" || return 1
+  agmsg_storage_ensure_initialized || return 1
   db="$(agmsg_db_path)"
   resource_sql="$(_agmsg_runtime_lock_resource_sql "$resource")"
   agmsg_sqlite "$db" <<SQL | tr -d '\r'
@@ -134,11 +141,13 @@ agmsg_runtime_lock_owner() {
 }
 
 agmsg_runtime_lock_verify() {
+  case "$2" in *[!0-9]*|'') return 1 ;; esac
   [ "$(agmsg_runtime_lock_owner "$1" 2>/dev/null || true)" = "$2" ]
 }
 
 agmsg_runtime_lock_release() {
   local resource_sql
+  case "$2" in *[!0-9]*|'') return 1 ;; esac
   resource_sql="$(_agmsg_runtime_lock_resource_sql "$1")"
   agmsg_sqlite "$(agmsg_db_path)" \
     "DELETE FROM locks WHERE resource = '$resource_sql' AND owner_pid = $2;" \
