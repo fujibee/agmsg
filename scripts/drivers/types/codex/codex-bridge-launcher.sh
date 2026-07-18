@@ -6,8 +6,8 @@ set -euo pipefail
 # dispatcher -> role child -> bridge process chain.
 exec 3>&- 4>&-
 
-# Runs outside Codex's tool sandbox and owns the app-server connection. One
-# bridge subscribes to every unpinned codex identity in this project.
+# Runs outside Codex's tool sandbox and owns the app-server connections. The
+# dispatcher starts one bridge per recorded Codex role in this project.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
