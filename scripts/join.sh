@@ -102,37 +102,6 @@ if [ "$FORCE" -ne 1 ] && [ -f "$TEAM_CONFIG" ]; then
   fi
 fi
 
-# Once a name is actually (re)joined past this point — whether because no
-# tombstone existed, or --force explicitly overrode one — it is no longer
-# "renamed away". Clear any matching tombstone so a later normal (non-forced)
-# join for this same identity (e.g. adding a second project/type
-# registration) doesn't keep hitting it (#360 review).
-if [ -f "$TEAM_CONFIG" ]; then
-  STRIP_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
-  HAS_TOMBSTONE=$(agmsg_sqlite_mem "
-    WITH cfg AS (SELECT CAST(readfile('$STRIP_SQL') AS TEXT) AS json)
-    SELECT EXISTS(
-      SELECT 1 FROM cfg, json_each(json_extract(cfg.json, '\$.renamed'))
-      WHERE json_extract(value, '\$.from') = '$AGENT_ID_SQL'
-    ) FROM cfg;
-  ")
-  if [ "$HAS_TOMBSTONE" = "1" ]; then
-    STRIPPED=$(agmsg_sqlite_mem "
-      WITH cfg AS (SELECT CAST(readfile('$STRIP_SQL') AS TEXT) AS json)
-      SELECT json_set(cfg.json, '\$.renamed',
-        COALESCE(
-          (SELECT json_group_array(value)
-           FROM cfg, json_each(json_extract(cfg.json, '\$.renamed'))
-           WHERE json_extract(value, '\$.from') != '$AGENT_ID_SQL'),
-          json('[]')
-        )
-      )
-      FROM cfg;
-    ")
-    agmsg_write_atomic "$TEAM_CONFIG" "$STRIPPED"
-  fi
-fi
-
 # --- Add or extend agent registrations ---
 CONFIG_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
@@ -191,17 +160,31 @@ else
 fi
 
 AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")
+# Clearing a matching tombstone (#360 review) is folded into this SAME
+# read-modify-write, not a separate one: a name is only ever "actually
+# (re)joined" once this single write lands, so if anything fails before it,
+# the tombstone (and thus the guard above) stays intact instead of being
+# dropped without a completed join.
 UPDATED=$(agmsg_sqlite_mem \
   "WITH cfg AS (SELECT CAST(readfile('$CONFIG_SQL') AS TEXT) AS json)
   SELECT json_set(
-    cfg.json,
-    '\$.agents',
-    json_patch(
-      CASE
-        WHEN json_type(json_extract(cfg.json, '\$.agents')) = 'object' THEN json_extract(cfg.json, '\$.agents')
-        ELSE json('{}')
-      END,
-      json_object('$AGENT_ID_SQL', json('$AGENT_OBJ_ESCAPED'))
+    json_set(
+      cfg.json,
+      '\$.agents',
+      json_patch(
+        CASE
+          WHEN json_type(json_extract(cfg.json, '\$.agents')) = 'object' THEN json_extract(cfg.json, '\$.agents')
+          ELSE json('{}')
+        END,
+        json_object('$AGENT_ID_SQL', json('$AGENT_OBJ_ESCAPED'))
+      )
+    ),
+    '\$.renamed',
+    COALESCE(
+      (SELECT json_group_array(value)
+       FROM json_each(json_extract(cfg.json, '\$.renamed'))
+       WHERE json_extract(value, '\$.from') != '$AGENT_ID_SQL'),
+      json('[]')
     )
   )
   FROM cfg;")
