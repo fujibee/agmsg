@@ -28,7 +28,7 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
-DISPATCHER_LOCK="$RUN_DIR/codex-bridge-dispatcher.$PROJECT_HASH.lock"
+DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
 SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
 
 # shellcheck source=../../../lib/node.sh
@@ -61,30 +61,35 @@ if [ -z "$LIFETIME_PID" ] || ! kill -0 "$LIFETIME_PID" 2>/dev/null; then
 fi
 
 release_dispatcher_lock() {
-  local owner=""
-  owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
-  [ "$owner" = "$$" ] || return 0
-  rm -f "$DISPATCHER_LOCK"
+  agmsg_runtime_lock_release "$DISPATCHER_LOCK_RESOURCE" "$$"
 }
 
 acquire_dispatcher_lock() {
-  local owner="" attempt
+  local owner="" attempt _barrier_attempt _barrier_count
   for attempt in {1..20}; do
-    # The symlink target publishes the owner in the same atomic operation that
-    # creates the lock, so contenders can never mistake a live lock for an
-    # ownerless stale directory. A forced stale replacement is followed by an
-    # ownership check: only the process whose target remains installed wins.
-    if ln -s "$$" "$DISPATCHER_LOCK" 2>/dev/null; then
+    owner="$(agmsg_runtime_lock_acquire "$DISPATCHER_LOCK_RESOURCE" "$$" 2>/dev/null || true)"
+    if [ "$owner" = "$$" ]; then
       trap release_dispatcher_lock EXIT
       trap 'exit 0' INT TERM
       return 0
     fi
-    owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
       return 1
     fi
-    ln -sfn "$$" "$DISPATCHER_LOCK" 2>/dev/null || true
-    owner="$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)"
+    if [ -n "${AGMSG_TEST_DISPATCHER_STALE_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_DISPATCHER_STALE_BARRIER.$$"
+      for _barrier_attempt in {1..100}; do
+        _barrier_count="$(find "$(dirname "$AGMSG_TEST_DISPATCHER_STALE_BARRIER")" \
+          -maxdepth 1 -name "$(basename "$AGMSG_TEST_DISPATCHER_STALE_BARRIER").*" \
+          -type f 2>/dev/null | wc -l | tr -d ' ')"
+        [ "$_barrier_count" -ge 2 ] && break
+        sleep 0.05
+      done
+    fi
+    # Replace only the exact stale generation observed above. SQLite serializes
+    # both statements with competing reclaimers, so once A replaces stale S
+    # with live A, B's `owner = S` delete cannot remove A (true CAS semantics).
+    owner="$(agmsg_runtime_lock_acquire "$DISPATCHER_LOCK_RESOURCE" "$$" "${owner:-0}" 2>/dev/null || true)"
     if [ "$owner" = "$$" ]; then
       trap release_dispatcher_lock EXIT
       trap 'exit 0' INT TERM
@@ -126,7 +131,7 @@ safety_fingerprint() {
 if [ -z "$ROLE_PAIR" ]; then
   acquire_dispatcher_lock || exit 0
   known_pairs=""
-  while [ "$(readlink "$DISPATCHER_LOCK" 2>/dev/null || true)" = "$$" ] \
+  while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && kill -0 "$LIFETIME_PID" 2>/dev/null; do
     current_pairs="$(resolve_identity || true)"
     while IFS="$TAB" read -r child_team child_name; do

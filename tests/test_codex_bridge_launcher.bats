@@ -102,7 +102,7 @@ run_launcher() {
   run_launcher & local driver_pid=$!
 
   local i recorded=""
-  for i in {1..30}; do
+  for i in {1..50}; do
     recorded="$(cat "$RUN_DIR/codex-bridge.team.alice.pid" 2>/dev/null || true)"
     [ -n "$recorded" ] && [ "$recorded" != 99999999 ] && break
     sleep 0.1
@@ -161,13 +161,14 @@ run_launcher() {
 @test "launcher: stale dispatcher reclamation remains singleton under contention" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
-  local hash lock
+  local hash lock_db
   hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
-  lock="$RUN_DIR/codex-bridge-dispatcher.$hash.lock"
-  ln -s 99999999 "$lock"
-  # A crash from the former two-directory implementation could leave this
-  # behind forever. The owner-in-link protocol must not depend on that reaper.
+  lock_db="$TEST_SKILL_DIR/db/messages.db"
+  sqlite3 "$lock_db" "CREATE TABLE locks(resource TEXT PRIMARY KEY, owner_pid INTEGER NOT NULL, acquired_at TEXT NOT NULL); INSERT INTO locks VALUES('codex-dispatcher:$hash', 99999999, datetime('now'));"
+  # A crash from the former two-directory implementation can leave this behind.
+  # The transactional lock protocol must not depend on that legacy reaper.
   mkdir "$RUN_DIR/codex-bridge-dispatcher.$hash.reap"
+  export AGMSG_TEST_DISPATCHER_STALE_BARRIER="$TEST_SKILL_DIR/stale-observed"
   sleep 10 3>&- & local parent_a=$!
   sleep 10 3>&- & local parent_b=$!
 

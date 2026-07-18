@@ -136,6 +136,25 @@ SH
   ! printf '%s' "$output" | grep -q '\^_'
 }
 
+@test "storage: runtime lock replacement is compare-and-swap" {
+  source "$SCRIPTS/lib/storage.sh"
+  local resource="codex-dispatcher:test" owner
+
+  owner="$(agmsg_runtime_lock_acquire "$resource" 111)"
+  [ "$owner" = 111 ]
+  owner="$(agmsg_runtime_lock_acquire "$resource" 222 111)"
+  [ "$owner" = 222 ]
+  # A contender that observed the old generation cannot delete its successor.
+  owner="$(agmsg_runtime_lock_acquire "$resource" 333 111)"
+  [ "$owner" = 222 ]
+  agmsg_runtime_lock_verify "$resource" 222
+  ! agmsg_runtime_lock_verify "$resource" 333
+  agmsg_runtime_lock_release "$resource" 333
+  agmsg_runtime_lock_verify "$resource" 222
+  agmsg_runtime_lock_release "$resource" 222
+  [ -z "$(agmsg_runtime_lock_owner "$resource")" ]
+}
+
 @test "send: concurrent fan-out to N recipients all land (no SQLITE_BUSY)" {
   # Without a busy_timeout, concurrent writers fail with SQLITE_BUSY(5) and the
   # sends silently drop. With the wrapper they wait and all land. See #114.
