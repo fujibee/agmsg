@@ -391,6 +391,18 @@ teardown() {
   [[ "$output" =~ "claude " ]]
 }
 
+@test "join: after --force revives a name, a later normal join for it no longer needs --force" {
+  # Once --force deliberately reuses a renamed-away name, that identity's
+  # tombstone must be cleared — otherwise every subsequent registration
+  # (e.g. adding a second project) would keep hitting the same guard forever.
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj --force
+  run bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-2
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Joined team myteam as claude" ]]
+}
+
 @test "join: joining the new name after a rename succeeds normally" {
   bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj
   bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
