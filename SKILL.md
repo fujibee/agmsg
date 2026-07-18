@@ -103,6 +103,10 @@ Do NOT manually edit config files. Always use join.sh.
 # subscribing to <name> while this session holds the lock. `drop` releases.
 # Codex: actas is send-side only (no stable session_id during slash commands
 # → no peer-visible lock). See README "Codex caveat" for details.
+# If <name> is new and none was given upfront (bare `actas`, or the user asks
+# for a suggestion), check the target team's roster first (team.sh <team>)
+# and propose 2-3 unused, short, role-descriptive names before asking the
+# user to pick.
 ~/.agents/skills/agmsg/scripts/actas-claim.sh "$(pwd)" <type> <name> "$session_id"
 ~/.agents/skills/agmsg/scripts/reset.sh "$(pwd)" <type> <name> "$session_id"
 
