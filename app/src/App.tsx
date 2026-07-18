@@ -48,6 +48,7 @@ import {
   type SplitNode,
 } from "./paneTree";
 import { PulseDot } from "./pulseSync";
+import { resolveActiveTab } from "./tabMemory";
 import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
@@ -567,23 +568,25 @@ export default function App() {
   // the whole visible tab set — restore whichever tab was active the last
   // time this team was selected (lastActiveTabByTeam), rather than leaving
   // `active` pointing at a now-hidden tab from the previous team (its PTY
-  // keeps running; the tab just isn't shown here). Falls back to "room"
-  // for a team visited for the first time this session, or if the
-  // remembered tab's window was closed while we were away. A layout effect
-  // (not a regular one) so this resolves before paint — otherwise the old
-  // team's pane, still technically "active" for one frame, would flash
-  // visible.
+  // keeps running; the tab just isn't shown here). Falls back to Team Room
+  // (or the team's first window, if Team Room is currently hidden — see
+  // resolveActiveTab) for a team visited for the first time this session,
+  // or if the remembered tab is no longer usable. A layout effect (not a
+  // regular one) so this resolves before paint — otherwise the old team's
+  // pane, still technically "active" for one frame, would flash visible.
   useLayoutEffect(() => {
     if (!team) return;
-    // `active`/`windows` are read via closure, not deps — this should only
-    // re-run when `team` itself changes, using whatever they're currently
-    // set to at that moment (the outgoing team's real last-active tab, and
-    // the freshest window list to validate the incoming team's remembered
-    // tab against).
+    // `active`/`windows`/`showTeamRoom` are read via closure, not deps —
+    // this should only re-run when `team` itself changes, using whatever
+    // they're currently set to at that moment (the outgoing team's real
+    // last-active tab, the freshest window list, and the current Team Room
+    // visibility to validate the incoming team's remembered tab against). A
+    // mid-visit showTeamRoom toggle is handled separately (see the "if Show
+    // Team Room gets switched off" effect below).
     if (prevTeamRef.current) lastActiveTabByTeam.current[prevTeamRef.current] = active;
     const remembered = lastActiveTabByTeam.current[team];
-    const stillOpen = remembered === "room" || windows.some((w) => w.team === team && w.id === remembered);
-    setActive(stillOpen ? remembered : "room");
+    const openWindowIds = windows.filter((w) => w.team === team).map((w) => w.id);
+    setActive(resolveActiveTab(remembered, showTeamRoom, openWindowIds));
     prevTeamRef.current = team;
   }, [team]);
 
