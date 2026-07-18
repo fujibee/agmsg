@@ -30,7 +30,7 @@ emit_status_json() {
 
 # Hook runtimes that pass JSON do so on stdin. Interactive invocations such as
 # Gemini's PostToolUse command may inherit a terminal stdin instead; reading
-# unconditionally there blocks waiting for input. The `[ ! -t 0 ]` guard above
+# unconditionally there blocks waiting for input. The `[ ! -t 0 ]` guard just below
 # only rules out that TTY case -- a non-TTY stdin whose write end is left
 # open (a hook runtime that writes the payload and then simply never closes
 # the pipe) still leaves this `cat` waiting for an EOF that never arrives.
