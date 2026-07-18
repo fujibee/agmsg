@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "agmsgをインストール中…",
     "installFailed": "agmsgのインストールに失敗しました: {{error}}",
+    "loginShellFailed": "ログインシェルを取得できませんでした: {{error}}",
     "loadTeamsFailed": "agmsgのチームを読み込めませんでした: {{error}}。agmsgは ~/.agents/skills/agmsg にインストールされていますか?",
     "coreOutdated": "インストール済みのagmsg CLIが古い可能性があります({{installed}} < {{pinned}})。このアプリと正しく動作しない場合があります。",
     "versionUnknown": "不明",

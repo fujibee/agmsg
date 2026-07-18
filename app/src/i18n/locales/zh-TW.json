@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "正在安裝 agmsg…",
     "installFailed": "無法安裝 agmsg：{{error}}",
+    "loginShellFailed": "無法判斷您的登入 Shell：{{error}}",
     "loadTeamsFailed": "無法載入 agmsg 團隊：{{error}}。agmsg 是否已安裝於 ~/.agents/skills/agmsg？",
     "coreOutdated": "已安裝的 agmsg CLI 版本過舊（{{installed}} < {{pinned}}），可能無法與此應用程式正常搭配。",
     "versionUnknown": "未知",

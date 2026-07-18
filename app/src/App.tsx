@@ -61,7 +61,7 @@ type Message = {
   body: string;
   created_at: string;
 };
-type Pane = {
+export type Pane = {
   id: string;
   label: string;
   cmd: string;
@@ -105,7 +105,19 @@ type PaneLayout = "vertical" | "horizontal" | "tile";
 // shell binary plus the flags to make it behave like one (source profile,
 // interactive prompt), for the free-shell "+" tab. `home` is the $HOME
 // fallback used when the current team has no project dir configured.
-type LoginShellInfo = { cmd: string; args: string[]; home: string };
+export type LoginShellInfo = { cmd: string; args: string[]; home: string };
+
+// Builds a free-shell Pane from Rust's resolved login shell — or null if
+// it hasn't resolved (yet, or ever). Deliberately has NO "bash" guess-
+// fallback: an earlier version defaulted to bash when `info` was still
+// unresolved, which raced the mount-effect fetch (app just launched, user
+// immediately hits "+") — broken on Windows (no bash), and not the user's
+// actual login shell even on unix (co1 review, PR #431). Pure so the
+// no-fallback contract is unit-testable without mounting the app.
+export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: string, cwd: string | undefined): Pane | null {
+  if (!info) return null;
+  return { id, label, cmd: info.cmd, args: info.args, cwd, native: false, shell: true };
+}
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
 // half-occupied preview highlight (see dropPreview below). null while
@@ -486,10 +498,35 @@ export default function App() {
   // shell (respecting $SHELL), not a hardcoded one. Resolved once in Rust
   // (lib.rs's login_shell) since the webview has no reliable way to read
   // $SHELL itself (unset for a Finder-launched process — see
-  // import_login_shell_path's doc comment).
+  // import_login_shell_path's doc comment). Just a warm-cache prefetch —
+  // getLoginShell (below) is what open-shell call sites actually await, so
+  // a click landing before this resolves still gets the real shell instead
+  // of racing to a fallback.
   useEffect(() => {
-    invoke<LoginShellInfo>("login_shell").then(setLoginShell).catch(() => {});
+    invoke<LoginShellInfo>("login_shell")
+      .then(setLoginShell)
+      .catch((err) => {
+        console.error(err);
+      });
   }, []);
+
+  // Resolves login_shell, awaiting Rust if the mount-effect prefetch above
+  // hasn't landed yet (real race: app just launched, user immediately hits
+  // "+" or "Open shell"). Returns null on failure — callers must NOT
+  // fall back to a guessed shell (e.g. "bash"): broken on Windows, and not
+  // the user's actual login shell even on unix (co1 review, PR #431).
+  const getLoginShell = useCallback(async (): Promise<LoginShellInfo | null> => {
+    if (loginShell) return loginShell;
+    try {
+      const info = await invoke<LoginShellInfo>("login_shell");
+      setLoginShell(info);
+      return info;
+    } catch (err) {
+      console.error(err);
+      setStartupError(t("startupError.loginShellFailed", { error: String(err) }));
+      return null;
+    }
+  }, [loginShell, t]);
 
   // showTeamRoom/showUserChat are already correctly seeded from localStorage
   // by their useState initializers above — this effect's only job is to
@@ -912,33 +949,29 @@ export default function App() {
   );
 
   // A plain login shell pane, unattached to any agent (vim'ing a file,
-  // poking around — not agmsg's business). Falls back to "bash" with no
-  // args if login_shell hasn't resolved yet (invoke failed, or this fires
-  // before the mount effect's response lands). cwd defaults to the current
-  // team's project dir (teamProject) rather than wherever the shell would
+  // poking around — not agmsg's business). Awaits getLoginShell (see the
+  // mount-effect section above) rather than reading `loginShell` state
+  // directly — null means it's genuinely unresolved/unresolvable, at which
+  // point shellPaneFrom itself refuses to guess a fallback shell (co1, PR
+  // #431); getLoginShell has already surfaced startupError in that case, so
+  // callers just bail out with no pane. cwd defaults to the current team's
+  // project dir (teamProject) rather than wherever the shell would
   // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
   // falling back to $HOME only when no project dir is configured. Shared by
   // openShellTab (new tab) and openShellInWindow (split into an existing
   // tab) below; both only ever act on the current team's tabs (windowMenu
   // can only target a teamWindows entry), so teamProject is always the
   // right project for either call site.
-  const buildShellPane = useCallback(
-    (): Pane => ({
-      id: `shell-${seq.current++}`,
-      label: t("tabs.shellLabel"),
-      cmd: loginShell?.cmd ?? "bash",
-      args: loginShell?.args ?? [],
-      cwd: teamProject || loginShell?.home || undefined,
-      native: false,
-      shell: true,
-    }),
-    [loginShell, t, teamProject],
-  );
+  const buildShellPane = useCallback(async (): Promise<Pane | null> => {
+    const info = await getLoginShell();
+    return shellPaneFrom(info, `shell-${seq.current++}`, t("tabs.shellLabel"), teamProject || info?.home || undefined);
+  }, [getLoginShell, t, teamProject]);
 
   // The "+" tab at the end of the tab bar. Same new-Pane-plus-new-Window
   // shape as spawnMember's no-targetWindowId branch and moveToNewWindow above.
-  const openShellTab = useCallback(() => {
-    const pane = buildShellPane();
+  const openShellTab = useCallback(async () => {
+    const pane = await buildShellPane();
+    if (!pane) return;
     setPanes((prev) => [...prev, pane]);
     const winId = `w-${seq.current++}`;
     setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team }]);
@@ -950,8 +983,9 @@ export default function App() {
   // agent beside an open shell pane (see windowHasShellPane/spawnMember
   // below): either direction, shell and agent end up split in the same tab.
   const openShellInWindow = useCallback(
-    (windowId: string) => {
-      const pane = buildShellPane();
+    async (windowId: string) => {
+      const pane = await buildShellPane();
+      if (!pane) return;
       setPanes((prev) => [...prev, pane]);
       setWindows((prev) =>
         prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),
@@ -1779,7 +1813,12 @@ export default function App() {
                 </button>
               </span>
             ))}
-            <button className="tab-new-shell" title={t("tabs.newShell")} onClick={openShellTab}>
+            <button
+              className="tab-new-shell"
+              title={t("tabs.newShell")}
+              aria-label={t("tabs.newShell")}
+              onClick={openShellTab}
+            >
               <Plus size={13} />
             </button>
             {/* Tabs are all clickable buttons, so they eat the drag region
