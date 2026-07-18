@@ -1686,7 +1686,7 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): warns when the installed shim loses to a different codex on PATH (#387)" {
+@test "delivery status (codex): notes when the installed shim loses to a different codex on PATH and no bridge has ever been alive (#387)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
@@ -1696,7 +1696,8 @@ EOF
 
   # A different, non-agmsg codex earlier on PATH -- exactly the "PATH order
   # loses" shape from #387/#397: mode stays "monitor" but launches never
-  # actually reach the shim.
+  # actually reach the shim. No bridge has ever come alive here either, so
+  # this is the one case with enough corroboration to say something.
   local other_bin="$TEST_SKILL_DIR/other-bin"
   mkdir -p "$other_bin"
   printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
@@ -1704,11 +1705,11 @@ EOF
 
   PATH="$other_bin:$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WARNING: delivery mode is monitor"* ]]
+  [[ "$output" == *"Note: an agmsg codex shim is installed"* ]]
   [[ "$output" == *"$other_bin/codex"* ]]
 }
 
-@test "delivery status (codex): no PATH-mismatch warning when the shim correctly wins PATH order (#387)" {
+@test "delivery status (codex): no PATH-mismatch note when the shim correctly wins PATH order (#387)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
@@ -1718,10 +1719,10 @@ EOF
 
   PATH="$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"WARNING:"* ]]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
 }
 
-@test "delivery status (codex): no PATH-mismatch warning when no PATH-based shim is installed (#387)" {
+@test "delivery status (codex): no PATH-mismatch note when no PATH-based shim is installed (#387)" {
   # The shell-function-only install method is invisible to this script (a
   # function from an interactive profile isn't inherited by a fresh
   # `bash delivery.sh status` invocation) -- must not false-alarm here.
@@ -1730,7 +1731,49 @@ EOF
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"WARNING:"* ]]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch note when a bridge is alive even if the shim file loses on PATH (#387 regression)" {
+  # Real-machine regression: the shim FILE existing at ~/.agents/bin/codex
+  # does not mean this install relies on PATH resolution for it -- the
+  # shell-function method (recommended first, in on_enable) is common, and
+  # having the PATH shim file ALSO present is a normal side effect of
+  # following the setup instructions, not evidence of a broken PATH-based
+  # setup. A live bridge is corroborating evidence that delivery is
+  # actually working (by whichever method), so the note must remain silent.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin" "$TEST_SKILL_DIR/run"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  local other_bin="$TEST_SKILL_DIR/other-bin"
+  mkdir -p "$other_bin"
+  printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
+  chmod +x "$other_bin/codex"
+
+  sleep 60 &
+  local bpid=$!
+  # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
+  trap "kill $bpid 2>/dev/null || true" EXIT
+  printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  PATH="$other_bin:$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice alive"* ]]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
+
+  kill "$bpid" 2>/dev/null || true
+  trap - EXIT
 }
 
 @test "delivery status (codex): multiple identities are enumerated independently" {
