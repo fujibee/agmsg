@@ -1362,6 +1362,63 @@ EOF
   grep -q '"code":-32601' "$log"
 }
 
+@test "codex-bridge: an approval request id colliding with our own pending request id is still answered (#299 review)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Client and server number their OWN outbound requests independently on
+  # this bidirectional connection, so a server-initiated request's id can
+  # collide with the id of one of our still-outstanding requests. Reuse the
+  # exact id the bridge assigned to its own pending "turn/start" (message.id
+  # at that point, whatever it happens to be) for the approval request, and
+  # send it BEFORE turn/start's real ack -- while that id is still pending.
+  # A handleLine() that checked `pending` before `method` would wrongly
+  # resolve turn/start with the approval's params and never reply to the
+  # approval at all, silently swallowing the real ack too.
+  local fake="$TEST_SKILL_DIR/fake-app-server-id-collision.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-id-collision.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  fs.appendFileSync(log, `${line}\n`);
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    const collideId = message.id;
+    send({ jsonrpc: "2.0", id: collideId, method: "item/commandExecution/requestApproval", params: { command: ["rm", "-rf", "/"] } });
+    send({ jsonrpc: "2.0", id: collideId, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "auto-declining an approval request" ]]
+  [[ "$output" =~ "started turn" ]]   # proves turn/start's real ack was NOT swallowed by the collision
+  grep -q '"decision":"decline"' "$log"
+}
+
 @test "codex-bridge: the turn watchdog rescues a resumed thread already active with no bridge-owned turn (#299)" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then

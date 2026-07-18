@@ -268,31 +268,34 @@ class AppServerClient {
       return;
     }
 
-    if (Object.prototype.hasOwnProperty.call(message, "id")) {
-      const pending = this.pending.get(message.id);
-      if (pending) {
-        this.pending.delete(message.id);
-        if (message.error) {
-          pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-        } else {
-          pending.resolve(message.result);
-        }
-        return;
-      }
-      // Not a reply to one of our own requests -- a server-initiated request
-      // awaiting an answer (e.g. an approval/elicitation prompt). Before #299
-      // this branch returned here unconditionally, silently dropping any such
-      // request before method dispatch ever ran: the app-server (and whatever
-      // real-world action was waiting on it, like a shell command) then hung
-      // forever with no reply ever sent.
-      if (message.method) {
+    // A message carrying `method` is always a request or notification FROM
+    // the app-server -- check this BEFORE looking at `pending`. Client and
+    // server number their own outbound requests independently on this
+    // bidirectional connection, so a server-initiated request's `id` can
+    // collide with the id of one of OUR still-outstanding requests (e.g. our
+    // pending "turn/start" and an incoming approval request both landing on
+    // id 4). Checking `pending` first would then wrongly resolve our own
+    // request with the approval's params and swallow the approval -- the
+    // exact #299 deadlock this fix exists to close. `method` presence is
+    // what a JSON-RPC response never has, so it is the correct discriminator.
+    if (message.method) {
+      if (Object.prototype.hasOwnProperty.call(message, "id")) {
         this.dispatchRequest(message.id, message.method, message.params || {});
+      } else if (this.handlers.has(message.method)) {
+        this.dispatch(message.method, message.params || {});
       }
       return;
     }
 
-    if (message.method && this.handlers.has(message.method)) {
-      this.dispatch(message.method, message.params || {});
+    if (Object.prototype.hasOwnProperty.call(message, "id")) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      if (message.error) {
+        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      } else {
+        pending.resolve(message.result);
+      }
     }
   }
 
@@ -593,28 +596,33 @@ class WebSocketAppServerClient {
       console.error(`codex-bridge: ignoring non-json app-server message: ${line}`);
       return;
     }
-    if (Object.prototype.hasOwnProperty.call(message, "id")) {
-      const pending = this.pending.get(message.id);
-      if (pending) {
-        this.pending.delete(message.id);
-        if (message.error) {
-          pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-        } else {
-          pending.resolve(message.result);
-        }
-        return;
-      }
-      // Not a reply to one of our own requests -- a server-initiated request
-      // awaiting an answer (e.g. an approval/elicitation prompt). Before #299
-      // this branch returned here unconditionally, silently dropping any such
-      // request before method dispatch ever ran.
-      if (message.method) {
+    // A message carrying `method` is always a request or notification FROM
+    // the app-server -- check this BEFORE looking at `pending`. Client and
+    // server number their own outbound requests independently on this
+    // bidirectional connection, so a server-initiated request's `id` can
+    // collide with the id of one of OUR still-outstanding requests. Checking
+    // `pending` first would then wrongly resolve our own request with the
+    // approval's params and swallow the approval -- the exact #299 deadlock
+    // this fix exists to close. `method` presence is what a JSON-RPC response
+    // never has, so it is the correct discriminator.
+    if (message.method) {
+      if (Object.prototype.hasOwnProperty.call(message, "id")) {
         this.dispatchRequest(message.id, message.method, message.params || {});
+      } else if (this.handlers.has(message.method)) {
+        this.dispatch(message.method, message.params || {});
       }
       return;
     }
-    if (message.method && this.handlers.has(message.method)) {
-      this.dispatch(message.method, message.params || {});
+
+    if (Object.prototype.hasOwnProperty.call(message, "id")) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      if (message.error) {
+        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      } else {
+        pending.resolve(message.result);
+      }
     }
   }
 
