@@ -24,8 +24,12 @@ describe("applyStateChange", () => {
 });
 
 describe("aggregateTeamStatus", () => {
-  it("returns unknown for an empty set", () => {
-    expect(aggregateTeamStatus([])).toBe("unknown");
+  it("returns empty for a team with no panes", () => {
+    expect(aggregateTeamStatus([])).toBe("empty");
+  });
+
+  it("returns unknown for a pane whose agent type isn't recognized", () => {
+    expect(aggregateTeamStatus([status("unknown")])).toBe("unknown");
   });
 
   it("lets one blocked pane beat every other state", () => {

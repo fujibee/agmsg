@@ -14,6 +14,15 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+
+# #414: TEAM becomes a path segment (teams/$TEAM/config.json) below whether or
+# not --force is given, so validate it unconditionally, before any config-path
+# resolution or DB init. --force bypasses roster *membership* only — it must
+# never bypass team-name path safety.
+agmsg_validate_team_name "$TEAM" || exit 1
+
 DB="$(agmsg_db_path)"
 
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
