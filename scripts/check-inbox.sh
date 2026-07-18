@@ -30,10 +30,23 @@ emit_status_json() {
 
 # Hook runtimes that pass JSON do so on stdin. Interactive invocations such as
 # Gemini's PostToolUse command may inherit a terminal stdin instead; reading
-# unconditionally there blocks waiting for input.
+# unconditionally there blocks waiting for input. The `[ ! -t 0 ]` guard above
+# only rules out that TTY case -- a non-TTY stdin whose write end is left
+# open (a hook runtime that writes the payload and then simply never closes
+# the pipe) still leaves this `cat` waiting for an EOF that never arrives.
+# Stop/turn hooks run synchronously, so a `cat` stuck here freezes the whole
+# agent pane until the user kills it. Bound the read; a runtime that forgets
+# to close its pipe still gets its payload delivered (it's already sitting in
+# the command substitution buffer by the time the deadline fires), just a few
+# seconds late instead of never. Fails open when `timeout` isn't on PATH
+# (stock macOS) -- same unbounded read as before, no regression there. #381
 INPUT=""
 if [ ! -t 0 ]; then
-  INPUT=$(cat 2>/dev/null || true)
+  if command -v timeout >/dev/null 2>&1; then
+    INPUT=$(timeout "${AGMSG_STDIN_TIMEOUT:-2}" cat 2>/dev/null || true)
+  else
+    INPUT=$(cat 2>/dev/null || true)
+  fi
 fi
 
 # Prevent infinite loop: if stop hook is already active, exit silently

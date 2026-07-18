@@ -869,6 +869,49 @@ EOF
   [[ "$output" =~ "ping copilot" ]]
 }
 
+@test "check-inbox: does not hang when stdin is a non-TTY pipe that never reaches EOF (#381)" {
+  # A minimal `timeout` shim so this test exercises check-inbox.sh's own
+  # `command -v timeout` code path deterministically, regardless of whether
+  # the host actually ships GNU timeout (stock macOS does not) -- what's
+  # under test is check-inbox.sh's wiring to `timeout`, not the host
+  # environment. Prepended first on PATH so it wins even where a real one
+  # also exists.
+  local bindir="$TEST_SKILL_DIR/shimbin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/usr/bin/env bash
+secs="$1"; shift
+("$@") & cmd_pid=$!
+( sleep "$secs"; kill "$cmd_pid" 2>/dev/null ) & watchdog_pid=$!
+if wait "$cmd_pid" 2>/dev/null; then
+  kill "$watchdog_pid" 2>/dev/null
+  exit 0
+else
+  exit 124
+fi
+EOF
+  chmod +x "$bindir/timeout"
+
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
+
+  local fifo="$TEST_PROJECT/repro.fifo"
+  mkfifo "$fifo"
+  # Write the payload, then hold the write end open without closing it --
+  # exactly the "hook runtime forgets to close the pipe" shape from the
+  # issue's own FIFO repro. A plain `sleep N | check-inbox.sh` does NOT
+  # reproduce this: bash waits for every pipeline member, so it looks like a
+  # hang even when the hook itself exits immediately.
+  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; sleep 300; } > "$fifo" &
+  local writer_pid="$!"
+
+  local newpath="$bindir:$PATH"
+  run bash -c "PATH='$newpath' AGMSG_STDIN_TIMEOUT=1 bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT' < '$fifo'"
+
+  kill "$writer_pid" 2>/dev/null || true
+  rm -f "$fifo"
+
+  [ "$status" -eq 0 ]
+}
 
 
 
