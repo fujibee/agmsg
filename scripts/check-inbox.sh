@@ -43,7 +43,7 @@ emit_status_json() {
 INPUT=""
 if [ ! -t 0 ]; then
   if command -v timeout >/dev/null 2>&1; then
-    INPUT=$(timeout "${AGMSG_STDIN_TIMEOUT:-2}" cat 2>/dev/null || true)
+    INPUT=$(timeout "${AGMSG_HOOK_STDIN_TIMEOUT:-2}" cat 2>/dev/null || true)
   else
     INPUT=$(cat 2>/dev/null || true)
   fi

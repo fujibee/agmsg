@@ -905,7 +905,7 @@ EOF
   local writer_pid="$!"
 
   local newpath="$bindir:$PATH"
-  run bash -c "PATH='$newpath' AGMSG_STDIN_TIMEOUT=1 bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT' < '$fifo'"
+  run bash -c "PATH='$newpath' AGMSG_HOOK_STDIN_TIMEOUT=1 bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT' < '$fifo'"
 
   kill "$writer_pid" 2>/dev/null || true
   rm -f "$fifo"
