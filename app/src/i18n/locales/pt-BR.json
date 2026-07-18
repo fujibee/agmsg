@@ -50,7 +50,9 @@
   },
   "tabs": {
     "roomLabel": "# sala da equipe",
-    "close": "×"
+    "close": "×",
+    "newShell": "Nova aba de shell",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "Carregando mais…",
@@ -155,6 +157,7 @@
     },
     "window": {
       "rename": "Renomear…",
+      "openShell": "Abrir shell",
       "layout": "Layout ▸",
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",

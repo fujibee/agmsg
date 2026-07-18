@@ -50,7 +50,9 @@
   },
   "tabs": {
     "roomLabel": "# 团队聊天室",
-    "close": "×"
+    "close": "×",
+    "newShell": "新建 Shell 标签",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "正在加载更多…",
@@ -155,6 +157,7 @@
     },
     "window": {
       "rename": "重命名…",
+      "openShell": "打开 Shell",
       "layout": "布局 ▸",
       "layoutVertical": "纵向",
       "layoutHorizontal": "横向",

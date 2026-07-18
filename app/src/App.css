@@ -962,6 +962,27 @@ body.resizing-row {
   opacity: 1;
   color: #f7768e;
 }
+/* The "+" free-shell tab, pinned right after the last real tab (not part
+   of teamWindows.map, so it isn't a .tab itself — no close button, no
+   active/rename state, just an icon button that opens a new one). */
+.tab-new-shell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: 26px;
+  height: 26px;
+  margin-bottom: 1px;
+  background: none;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tab-new-shell:hover {
+  color: var(--fg);
+  background: var(--panel-2);
+}
 
 /* Stage */
 .stage {

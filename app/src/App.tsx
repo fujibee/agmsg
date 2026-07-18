@@ -8,6 +8,7 @@ import {
   Minimize2,
   Minus,
   PanelLeftClose,
+  Plus,
   RectangleHorizontal,
   Settings,
   Users,
@@ -71,6 +72,12 @@ type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
+   *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
+   *  the shell instead of a new tab" behavior below: it has to be an
+   *  explicit flag rather than inferred from `cmd`, since `cmd` is
+   *  whatever login_shell resolved (zsh/bash/fish/...), not a fixed string. */
+  shell?: boolean;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
@@ -94,6 +101,11 @@ type Window = {
 // drags or split-drops produced and rebuilds a fresh tree matching the
 // preset; it is NOT a persisted mode the window stays locked into.
 type PaneLayout = "vertical" | "horizontal" | "tile";
+// What Rust's login_shell resolved (see lib.rs) — the user's actual login
+// shell binary plus the flags to make it behave like one (source profile,
+// interactive prompt), for the free-shell "+" tab. `home` is the $HOME
+// fallback used when the current team has no project dir configured.
+type LoginShellInfo = { cmd: string; args: string[]; home: string };
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
 // half-occupied preview highlight (see dropPreview below). null while
@@ -193,6 +205,7 @@ export default function App() {
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
+  const [loginShell, setLoginShell] = useState<LoginShellInfo | null>(null);
   const [active, setActive] = useState<string>("room");
   // Remembers which tab was active on each team, so switching back to a
   // team you were already on lands where you left it instead of always
@@ -469,6 +482,15 @@ export default function App() {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
 
+  // What to spawn for the free-shell "+" tab — the user's actual login
+  // shell (respecting $SHELL), not a hardcoded one. Resolved once in Rust
+  // (lib.rs's login_shell) since the webview has no reliable way to read
+  // $SHELL itself (unset for a Finder-launched process — see
+  // import_login_shell_path's doc comment).
+  useEffect(() => {
+    invoke<LoginShellInfo>("login_shell").then(setLoginShell).catch(() => {});
+  }, []);
+
   // showTeamRoom/showUserChat are already correctly seeded from localStorage
   // by their useState initializers above — this effect's only job is to
   // PUSH that initial value into Rust (set_team_room_visible/
@@ -675,18 +697,7 @@ export default function App() {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
       applyAgentState(event.payload.id, event.payload.state);
     });
-    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
-      setPaneStatus((current) => {
-        if (!(event.payload.id in current)) return current;
-        const next = { ...current };
-        delete next[event.payload.id];
-        return next;
-      });
-    });
-    return () => {
-      void stateListener.then((unlisten) => unlisten());
-      void exitListener.then((unlisten) => unlisten());
-    };
+    return () => void stateListener.then((unlisten) => unlisten());
   }, [applyAgentState]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
@@ -837,6 +848,28 @@ export default function App() {
     [detachPane],
   );
 
+  useEffect(() => {
+    const p = listen<{ id: string }>("pty-exit", (e) => {
+      setPaneStatus((current) => {
+        if (!(e.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[e.payload.id];
+        return next;
+      });
+      // A free-shell pane has no "still running, look at the error" state
+      // worth preserving the way an agent's crash banner does
+      // (TerminalPane's own pty-exit listener writes that inline) — its own
+      // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
+      // tab, if it was the last one) just goes away instead of sitting on a
+      // dead prompt. Agent panes are untouched — this only fires for panes
+      // flagged `shell`.
+      if (panesRef.current.find((pane) => pane.id === e.payload.id)?.shell) {
+        closeWindowPane(e.payload.id);
+      }
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, [closeWindowPane]);
+
   // Close a whole tab: kill every pane it holds.
   const closeWindow = useCallback((windowId: string) => {
     const w = windowsRef.current.find((x) => x.id === windowId);
@@ -877,6 +910,67 @@ export default function App() {
     },
     [detachPane, team],
   );
+
+  // A plain login shell pane, unattached to any agent (vim'ing a file,
+  // poking around — not agmsg's business). Falls back to "bash" with no
+  // args if login_shell hasn't resolved yet (invoke failed, or this fires
+  // before the mount effect's response lands). cwd defaults to the current
+  // team's project dir (teamProject) rather than wherever the shell would
+  // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
+  // falling back to $HOME only when no project dir is configured. Shared by
+  // openShellTab (new tab) and openShellInWindow (split into an existing
+  // tab) below; both only ever act on the current team's tabs (windowMenu
+  // can only target a teamWindows entry), so teamProject is always the
+  // right project for either call site.
+  const buildShellPane = useCallback(
+    (): Pane => ({
+      id: `shell-${seq.current++}`,
+      label: t("tabs.shellLabel"),
+      cmd: loginShell?.cmd ?? "bash",
+      args: loginShell?.args ?? [],
+      cwd: teamProject || loginShell?.home || undefined,
+      native: false,
+      shell: true,
+    }),
+    [loginShell, t, teamProject],
+  );
+
+  // The "+" tab at the end of the tab bar. Same new-Pane-plus-new-Window
+  // shape as spawnMember's no-targetWindowId branch and moveToNewWindow above.
+  const openShellTab = useCallback(() => {
+    const pane = buildShellPane();
+    setPanes((prev) => [...prev, pane]);
+    const winId = `w-${seq.current++}`;
+    setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team }]);
+    setActive(winId);
+  }, [buildShellPane, team]);
+
+  // A tab's "Open shell" context-menu item — splits a shell pane in beside
+  // whatever's already in that tab. The symmetric counterpart of spawning an
+  // agent beside an open shell pane (see windowHasShellPane/spawnMember
+  // below): either direction, shell and agent end up split in the same tab.
+  const openShellInWindow = useCallback(
+    (windowId: string) => {
+      const pane = buildShellPane();
+      setPanes((prev) => [...prev, pane]);
+      setWindows((prev) =>
+        prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),
+      );
+      setActive(windowId);
+    },
+    [buildShellPane],
+  );
+
+  // True when `windowId`'s tab currently has a free-shell pane in it — the
+  // signal spawnMember's sidebar-click site uses to decide "spawn this agent
+  // beside the shell in the same tab" (koit's design B) instead of the
+  // default "open a new tab".
+  const windowHasShellPane = useCallback((windowId: string) => {
+    const w = windowsRef.current.find((w) => w.id === windowId);
+    if (!w) return false;
+    const ids = leaves(w.root);
+    return panesRef.current.some((p) => ids.includes(p.id) && p.shell);
+  }, []);
 
   // Swap two panes' positions within the same window (tree shape unchanged
   // — no DOM remount, same as every other pane move in this file).
@@ -1560,7 +1654,7 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m)}
+                        onClick={() => spawnMember(m, windowHasShellPane(active) ? active : undefined)}
                         title={
                           pane
                             ? t("sidebar.member.titleRunning")
@@ -1685,6 +1779,9 @@ export default function App() {
                 </button>
               </span>
             ))}
+            <button className="tab-new-shell" title={t("tabs.newShell")} onClick={openShellTab}>
+              <Plus size={13} />
+            </button>
             {/* Tabs are all clickable buttons, so they eat the drag region
                 the <nav> itself claims — this dedicated strip is always
                 empty and always draggable, regardless of tab count. */}
@@ -2364,6 +2461,14 @@ export default function App() {
                 }}
               >
                 {t("ctxMenu.window.rename")}
+              </button>
+              <button
+                onClick={() => {
+                  openShellInWindow(windowMenu.windowId);
+                  setWindowMenu(null);
+                }}
+              >
+                {t("ctxMenu.window.openShell")}
               </button>
               <div className="submenu-trigger">
                 <span className="submenu-label">{t("ctxMenu.window.layout")}</span>

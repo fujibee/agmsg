@@ -50,7 +50,9 @@
   },
   "tabs": {
     "roomLabel": "# Team-Room",
-    "close": "×"
+    "close": "×",
+    "newShell": "Neuer Shell-Tab",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "Weitere werden geladen…",
@@ -155,6 +157,7 @@
     },
     "window": {
       "rename": "Umbenennen…",
+      "openShell": "Shell öffnen",
       "layout": "Layout ▸",
       "layoutVertical": "Vertikal",
       "layoutHorizontal": "Horizontal",

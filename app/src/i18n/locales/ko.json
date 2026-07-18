@@ -50,7 +50,9 @@
   },
   "tabs": {
     "roomLabel": "# 팀 채팅방",
-    "close": "×"
+    "close": "×",
+    "newShell": "새 셸 탭",
+    "shellLabel": "셸"
   },
   "room": {
     "loadingMore": "더 불러오는 중…",
@@ -155,6 +157,7 @@
     },
     "window": {
       "rename": "이름 변경…",
+      "openShell": "셸 열기",
       "layout": "레이아웃 ▸",
       "layoutVertical": "세로",
       "layoutHorizontal": "가로",

@@ -50,7 +50,9 @@
   },
   "tabs": {
     "roomLabel": "# チームルーム",
-    "close": "×"
+    "close": "×",
+    "newShell": "新規シェルタブ",
+    "shellLabel": "シェル"
   },
   "room": {
     "loadingMore": "さらに読み込み中…",
@@ -155,6 +157,7 @@
     },
     "window": {
       "rename": "名前を変更…",
+      "openShell": "シェルを開く",
       "layout": "レイアウト ▸",
       "layoutVertical": "縦",
       "layoutHorizontal": "横",
