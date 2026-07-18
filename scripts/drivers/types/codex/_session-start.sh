@@ -62,6 +62,25 @@ INNER_EOF
 agmsg_session_start() {
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
+  # A recorded role belongs to its recorded Codex thread. The in-sandbox
+  # fallback has no launcher to arbitrate this, so exclude a mismatched role
+  # rather than ever injecting it into this session's thread (#150/#350).
+  # shellcheck source=../../../lib/role-session.sh
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+  safe_pairs=""
+  while IFS=$'\t' read -r candidate_team candidate_name; do
+    [ -n "$candidate_team" ] || continue
+    candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
+    if [ -n "$candidate_thread" ]; then
+      candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
+      candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+      { [ "$candidate_project_phys" = "$project_phys" ] && [ "$candidate_thread" = "$thread_id" ]; } || continue
+    fi
+    safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
+  done <<< "$PAIRS"
+  PAIRS="$safe_pairs"
+  [ -n "$PAIRS" ] || exit 0
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -81,25 +100,23 @@ agmsg_session_start() {
   fi
   [ -n "$app_server" ] || exit 0
 
-  pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
-  [ "$pair_count" = "1" ] || exit 0
-  team=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $1; exit }')
-  name=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $2; exit }')
-  [ -n "$team" ] && [ -n "$name" ] || exit 0
-
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
     project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
     request_file="$RUN_DIR/codex-bridge-request.$project_hash"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$TYPE" "$team" "$name" "$thread_id" "$app_server" > "$tmp_request"
+    printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
     mv "$tmp_request" "$request_file"
     exit 0
   fi
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
+  bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  bridge_pairs=()
+  while IFS=$'\t' read -r candidate_team candidate_name; do
+    bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+  done <<< "$PAIRS"
+  pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
@@ -107,7 +124,7 @@ agmsg_session_start() {
     fi
   fi
 
-  log="$RUN_DIR/codex-bridge.$team.$name.log"
+  log="$RUN_DIR/codex-bridge.$bridge_key.log"
   # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
   # wrappers) — run it as-is. Only the default codex-bridge.js is launched
   # through a resolved Node, since its env-node shebang fails in shells where a
@@ -120,8 +137,7 @@ agmsg_session_start() {
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --type "$TYPE" \
-    --team "$team" \
-    --name "$name" \
+    "${bridge_pairs[@]}" \
     --thread "$thread_id" \
     --app-server "$app_server" \
     --inline-inbox \

@@ -90,11 +90,19 @@ EOF
   [ "$output" = $'team\talice' ]
 }
 
-@test "codex-bridge: resolve-only rejects ambiguous identities" {
+@test "codex-bridge: resolve-only lists all identities when unfiltered" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --resolve-only
-  [ "$status" -eq 1 ]
-  [[ "$output" =~ "multiple identities match" ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'team\talice'* ]]
+  [[ "$output" == *$'team\tbob'* ]]
+}
+
+@test "codex-bridge: explicit --pair keeps a single identity" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --pair $'team\tbob' --resolve-only
+  [ "$status" -eq 0 ]
+  [ "$output" = $'team\tbob' ]
 }
 
 @test "codex-bridge: rejects unsupported app-server endpoints" {

@@ -85,6 +85,7 @@ function parseArgs(argv) {
     requestTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_REQUEST_TIMEOUT_MS || 30000),
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
+    pairs: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
   };
 
@@ -102,6 +103,10 @@ function parseArgs(argv) {
       opts.team = argv[++i];
     } else if (arg === "--name") {
       opts.name = argv[++i];
+    } else if (arg === "--pair") {
+      const [team, name] = (argv[++i] || "").split("\t");
+      if (!team || !name) die("--pair must be team<TAB>agent");
+      opts.pairs.push({ team, name });
     } else if (arg === "--timeout") {
       opts.timeout = Number(argv[++i]);
     } else if (arg === "--interval") {
@@ -171,7 +176,7 @@ function runScript(script, args) {
   return result;
 }
 
-function resolveIdentity(opts) {
+function resolveIdentities(opts) {
   const result = runScript("identities.sh", [toPosixPath(opts.project), opts.type]);
   if (result.status !== 0) {
     die(`identity resolution failed: ${(result.stderr || result.stdout).trim()}`);
@@ -187,7 +192,8 @@ function resolveIdentity(opts) {
     })
     .filter((pair) => pair.team && pair.name)
     .filter((pair) => !opts.team || pair.team === opts.team)
-    .filter((pair) => !opts.name || pair.name === opts.name);
+    .filter((pair) => !opts.name || pair.name === opts.name)
+    .filter((pair) => opts.pairs.length === 0 || opts.pairs.some((wanted) => wanted.team === pair.team && wanted.name === pair.name));
 
   const deduped = [];
   const seen = new Set();
@@ -200,8 +206,7 @@ function resolveIdentity(opts) {
   }
 
   if (deduped.length === 0) die("no matching codex identity; run actas or pass --team/--name");
-  if (deduped.length > 1) die("multiple identities match; pass --team and --name");
-  return deduped[0];
+  return deduped;
 }
 
 class AppServerClient {
@@ -658,9 +663,10 @@ class WebSocketAppServerClient {
 }
 
 class CodexBridge {
-  constructor(opts, identity) {
+  constructor(opts, identities) {
     this.opts = opts;
-    this.identity = identity;
+    this.identities = identities;
+    this.identity = identities[0];
     this.client = createAppServerClient(opts);
     this.threadId = opts.threadId || null;
     this.threadIdle = true;
@@ -675,8 +681,9 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
     this.stopping = false;
-    this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
-    this.metafile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.meta`);
+    const key = crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
+    this.pidfile = path.join(RUN_DIR, `codex-bridge.${key}.pid`);
+    this.metafile = path.join(RUN_DIR, `codex-bridge.${key}.meta`);
   }
 
   async run() {
@@ -724,8 +731,7 @@ class CodexBridge {
       [
         `pid=${process.pid}`,
         `project=${this.opts.project}`,
-        `team=${this.identity.team}`,
-        `name=${this.identity.name}`,
+        `identities=${this.identities.map((p) => `${p.team}/${p.name}`).join(",")}`,
         `type=${this.opts.type}`,
       ].join("\n") + "\n",
     );
@@ -826,15 +832,12 @@ class CodexBridge {
       // project path. The spawn cwd below stays native for the app-server.
       toPosixPath(this.opts.project),
       this.opts.type,
-      "--team",
-      this.identity.team,
-      "--name",
-      this.identity.name,
       "--timeout",
       String(this.opts.timeout),
       "--interval",
       String(this.opts.interval),
     ];
+    for (const pair of this.identities) command.push("--pair", `${pair.team}\t${pair.name}`);
     try {
       await this.client.request("process/spawn", {
         command,
@@ -1029,36 +1032,29 @@ class CodexBridge {
     const send = path.join(SCRIPTS_DIR, "send.sh");
     if (this.opts.inlineInbox) {
       return [
-        `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
+        "agmsg delivered the following unread messages. Each section names the identity to use when replying:",
         "",
         this.inlineInboxText.trim(),
         "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
-        `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+        this.identities.map((p) => `${send} ${p.team} ${p.name} <to> <message>  # reply as ${p.team}/${p.name}`).join("\n"),
       ].join("\n");
     }
     return [
-      `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
-      `Run: ${inbox} ${this.identity.team} ${this.identity.name}`,
+      `agmsg has unread messages for ${this.identities.map((p) => `${p.team}/${p.name}`).join(", ")}.`,
       "Read the messages and continue the conversation. If a reply is needed, send it with:",
-      `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+      this.identities.map((p) => `${send} ${p.team} ${p.name} <to> <message>`).join("\n"),
     ].join("\n");
   }
 
   readInboxForPrompt() {
-    const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), this.identity.team, this.identity.name], {
-      cwd: this.opts.project,
-      encoding: "utf8",
-    });
-    if (result.error) {
-      console.error(`codex-bridge: inbox.sh failed: ${result.error.message}`);
-      return "";
+    const sections = [];
+    for (const pair of this.identities) {
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
+      if ((result.stdout || "").trim()) sections.push(`Messages addressed to ${pair.team}/${pair.name}:\n${result.stdout.trim()}`);
     }
-    if (result.status !== 0) {
-      console.error(`codex-bridge: inbox.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
-      return "";
-    }
-    return result.stdout || "";
+    return sections.join("\n\n");
   }
 
   async shutdown() {
@@ -1218,13 +1214,13 @@ async function main() {
     return;
   }
 
-  const identity = resolveIdentity(opts);
+  const identities = resolveIdentities(opts);
   if (opts.resolveOnly) {
-    console.log(`${identity.team}\t${identity.name}`);
+    console.log(identities.map((pair) => `${pair.team}\t${pair.name}`).join("\n"));
     return;
   }
 
-  const bridge = new CodexBridge(opts, identity);
+  const bridge = new CodexBridge(opts, identities);
   await bridge.run();
 }
 

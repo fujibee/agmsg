@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs outside Codex's tool sandbox and owns the app-server connection: it starts
-# codex-bridge.js for this project's single codex identity.
+# Runs outside Codex's tool sandbox and owns the app-server connection. One
+# bridge subscribes to every unpinned codex identity in this project.
 #
 # On codex 0.141+ the SessionStart hook cannot resolve the thread id
 # (CODEX_THREAD_ID is not exported and no rollout is written for --remote
@@ -47,33 +47,63 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
 }
 
 # actas may register the role a moment after launch, so retry while the parent
-# (codex-monitor.sh) is alive. Proceed only when exactly one identity resolves.
-team="" name=""
+# (codex-monitor.sh) is alive. Multiple identities are intentional (#150).
+ids=""
 while kill -0 "$PARENT_PID" 2>/dev/null; do
   ids="$(resolve_identity || true)"
-  count="$(printf '%s\n' "$ids" | grep -c . || true)"
-  if [ "$count" = "1" ]; then
-    IFS="$TAB" read -r team name <<EOF
-$ids
-EOF
-    [ -n "$team" ] && [ -n "$name" ] && break
-    team="" name=""
-  fi
+  [ -n "$ids" ] && break
   sleep 0.3
 done
-[ -n "$team" ] && [ -n "$name" ] || exit 0
+[ -n "$ids" ] || exit 0
 
-pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
-log="$RUN_DIR/codex-bridge.$team.$name.log"
+# Safety over delivery (#150): a role-session record identifies the thread that
+# owns a role. Never inject that role's inbox into a different live TUI. Roles
+# without a record may share the current project TUI. If the hook could not
+# provide a concrete live thread (`loaded`), recorded roles are conservatively
+# left unsubscribed rather than guessed. They remain unread for their proper
+# next SessionStart.
+thread_hint="loaded"
+if [ -f "$REQUEST_FILE" ]; then
+  request="$(cat "$REQUEST_FILE" 2>/dev/null || true)"
+  if [ -n "$request" ]; then
+    IFS="$TAB" read -r _hint_type _hint_thread _hint_app <<EOF
+$request
+EOF
+    [ -n "${_hint_thread:-}" ] && thread_hint="$_hint_thread"
+  fi
+fi
+safe_ids=""
+while IFS="$TAB" read -r candidate_team candidate_name; do
+  [ -n "$candidate_team" ] || continue
+  candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
+  if [ -n "$candidate_thread" ]; then
+    candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
+    candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] || [ "$thread_hint" = "loaded" ] || [ "$candidate_thread" != "$thread_hint" ]; then
+      continue
+    fi
+  fi
+  safe_ids="${safe_ids:+$safe_ids$'\n'}${candidate_team}"$'\t'"${candidate_name}"
+done <<< "$ids"
+ids="$safe_ids"
+[ -n "$ids" ] || exit 0
+
+bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
+bridge_pairs=()
+while IFS="$TAB" read -r candidate_team candidate_name; do
+  bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+done <<< "$ids"
+pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
+log="$RUN_DIR/codex-bridge.$bridge_key.log"
 # Records the app-server URL the live bridge was launched against, so a later
 # launcher instance can tell a bridge bound to a stale app-server (old port,
 # from before a codex upgrade) from one bound to the current server. See #197/#237.
-appserver_file="$RUN_DIR/codex-bridge.$team.$name.appserver"
+appserver_file="$RUN_DIR/codex-bridge.$bridge_key.appserver"
 # Records the thread a live bridge was bound to (#350), so a later launcher can
 # rebind when the resolved thread changes -- e.g. once a role-session record
 # appears for a bridge first launched on "loaded", it is torn down and relaunched
 # on the recorded thread instead of clinging to the ambiguous "loaded" one.
-thread_file="$RUN_DIR/codex-bridge.$team.$name.thread"
+thread_file="$RUN_DIR/codex-bridge.$bridge_key.thread"
 # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
 # wrappers) — run it as-is. Only the default codex-bridge.js is launched through
 # a resolved Node, since its env-node shebang fails where a version-manager Node
@@ -94,7 +124,7 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   if [ -f "$REQUEST_FILE" ]; then
     request="$(cat "$REQUEST_FILE" 2>/dev/null || true)"
     if [ -n "$request" ]; then
-      IFS="$TAB" read -r _rtype _rteam _rname _rthread _rapp <<EOF
+      IFS="$TAB" read -r _rtype _rthread _rapp <<EOF
 $request
 EOF
       [ -n "${_rthread:-}" ] && thread_id="$_rthread"
@@ -102,7 +132,10 @@ EOF
     fi
   fi
 
-  # Prefer this role's RECORDED codex thread (#350). The app-server's "loaded"
+  # With exactly one identity, preserve #350's role-session thread affinity.
+  # Multiple identities are multiplexed into the active project thread; a role
+  # that has a recorded thread is handled by its own future launcher pass rather
+  # than being silently mapped to another role's recorded thread.
   # thread is whichever conversation the server last touched -- ambiguous when a
   # cwd has run more than one codex thread, so a co-resident thread can capture
   # this role's messages. The role-session record (#339) stores this role's own
@@ -111,7 +144,10 @@ EOF
   # different project -- falls back to "loaded" (fail-open for roles predating the
   # record). Freshness holds because a role re-runs actas on resume (#339), which
   # rewrites the record with its current thread.
-  if [ "$thread_id" = "loaded" ]; then
+  if [ "$thread_id" = "loaded" ] && [ "$(printf '%s\n' "$ids" | grep -c . || true)" = "1" ]; then
+    IFS="$TAB" read -r team name <<EOF
+$ids
+EOF
     rec_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
     if [ -n "$rec_thread" ]; then
       rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
@@ -148,8 +184,7 @@ EOF
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --type "$TYPE" \
-    --team "$team" \
-    --name "$name" \
+    "${bridge_pairs[@]}" \
     --thread "$thread_id" \
     --app-server "$req_app_server" \
     --inline-inbox \
