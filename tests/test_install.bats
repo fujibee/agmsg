@@ -36,6 +36,13 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
+
+  grep -Fq "& 'C:\\Program Files\\Git\\bin\\bash.exe' -lc '~/.agents/skills/agmsg/scripts/whoami.sh \"\$(pwd)\" codex'" "$SK/SKILL.md"
+  grep -Fq "Do not use POSIX \`'\"'\"'\` quote splicing in PowerShell" "$SK/SKILL.md"
+}
+
 @test "install: --update restores scripts/lib even if it went missing" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-update-projA
