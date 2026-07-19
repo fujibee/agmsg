@@ -1364,6 +1364,59 @@ EOF
   [[ "$output" =~ "wakeup 2" ]]
 }
 
+@test "codex-bridge: non-message turn activity (reasoning/tool-call progress) also re-arms the idle watchdog" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Same shape as the streaming test above, but sends ONLY notification types
+  # the bridge has no dedicated handler for (a plausible reasoning-delta and
+  # a tool-call-progress notification) -- never item/agentMessage/delta. If
+  # re-arming only covered that one specific method (an earlier, incomplete
+  # version of this fix), this turn would still get cut off by the watchdog
+  # despite being visibly active the whole time.
+  local fake="$TEST_SKILL_DIR/fake-app-server-nonmessage-activity.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let maxId = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    maxId += 1;
+    const id = maxId;
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    const threadId = message.params.threadId;
+    setTimeout(() => send({ jsonrpc: "2.0", method: "item/reasoning/textDelta", params: { threadId, delta: "thinking..." } }), 300);
+    setTimeout(() => send({ jsonrpc: "2.0", method: "item/commandExecution/outputDelta", params: { threadId, delta: "$ ls\n" } }), 900);
+    setTimeout(() => send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: {} } }), 1600);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --turn-timeout 1 --max-wakes 2
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "wakeup 1" ]]
+  [[ "$output" =~ "turn completed on thread" ]]      # ended via real completion...
+  [[ "$output" != *"no turn activity within"* ]]     # ...never via the idle watchdog
+  [[ "$output" =~ "wakeup 2" ]]
+}
+
 @test "codex-bridge: delivers a wake observed while the resumed thread was still active (no stale-stop)" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
