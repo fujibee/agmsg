@@ -332,6 +332,16 @@ if [ -z "$TEAM" ]; then
   fi
 fi
 
+# actas-handshake nonce (#338 Gap 2; review finding, 2026-07-19): computed here,
+# before the boot script is assembled below, so it can be exported into it.
+# Binds the mark this spawn waits for to THIS launch specifically — see the
+# "Readiness handshakes" section further down for the full rationale.
+HANDSHAKE="$(agmsg_type_get "$AGENT_TYPE" handshake)"
+ACTAS_NONCE=""
+if [ "$WAIT_READY" = "1" ] && [ "$HANDSHAKE" = "actas" ]; then
+  ACTAS_NONCE="$$.${TEAM}.${NAME}"
+fi
+
 # Role's session display name (#339): now that TEAM is final, join it to the
 # agent name. Emitted into the boot script when the type declares name_arg.
 SESSION_NAME="${TEAM}-${NAME}"
@@ -434,6 +444,15 @@ esac
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # actas-handshake types (review finding, 2026-07-19): the boot prompt only
+  # names the agent, not which team spawn resolved (identities.sh can return
+  # more than one team for that name) or which launch this is. Export both so
+  # the template can mark the exact (team, nonce) this spawn is waiting on
+  # instead of guessing.
+  if [ -n "$ACTAS_NONCE" ]; then
+    printf 'export AGMSG_SPAWN_TEAM=%q\n' "$TEAM"
+    printf 'export AGMSG_SPAWN_NONCE=%q\n' "$ACTAS_NONCE"
+  fi
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   if [ -n "$SPAWN_UNSET_VARS" ]; then
     printf 'unset %s\n' "$SPAWN_UNSET_VARS"
@@ -711,7 +730,9 @@ place_and_launch() {
 # Types without handshake=actas retain the existing monitor=yes/no behavior.
 # This preserves Claude Code's watcher wait while keeping no-monitor types
 # immediate. --no-wait opts out before either protocol is selected.
-HANDSHAKE="$(agmsg_type_get "$AGENT_TYPE" handshake)"
+#
+# HANDSHAKE/ACTAS_NONCE are already computed above (before the boot script is
+# assembled, so the nonce can be exported into it); reused here as-is.
 READY_KIND=""
 READY_PATH=""
 if [ "$WAIT_READY" = "1" ]; then
@@ -747,7 +768,7 @@ if [ "$WAIT_READY" = "1" ]; then
   waited=0
   while true; do
     if [ "$READY_KIND" = "actas" ]; then
-      "$SCRIPT_DIR/ready.sh" check "$TEAM" "$NAME" && break
+      "$SCRIPT_DIR/ready.sh" check "$TEAM" "$NAME" "$ACTAS_NONCE" && break
     elif [ -e "$READY_PATH" ]; then
       break
     fi

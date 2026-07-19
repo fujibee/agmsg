@@ -27,11 +27,20 @@ opt in.
 ## Decision
 
 Add the optional agent-type manifest key `handshake=actas`. A driver declaring
-it must call `ready.sh mark <team> <agent>` exactly once after identity claim
-and any required delivery setup complete. `spawn.sh` clears that driver's stale
-one-shot sentinel before launch, waits for it, consumes it after observation,
-and enforces a minimum timeout of 300 seconds. `--no-wait` remains an explicit
-opt-out.
+it must call `ready.sh mark <team> <agent> [nonce]` exactly once after identity
+claim and any required delivery setup complete. `spawn.sh` clears that driver's
+stale one-shot sentinel before launch, waits for it, consumes it after
+observation, and enforces a minimum timeout of 300 seconds. `--no-wait` remains
+an explicit opt-out.
+
+Each `spawn` invocation with `handshake=actas` generates a per-launch nonce and
+exports it (with the resolved team) as `AGMSG_SPAWN_TEAM`/`AGMSG_SPAWN_NONCE`
+for the template to echo back on mark, and requires the check to see that exact
+nonce. Without this, a mark from an abandoned or timed-out earlier launch for
+the same (team, agent) — still possible after its own 300s wait gives up,
+since the model may keep booting past that point — could satisfy a *later*
+spawn's check, reporting `status=ready` before that later launch's own agent
+has actually completed bootstrap (review finding, 2026-07-19).
 
 The one-shot file is named `actas-ready.<team>__<agent>` (with the existing
 lossless filesystem encoding). It is separate from the watcher-owned

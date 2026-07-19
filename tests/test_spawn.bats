@@ -830,11 +830,23 @@ EOF
 @test "spawn: grok-build waits for and consumes the one-shot actas handshake" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
 
-  # Simulate the agent completing its actas template after launch. This uses
-  # ready.sh rather than watch.sh's distinct, long-lived ready.* sentinel.
+  # Simulate the agent completing its actas template after launch: read the
+  # spawn-exported team/nonce back out of the generated boot script (the same
+  # thing the real template does via $AGMSG_SPAWN_TEAM/$AGMSG_SPAWN_NONCE),
+  # then mark with them — a bare mark without the nonce would no longer
+  # satisfy spawn's check (review finding, 2026-07-19). This uses ready.sh
+  # rather than watch.sh's distinct, long-lived ready.* sentinel.
+  local mark_helper="$TEST_SKILL_DIR/mark-helper.sh"
+  cat > "$mark_helper" <<EOF
+#!/usr/bin/env bash
+eval "\$(grep -E '^export AGMSG_SPAWN_(TEAM|NONCE)=' "\$1")"
+bash "$SCRIPTS/ready.sh" mark "\$AGMSG_SPAWN_TEAM" alice "\$AGMSG_SPAWN_NONCE"
+EOF
+  chmod +x "$mark_helper"
+
   run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
     --ready-timeout 300 \
-    --terminal "bash $SCRIPTS/ready.sh mark myteam alice # {cmd}"
+    --terminal "bash $mark_helper {cmd}"
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=ready"* ]]
   [[ "$output" != *"skipping readiness wait"* ]]
@@ -842,6 +854,25 @@ EOF
   # The mark is an edge, not liveness: spawn consumes it after observing it.
   run bash "$SCRIPTS/ready.sh" check myteam alice
   [ "$status" -ne 0 ]
+}
+
+@test "spawn: a stale actas mark from an abandoned earlier launch does not satisfy a later spawn's wait" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  # An earlier, abandoned spawn attempt marks with SOME other nonce (as if a
+  # slow-booting agent from a previous, already-timed-out launch finally
+  # completed and called ready.sh mark late) — this must NOT satisfy a new
+  # spawn's wait (review finding, 2026-07-19: P2, converged Codex + Fugu).
+  bash "$SCRIPTS/ready.sh" mark myteam alice "stale-nonce-from-abandoned-launch"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/sleep"
+  chmod +x "$STUB_BIN/sleep"
+
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
+    --ready-timeout 2 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=timeout"* ]]
+  [[ "$output" != *"status=ready"* ]]
 }
 
 @test "spawn: actas handshake clears stale state and enforces the 300s timeout floor" {
