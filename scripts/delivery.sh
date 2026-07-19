@@ -46,6 +46,10 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/instance-id.sh"
+# actas-lock: agmsg_ready_path for per-identity watcher liveness in status
+# (ready.<team>__<agent> sentinel written by watch.sh in actas mode).
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/node.sh"
 # hash.sh provides agmsg_sha1 — stop_codex_bridge derives the per-project
@@ -245,9 +249,115 @@ agmsg_delivery_status_default() {
 }
 agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
 
+# Print one liveness line for a (team, agent) whose receive path is a watch.sh
+# actas watcher (ready-file + watch.<token>.pid). Generic — not type-branded —
+# so any monitor-tool type (grok-build, claude-code, …) can share it. Codex
+# bridge liveness lives in the codex plug and does not call this.
+# Args: <team> <agent> <project> <type>
+agmsg_delivery_print_watcher_status() {
+  local team="$1" name="$2" project="$3" type="$4"
+  local ready_file token watcher_pidfile watcher_pid cmd
+
+  ready_file="$(agmsg_ready_path "$team" "$name")"
+  if [ ! -f "$ready_file" ]; then
+    echo "Watcher: $team/$name not running"
+    return 0
+  fi
+
+  token=$(tr -d '\r\n' < "$ready_file" 2>/dev/null || true)
+  if [ -z "$token" ]; then
+    echo "Watcher: $team/$name stale ready (empty token)"
+    return 0
+  fi
+
+  # watch.sh writes its pidfile BEFORE the ready sentinel (same process,
+  # sequential), so a present ready file without a matching pidfile is stale
+  # rather than "still arming".
+  watcher_pidfile="$RUN_DIR/watch.${token}.pid"
+  if [ ! -f "$watcher_pidfile" ]; then
+    echo "Watcher: $team/$name stale ready (missing watcher pidfile)"
+    return 0
+  fi
+
+  watcher_pid=$(tr -d '\r\n' < "$watcher_pidfile" 2>/dev/null || true)
+  case "$watcher_pid" in
+    ''|*[!0-9]*)
+      echo "Watcher: $team/$name stale pidfile (empty pid)"
+      return 0
+      ;;
+  esac
+  if [ "$watcher_pid" -le 1 ] 2>/dev/null; then
+    echo "Watcher: $team/$name stale pidfile (empty pid)"
+    return 0
+  fi
+
+  if ! kill -0 "$watcher_pid" 2>/dev/null; then
+    echo "Watcher: $team/$name stale pidfile (pid $watcher_pid not running)"
+    return 0
+  fi
+
+  # Identify the pid as OUR watch.sh for this (project, type, agent). Session
+  # id is NOT matched: some hosts (e.g. grok-build's monitor tool) launch with
+  # an empty session env and watch.sh self-derives its id, so the ready token
+  # can diverge from the argv the agent was told to pass.
+  cmd=$(compat_get_cmdline "$watcher_pid" 2>/dev/null || true)
+  case " $cmd " in
+    *" $SKILL_DIR/scripts/watch.sh "*|*"$SKILL_DIR/scripts/watch.sh "*)
+      # argv: watch.sh <session_id> <project> <type> [active_name]
+      # Match adjacent project/type/name fields to avoid recycled pids whose
+      # cmdline merely happens to contain those substrings separately.
+      case " $cmd " in
+        *" $project $type $name "*|*" $project $type $name")
+          echo "Watcher: $team/$name alive (pid $watcher_pid)"
+          return 0
+          ;;
+      esac
+      # Also accept when args appear without the leading-space padding that
+      # fails when watch.sh is argv[0] with no shell prefix (ps may omit a
+      # trailing space). Fall back to a looser but still ordered match.
+      case "$cmd" in
+        *"$SKILL_DIR/scripts/watch.sh"*"$project"*"$type"*"$name"*)
+          echo "Watcher: $team/$name alive (pid $watcher_pid)"
+          return 0
+          ;;
+      esac
+      echo "Watcher: $team/$name stale pidfile (process mismatch)"
+      ;;
+    *)
+      echo "Watcher: $team/$name stale pidfile (process mismatch)"
+      ;;
+  esac
+}
+
 agmsg_delivery_runtime_status_default() {
+  local type="${1:-}" project="${2:-}"
+
+  # Per-identity ready+watcher liveness when (type, project) is known and the
+  # project has registered identities for that type. Same granularity as the
+  # codex plug's "Codex bridge: team/agent alive (pid N)" lines, but for the
+  # generic watch.sh receive path used by monitor-tool types. Types with a
+  # different runtime (codex bridge) override agmsg_delivery_runtime_status
+  # entirely and never reach this default. See #267.
+  if [ -n "$type" ] && [ -n "$project" ]; then
+    local pairs
+    pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
+    if [ -n "$pairs" ]; then
+      while IFS=$'\t' read -r team name _rest; do
+        if [ -z "$team" ] || [ -z "$name" ]; then
+          continue
+        fi
+        agmsg_delivery_print_watcher_status "$team" "$name" "$project" "$type"
+      done <<< "$pairs"
+    fi
+  fi
+
+  # Aggregate watch pidfile summary — still useful for unfiltered (non-actas)
+  # watchers that never write a ready sentinel, and for bare `status` with no
+  # type/project. Always emit a line (0/0 when run/ is absent) so status is
+  # predictable for automation. Codex's plug replaces this whole function and
+  # suppresses the count so bridge lines stay the single source of truth.
+  local alive=0 dead=0
   if [ -d "$RUN_DIR" ]; then
-    local alive=0 dead=0
     for f in "$RUN_DIR"/watch.*.pid; do
       [ -f "$f" ] || continue
       local pid
@@ -258,8 +368,8 @@ agmsg_delivery_runtime_status_default() {
         dead=$((dead + 1))
       fi
     done
-    echo "watch processes: $alive alive, $dead stale pidfiles"
   fi
+  echo "watch processes: $alive alive, $dead stale pidfiles"
 }
 agmsg_delivery_runtime_status() { agmsg_delivery_runtime_status_default "$@"; }
 

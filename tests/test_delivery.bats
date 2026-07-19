@@ -2430,3 +2430,113 @@ JSON
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [[ "$output" =~ "mode: turn" ]]
 }
+
+# --- monitor-tool watcher liveness (ready file + watch.<token>.pid, #267) ---
+# Generic default runtime status for types that receive via watch.sh (grok-build,
+# claude-code, …). Codex keeps its own bridge-based override.
+
+@test "delivery status (watcher): live ready+pidfile reports alive for grok-build" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-live-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # Launch a real actas watcher — it claims the role, writes watch.<token>.pid,
+  # then the ready.<team>__<agent> sentinel (same path despawn tests use).
+  # AGMSG_AGENT_PID is empty in this suite so the session_id stays bare.
+  local token="sess-live-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" grok-build alice >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice"
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -f "$ready" ] && break
+    sleep 0.25
+  done
+  [ -f "$ready" ]
+
+  # watch.sh may normalize/rewrite the session token (composite id); use the
+  # ready-file content and the live pidfile rather than our launch token.
+  local ready_token pidfile_pid
+  ready_token=$(tr -d '\r\n' < "$ready")
+  [ -n "$ready_token" ]
+  [ -f "$TEST_SKILL_DIR/run/watch.${ready_token}.pid" ]
+  pidfile_pid=$(tr -d '\r\n' < "$TEST_SKILL_DIR/run/watch.${ready_token}.pid")
+  kill -0 "$pidfile_pid" 2>/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Watcher: team/alice alive (pid $pidfile_pid)"* ]]
+
+  kill "$wpid" 2>/dev/null || true
+  # watch.sh may have re-execed / forked; also kill via pidfile.
+  kill "$pidfile_pid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (watcher): missing ready file reports not running" {
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-nr-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Watcher: team/alice not running"* ]]
+}
+
+@test "delivery status (watcher): dead watcher pid reports stale pidfile" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-dead-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do
+    dead_pid=$((dead_pid + 1))
+  done
+  local token="sess-dead.$$"
+  printf '%s\n' "$token" > "$TEST_SKILL_DIR/run/ready.team__alice"
+  printf '%s\n' "$dead_pid" > "$TEST_SKILL_DIR/run/watch.${token}.pid"
+
+  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Watcher: team/alice stale pidfile (pid $dead_pid not running)"* ]]
+}
+
+@test "delivery status (watcher): ready without pidfile reports stale ready" {
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-orphan-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  printf '%s\n' "sess-orphan.$$" > "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Watcher: team/alice stale ready (missing watcher pidfile)"* ]]
+}
+
+@test "delivery status (watcher): still reports aggregate watch count (unlike codex)" {
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-agg-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Watcher: team/alice not running"* ]]
+  [[ "$output" == *"watch processes:"* ]]
+}
+
+@test "delivery status (watcher): claude-code identities use the same generic lines" {
+  bash "$SCRIPTS/join.sh" team bob claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  [[ "$output" == *"Watcher: team/bob not running"* ]]
+  [[ "$output" == *"watch processes:"* ]]
+}
