@@ -564,6 +564,27 @@ EOF
   [[ "$output" =~ "bridge already running" ]]
 }
 
+@test "codex-bridge: accepts its PID when the launcher records it before startup (#442)" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local wrapper="$TEST_SKILL_DIR/run-with-preseeded-pid.sh"
+  cat > "$wrapper" <<'EOF'
+#!/usr/bin/env bash
+pidfile="$1"
+shift
+printf '%s\n' "$$" > "$pidfile"
+exec "$@"
+EOF
+  chmod +x "$wrapper"
+
+  AGMSG_CODEX_APP_SERVER_CMD="exit 1" run "$wrapper" \
+    "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" \
+    node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice
+
+  [ "$status" -ne 0 ]
+  [[ ! "$output" =~ "bridge already running" ]]
+}
+
 @test "codex-bridge: starts a turn when app-server reports watch-once pending" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then

@@ -1289,6 +1289,10 @@ class CodexBridge {
   ensureSingleInstance() {
     const existing = readPid(this.pidfile);
     if (!existing) return;
+    // The launcher records the spawned PID immediately so status never points
+    // at a stale predecessor. When that write wins the startup race, this
+    // process sees its own PID here; it owns the reservation, not a peer bridge.
+    if (existing === process.pid) return;
     try {
       process.kill(existing, 0);
       die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
