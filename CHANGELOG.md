@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.10] - 2026-07-19
+
+### Fixed
+- Allow launcher-reserved bridge PID (#444)
+
 ## [1.1.9] - 2026-07-19
 
 ### Added
@@ -306,6 +311,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.10]: https://github.com/fujibee/agmsg/compare/app-v0.3.0...v1.1.10
 [1.1.9]: https://github.com/fujibee/agmsg/compare/app-v0.2.0...v1.1.9
 [1.1.8]: https://github.com/fujibee/agmsg/compare/app-v0.1.5...v1.1.8
 [app-v0.1.5]: https://github.com/fujibee/agmsg/compare/v1.1.7...app-v0.1.5
