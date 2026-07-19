@@ -2604,3 +2604,114 @@ JSON
   run bash "$SCRIPTS/receiver-live.sh" team nobody
   [ "$status" -ne 0 ]
 }
+
+# --- 2026-07-19 self-multi-model review findings (Codex + Fugu, independently
+# converging on the same two gaps) ---
+
+@test "delivery status (watcher): an exclusive watcher for a DIFFERENT agent is not reported as broad coverage" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # alice has a real EXCLUSIVE watcher (trailing agent arg after project/type).
+  local token="sess-excl-other-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" claude-code alice >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice" i
+  for i in $(seq 1 40); do
+    [ -f "$ready" ] && break
+    sleep 0.25
+  done
+  [ -f "$ready" ]
+
+  # bob has NO ready file and no watcher of his own — a plain substring match
+  # on "project type" would find alice's exclusive process (same project/type,
+  # trailing "alice") and misreport it as broad coverage for bob (P1, 2026-07-19).
+  [ ! -f "$TEST_SKILL_DIR/run/ready.team__bob" ]
+
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Watcher: team/bob not running"* ]]
+  [[ "$output" != *"team/bob no exclusive receiver"* ]]
+
+  kill "$wpid" 2>/dev/null || true
+  trap - EXIT
+}
+
+# Fake `ps` that always fails, simulating the Claude Code sandbox environment
+# where compat_get_cmdline can't inspect argv at all (watch.sh's own
+# self-clean logic already has a documented fallback for this; the status
+# helpers below did not, until this review).
+_mock_no_ps() {
+  local bindir="$TEST_SKILL_DIR/mock-no-ps-bin"
+  mkdir -p "$bindir"
+  cat > "$bindir/ps" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$bindir/ps"
+  printf '%s' "$bindir"
+}
+
+@test "receiver-live.sh: ps-unavailable still reports a live exclusive watcher (P1-2)" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local token="sess-noPS-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" claude-code alice >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice" i
+  for i in $(seq 1 40); do
+    [ -f "$ready" ] && break
+    sleep 0.25
+  done
+  [ -f "$ready" ]
+
+  local mockdir
+  mockdir="$(_mock_no_ps)"
+  PATH="$mockdir:$PATH" run bash "$SCRIPTS/receiver-live.sh" team alice
+  [ "$status" -eq 0 ]
+
+  kill "$wpid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (watcher): ps-unavailable still reports the sole live broad watcher (P1-2)" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team bob claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  local token="sess-broad-noPS-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" claude-code >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local i
+  for i in $(seq 1 40); do
+    ls "$TEST_SKILL_DIR/run"/watch.*.pid >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+  local broad_pid
+  broad_pid=$(cat "$TEST_SKILL_DIR/run"/watch.*.pid 2>/dev/null | head -1 | tr -d '\r\n')
+  [ -n "$broad_pid" ]
+
+  local mockdir
+  mockdir="$(_mock_no_ps)"
+  PATH="$mockdir:$PATH" run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no exclusive receiver (broad watcher alive, pid $broad_pid)"* ]]
+
+  kill "$wpid" 2>/dev/null || true
+  trap - EXIT
+}

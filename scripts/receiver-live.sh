@@ -59,12 +59,27 @@ esac
 
 kill -0 "$watcher_pid" 2>/dev/null || exit 1
 
-# Defend against pid recycling: the live pid must still look like our watch.sh.
+# Defend against pid recycling: the live pid must still look like our watch.sh
+# for THIS agent specifically — not just any watch.sh (a recycled pid could
+# just as easily be an unrelated watcher for a different team/role).
 cmd="$(compat_get_cmdline "$watcher_pid" 2>/dev/null || true)"
-case "$cmd" in
-  *"$SKILL_DIR/scripts/watch.sh"*|*"watch.sh "*) ;;
-  *) exit 1 ;;
-esac
+if [ -n "$cmd" ]; then
+  case "$cmd" in
+    *"$SKILL_DIR/scripts/watch.sh"*|*"watch.sh "*) ;;
+    *) exit 1 ;;
+  esac
+  # An exclusive watcher's cmdline carries the agent name as its trailing
+  # argument (watch.sh <sid> <project> <type> <agent>) — require it (review
+  # finding, 2026-07-19).
+  case " $cmd " in
+    *" $AGENT "*) ;;
+    *) exit 1 ;;
+  esac
+fi
+# else: ps unavailable (e.g. Claude Code sandbox) — compat_get_cmdline can't
+# inspect argv here. Skip validation and rely on kill -0 alone, matching
+# watch.sh's own self-clean fallback for this same environment (#66; review
+# finding, 2026-07-19) rather than reporting every live watcher as dead.
 
 if [ "$PRINT_PID" -eq 1 ]; then
   printf '%s\n' "$watcher_pid"

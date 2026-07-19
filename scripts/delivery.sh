@@ -252,9 +252,9 @@ agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
 # Args: <project> <type>
 agmsg_delivery_find_broad_watcher_pid() {
   local project="$1" type="$2"
-  local f pid cmd needle
+  local f pid cmd
   [ -d "$RUN_DIR" ] || return 0
-  needle=" $project $type "
+  local unresolved_count=0 unresolved_pid=""
   for f in "$RUN_DIR"/watch.*.pid; do
     [ -f "$f" ] || continue
     pid=$(tr -d '\r\n' < "$f" 2>/dev/null || true)
@@ -263,14 +263,34 @@ agmsg_delivery_find_broad_watcher_pid() {
     esac
     kill -0 "$pid" 2>/dev/null || continue
     cmd=$(compat_get_cmdline "$pid" 2>/dev/null || true)
-    case "$cmd" in
-      *"$SKILL_DIR/scripts/watch.sh"*) ;;
-      *) continue ;;
-    esac
-    case " $cmd " in
-      *"$needle"*) printf '%s\n' "$pid"; return 0 ;;
-    esac
+    if [ -n "$cmd" ]; then
+      case "$cmd" in
+        *"$SKILL_DIR/scripts/watch.sh"*) ;;
+        *) continue ;;
+      esac
+      # Broad watchers invoke `watch.sh <sid> <project> <type>` with NO 4th
+      # arg — project/type must be the trailing tokens. An exclusive watcher
+      # for some OTHER agent shares the same project/type as a substring but
+      # has a trailing agent name after it, so a plain substring match would
+      # misreport it as broad coverage for an unrelated identity with zero
+      # actual receivers (review finding, 2026-07-19).
+      case "$cmd" in
+        *" $project $type") printf '%s\n' "$pid"; return 0 ;;
+        *) continue ;;
+      esac
+    fi
+    # ps unavailable (e.g. Claude Code sandbox) — compat_get_cmdline can't
+    # inspect argv, so project/type can't be confirmed here. Best effort: if
+    # exactly one watcher is live at all, it's almost certainly this
+    # sandbox's own single watcher; with 0 or 2+ such candidates there is no
+    # way to disambiguate without argv, so stay silent rather than guess
+    # (review finding, 2026-07-19).
+    unresolved_count=$((unresolved_count + 1))
+    unresolved_pid="$pid"
   done
+  if [ "$unresolved_count" -eq 1 ]; then
+    printf '%s\n' "$unresolved_pid"
+  fi
   return 0
 }
 
