@@ -1898,6 +1898,7 @@ EOF
 
 @test "session-start.sh for codex resolves the rollout by real mtime, not filename order (#416)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice stale-by-name-uuid "$TEST_PROJECT" codex
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
   cat >"$fake" <<'EOF'
