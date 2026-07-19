@@ -1305,6 +1305,65 @@ EOF
   [[ "$output" =~ "wakeup 2" ]]
 }
 
+@test "codex-bridge: an actively-streaming turn is not cut off by the idle watchdog past turn-timeout" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # turn-timeout is 1s, but this fake keeps the turn "active" by sending
+  # item/agentMessage/delta every 300ms for 1.5s (5x the nominal timeout)
+  # before finally completing. If the watchdog were a fixed ceiling from turn
+  # start (the pre-fix behavior), it would fire well before turn/completed
+  # and the bridge would report the turn as ended via the timeout message
+  # instead of a real completion — the regression this test guards against.
+  local fake="$TEST_SKILL_DIR/fake-app-server-streaming.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+let maxId = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    maxId += 1;
+    const id = maxId;
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    const threadId = message.params.threadId;
+    for (let i = 1; i <= 5; i += 1) {
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { threadId, delta: `chunk-${i} ` } });
+      }, i * 300);
+    }
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId, turn: {} } });
+    }, 1600);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --turn-timeout 1 --max-wakes 2
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "wakeup 1" ]]
+  [[ "$output" =~ "chunk-5" ]]                       # the full stream was delivered, not cut short
+  [[ "$output" =~ "turn completed on thread" ]]      # ended via real completion...
+  [[ "$output" != *"no turn activity within"* ]]     # ...never via the idle watchdog
+  [[ "$output" =~ "wakeup 2" ]]
+}
+
 @test "codex-bridge: delivers a wake observed while the resumed thread was still active (no stale-stop)" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then

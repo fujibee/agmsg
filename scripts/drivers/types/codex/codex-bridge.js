@@ -48,6 +48,11 @@ Options:
                           CODEX_THREAD_ID; "loaded" discovers the live TUI thread
                           via thread/loaded/list (codex 0.141+, see #170).
   --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
+  --turn-timeout <sec>    Idle watchdog: assume a turn ended after this many
+                          seconds with no new agent-message output (default:
+                          60; 0 disables). Re-armed on every output chunk, so
+                          an actively-working turn is never cut off regardless
+                          of total duration — only true silence trips it.
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
   --resolve-only          Print resolved team/name and exit.
   --help                  Show this help.
@@ -1143,13 +1148,21 @@ class CodexBridge {
     }
   }
 
+  // Idle watchdog, not a fixed ceiling on the turn's total duration: every
+  // agent-message delta (onAgentMessageDelta) re-arms it, so a turn that is
+  // actively producing output never trips it no matter how long it runs —
+  // only turnTimeout seconds of silence does. This matters because the app
+  // -server does not reliably send turn/completed (#41), so something has to
+  // detect a turn that will never report completion; a turn that is visibly
+  // still working is not that case, and cutting it off before it reaches its
+  // own send.sh call silently drops whatever it was about to report.
   startTurnWatchdog() {
     this.clearTurnWatchdog();
     if (!this.opts.turnTimeout) return;
     this.turnTimer = setTimeout(() => {
       this.turnTimer = null;
       console.error(
-        `codex-bridge: no turn completion within ${this.opts.turnTimeout}s; assuming the turn ended and resuming`,
+        `codex-bridge: no turn activity within ${this.opts.turnTimeout}s; assuming the turn ended and resuming`,
       );
       this.onTurnEnded().catch((error) =>
         console.error(`codex-bridge: resume after turn timeout failed: ${error.message}`),
@@ -1196,6 +1209,15 @@ class CodexBridge {
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
     process.stderr.write(params.delta);
+    // The turn is demonstrably still producing output, so push the watchdog
+    // deadline forward instead of leaving it counting down from turn start.
+    // Without this, a turn that is actively reasoning/tool-calling for longer
+    // than turnTimeout (default 60s) — e.g. diagnosing a multi-step failure
+    // before replying — gets cut off by startTurnWatchdog()'s fixed timer
+    // before it ever reaches its own send.sh call, and the bridge silently
+    // re-arms as if the turn had ended with nothing to report. Only a turn
+    // that goes truly silent for turnTimeout seconds should trip this.
+    if (this.turnActive) this.startTurnWatchdog();
   }
 
   buildPrompt() {
