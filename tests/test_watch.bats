@@ -532,3 +532,85 @@ _wait_pidfile() {
   ! grep -q "Usage: watch.sh" "$out"
   ! grep -q "ERROR: unknown agent type" "$out"
 }
+
+# read_at for the most recent message with the given body, empty if unread.
+_read_at_for_body() {
+  ( # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_sqlite "$(agmsg_db_path)" \
+      "SELECT read_at FROM messages WHERE body='$1' ORDER BY id DESC LIMIT 1;" )
+}
+
+
+@test "watch: marks a delivered message's read_at so a later inbox.sh does not re-surface it" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-readat"
+  local out="$TEST_SKILL_DIR/readat.log"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  # Wait for the watcher to actually attach (watermark file appears) before
+  # sending, instead of a fixed sleep — avoids flakiness on a slow/loaded CI
+  # runner (2026-07-19 review finding).
+  _wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  bash "$SCRIPTS/send.sh" team bob alice "M-readat-check" >/dev/null
+
+  # Delivered live...
+  _wait_for_file_contains "$out" "M-readat-check" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  # ...and read_at follows shortly after delivery — poll instead of a fixed
+  # sleep for the same flakiness reason.
+  local i got=""
+  for i in $(seq 1 50); do
+    got="$(_read_at_for_body "M-readat-check")"
+    [ -n "$got" ] && break
+    sleep 0.1
+  done
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  [ -n "$got" ]
+  # A subsequent inbox.sh call must not report it as a new/unread message.
+  ! bash "$SCRIPTS/inbox.sh" team alice | grep -q "M-readat-check"
+}
+
+@test "watch: a broad watcher does not mark read_at for a role with its own exclusive ready sentinel" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Simulate alice already having a live exclusive watcher elsewhere: the
+  # sentinel's mere presence is the protocol (#108) — no live process needed
+  # for this guard, which only checks the file (review finding, 2026-07-19).
+  mkdir -p "$TEST_SKILL_DIR/run"
+  touch "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  local sid="sess-broad-guard"
+  local out="$TEST_SKILL_DIR/broad-guard.log"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
+    || { kill "$w" 2>/dev/null || true; false; }
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-broad-guard-alice" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob bob "M-broad-guard-bob" >/dev/null
+
+  # Both stream through this broad watcher (PAIRS covers every project role)...
+  _wait_for_file_contains "$out" "M-broad-guard-bob" \
+    || { kill "$w" 2>/dev/null || true; false; }
+
+  # ...but only bob's (no exclusive owner) gets marked read by this watcher.
+  local i got_bob=""
+  for i in $(seq 1 50); do
+    got_bob="$(_read_at_for_body "M-broad-guard-bob")"
+    [ -n "$got_bob" ] && break
+    sleep 0.1
+  done
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  [ -n "$got_bob" ]
+  # Alice's exclusive ready sentinel means this broad watcher must defer —
+  # it must NOT have consumed the read state that alice's own watcher owns.
+  [ -z "$(_read_at_for_body "M-broad-guard-alice")" ]
+}

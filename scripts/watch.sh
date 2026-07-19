@@ -312,6 +312,21 @@ done <<< "$PAIRS"
 WATERMARK_FILE="$RUN_DIR/watch.$SESSION_ID.watermark"
 persist_watermark() { printf '%s\n' "$LAST" > "$WATERMARK_FILE" 2>/dev/null || true; }
 
+# Mark a row's read_at so a later inbox.sh call does not re-surface it as
+# unread — the watermark only stops THIS watcher from re-streaming a row, it
+# never touches read_at (see the call sites below for the full rationale).
+# Shared by both the normal delivery path and the ctrl:despawn control-row
+# path so the two do not drift (#review finding, 2026-07-19). $1 is trusted
+# to be a DB-sourced id everywhere this is called, but it is guarded anyway
+# (matches inbox.sh's own defensive stance) since it is interpolated into SQL.
+mark_read() {
+  local mid="$1"
+  case "$mid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=$mid AND read_at IS NULL;" 2>/dev/null || true
+}
+
 LAST=""
 if [ -f "$WATERMARK_FILE" ]; then
   LAST="$(cat "$WATERMARK_FILE" 2>/dev/null || true)"
@@ -390,6 +405,7 @@ while true; do
         # which also ends the agent CLI sharing it. Deterministic teardown, no
         # dependence on the agent LLM noticing the message. See #109.
         if [ "$body" = "ctrl:despawn" ]; then
+          mark_read "$id"
           LAST="$id"; persist_watermark
           # Only an EXCLUSIVE watcher dedicated to exactly this role tears
           # itself down. A broad-subscription watcher (e.g. a leader whose
@@ -413,6 +429,12 @@ while true; do
           cleanup
           exit 0
         fi
+        # Mark delivered so a later inbox.sh call (e.g. a respawned/resumed
+        # session's actas re-registration) does not re-surface this message as
+        # unread. Without this, every message ever streamed live stays
+        # read_at IS NULL forever, and a single inbox.sh call replays the
+        # entire history as "new".
+        mark_read "$id"
         LAST="$id"
         persist_watermark
       done <<< "$ROWS"

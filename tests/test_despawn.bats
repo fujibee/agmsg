@@ -47,6 +47,36 @@ teardown() {
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
 
+# read_at for the most recent message with the given body, empty if unread.
+_read_at_for_body() {
+  ( # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_sqlite "$(agmsg_db_path)" \
+      "SELECT read_at FROM messages WHERE body='$1' ORDER BY id DESC LIMIT 1;" )
+}
+
+@test "despawn: graceful — ctrl:despawn control row is marked read (does not linger as unread)" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  setup_live_owner "$RUN" sess-m
+
+  AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
+    >/dev/null 2>&1 &
+  local wpid=$! i
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
+  [ -e "$RUN/ready.team__alice" ]
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10
+  [ "$status" -eq 0 ]
+
+  # The ctrl:despawn row itself must not be left permanently unread — a
+  # broad (non-actas) watcher that later scans this project's inbox must not
+  # see it resurface as a "new" message (2026-07-19 review finding).
+  [ -n "$(_read_at_for_body "ctrl:despawn")" ]
+
+  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+}
+
 @test "despawn --force: kills recorded placement and drops registration without the member" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   # Placement as spawn would have recorded it (pane %99 doesn't exist; kill is
