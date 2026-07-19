@@ -24,6 +24,12 @@ teardown() {
 @test "install: fresh install ships scripts/lib and the commands actually run" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/scripts/lib/storage.sh" ]
+  [ -x "$SK/scripts/ready.sh" ]
+
+  # The opt-in actas handshake is part of the installed public command set.
+  bash "$SK/scripts/ready.sh" mark demo alice
+  bash "$SK/scripts/ready.sh" check demo alice
+  bash "$SK/scripts/ready.sh" clear demo alice
 
   # End-to-end through the installed scripts — a missing sourced helper would
   # surface here, not just as a stat on a file.

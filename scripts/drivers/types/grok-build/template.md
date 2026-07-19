@@ -133,9 +133,15 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
    b. Launch a fresh watcher with the `monitor` tool (persistent):
       - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${GROK_SESSION_ID:--}" "$(pwd)" grok-build <name>`
       - description: `agmsg inbox stream`
+   Wait until the monitor tool confirms that this watcher task has started and
+   is streaming before continuing. A launch request by itself is not readiness;
+   do not run step 6 while the watcher is still starting.
    The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
 5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-6. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
+6. After the identity claim is complete and, in monitor mode, the monitor tool has confirmed the watcher is running and streaming, signal one-shot spawn readiness exactly once:
+   `~/.agents/skills/__SKILL_NAME__/scripts/ready.sh mark <team> <name>`
+   Use the team resolved in steps 2-3. This mark says only that actas bootstrap completed; it is not a watcher-liveness signal.
+7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.

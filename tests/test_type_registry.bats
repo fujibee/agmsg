@@ -54,6 +54,17 @@ write_node_launcher_fixtures() {
   [ "$output" = "FALLBACK" ]
 }
 
+@test "type-registry: actas handshake is explicit opt-in" {
+  run env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get grok-build handshake"
+  [ "$status" -eq 0 ]
+  [ "$output" = "actas" ]
+
+  # Missing key remains empty, preserving existing driver behavior.
+  run env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get codex handshake"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "type-registry: template_path resolves to the type dir's template.md" {
   run env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_template_path codex"
   [ "$status" -eq 0 ]
