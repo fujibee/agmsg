@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.9] - 2026-07-19
 
 ### Added
+- Isolate Codex monitor bridges by role (#425)
 - Free shell tab, unattached to any agent (#431)
 - Add session-only dismiss to outdated-CLI banner (#430)
 - Extend join/actas prompts with roster-aware name suggestions (#421)
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replace flaky ls -t rollout lookup with find + portable mtime sort (#423)
 - Bound the stdin read so a never-closed pipe cannot freeze the agent pane (#422)
 - Convert team config paths for readfile() via agmsg_sql_readfile_path (#396)
+- Fix Codex monitor multi-identity delivery (#419)
 - Auto-decline approval requests, arm the turn watchdog on externally-active turns (#420)
 - Add Shell requirement to all type templates (#345)
 - Validate team name before resolving roster config path (#418)
