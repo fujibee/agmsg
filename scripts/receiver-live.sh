@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# receiver-live.sh — is the actas receiver for (team, agent) still live?
+# receiver-live.sh — is the exclusive (actas) receiver for (team, agent) live?
 #
-# Reads the ready sentinel written by watch.sh when an exclusive (actas)
-# watcher attaches (see agmsg_ready_path / #108) and checks that the owner
-# process is still running.
+# Exclusive watchers (watch.sh with ACTIVE_NAME set) write:
+#   1. run/watch.<session_token>.pid  — the watcher process itself (first)
+#   2. run/ready.<team>__<agent>      — content = <session_token> (second)
+# See watch.sh / agmsg_ready_path / #108. Broad (non-actas) watchers never
+# write a ready sentinel; they are outside this helper's scope.
 #
-# Origin: proposed in fujibee/agmsg#372 by @u-ichi as a shared liveness
-# primitive for external delivery daemons and spawn readiness (#338 Gap 2).
-# This copy keeps that contract and adds a composite-instance-id fallback
-# so it works with today's watch.sh ready tokens ("<session_id>.<pid>",
-# see instance-id.sh / #93) in addition to an explicit "pid=N" field.
+# Origin: fujibee/agmsg#372 by @u-ichi proposed a ready-file + kill -0 helper.
+# This copy keeps the ready-path contract and extends it so the process we
+# probe is the WATCHER (watch.<token>.pid), not the agent CLI pid embedded in
+# a composite instance id. Treating the composite trailing digits as the
+# watcher pid is wrong: that component is the agent process (#93), so a dead
+# watcher with a live agent would false-alive. Credit #372; extension is for
+# accurate exclusive-receiver liveness used by delivery.sh status (#267).
 #
 # Usage:
 #   receiver-live.sh <team> <agent>        # exit 0 if live, non-zero if not; silent
-#   receiver-live.sh <team> <agent> --pid  # print the live pid on stdout when live
+#   receiver-live.sh <team> <agent> --pid  # print the live WATCHER pid when live
 #
-# Exit status: 0 = live, 1 = missing/stale/not-alive.
+# Exit status: 0 = exclusive receiver live, 1 = missing/stale/not-alive.
 set -euo pipefail
 
 TEAM="${1:?team required}"
@@ -27,38 +31,42 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/compat.sh"
 
 ready="$(SKILL_DIR="$SKILL_DIR" agmsg_ready_path "$TEAM" "$AGENT")"
 [ -f "$ready" ] || exit 1
 
-# Preferred form from #372: an explicit pid=N field anywhere in the file.
-pid="$(sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' "$ready" | head -1 | tr -d '\r')"
+# Full ready content is the session token watch.sh stamped (bare sid or
+# composite "<sid>.<agent_pid>"). Do NOT treat the trailing digits as the
+# watcher pid — those are the agent CLI's pid when composite.
+token="$(tr -d '\r\n' < "$ready" 2>/dev/null || true)"
+[ -n "$token" ] || exit 1
 
-# Fallback: watch.sh today stamps the composite instance id
-# ("<session_id>.<pid>") as the sole line. Trailing numeric component is the
-# owner process (same pid kill -0 gate actas_lock_sid_alive uses).
-if [ -z "$pid" ]; then
-  token="$(tr -d '\r\n' < "$ready" 2>/dev/null || true)"
-  case "$token" in
-    *.*)
-      trail="${token##*.}"
-      case "$trail" in
-        ''|*[!0-9]*) ;;
-        *) pid="$trail" ;;
-      esac
-      ;;
-  esac
-fi
+# Required: watcher pidfile, written before the ready sentinel (same process,
+# sequential in watch.sh). Missing pidfile ⇒ stale ready, not live.
+watcher_pidfile="$RUN_DIR/watch.${token}.pid"
+[ -f "$watcher_pidfile" ] || exit 1
 
-case "$pid" in
+watcher_pid="$(tr -d '\r\n' < "$watcher_pidfile" 2>/dev/null || true)"
+case "$watcher_pid" in
   ''|*[!0-9]*|0) exit 1 ;;
 esac
+[ "$watcher_pid" -gt 1 ] 2>/dev/null || exit 1
 
-kill -0 "$pid" 2>/dev/null || exit 1
+kill -0 "$watcher_pid" 2>/dev/null || exit 1
+
+# Defend against pid recycling: the live pid must still look like our watch.sh.
+cmd="$(compat_get_cmdline "$watcher_pid" 2>/dev/null || true)"
+case "$cmd" in
+  *"$SKILL_DIR/scripts/watch.sh"*|*"watch.sh "*) ;;
+  *) exit 1 ;;
+esac
 
 if [ "$PRINT_PID" -eq 1 ]; then
-  printf '%s\n' "$pid"
+  printf '%s\n' "$watcher_pid"
 fi
 exit 0

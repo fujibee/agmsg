@@ -245,32 +245,70 @@ agmsg_delivery_status_default() {
 }
 agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
 
-# Print one liveness line for a (team, agent) using receiver-live.sh — the
-# shared ready-sentinel primitive proposed in fujibee/agmsg#372 (@u-ichi).
-# Generic label "Watcher:" (not type-branded) so any monitor-tool type that
-# uses watch.sh actas ready files benefits. Codex bridge liveness stays in
-# the codex plug and never calls this. See also #267 / #338.
-# Args: <team> <agent>
+# First live watch.sh pid whose cmdline matches <project> <type> (adjacent
+# fields, same needle shape as kill_all_watchers). Empty if none. Used when an
+# identity has no exclusive ready sentinel — Claude Code's default SessionStart
+# watcher is broad (no ACTIVE_NAME) and never writes ready.* (#108).
+# Args: <project> <type>
+agmsg_delivery_find_broad_watcher_pid() {
+  local project="$1" type="$2"
+  local f pid cmd needle
+  [ -d "$RUN_DIR" ] || return 0
+  needle=" $project $type "
+  for f in "$RUN_DIR"/watch.*.pid; do
+    [ -f "$f" ] || continue
+    pid=$(tr -d '\r\n' < "$f" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || continue
+    cmd=$(compat_get_cmdline "$pid" 2>/dev/null || true)
+    case "$cmd" in
+      *"$SKILL_DIR/scripts/watch.sh"*) ;;
+      *) continue ;;
+    esac
+    case " $cmd " in
+      *"$needle"*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# Print one liveness line for a (team, agent). Two-tier:
+#   1) exclusive actas receiver via receiver-live.sh (ready + watch.<token>.pid)
+#   2) else, if a project/type-scoped broad watcher is live, say so explicitly
+#      instead of a false "not running" (P1-2)
+# Built on the #372 ready-path idea (@u-ichi) with watcher-pidfile accuracy.
+# Codex bridge liveness stays in the codex plug. See #267 / #338.
+# Args: <team> <agent> <project> <type>
 agmsg_delivery_print_watcher_status() {
-  local team="$1" name="$2"
-  local pid
-  # --pid prints the live owner pid on stdout when the receiver is alive;
-  # non-zero exit means missing/stale/not-alive (same contract as bare call).
+  local team="$1" name="$2" project="$3" type="$4"
+  local pid broad
+
   if pid=$(bash "$SCRIPT_DIR/receiver-live.sh" "$team" "$name" --pid 2>/dev/null); then
-    echo "Watcher: $team/$name alive (pid $pid)"
-  else
-    echo "Watcher: $team/$name not running"
+    echo "Watcher: $team/$name alive (exclusive, pid $pid)"
+    return 0
   fi
+
+  # No live exclusive receiver. Broad watchers cover many roles without a
+  # per-identity ready file — report coverage instead of a hard not-running.
+  if [ -n "$project" ] && [ -n "$type" ]; then
+    broad=$(agmsg_delivery_find_broad_watcher_pid "$project" "$type")
+    if [ -n "$broad" ]; then
+      echo "Watcher: $team/$name no exclusive receiver (broad watcher alive, pid $broad)"
+      return 0
+    fi
+  fi
+
+  echo "Watcher: $team/$name not running"
 }
 
 agmsg_delivery_runtime_status_default() {
   local type="${1:-}" project="${2:-}"
 
-  # Per-identity receiver liveness via receiver-live.sh when (type, project)
-  # is known and identities are registered. Same granularity as the codex
-  # plug's "Codex bridge: team/agent alive (pid N)" lines, built on the
-  # #372 primitive instead of an ad-hoc ready/pidfile walk. Types with a
-  # different runtime (codex bridge) override this whole function.
+  # Per-identity receiver liveness when (type, project) is known and identities
+  # are registered. Types with a different runtime (codex bridge) override this
+  # whole function.
   if [ -n "$type" ] && [ -n "$project" ]; then
     local pairs
     pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
@@ -279,16 +317,13 @@ agmsg_delivery_runtime_status_default() {
         if [ -z "$team" ] || [ -z "$name" ]; then
           continue
         fi
-        agmsg_delivery_print_watcher_status "$team" "$name"
+        agmsg_delivery_print_watcher_status "$team" "$name" "$project" "$type"
       done <<< "$pairs"
     fi
   fi
 
-  # Aggregate watch pidfile summary — still useful for unfiltered (non-actas)
-  # watchers that never write a ready sentinel, and for bare `status` with no
-  # type/project. Always emit a line (0/0 when run/ is absent) so status is
-  # predictable for automation. Codex's plug replaces this whole function and
-  # suppresses the count so bridge lines stay the single source of truth.
+  # Aggregate watch pidfile summary — always emit (0/0 when run/ is absent).
+  # Codex's plug replaces this whole function and suppresses the count.
   local alive=0 dead=0
   if [ -d "$RUN_DIR" ]; then
     for f in "$RUN_DIR"/watch.*.pid; do

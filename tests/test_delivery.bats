@@ -2432,75 +2432,111 @@ JSON
 }
 
 # --- monitor-tool watcher liveness via receiver-live.sh (#372 / #267) ---
-# Generic default runtime status for types that receive via watch.sh actas
-# ready sentinels (grok-build, claude-code, …). Built on the #372 primitive
-# (receiver-live.sh) rather than an ad-hoc ready/pidfile walk. Codex keeps
-# its own bridge-based override.
+# Exclusive path: ready sentinel + watch.<token>.pid (watcher, not agent pid).
+# Broad path: no ready → report broad watcher coverage instead of false
+# "not running" (Claude Code SessionStart default). Codex keeps its override.
 
-@test "delivery status (watcher): live ready (composite token) reports alive" {
+@test "delivery status (watcher): exclusive ready + live watch pidfile reports alive" {
   skip_on_windows "watcher status liveness under Git Bash"
   bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
   GROK_SESSION_ID="grok-live-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
 
-  # Live stand-in for the owner process; watch.sh stamps composite
-  # "<session>.<pid>" into the ready sentinel today.
-  sleep 60 &
-  local opid=$!
+  # Real actas watcher: writes watch.<token>.pid then ready with that token.
+  local token="sess-excl-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" grok-build alice >/dev/null 2>&1 &
+  local wpid=$!
   # shellcheck disable=SC2064
-  trap "kill $opid 2>/dev/null || true" EXIT
-  printf 'sess-live.%s\n' "$opid" > "$TEST_SKILL_DIR/run/ready.team__alice"
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice" i
+  for i in $(seq 1 40); do
+    [ -f "$ready" ] && break
+    sleep 0.25
+  done
+  [ -f "$ready" ]
+  local ready_token pidfile_pid
+  ready_token=$(tr -d '\r\n' < "$ready")
+  pidfile_pid=$(tr -d '\r\n' < "$TEST_SKILL_DIR/run/watch.${ready_token}.pid")
 
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Watcher: team/alice alive (pid $opid)"* ]]
+  [[ "$output" == *"Watcher: team/alice alive (exclusive, pid $pidfile_pid)"* ]]
 
-  kill "$opid" 2>/dev/null || true
+  kill "$wpid" 2>/dev/null || true
+  kill "$pidfile_pid" 2>/dev/null || true
   trap - EXIT
 }
 
-@test "delivery status (watcher): live ready with explicit pid= field reports alive (#372 form)" {
+@test "delivery status (watcher): agent-alive but watcher-dead is not exclusive alive (P1-1)" {
   skip_on_windows "watcher status liveness under Git Bash"
   bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
-  GROK_SESSION_ID="grok-live-2" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
+  GROK_SESSION_ID="grok-p1-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
 
+  # Live agent pid in composite token, but no/dead watcher pidfile.
   sleep 60 &
-  local opid=$!
+  local agent_pid=$!
   # shellcheck disable=SC2064
-  trap "kill $opid 2>/dev/null || true" EXIT
-  printf 'owner=sess-x pid=%s\n' "$opid" > "$TEST_SKILL_DIR/run/ready.team__alice"
+  trap "kill $agent_pid 2>/dev/null || true" EXIT
+  local token="sess-agent-only.${agent_pid}"
+  printf '%s\n' "$token" > "$TEST_SKILL_DIR/run/ready.team__alice"
+  # Intentionally no watch.<token>.pid — old bug treated agent_pid as watcher.
 
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Watcher: team/alice alive (pid $opid)"* ]]
+  [[ "$output" != *"alive (exclusive"* ]]
+  [[ "$output" == *"Watcher: team/alice not running"* ]] || \
+    [[ "$output" == *"no exclusive receiver"* ]]
 
-  kill "$opid" 2>/dev/null || true
+  kill "$agent_pid" 2>/dev/null || true
   trap - EXIT
 }
 
-@test "delivery status (watcher): missing ready file reports not running" {
+@test "delivery status (watcher): missing ready + live broad watcher reports broad coverage (P1-2)" {
+  skip_on_windows "watcher status liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team bob claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # Broad watcher: no ACTIVE_NAME ⇒ no ready file; argv is project+type only.
+  local token="sess-broad-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" claude-code >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local i
+  for i in $(seq 1 40); do
+    [ -f "$TEST_SKILL_DIR/run/watch.${token}.pid" ] && break
+    # watch.sh may normalize the token to composite
+    ls "$TEST_SKILL_DIR/run"/watch.*.pid >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+
+  # Resolve actual pid from whatever pidfile watch wrote
+  local broad_pid=""
+  broad_pid=$(cat "$TEST_SKILL_DIR/run"/watch.*.pid 2>/dev/null | head -1 | tr -d '\r\n')
+  [ -n "$broad_pid" ]
+  kill -0 "$broad_pid" 2>/dev/null
+
+  # No ready.team__bob
+  [ ! -f "$TEST_SKILL_DIR/run/ready.team__bob" ]
+
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Watcher: team/bob no exclusive receiver (broad watcher alive, pid $broad_pid)"* ]]
+  [[ "$output" != *"Watcher: team/bob not running"* ]]
+
+  kill "$wpid" 2>/dev/null || true
+  kill "$broad_pid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "delivery status (watcher): missing ready and no watchers reports not running" {
   bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
   GROK_SESSION_ID="grok-nr-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
-
-  run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Watcher: team/alice not running"* ]]
-}
-
-@test "delivery status (watcher): dead owner pid reports not running" {
-  skip_on_windows "watcher status liveness under Git Bash"
-  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
-  GROK_SESSION_ID="grok-dead-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
-  mkdir -p "$TEST_SKILL_DIR/run"
-
-  local dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do
-    dead_pid=$((dead_pid + 1))
-  done
-  printf 'sess-dead.%s\n' "$dead_pid" > "$TEST_SKILL_DIR/run/ready.team__alice"
 
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [ "$status" -eq 0 ]
@@ -2518,34 +2554,49 @@ JSON
   [[ "$output" == *"watch processes:"* ]]
 }
 
-@test "delivery status (watcher): claude-code identities use the same generic lines" {
-  bash "$SCRIPTS/join.sh" team bob claude-code "$TEST_PROJECT" >/dev/null
-  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
-
-  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Watcher: team/bob not running"* ]]
-  [[ "$output" == *"watch processes:"* ]]
-}
-
-@test "receiver-live.sh: exits 0 for a live composite ready token" {
+@test "receiver-live.sh: exits 0 only when watch pidfile is live (not agent pid alone)" {
   skip_on_windows "receiver-live liveness under Git Bash"
+  bash "$SCRIPTS/join.sh" team alice grok-build "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 60 &
-  local opid=$!
-  # shellcheck disable=SC2064
-  trap "kill $opid 2>/dev/null || true" EXIT
-  printf 'sess.%s\n' "$opid" > "$TEST_SKILL_DIR/run/ready.team__alice"
 
-  run bash "$SCRIPTS/receiver-live.sh" team alice
-  [ "$status" -eq 0 ]
+  local token="sess-rl-$$"
+  bash "$SCRIPTS/watch.sh" "$token" "$TEST_PROJECT" grok-build alice >/dev/null 2>&1 &
+  local wpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $wpid 2>/dev/null || true" EXIT
+
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice" i
+  for i in $(seq 1 40); do
+    [ -f "$ready" ] && break
+    sleep 0.25
+  done
+  [ -f "$ready" ]
+  local ready_token pidfile_pid
+  ready_token=$(tr -d '\r\n' < "$ready")
+  pidfile_pid=$(tr -d '\r\n' < "$TEST_SKILL_DIR/run/watch.${ready_token}.pid")
 
   run bash "$SCRIPTS/receiver-live.sh" team alice --pid
   [ "$status" -eq 0 ]
-  [ "$output" = "$opid" ]
+  [ "$output" = "$pidfile_pid" ]
 
-  kill "$opid" 2>/dev/null || true
+  kill "$wpid" 2>/dev/null || true
+  kill "$pidfile_pid" 2>/dev/null || true
+  trap - EXIT
+}
+
+@test "receiver-live.sh: agent-only composite ready without watch pidfile is not live (P1-1)" {
+  skip_on_windows "receiver-live liveness under Git Bash"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 60 &
+  local agent_pid=$!
+  # shellcheck disable=SC2064
+  trap "kill $agent_pid 2>/dev/null || true" EXIT
+  printf 'sess-only.%s\n' "$agent_pid" > "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  run bash "$SCRIPTS/receiver-live.sh" team alice
+  [ "$status" -ne 0 ]
+
+  kill "$agent_pid" 2>/dev/null || true
   trap - EXIT
 }
 
