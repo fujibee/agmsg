@@ -2101,6 +2101,7 @@ export default function App() {
                     args={p.args}
                     cwd={p.cwd}
                     fontSize={terminalFontSize}
+                    active={isActiveWindow}
                     onAgentState={applyAgentState}
                     onCellSize={handleCellSize}
                   />

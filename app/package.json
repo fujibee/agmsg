@@ -18,6 +18,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "0.19.0",
     "@xterm/xterm": "^6.0.0",
     "i18next": "^26.3.4",
     "i18next-browser-languagedetector": "^8.2.1",
