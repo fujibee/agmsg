@@ -49,6 +49,43 @@
       "title": "{{team}} のapp-user"
     }
   },
+  "managedSession": {
+    "title": "Managed session",
+    "noProject": "exact director登録がありません",
+    "inventory": {
+      "registration": "registration",
+      "process": "process",
+      "pane": "pane",
+      "worktree": "worktree",
+      "generation": "generation",
+      "active_turn": "active turn",
+      "final_ack": "final ACK"
+    },
+    "action": {
+      "start": "Start session",
+      "detach": "Detach",
+      "reconnect": "Reconnect",
+      "ack": "Final ACK",
+      "end": "End session"
+    },
+    "error": {
+      "noDirector": "このチームにproject付きのexact name \"director\" を登録してください。",
+      "notSpawnable": "directorの登録typeには起動可能なCLIがありません。"
+    },
+    "modal": {
+      "detachPane": {
+        "title": "managed sessionからdetachしますか？",
+        "body": "tmux attach clientだけを閉じます。directorとmanaged sessionは継続します。",
+        "confirm": "Detach"
+      },
+      "detachTab": {
+        "title": "このタブを閉じますか？",
+        "body": "tmux attach clientだけを閉じ、directorとmanaged sessionは継続します。",
+        "mixedBody": "managed sessionは継続しますが、次のdirect agentは停止します: {{names}}。",
+        "confirm": "タブを閉じる"
+      }
+    }
+  },
   "tabs": {
     "roomLabel": "# チームルーム",
     "close": "×",

@@ -14,6 +14,10 @@ type Props = {
   id: string;
   cmd: string;
   args?: string[];
+  /** Optional classifier identity when the PTY command is only a transport
+   * (the managed tmux attach client). Direct panes leave this unset and keep
+   * deriving detection from cmd in Rust. */
+  detectionType?: string;
   cwd?: string;
   fontSize?: number;
   /** Whether this pane is the currently visible one. Every pane across
@@ -38,7 +42,17 @@ function b64ToBytes(b64: string): Uint8Array {
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
  */
-export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, onAgentState, onCellSize }: Props) {
+export function TerminalPane({
+  id,
+  cmd,
+  args = [],
+  detectionType,
+  cwd,
+  fontSize = 12,
+  active,
+  onAgentState,
+  onCellSize,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   // Live handles to the current terminal/fit addon, for the font-size effect
   // below to reach — that effect must NOT be a dependency of the main effect
@@ -151,7 +165,7 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, o
       term.onData((data) => void invoke("pty_write", { id, data }));
       fitNow(); // size the PTY to the pane if it's already laid out
       try {
-        await invoke("pty_spawn", { id, cmd, args, cwd, rows: term.rows, cols: term.cols });
+        await invoke("pty_spawn", { id, cmd, args, detectionType, cwd, rows: term.rows, cols: term.cols });
       } catch (err) {
         // A failed spawn (missing CLI on PATH, bad cwd, ...) would otherwise
         // leave this pane blank forever with zero indication anything went
@@ -192,7 +206,7 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, o
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [id, cmd, cwd, onAgentState, onCellSize]);
+  }, [id, cmd, detectionType, cwd, onAgentState, onCellSize]);
 
   // Apply a fontSize change live, without recreating the terminal (which
   // would kill and respawn the PTY). Skips its very first run — at that

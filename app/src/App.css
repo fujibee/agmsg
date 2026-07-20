@@ -685,6 +685,82 @@ body.resizing-row {
 .team-status-dot.status-idle { background: var(--green); }
 .team-status-dot.status-unknown { background: var(--green); }
 .team-status-dot.status-empty { background: var(--muted); }
+.managed-session-control {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+}
+.managed-session-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+.managed-session-state {
+  color: var(--muted);
+  font-size: 9px;
+}
+.managed-session-state.state-active { color: var(--green); }
+.managed-session-state.state-draining { color: #e0af68; }
+.managed-session-project {
+  margin: 5px 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.managed-session-inventory {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 6px;
+}
+.managed-session-inventory > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.managed-session-inventory dt { color: var(--muted); }
+.managed-session-inventory dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.managed-session-error {
+  max-height: 38px;
+  margin-bottom: 6px;
+  overflow: auto;
+  color: #f7768e;
+  overflow-wrap: anywhere;
+}
+.managed-session-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+.managed-session-actions button {
+  min-width: 0;
+  padding: 4px 3px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.managed-session-actions button:hover:not(:disabled) { border-color: var(--accent); }
+.managed-session-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.managed-session-actions .managed-session-end {
+  grid-column: 1 / -1;
+  color: #f7768e;
+}
 .collapsed-team-status {
   width: 28px;
   padding: 2px;

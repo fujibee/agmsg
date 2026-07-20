@@ -1,5 +1,6 @@
 mod agmsg;
 mod agent_state;
+mod managed_session;
 mod menu_i18n;
 mod pty;
 
@@ -650,6 +651,11 @@ pub fn run() {
             agmsg::agmsg_default_project,
             agmsg::agmsg_command_name,
             agmsg::agmsg_spawnable_types,
+            managed_session::managed_session_start,
+            managed_session::managed_session_status,
+            managed_session::managed_session_turn,
+            managed_session::managed_session_ack,
+            managed_session::managed_session_end,
             set_menu_language,
             set_team_room_visible,
             set_user_chat_visible,
