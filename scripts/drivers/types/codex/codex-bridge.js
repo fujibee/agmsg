@@ -26,6 +26,8 @@ Beta Codex app-server bridge for agmsg pseudo-monitoring.
 
 Options:
   --project <path>        Project path to monitor.
+  --workspace-root <path> Additional writable root to retain on bridge turns.
+                          Repeat for multiple roots.
   --type <agent_type>     Agent type for identity resolution (default: codex).
   --team <team>           Limit wakeups to one team.
   --name <agent>          Limit wakeups to one agent name.
@@ -85,6 +87,8 @@ function parseArgs(argv) {
     requestTimeoutMs: Number(process.env.AGMSG_CODEX_BRIDGE_REQUEST_TIMEOUT_MS || 30000),
     watchFailureLimit: Number(process.env.AGMSG_CODEX_BRIDGE_WATCH_FAILURE_LIMIT || 3),
     inlineInbox: false,
+    pairs: [],
+    workspaceRoots: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
   };
 
@@ -96,12 +100,18 @@ function parseArgs(argv) {
       opts.resolveOnly = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
+    } else if (arg === "--workspace-root") {
+      opts.workspaceRoots.push(argv[++i]);
     } else if (arg === "--type") {
       opts.type = argv[++i];
     } else if (arg === "--team") {
       opts.team = argv[++i];
     } else if (arg === "--name") {
       opts.name = argv[++i];
+    } else if (arg === "--pair") {
+      const [team, name] = (argv[++i] || "").split("\t");
+      if (!team || !name) die("--pair must be team<TAB>agent");
+      opts.pairs.push({ team, name });
     } else if (arg === "--timeout") {
       opts.timeout = Number(argv[++i]);
     } else if (arg === "--interval") {
@@ -133,6 +143,8 @@ function parseArgs(argv) {
 
   if (opts.help) return opts;
   if (!opts.project) die("--project is required");
+  if (opts.workspaceRoots.some((root) => !root)) die("--workspace-root requires a path");
+  opts.workspaceRoots = [...new Set([opts.project, ...opts.workspaceRoots])];
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) die("--timeout must be a positive number");
   if (!Number.isFinite(opts.interval) || opts.interval <= 0) die("--interval must be a positive number");
   if (!Number.isFinite(opts.maxWakes) || opts.maxWakes < 0) die("--max-wakes must be a non-negative number");
@@ -171,7 +183,7 @@ function runScript(script, args) {
   return result;
 }
 
-function resolveIdentity(opts) {
+function resolveIdentities(opts) {
   const result = runScript("identities.sh", [toPosixPath(opts.project), opts.type]);
   if (result.status !== 0) {
     die(`identity resolution failed: ${(result.stderr || result.stdout).trim()}`);
@@ -187,7 +199,8 @@ function resolveIdentity(opts) {
     })
     .filter((pair) => pair.team && pair.name)
     .filter((pair) => !opts.team || pair.team === opts.team)
-    .filter((pair) => !opts.name || pair.name === opts.name);
+    .filter((pair) => !opts.name || pair.name === opts.name)
+    .filter((pair) => opts.pairs.length === 0 || opts.pairs.some((wanted) => wanted.team === pair.team && wanted.name === pair.name));
 
   const deduped = [];
   const seen = new Set();
@@ -200,8 +213,8 @@ function resolveIdentity(opts) {
   }
 
   if (deduped.length === 0) die("no matching codex identity; run actas or pass --team/--name");
-  if (deduped.length > 1) die("multiple identities match; pass --team and --name");
-  return deduped[0];
+  if (deduped.length > 1) die("multiple identities match; launch one bridge per --pair");
+  return deduped;
 }
 
 class AppServerClient {
@@ -212,6 +225,7 @@ class AppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
+    this.requestHandlers = new Map();
     this.child = null;
   }
 
@@ -249,6 +263,14 @@ class AppServerClient {
     this.handlers.set(method, handler);
   }
 
+  // Register a handler for a REQUEST the app-server sends us (a message with
+  // both `method` and `id`, expecting a reply) -- as opposed to `on()`, which
+  // only ever sees notifications (no `id`). Approval/elicitation prompts are
+  // requests: see dispatchRequest() and #299.
+  onRequest(method, handler) {
+    this.requestHandlers.set(method, handler);
+  }
+
   handleLine(line) {
     if (!line.trim()) return;
     let message;
@@ -256,6 +278,25 @@ class AppServerClient {
       message = JSON.parse(line);
     } catch (error) {
       console.error(`codex-bridge: ignoring non-json app-server line: ${line}`);
+      return;
+    }
+
+    // A message carrying `method` is always a request or notification FROM
+    // the app-server -- check this BEFORE looking at `pending`. Client and
+    // server number their own outbound requests independently on this
+    // bidirectional connection, so a server-initiated request's `id` can
+    // collide with the id of one of OUR still-outstanding requests (e.g. our
+    // pending "turn/start" and an incoming approval request both landing on
+    // id 4). Checking `pending` first would then wrongly resolve our own
+    // request with the approval's params and swallow the approval -- the
+    // exact #299 deadlock this fix exists to close. `method` presence is
+    // what a JSON-RPC response never has, so it is the correct discriminator.
+    if (message.method) {
+      if (Object.prototype.hasOwnProperty.call(message, "id")) {
+        this.dispatchRequest(message.id, message.method, message.params || {});
+      } else if (this.handlers.has(message.method)) {
+        this.dispatch(message.method, message.params || {});
+      }
       return;
     }
 
@@ -268,12 +309,31 @@ class AppServerClient {
       } else {
         pending.resolve(message.result);
       }
+    }
+  }
+
+  dispatchRequest(id, method, params) {
+    const handler = this.requestHandlers.get(method);
+    if (!handler) {
+      console.error(`codex-bridge: no handler for app-server request '${method}'; replying with method-not-found`);
+      this.respondError(id, -32601, `Method not found: ${method}`);
       return;
     }
+    Promise.resolve()
+      .then(() => handler(params))
+      .then((result) => this.respond(id, result === undefined ? null : result))
+      .catch((error) => {
+        console.error(`codex-bridge: ${method} request handler failed: ${error.message}`);
+        this.respondError(id, -32000, error.message || String(error));
+      });
+  }
 
-    if (message.method && this.handlers.has(message.method)) {
-      this.dispatch(message.method, message.params || {});
-    }
+  respond(id, result) {
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  }
+
+  respondError(id, code, message) {
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
   }
 
   request(method, params) {
@@ -349,6 +409,7 @@ class WebSocketAppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
+    this.requestHandlers = new Map();
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.connected = false;
@@ -442,6 +503,14 @@ class WebSocketAppServerClient {
 
   on(method, handler) {
     this.handlers.set(method, handler);
+  }
+
+  // Register a handler for a REQUEST the app-server sends us (a message with
+  // both `method` and `id`, expecting a reply) -- as opposed to `on()`, which
+  // only ever sees notifications (no `id`). Approval/elicitation prompts are
+  // requests: see dispatchRequest() and #299.
+  onRequest(method, handler) {
+    this.requestHandlers.set(method, handler);
   }
 
   handleData(chunk, resolveStart, rejectStart) {
@@ -540,6 +609,24 @@ class WebSocketAppServerClient {
       console.error(`codex-bridge: ignoring non-json app-server message: ${line}`);
       return;
     }
+    // A message carrying `method` is always a request or notification FROM
+    // the app-server -- check this BEFORE looking at `pending`. Client and
+    // server number their own outbound requests independently on this
+    // bidirectional connection, so a server-initiated request's `id` can
+    // collide with the id of one of OUR still-outstanding requests. Checking
+    // `pending` first would then wrongly resolve our own request with the
+    // approval's params and swallow the approval -- the exact #299 deadlock
+    // this fix exists to close. `method` presence is what a JSON-RPC response
+    // never has, so it is the correct discriminator.
+    if (message.method) {
+      if (Object.prototype.hasOwnProperty.call(message, "id")) {
+        this.dispatchRequest(message.id, message.method, message.params || {});
+      } else if (this.handlers.has(message.method)) {
+        this.dispatch(message.method, message.params || {});
+      }
+      return;
+    }
+
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -549,11 +636,31 @@ class WebSocketAppServerClient {
       } else {
         pending.resolve(message.result);
       }
+    }
+  }
+
+  dispatchRequest(id, method, params) {
+    const handler = this.requestHandlers.get(method);
+    if (!handler) {
+      console.error(`codex-bridge: no handler for app-server request '${method}'; replying with method-not-found`);
+      this.respondError(id, -32601, `Method not found: ${method}`);
       return;
     }
-    if (message.method && this.handlers.has(message.method)) {
-      this.dispatch(message.method, message.params || {});
-    }
+    Promise.resolve()
+      .then(() => handler(params))
+      .then((result) => this.respond(id, result === undefined ? null : result))
+      .catch((error) => {
+        console.error(`codex-bridge: ${method} request handler failed: ${error.message}`);
+        this.respondError(id, -32000, error.message || String(error));
+      });
+  }
+
+  respond(id, result) {
+    this.sendJson({ jsonrpc: "2.0", id, result });
+  }
+
+  respondError(id, code, message) {
+    this.sendJson({ jsonrpc: "2.0", id, error: { code, message } });
   }
 
   request(method, params) {
@@ -658,9 +765,10 @@ class WebSocketAppServerClient {
 }
 
 class CodexBridge {
-  constructor(opts, identity) {
+  constructor(opts, identities) {
     this.opts = opts;
-    this.identity = identity;
+    this.identities = identities;
+    this.identity = identities[0];
     this.client = createAppServerClient(opts);
     this.threadId = opts.threadId || null;
     this.threadIdle = true;
@@ -675,8 +783,11 @@ class CodexBridge {
     this.watchRearmTimer = null;
     this.inlineInboxText = "";
     this.stopping = false;
-    this.pidfile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.pid`);
-    this.metafile = path.join(RUN_DIR, `codex-bridge.${identity.team}.${identity.name}.meta`);
+    const key = identities.length === 1
+      ? `${identities[0].team}.${identities[0].name}`
+      : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
+    this.pidfile = path.join(RUN_DIR, `codex-bridge.${key}.pid`);
+    this.metafile = path.join(RUN_DIR, `codex-bridge.${key}.meta`);
   }
 
   async run() {
@@ -691,9 +802,28 @@ class CodexBridge {
     this.client.on("turn/started", this.clientHandler("turn/started", () => {
       this.turnActive = true;
       this.threadIdle = false;
+      // This turn was not started by tryStartTurn() -- e.g. a TUI-driven turn
+      // on a thread the bridge shares -- so nothing else will arm a watchdog
+      // for it. Without one, a turn that never reports completion (the app
+      // -server does not reliably send turn/completed, see #41) leaves
+      // turnActive stuck true and every later wake deferred forever. See #299.
+      this.startTurnWatchdog();
     }));
     this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
     this.client.on("turn/failed", this.clientHandler("turn/failed", () => this.onTurnCompleted()));
+
+    // A headless bridge must never leave a prompt only a human can answer
+    // unanswered -- an unanswered approval/elicitation request wedges the
+    // thread in "waitingOnApproval" forever, with no watchdog able to save it
+    // (see #299). Auto-decline everything: a denied command/patch/permission
+    // still lets the turn finish normally instead of hanging.
+    this.client.onRequest("item/commandExecution/requestApproval", () => this.denyApproval());
+    this.client.onRequest("item/fileChange/requestApproval", () => this.denyApproval());
+    this.client.onRequest("item/permissions/requestApproval", () => this.denyPermissions());
+    this.client.onRequest("mcpServer/elicitation/request", () => this.denyElicitation());
+    // Legacy (pre-v2) app-server protocol names, kept as a safety net.
+    this.client.onRequest("execCommandApproval", () => this.denyLegacyApproval());
+    this.client.onRequest("applyPatchApproval", () => this.denyLegacyApproval());
 
     this.client.start();
     await this.client.ready?.();
@@ -724,8 +854,7 @@ class CodexBridge {
       [
         `pid=${process.pid}`,
         `project=${this.opts.project}`,
-        `team=${this.identity.team}`,
-        `name=${this.identity.name}`,
+        `identities=${this.identities.map((p) => `${p.team}/${p.name}`).join(",")}`,
         `type=${this.opts.type}`,
       ].join("\n") + "\n",
     );
@@ -788,24 +917,45 @@ class CodexBridge {
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
     }
     if (this.threadId) {
-      const response = await this.client.request("thread/resume", {
-        threadId: this.threadId,
-        cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
-        excludeTurns: true,
-      });
+      let response;
+      try {
+        response = await this.client.request("thread/resume", {
+          threadId: this.threadId,
+          cwd: this.opts.project,
+          runtimeWorkspaceRoots: this.opts.workspaceRoots,
+          excludeTurns: true,
+        });
+      } catch (err) {
+        // Codex 0.142+'s --remote sessions may not create a rollout, which
+        // makes the thread/resume request itself fail outright. turn/start
+        // only needs threadId, so keep the bridge alive by falling back to
+        // the idle state instead of dying. This catch covers only the
+        // request -- the "did not return the requested thread id" check
+        // below is a distinct failure (a resume that succeeded but returned
+        // the wrong thread) and should still die() as before, not be
+        // silently swallowed by this fallback.
+        console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
+        this.threadIdle = true;
+        this.turnActive = false;
+        return;
+      }
       if (!response.thread || response.thread.id !== this.threadId) {
         die("thread/resume did not return the requested thread id");
       }
       const type = response.thread.status && response.thread.status.type;
       this.threadIdle = type !== "active";
       this.turnActive = type === "active";
+      // The thread can already be active on resume (e.g. a stuck approval
+      // predating this bridge, or a co-resident TUI turn) with no bridge-owned
+      // turn/start to hang a watchdog off of. Arm one here too so a pending
+      // wake never waits on it forever. See #299.
+      if (this.turnActive) this.startTurnWatchdog();
       console.error(`codex-bridge: resumed thread ${this.threadId}`);
       return;
     }
     const response = await this.client.request("thread/start", {
       cwd: this.opts.project,
-      runtimeWorkspaceRoots: [this.opts.project],
+      runtimeWorkspaceRoots: this.opts.workspaceRoots,
       ephemeral: false,
     });
     this.threadId = response.thread && response.thread.id;
@@ -826,15 +976,12 @@ class CodexBridge {
       // project path. The spawn cwd below stays native for the app-server.
       toPosixPath(this.opts.project),
       this.opts.type,
-      "--team",
-      this.identity.team,
-      "--name",
-      this.identity.name,
       "--timeout",
       String(this.opts.timeout),
       "--interval",
       String(this.opts.interval),
     ];
+    for (const pair of this.identities) command.push("--pair", `${pair.team}\t${pair.name}`);
     try {
       await this.client.request("process/spawn", {
         command,
@@ -907,6 +1054,10 @@ class CodexBridge {
     if (type === "active") {
       this.turnActive = true;
       this.threadIdle = false;
+      // See the identical comment on the "turn/started" handler in run() --
+      // this transition can also happen without tryStartTurn() ever calling
+      // startTurnWatchdog() itself. See #299.
+      this.startTurnWatchdog();
       return;
     }
     if (type === "idle") {
@@ -976,7 +1127,7 @@ class CodexBridge {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
-        runtimeWorkspaceRoots: [this.opts.project],
+        runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       this.pendingWake = false;
@@ -1019,6 +1170,29 @@ class CodexBridge {
     console.error(`codex-bridge: server error: ${JSON.stringify(params)}`);
   }
 
+  // Response shapes below are the app-server's actual v2/legacy approval
+  // protocol (codex-rs app-server-protocol ServerRequest), not guesses.
+  denyApproval() {
+    console.error("codex-bridge: auto-declining an approval request (headless bridge, see #299)");
+    return { decision: "decline" };
+  }
+
+  denyLegacyApproval() {
+    console.error("codex-bridge: auto-denying a legacy approval request (headless bridge, see #299)");
+    return { decision: "denied" };
+  }
+
+  denyPermissions() {
+    // No optional grant fields set = no additional permissions granted.
+    console.error("codex-bridge: auto-declining a permissions request (headless bridge, see #299)");
+    return { permissions: {}, scope: "turn" };
+  }
+
+  denyElicitation() {
+    console.error("codex-bridge: auto-declining an MCP elicitation request (headless bridge, see #299)");
+    return { action: "decline", content: null, _meta: null };
+  }
+
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
     process.stderr.write(params.delta);
@@ -1046,19 +1220,25 @@ class CodexBridge {
   }
 
   readInboxForPrompt() {
-    const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), this.identity.team, this.identity.name], {
-      cwd: this.opts.project,
-      encoding: "utf8",
-    });
-    if (result.error) {
-      console.error(`codex-bridge: inbox.sh failed: ${result.error.message}`);
+    // Re-resolve locks immediately before reading. watch-once only tells us
+    // that *some* eligible identity woke; ownership can change before this
+    // turn starts, so never let a stale bridge membership mark another
+    // session's messages read.
+    const eligible = spawnSync(BASH_BIN, [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type,
+      ...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`])], { cwd: this.opts.project, encoding: "utf8" });
+    if (eligible.error || eligible.status !== 0) {
+      console.error("codex-bridge: could not resolve eligible identities before reading inbox");
       return "";
     }
-    if (result.status !== 0) {
-      console.error(`codex-bridge: inbox.sh exited ${result.status}: ${(result.stderr || "").trim()}`);
-      return "";
+    const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
+    const sections = [];
+    for (const pair of this.identities) {
+      if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
+      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
     }
-    return result.stdout || "";
+    return sections.join("\n\n");
   }
 
   async shutdown() {
@@ -1109,6 +1289,10 @@ class CodexBridge {
   ensureSingleInstance() {
     const existing = readPid(this.pidfile);
     if (!existing) return;
+    // The launcher records the spawned PID immediately so status never points
+    // at a stale predecessor. When that write wins the startup race, this
+    // process sees its own PID here; it owns the reservation, not a peer bridge.
+    if (existing === process.pid) return;
     try {
       process.kill(existing, 0);
       die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
@@ -1218,13 +1402,13 @@ async function main() {
     return;
   }
 
-  const identity = resolveIdentity(opts);
+  const identities = resolveIdentities(opts);
   if (opts.resolveOnly) {
-    console.log(`${identity.team}\t${identity.name}`);
+    console.log(identities.map((pair) => `${pair.team}\t${pair.name}`).join("\n"));
     return;
   }
 
-  const bridge = new CodexBridge(opts, identity);
+  const bridge = new CodexBridge(opts, identities);
   await bridge.run();
 }
 

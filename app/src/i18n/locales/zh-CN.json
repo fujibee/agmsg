@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "正在安装 agmsg…",
     "installFailed": "无法安装 agmsg：{{error}}",
+    "loginShellFailed": "无法确定您的登录 Shell：{{error}}",
     "loadTeamsFailed": "无法加载 agmsg 团队：{{error}}。是否已在 ~/.agents/skills/agmsg 安装 agmsg？",
     "coreOutdated": "已安装的 agmsg CLI 版本过旧（{{installed}} < {{pinned}}），可能无法与此应用正常配合。",
     "versionUnknown": "未知",
@@ -50,7 +51,9 @@
   },
   "tabs": {
     "roomLabel": "# 团队聊天室",
-    "close": "×"
+    "close": "×",
+    "newShell": "新建 Shell 标签",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "正在加载更多…",
@@ -155,6 +158,7 @@
     },
     "window": {
       "rename": "重命名…",
+      "openShell": "打开 Shell",
       "layout": "布局 ▸",
       "layoutVertical": "纵向",
       "layoutHorizontal": "横向",

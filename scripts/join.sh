@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: join.sh <team> <agent_id> <type> <project_path>
+# Usage: join.sh <team> <agent_id> <type> <project_path> [--force]
 #
 # Adds an agent to a team. Creates the team if it doesn't exist.
 
-TEAM="${1:?Usage: join.sh <team> <agent_id> <type> <project_path>}"
+TEAM="${1:?Usage: join.sh <team> <agent_id> <type> <project_path> [--force]}"
 AGENT_ID="${2:?Missing agent_id}"
 AGENT_TYPE="${3:?Missing type (a registered type under scripts/drivers/types/<name>/)}"
 PROJECT_PATH="${4:?Missing project_path}"
+FORCE=0
+if [ "${5:-}" = "--force" ]; then
+  FORCE=1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -69,9 +73,37 @@ if [ ! -f "$TEAM_CONFIG" ]; then
   echo "Created team: $TEAM"
 fi
 
+# --- Refuse silently reviving a name that rename.sh just renamed away (#360) ---
+# A CLI's slash-command history can resubmit `/agmsg actas <old_name>` well
+# after a rename — actas falls through to this join.sh, which used to
+# materialize <old_name> again with no warning, silently rolling the rename
+# back. rename.sh appends a {from,to,at} tombstone to the $.renamed array;
+# --force bypasses this for a deliberate, unrelated reuse of the name. The
+# agent id is compared as an ordinary SQL value (json_each + WHERE), not
+# spliced into a JSON path, so a name containing a single quote can't break
+# the query.
+AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
+if [ "$FORCE" -ne 1 ] && [ -f "$TEAM_CONFIG" ]; then
+  TOMBSTONE_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
+  TOMBSTONE=$(agmsg_sqlite_mem "
+    WITH cfg AS (SELECT CAST(readfile('$TOMBSTONE_SQL') AS TEXT) AS json)
+    SELECT value
+    FROM cfg, json_each(json_extract(cfg.json, '\$.renamed'))
+    WHERE json_extract(value, '\$.from') = '$AGENT_ID_SQL'
+    ORDER BY key DESC
+    LIMIT 1;
+  ")
+  if [ -n "$TOMBSTONE" ] && [ "$TOMBSTONE" != "null" ]; then
+    TOMBSTONE_ESCAPED=$(printf '%s' "$TOMBSTONE" | sed "s/'/''/g")
+    RENAMED_TO=$(agmsg_sqlite_mem "SELECT json_extract('$TOMBSTONE_ESCAPED', '\$.to');")
+    RENAMED_AT=$(agmsg_sqlite_mem "SELECT json_extract('$TOMBSTONE_ESCAPED', '\$.at');")
+    echo "Error: '$AGENT_ID' was renamed to '$RENAMED_TO' in team '$TEAM' at $RENAMED_AT. Did you mean to join/actas as '$RENAMED_TO'? Use --force to create '$AGENT_ID' as a new, separate identity anyway." >&2
+    exit 1
+  fi
+fi
+
 # --- Add or extend agent registrations ---
 CONFIG_SQL=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
-AGENT_ID_SQL=$(printf '%s' "$AGENT_ID" | sed "s/'/''/g")
 AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
 PROJECT_SQL=$(printf '%s' "$PROJECT_PATH" | sed "s/'/''/g")
 PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
@@ -128,17 +160,31 @@ else
 fi
 
 AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")
+# Clearing a matching tombstone (#360 review) is folded into this SAME
+# read-modify-write, not a separate one: a name is only ever "actually
+# (re)joined" once this single write lands, so if anything fails before it,
+# the tombstone (and thus the guard above) stays intact instead of being
+# dropped without a completed join.
 UPDATED=$(agmsg_sqlite_mem \
   "WITH cfg AS (SELECT CAST(readfile('$CONFIG_SQL') AS TEXT) AS json)
   SELECT json_set(
-    cfg.json,
-    '\$.agents',
-    json_patch(
-      CASE
-        WHEN json_type(json_extract(cfg.json, '\$.agents')) = 'object' THEN json_extract(cfg.json, '\$.agents')
-        ELSE json('{}')
-      END,
-      json_object('$AGENT_ID_SQL', json('$AGENT_OBJ_ESCAPED'))
+    json_set(
+      cfg.json,
+      '\$.agents',
+      json_patch(
+        CASE
+          WHEN json_type(json_extract(cfg.json, '\$.agents')) = 'object' THEN json_extract(cfg.json, '\$.agents')
+          ELSE json('{}')
+        END,
+        json_object('$AGENT_ID_SQL', json('$AGENT_OBJ_ESCAPED'))
+      )
+    ),
+    '\$.renamed',
+    COALESCE(
+      (SELECT json_group_array(value)
+       FROM json_each(json_extract(cfg.json, '\$.renamed'))
+       WHERE json_extract(value, '\$.from') != '$AGENT_ID_SQL'),
+      json('[]')
     )
   )
   FROM cfg;")

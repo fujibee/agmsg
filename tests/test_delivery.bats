@@ -445,6 +445,51 @@ JSON
   [ ! -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
 }
 
+# --- session-start.sh: skip worktree sub-sessions (#367) ---
+
+@test "session-start: skips the Monitor directive when hook cwd is under .claude/worktrees/" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local sub_cwd="$TEST_PROJECT/.claude/worktrees/bg-task-1"
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-sub\",\"cwd\":\"$sub_cwd\"}"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ ! "$output" =~ "invoke the Monitor tool" ]]
+}
+
+@test "session-start: skips when hook cwd uses escaped-backslash (Windows JSON) separators" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< '{"session_id":"sid-sub-win","cwd":"C:\\proj\\.claude\\worktrees\\bg-1"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-start: falls back to \$PWD for the worktree check when the hook input has no cwd" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local sub_cwd="$TEST_PROJECT/.claude/worktrees/bg-task-2"
+  mkdir -p "$sub_cwd"
+  run env AGMSG_RESOLVE_PROJECT=0 bash -c "cd '$sub_cwd' && bash '$SCRIPTS/session-start.sh' claude-code '$TEST_PROJECT' <<< '{\"session_id\":\"sid-sub-nocwd\"}'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "session-start: still emits the Monitor directive for a normal (non-worktree) cwd" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-normal\",\"cwd\":\"$TEST_PROJECT\"}"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+}
+
+@test "session-start: does NOT skip a project whose path merely contains 'claude' and 'worktrees' loosely" {
+  # Regression guard: a naive *.claude*worktrees* glob would also match
+  # unrelated project names like .claude-tools/my-worktrees-app, which don't
+  # form the actual .claude/worktrees path segment sequence.
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  local decoy_cwd="$TEST_PROJECT/.claude-tools/my-worktrees-app"
+  run env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<< "{\"session_id\":\"sid-decoy\",\"cwd\":\"$decoy_cwd\"}"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "invoke the Monitor tool" ]]
+}
+
 # --- session-start.sh dedup across /clear ---
 
 @test "session-start.sh kills previous watcher when called with new session_id in same cc-instance" {
@@ -707,6 +752,7 @@ JSON
   phys=$(cd "$realproj" && pwd -P)
 
   bash "$SCRIPTS/join.sh" team alice codex "$linkproj" >/dev/null
+  _seed_role_record team alice thread-sym "$linkproj" codex
 
   # Stage a Codex rollout whose session_meta records the PHYSICAL cwd.
   local sdir="$HOME/.codex/sessions/2026/06/19"
@@ -869,6 +915,50 @@ EOF
   [[ "$output" =~ "ping copilot" ]]
 }
 
+@test "check-inbox: does not hang when stdin is a non-TTY pipe that never reaches EOF (#381)" {
+  # A minimal `timeout` shim so this test exercises check-inbox.sh's own
+  # `command -v timeout` code path deterministically, regardless of whether
+  # the host actually ships GNU timeout (stock macOS does not) -- what's
+  # under test is check-inbox.sh's wiring to `timeout`, not the host
+  # environment. Prepended first on PATH so it wins even where a real one
+  # also exists.
+  local bindir="$TEST_SKILL_DIR/shimbin"
+  mkdir -p "$bindir"
+  cat > "$bindir/timeout" <<'EOF'
+#!/usr/bin/env bash
+secs="$1"; shift
+("$@") & cmd_pid=$!
+( sleep "$secs"; kill "$cmd_pid" 2>/dev/null ) & watchdog_pid=$!
+if wait "$cmd_pid" 2>/dev/null; then
+  kill "$watchdog_pid" 2>/dev/null
+  exit 0
+else
+  exit 124
+fi
+EOF
+  chmod +x "$bindir/timeout"
+
+  bash "$SCRIPTS/join.sh" testteam alice claude-code "$TEST_PROJECT"
+
+  local fifo="$TEST_PROJECT/repro.fifo"
+  mkfifo "$fifo"
+  # Write the payload, then hold the write end open without closing it --
+  # exactly the "hook runtime forgets to close the pipe" shape from the
+  # issue's own FIFO repro. A plain `sleep N | check-inbox.sh` does NOT
+  # reproduce this: bash waits for every pipeline member, so it looks like a
+  # hang even when the hook itself exits immediately.
+  { printf '%s' '{"stop_hook_active":false,"session_id":"repro-381"}'; sleep 300; } \
+    3>&- 4>&- > "$fifo" &
+  local writer_pid="$!"
+
+  local newpath="$bindir:$PATH"
+  run bash -c "PATH='$newpath' AGMSG_HOOK_STDIN_TIMEOUT=1 bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT' < '$fifo'"
+
+  kill "$writer_pid" 2>/dev/null || true
+  rm -f "$fifo"
+
+  [ "$status" -eq 0 ]
+}
 
 
 
@@ -1474,6 +1564,7 @@ JSON
 # --- Codex monitor bridge (#41) ---
 @test "session-start.sh for codex starts bridge when monitor launcher env is present" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-123 "$TEST_PROJECT" codex
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
   cat >"$fake" <<'EOF'
@@ -1483,6 +1574,7 @@ EOF
   chmod +x "$fake"
 
   AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store" \
   AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
   AGMSG_TEST_LOG="$log" \
@@ -1496,6 +1588,7 @@ EOF
 
   [ -f "$log" ]
   grep -q -- "--project $TEST_PROJECT" "$log"
+  grep -q -- "--workspace-root $TEST_SKILL_DIR/custom-store" "$log"
   grep -q -- "--thread thread-123" "$log"
   grep -q -- "--app-server unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" "$log"
   grep -q -- "--inline-inbox" "$log"
@@ -1643,6 +1736,96 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
+@test "delivery status (codex): notes when the installed shim loses to a different codex on PATH and no bridge has ever been alive (#387)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  # A different, non-agmsg codex earlier on PATH -- exactly the "PATH order
+  # loses" shape from #387/#397: mode stays "monitor" but launches never
+  # actually reach the shim. No bridge has ever come alive here either, so
+  # this is the one case with enough corroboration to say something.
+  local other_bin="$TEST_SKILL_DIR/other-bin"
+  mkdir -p "$other_bin"
+  printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
+  chmod +x "$other_bin/codex"
+
+  PATH="$other_bin:$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Note: an agmsg codex shim is installed"* ]]
+  [[ "$output" == *"$other_bin/codex"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch note when the shim correctly wins PATH order (#387)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  PATH="$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch note when no PATH-based shim is installed (#387)" {
+  # The shell-function-only install method is invisible to this script (a
+  # function from an interactive profile isn't inherited by a fresh
+  # `bash delivery.sh status` invocation) -- must not false-alarm here.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
+}
+
+@test "delivery status (codex): no PATH-mismatch note when a bridge is alive even if the shim file loses on PATH (#387 regression)" {
+  # Real-machine regression: the shim FILE existing at ~/.agents/bin/codex
+  # does not mean this install relies on PATH resolution for it -- the
+  # shell-function method (recommended first, in on_enable) is common, and
+  # having the PATH shim file ALSO present is a normal side effect of
+  # following the setup instructions, not evidence of a broken PATH-based
+  # setup. A live bridge is corroborating evidence that delivery is
+  # actually working (by whichever method), so the note must remain silent.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  mkdir -p "$HOME/.agents/bin" "$TEST_SKILL_DIR/run"
+  cp "$TYPES/codex/codex-shim.sh" "$HOME/.agents/bin/codex"
+  chmod +x "$HOME/.agents/bin/codex"
+
+  local other_bin="$TEST_SKILL_DIR/other-bin"
+  mkdir -p "$other_bin"
+  printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
+  chmod +x "$other_bin/codex"
+
+  sleep 60 &
+  local bpid=$!
+  # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
+  trap "kill $bpid 2>/dev/null || true" EXIT
+  printf '%s\n' "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$bpid
+project=$TEST_PROJECT
+team=team
+name=alice
+type=codex
+EOF
+
+  PATH="$other_bin:$HOME/.agents/bin:$PATH" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice alive"* ]]
+  [[ "$output" != *"Note: an agmsg codex shim"* ]]
+
+  kill "$bpid" 2>/dev/null || true
+  trap - EXIT
+}
+
 @test "delivery status (codex): multiple identities are enumerated independently" {
   skip_on_windows "codex bridge status liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
@@ -1685,6 +1868,7 @@ EOF
 
 @test "session-start.sh for codex resolves thread id from rollout when CODEX_THREAD_ID is unset" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice rollout-thread-999 "$TEST_PROJECT" codex
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
   local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
   cat >"$fake" <<'EOF'
@@ -1710,6 +1894,47 @@ EOF
   for _ in {1..20}; do [ -f "$log" ] && break; sleep 0.1; done
   [ -f "$log" ]
   grep -q -- "--thread rollout-thread-999" "$log"
+}
+
+@test "session-start.sh for codex resolves the rollout by real mtime, not filename order (#416)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice stale-by-name-uuid "$TEST_PROJECT" codex
+  local fake="$TEST_SKILL_DIR/fake-codex-bridge"
+  local log="$TEST_SKILL_DIR/fake-codex-bridge.log"
+  cat >"$fake" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
+EOF
+  chmod +x "$fake"
+
+  # `ls -t "$dir"/*/*/*/rollout-*.jsonl` was flaky on Windows/Git Bash --
+  # intermittently returned an empty/truncated list with no filesystem
+  # changes in between, so agmsg_resolve_codex_thread got starved of any
+  # candidate and the SessionStart hook silently no-opped (#416). The fix
+  # replaced it with find + a portable per-file mtime sort. Prove it is a
+  # real mtime sort and not an accidental filename-lexical sort: one rollout
+  # has an OLDER-looking filename timestamp but its actual mtime is touched
+  # to be the newest of the two, matching this project's cwd. A find+sort-
+  # by-name "fix" would pick the wrong (stale) rollout here.
+  local rollout_dir="$TEST_SKILL_DIR/home/.codex/sessions/2026/06/17"
+  mkdir -p "$rollout_dir"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"stale-by-name-uuid\",\"cwd\":\"$TEST_PROJECT\"}}" \
+    > "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
+  printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"newer-by-name-uuid\",\"cwd\":\"$TEST_PROJECT\"}}" \
+    > "$rollout_dir/rollout-2026-06-17T00-00-00-newer-by-name-uuid.jsonl"
+  sleep 1
+  touch "$rollout_dir/rollout-2020-01-01T00-00-00-stale-by-name-uuid.jsonl"
+
+  HOME="$TEST_SKILL_DIR/home" \
+  AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_CODEX_BRIDGE_APP_SERVER="unix://$TEST_SKILL_DIR/run/codex-app-server.test.sock" \
+  AGMSG_CODEX_BRIDGE_CMD="$fake" \
+  AGMSG_TEST_LOG="$log" \
+    env -u CODEX_THREAD_ID bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  for _ in {1..20}; do [ -f "$log" ] && break; sleep 0.1; done
+  [ -f "$log" ]
+  grep -q -- "--thread stale-by-name-uuid" "$log"
 }
 
 @test "delivery set monitor (codex): warns loudly when Node is missing" {

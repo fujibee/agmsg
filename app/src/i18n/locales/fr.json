@@ -9,6 +9,7 @@
   "startupError": {
     "installing": "Installation d'agmsg…",
     "installFailed": "Impossible d'installer agmsg : {{error}}",
+    "loginShellFailed": "Impossible de déterminer votre shell de connexion : {{error}}",
     "loadTeamsFailed": "Impossible de charger les équipes agmsg : {{error}}. agmsg est-il installé dans ~/.agents/skills/agmsg ?",
     "coreOutdated": "Ton CLI agmsg est obsolète ({{installed}} < {{pinned}}) et pourrait ne pas fonctionner correctement avec cette app.",
     "versionUnknown": "inconnue",
@@ -50,7 +51,9 @@
   },
   "tabs": {
     "roomLabel": "# salle d'équipe",
-    "close": "×"
+    "close": "×",
+    "newShell": "Nouvel onglet shell",
+    "shellLabel": "Shell"
   },
   "room": {
     "loadingMore": "Chargement…",
@@ -155,6 +158,7 @@
     },
     "window": {
       "rename": "Renommer…",
+      "openShell": "Ouvrir un shell",
       "layout": "Disposition ▸",
       "layoutVertical": "Vertical",
       "layoutHorizontal": "Horizontal",

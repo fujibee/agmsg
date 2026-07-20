@@ -86,6 +86,34 @@ fi
 # Fallback so the instruction is still actionable even outside a hook flow.
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown-$$"
 
+# --- Skip spawned worktree sub-sessions (.claude/worktrees checkouts). ---
+# Claude Code's background-task feature runs a short-lived sub-session in an
+# isolated worktree under .claude/worktrees/<name>. SessionStart still fires
+# there (#92's resolve-project normalizes its cwd back to the registered
+# project, so identities resolve fine), so a persistent inbox watcher was
+# getting launched for it too — but that watcher keeps the sub-session's
+# Monitor alive past the point its task finishes, so the parent session never
+# receives the sub-session's completion notification (#367). The sub-session
+# is also not normally an agmsg team member in its own right, so a watcher
+# has little value there anyway. cwd may arrive as forward slashes or
+# JSON-escaped backslashes depending on platform (a single escaped backslash
+# decodes to two raw '\' bytes in the captured substring), so normalize both
+# to '/' and squeeze doubled separators before matching. Match the exact
+# ".claude/worktrees" PATH SEGMENT sequence, not a loose substring — a naive
+# `*.claude*worktrees*` glob would also skip an unrelated project merely
+# named e.g. ".claude-tools/my-worktrees-app".
+HOOK_CWD=""
+if [ -n "$INPUT" ]; then
+  HOOK_CWD=$(printf '%s' "$INPUT" \
+    | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -1)
+fi
+[ -z "$HOOK_CWD" ] && HOOK_CWD="${PWD:-}"
+HOOK_CWD_NORM=$(printf '%s' "$HOOK_CWD" | tr '\\' '/' | sed 's#//*#/#g')
+case "$HOOK_CWD_NORM" in
+  */.claude/worktrees|*/.claude/worktrees/*|.claude/worktrees|.claude/worktrees/*) exit 0 ;;
+esac
+
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 
 # --- Identify the enclosing Claude Code process. ---

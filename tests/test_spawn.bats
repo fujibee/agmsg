@@ -650,6 +650,17 @@ YAML
   [[ "$output" == *"reviewer"* ]]
 }
 
+@test "spawn: resolve_team reads team configs via agmsg_sql_readfile_path (Windows-native sqlite3 regression)" {
+  # sqlite3.exe (native Windows) cannot readfile() a POSIX-form path: it returns
+  # NULL, the JSON probe yields no rows, and spawn dies with 'no team is
+  # registered' even though join succeeded. The helper cygpath-converts and
+  # SQL-escapes; a bare sed-escape here reintroduces the bug. No portable
+  # runtime probe exists (it needs a native sqlite3 plus a POSIX-form tmpdir),
+  # so assert the source directly.
+  run grep -F 'cfg_sql=$(agmsg_sql_readfile_path "$config_file")' "$SCRIPTS/spawn.sh"
+  [ "$status" -eq 0 ]
+}
+
 @test "spawn: codex boot prompt uses the \$ skill prefix, not / (#283)" {
   # codex invokes a skill with \$<cmd>, not Claude Code's /<cmd>. The boot script
   # must carry \$<cmd> actas, never /<cmd> actas. (%q escapes the space as "\ ",

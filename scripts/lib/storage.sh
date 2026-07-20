@@ -93,6 +93,67 @@ agmsg_sqlite() {
   sqlite3 $(_agmsg_escape_flag) -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
 }
 
+# Runtime ownership seam. This is the first run/-state-in-storage primitive for
+# the storage 1.2 direction: a future remote driver can preserve these acquire /
+# verify / release semantics with SETNX, WATCH, or its native equivalent.
+# `locks` is intentionally resource-generic; Codex dispatchers are merely the
+# first caller. Acquire prints the current owner. With expected_owner supplied,
+# replacement is a transactionally serialized compare-and-swap.
+_agmsg_runtime_lock_resource_sql() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+agmsg_storage_ensure_initialized() {
+  local lib_dir init_script
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  init_script="$lib_dir/../internal/init-db.sh"
+  AGMSG_STORAGE_PATH="$(agmsg_storage_dir)" bash "$init_script" >/dev/null
+}
+
+agmsg_runtime_lock_acquire() {
+  local resource owner_pid expected_owner db resource_sql
+  resource="$1"; owner_pid="$2"; expected_owner="${3:-}"
+  case "$owner_pid:$expected_owner" in *[!0-9:]*) return 1 ;; esac
+  agmsg_storage_ensure_initialized || return 1
+  db="$(agmsg_db_path)"
+  resource_sql="$(_agmsg_runtime_lock_resource_sql "$resource")"
+  agmsg_sqlite "$db" <<SQL | tr -d '\r'
+CREATE TABLE IF NOT EXISTS locks (
+  resource TEXT PRIMARY KEY,
+  owner_pid INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL
+);
+BEGIN IMMEDIATE;
+$(if [ -n "$expected_owner" ]; then printf "DELETE FROM locks WHERE resource = '%s' AND owner_pid = %s;" "$resource_sql" "$expected_owner"; fi)
+INSERT OR IGNORE INTO locks(resource, owner_pid, acquired_at)
+VALUES('$resource_sql', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+SELECT owner_pid FROM locks WHERE resource = '$resource_sql';
+COMMIT;
+SQL
+}
+
+agmsg_runtime_lock_owner() {
+  local resource_sql
+  resource_sql="$(_agmsg_runtime_lock_resource_sql "$1")"
+  agmsg_sqlite "$(agmsg_db_path)" \
+    "SELECT owner_pid FROM locks WHERE resource = '$resource_sql';" 2>/dev/null \
+    | tr -d '\r'
+}
+
+agmsg_runtime_lock_verify() {
+  case "$2" in *[!0-9]*|'') return 1 ;; esac
+  [ "$(agmsg_runtime_lock_owner "$1" 2>/dev/null || true)" = "$2" ]
+}
+
+agmsg_runtime_lock_release() {
+  local resource_sql
+  case "$2" in *[!0-9]*|'') return 1 ;; esac
+  resource_sql="$(_agmsg_runtime_lock_resource_sql "$1")"
+  agmsg_sqlite "$(agmsg_db_path)" \
+    "DELETE FROM locks WHERE resource = '$resource_sql' AND owner_pid = $2;" \
+    >/dev/null 2>&1 || true
+}
+
 # In-memory sqlite for JSON parsing / scalar lookups whose stdout is captured in
 # a command substitution ($(...)). On Windows, sqlite3.exe writes stdout in text
 # mode and turns every \n into \r\n; command substitution strips the trailing \n

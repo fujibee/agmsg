@@ -48,9 +48,48 @@ agmsg_delivery_on_disable() {
   echo "    # then drop any agmsg Codex function or ~/.agents/bin PATH entry you added for monitor"
 }
 
+agmsg_codex_shim_path_note() {
+  # "mode: monitor" only means a project is CONFIGURED for monitor delivery;
+  # it says nothing about whether `codex` on PATH actually reaches the shim
+  # right now. A PATH-based install (codex-shim-install.sh install, or a raw
+  # symlink) that loses to the real Codex binary in PATH order launches
+  # completely unmonitored sessions with no other signal at all. See #387/#397.
+  #
+  # This is inherently a best-effort hint, not a diagnosis: the shim FILE
+  # existing at $HOME/.agents/bin/codex does NOT mean this install relies on
+  # PATH resolution for it. The shell-function method (on_enable's primary
+  # recommendation) is the common case, and having the PATH shim file ALSO
+  # present alongside it is normal, not contradictory -- a function takes
+  # priority over PATH in an interactive shell regardless of what's on PATH,
+  # and a fresh non-interactive `command -v codex` here never sees that
+  # function at all, so it can look like a "mismatch" on a perfectly healthy,
+  # function-routed setup. Found in real-machine testing after the first cut
+  # of this check warned unconditionally on exactly that combination.
+  #
+  # So: only surface this note when the PATH shim file exists AND resolves
+  # to something else AND no bridge for this project has ever come alive
+  # (weak but non-alarmist corroboration -- a live/previously-live bridge
+  # means SOMETHING is routing correctly already, by whichever method).
+  # Phrased as a conditional hint, not an assertion of brokenness.
+  local project="$1" any_alive="$2"
+  [ "$any_alive" = "0" ] || return 0
+
+  local marker="Optional Codex entrypoint shim for agmsg monitor mode"
+  local shim_bin="$HOME/.agents/bin/codex"
+  [ -f "$shim_bin" ] && grep -q "$marker" "$shim_bin" 2>/dev/null || return 0
+
+  local resolved
+  resolved="$(command -v codex 2>/dev/null || true)"
+  if [ -n "$resolved" ] && [ "$resolved" != "$shim_bin" ] && ! (grep -q "$marker" "$resolved" 2>/dev/null); then
+    echo "Note: an agmsg codex shim is installed at $shim_bin, but 'codex' resolves to $resolved in this non-interactive check, and no bridge for this project has come alive yet."
+    echo "  If you launch Codex via the agmsg shell function (codex() in your shell profile), this is expected and fine -- a function isn't visible to this check."
+    echo "  If you rely on the PATH-based shim instead, put \$HOME/.agents/bin earlier in PATH."
+  fi
+}
+
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
-  local pairs found=0
+  local pairs found=0 any_alive=0
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
 
   if [ -z "$pairs" ]; then
@@ -99,6 +138,7 @@ agmsg_delivery_runtime_status() {
 
     if kill -0 "$pid" 2>/dev/null; then
       echo "Codex bridge: $team/$name alive (pid $pid)"
+      any_alive=1
     else
       echo "Codex bridge: $team/$name stale pidfile (pid $pid not running)"
     fi
@@ -107,4 +147,17 @@ agmsg_delivery_runtime_status() {
   if [ "$found" -eq 0 ]; then
     echo "Codex bridge: no identities registered for this project"
   fi
+
+  # Capture the FULL output rather than piping into `head -1`: head closing
+  # its read end after one line while agmsg_delivery_status_default is still
+  # writing more would SIGPIPE it, and under this script's set -euo
+  # pipefail that aborts the whole `delivery.sh status` call outright --
+  # the same class of bug fixed in #423 (sort | head under pipefail), now
+  # avoided here by never piping into an early-closing reader at all.
+  local full_status mode_line
+  full_status="$(agmsg_delivery_status_default "$type" "$project" 2>/dev/null || true)"
+  mode_line="${full_status%%$'\n'*}"
+  case "$mode_line" in
+    "mode: monitor"|"mode: both") agmsg_codex_shim_path_note "$project" "$any_alive" ;;
+  esac
 }

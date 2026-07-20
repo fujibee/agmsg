@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.10] - 2026-07-19
+
+### Fixed
+- Allow launcher-reserved bridge PID (#444)
+
+## [1.1.9] - 2026-07-19
+
+### Added
+- Isolate Codex monitor bridges by role (#425)
+- Free shell tab, unattached to any agent (#431)
+- Add session-only dismiss to outdated-CLI banner (#430)
+- Extend join/actas prompts with roster-aware name suggestions (#421)
+- Remember the last active tab per team (#417)
+
+### Fixed
+- Tombstone renamed-away names so join/actas can't silently revive them (#427)
+- Don't let co-located app-v* tags pollute the recorded core VERSION (#432)
+- Resolve shim through symlinks, warn when monitor mode isn't actually reached (#429)
+- Skip Monitor directive for .claude/worktrees sub-sessions (#428)
+- Grace fallback for thread/resume failure on Codex 0.142+ (rebase of #276) (#426)
+- Stop Claude Code 2.1.x daemon from hijacking pid resolution (#424)
+- Mark only the displayed messages as read (#361)
+- Replace flaky ls -t rollout lookup with find + portable mtime sort (#423)
+- Bound the stdin read so a never-closed pipe cannot freeze the agent pane (#422)
+- Convert team config paths for readfile() via agmsg_sql_readfile_path (#396)
+- Fix Codex monitor multi-identity delivery (#419)
+- Auto-decline approval requests, arm the turn watchdog on externally-active turns (#420)
+- Add Shell requirement to all type templates (#345)
+- Validate team name before resolving roster config path (#418)
+- Give team-status-rail its own gray for zero-pane teams (#413)
+
+### Documentation
+- Clarify sandbox and storage guidance (#362)
+- Fix leftover OpenCode references in cursor template (#398)
+
 ## [1.1.8] - 2026-07-15
 
 ### Added
@@ -276,6 +311,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.10]: https://github.com/fujibee/agmsg/compare/app-v0.3.0...v1.1.10
+[1.1.9]: https://github.com/fujibee/agmsg/compare/app-v0.2.0...v1.1.9
 [1.1.8]: https://github.com/fujibee/agmsg/compare/app-v0.1.5...v1.1.8
 [app-v0.1.5]: https://github.com/fujibee/agmsg/compare/v1.1.7...app-v0.1.5
 [1.1.7]: https://github.com/fujibee/agmsg/compare/app-v0.1.4...v1.1.7

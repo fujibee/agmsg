@@ -14,6 +14,42 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
+# Newest-N rollout files under $sessions_dir, sorted by mtime descending.
+# `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
+# reported to intermittently return an empty/truncated list with no
+# filesystem changes in between (root cause unconfirmed, possibly an
+# MSYS2 glob/large-arglist interaction), which silently starves
+# agmsg_resolve_codex_thread of any candidate: the SessionStart hook just
+# no-ops and the bridge never launches, with no error output at all. `find`
+# is reported reliable there; do the mtime sort ourselves with the existing
+# portable compat_file_mtime, since `find -printf` is GNU-only (no
+# `-printf` on macOS/BSD find, which this repo also has to support). See #416.
+agmsg_newest_rollout_files() {
+  local dir="$1" limit="$2" f mtime
+  # `head -n "$limit"` here would close its read end after $limit lines while
+  # `sort` may still be writing -- under this caller's `set -euo pipefail`,
+  # that SIGPIPEs `sort` (status 141) and pipefail surfaces it as the whole
+  # pipeline's status even though head/cut both still exit 0. With enough
+  # rollout files to exceed the pipe buffer (confirmed at ~20k candidate
+  # lines in review), that silently starves the caller of a result -- the
+  # exact class of bug this function exists to fix, reintroduced by a
+  # different mechanism. awk reads its input through to EOF regardless of
+  # `n` (only *printing* stops early), so `sort` is always fully drained and
+  # never SIGPIPEd.
+  # `|| true` on the mtime lookup: under set -e, a plain `var=$(cmd)`
+  # assignment DOES abort on cmd's failure (unlike a substitution used inside
+  # a test/conditional). A rollout that `find` listed but that Codex deletes
+  # or rotates before `stat` runs on it (a real possibility across the ~1-2s
+  # this loop can take with hundreds of files) would otherwise abort this
+  # whole while-loop subshell -- another way to reintroduce the "no
+  # candidate found" failure the ${mtime:-0} fallback below already exists to
+  # avoid.
+  find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
+    mtime=$(compat_file_mtime "$f" || true)
+    printf '%s\t%s\n' "${mtime:-0}" "$f"
+  done | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
+}
+
 # Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
 # interactive --remote path; fresh and `codex exec` sessions never export it, so
 # fall back to the newest rollout file whose session_meta cwd matches the
@@ -50,7 +86,7 @@ agmsg_resolve_codex_thread() {
         return 0
       fi
     done <<INNER_EOF
-$(ls -t "$sessions_dir"/*/*/*/rollout-*.jsonl 2>/dev/null | head -20)
+$(agmsg_newest_rollout_files "$sessions_dir" 20)
 INNER_EOF
     [ "$waited" -ge 2 ] && break
     waited=$((waited + 1))
@@ -62,6 +98,28 @@ INNER_EOF
 agmsg_session_start() {
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
+  # A recorded role belongs to its recorded Codex thread. The in-sandbox
+  # fallback has no launcher to arbitrate this, so exclude a mismatched role
+  # rather than ever injecting it into this session's thread (#150/#350).
+  # shellcheck source=../../../lib/role-session.sh
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+  safe_pairs=""
+  while IFS=$'\t' read -r candidate_team candidate_name; do
+    [ -n "$candidate_team" ] || continue
+    candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
+    if [ -n "$candidate_thread" ]; then
+      candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
+      candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+      { [ "$candidate_project_phys" = "$project_phys" ] && [ "$candidate_thread" = "$thread_id" ]; } || continue
+    else
+      # No recorded seat means no live TUI for this role; leave its inbox unread.
+      continue
+    fi
+    safe_pairs="${safe_pairs:+$safe_pairs$'\n'}${candidate_team}"$'\t'"${candidate_name}"
+  done <<< "$PAIRS"
+  PAIRS="$safe_pairs"
+  [ -n "$PAIRS" ] || exit 0
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
@@ -81,25 +139,31 @@ agmsg_session_start() {
   fi
   [ -n "$app_server" ] || exit 0
 
-  pair_count=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { c++ } END { print c + 0 }')
-  [ "$pair_count" = "1" ] || exit 0
-  team=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $1; exit }')
-  name=$(printf '%s\n' "$PAIRS" | awk 'NF >= 2 { print $2; exit }')
-  [ -n "$team" ] && [ -n "$name" ] || exit 0
-
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
     project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
     request_file="$RUN_DIR/codex-bridge-request.$project_hash"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$TYPE" "$team" "$name" "$thread_id" "$app_server" > "$tmp_request"
+    printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"
     mv "$tmp_request" "$request_file"
     exit 0
   fi
 
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
+  pair_count=$(printf '%s\n' "$PAIRS" | grep -c . || true)
+  if [ "$pair_count" = "1" ]; then
+    IFS=$'\t' read -r key_team key_name <<EOF
+$PAIRS
+EOF
+    bridge_key="$key_team.$key_name"
+  else
+    bridge_key=$(printf '%s' "$PAIRS" | agmsg_sha1)
+  fi
+  bridge_pairs=()
+  while IFS=$'\t' read -r candidate_team candidate_name; do
+    bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+  done <<< "$PAIRS"
+  pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
     if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
@@ -107,7 +171,7 @@ agmsg_session_start() {
     fi
   fi
 
-  log="$RUN_DIR/codex-bridge.$team.$name.log"
+  log="$RUN_DIR/codex-bridge.$bridge_key.log"
   # An explicit AGMSG_CODEX_BRIDGE_CMD is a complete runnable (tests, custom
   # wrappers) — run it as-is. Only the default codex-bridge.js is launched
   # through a resolved Node, since its env-node shebang fails in shells where a
@@ -117,14 +181,18 @@ agmsg_session_start() {
   else
     bridge_run=("$(agmsg_resolve_node)" "$SKILL_DIR/scripts/drivers/types/codex/codex-bridge.js")
   fi
+  local storage_dir
+  storage_dir="$(agmsg_storage_dir)"
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
+    --workspace-root "$storage_dir" \
+    --workspace-root "$SKILL_DIR/teams" \
+    --workspace-root "$SKILL_DIR/run" \
     --type "$TYPE" \
-    --team "$team" \
-    --name "$name" \
+    "${bridge_pairs[@]}" \
     --thread "$thread_id" \
     --app-server "$app_server" \
     --inline-inbox \
-    >>"$log" 2>&1 &
+    >>"$log" 2>&1 3>&- 4>&- &
   exit 0
 }

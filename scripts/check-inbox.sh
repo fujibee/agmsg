@@ -30,10 +30,23 @@ emit_status_json() {
 
 # Hook runtimes that pass JSON do so on stdin. Interactive invocations such as
 # Gemini's PostToolUse command may inherit a terminal stdin instead; reading
-# unconditionally there blocks waiting for input.
+# unconditionally there blocks waiting for input. The `[ ! -t 0 ]` guard just below
+# only rules out that TTY case -- a non-TTY stdin whose write end is left
+# open (a hook runtime that writes the payload and then simply never closes
+# the pipe) still leaves this `cat` waiting for an EOF that never arrives.
+# Stop/turn hooks run synchronously, so a `cat` stuck here freezes the whole
+# agent pane until the user kills it. Bound the read; a runtime that forgets
+# to close its pipe still gets its payload delivered (it's already sitting in
+# the command substitution buffer by the time the deadline fires), just a few
+# seconds late instead of never. Fails open when `timeout` isn't on PATH
+# (stock macOS) -- same unbounded read as before, no regression there. #381
 INPUT=""
 if [ ! -t 0 ]; then
-  INPUT=$(cat 2>/dev/null || true)
+  if command -v timeout >/dev/null 2>&1; then
+    INPUT=$(timeout "${AGMSG_HOOK_STDIN_TIMEOUT:-2}" cat 2>/dev/null || true)
+  else
+    INPUT=$(cat 2>/dev/null || true)
+  fi
 fi
 
 # Prevent infinite loop: if stop hook is already active, exit silently
@@ -141,19 +154,38 @@ for team in "${TEAM_LIST[@]}"; do
   esac
 
   RESULT=$(agmsg_sqlite "$DB" "
-    SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+    SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
     ORDER BY created_at ASC;
   ")
   if [ -n "$RESULT" ]; then
     COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
     OUTPUT+="$COUNT new message(s) in $team:"$'\n'
-    while IFS=$'\x1f' read -r from body ts; do
+    IDS=""
+    while IFS=$'\x1f' read -r id from body ts; do
       OUTPUT+="  [$ts] $from: $body"$'\n'
+      case "$id" in
+        ''|*[!0-9]*) ;; # defensive: never splice a non-numeric value into SQL
+        *) IDS="${IDS:+$IDS,}$id" ;;
+      esac
     done <<< "$RESULT"
     OUTPUT+=$'\n'
-    # Mark as read
-    agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL;" 2>/dev/null || true
+    # Test seam: a two-file barrier that lets the race regression test land a
+    # message deterministically between display and mark. No-op unless set.
+    if [ -n "${AGMSG_TEST_MARK_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_MARK_BARRIER.reached"
+      _agmsg_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_MARK_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_barrier_waited=$((_agmsg_barrier_waited + 1))
+        [ "$_agmsg_barrier_waited" -ge 200 ] && break # 10s safety cap
+      done
+    fi
+    # Mark as read — only the ids captured above, so a message that arrives
+    # between the SELECT and this UPDATE is not marked read unseen.
+    if [ -n "$IDS" ]; then
+      agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN ($IDS);" 2>/dev/null || true
+    fi
   fi
 done
 

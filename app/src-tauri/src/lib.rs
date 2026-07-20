@@ -177,6 +177,42 @@ fn resolve_login_shell() -> String {
     "/bin/zsh".into()
 }
 
+/// What to spawn for the free-shell tab (App.tsx's "+" tab and a tab's "Open
+/// shell" menu item, unattached to any agent). `args` carries login+
+/// interactive flags on unix so the shell sources the user's profile
+/// (aliases, PATH additions, prompt) the same way a real terminal window
+/// would — plain PTY attachment alone doesn't imply that, since e.g. zsh
+/// only treats stdin-is-a-tty as sufficient for *interactive*, not *login*.
+/// `home` is the frontend's cwd fallback when the current team has no
+/// project dir configured — the frontend's own default-project value always
+/// wins when set (koit: cd'ing from $HOME every time is tedious), this is
+/// only reached when that's empty. A login shell doesn't cd to $HOME on its
+/// own; that's a real terminal app's spawn-time cwd, not shell behavior.
+#[derive(Serialize)]
+pub struct LoginShellInfo {
+    cmd: String,
+    args: Vec<String>,
+    home: String,
+}
+
+#[tauri::command]
+fn login_shell() -> LoginShellInfo {
+    #[cfg(unix)]
+    {
+        LoginShellInfo {
+            cmd: resolve_login_shell(),
+            args: vec!["-il".into()],
+            home: std::env::var("HOME").unwrap_or_default(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        LoginShellInfo { cmd: comspec, args: vec![], home }
+    }
+}
+
 /// Appends a timestamped line to ~/Library/Logs/agmsg/path-import.log. The
 /// only real diagnostic available for import_login_shell_path(): it runs
 /// before the webview (and thus DevTools) exists, and its failure mode was
@@ -598,6 +634,7 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_inject,
             pty::agent_state,
+            login_shell,
             agmsg::agmsg_is_installed,
             agmsg::agmsg_install,
             agmsg::agmsg_core_version_status,

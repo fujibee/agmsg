@@ -8,10 +8,35 @@ set -euo pipefail
 # launches are routed through codex-monitor.sh. Everything else is passed
 # through to the real Codex command unchanged.
 
+# Resolve $0 through symlinks to its real location, POSIX-portably (no
+# `readlink -f`: BSD/macOS readlink doesn't support it, only GNU's does).
+# Installing this shim as a symlink -- consistent with the header comment
+# below -- is a documented install method, but `dirname "$0"` alone resolves
+# to the SYMLINK's directory, not the real script's. That pointed
+# `$SCRIPT_DIR/../../../delivery.sh` at a nonexistent path, which
+# is_monitor_project() then silently treated as "not a monitor project"
+# instead of a broken install -- every Codex launch quietly bypassed the
+# bridge with no signal at all. See #387.
+_agmsg_resolve_self() {
+  local src="$1" dir link
+  while [ -L "$src" ]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    link="$(readlink "$src")"
+    case "$link" in
+      /*) src="$link" ;;
+      *) src="$dir/$link" ;;
+    esac
+  done
+  dir="$(cd "$(dirname "$src")" && pwd)"
+  printf '%s/%s\n' "$dir" "$(basename "$src")"
+}
+
 if [ "${AGMSG_CODEX_SHIM_WRAPPER:-}" = "1" ] && [ -n "${AGMSG_CODEX_SHIM_SCRIPT_DIR:-}" ]; then
   SCRIPT_DIR="$AGMSG_CODEX_SHIM_SCRIPT_DIR"
+  SELF_PATH="$AGMSG_CODEX_SHIM_SCRIPT_DIR/codex-shim.sh"
 else
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  SELF_PATH="$(_agmsg_resolve_self "$0")"
+  SCRIPT_DIR="$(dirname "$SELF_PATH")"
 fi
 
 is_agmsg_wrapper() {
@@ -24,9 +49,8 @@ resolve_real_codex() {
     return 0
   fi
 
-  local self_dir self_path shim_target path_dir candidate candidate_dir candidate_path
-  self_dir="$(cd "$(dirname "$0")" && pwd)"
-  self_path="$self_dir/$(basename "$0")"
+  local self_path shim_target path_dir candidate candidate_dir candidate_path
+  self_path="$SELF_PATH"
   shim_target="${AGMSG_CODEX_SHIM_TARGET:-}"
 
   local old_ifs="$IFS"
@@ -111,8 +135,18 @@ first_non_option() {
 
 is_monitor_project() {
   local project="$1"
+  local delivery_script="$SCRIPT_DIR/../../../delivery.sh"
+  if [ ! -f "$delivery_script" ]; then
+    # A broken install (e.g. SCRIPT_DIR resolved wrong, or the skill was
+    # relocated/removed underneath an existing shim) previously looked
+    # identical to "this project just isn't in monitor mode" -- the shim
+    # failed open with zero signal. Warn loudly instead before doing so.
+    # See #387.
+    echo "agmsg codex shim: cannot find delivery.sh at $delivery_script (broken install?); falling through to plain codex" >&2
+    return 1
+  fi
   local status
-  status="$("$SCRIPT_DIR/../../../delivery.sh" status codex "$project" 2>/dev/null || true)"
+  status="$("$delivery_script" status codex "$project" 2>/dev/null || true)"
   printf '%s\n' "$status" | grep -qx "mode: monitor"
 }
 

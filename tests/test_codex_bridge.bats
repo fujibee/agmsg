@@ -90,11 +90,18 @@ EOF
   [ "$output" = $'team\talice' ]
 }
 
-@test "codex-bridge: resolve-only rejects ambiguous identities" {
+@test "codex-bridge: resolve-only rejects multiple identities without a role pair" {
   skip_on_windows "codex bridge identity resolution on Windows (#182)"
   run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --resolve-only
   [ "$status" -eq 1 ]
-  [[ "$output" =~ "multiple identities match" ]]
+  [[ "$output" =~ "launch one bridge per --pair" ]]
+}
+
+@test "codex-bridge: explicit --pair keeps a single identity" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  run node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --pair $'team\tbob' --resolve-only
+  [ "$status" -eq 0 ]
+  [ "$output" = $'team\tbob' ]
 }
 
 @test "codex-bridge: rejects unsupported app-server endpoints" {
@@ -557,6 +564,27 @@ EOF
   [[ "$output" =~ "bridge already running" ]]
 }
 
+@test "codex-bridge: accepts its PID when the launcher records it before startup (#442)" {
+  skip_on_windows "codex bridge identity resolution on Windows (#182)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local wrapper="$TEST_SKILL_DIR/run-with-preseeded-pid.sh"
+  cat > "$wrapper" <<'EOF'
+#!/usr/bin/env bash
+pidfile="$1"
+shift
+printf '%s\n' "$$" > "$pidfile"
+exec "$@"
+EOF
+  chmod +x "$wrapper"
+
+  AGMSG_CODEX_APP_SERVER_CMD="exit 1" run "$wrapper" \
+    "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid" \
+    node "$TYPES/codex/codex-bridge.js" --project "$PROJ" --team team --name alice
+
+  [ "$status" -ne 0 ]
+  [[ ! "$output" =~ "bridge already running" ]]
+}
+
 @test "codex-bridge: starts a turn when app-server reports watch-once pending" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then
@@ -666,6 +694,90 @@ EOF
   [ "$status" -eq 0 ]
   grep -q "thread/resume" "$log"
   ! grep -q "thread/start" "$log"
+}
+
+@test "codex-bridge: falls back to idle instead of dying when thread/resume itself fails (#276)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Codex 0.142+'s --remote sessions may not create a rollout, so the
+  # thread/resume request itself can fail outright (not merely return a
+  # mismatched thread). turn/start only needs threadId, so the bridge should
+  # keep running in idle state instead of die()ing.
+  local fake="$TEST_SKILL_DIR/fake-app-server-resume-fails.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, error: { message: "no rollout for this thread" } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({
+        jsonrpc: "2.0",
+        method: "process/exited",
+        params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" },
+      });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-no-rollout \
+    --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "thread/resume failed" ]]
+  [[ "$output" =~ "proceeding without resume" ]]
+  [[ "$output" =~ "started turn" ]]
+}
+
+@test "codex-bridge: still dies when thread/resume succeeds but returns the wrong thread id (#276)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # This is a DISTINCT failure mode from the request itself erroring -- the
+  # request succeeded but the app-server handed back a different thread. The
+  # #276 fallback must not swallow it: the try/catch added there wraps only
+  # the request, not this validation.
+  local fake="$TEST_SKILL_DIR/fake-app-server-resume-wrong-id.js"
+  cat >"$fake" <<'EOF'
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "some-other-thread", status: { type: "idle" } } } });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-expected --timeout 20
+
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "did not return the requested thread id" ]]
+  [[ "$output" != *"proceeding without resume"* ]]
 }
 
 @test "codex-bridge: --thread loaded discovers the live thread via thread/loaded/list" {
@@ -795,6 +907,16 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id: message.id, error: { message: "missing inline inbox body" } });
       return;
     }
+    const expectedRoots = [
+      process.env.PROJ,
+      `${process.env.TEST_SKILL_DIR}/custom-store`,
+      `${process.env.TEST_SKILL_DIR}/teams`,
+      `${process.env.TEST_SKILL_DIR}/run`,
+    ];
+    if (JSON.stringify(message.params.runtimeWorkspaceRoots) !== JSON.stringify(expectedRoots)) {
+      send({ jsonrpc: "2.0", id: message.id, error: { message: "wrong runtime workspace roots" } });
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: {} });
     setTimeout(() => {
       send({
@@ -810,7 +932,12 @@ rl.on("line", (line) => {
 EOF
 
   AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$TYPES/codex/codex-bridge.js" \
-    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 --inline-inbox
+    --project "$PROJ" \
+    --workspace-root "$TEST_SKILL_DIR/custom-store" \
+    --workspace-root "$TEST_SKILL_DIR/teams" \
+    --workspace-root "$TEST_SKILL_DIR/run" \
+    --workspace-root "$PROJ" \
+    --team team --name alice --timeout 1 --interval 1 --max-wakes 1 --inline-inbox
 
   [ "$status" -eq 0 ]
   [[ "$output" =~ "started turn" ]]
@@ -1258,4 +1385,224 @@ EOF
   [[ "$output" =~ "wakeup 1" ]]
   [[ "$output" =~ "wakeup 2" ]]    # proves wakeup 1 was delivered, not stale-stopped
   grep -q "turn/start" "$log"      # the deferred wake actually reached a turn
+}
+
+# --- deadlock hardening (#299): the bridge must never leave an app-server
+# request unanswered, and a watchdog must always be armed while a turn is
+# active, even when the bridge did not start that turn itself. ---
+
+@test "codex-bridge: auto-declines an approval request from the app-server (#299)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-approval.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-approval.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  fs.appendFileSync(log, `${line}\n`);
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    // A server-initiated request: only a human could normally answer this.
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", id: 500, method: "item/commandExecution/requestApproval", params: { command: ["rm", "-rf", "/"] } });
+    }, 10);
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 40);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "auto-declining an approval request" ]]
+  grep -q '"id":500' "$log"          # the bridge's reply, echoed back by the fake server
+  grep -q '"decision":"decline"' "$log"
+}
+
+@test "codex-bridge: an unhandled server-initiated request gets a method-not-found reply instead of hanging (#299)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-app-server-unknown-request.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-unknown-request.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  fs.appendFileSync(log, `${line}\n`);
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    // A future/unknown request type the bridge has no handler for.
+    send({ jsonrpc: "2.0", id: 9001, method: "totally/unknown/method", params: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "no handler for app-server request 'totally/unknown/method'" ]]
+  grep -q '"id":9001' "$log"
+  grep -q '"code":-32601' "$log"
+}
+
+@test "codex-bridge: an approval request id colliding with our own pending request id is still answered (#299 review)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Client and server number their OWN outbound requests independently on
+  # this bidirectional connection, so a server-initiated request's id can
+  # collide with the id of one of our still-outstanding requests. Reuse the
+  # exact id the bridge assigned to its own pending "turn/start" (message.id
+  # at that point, whatever it happens to be) for the approval request, and
+  # send it BEFORE turn/start's real ack -- while that id is still pending.
+  # A handleLine() that checked `pending` before `method` would wrongly
+  # resolve turn/start with the approval's params and never reply to the
+  # approval at all, silently swallowing the real ack too.
+  local fake="$TEST_SKILL_DIR/fake-app-server-id-collision.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-id-collision.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  fs.appendFileSync(log, `${line}\n`);
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-1", status: { type: "idle" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: "status=pending count=1 max_id=1\n", stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    const collideId = message.id;
+    send({ jsonrpc: "2.0", id: collideId, method: "item/commandExecution/requestApproval", params: { command: ["rm", "-rf", "/"] } });
+    send({ jsonrpc: "2.0", id: collideId, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --timeout 1 --interval 1 --max-wakes 1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "auto-declining an approval request" ]]
+  [[ "$output" =~ "started turn" ]]   # proves turn/start's real ack was NOT swallowed by the collision
+  grep -q '"decision":"decline"' "$log"
+}
+
+@test "codex-bridge: the turn watchdog rescues a resumed thread already active with no bridge-owned turn (#299)" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # Regression: thread/resume reports the thread already "active" (e.g. a
+  # stuck approval predating this bridge) and this fake NEVER sends
+  # turn/completed or an idle notification -- the pre-#299 bridge had no
+  # watchdog for a turn it did not start itself, so a pending wake would wait
+  # forever. With the fix, startTurnWatchdog() is armed on resume too, so the
+  # deferred wake still gets delivered once the (short, test-only) turn
+  # timeout elapses.
+  local fake="$TEST_SKILL_DIR/fake-app-server-stuck-active.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-stuck-active.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+let spawns = 0;
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: message.params.threadId, status: { type: "active" } } } });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    spawns += 1;
+    // Same unread max_id (5) until the deferred wake is delivered; a second
+    // message (6) follows so the run then terminates via --max-wakes, same
+    // pattern as the "delivers a wake observed while..." test above.
+    const id = spawns === 1 ? 5 : 6;
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "process/exited", params: { processHandle: message.params.processHandle, exitCode: 0, stdout: `status=pending count=1 max_id=${id}\n`, stderr: "" } });
+    }, 10);
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => {
+      send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "turn-1" } } });
+    }, 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-active \
+    --timeout 1 --interval 1 --turn-timeout 1 --max-wakes 2
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "wakeup 1" ]]
+  [[ "$output" =~ "wakeup 2" ]]
+  [[ "$output" =~ "started turn" ]]
+  grep -q "turn/start" "$log"
 }

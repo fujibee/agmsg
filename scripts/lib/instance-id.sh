@@ -280,7 +280,18 @@ EOF
 }
 
 # True iff <token> identifies a still-live instance.
-#   composite "<sid>.<pid>" → the embedded pid is alive (kill -0).
+#   composite "<sid>.<pid>" → the embedded pid is alive (kill -0), AND, when a
+#                            cc-instance.<pid> record exists for that pid, its
+#                            content still names this exact token. A shared pid
+#                            (the Claude Code 2.1.x daemon, #349) can outlive
+#                            the specific session that derived this token —
+#                            session-start.sh's dedup overwrites cc-instance.
+#                            <pid> with the newest attaching token, so a stale
+#                            token's kill-0-only check would otherwise report
+#                            "alive" forever via the shared pid. No record at
+#                            all (codex: its SessionStart plug exits before
+#                            ever reaching that write) falls back to the plain
+#                            pid check, unchanged from before.
 #   bare "<sid>"            → some live cc-instance.<p> file references it. For
 #                            upgrade compatibility a cc-instance whose content
 #                            is either exactly "<sid>" or the composite
@@ -292,7 +303,12 @@ agmsg_instance_alive() {
   [ -n "$token" ] || return 1
   if agmsg_instance_is_composite "$token"; then
     local pid="${token##*.}"
-    _agmsg_pid_alive "$pid" && return 0
+    _agmsg_pid_alive "$pid" || return 1
+    local f s
+    f="$SKILL_DIR/run/cc-instance.$pid"
+    [ -f "$f" ] || return 0
+    s="$(cat "$f" 2>/dev/null || true)"
+    [ "$s" = "$token" ] && return 0
     return 1
   fi
   local run f p s

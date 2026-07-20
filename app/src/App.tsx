@@ -8,6 +8,7 @@ import {
   Minimize2,
   Minus,
   PanelLeftClose,
+  Plus,
   RectangleHorizontal,
   Settings,
   Users,
@@ -60,7 +61,7 @@ type Message = {
   body: string;
   created_at: string;
 };
-type Pane = {
+export type Pane = {
   id: string;
   label: string;
   cmd: string;
@@ -71,12 +72,18 @@ type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
+   *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
+   *  the shell instead of a new tab" behavior below: it has to be an
+   *  explicit flag rather than inferred from `cmd`, since `cmd` is
+   *  whatever login_shell resolved (zsh/bash/fish/...), not a fixed string. */
+  shell?: boolean;
 };
 // A tab. Holds one or more panes, arranged as a binary split tree (see
 // paneTree.ts) — draggable dividers and directional split/swap drag-drop
 // (issue #317) both need real nested structure, which a flat list + layout
 // enum couldn't represent (see the design doc on that issue for why).
-type Window = {
+export type Window = {
   id: string;
   root: SplitNode;
   /** User-set tab name (Rename); falls back to the joined pane labels. */
@@ -94,6 +101,52 @@ type Window = {
 // drags or split-drops produced and rebuilds a fresh tree matching the
 // preset; it is NOT a persisted mode the window stays locked into.
 type PaneLayout = "vertical" | "horizontal" | "tile";
+// What Rust's login_shell resolved (see lib.rs) — the user's actual login
+// shell binary plus the flags to make it behave like one (source profile,
+// interactive prompt), for the free-shell "+" tab. `home` is the $HOME
+// fallback used when the current team has no project dir configured.
+export type LoginShellInfo = { cmd: string; args: string[]; home: string };
+
+// Builds a free-shell Pane from Rust's resolved login shell — or null if
+// it hasn't resolved (yet, or ever). Deliberately has NO "bash" guess-
+// fallback: an earlier version defaulted to bash when `info` was still
+// unresolved, which raced the mount-effect fetch (app just launched, user
+// immediately hits "+") — broken on Windows (no bash), and not the user's
+// actual login shell even on unix (co1 review, PR #431). Pure so the
+// no-fallback contract is unit-testable without mounting the app.
+export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: string, cwd: string | undefined): Pane | null {
+  if (!info) return null;
+  return { id, label, cmd: info.cmd, args: info.args, cwd, native: false, shell: true };
+}
+
+// Whether openShellTab's new window should still be committed after its
+// getLoginShell await — false if the user switched teams while it was in
+// flight. Committing anyway would silently add a window under the stale
+// team (hidden — only the current team's windows render) while `active`
+// pointed at it (co1, PR #431).
+export function shellTabStillValid(currentTeam: string, requestedTeam: string): boolean {
+  return currentTeam === requestedTeam;
+}
+
+// Whether openShellInWindow's target tab is still a valid split target
+// after its getLoginShell await — false if the user closed it (no window
+// references it, and `active` would point at a nonexistent id), OR just
+// switched teams while it was in flight: the target window can still exist
+// but now belong to the team the user navigated away from, in which case
+// splitting into it and setting `active` there produces the same
+// hidden-active bug openShellTab's shellTabStillValid guards against — a
+// window's `team` never changes after creation, so if the current team no
+// longer matches `requestedTeam` the window can't be a live tab regardless
+// of whether it's still present in `windows` (co1, PR #431).
+export function shellSplitStillValid(
+  windows: ReadonlyArray<Pick<Window, "id" | "team">>,
+  windowId: string,
+  currentTeam: string,
+  requestedTeam: string,
+): boolean {
+  if (currentTeam !== requestedTeam) return false;
+  return windows.some((w) => w.id === windowId && w.team === requestedTeam);
+}
 // A pane being dragged, and where within the target pane it's hovering —
 // drives both the drop classification (paneTree's classifyDrop) and the
 // half-occupied preview highlight (see dropPreview below). null while
@@ -147,6 +200,19 @@ const PANE_DRAG_MIME = "application/x-agmsg-pane";
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
+// Whether the outdated-CLI banner should render. A pure function (rather
+// than an inline JSX condition) purely so it's unit-testable — pinning down
+// that "Update now" already in flight (updatingCore) and a session-only ×
+// dismiss both independently suppress the banner, on top of the base
+// coreOutdated !== null check.
+export function shouldShowOutdatedBanner<T>(
+  coreOutdated: T,
+  updatingCore: boolean,
+  dismissed: boolean,
+): coreOutdated is NonNullable<T> {
+  return coreOutdated != null && !updatingCore && !dismissed;
+}
+
 export default function App() {
   const { t } = useTranslation();
   // Set when a startup call that the whole app depends on (loading teams)
@@ -163,6 +229,11 @@ export default function App() {
   // install still passes agmsg_is_installed(), so this is a separate check.
   // Never updated automatically: only ever from the user clicking Update.
   const [coreOutdated, setCoreOutdated] = useState<{ installed: string | null; pinned: string } | null>(null);
+  // The outdated banner's own × dismiss — deliberately session-only, not
+  // persisted (no localStorage key): a user who dismisses it once still
+  // hasn't actually updated the CLI, so the warning should come back on the
+  // next launch rather than staying silenced forever.
+  const [coreOutdatedDismissed, setCoreOutdatedDismissed] = useState(false);
   const [updatingCore, setUpdatingCore] = useState(false);
   // The version just updated to, shown as a confirmation banner — Update now
   // otherwise completes silently (the outdated banner just disappears),
@@ -175,6 +246,7 @@ export default function App() {
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
   const [windows, setWindows] = useState<Window[]>([]);
+  const [loginShell, setLoginShell] = useState<LoginShellInfo | null>(null);
   const [active, setActive] = useState<string>("room");
   // Remembers which tab was active on each team, so switching back to a
   // team you were already on lands where you left it instead of always
@@ -371,6 +443,12 @@ export default function App() {
   panesRef.current = panes;
   const windowsRef = useRef<Window[]>([]);
   windowsRef.current = windows;
+  // The stale-context guard openShellTab/openShellInWindow re-check after
+  // their getLoginShell await (see below) — a real gap now that login_shell
+  // resolution can take real time, during which the user can switch teams
+  // or close the target tab (co1, PR #431).
+  const teamRef = useRef<string>("");
+  teamRef.current = team;
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -450,6 +528,40 @@ export default function App() {
   useEffect(() => {
     invoke<string>("agmsg_command_name").then(setCmdName).catch(() => {});
   }, []);
+
+  // What to spawn for the free-shell "+" tab — the user's actual login
+  // shell (respecting $SHELL), not a hardcoded one. Resolved once in Rust
+  // (lib.rs's login_shell) since the webview has no reliable way to read
+  // $SHELL itself (unset for a Finder-launched process — see
+  // import_login_shell_path's doc comment). Just a warm-cache prefetch —
+  // getLoginShell (below) is what open-shell call sites actually await, so
+  // a click landing before this resolves still gets the real shell instead
+  // of racing to a fallback.
+  useEffect(() => {
+    invoke<LoginShellInfo>("login_shell")
+      .then(setLoginShell)
+      .catch((err) => {
+        console.error(err);
+      });
+  }, []);
+
+  // Resolves login_shell, awaiting Rust if the mount-effect prefetch above
+  // hasn't landed yet (real race: app just launched, user immediately hits
+  // "+" or "Open shell"). Returns null on failure — callers must NOT
+  // fall back to a guessed shell (e.g. "bash"): broken on Windows, and not
+  // the user's actual login shell even on unix (co1 review, PR #431).
+  const getLoginShell = useCallback(async (): Promise<LoginShellInfo | null> => {
+    if (loginShell) return loginShell;
+    try {
+      const info = await invoke<LoginShellInfo>("login_shell");
+      setLoginShell(info);
+      return info;
+    } catch (err) {
+      console.error(err);
+      setStartupError(t("startupError.loginShellFailed", { error: String(err) }));
+      return null;
+    }
+  }, [loginShell, t]);
 
   // showTeamRoom/showUserChat are already correctly seeded from localStorage
   // by their useState initializers above — this effect's only job is to
@@ -657,18 +769,7 @@ export default function App() {
     const stateListener = listen<{ id: string; state: RawState }>("agent-state", (event) => {
       applyAgentState(event.payload.id, event.payload.state);
     });
-    const exitListener = listen<{ id: string }>("pty-exit", (event) => {
-      setPaneStatus((current) => {
-        if (!(event.payload.id in current)) return current;
-        const next = { ...current };
-        delete next[event.payload.id];
-        return next;
-      });
-    });
-    return () => {
-      void stateListener.then((unlisten) => unlisten());
-      void exitListener.then((unlisten) => unlisten());
-    };
+    return () => void stateListener.then((unlisten) => unlisten());
   }, [applyAgentState]);
 
   // Load-more-on-scroll-up: fetch the page older than the currently-oldest
@@ -819,6 +920,28 @@ export default function App() {
     [detachPane],
   );
 
+  useEffect(() => {
+    const p = listen<{ id: string }>("pty-exit", (e) => {
+      setPaneStatus((current) => {
+        if (!(e.payload.id in current)) return current;
+        const next = { ...current };
+        delete next[e.payload.id];
+        return next;
+      });
+      // A free-shell pane has no "still running, look at the error" state
+      // worth preserving the way an agent's crash banner does
+      // (TerminalPane's own pty-exit listener writes that inline) — its own
+      // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
+      // tab, if it was the last one) just goes away instead of sitting on a
+      // dead prompt. Agent panes are untouched — this only fires for panes
+      // flagged `shell`.
+      if (panesRef.current.find((pane) => pane.id === e.payload.id)?.shell) {
+        closeWindowPane(e.payload.id);
+      }
+    });
+    return () => void p.then((unlisten) => unlisten());
+  }, [closeWindowPane]);
+
   // Close a whole tab: kill every pane it holds.
   const closeWindow = useCallback((windowId: string) => {
     const w = windowsRef.current.find((x) => x.id === windowId);
@@ -859,6 +982,78 @@ export default function App() {
     },
     [detachPane, team],
   );
+
+  // A plain login shell pane, unattached to any agent (vim'ing a file,
+  // poking around — not agmsg's business). Awaits getLoginShell (see the
+  // mount-effect section above) rather than reading `loginShell` state
+  // directly — null means it's genuinely unresolved/unresolvable, at which
+  // point shellPaneFrom itself refuses to guess a fallback shell (co1, PR
+  // #431); getLoginShell has already surfaced startupError in that case, so
+  // callers just bail out with no pane. cwd defaults to the current team's
+  // project dir (teamProject) rather than wherever the shell would
+  // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
+  // falling back to $HOME only when no project dir is configured. Shared by
+  // openShellTab (new tab) and openShellInWindow (split into an existing
+  // tab) below; both only ever act on the current team's tabs (windowMenu
+  // can only target a teamWindows entry), so teamProject is always the
+  // right project for either call site.
+  const buildShellPane = useCallback(async (): Promise<Pane | null> => {
+    const info = await getLoginShell();
+    return shellPaneFrom(info, `shell-${seq.current++}`, t("tabs.shellLabel"), teamProject || info?.home || undefined);
+  }, [getLoginShell, t, teamProject]);
+
+  // The "+" tab at the end of the tab bar. Same new-Pane-plus-new-Window
+  // shape as spawnMember's no-targetWindowId branch and moveToNewWindow
+  // above. buildShellPane's getLoginShell await is a real gap now (not just
+  // a microtask) — the user can switch teams while it's in flight, which
+  // would otherwise add the new window under the STALE `team` closed over
+  // at click time (hidden, since only the current team's windows render)
+  // while `active` still points at it (co1, PR #431). Bail out rather than
+  // create an orphaned, invisible tab if the team moved on.
+  const openShellTab = useCallback(async () => {
+    const requestedTeam = team;
+    const pane = await buildShellPane();
+    if (!pane || !shellTabStillValid(teamRef.current, requestedTeam)) return;
+    setPanes((prev) => [...prev, pane]);
+    const winId = `w-${seq.current++}`;
+    setWindows((prev) => [...prev, { id: winId, root: { kind: "leaf", paneId: pane.id }, team: requestedTeam }]);
+    setActive(winId);
+  }, [buildShellPane, team]);
+
+  // A tab's "Open shell" context-menu item — splits a shell pane in beside
+  // whatever's already in that tab. The symmetric counterpart of spawning an
+  // agent beside an open shell pane (see windowHasShellPane/spawnMember
+  // below): either direction, shell and agent end up split in the same tab.
+  // Same stale-context concern as openShellTab, in two shapes: the target
+  // tab can be closed while getLoginShell's await is in flight (orphaned
+  // pane, `active` pointing at a dead id), or the team can just switch
+  // while the window itself stays open — it's now a hidden tab under the
+  // team the user navigated away from, so splitting into it and activating
+  // it reproduces the same hidden-active bug (co1, PR #431).
+  const openShellInWindow = useCallback(
+    async (windowId: string) => {
+      const requestedTeam = team;
+      const pane = await buildShellPane();
+      if (!pane || !shellSplitStillValid(windowsRef.current, windowId, teamRef.current, requestedTeam)) return;
+      setPanes((prev) => [...prev, pane]);
+      setWindows((prev) =>
+        prev.map((w) => (w.id === windowId ? { ...w, root: insertAsNewLeaf(w.root, pane.id) } : w)),
+      );
+      setActive(windowId);
+    },
+    [buildShellPane, team],
+  );
+
+  // True when `windowId`'s tab currently has a free-shell pane in it — the
+  // signal spawnMember's sidebar-click site uses to decide "spawn this agent
+  // beside the shell in the same tab" (koit's design B) instead of the
+  // default "open a new tab".
+  const windowHasShellPane = useCallback((windowId: string) => {
+    const w = windowsRef.current.find((w) => w.id === windowId);
+    if (!w) return false;
+    const ids = leaves(w.root);
+    return panesRef.current.some((p) => ids.includes(p.id) && p.shell);
+  }, []);
 
   // Swap two panes' positions within the same window (tree shape unchanged
   // — no DOM remount, same as every other pane move in this file).
@@ -1245,7 +1440,7 @@ export default function App() {
           <span>{t("startupError.installing")}</span>
         </div>
       )}
-      {coreOutdated && !updatingCore && (
+      {shouldShowOutdatedBanner(coreOutdated, updatingCore, coreOutdatedDismissed) && (
         <div className="startup-outdated-banner">
           <span>
             {t("startupError.coreOutdated", {
@@ -1253,25 +1448,35 @@ export default function App() {
               pinned: coreOutdated.pinned,
             })}
           </span>
-          <button
-            onClick={async () => {
-              const targetVersion = coreOutdated.pinned;
-              setUpdatingCore(true);
-              try {
-                await invoke("agmsg_update_core");
-                setCoreOutdated(null);
-                setCoreUpdateSucceeded(targetVersion);
-                await loadTeams();
-              } catch (err) {
-                console.error(err);
-                setStartupError(t("startupError.updateFailed", { error: String(err) }));
-              } finally {
-                setUpdatingCore(false);
-              }
-            }}
-          >
-            {t("startupError.updateNow")}
-          </button>
+          <div className="startup-outdated-banner-actions">
+            <button
+              onClick={async () => {
+                const targetVersion = coreOutdated.pinned;
+                setUpdatingCore(true);
+                try {
+                  await invoke("agmsg_update_core");
+                  setCoreOutdated(null);
+                  setCoreUpdateSucceeded(targetVersion);
+                  await loadTeams();
+                } catch (err) {
+                  console.error(err);
+                  setStartupError(t("startupError.updateFailed", { error: String(err) }));
+                } finally {
+                  setUpdatingCore(false);
+                }
+              }}
+            >
+              {t("startupError.updateNow")}
+            </button>
+            <button
+              className="startup-outdated-banner-dismiss"
+              onClick={() => setCoreOutdatedDismissed(true)}
+              title={t("startupError.dismiss")}
+              aria-label={t("startupError.dismiss")}
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
       {updatingCore && (
@@ -1532,7 +1737,7 @@ export default function App() {
                       )}
                       <button
                         className="member"
-                        onClick={() => spawnMember(m)}
+                        onClick={() => spawnMember(m, windowHasShellPane(active) ? active : undefined)}
                         title={
                           pane
                             ? t("sidebar.member.titleRunning")
@@ -1657,6 +1862,14 @@ export default function App() {
                 </button>
               </span>
             ))}
+            <button
+              className="tab-new-shell"
+              title={t("tabs.newShell")}
+              aria-label={t("tabs.newShell")}
+              onClick={openShellTab}
+            >
+              <Plus size={13} />
+            </button>
             {/* Tabs are all clickable buttons, so they eat the drag region
                 the <nav> itself claims — this dedicated strip is always
                 empty and always draggable, regardless of tab count. */}
@@ -1888,6 +2101,7 @@ export default function App() {
                     args={p.args}
                     cwd={p.cwd}
                     fontSize={terminalFontSize}
+                    active={isActiveWindow}
                     onAgentState={applyAgentState}
                     onCellSize={handleCellSize}
                   />
@@ -2336,6 +2550,14 @@ export default function App() {
                 }}
               >
                 {t("ctxMenu.window.rename")}
+              </button>
+              <button
+                onClick={() => {
+                  openShellInWindow(windowMenu.windowId);
+                  setWindowMenu(null);
+                }}
+              >
+                {t("ctxMenu.window.openShell")}
               </button>
               <div className="submenu-trigger">
                 <span className="submenu-label">{t("ctxMenu.window.layout")}</span>

@@ -210,6 +210,62 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+# --- Claude Code 2.1.x daemon architecture (#349) ---
+
+@test "pid-is-agent: excludes a 'claude daemon run' process even though argv0 matches" {
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a "claude daemon run --json-path /tmp/agmsg-test-daemon.json" sleep 5' &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" claude-code
+  kill "$p" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+}
+
+@test "pid-is-agent: accepts the real session shape (version-named binary + --bg-spare)" {
+  skip_on_windows "process argv faking via exec -a (#349)"
+  # --bg-spare appears on the REAL per-session binary too (per #349's report),
+  # so it must NOT be an exclusion signal on its own — only "daemon run"
+  # identifies the daemon. This is the actual reported shape:
+  # ".../claude/versions/2.1.199 --bg-spare ...".
+  bash -c 'exec -a "2.1.199 --bg-spare" sleep 5' &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" claude-code
+  kill "$p" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+}
+
+@test "pid-is-agent: accepts a version-named claude-code session binary" {
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a "2.1.199" sleep 5' &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" claude-code
+  kill "$p" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+}
+
+@test "pid-is-agent: accepts a version-named session binary under a full versions/ path" {
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a "/home/x/.local/share/claude/versions/2.1.199" sleep 5' &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" claude-code
+  kill "$p" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+}
+
+@test "pid-is-agent: a version-named binary is NOT accepted for a non-claude-code type" {
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a "2.1.199" sleep 5' &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" codex
+  kill "$p" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+}
+
 @test "read-marker: untrusted pid is not honored even if the file exists" {
   agmsg_write_project_marker "$$" "/should/not/trust"   # $$ is not an agent
   run agmsg_read_project_marker "$$" claude-code
