@@ -45,7 +45,15 @@ _agmsg_pid_alive() {
       return $?
       ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  # A non-zero `kill -0` is ESRCH (dead) or EPERM (alive but unsignalable under
+  # the sandbox). Only ESRCH is dead. `export LC_ALL=C` (not a bare prefix, which
+  # misses the builtin on bash 3.2) forces English error text for the match.
+  local err
+  err="$(export LC_ALL=C; kill -0 "$pid" 2>&1)" && return 0
+  case "$err" in
+    *[Nn]'o such process'*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # Compose from an explicit pid. Bare sid when pid is empty/non-numeric.

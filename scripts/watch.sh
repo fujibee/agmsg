@@ -111,18 +111,20 @@ mkdir -p "$RUN_DIR" 2>/dev/null || true
 # against pid recycling — only touch processes whose cmdline still matches
 # our watch.sh. See #66.
 #
-# When ps is unavailable (e.g. Claude Code sandbox), fall back to kill -0
-# which confirms the pid is alive but cannot validate the cmdline.
+# When ps is unavailable (e.g. Claude Code sandbox), fall back to _agmsg_pid_alive
+# which confirms the pid is alive but cannot validate the cmdline. It is EPERM-aware
+# so a live-but-unsignalable sibling watcher isn't misread as dead and left running.
 if [ -f "$PIDFILE" ]; then
   prev_pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && kill -0 "$prev_pid" 2>/dev/null; then
+  if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && _agmsg_pid_alive "$prev_pid"; then
     prev_cmd=$(compat_get_cmdline "$prev_pid" 2>/dev/null || true)
     if [ -n "$prev_cmd" ]; then
       case "$prev_cmd" in
         *"$SKILL_DIR/scripts/watch.sh"*) kill "$prev_pid" 2>/dev/null || true ;;
       esac
     else
-      # ps unavailable (sandboxed) — skip cmdline validation, rely on kill -0
+      # ps unavailable (sandboxed) — skip cmdline validation, rely on the
+      # _agmsg_pid_alive check above
       kill "$prev_pid" 2>/dev/null || true
     fi
   fi

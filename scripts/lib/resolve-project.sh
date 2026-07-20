@@ -335,12 +335,15 @@ agmsg_read_project_marker() {
 agmsg_marker_gc_stale() {
   local dir; dir="$(_agmsg_run_dir)"
   [ -d "$dir" ] || return 0
+  # Skip if _agmsg_pid_alive (EPERM-aware; instance-id.sh) isn't loaded, so a
+  # "command not found" can't fall through to `|| rm -f` and delete a live marker.
+  declare -F _agmsg_pid_alive >/dev/null 2>&1 || return 0
   local f pid
   for f in "$dir"/proj.*.project; do
     [ -f "$f" ] || continue
     pid=${f##*/proj.}; pid=${pid%.project}
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || rm -f "$f"
+    _agmsg_pid_alive "$pid" || rm -f "$f"
   done
 }
 

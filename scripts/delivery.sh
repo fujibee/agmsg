@@ -284,7 +284,9 @@ emit_monitor_directive() {
   if [ -f "$pidfile" ]; then
     local existing
     existing=$(cat "$pidfile" 2>/dev/null || true)
-    if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+    # EPERM-aware liveness (_agmsg_pid_alive): a sandbox-unsignalable watcher is
+    # still alive, so we must not re-emit and spawn a duplicate.
+    if [ -n "$existing" ] && _agmsg_pid_alive "$existing"; then
       cat <<EOF
 
 A watch.sh is already streaming into this session (pid $existing). No

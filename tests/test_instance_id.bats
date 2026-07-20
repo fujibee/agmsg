@@ -130,6 +130,52 @@ teardown() { teardown_test_env; }
   ! agmsg_instance_alive ""
 }
 
+# --- _agmsg_pid_alive: EPERM vs ESRCH (Claude Code sandbox) ---
+#
+# Under the sandbox `kill -0` on a live pid returns EPERM, not ESRCH. Only ESRCH
+# is dead; EPERM must read as alive or the watcher self-exits. `kill` is stubbed
+# to script each errno string (real EPERM is hard to force).
+
+@test "pid_alive: a real live pid (self) is alive" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  _agmsg_pid_alive $$
+}
+
+@test "pid_alive: a real dead pid is not alive (ESRCH end-to-end)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  ! _agmsg_pid_alive 2147483647
+}
+
+@test "pid_alive: a signalable pid (kill -0 exit 0) is alive" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  kill() { return 0; }
+  _agmsg_pid_alive 12345
+}
+
+@test "pid_alive: ESRCH 'No such process' reads as dead" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  kill() { echo "bash: kill: (999) - No such process" >&2; return 1; }
+  ! _agmsg_pid_alive 999
+}
+
+@test "pid_alive: lowercase 'no such process' (zsh wording) also reads as dead" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  kill() { echo "kill: (999) - no such process" >&2; return 1; }
+  ! _agmsg_pid_alive 999
+}
+
+@test "pid_alive: EPERM 'Operation not permitted' reads as alive (sandbox)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  kill() { echo "bash: kill: (1) - Operation not permitted" >&2; return 1; }
+  _agmsg_pid_alive 1
+}
+
+@test "pid_alive: an unrecognized kill failure defaults to alive (fail-safe)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  kill() { echo "kill: some novel platform error" >&2; return 1; }
+  _agmsg_pid_alive 42
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {
