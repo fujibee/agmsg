@@ -103,7 +103,7 @@ agmsg_delivery_runtime_status() {
     fi
     found=1
 
-    local base pidfile metafile pid meta_pid meta_project meta_type meta_ok
+    local base pidfile metafile pid meta_pid meta_project meta_type meta_ok want_proj have_proj
     base="$RUN_DIR/codex-bridge.$team.$name"
     pidfile="$base.pid"
     metafile="$base.meta"
@@ -129,7 +129,15 @@ agmsg_delivery_runtime_status() {
     meta_project=$(awk -F= '/^project=/{sub(/^project=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
     meta_type=$(awk -F= '/^type=/{sub(/^type=/, ""); print; exit}' "$metafile" 2>/dev/null || true)
     [ -n "$meta_pid" ] && [ "$meta_pid" != "$pid" ] && meta_ok=0
-    [ -n "$meta_project" ] && [ "$meta_project" != "$project" ] && meta_ok=0
+    # The bridge records its project via Node's path.resolve (C:\x\y on
+    # Windows) while callers pass Git Bash spellings (/c/x/y or C:/x/y), so a
+    # verbatim compare mislabels every live bridge stale. Compare canonical
+    # normalized forms instead.
+    if [ -n "$meta_project" ]; then
+      want_proj="$(agmsg_normalize_project_path "$(agmsg_canonical_path "$project")")"
+      have_proj="$(agmsg_normalize_project_path "$(agmsg_canonical_path "$meta_project")")"
+      [ "$have_proj" != "$want_proj" ] && meta_ok=0
+    fi
     [ -n "$meta_type" ] && [ "$meta_type" != "$type" ] && meta_ok=0
     if [ "$meta_ok" -ne 1 ]; then
       echo "Codex bridge: $team/$name stale pidfile (metadata mismatch)"

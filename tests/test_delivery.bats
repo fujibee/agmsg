@@ -1767,6 +1767,54 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
+@test "delivery status (codex): metadata project spelling variant is not a mismatch" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # Same directory, different spelling (trailing slash). A verbatim compare
+  # calls this a mismatch; canonical comparison must not.
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$$
+project=$TEST_PROJECT/
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice"* ]]
+  [[ "$output" != *"metadata mismatch"* ]]
+}
+
+@test "delivery status (codex): metadata project in native Windows spelling is not a mismatch" {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) skip "needs a real Windows path spelling (cygpath)" ;; esac
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # The bridge records the project via Node's path.resolve, i.e. the
+  # backslash form cygpath -w produces — the exact shape that made every
+  # live bridge read as "metadata mismatch" on Windows.
+  local win_project
+  win_project="$(cygpath -w "$TEST_PROJECT")"
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
+  cat > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta" <<EOF
+pid=$$
+project=$win_project
+team=team
+name=alice
+type=codex
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/alice"* ]]
+  [[ "$output" != *"metadata mismatch"* ]]
+}
+
 @test "delivery status (codex): missing bridge metadata is reported as stale" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
