@@ -146,6 +146,7 @@ pub fn pty_spawn(
     id: String,
     cmd: String,
     args: Vec<String>,
+    detection_type: Option<String>,
     cwd: Option<String>,
     rows: Option<u16>,
     cols: Option<u16>,
@@ -205,10 +206,18 @@ pub fn pty_spawn(
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let tail = Arc::new(Mutex::new(TailBuffer::default()));
-    let agent_type = std::path::Path::new(&cmd)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&cmd)
+    // A managed pane runs `tmux attach`, but its visible output belongs to the
+    // registered director type. Direct panes omit this override and preserve
+    // the original command-derived classifier identity.
+    let agent_type = detection_type
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::path::Path::new(&cmd)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&cmd)
+                .to_string()
+        })
         .to_ascii_lowercase();
     let detection = Arc::new(Mutex::new(DetectionTracker::new(agent_type)));
 

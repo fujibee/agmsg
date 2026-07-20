@@ -59,6 +59,43 @@
       "title": "app-user in {{team}}"
     }
   },
+  "managedSession": {
+    "title": "Managed session",
+    "noProject": "No exact director registration",
+    "inventory": {
+      "registration": "registration",
+      "process": "process",
+      "pane": "pane",
+      "worktree": "worktree",
+      "generation": "generation",
+      "active_turn": "active turn",
+      "final_ack": "final ACK"
+    },
+    "action": {
+      "start": "Start session",
+      "detach": "Detach",
+      "reconnect": "Reconnect",
+      "ack": "Final ACK",
+      "end": "End session"
+    },
+    "error": {
+      "noDirector": "Register an exact \"director\" with a project in this team first.",
+      "notSpawnable": "The director's registered type has no spawnable CLI."
+    },
+    "modal": {
+      "detachPane": {
+        "title": "Detach from the managed session?",
+        "body": "This closes only the tmux attach client. The director and managed session keep running.",
+        "confirm": "Detach"
+      },
+      "detachTab": {
+        "title": "Close this tab?",
+        "body": "The tmux attach client will close, but the director and managed session keep running.",
+        "mixedBody": "The managed session stays running, but these direct agents will stop: {{names}}.",
+        "confirm": "Close tab"
+      }
+    }
+  },
   "tabs": {
     "roomLabel": "# team room",
     "close": "×",

@@ -15,6 +15,14 @@ import {
 } from "lucide-react";
 import { TerminalPane } from "./TerminalPane";
 import { aggregateTeamStatus, applyStateChange, type PaneStatusMap, type RawState } from "./agentStatus";
+import {
+  canFinalAck,
+  directorArgv,
+  exactDirector,
+  inventoryRows,
+  observedTurnSignal,
+  type ManagedSessionResponse,
+} from "./managedSession";
 import { AUTO_TIMEZONE, formatMessageTime, isValidTimeZone, resolveTimeZone } from "./time";
 import {
   AgentModal,
@@ -72,6 +80,12 @@ export type Pane = {
    *  False for actas-booted types with no monitor of their own (codex,
    *  grok-build, hermes, ...): the app's stdin-inject IS their only delivery. */
   native: boolean;
+  /** This PTY is only a tmux attach client. Closing it detaches from the
+   * managed director session; lifecycle cleanup stays behind the explicit
+   * managed-session End action. */
+  managedSessionId?: string;
+  managedProject?: string;
+  detectionType?: string;
   /** A free login shell (the "+" tab, or a tab's "Open shell" context menu
    *  item) — unattached to any agent. Drives the sidebar-click "spawn beside
    *  the shell instead of a new tab" behavior below: it has to be an
@@ -242,6 +256,7 @@ export default function App() {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [members, setMembers] = useState<Member[]>([]);
+  const [membersTeam, setMembersTeam] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [panes, setPanes] = useState<Pane[]>([]);
   const [paneStatus, setPaneStatus] = useState<PaneStatusMap>({});
@@ -261,6 +276,10 @@ export default function App() {
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
+  const [managedSession, setManagedSession] = useState<ManagedSessionResponse | null>(null);
+  const [managedSessionError, setManagedSessionError] = useState<string | null>(null);
+  const [managedSessionBusy, setManagedSessionBusy] = useState(false);
+  const [managedTurnSyncTick, setManagedTurnSyncTick] = useState(0);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
   // Terminal font size, adjustable from the Settings modal and persisted
@@ -449,6 +468,8 @@ export default function App() {
   // or close the target tab (co1, PR #431).
   const teamRef = useRef<string>("");
   teamRef.current = team;
+  const managedTurnInFlightRef = useRef(false);
+  const lastManagedTurnAttemptRef = useRef<string>("");
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -480,6 +501,7 @@ export default function App() {
   const teamProject = appUserMember?.project ?? "";
   // Everyone else is a spawnable/messageable agent.
   const others = members.filter((m) => !m.types.includes(APP_USER_TYPE));
+  const managedDirector = membersTeam === team ? exactDirector(members) : null;
   // The app user's own send/receive thread.
   const myThread = messages.filter((m) => m.from === appUser || m.to === appUser);
 
@@ -521,6 +543,7 @@ export default function App() {
   const loadMembers = useCallback(async (t: string) => {
     const m = await invoke<Member[]>("agmsg_members", { team: t });
     setMembers(m);
+    setMembersTeam(t);
     return m;
   }, []);
 
@@ -933,9 +956,11 @@ export default function App() {
       // (TerminalPane's own pty-exit listener writes that inline) — its own
       // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
       // tab, if it was the last one) just goes away instead of sitting on a
-      // dead prompt. Agent panes are untouched — this only fires for panes
-      // flagged `shell`.
-      if (panesRef.current.find((pane) => pane.id === e.payload.id)?.shell) {
+      // dead prompt. A managed pane is likewise only an attach client, so an
+      // exited client disappears without ending its tmux session. Direct
+      // agent panes are untouched.
+      const exitedPane = panesRef.current.find((pane) => pane.id === e.payload.id);
+      if (exitedPane?.shell || exitedPane?.managedSessionId) {
         closeWindowPane(e.payload.id);
       }
     });
@@ -952,6 +977,221 @@ export default function App() {
     setWindows((prev) => prev.filter((x) => x.id !== windowId));
     setActive((a) => (a === windowId ? "room" : a));
   }, []);
+
+  const refreshManagedStatus = useCallback(async (project: string, expectedTeam: string) => {
+    const response = await invoke<ManagedSessionResponse>("managed_session_status", { project });
+    if (teamRef.current === expectedTeam) setManagedSession(response);
+    return response;
+  }, []);
+
+  const attachManagedSession = useCallback(
+    async (response: ManagedSessionResponse, director: Member) => {
+      if (response.state !== "ACTIVE" || !response.session_id) return;
+      const existing = panesRef.current.find((pane) => pane.managedSessionId === response.session_id);
+      if (existing) {
+        const owner = windowsRef.current.find((window) => leaves(window.root).includes(existing.id));
+        if (owner) setActive(owner.id);
+        return;
+      }
+
+      const requestedTeam = team;
+      const types = await invoke<AgentType[]>("agmsg_spawnable_types").catch(() => spawnTypes);
+      setSpawnTypes(types);
+      const type = director.types.find((name) => types.some((candidate) => candidate.name === name));
+      let monitors = false;
+      if (type) {
+        try {
+          const mode = await invoke<string>("agmsg_delivery_mode", {
+            agentType: type,
+            project: director.project,
+          });
+          monitors = mode === "monitor" || mode === "both";
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      if (teamRef.current !== requestedTeam) return;
+
+      const paneId = `managed-director-${seq.current++}`;
+      const windowId = `w-${seq.current++}`;
+      const pane: Pane = {
+        id: paneId,
+        label: director.name,
+        cmd: "tmux",
+        args: ["attach-session", "-t", `=${response.session_id}`],
+        cwd: director.project,
+        native: monitors,
+        managedSessionId: response.session_id,
+        managedProject: director.project,
+        detectionType: type,
+      };
+      setPanes((current) => [...current, pane]);
+      setWindows((current) => [
+        ...current,
+        { id: windowId, root: { kind: "leaf", paneId }, team: requestedTeam },
+      ]);
+      setActive(windowId);
+    },
+    [spawnTypes, team],
+  );
+
+  const startManagedSession = useCallback(async () => {
+    if (!managedDirector) {
+      setManagedSessionError(t("managedSession.error.noDirector"));
+      return;
+    }
+    const requestedTeam = team;
+    setManagedSessionBusy(true);
+    setManagedSessionError(null);
+    try {
+      const types = await invoke<AgentType[]>("agmsg_spawnable_types");
+      setSpawnTypes(types);
+      const argv = directorArgv(managedDirector, types, cmdName);
+      if (!argv) {
+        setManagedSessionError(t("managedSession.error.notSpawnable"));
+        return;
+      }
+      const response = await invoke<ManagedSessionResponse>("managed_session_start", {
+        project: managedDirector.project,
+        team: requestedTeam,
+        directorArgv: argv,
+      });
+      if (teamRef.current !== requestedTeam) return;
+      setManagedSession(response);
+      if (response.result === "DENY") {
+        setManagedSessionError(response.reason_code ?? "DENY");
+        return;
+      }
+      await attachManagedSession(response, managedDirector);
+    } catch (error) {
+      if (teamRef.current === requestedTeam) setManagedSessionError(String(error));
+    } finally {
+      setManagedSessionBusy(false);
+    }
+  }, [attachManagedSession, cmdName, managedDirector, t, team]);
+
+  const detachManagedSession = useCallback(() => {
+    if (!managedSession?.session_id) return;
+    const pane = panesRef.current.find((candidate) => candidate.managedSessionId === managedSession.session_id);
+    if (pane) closeWindowPane(pane.id);
+  }, [closeWindowPane, managedSession]);
+
+  const reconnectManagedSession = useCallback(async () => {
+    if (!managedDirector || !managedSession || managedSession.state !== "ACTIVE") return;
+    setManagedSessionError(null);
+    try {
+      await attachManagedSession(managedSession, managedDirector);
+    } catch (error) {
+      setManagedSessionError(String(error));
+    }
+  }, [attachManagedSession, managedDirector, managedSession]);
+
+  const acknowledgeManagedSession = useCallback(async () => {
+    const generation = managedSession?.inventory?.generation;
+    if (!managedDirector || generation == null || !canFinalAck(managedSession)) return;
+    const requestedTeam = team;
+    setManagedSessionBusy(true);
+    setManagedSessionError(null);
+    try {
+      const response = await invoke<ManagedSessionResponse>("managed_session_ack", {
+        project: managedDirector.project,
+        generation,
+      });
+      if (teamRef.current !== requestedTeam) return;
+      if (response.result === "DENY") setManagedSessionError(response.reason_code ?? "DENY");
+      await refreshManagedStatus(managedDirector.project, requestedTeam);
+    } catch (error) {
+      if (teamRef.current === requestedTeam) setManagedSessionError(String(error));
+    } finally {
+      setManagedSessionBusy(false);
+    }
+  }, [managedDirector, managedSession, refreshManagedStatus, team]);
+
+  const endManagedSession = useCallback(async () => {
+    if (!managedDirector || !managedSession || managedSession.state === "INACTIVE") return;
+    const requestedTeam = team;
+    const sessionId = managedSession.session_id;
+    setManagedSessionBusy(true);
+    setManagedSessionError(null);
+    try {
+      const response = await invoke<ManagedSessionResponse>("managed_session_end", {
+        project: managedDirector.project,
+      });
+      if (teamRef.current !== requestedTeam) return;
+      setManagedSession(response);
+      if (response.result === "DENY") {
+        setManagedSessionError(response.reason_code ?? "DENY");
+      } else if (response.state === "INACTIVE") {
+        const pane = panesRef.current.find((candidate) => candidate.managedSessionId === sessionId);
+        if (pane) closeWindowPane(pane.id);
+      }
+    } catch (error) {
+      if (teamRef.current === requestedTeam) setManagedSessionError(String(error));
+    } finally {
+      setManagedSessionBusy(false);
+    }
+  }, [closeWindowPane, managedDirector, managedSession, team]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setManagedSession(null);
+    setManagedSessionError(null);
+    lastManagedTurnAttemptRef.current = "";
+    if (!team || membersTeam !== team) return;
+    if (!managedDirector) {
+      setManagedSessionError(t("managedSession.error.noDirector"));
+      return;
+    }
+    invoke<ManagedSessionResponse>("managed_session_status", { project: managedDirector.project })
+      .then((response) => {
+        if (cancelled) return;
+        setManagedSession(response);
+        if (response.result === "DENY") setManagedSessionError(response.reason_code ?? "DENY");
+      })
+      .catch((error) => {
+        if (!cancelled) setManagedSessionError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [managedDirector, membersTeam, t, team]);
+
+  useEffect(() => {
+    const inventory = managedSession?.inventory;
+    const generation = inventory?.generation;
+    if (!managedDirector || managedSession?.state !== "ACTIVE" || !inventory || generation == null) return;
+    const pane = panes.find((candidate) => candidate.managedSessionId === managedSession.session_id);
+    if (!pane) return;
+    const paneState = paneStatus[pane.id]?.state;
+    if (!paneState) return;
+    const signal = observedTurnSignal(paneState);
+    if (!signal) return;
+    const nextActive = signal === "active";
+    if (inventory.active_turn === nextActive) return;
+    const attemptKey = `${managedSession.session_id}:${generation}:${signal}:${paneState}`;
+    if (managedTurnInFlightRef.current || lastManagedTurnAttemptRef.current === attemptKey) return;
+    managedTurnInFlightRef.current = true;
+    lastManagedTurnAttemptRef.current = attemptKey;
+    invoke<ManagedSessionResponse>("managed_session_turn", {
+      project: managedDirector.project,
+      signal,
+      generation,
+    })
+      .then((response) => {
+        if (teamRef.current === team) {
+          if (response.result === "DENY") setManagedSessionError(response.reason_code ?? "DENY");
+          else setManagedSessionError(null);
+        }
+        return refreshManagedStatus(managedDirector.project, team);
+      })
+      .catch((error) => {
+        if (teamRef.current === team) setManagedSessionError(String(error));
+      })
+      .finally(() => {
+        managedTurnInFlightRef.current = false;
+        setManagedTurnSyncTick((tick) => tick + 1);
+      });
+  }, [managedDirector, managedSession, managedTurnSyncTick, paneStatus, panes, refreshManagedStatus, team]);
 
   // Move a pane into another tab, adding it to that tab's side-by-side split
   // (uncapped — N panes in a tab render as N equal columns, see
@@ -1155,6 +1395,10 @@ export default function App() {
       }),
     );
   }, [teams, windows, paneStatus]);
+  const attachedManagedPane = managedSession?.session_id
+    ? panes.find((pane) => pane.managedSessionId === managedSession.session_id)
+    : undefined;
+  const managedInventoryRows = inventoryRows(managedSession);
 
   // If Show Team Room gets switched off while it's the active tab, land on
   // whichever pane tab exists instead — the room tab itself is about to
@@ -1665,6 +1909,60 @@ export default function App() {
                   );
                 })}
               </div>
+              <section className="managed-session-control" aria-label={t("managedSession.title")}>
+                <div className="managed-session-heading">
+                  <span>{t("managedSession.title")}</span>
+                  <span className={`managed-session-state state-${managedSession?.state.toLowerCase() ?? "unknown"}`}>
+                    {managedSession?.state ?? "UNKNOWN"}
+                  </span>
+                </div>
+                <div className="managed-session-project" title={managedDirector?.project}>
+                  {managedDirector?.project ?? t("managedSession.noProject")}
+                </div>
+                <dl className="managed-session-inventory">
+                  {managedInventoryRows.map((row) => (
+                    <div key={row.key}>
+                      <dt>{t(`managedSession.inventory.${row.key}`)}</dt>
+                      <dd>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+                {managedSessionError && <div className="managed-session-error">{managedSessionError}</div>}
+                <div className="managed-session-actions">
+                  <button
+                    onClick={() => void startManagedSession()}
+                    disabled={
+                      !managedDirector ||
+                      managedSessionBusy ||
+                      (managedSession != null && managedSession.state !== "INACTIVE")
+                    }
+                  >
+                    {t("managedSession.action.start")}
+                  </button>
+                  <button onClick={detachManagedSession} disabled={!attachedManagedPane}>
+                    {t("managedSession.action.detach")}
+                  </button>
+                  <button
+                    onClick={() => void reconnectManagedSession()}
+                    disabled={managedSessionBusy || managedSession?.state !== "ACTIVE" || Boolean(attachedManagedPane)}
+                  >
+                    {t("managedSession.action.reconnect")}
+                  </button>
+                  <button
+                    onClick={() => void acknowledgeManagedSession()}
+                    disabled={managedSessionBusy || !canFinalAck(managedSession)}
+                  >
+                    {t("managedSession.action.ack")}
+                  </button>
+                  <button
+                    className="managed-session-end"
+                    onClick={() => void endManagedSession()}
+                    disabled={managedSessionBusy || !managedSession || managedSession.state === "INACTIVE"}
+                  >
+                    {t("managedSession.action.end")}
+                  </button>
+                </div>
+              </section>
               <div className="sidebar-title">
                 <span className="sidebar-title-label">
                   {t("sidebar.title")}
@@ -2099,6 +2397,7 @@ export default function App() {
                     id={p.id}
                     cmd={p.cmd}
                     args={p.args}
+                    detectionType={p.detectionType}
                     cwd={p.cwd}
                     fontSize={terminalFontSize}
                     active={isActiveWindow}
@@ -2318,15 +2617,29 @@ export default function App() {
         (() => {
           const win = windows.find((w) => w.id === modal.windowId);
           if (!win) return null;
-          const names = leaves(win.root)
-            .map((pid) => panes.find((p) => p.id === pid)?.label)
-            .filter((n): n is string => Boolean(n));
+          const windowPanes = leaves(win.root)
+            .map((pid) => panes.find((p) => p.id === pid))
+            .filter((pane): pane is Pane => Boolean(pane));
+          const hasManaged = windowPanes.some((pane) => Boolean(pane.managedSessionId));
+          const directNames = windowPanes.filter((pane) => !pane.managedSessionId).map((pane) => pane.label);
+          const names = windowPanes.map((pane) => pane.label);
           return (
             <ConfirmModal
-              title={t("modal.closeWindow.title")}
-              body={t("modal.closeWindow.body", { names: names.join(", ") })}
-              confirmLabel={t("modal.closeWindow.confirmLabel")}
-              danger
+              title={hasManaged ? t("managedSession.modal.detachTab.title") : t("modal.closeWindow.title")}
+              body={
+                hasManaged
+                  ? t(
+                      directNames.length > 0
+                        ? "managedSession.modal.detachTab.mixedBody"
+                        : "managedSession.modal.detachTab.body",
+                      { names: directNames.join(", ") },
+                    )
+                  : t("modal.closeWindow.body", { names: names.join(", ") })
+              }
+              confirmLabel={
+                hasManaged ? t("managedSession.modal.detachTab.confirm") : t("modal.closeWindow.confirmLabel")
+              }
+              danger={directNames.length > 0 || !hasManaged}
               onConfirm={() => closeWindow(modal.windowId)}
               onClose={() => setModal(null)}
             />
@@ -2338,10 +2651,22 @@ export default function App() {
           if (!pane) return null;
           return (
             <ConfirmModal
-              title={t("modal.closePane.title", { name: pane.label })}
-              body={t("modal.closePane.body", { name: pane.label })}
-              confirmLabel={t("modal.closePane.confirmLabel")}
-              danger
+              title={
+                pane.managedSessionId
+                  ? t("managedSession.modal.detachPane.title")
+                  : t("modal.closePane.title", { name: pane.label })
+              }
+              body={
+                pane.managedSessionId
+                  ? t("managedSession.modal.detachPane.body")
+                  : t("modal.closePane.body", { name: pane.label })
+              }
+              confirmLabel={
+                pane.managedSessionId
+                  ? t("managedSession.modal.detachPane.confirm")
+                  : t("modal.closePane.confirmLabel")
+              }
+              danger={!pane.managedSessionId}
               onConfirm={() => closeWindowPane(modal.paneId)}
               onClose={() => setModal(null)}
             />
