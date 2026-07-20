@@ -203,15 +203,20 @@ teardown() {
   local pid_path; pid_path="$(agmsg_boot_pid_path myteam alice)"
 
   boot="$(cat "$CAPTURE")"; run cat "$boot"
-  [[ "$output" == *"echo \$\$ > $pid_path"* ]]
-  [[ "$output" == *"rm -f $pid_path"* ]]
+  # The literal path is assigned to a boot-local var once, then referenced by
+  # name everywhere else (write, trap, clear) rather than re-embedded.
+  [[ "$output" == *"AGMSG_BOOT_PID_PATH=$pid_path"* ]]
+  [[ "$output" == *'echo $$ > "$AGMSG_BOOT_PID_PATH"'* ]]
+  [[ "$output" == *'trap '"'"'rm -f "$AGMSG_BOOT_PID_PATH"'* ]]
+  [[ "$output" == *"EXIT HUP TERM INT"* ]]
+  [[ "$output" == *'rm -f "$AGMSG_BOOT_PID_PATH"'* ]]
   # Written before the CLI line, cleared after it -- not the other way round.
   # (The CLI invocation is asserted-between, not line-anchored, since it may be
   # prefixed by MSYS2_ARG_CONV_EXCL=... even on macOS/Linux -- inert there, but
   # it means the line doesn't start with the bare cli name.)
   local write_line clear_line between
-  write_line="$(grep -n "echo \$\$ >" "$boot" | head -1 | cut -d: -f1)"
-  clear_line="$(grep -n "^rm -f $pid_path" "$boot" | head -1 | cut -d: -f1)"
+  write_line="$(grep -n "AGMSG_BOOT_PID_PATH=" "$boot" | head -1 | cut -d: -f1)"
+  clear_line="$(grep -n "^rm -f \"\$AGMSG_BOOT_PID_PATH\"" "$boot" | head -1 | cut -d: -f1)"
   [ -n "$write_line" ]
   [ -n "$clear_line" ]
   [ "$write_line" -lt "$clear_line" ]

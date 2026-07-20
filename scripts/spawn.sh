@@ -442,9 +442,16 @@ esac
   # $$ here is the boot script's own shell pid, not spawn.sh's -- it stays
   # alive for exactly as long as the CLI below runs (foreground, not exec'd),
   # so a liveness check on this pid tracks the CLI's lifetime even if the
-  # CLI/model never reaches its own watcher-registration step.
+  # CLI/model never reaches its own watcher-registration step. A consumer
+  # always validates via kill(pid, 0) (same contract as every other sentinel
+  # here), so a stale file is harmless -- but the trap below still clears it
+  # on the common abnormal-exit paths (closed window/tab -> HUP, killed pane
+  # -> TERM, Ctrl-C -> INT) so it doesn't needlessly linger; only a SIGKILL
+  # (untrappable) leaves it behind for the next liveness check to invalidate.
   printf 'mkdir -p %q 2>/dev/null || true\n' "$(_actas_lock_dir)"
-  printf 'echo $$ > %q 2>/dev/null || true\n' "$BOOT_PID_PATH"
+  printf 'AGMSG_BOOT_PID_PATH=%q\n' "$BOOT_PID_PATH"
+  printf 'echo $$ > "$AGMSG_BOOT_PID_PATH" 2>/dev/null || true\n'
+  printf 'trap '\''rm -f "$AGMSG_BOOT_PID_PATH" 2>/dev/null'\'' EXIT HUP TERM INT\n'
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   if [ -n "$SPAWN_UNSET_VARS" ]; then
     printf 'unset %s\n' "$SPAWN_UNSET_VARS"
@@ -489,7 +496,8 @@ esac
     agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
     printf '\n'
   fi
-  printf 'rm -f %q 2>/dev/null || true\n' "$BOOT_PID_PATH"  # CLI exited (or was killed) -- presence over
+  echo 'trap - EXIT HUP TERM INT'  # CLI returned normally -- the explicit rm below covers it, not the trap
+  echo 'rm -f "$AGMSG_BOOT_PID_PATH" 2>/dev/null'  # presence over
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
 } > "$BOOT"
