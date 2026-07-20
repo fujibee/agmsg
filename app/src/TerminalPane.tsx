@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createWriteBatcher } from "./writeBatcher";
+import { attachWebglAddon } from "./webglAttach";
 
 type Props = {
   /** Stable session id; also the key the backend stores the PTY under. */
@@ -245,34 +246,10 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, o
   useEffect(() => {
     const term = termRef.current;
     if (!term || !active) return;
-    const webgl = new WebglAddon();
-    // Real GPU/driver context loss (as opposed to the cleanup below's own
-    // proactive dispose on going inactive) — e.g. an unsupported/locked-
-    // down GPU, or the context cap getting hit some other way despite the
-    // active-only scoping above. Falls back to the default DOM renderer for
-    // the rest of this pane's active session; deliberately no retry loop
-    // here (the effect below still retries naturally on the next
-    // inactive->active transition).
-    webgl.onContextLoss(() => {
-      webgl.dispose();
-      if (webglAddonRef.current === webgl) webglAddonRef.current = null;
-    });
-    try {
-      term.loadAddon(webgl);
-      webglAddonRef.current = webgl;
-    } catch {
-      // loadAddon can throw synchronously (e.g. WebGL2 unavailable) — same
-      // graceful fallback as a context-loss event, nothing further to do.
-      return;
-    }
-    return () => {
-      // Guards against double-dispose if onContextLoss already fired and
-      // cleared the ref for this exact addon instance.
-      if (webglAddonRef.current === webgl) {
-        webgl.dispose();
-        webglAddonRef.current = null;
-      }
-    };
+    // Throw/dispose/context-loss edge cases live in attachWebglAddon
+    // (webglAttach.ts) so they're unit-testable without a real WebGL
+    // context — see that file for the failure-path reasoning.
+    return attachWebglAddon(term, () => new WebglAddon(), webglAddonRef);
   }, [active]);
 
   return <div className="term-pane" ref={ref} />;
