@@ -3,6 +3,11 @@ set -euo pipefail
 
 # Usage: send.sh <team> <from> <to> <message> [--force]
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/fast-dispatch.sh"
+agmsg_fast_dispatch send "$@"
+
 TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
@@ -12,7 +17,6 @@ if [ "${5:-}" = "--force" ]; then
   FORCE=1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
