@@ -12,6 +12,7 @@ import type { Config } from "../src/config.js";
 import { exchangePairingToken, issuePairingToken } from "../src/credentials.js";
 import { migrate } from "../src/db.js";
 import { envelopeDigest } from "../src/protocol.js";
+import { retainThrough } from "../src/storage.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDatabase = databaseUrl ? describe : describe.skip;
@@ -55,6 +56,7 @@ describeDatabase("Stage-1 polling sync client", () => {
     const config: Config = {
       databaseUrl: databaseUrl ?? "",
       host: "127.0.0.1", port: 8787, logLevel: "silent",
+      retentionMaxLiveMessages: null,
     };
     const issued = await issuePairingToken(pool, teamId);
     token = String((await exchangePairingToken(pool, issued.token)).credential);
@@ -211,5 +213,23 @@ storage_list_unread "$2" "$3"`;
     expect((await history(storeA)).map((message) => message.body)).toEqual([
       "fixture from machine A", "fixture reply from machine B",
     ]);
+
+    await retainThrough(pool, teamId, 3n);
+    await expect(sync(storeB, "once", "--team", localTeam)).rejects.toMatchObject({
+      stderr: expect.stringContaining("HTTP 410 resync-required"),
+    });
+    const beforeResync = await history(storeB);
+    const recovered = await sync(storeB, "resync", "--team", localTeam,
+      "--accept-floor", "3");
+    expect(recovered.stdout).toContain('"event":"resync.complete"');
+    expect(recovered.stdout).toContain('"disposition":"accepted"');
+    expect(await history(storeB)).toEqual(beforeResync);
+    const resyncState = await execFileAsync("sqlite3", [join(storeB, "messages.db"),
+      `SELECT transport_cursor || ':' ||
+         (SELECT count(*) FROM sync_resync_audits) FROM sync_bindings;`]);
+    expect(resyncState.stdout.trim()).toBe("3:1");
+    const retried = await sync(storeB, "resync", "--team", localTeam,
+      "--accept-floor", "3");
+    expect(retried.stdout).toContain('"disposition":"already-accepted"');
   }, 20_000);
 });

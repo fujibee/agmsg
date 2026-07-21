@@ -18,6 +18,10 @@ export function errorBody(error: ProtocolError): Record<string, unknown> {
       ? { server_instance_id: error.binding.serverInstanceId }
       : {}),
     ...(error.binding.teamId ? { team_id: error.binding.teamId } : {}),
+    ...(error.code === "resync-required" &&
+      typeof error.details.min_available_seq === "string"
+      ? { min_available_seq: error.details.min_available_seq }
+      : {}),
     error: {
       code: error.code,
       message: error.message,

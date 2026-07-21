@@ -63,6 +63,23 @@ not capture request or response bodies there. Then run:
 docker compose up --build
 ```
 
+Live-envelope retention is disabled by default. To bound each team's live
+payload rows while keeping permanent idempotency tombstones, set a canonical
+positive signed-BIGINT value before starting Compose:
+
+```sh
+export AGMSG_RETENTION_MAX_LIVE_MESSAGES=100000
+docker compose up --build
+```
+
+After a successful write, the reference server applies the configured floor in
+the same team transaction as sequence allocation and logs only the team ID, old
+and new floors, and removed row count. Tombstones and other protocol metadata
+remain durable, so this is not a hard bound on total database bytes. A window
+smaller than a device's offline interval—or small relative to an active write
+burst—causes `410 resync-required`; recovery requires the client's explicit
+operator-approved `remote-sync.sh resync --accept-floor` flow.
+
 `GET /v1/health` is available without credentials. The message, member, and
 capability endpoints require the credential returned by pairing plus these
 headers:

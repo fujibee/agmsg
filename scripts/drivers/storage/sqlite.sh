@@ -80,7 +80,7 @@ storage_check() {
 storage_describe() {
   printf 'name=sqlite\n'
   printf 'backend=SQLite (WAL) event log + legacy messages table\n'
-  printf 'capabilities=stage1-sync,stage2-read-state\n'
+  printf 'capabilities=stage1-sync,stage1-resync,stage2-read-state\n'
   printf 'db=%s\n' "$(_sqlite_db)"
 }
 

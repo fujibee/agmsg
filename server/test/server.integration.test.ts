@@ -14,7 +14,7 @@ import {
   issuePairingToken,
 } from "../src/credentials.js";
 import { migrate } from "../src/db.js";
-import { retainThrough } from "../src/storage.js";
+import { postMessages, retainThrough } from "../src/storage.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeDatabase = databaseUrl ? describe : describe.skip;
@@ -36,6 +36,7 @@ describeDatabase("remote storage HTTP API v1", () => {
     host: "127.0.0.1",
     port: 8787,
     logLevel: "silent",
+    retentionMaxLiveMessages: null,
   };
 
   let headers: Record<string, string>;
@@ -484,6 +485,7 @@ describeDatabase("remote storage HTTP API v1", () => {
     });
     expect(belowFloor.statusCode).toBe(410);
     expect(belowFloor.json().error.code).toBe("resync-required");
+    expect(belowFloor.json().min_available_seq).toBe("4");
 
     const replay = await app.inject({
       method: "POST",
@@ -537,6 +539,89 @@ describeDatabase("remote storage HTTP API v1", () => {
     });
     expect(outOfRange.statusCode).toBe(400);
     expect(outOfRange.json().error.code).toBe("invalid-request");
+  });
+
+  it("applies configured live-message retention in the writer transaction", async () => {
+    const automaticTeam = "018f3f7e-0000-7000-8000-000000000051";
+    await pool.query("INSERT INTO teams(team_id,team_name) VALUES($1,'automatic-retention')",
+      [automaticTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history
+         (team_id,policy_revision,effective_from_seq,
+          accepted_envelope_versions,write_allowed_ciphers)
+       VALUES($1,0,1,ARRAY[1],ARRAY['none','age-v1']::TEXT[])`,
+      [automaticTeam],
+    );
+    const notices: unknown[] = [];
+    const entries = [
+      message("750e8400-e29b-41d4-a716-446655440051", "retained-1"),
+      message("750e8400-e29b-41d4-a716-446655440052", "live-2"),
+      message("750e8400-e29b-41d4-a716-446655440053", "live-3"),
+    ];
+    const response = await postMessages(pool, automaticTeam, entries, 2n,
+      (notice) => notices.push(notice));
+    expect(response).toMatchObject({ min_available_seq: "1",
+      acks: [{ server_seq: "1" }, { server_seq: "2" }, { server_seq: "3" }] });
+    expect(notices).toEqual([{ team_id: automaticTeam, old_floor: "0",
+      new_floor: "1", removed_live_rows: 1 }]);
+    const stored = await pool.query<{ live: string; tombstones: string; floor: string }>(
+      `SELECT (SELECT count(*)::text FROM messages WHERE team_id=$1) AS live,
+              (SELECT count(*)::text FROM message_tombstones WHERE team_id=$1) AS tombstones,
+              (SELECT min_available_seq::text FROM teams WHERE team_id=$1) AS floor`,
+      [automaticTeam],
+    );
+    expect(stored.rows[0]).toEqual({ live: "2", tombstones: "1", floor: "1" });
+    const replay = await postMessages(pool, automaticTeam, [entries[0]!], 2n);
+    expect(replay.acks).toEqual([
+      { id: entries[0]!.id, server_seq: "1", disposition: "duplicate" },
+    ]);
+  });
+
+  it("rolls automatic retention back with the triggering message batch", async () => {
+    const rollbackTeam = "018f3f7e-0000-7000-8000-000000000052";
+    await pool.query("INSERT INTO teams(team_id,team_name) VALUES($1,'retention-rollback')",
+      [rollbackTeam]);
+    await pool.query(
+      `INSERT INTO team_policy_history
+         (team_id,policy_revision,effective_from_seq,
+          accepted_envelope_versions,write_allowed_ciphers)
+       VALUES($1,0,1,ARRAY[1],ARRAY['none','age-v1']::TEXT[])`,
+      [rollbackTeam],
+    );
+    await pool.query(
+      `CREATE FUNCTION fail_automatic_retention() RETURNS trigger AS $$
+       BEGIN
+         IF OLD.team_id = '${rollbackTeam}'::uuid THEN
+           RAISE EXCEPTION 'injected automatic retention failure';
+         END IF;
+         RETURN OLD;
+       END;
+       $$ LANGUAGE plpgsql`,
+    );
+    await pool.query(
+      `CREATE TRIGGER fail_automatic_retention BEFORE DELETE ON messages
+       FOR EACH ROW EXECUTE FUNCTION fail_automatic_retention()`,
+    );
+    const notices: unknown[] = [];
+    await expect(postMessages(pool, rollbackTeam, [
+      message("750e8400-e29b-41d4-a716-446655440061", "rollback-1"),
+      message("750e8400-e29b-41d4-a716-446655440062", "rollback-2"),
+    ], 1n, (notice) => notices.push(notice))).rejects.toThrow(
+      /injected automatic retention failure/,
+    );
+    expect(notices).toEqual([]);
+    const state = await pool.query<{
+      messages: string; tombstones: string; current: string; floor: string;
+    }>(
+      `SELECT (SELECT count(*)::text FROM messages WHERE team_id=$1) AS messages,
+              (SELECT count(*)::text FROM message_tombstones WHERE team_id=$1) AS tombstones,
+              current_seq::text AS current,min_available_seq::text AS floor
+         FROM teams WHERE team_id=$1`,
+      [rollbackTeam],
+    );
+    expect(state.rows[0]).toEqual({ messages: "0", tombstones: "0", current: "0", floor: "0" });
+    await pool.query("DROP TRIGGER fail_automatic_retention ON messages");
+    await pool.query("DROP FUNCTION fail_automatic_retention()");
   });
 
   it("atomically provisions the operator roster and permanently retires IDs", async () => {

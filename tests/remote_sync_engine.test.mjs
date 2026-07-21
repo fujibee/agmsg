@@ -9,12 +9,15 @@ import {
   driver,
   isRetryable,
   plaintextWriteEligible,
+  parseStrictJsonl,
   readStateCycle,
   readStateUpdateBatches,
   request,
+  resyncCycle,
   retainAgeCheckpoint,
   selectWriteProfile,
   stage2ReadStateSupported,
+  stage1ResyncSupported,
   validateAckMapping,
   validateAgeConfiguration,
   validateConfiguredAgeIdentities,
@@ -22,6 +25,8 @@ import {
   validateErrorBinding,
   validateMembers,
   validateReadStatePage,
+  validateResyncResult,
+  validateResyncStatus,
 } from "../scripts/internal/remote-sync.mjs";
 
 const config = {
@@ -110,6 +115,103 @@ test("Stage-2 capability is optional and blocked members emit no mutation", () =
     type: "sync_read_blocked", member_id: member.member_id,
     reason: "read-state-limit-exceeded",
   }]), [[]]);
+});
+
+test("resync framing rejects duplicate keys and inconsistent audits", () => {
+  assert.throws(() => parseStrictJsonl(
+    '{"type":"sync_resync_status","type":"sync_resync_status"}\n'), /duplicate key/u);
+  assert.throws(() => parseStrictJsonl(
+    '{"type":"sync_resync_status","audit":{"gap_end":"5","gap_end":"6"}}\n'),
+  /duplicate key/u);
+  const generation = "018f3f7e-0000-7000-8000-000000000099";
+  const status = { type: "sync_resync_status", driver_generation: generation,
+    transport_cursor: "5", audit: { expected_transport_cursor: "0", accepted_floor: "5",
+      gap_start: "1", gap_end: "5", reason: "retention-gap-accepted" } };
+  assert.deepEqual(validateResyncStatus([status], "5"), status);
+  assert.throws(() => validateResyncStatus([{ ...status,
+    audit: { ...status.audit, gap_start: "2" } }], "5"), /inconsistent/u);
+  assert.throws(() => validateResyncStatus([{ ...status, extra: true }], "5"), /shape/u);
+  const result = { type: "sync_resync_result", driver_generation: generation,
+    expected_transport_cursor: "0", transport_cursor: "5", accepted_floor: "5",
+    gap_start: "1", gap_end: "5", reason: "retention-gap-accepted" };
+  assert.deepEqual(validateResyncResult([result], status, "5"), result);
+});
+
+test("resync requires an authenticated 410 before atomically accepting a gap", async () => {
+  const generation = "018f3f7e-0000-7000-8000-000000000099";
+  const operations = [];
+  const capabilities = {
+    protocol_version: 1, server_instance_id: config.server_instance_id,
+    team_id: config.remote_team_id, team_name: "demo", min_available_seq: "5",
+    current_seq: "7", next_sequence_boundary: "8", accepted_envelope_versions: [1],
+    write_allowed_ciphers: ["none"], policy_revision: "0", effective_from_seq: "1",
+    max_blob_bytes: "1048576", policy_history: [{ policy_revision: "0",
+      effective_from_seq: "1", accepted_envelope_versions: [1], write_allowed_ciphers: ["none"] }],
+  };
+  const result = await resyncCycle(config, "5", {
+    driverCall: async (operation, _config, input, extra) => {
+      operations.push(operation);
+      if (operation === "capabilities") return [{ type: "sync_driver_capabilities",
+        capabilities: ["stage1-sync", "stage1-resync"] }];
+      if (operation === "resync-status") {
+        assert.deepEqual(extra, ["5"]);
+        return [{ type: "sync_resync_status", driver_generation: generation,
+          transport_cursor: "0", audit: null }];
+      }
+      assert.equal(operation, "resync");
+      assert.deepEqual(input, [{ type: "sync_resync", expected_transport_cursor: "0",
+        min_available_seq: "5", current_seq: "7", reason: "retention-gap-accepted" }]);
+      return [{ type: "sync_resync_result", driver_generation: generation,
+        expected_transport_cursor: "0", transport_cursor: "5", accepted_floor: "5",
+        gap_start: "1", gap_end: "5", reason: "retention-gap-accepted" }];
+    },
+    requestCall: async (_config, path) => {
+      if (path === "/v1/capabilities") return capabilities;
+      const error = new Error("retained");
+      error.status = 410; error.code = "resync-required";
+      error.body = { protocol_version: 1, server_instance_id: config.server_instance_id,
+        team_id: config.remote_team_id, min_available_seq: "5",
+        error: { code: "resync-required", details: { after: "0", min_available_seq: "5" } } };
+      throw error;
+    },
+    eventCall: async () => {},
+  });
+  assert.equal(result.transport_cursor, "5");
+  assert.deepEqual(operations, ["capabilities", "resync-status", "resync"]);
+});
+
+test("resync output-loss retry returns the immutable audit without replaying 410", async () => {
+  const generation = "018f3f7e-0000-7000-8000-000000000099";
+  let messageRequest = false;
+  const result = await resyncCycle(config, "5", {
+    driverCall: async (operation) => {
+      if (operation === "capabilities") return [{ type: "sync_driver_capabilities",
+        capabilities: ["stage1-sync", "stage1-resync"] }];
+      assert.equal(operation, "resync-status");
+      return [{ type: "sync_resync_status", driver_generation: generation,
+        transport_cursor: "5", audit: { expected_transport_cursor: "0", accepted_floor: "5",
+          gap_start: "1", gap_end: "5", reason: "retention-gap-accepted" } }];
+    },
+    requestCall: async (_config, path) => {
+      if (path !== "/v1/capabilities") messageRequest = true;
+      return { protocol_version: 1, server_instance_id: config.server_instance_id,
+        team_id: config.remote_team_id, team_name: "demo", min_available_seq: "5",
+        current_seq: "7", next_sequence_boundary: "8", accepted_envelope_versions: [1],
+        write_allowed_ciphers: ["none"], policy_revision: "0", effective_from_seq: "1",
+        max_blob_bytes: "1048576", policy_history: [{ policy_revision: "0",
+          effective_from_seq: "1", accepted_envelope_versions: [1], write_allowed_ciphers: ["none"] }] };
+    },
+    eventCall: async () => {},
+  });
+  assert.equal(messageRequest, false);
+  assert.deepEqual(result, { type: "sync_resync_result", driver_generation: generation,
+    expected_transport_cursor: "0", transport_cursor: "5", accepted_floor: "5",
+    gap_start: "1", gap_end: "5", reason: "retention-gap-accepted" });
+});
+
+test("resync remains optional for Stage-1 drivers", () => {
+  assert.equal(stage1ResyncSupported([{ type: "sync_driver_capabilities",
+    capabilities: ["stage1-sync"] }]), false);
 });
 
 test("Stage-1-only driver skips the optional Stage-2 network path", async () => {

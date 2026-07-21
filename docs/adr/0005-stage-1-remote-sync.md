@@ -154,15 +154,17 @@ existing atomic import transition. Reprocessing is explicit rather than part of
 every polling cycle, so a permanently invalid ciphertext cannot cause an
 automatic decrypt loop.
 
-The following future operation remains reserved but is not implemented in
-Stage 1:
+ADR 0009 promotes the previously reserved recovery operation behind a separate
+optional `stage1-resync` capability:
 
 ```text
 storage_sync_resync       # operator-approved recovery after HTTP 410
 ```
 
-HTTP 410 remains terminal in Stage 1. The engine must not reset a transport
-cursor automatically.
+HTTP 410 remains terminal during normal Stage-1 polling. Only the explicit
+operator command defined by ADR 0009 may transactionally record the unavailable
+gap and advance to an authenticated retention floor; the engine never resets a
+transport cursor automatically.
 
 ## Consequences
 
@@ -181,4 +183,5 @@ cursor automatically.
 
 - [HTTP API v1](../../server/spec/v1.md)
 - [ADR 0003: storage-axis ABI and scope](0003-storage-axis-driver-abi-and-scope.md)
+- [ADR 0009: retention-gap resynchronization](0009-retention-gap-resynchronization.md)
 - Issue #441 (local-first cross-machine replication proposal)

@@ -208,7 +208,11 @@ export function createApp(pool: Pool, config: Config): FastifyInstance {
   app.post("/v1/messages", async (request) => {
     const teamId = await scopedTeamId(pool, request);
     const body = postMessagesSchema.parse(request.body);
-    return postMessages(pool, teamId, body.messages);
+    return postMessages(pool, teamId, body.messages,
+      config.retentionMaxLiveMessages, (notice) => {
+        app.log.info({ event: "retention.applied", ...notice },
+          "automatic live-message retention applied");
+      });
   });
 
   app.post("/v1/read-state/sync", async (request, reply) => {

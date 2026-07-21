@@ -19,9 +19,10 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://agmsg:agmsg-local-only@postgres:5432/agmsg
-      HOST: 0.0.0.0
-      PORT: 8787
+      - DATABASE_URL=postgresql://agmsg:agmsg-local-only@postgres:5432/agmsg
+      - HOST=0.0.0.0
+      - PORT=8787
+      - AGMSG_RETENTION_MAX_LIVE_MESSAGES
     ports:
       - "8787:8787"
 

@@ -104,8 +104,11 @@ export async function postMessages(
   pool: Pool,
   teamId: string,
   messages: MessageInput[],
+  retentionMaxLiveMessages: bigint | null = null,
+  retentionObserver?: (notice: RetentionNotice) => void,
 ): Promise<Record<string, unknown>> {
-  return inTransaction(pool, async (client) => {
+  let retentionNotice: RetentionNotice | undefined;
+  const response = await inTransaction(pool, async (client) => {
     const serverId = await serverInstanceId(client);
     const team = await teamRow(client, teamId, true);
     if (!team) throw notFound(serverId, teamId);
@@ -275,12 +278,26 @@ export async function postMessages(
       };
     });
 
+    let effectiveFloor = BigInt(team.min_available_seq);
+    if (retentionMaxLiveMessages !== null && next > retentionMaxLiveMessages) {
+      const target = next - retentionMaxLiveMessages;
+      if (target > effectiveFloor) {
+        retentionNotice = await retainThroughLocked(
+          client, teamId, effectiveFloor, target,
+        );
+        effectiveFloor = target;
+      }
+    }
+
     return {
-      ...common(serverId, { ...team, current_seq: next.toString() }),
+      ...common(serverId, { ...team, current_seq: next.toString(),
+        min_available_seq: effectiveFloor.toString() }),
       policy_revision: team.policy_revision,
       acks,
     };
   });
+  if (retentionNotice) retentionObserver?.(retentionNotice);
+  return response;
 }
 
 export async function syncReadState(
@@ -533,6 +550,53 @@ async function deleteCoveredExact(
   );
 }
 
+export type RetentionNotice = {
+  team_id: string;
+  old_floor: string;
+  new_floor: string;
+  removed_live_rows: number;
+};
+
+async function retainThroughLocked(
+  client: PoolClient,
+  teamId: string,
+  currentFloor: bigint,
+  through: bigint,
+): Promise<RetentionNotice> {
+  const tombstones = await client.query(
+    `INSERT INTO message_tombstones
+       (team_id, id, original_team_seq, envelope_digest)
+     SELECT team_id, id, team_seq, envelope_digest
+       FROM messages
+      WHERE team_id = $1 AND team_seq <= $2
+     RETURNING id`,
+    [teamId, through.toString()],
+  );
+  const deleted = await client.query(
+    "DELETE FROM messages WHERE team_id = $1 AND team_seq <= $2",
+    [teamId, through.toString()],
+  );
+  if (deleted.rowCount !== tombstones.rowCount) {
+    throw new Error("retention tombstone and deletion counts differ");
+  }
+  await client.query(
+    "UPDATE teams SET min_available_seq = $2 WHERE team_id = $1",
+    [teamId, through.toString()],
+  );
+  await client.query(
+    `UPDATE read_frontiers SET server_seq = GREATEST(server_seq, $2)
+      WHERE team_id = $1`,
+    [teamId, through.toString()],
+  );
+  await deleteCoveredExact(client, teamId, through);
+  return {
+    team_id: teamId,
+    old_floor: currentFloor.toString(),
+    new_floor: through.toString(),
+    removed_live_rows: deleted.rowCount ?? 0,
+  };
+}
+
 export async function retainThrough(
   pool: Pool,
   teamId: string,
@@ -558,36 +622,11 @@ export async function retainThrough(
       );
     }
 
-    const tombstones = await client.query(
-      `INSERT INTO message_tombstones
-         (team_id, id, original_team_seq, envelope_digest)
-       SELECT team_id, id, team_seq, envelope_digest
-         FROM messages
-        WHERE team_id = $1 AND team_seq <= $2
-       RETURNING id`,
-      [teamId, through.toString()],
-    );
-    const deleted = await client.query(
-      "DELETE FROM messages WHERE team_id = $1 AND team_seq <= $2",
-      [teamId, through.toString()],
-    );
-    if (deleted.rowCount !== tombstones.rowCount) {
-      throw new Error("retention tombstone and deletion counts differ");
-    }
-    await client.query(
-      "UPDATE teams SET min_available_seq = $2 WHERE team_id = $1",
-      [teamId, through.toString()],
-    );
-    await client.query(
-      `UPDATE read_frontiers SET server_seq = GREATEST(server_seq, $2)
-        WHERE team_id = $1`,
-      [teamId, through.toString()],
-    );
-    await deleteCoveredExact(client, teamId, through);
+    const notice = await retainThroughLocked(client, teamId, currentFloor, through);
     return {
       ...common(serverId, { ...team, min_available_seq: through.toString() }),
       retained_through: through.toString(),
-      tombstones_created: String(tombstones.rowCount ?? 0),
+      tombstones_created: String(notice.removed_live_rows),
     };
   });
 }

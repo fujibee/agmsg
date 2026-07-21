@@ -332,6 +332,23 @@ reevaluation without rewinding transport. The complete framing, record schemas,
 crash boundaries, and future reserved operation names are defined by
 [ADR 0005](../adr/0005-stage-1-remote-sync.md).
 
+A driver may additionally advertise `stage1-resync` and implement the explicit
+operator recovery contract from [ADR 0009](../adr/0009-retention-gap-resynchronization.md):
+
+```text
+storage_sync_resync_status <local-team> <server-instance-id> <remote-team-id> <protocol-version> <accepted-floor>
+storage_sync_resync <local-team> <server-instance-id> <remote-team-id> <protocol-version>
+```
+
+Status is a strictly read-only cursor/audit lookup; it cannot reserve or seal a
+message. Resync atomically records an authenticated, operator-accepted retention
+gap and advances only the transport cursor. Together they make result-loss
+retry idempotent without exposing driver storage internals. They never make
+HTTP 410 an automatic polling recovery and never delete local messages or
+independent state layers. ADR 0009 pins their exact strict JSONL status, input,
+audit, and result objects, including canonical sequence arithmetic and
+duplicate/unknown-field rejection.
+
 The independent Stage-2 extension from
 [ADR 0008](../adr/0008-stage-2-read-cursor-sync.md) is advertised as
 `capabilities=stage1-sync,stage2-read-state` and adds:

@@ -34,6 +34,11 @@ _sqlite_sync_decimal_le() {
   fi
 }
 
+_sqlite_sync_sequence() {
+  case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$(_sqlite_sync_decimal_le "$1" 9223372036854775807)" = 1 ]
+}
+
 _sqlite_sync_schema() {
   command -v jq >/dev/null 2>&1 || {
     echo "agmsg: Stage-1 sync requires jq" >&2
@@ -115,6 +120,21 @@ _sqlite_sync_schema() {
       UNIQUE(server_instance_id,remote_team_id,protocol_version,
              server_seq,wire_id,reason)
     );
+    CREATE TABLE IF NOT EXISTS sync_resync_audits (
+      local_team TEXT NOT NULL,
+      server_instance_id TEXT NOT NULL,
+      remote_team_id TEXT NOT NULL,
+      protocol_version INTEGER NOT NULL,
+      driver_generation TEXT NOT NULL,
+      expected_transport_cursor TEXT NOT NULL,
+      accepted_floor TEXT NOT NULL,
+      gap_start TEXT NOT NULL,
+      gap_end TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK(reason='retention-gap-accepted'),
+      accepted_at TEXT NOT NULL,
+      PRIMARY KEY(local_team,server_instance_id,remote_team_id,
+                  protocol_version,driver_generation,accepted_floor)
+    );
     CREATE TABLE IF NOT EXISTS sync_read_members (
       local_team TEXT NOT NULL,
       server_instance_id TEXT NOT NULL,
@@ -188,6 +208,102 @@ _sqlite_sync_schema() {
     agmsg_sqlite "$db" "INSERT OR IGNORE INTO sync_store_metadata(singleton,generation)
       VALUES(1,'$(_sqlite_lit "$generation")');" >/dev/null 2>&1 || return 13
   fi
+}
+
+# Read-only cursor/audit lookup for explicit retention-gap recovery. This
+# deliberately does not call _sqlite_sync_schema or initialize a binding.
+storage_sync_resync_status() {
+  local team="$1" server="$2" remote="$3" protocol="$4" floor="$5"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  _sqlite_sync_sequence "$floor" || return 13
+  local db tl generation table_count
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
+  [ -f "$db" ] || return 13
+  table_count=$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sqlite_master
+    WHERE type='table' AND name IN ('sync_store_metadata','sync_bindings','sync_resync_audits');" \
+    2>/dev/null | tr -d '\r') || return 13
+  [ "$table_count" = 3 ] || return 13
+  generation=$(agmsg_sqlite "$db" "SELECT generation FROM sync_store_metadata WHERE singleton=1;" \
+    2>/dev/null | tr -d '\r') || return 13
+  [ -n "$generation" ] || return 13
+  local output
+  output=$(_sqlite_data "SELECT json_object(
+      'type','sync_resync_status','driver_generation',b.driver_generation,
+      'transport_cursor',b.transport_cursor,'audit',CASE WHEN a.accepted_floor IS NULL
+        THEN NULL ELSE json_object(
+          'expected_transport_cursor',a.expected_transport_cursor,
+          'accepted_floor',a.accepted_floor,'gap_start',a.gap_start,
+          'gap_end',a.gap_end,'reason',a.reason) END)
+    FROM sync_bindings b LEFT JOIN sync_resync_audits a
+      ON a.local_team=b.local_team AND a.server_instance_id=b.server_instance_id
+     AND a.remote_team_id=b.remote_team_id AND a.protocol_version=b.protocol_version
+     AND a.driver_generation=b.driver_generation AND a.accepted_floor='$floor'
+    WHERE b.local_team='$tl' AND b.server_instance_id='$server'
+      AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
+      AND b.driver_generation='$(_sqlite_lit "$generation")';") || return 13
+  [ -n "$output" ] || return 13
+  printf '%s\n' "$output"
+}
+
+# Atomically records an operator-accepted unavailable interval and advances
+# only the pull transport cursor.
+storage_sync_resync() {
+  local team="$1" server="$2" remote="$3" protocol="$4"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  local line expected floor current reason generation db tl gap_start node_bin strict_parser
+  node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
+  strict_parser="$SKILL_DIR/scripts/internal/strict-jsonl.mjs"
+  command -v "$node_bin" >/dev/null 2>&1 && [ -f "$strict_parser" ] || return 10
+  line=$("$node_bin" "$strict_parser" current_seq expected_transport_cursor \
+    min_available_seq reason type) || return 13
+  printf '%s\n' "$line" | jq -e '
+    (keys == ["current_seq","expected_transport_cursor","min_available_seq","reason","type"])
+    and .type == "sync_resync" and .reason == "retention-gap-accepted"
+    and (.expected_transport_cursor|type)=="string"
+    and (.min_available_seq|type)=="string" and (.current_seq|type)=="string"' \
+    >/dev/null 2>&1 || return 13
+  expected=$(printf '%s\n' "$line" | jq -r '.expected_transport_cursor')
+  floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$line" | jq -r '.current_seq')
+  reason=$(printf '%s\n' "$line" | jq -r '.reason')
+  _sqlite_sync_sequence "$expected" && _sqlite_sync_sequence "$floor" &&
+    _sqlite_sync_sequence "$current" || return 13
+  [ "$(_sqlite_sync_decimal_le "$expected" "$floor")" = 1 ] && [ "$expected" != "$floor" ] || return 13
+  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] || return 13
+  gap_start=$((10#$expected + 1))
+  _sqlite_sync_sequence "$gap_start" || return 13
+  _sqlite_sync_schema || return $?
+  generation=$(_sqlite_sync_generation); db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
+
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+    CREATE TEMP TABLE resync_assert(ok INTEGER CHECK(ok=1));
+    INSERT INTO resync_assert SELECT CASE WHEN COUNT(*)=1 THEN 1 ELSE 0 END
+      FROM sync_bindings WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$(_sqlite_lit "$generation")'
+       AND transport_cursor='$expected';
+    INSERT INTO sync_resync_audits
+      (local_team,server_instance_id,remote_team_id,protocol_version,
+       driver_generation,expected_transport_cursor,accepted_floor,gap_start,
+       gap_end,reason,accepted_at)
+    VALUES('$tl','$server','$remote',$protocol,'$(_sqlite_lit "$generation")',
+      '$expected','$floor','$gap_start','$floor','$reason',
+      strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+    UPDATE sync_bindings SET transport_cursor='$floor'
+     WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$(_sqlite_lit "$generation")'
+       AND transport_cursor='$expected';
+    COMMIT;" >/dev/null 2>&1 || return 13
+
+  _sqlite_data "SELECT json_object(
+      'type','sync_resync_result','driver_generation',driver_generation,
+      'expected_transport_cursor',expected_transport_cursor,
+      'transport_cursor',accepted_floor,'accepted_floor',accepted_floor,
+      'gap_start',gap_start,'gap_end',gap_end,'reason',reason)
+    FROM sync_resync_audits WHERE local_team='$tl' AND server_instance_id='$server'
+      AND remote_team_id='$remote' AND protocol_version=$protocol
+      AND driver_generation='$(_sqlite_lit "$generation")' AND accepted_floor='$floor';"
 }
 
 _sqlite_sync_generation() {

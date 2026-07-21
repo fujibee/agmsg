@@ -7,6 +7,11 @@ const environmentSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  AGMSG_RETENTION_MAX_LIVE_MESSAGES: z.string()
+    .regex(/^[1-9][0-9]*$/u)
+    .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n,
+      "retention maximum exceeds signed BIGINT")
+    .optional(),
 });
 
 export type Config = {
@@ -14,6 +19,7 @@ export type Config = {
   host: string;
   port: number;
   logLevel: z.infer<typeof environmentSchema>["LOG_LEVEL"];
+  retentionMaxLiveMessages: bigint | null;
 };
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config {
@@ -23,5 +29,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Config
     host: parsed.HOST,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
+    retentionMaxLiveMessages: parsed.AGMSG_RETENTION_MAX_LIVE_MESSAGES === undefined
+      ? null
+      : BigInt(parsed.AGMSG_RETENTION_MAX_LIVE_MESSAGES),
   };
 }

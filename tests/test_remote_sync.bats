@@ -213,6 +213,81 @@ prepare_push() {
   [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" = imported ]
 }
 
+@test "sync contract: retention resync records one immutable gap and preserves local state" {
+  storage_send demo alice bob "local survives retention" >/dev/null
+  local prepared status input result repeated db wire
+  prepared=$(prepare_push)
+  wire=$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_push_candidate")|.id')
+  status=$(storage_sync_resync_status demo "$SERVER_ID" "$TEAM_ID" 1 5)
+  printf '%s\n' "$status" | jq -e '
+    keys==["audit","driver_generation","transport_cursor","type"]
+    and .type=="sync_resync_status" and .transport_cursor=="0" and .audit==null' >/dev/null
+
+  input='{"type":"sync_resync","expected_transport_cursor":"0","min_available_seq":"5","current_seq":"7","reason":"retention-gap-accepted"}'
+  result=$(storage_sync_resync demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$input")
+  printf '%s\n' "$result" | jq -e '
+    keys==["accepted_floor","driver_generation","expected_transport_cursor","gap_end","gap_start","reason","transport_cursor","type"]
+    and .type=="sync_resync_result" and .expected_transport_cursor=="0"
+    and .transport_cursor=="5" and .accepted_floor=="5"
+    and .gap_start=="1" and .gap_end=="5"
+    and .reason=="retention-gap-accepted"' >/dev/null
+
+  status=$(storage_sync_resync_status demo "$SERVER_ID" "$TEAM_ID" 1 5)
+  printf '%s\n' "$status" | jq -e '
+    .transport_cursor=="5" and .audit=={
+      expected_transport_cursor:"0",accepted_floor:"5",gap_start:"1",gap_end:"5",
+      reason:"retention-gap-accepted"}' >/dev/null
+  db=$(agmsg_db_path)
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_resync_audits;" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM events WHERE body='local survives retention';" | tr -d '\r')" -eq 1 ]
+  [ "$(agmsg_sqlite "$db" "SELECT wire_id FROM sync_messages WHERE direction='push';" | tr -d '\r')" = "$wire" ]
+
+  run storage_sync_resync demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$input"
+  [ "$status" -ne 0 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_resync_audits;" | tr -d '\r')" -eq 1 ]
+}
+
+@test "sync contract: resync status is read-only and absent bindings fail closed" {
+  local before after other
+  prepare_push >/dev/null
+  before=$(agmsg_sqlite "$(agmsg_db_path)" "SELECT total_changes();" | tr -d '\r')
+  storage_sync_resync_status demo "$SERVER_ID" "$TEAM_ID" 1 10 >/dev/null
+  after=$(agmsg_sqlite "$(agmsg_db_path)" "SELECT total_changes();" | tr -d '\r')
+  [ "$before" = "$after" ]
+  other=018f3f7e-0000-7000-8000-000000000002
+  run storage_sync_resync_status demo "$SERVER_ID" "$other" 1 10
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "sync contract: resync input rejects duplicate keys and later records" {
+  prepare_push >/dev/null
+  local duplicate multiple db
+  duplicate='{"type":"sync_resync","expected_transport_cursor":"0","min_available_seq":"4","min_available_seq":"5","current_seq":"7","reason":"retention-gap-accepted"}'
+  run storage_sync_resync demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$duplicate"
+  [ "$status" -ne 0 ]
+  multiple=$'{"type":"sync_resync","expected_transport_cursor":"0","min_available_seq":"5","current_seq":"7","reason":"retention-gap-accepted"}\n\n{"type":"sync_resync","expected_transport_cursor":"0","min_available_seq":"6","current_seq":"7","reason":"retention-gap-accepted"}'
+  run storage_sync_resync demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$multiple"
+  [ "$status" -ne 0 ]
+  db=$(agmsg_db_path)
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_resync_audits;" | tr -d '\r')" -eq 0 ]
+  [ "$(agmsg_sqlite "$db" "SELECT transport_cursor FROM sync_bindings;" | tr -d '\r')" = 0 ]
+}
+
+@test "sync contract: resync uses the resolved Node runtime when literal node is unavailable" {
+  prepare_push >/dev/null
+  local resolved_node input result
+  resolved_node=$(command -v node)
+  [ -x "$resolved_node" ]
+  input='{"type":"sync_resync","expected_transport_cursor":"0","min_available_seq":"5","current_seq":"7","reason":"retention-gap-accepted"}'
+  node() { return 127; }
+  export AGMSG_SYNC_NODE_BIN="$resolved_node"
+  unset AGMSG_NODE
+  result=$(storage_sync_resync demo "$SERVER_ID" "$TEAM_ID" 1 <<< "$input")
+  unset -f node
+  [ "$(printf '%s\n' "$result" | jq -r '.transport_cursor')" = 5 ]
+}
+
 @test "Stage-2 sync exports exact reads across holes and applies remote frontier separately" {
   local first second page ids second_local context prepared applied db
   first=$(jq -nc '
