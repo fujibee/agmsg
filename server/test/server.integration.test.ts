@@ -251,6 +251,152 @@ describeDatabase("remote storage HTTP API v1", () => {
     });
   });
 
+  it("max-merges and paginates composite read state", async () => {
+    const exactId = "750e8400-e29b-41d4-a716-446655440002";
+    const firstPage = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [{ member_id: memberId, server_seq: "1", exact_wire_ids: [exactId] }],
+        page_after: null,
+        page_limit: 1,
+      },
+    });
+    expect(firstPage.statusCode).toBe(200);
+    expect(firstPage.headers["cache-control"]).toBe("no-store");
+    expect(firstPage.json()).toMatchObject({
+      min_available_seq: "0",
+      current_seq: "2",
+      items: [{ kind: "frontier", member_id: memberId, server_seq: "1" }],
+      next_page_after: { member_id: memberId, kind: "frontier" },
+      has_more: true,
+    });
+
+    const secondPage = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [],
+        page_after: firstPage.json().next_page_after,
+        page_limit: 1,
+      },
+    });
+    expect(secondPage.json()).toMatchObject({
+      items: [{ kind: "exact", member_id: memberId, wire_id: exactId }],
+      next_page_after: null,
+      has_more: false,
+    });
+
+    const absorbed = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [{ member_id: memberId, server_seq: "2", exact_wire_ids: [] }],
+        page_after: null,
+        page_limit: 10,
+      },
+    });
+    expect(absorbed.json()).toMatchObject({
+      items: [{ kind: "frontier", member_id: memberId, server_seq: "2" }],
+      has_more: false,
+    });
+    const exactCount = await pool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM read_exact WHERE team_id=$1",
+      [teamId],
+    );
+    expect(exactCount.rows[0]?.count).toBe("0");
+
+    const future = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: {
+        updates: [{ member_id: memberId, server_seq: "3", exact_wire_ids: [] }],
+        page_after: null,
+        page_limit: 10,
+      },
+    });
+    expect(future.statusCode).toBe(400);
+    expect(future.json().error.code).toBe("invalid-request");
+  });
+
+  it("attributes a team-wide exact overflow to a causal request member", async () => {
+    const coveredWire = "750e8400-e29b-41d4-a716-446655440008";
+    const causalWire = "750e8400-e29b-41d4-a716-446655440009";
+    const coveredMember = "018f3f7e-0000-7000-8000-000000000098";
+    const causalMember = "018f3f7e-0000-7000-8000-000000000099";
+    const previousSequence = (await pool.query<{ current_seq: string }>(
+      "SELECT current_seq::text FROM teams WHERE team_id=$1", [teamId],
+    )).rows[0]?.current_seq ?? "0";
+    await pool.query("UPDATE teams SET current_seq=GREATEST(current_seq,2) WHERE team_id=$1", [teamId]);
+    await pool.query(
+      `INSERT INTO message_tombstones(team_id,id,original_team_seq,envelope_digest)
+       VALUES($1,$2,1,decode(repeat('00',32),'hex')),
+             ($1,$3,2,decode(repeat('11',32),'hex'))`,
+      [teamId, coveredWire, causalWire],
+    );
+    await pool.query(
+      `INSERT INTO members(team_id, member_id, name)
+       SELECT $1,
+         ('018f3f7e-0000-7000-8000-' || lpad(value::text, 12, '0'))::uuid,
+         'limit-member-' || value::text
+       FROM generate_series(100, 115) AS value`,
+      [teamId],
+    );
+    await pool.query(
+      `INSERT INTO members(team_id,member_id,name) VALUES
+       ($1,$2,'limit-covered-member'),($1,$3,'limit-causal-member')`,
+      [teamId, coveredMember, causalMember],
+    );
+    await pool.query(
+      `INSERT INTO read_exact(team_id, member_id, wire_id)
+       SELECT $1,
+         ('018f3f7e-0000-7000-8000-' ||
+           lpad((100 + ((value - 1) / 4096))::text, 12, '0'))::uuid,
+         ('550e8400-e29b-4000-8000-' || lpad(value::text, 12, '0'))::uuid
+       FROM generate_series(1, 65536) AS value`,
+      [teamId],
+    );
+    const seeded = await pool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM read_exact WHERE team_id=$1",
+      [teamId],
+    );
+    expect(seeded.rows[0]?.count).toBe("65536");
+    try {
+      const overflow = await app.inject({
+        method: "POST",
+        url: "/v1/read-state/sync",
+        headers,
+        payload: {
+          updates: [
+            { member_id: coveredMember, server_seq: "1", exact_wire_ids: [coveredWire] },
+            { member_id: causalMember, server_seq: "0", exact_wire_ids: [causalWire] },
+          ],
+          page_after: null,
+          page_limit: 1,
+        },
+      });
+      expect(overflow.statusCode).toBe(409);
+      expect(overflow.json().error).toMatchObject({
+        code: "read-state-limit-exceeded",
+        details: { member_id: causalMember, team_exact_count: "65537" },
+      });
+    } finally {
+      await pool.query(
+        `DELETE FROM members WHERE team_id=$1 AND name LIKE 'limit-%'`,
+        [teamId],
+      );
+      await pool.query(
+        "DELETE FROM message_tombstones WHERE team_id=$1 AND id=ANY($2::uuid[])",
+        [teamId, [coveredWire, causalWire]],
+      );
+      await pool.query("UPDATE teams SET current_seq=$2 WHERE team_id=$1", [teamId, previousSequence]);
+    }
+  });
+
   it("serializes concurrent writers on the team row", async () => {
     const writes = await Promise.all(
       [
@@ -319,6 +465,17 @@ describeDatabase("remote storage HTTP API v1", () => {
     });
     expect(posted.statusCode).toBe(200);
     expect(posted.json().acks[0].server_seq).toBe("5");
+
+    const readAfterRetention = await app.inject({
+      method: "POST",
+      url: "/v1/read-state/sync",
+      headers,
+      payload: { updates: [], page_after: null, page_limit: 10 },
+    });
+    expect(readAfterRetention.json()).toMatchObject({
+      min_available_seq: "4",
+      items: [{ kind: "frontier", member_id: memberId, server_seq: "4" }],
+    });
 
     const belowFloor = await app.inject({
       method: "GET",
@@ -424,6 +581,20 @@ describeDatabase("remote storage HTTP API v1", () => {
       const first = await runProvision();
       expect(JSON.parse(first.stdout)).toMatchObject({ members_revision: "0" });
 
+      await pool.query(
+        `INSERT INTO read_frontiers(team_id, member_id, server_seq)
+         VALUES ($1, $2, 7)`,
+        [provisionTeam, provisionMember],
+      );
+      const reprovisioned = await runProvision();
+      expect(JSON.parse(reprovisioned.stdout)).toMatchObject({ members_revision: "1" });
+      const preservedReadState = await pool.query<{ server_seq: string }>(
+        `SELECT server_seq::text FROM read_frontiers
+          WHERE team_id=$1 AND member_id=$2`,
+        [provisionTeam, provisionMember],
+      );
+      expect(preservedReadState.rows[0]?.server_seq).toBe("7");
+
       await writeFile(
         manifestPath,
         JSON.stringify({
@@ -433,7 +604,13 @@ describeDatabase("remote storage HTTP API v1", () => {
         }),
       );
       const second = await runProvision();
-      expect(JSON.parse(second.stdout)).toMatchObject({ members_revision: "1" });
+      expect(JSON.parse(second.stdout)).toMatchObject({ members_revision: "2" });
+      const retiredReadState = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM read_frontiers
+          WHERE team_id=$1 AND member_id=$2`,
+        [provisionTeam, provisionMember],
+      );
+      expect(retiredReadState.rows[0]?.count).toBe("0");
 
       await writeFile(
         manifestPath,
@@ -444,6 +621,20 @@ describeDatabase("remote storage HTTP API v1", () => {
         }),
       );
       await expect(runProvision()).rejects.toThrow(/retired/);
+
+      await writeFile(
+        manifestPath,
+        JSON.stringify({
+          team_id: provisionTeam,
+          team_name: "provisioned-team",
+          members: Array.from({ length: 1001 }, (_, index) => ({
+            member_id: `018f3f7e-0000-7000-8000-${String(index).padStart(12, "0")}`,
+            name: `member-${index}`,
+            registrations: [],
+          })),
+        }),
+      );
+      await expect(runProvision()).rejects.toThrow(/too_big|1000|Array/u);
     } finally {
       if (!directory.startsWith(join(tmpdir(), "agmsg-provision-test-"))) {
         throw new Error("refusing to remove an unexpected temporary directory");

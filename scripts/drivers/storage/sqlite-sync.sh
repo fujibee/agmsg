@@ -20,6 +20,20 @@ _sqlite_sync_valid_binding() {
   case "$3" in ''|*[!0-9]*) return 1 ;; esac
 }
 
+_sqlite_sync_decimal_le() {
+  local left right
+  left=$(printf '%s' "$1" | sed 's/^0*//')
+  right=$(printf '%s' "$2" | sed 's/^0*//')
+  [ -n "$left" ] || left=0
+  [ -n "$right" ] || right=0
+  if [ "${#left}" -lt "${#right}" ] ||
+     { [ "${#left}" -eq "${#right}" ] && [[ "$left" < "$right" || "$left" = "$right" ]]; }; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
 _sqlite_sync_schema() {
   command -v jq >/dev/null 2>&1 || {
     echo "agmsg: Stage-1 sync requires jq" >&2
@@ -101,7 +115,72 @@ _sqlite_sync_schema() {
       UNIQUE(server_instance_id,remote_team_id,protocol_version,
              server_seq,wire_id,reason)
     );
+    CREATE TABLE IF NOT EXISTS sync_read_members (
+      local_team TEXT NOT NULL,
+      server_instance_id TEXT NOT NULL,
+      remote_team_id TEXT NOT NULL,
+      protocol_version INTEGER NOT NULL,
+      driver_generation TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      remote_agent TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+      name_mismatch INTEGER NOT NULL DEFAULT 0 CHECK(name_mismatch IN (0,1)),
+      blocked_reason TEXT,
+      remote_server_seq TEXT NOT NULL DEFAULT '0',
+      min_available_seq TEXT NOT NULL DEFAULT '0',
+      PRIMARY KEY(local_team,server_instance_id,remote_team_id,
+                  protocol_version,driver_generation,member_id),
+      UNIQUE(local_team,server_instance_id,remote_team_id,
+             protocol_version,driver_generation,agent)
+    );
+    CREATE TABLE IF NOT EXISTS sync_read_remote_exact (
+      local_team TEXT NOT NULL,
+      server_instance_id TEXT NOT NULL,
+      remote_team_id TEXT NOT NULL,
+      protocol_version INTEGER NOT NULL,
+      driver_generation TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      wire_id TEXT NOT NULL,
+      PRIMARY KEY(local_team,server_instance_id,remote_team_id,
+                  protocol_version,driver_generation,member_id,wire_id)
+    );
+    CREATE TABLE IF NOT EXISTS sync_read_aliases (
+      local_team TEXT NOT NULL,
+      server_instance_id TEXT NOT NULL,
+      remote_team_id TEXT NOT NULL,
+      protocol_version INTEGER NOT NULL,
+      driver_generation TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      local_id TEXT NOT NULL,
+      wire_id TEXT NOT NULL,
+      server_seq TEXT,
+      PRIMARY KEY(local_team,server_instance_id,remote_team_id,
+                  protocol_version,driver_generation,agent,local_id),
+      UNIQUE(server_instance_id,remote_team_id,protocol_version,agent,wire_id)
+    );
+    CREATE TABLE IF NOT EXISTS sync_read_prepared (
+      local_team TEXT NOT NULL,
+      server_instance_id TEXT NOT NULL,
+      remote_team_id TEXT NOT NULL,
+      protocol_version INTEGER NOT NULL,
+      driver_generation TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      server_seq TEXT NOT NULL,
+      PRIMARY KEY(local_team,server_instance_id,remote_team_id,
+                  protocol_version,driver_generation,member_id)
+    );
   " >/dev/null 2>&1 || return 13
+  if ! agmsg_sqlite "$db" "PRAGMA table_info(sync_read_members);" | cut -d'|' -f2 |
+      grep -qx remote_agent; then
+    agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+      ALTER TABLE sync_read_members ADD COLUMN remote_agent TEXT NOT NULL DEFAULT '';
+      ALTER TABLE sync_read_members ADD COLUMN name_mismatch INTEGER NOT NULL DEFAULT 0
+        CHECK(name_mismatch IN (0,1));
+      ALTER TABLE sync_read_members ADD COLUMN blocked_reason TEXT;
+      UPDATE sync_read_members SET remote_agent=agent;
+      COMMIT;" >/dev/null 2>&1 || return 13
+  fi
   generation=$(agmsg_sqlite "$db" \
     "SELECT generation FROM sync_store_metadata WHERE singleton=1;" 2>/dev/null | tr -d '\r')
   if [ -z "$generation" ]; then
@@ -233,6 +312,17 @@ storage_sync_prepare_push() {
       VALUES('$tl','$server','$remote',$protocol,'$generation',$pos,
              '$(_sqlite_lit "$local_id")','$wire',1,'$(_sqlite_lit "$cipher")',$q,
              '$(_sqlite_lit "$blob")','push');
+      INSERT OR IGNORE INTO sync_read_aliases
+        (local_team,server_instance_id,remote_team_id,protocol_version,
+         driver_generation,agent,local_id,wire_id,server_seq)
+      SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
+             m.driver_generation,e.to_agent,m.local_id,m.wire_id,m.server_seq
+        FROM sync_messages m JOIN events e ON e.seq=m.local_position
+       WHERE m.local_team='$tl' AND m.server_instance_id='$server'
+         AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
+         AND m.driver_generation='$generation' AND m.local_position=$pos
+         AND EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+           AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id);
       COMMIT;" >/dev/null 2>&1 || return 13
   done <<EOF
 $rows
@@ -296,6 +386,15 @@ storage_sync_reconcile_push() {
         AND protocol_version=$protocol AND driver_generation='$generation'
         AND EXISTS(SELECT 1 FROM incoming_sync_acks a
           WHERE a.local_position=sync_messages.local_position AND a.wire_id=sync_messages.wire_id);
+    UPDATE sync_read_aliases AS x SET server_seq=(
+      SELECT m.server_seq FROM sync_messages m
+       WHERE m.local_team=x.local_team AND m.server_instance_id=x.server_instance_id
+         AND m.remote_team_id=x.remote_team_id AND m.protocol_version=x.protocol_version
+         AND m.driver_generation=x.driver_generation AND m.local_id=x.local_id
+         AND m.wire_id=x.wire_id)
+     WHERE x.local_team='$tl' AND x.server_instance_id='$server'
+       AND x.remote_team_id='$remote' AND x.protocol_version=$protocol
+       AND x.driver_generation='$generation';
     UPDATE sync_bindings AS b SET push_cursor=COALESCE((
       SELECT MAX(e.seq) FROM events e
       WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
@@ -557,4 +656,385 @@ storage_sync_reprocess() {
       AND status IN ('unsupported_cipher','pending_key','authentication_failed',
                      'malformed','policy_violation')
     ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT $limit;"
+}
+
+# Derive the remote read frontier and exact wire exceptions from durable local
+# outcomes. The authenticated member roster/floor is supplied by the engine.
+storage_sync_prepare_read_state() {
+  local team="$1" server="$2" remote="$3" protocol="$4"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  _sqlite_sync_schema || return $?
+  local generation db tl context floor current members local_agents count values="" local_values=""
+  local member id name agent insert_members="" insert_local_agents=""
+  generation=$(_sqlite_sync_generation) || return 13
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
+  _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || return 13
+  context=$(cat)
+  [ "$(printf '%s\n' "$context" | jq -r '
+    select(.type=="sync_read_context" and (.min_available_seq|type)=="string" and
+      (.current_seq|type)=="string" and (.members|type)=="array" and
+      (.local_agents|type)=="array" and (.local_agents|length)<=1000 and
+      ((.local_agents|unique|length)==(.local_agents|length)) and all(.local_agents[];
+        (type=="string") and length>0) and
+      (.members|length)<=1000 and all(.members[];
+        ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0)) | "ok"' \
+      2>/dev/null)" = ok ] || return 13
+  floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
+  current=$(printf '%s\n' "$context" | jq -r '.current_seq')
+  case "$floor:$current" in *[!0-9:]*) return 13 ;; esac
+  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
+    [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || return 13
+  members=$(printf '%s\n' "$context" | jq -c '.members[]')
+  count=0
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    id=$(printf '%s\n' "$member" | jq -r '.member_id')
+    name=$(printf '%s\n' "$member" | jq -r '.name')
+    printf '%s\n' "$id" | grep -Eq \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 13
+    values="${values}${values:+,}('$id','$(_sqlite_lit "$name")')"
+    count=$((count + 1))
+  done <<EOF
+$members
+EOF
+  local_agents=$(printf '%s\n' "$context" | jq -r '.local_agents[]')
+  while IFS= read -r agent; do
+    [ -n "$agent" ] || continue
+    local_values="${local_values}${local_values:+,}('$(_sqlite_lit "$agent")')"
+  done <<EOF
+$local_agents
+EOF
+  if [ "$count" -gt 0 ]; then
+    insert_members="INSERT INTO incoming_read_members VALUES $values;"
+  fi
+  if [ -n "$local_values" ]; then
+    insert_local_agents="INSERT INTO local_read_agents VALUES $local_values;"
+  fi
+
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+    CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
+    CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
+    $insert_members
+    $insert_local_agents
+    UPDATE sync_read_members SET active=0 WHERE local_team='$tl'
+      AND server_instance_id='$server' AND remote_team_id='$remote'
+      AND protocol_version=$protocol AND driver_generation='$generation';
+    INSERT INTO sync_read_members
+      (local_team,server_instance_id,remote_team_id,protocol_version,
+       driver_generation,member_id,agent,remote_agent,active,name_mismatch,
+       remote_server_seq,min_available_seq)
+    SELECT '$tl','$server','$remote',$protocol,'$generation',member_id,agent,agent,1,
+           CASE WHEN EXISTS(SELECT 1 FROM local_read_agents l WHERE l.agent=incoming_read_members.agent)
+                THEN 0 ELSE 1 END,
+           '$floor','$floor' FROM incoming_read_members WHERE 1
+    ON CONFLICT(local_team,server_instance_id,remote_team_id,protocol_version,
+                driver_generation,member_id) DO UPDATE SET
+      remote_agent=excluded.agent,active=1,
+      name_mismatch=CASE WHEN sync_read_members.agent=excluded.agent
+        AND EXISTS(SELECT 1 FROM local_read_agents l WHERE l.agent=excluded.agent)
+        THEN 0 ELSE 1 END,
+      remote_server_seq=CAST(MAX(CAST(sync_read_members.remote_server_seq AS INTEGER),$floor) AS TEXT),
+      min_available_seq=CAST(MAX(CAST(sync_read_members.min_available_seq AS INTEGER),$floor) AS TEXT);
+    INSERT OR IGNORE INTO sync_read_aliases
+      (local_team,server_instance_id,remote_team_id,protocol_version,
+       driver_generation,agent,local_id,wire_id,server_seq)
+    SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
+           m.driver_generation,e.to_agent,m.local_id,m.wire_id,m.server_seq
+      FROM sync_messages m JOIN events e ON e.seq=m.local_position
+     WHERE m.local_team='$tl' AND m.server_instance_id='$server'
+       AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
+       AND m.driver_generation='$generation' AND m.server_seq IS NOT NULL
+       AND EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+         AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id);
+    UPDATE sync_read_aliases AS x SET server_seq=(
+      SELECT m.server_seq FROM sync_messages m
+       WHERE m.local_team=x.local_team AND m.server_instance_id=x.server_instance_id
+         AND m.remote_team_id=x.remote_team_id AND m.protocol_version=x.protocol_version
+         AND m.driver_generation=x.driver_generation AND m.local_id=x.local_id
+         AND m.wire_id=x.wire_id)
+     WHERE x.local_team='$tl' AND x.server_instance_id='$server'
+       AND x.remote_team_id='$remote' AND x.protocol_version=$protocol
+       AND x.driver_generation='$generation' AND x.server_seq IS NULL;
+    DELETE FROM sync_read_prepared WHERE local_team='$tl'
+      AND server_instance_id='$server' AND remote_team_id='$remote'
+      AND protocol_version=$protocol AND driver_generation='$generation';
+    INSERT INTO sync_read_prepared
+      (local_team,server_instance_id,remote_team_id,protocol_version,
+       driver_generation,member_id,server_seq)
+    WITH ordered AS (
+      SELECT rm.member_id,rm.agent,CAST(rm.remote_server_seq AS INTEGER) AS base,
+             CAST(b.transport_cursor AS INTEGER) AS tip,
+             CAST(q.server_seq AS INTEGER) AS seq,q.status,m.local_position,e.to_agent,
+             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY CAST(q.server_seq AS INTEGER)) AS rn
+        FROM sync_read_members rm JOIN sync_bindings b
+          ON b.local_team=rm.local_team AND b.server_instance_id=rm.server_instance_id
+         AND b.remote_team_id=rm.remote_team_id AND b.protocol_version=rm.protocol_version
+         AND b.driver_generation=rm.driver_generation
+        LEFT JOIN sync_quarantine q ON q.local_team=rm.local_team
+         AND q.server_instance_id=rm.server_instance_id AND q.remote_team_id=rm.remote_team_id
+         AND q.protocol_version=rm.protocol_version AND q.driver_generation=rm.driver_generation
+         AND CAST(q.server_seq AS INTEGER)>CAST(rm.remote_server_seq AS INTEGER)
+         AND CAST(q.server_seq AS INTEGER)<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
+        LEFT JOIN sync_messages m ON m.server_instance_id=rm.server_instance_id
+         AND m.remote_team_id=rm.remote_team_id AND m.protocol_version=rm.protocol_version
+         AND m.wire_id=q.wire_id
+        LEFT JOIN events e ON e.seq=m.local_position
+       WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
+         AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
+         AND rm.driver_generation='$generation' AND rm.active=1
+         AND rm.name_mismatch=0
+    ), bad AS (
+      SELECT member_id,MIN(base+rn) AS seq FROM ordered
+       WHERE seq IS NULL OR seq<>base+rn OR status NOT IN ('imported','reconciled')
+          OR local_position IS NULL
+          OR (to_agent=agent AND local_position>COALESCE((SELECT local_position
+                FROM read_cursors c WHERE c.team='$tl' AND c.agent=ordered.agent),0)
+              AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+                AND r.team='$tl' AND r.agent=ordered.agent
+                AND r.msg_id=(SELECT id FROM events se WHERE se.seq=ordered.local_position)))
+       GROUP BY member_id
+    )
+    SELECT '$tl','$server','$remote',$protocol,'$generation',rm.member_id,
+      CAST(MAX(CAST(rm.remote_server_seq AS INTEGER),
+      MIN(CAST(b.transport_cursor AS INTEGER),$current,COALESCE(bad.seq-1,$current))) AS TEXT)
+      FROM sync_read_members rm JOIN sync_bindings b
+        ON b.local_team=rm.local_team AND b.server_instance_id=rm.server_instance_id
+       AND b.remote_team_id=rm.remote_team_id AND b.protocol_version=rm.protocol_version
+       AND b.driver_generation=rm.driver_generation
+      LEFT JOIN bad ON bad.member_id=rm.member_id
+     WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
+       AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
+       AND rm.driver_generation='$generation' AND rm.active=1
+       AND rm.name_mismatch=0;
+    COMMIT;" >/dev/null || return 13
+
+  _sqlite_data "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
+      'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm
+      ON rm.local_team=f.local_team AND rm.server_instance_id=f.server_instance_id
+     AND rm.remote_team_id=f.remote_team_id AND rm.protocol_version=f.protocol_version
+     AND rm.driver_generation=f.driver_generation AND rm.member_id=f.member_id
+     WHERE f.local_team='$tl' AND f.server_instance_id='$server' AND f.remote_team_id='$remote'
+      AND f.protocol_version=$protocol AND f.driver_generation='$generation'
+      AND rm.blocked_reason IS NULL ORDER BY f.member_id;
+    SELECT json_object('type','sync_read_exact','member_id',rm.member_id,'wire_id',x.wire_id)
+      FROM sync_read_aliases x JOIN sync_read_members rm
+        ON rm.local_team=x.local_team AND rm.server_instance_id=x.server_instance_id
+       AND rm.remote_team_id=x.remote_team_id AND rm.protocol_version=x.protocol_version
+       AND rm.driver_generation=x.driver_generation AND rm.agent=x.agent AND rm.active=1
+       AND rm.blocked_reason IS NULL
+      JOIN sync_read_prepared f ON f.local_team=rm.local_team
+       AND f.server_instance_id=rm.server_instance_id AND f.remote_team_id=rm.remote_team_id
+       AND f.protocol_version=rm.protocol_version AND f.driver_generation=rm.driver_generation
+       AND f.member_id=rm.member_id
+     WHERE x.local_team='$tl' AND x.server_instance_id='$server'
+       AND x.remote_team_id='$remote' AND x.protocol_version=$protocol
+       AND x.driver_generation='$generation' AND x.server_seq IS NOT NULL
+       AND CAST(x.server_seq AS INTEGER)>f.server_seq
+     ORDER BY rm.member_id,x.wire_id;"
+  _sqlite_data "SELECT json_object('type','sync_read_blocked','member_id',member_id,
+      'reason',CASE WHEN name_mismatch=1 THEN 'member-name-mismatch' ELSE blocked_reason END)
+      FROM sync_read_members WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$generation' AND active=1
+       AND (name_mismatch=1 OR blocked_reason IS NOT NULL) ORDER BY member_id;"
+}
+
+# Persist a server-declared exact-set limit for one member. Prepared local facts
+# remain untouched and can be retried after operator remediation.
+storage_sync_block_read_state() {
+  local team="$1" server="$2" remote="$3" protocol="$4"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  _sqlite_sync_schema || return $?
+  local generation db tl input member reason
+  generation=$(_sqlite_sync_generation) || return 13
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"; input=$(cat)
+  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.member_id // empty')
+  reason=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_block")|.reason // empty')
+  printf '%s\n' "$member" | grep -Eq \
+    '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 13
+  [ "$reason" = read-state-limit-exceeded ] || return 13
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+    CREATE TEMP TABLE sync_read_block_assert(ok INTEGER CHECK(ok=1));
+    UPDATE sync_read_members SET blocked_reason='$reason'
+     WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$generation' AND member_id='$member' AND active=1;
+    INSERT INTO sync_read_block_assert VALUES(changes());
+    COMMIT;" >/dev/null || return 13
+  printf '{"type":"sync_read_blocked","member_id":"%s","reason":"%s"}\n' "$member" "$reason"
+}
+
+storage_sync_unblock_read_state() {
+  local team="$1" server="$2" remote="$3" protocol="$4"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  _sqlite_sync_schema || return $?
+  local generation db tl input member
+  generation=$(_sqlite_sync_generation) || return 13
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"; input=$(cat)
+  member=$(printf '%s\n' "$input" | jq -r 'select(.type=="sync_read_unblock")|.member_id // empty')
+  printf '%s\n' "$member" | grep -Eq \
+    '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 13
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+    CREATE TEMP TABLE sync_read_unblock_assert(ok INTEGER CHECK(ok=1));
+    INSERT INTO sync_read_unblock_assert SELECT COUNT(*) FROM sync_read_members
+     WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$generation' AND member_id='$member' AND active=1;
+    UPDATE sync_read_members SET blocked_reason=NULL
+     WHERE local_team='$tl' AND server_instance_id='$server'
+       AND remote_team_id='$remote' AND protocol_version=$protocol
+       AND driver_generation='$generation' AND member_id='$member' AND active=1
+       AND blocked_reason='read-state-limit-exceeded';
+    COMMIT;" >/dev/null || return 13
+  printf '{"type":"sync_read_unblocked","member_id":"%s"}\n' "$member"
+}
+
+# Merge one authenticated server read-state page and project coverage only onto
+# already imported/reconciled local messages. Transport/decrypt cursors are not
+# touched by this operation.
+storage_sync_apply_read_state() {
+  local team="$1" server="$2" remote="$3" protocol="$4"
+  _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
+  _sqlite_sync_schema || return $?
+  local generation db tl sql_file line type floor="" current="" member seq wire
+  generation=$(_sqlite_sync_generation) || return 13
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
+  sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-read-sync-sql.XXXXXX") || return 13
+  _AGMSG_READ_SYNC_SQL_FILE="$sql_file"
+  trap 'case "${_AGMSG_READ_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-read-sync-sql.*) rm -f "$_AGMSG_READ_SYNC_SQL_FILE" ;; esac' EXIT INT TERM HUP
+  printf '%s\n' 'BEGIN IMMEDIATE; CREATE TEMP TABLE sync_read_assert(ok INTEGER CHECK(ok=1));' > "$sql_file"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    type=$(printf '%s\n' "$line" | jq -r '.type // empty')
+    case "$type" in
+      sync_read_snapshot)
+        [ -z "$floor" ] || { rm -f "$sql_file"; return 13; }
+        floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq // empty')
+        current=$(printf '%s\n' "$line" | jq -r '.current_seq // empty')
+        case "$floor:$current" in *[!0-9:]*) rm -f "$sql_file"; return 13 ;; esac
+        [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
+          [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || {
+            rm -f "$sql_file"; return 13;
+          }
+        ;;
+      sync_read_frontier)
+        [ -n "$current" ] || { rm -f "$sql_file"; return 13; }
+        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
+        seq=$(printf '%s\n' "$line" | jq -r '.server_seq // empty')
+        case "$seq" in ''|*[!0-9]*) rm -f "$sql_file"; return 13 ;; esac
+        printf '%s\n' "$member" | grep -Eq \
+          '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
+          || { rm -f "$sql_file"; return 13; }
+        [ "$(_sqlite_sync_decimal_le "$seq" "$current")" = 1 ] || { rm -f "$sql_file"; return 13; }
+        printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
+          SELECT 1 FROM sync_read_members WHERE local_team='$tl'
+            AND server_instance_id='$server' AND remote_team_id='$remote'
+            AND protocol_version=$protocol AND driver_generation='$generation'
+            AND member_id='$member' AND active=1) THEN 1 ELSE 0 END;
+        UPDATE sync_read_members SET remote_server_seq=
+          CAST(MAX(CAST(remote_server_seq AS INTEGER),$seq) AS TEXT)
+          WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
+            AND protocol_version=$protocol AND driver_generation='$generation'
+            AND member_id='$member' AND active=1;" >> "$sql_file"
+        ;;
+      sync_read_exact)
+        [ -n "$current" ] || { rm -f "$sql_file"; return 13; }
+        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
+        wire=$(printf '%s\n' "$line" | jq -r '.wire_id // empty')
+        printf '%s\n' "$member" | grep -Eq \
+          '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
+          || { rm -f "$sql_file"; return 13; }
+        printf '%s\n' "$wire" | grep -Eq \
+          '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
+          || { rm -f "$sql_file"; return 13; }
+        printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
+          SELECT 1 FROM sync_read_members WHERE local_team='$tl'
+            AND server_instance_id='$server' AND remote_team_id='$remote'
+            AND protocol_version=$protocol AND driver_generation='$generation'
+            AND member_id='$member' AND active=1) THEN 1 ELSE 0 END;
+        INSERT OR IGNORE INTO sync_read_remote_exact
+          (local_team,server_instance_id,remote_team_id,protocol_version,
+           driver_generation,member_id,wire_id)
+          SELECT '$tl','$server','$remote',$protocol,'$generation','$member','$wire'
+           WHERE EXISTS(SELECT 1 FROM sync_read_members rm WHERE rm.local_team='$tl'
+             AND rm.server_instance_id='$server' AND rm.remote_team_id='$remote'
+             AND rm.protocol_version=$protocol AND rm.driver_generation='$generation'
+             AND rm.member_id='$member' AND rm.active=1);" >> "$sql_file"
+        ;;
+      *) rm -f "$sql_file"; return 13 ;;
+    esac
+  done
+  [ -n "$floor" ] && [ -n "$current" ] || { rm -f "$sql_file"; return 13; }
+  printf "%s\n" "
+    UPDATE sync_read_members SET
+      min_available_seq=CAST(MAX(CAST(min_available_seq AS INTEGER),$floor) AS TEXT),
+      remote_server_seq=CAST(MAX(CAST(remote_server_seq AS INTEGER),$floor) AS TEXT)
+     WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
+       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1;
+    INSERT INTO events(type,id,team,agent,msg_id,at)
+    SELECT 'message_read',lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||
+           '-7'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||
+           '-'||lower(hex(randomblob(6))),e.team,rm.agent,e.id,
+           strftime('%Y-%m-%dT%H:%M:%SZ','now')
+      FROM sync_read_members rm JOIN sync_messages m
+        ON m.local_team=rm.local_team AND m.server_instance_id=rm.server_instance_id
+       AND m.remote_team_id=rm.remote_team_id AND m.protocol_version=rm.protocol_version
+       AND m.driver_generation=rm.driver_generation AND m.server_seq IS NOT NULL
+      JOIN events e ON e.seq=m.local_position
+      LEFT JOIN sync_quarantine q ON q.server_instance_id=m.server_instance_id
+       AND q.remote_team_id=m.remote_team_id AND q.protocol_version=m.protocol_version
+       AND q.wire_id=m.wire_id
+     WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
+       AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
+       AND rm.driver_generation='$generation' AND rm.active=1 AND e.to_agent=rm.agent
+       AND (m.direction='push' OR q.status IN ('imported','reconciled'))
+       AND (CAST(m.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER)
+         OR EXISTS(SELECT 1 FROM sync_read_remote_exact x
+           WHERE x.local_team=rm.local_team AND x.server_instance_id=rm.server_instance_id
+             AND x.remote_team_id=rm.remote_team_id AND x.protocol_version=rm.protocol_version
+             AND x.driver_generation=rm.driver_generation AND x.member_id=rm.member_id
+             AND x.wire_id=m.wire_id))
+       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+         AND r.team=e.team AND r.agent=rm.agent AND r.msg_id=e.id);
+    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
+      SELECT '$tl',agent,0 FROM sync_read_members WHERE local_team='$tl'
+       AND server_instance_id='$server' AND remote_team_id='$remote'
+       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1;
+    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
+      SELECT MIN(e.seq)-1 FROM events e WHERE e.type='message_sent' AND e.team='$tl'
+       AND e.to_agent=read_cursors.agent AND e.seq>read_cursors.local_position
+       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+         AND r.team=e.team AND r.agent=read_cursors.agent AND r.msg_id=e.id)
+    ),$(_sqlite_highwater))) WHERE team='$tl' AND agent IN (
+      SELECT agent FROM sync_read_members WHERE local_team='$tl'
+       AND server_instance_id='$server' AND remote_team_id='$remote'
+       AND protocol_version=$protocol AND driver_generation='$generation' AND active=1);
+    DELETE FROM sync_read_remote_exact AS x WHERE x.local_team='$tl'
+      AND x.server_instance_id='$server' AND x.remote_team_id='$remote'
+      AND x.protocol_version=$protocol AND x.driver_generation='$generation'
+      AND EXISTS(SELECT 1 FROM sync_messages m JOIN sync_read_members rm
+        ON rm.local_team=x.local_team AND rm.server_instance_id=x.server_instance_id
+       AND rm.remote_team_id=x.remote_team_id AND rm.protocol_version=x.protocol_version
+       AND rm.driver_generation=x.driver_generation AND rm.member_id=x.member_id
+       WHERE m.server_instance_id=x.server_instance_id AND m.remote_team_id=x.remote_team_id
+         AND m.protocol_version=x.protocol_version AND m.wire_id=x.wire_id
+         AND m.server_seq IS NOT NULL
+         AND CAST(m.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER));
+    DELETE FROM sync_read_aliases AS x WHERE x.local_team='$tl'
+      AND x.server_instance_id='$server' AND x.remote_team_id='$remote'
+      AND x.protocol_version=$protocol AND x.driver_generation='$generation'
+      AND x.server_seq IS NOT NULL AND EXISTS(SELECT 1 FROM sync_read_members rm
+        WHERE rm.local_team=x.local_team AND rm.server_instance_id=x.server_instance_id
+          AND rm.remote_team_id=x.remote_team_id AND rm.protocol_version=x.protocol_version
+          AND rm.driver_generation=x.driver_generation AND rm.agent=x.agent
+          AND CAST(x.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER));
+    COMMIT;" >> "$sql_file"
+  if ! agmsg_sqlite "$db" < "$sql_file" >/dev/null 2>&1; then
+    rm -f "$sql_file"; trap - EXIT INT TERM HUP; return 13
+  fi
+  rm -f "$sql_file"; trap - EXIT INT TERM HUP; _AGMSG_READ_SYNC_SQL_FILE=""
+  _sqlite_data "SELECT json_object('type','sync_read_apply_result','min_available_seq',
+      MAX(min_available_seq),'member_count',COUNT(*)) FROM sync_read_members
+    WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
+      AND protocol_version=$protocol AND driver_generation='$generation' AND active=1;"
 }

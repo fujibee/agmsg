@@ -1,9 +1,8 @@
 #!/usr/bin/env bats
 
-# Regression tests for the watch.sh per-session watermark (#107): a Monitor
-# restart must deliver messages that arrived during the restart gap, without
-# re-delivering anything already streamed, while a fresh session still starts
-# from "now" rather than replaying history.
+# Regression tests for the store-owned per-(team,agent) read cursor. Inbox and
+# monitor share this frontier, so restarts deliver gaps without replaying rows
+# already consumed by either delivery path.
 
 load test_helper
 
@@ -27,11 +26,32 @@ teardown() {
 # Returns once the watcher has been stopped.
 run_watcher_for() {
   local sid="$1" out="$2" secs="$3"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
   sleep "$secs"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+}
+
+run_watcher_until() {
+  local sid="$1" out="$2" needle="$3" before
+  before=$(_read_cursor team alice 2>/dev/null || echo 0)
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+  _wait_for_file_contains "$out" "$needle"
+  local found=$?
+  if [ "$found" -eq 0 ]; then
+    local i cursor
+    for i in $(seq 1 100); do
+      cursor=$(_read_cursor team alice 2>/dev/null || echo 0)
+      [ "${cursor:-0}" -gt "${before:-0}" ] && break
+      sleep 0.1
+    done
+    [ "${cursor:-0}" -gt "${before:-0}" ] || found=1
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return "$found"
 }
 
 # Compute the per-process instance id (#93) that watch.sh / session-end key on
@@ -54,14 +74,12 @@ _max_message_id() {
     agmsg_sqlite "$(agmsg_db_path)" "SELECT COALESCE(MAX(id), 0) FROM messages;" )
 }
 
-# The delivery watermark is now an opaque storage cursor (the event-log
-# high-water), not a legacy messages id. This mirrors what storage_watch_tip
-# issues, so tests can assert the watcher's persisted watermark against it.
-_storage_tip() {
+# Read one pair's store-owned local frontier.
+_read_cursor() {
   ( # shellcheck disable=SC1090
     source "$SCRIPTS/lib/storage.sh"
-    agmsg_sqlite "$(agmsg_db_path)" \
-      "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0);" )
+    agmsg_storage_load
+    storage_read_cursor_get "$1" "$2" )
 }
 
 _wait_for_file() {
@@ -70,6 +88,7 @@ _wait_for_file() {
     [ -f "$file" ] && return 0
     sleep 0.1
   done
+  [ "${cursor:-0}" -gt 0 ]
   return 1
 }
 
@@ -95,13 +114,19 @@ _wait_for_file_contains() {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-restart"
 
-  # First watcher: fresh session, takes its mark at MAX(id)=0, then streams M1.
+  # First watcher consumes M1 into the shared store frontier.
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
-    >"$TEST_SKILL_DIR/out1.log" 2>/dev/null 3>&- &
+    >"$TEST_SKILL_DIR/out1.log" 2>/dev/null 3>&- 4>&- &
   local w1=$!
   sleep 1.5
   bash "$SCRIPTS/send.sh" team bob alice "M1-before-stop" >/dev/null
-  sleep 2
+  _wait_for_file_contains "$TEST_SKILL_DIR/out1.log" "M1-before-stop"
+  local i cursor
+  for i in $(seq 1 100); do
+    cursor=$(_read_cursor team alice 2>/dev/null || echo 0)
+    [ "${cursor:-0}" -gt 0 ] && break
+    sleep 0.1
+  done
   kill "$w1" 2>/dev/null || true
   wait "$w1" 2>/dev/null || true
   grep -q "M1-before-stop" "$TEST_SKILL_DIR/out1.log"
@@ -109,7 +134,7 @@ _wait_for_file_contains() {
   # A message arrives while NO watcher is running for this session.
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
 
-  # Restart the SAME session_id — should resume from the persisted watermark.
+  # Any later watcher resumes from the store frontier (session id is irrelevant).
   run_watcher_for "$sid" "$TEST_SKILL_DIR/out2.log" 2
 
   # In-gap message is delivered on restart...
@@ -118,32 +143,21 @@ _wait_for_file_contains() {
   ! grep -q "M1-before-stop" "$TEST_SKILL_DIR/out2.log"
 }
 
-@test "watch: a fresh session starts from now and does not replay history" {
+@test "watch: a fresh session delivers existing unread; a later watcher does not replay it" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # Pre-existing message before any watcher for this session ever runs.
   bash "$SCRIPTS/send.sh" team bob alice "M0-history" >/dev/null
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-fresh" "$PROJ" claude-code \
-    >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null 3>&- &
-  local w=$!
-  sleep 1.5
+  run_watcher_until "sess-fresh" "$TEST_SKILL_DIR/fresh1.log" "M0-history"
+  grep -q "M0-history" "$TEST_SKILL_DIR/fresh1.log"
+
   bash "$SCRIPTS/send.sh" team bob alice "M-live" >/dev/null
-  sleep 2
-  kill "$w" 2>/dev/null || true
-  wait "$w" 2>/dev/null || true
-
-  # Live message after attach is delivered; pre-existing history is not replayed.
-  grep -q "M-live" "$TEST_SKILL_DIR/fresh.log"
-  ! grep -q "M0-history" "$TEST_SKILL_DIR/fresh.log"
+  run_watcher_until "sess-fresh2" "$TEST_SKILL_DIR/fresh2.log" "M-live"
+  grep -q "M-live" "$TEST_SKILL_DIR/fresh2.log"
+  ! grep -q "M0-history" "$TEST_SKILL_DIR/fresh2.log"
 }
 
-@test "watch: persists a watermark file for the session" {
-  skip_on_windows "watcher background launch under Git Bash (#182)"
-  run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
-  [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
-}
-
-@test "watch: exits within one interval when its session dies, without advancing the watermark past an undelivered row (#67)" {
+@test "watch: exits when its session dies without consuming an undelivered row (#67)" {
   skip_on_windows "watcher session liveness under Git Bash (#182)"
   # REWRITTEN from "closed consumer does not advance watermark...". The old test
   # asserted that a closed *downstream* consumer (`watch.sh | head -n 1`) made
@@ -162,23 +176,18 @@ _wait_for_file_contains() {
   # arrived while the watcher was down".
   local sesspid; sleep 600 & sesspid=$!
   local iid="sess-liveness.$sesspid"
-  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
   local out="$TEST_SKILL_DIR/liveness-delivery.log"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local w=$!
-  # Wait for the watermark file, not just the pidfile: the pidfile is written
-  # early (before the subscription is resolved and LAST is seeded), so sending a
-  # message right after it appears would race the seed and the row would land at
-  # or below the initial watermark and never be "new". The watermark file is
-  # written once the watcher is ready to receive.
-  _wait_for_file "$wm"
+  # There is no seed race: a pre-poll message remains unread at cursor zero.
+  _wait_for_file "$pf"
   [ -f "$pf" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "M1-delivered" >/dev/null
   _wait_for_file_contains "$out" "M1-delivered"
-  local first_id="$(_storage_tip)"
+  local first_cursor="$(_read_cursor team alice)"
 
   # Owning session dies (reap it so kill -0 reports gone, not a zombie), then a
   # newer row arrives. The liveness guard runs before the DB poll, so the watcher
@@ -186,29 +195,27 @@ _wait_for_file_contains() {
   kill "$sesspid" 2>/dev/null || true
   wait "$sesspid" 2>/dev/null || true
   bash "$SCRIPTS/send.sh" team bob alice "M2-undelivered" >/dev/null
-  local second_id="$(_storage_tip)"
-
   _wait_for_missing "$pf" || { kill "$w" 2>/dev/null || true; false; }
   run kill -0 "$w"; [ "$status" -ne 0 ]
-  [ "$first_id" != "$second_id" ]
-  [ "$(cat "$wm")" = "$first_id" ]
+  [ "$(_read_cursor team alice)" = "$first_cursor" ]
   ! grep -q "M2-undelivered" "$out"
+  run_watcher_for "after-liveness" "$TEST_SKILL_DIR/liveness-redelivery.log" 2
+  grep -q "M2-undelivered" "$TEST_SKILL_DIR/liveness-redelivery.log"
 }
 
-@test "watch: closed stdout exits without advancing the watermark" {
+@test "watch: closed stdout exits without advancing the read cursor" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-stdout-closed"
   local iid="$(_iid "$sid")"
-  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
-    1>&- 2>/dev/null 3>&- &
+    1>&- 2>/dev/null 3>&- 4>&- &
   local w=$!
 
-  _wait_for_file "$wm"
+  _wait_for_file "$pf"
   [ -f "$pf" ]
-  local initial="$(cat "$wm")"
+  local initial="$(_read_cursor team alice)"
 
   bash "$SCRIPTS/send.sh" team bob alice "M-after-closed-stdout" >/dev/null
 
@@ -219,26 +226,25 @@ _wait_for_file_contains() {
   }
   wait "$w" 2>/dev/null || true
 
-  [ "$(cat "$wm")" = "$initial" ]
+  [ "$(_read_cursor team alice)" = "$initial" ]
 
   run_watcher_for "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" 2
   grep -q "M-after-closed-stdout" "$TEST_SKILL_DIR/closed-redelivery.log"
 }
 
-@test "session-end: removes the session watermark file" {
-  # Key the watermark under the same instance id session-end will derive.
-  local wm="$TEST_SKILL_DIR/run/watch.$(_iid sess-end).watermark"
-  mkdir -p "$TEST_SKILL_DIR/run"
-  echo 5 > "$wm"
+@test "session-end: leaves the store-owned read cursor intact" {
+  bash "$SCRIPTS/send.sh" team bob alice "read-before-end" >/dev/null
+  run bash "$SCRIPTS/inbox.sh" team alice
+  local before="$(_read_cursor team alice)"
   printf '{"session_id":"sess-end"}' | bash "$SCRIPTS/session-end.sh" claude-code "$PROJ" >/dev/null 2>&1 || true
-  [ ! -f "$wm" ]
+  [ "$(_read_cursor team alice)" = "$before" ]
 }
 
 @test "watch: actas-mode watcher creates a ready sentinel and removes it on exit" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-ready" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 3>&- &
+    >/dev/null 2>&1 3>&- 4>&- &
   local w=$!
   # Wait for the watcher to attach and signal readiness.
   local i
@@ -264,7 +270,7 @@ _wait_for_file_contains() {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-own" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 3>&- &
+    >/dev/null 2>&1 3>&- 4>&- &
   local w=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # watch.sh stamps the instance id (composite under an agent ancestor).
@@ -276,7 +282,7 @@ _wait_for_file_contains() {
 @test "watch: cleanup leaves a sentinel that a successor session re-owned" {
   local ready="$TEST_SKILL_DIR/run/ready.team__alice"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-old" "$PROJ" claude-code alice \
-    >/dev/null 2>&1 3>&- &
+    >/dev/null 2>&1 3>&- 4>&- &
   local w=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
   # A successor watcher overwrites the sentinel with its own id.
@@ -295,7 +301,7 @@ _wait_for_file_contains() {
 
   # Start a watcher so a pidfile exists with a live pid.
   AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" "sess1" "$PROJ" claude-code \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- 4>&- &
   local wpid=$!
 
   # Resolve the instance id session-start.sh will compute for "sess1".
@@ -323,24 +329,20 @@ _wait_for_file_contains() {
   wait "$wpid" 2>/dev/null || true
 }
 
-@test "session-start: GCs stale watermark/ready but keeps live ones" {
+@test "session-start: GCs a stale ready sentinel but keeps a live one" {
   skip_on_windows "watcher live-owner liveness under Git Bash (#182)"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   # Stale (owner has no live cc-instance).
-  echo 5 > "$TEST_SKILL_DIR/run/watch.deadsid.watermark"
   echo deadsid > "$TEST_SKILL_DIR/run/ready.team__ghost"
   # Live owner.
   setup_live_owner "$TEST_SKILL_DIR/run" LIVESID
-  echo 7 > "$TEST_SKILL_DIR/run/watch.LIVESID.watermark"
   echo LIVESID > "$TEST_SKILL_DIR/run/ready.team__live"
 
   printf '{"session_id":"somesess"}' \
     | bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" >/dev/null 2>&1 || true
 
-  [ ! -f "$TEST_SKILL_DIR/run/watch.deadsid.watermark" ]
   [ ! -f "$TEST_SKILL_DIR/run/ready.team__ghost" ]
-  [ -f "$TEST_SKILL_DIR/run/watch.LIVESID.watermark" ]
   [ -f "$TEST_SKILL_DIR/run/ready.team__live" ]
 }
 
@@ -368,9 +370,9 @@ _wait_pidfile() {
   local pf1="$TEST_SKILL_DIR/run/watch.shared.$sp1.pid"
   local pf2="$TEST_SKILL_DIR/run/watch.shared.$sp2.pid"
 
-  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.$sp1" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.$sp1" "$PROJ" claude-code >/dev/null 2>&1 3>&- 4>&- &
   local w1=$!
-  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.$sp2" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "shared.$sp2" "$PROJ" claude-code >/dev/null 2>&1 3>&- 4>&- &
   local w2=$!
 
   _wait_pidfile "$pf1" "$w1"
@@ -399,11 +401,11 @@ _wait_pidfile() {
   local iid="solo.$sesspid"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
 
-  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >/dev/null 2>&1 3>&- 4>&- &
   local w1=$!
   _wait_pidfile "$pf" "$w1"
 
-  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >/dev/null 2>&1 3>&- &
+  AGMSG_WATCH_INTERVAL=5 bash "$SCRIPTS/watch.sh" "$iid" "$PROJ" claude-code >/dev/null 2>&1 3>&- 4>&- &
   local w2=$!
   # Successor claims the pidfile slot...
   _wait_pidfile "$pf" "$w2"
@@ -428,7 +430,7 @@ _wait_pidfile() {
   [ -f "$DB" ]                # init-db.sh created it in setup_test_env
   chmod 000 "$DB"
   local out="$BATS_TEST_TMPDIR/hc.out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
   sleep 2                     # > one poll interval; a spinning watcher would re-emit
   kill "$pid" 2>/dev/null || true   # no-op if the healthcheck already exited
@@ -443,18 +445,18 @@ _wait_pidfile() {
 # an id and start, not die with a "Usage" error (which left the monitor down).
 # No silent message loss across a burst (#245): the head-5 truncation bug had a
 # grok agent append `| head -5` to the monitor command, so after the 5th line the
-# consumer closed and later messages were dropped while the watermark advanced
+# consumer closed and later messages were dropped while the cursor advanced
 # past them. With the watcher streaming normally (no downstream truncation), a
 # burst of N>5 consecutive messages must ALL be delivered.
 @test "watch: delivers a burst of 8 consecutive messages without loss (#245)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-burst"
   local out="$TEST_SKILL_DIR/burst.log"
-  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+  local pf="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").pid"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local w=$!
-  _wait_for_file "$wm"          # ready to receive (watermark seeded)
+  _wait_for_file "$pf"          # watcher process is live; unread has no seed race
 
   local n
   for n in 1 2 3 4 5 6 7 8; do
@@ -473,7 +475,7 @@ _wait_pidfile() {
 
 @test "watch: empty session_id gets a generated fallback instead of a Usage error (#236)" {
   local out="$BATS_TEST_TMPDIR/empty-sid.out"
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 3>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 3>&- 4>&- &
   local pid=$!
   # A fallback id means a watch.agmsg-*.pid appears under run/ as the watcher arms.
   local i started=0

@@ -19,6 +19,7 @@ import {
   messagesQuerySchema,
   parseSequence,
   postMessagesSchema,
+  readStateSyncSchema,
   uuidV7Schema,
 } from "./protocol.js";
 import {
@@ -27,6 +28,7 @@ import {
   getMessages,
   health,
   postMessages,
+  syncReadState,
 } from "./storage.js";
 
 const emptyQuerySchema = z.object({}).strict();
@@ -207,6 +209,14 @@ export function createApp(pool: Pool, config: Config): FastifyInstance {
     const teamId = await scopedTeamId(pool, request);
     const body = postMessagesSchema.parse(request.body);
     return postMessages(pool, teamId, body.messages);
+  });
+
+  app.post("/v1/read-state/sync", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const teamId = await scopedTeamId(pool, request);
+    const body = readStateSyncSchema.parse(request.body);
+    reply.header("Cache-Control", "no-store");
+    return syncReadState(pool, teamId, body);
   });
 
   app.post("/v1/pairing/exchange", async (request, reply) => {

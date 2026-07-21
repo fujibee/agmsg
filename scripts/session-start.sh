@@ -210,17 +210,9 @@ agmsg_marker_gc_stale 2>/dev/null || true
 AGENT_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 [ -n "$AGENT_PID" ] && agmsg_write_project_marker "$AGENT_PID" "$PROJECT" 2>/dev/null || true
 
-# Garbage-collect stream watermarks (#107) and readiness sentinels (#108) whose
-# owner session_id is no longer alive — left behind when a watcher dies without
-# running its EXIT trap (SIGKILL, terminal crash). Runs after the dead
-# cc-instance cleanup so actas_lock_sid_alive reflects current liveness. Both
-# are advisory (a live watcher rewrites them on attach; spawn clears the
-# sentinel before use), so this is hygiene, not correctness.
-for f in "$RUN_DIR"/watch.*.watermark; do
-  [ -f "$f" ] || continue
-  wm_sid=${f##*/}; wm_sid=${wm_sid#watch.}; wm_sid=${wm_sid%.watermark}
-  actas_lock_sid_alive "$wm_sid" || rm -f "$f"
-done
+# Garbage-collect readiness sentinels (#108) whose owner session_id is no longer
+# alive. Read progress is store-owned, so there is no per-session watermark to
+# collect.
 for f in "$RUN_DIR"/ready.*; do
   [ -f "$f" ] || continue
   rd_sid=$(cat "$f" 2>/dev/null || true)

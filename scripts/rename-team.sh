@@ -92,10 +92,37 @@ fi
 if [ -f "$DB" ]; then
   OLD_LIT=$(agmsg_sqlesc "$OLD_TEAM")
   NEW_LIT=$(agmsg_sqlesc "$NEW_TEAM")
-  agmsg_sqlite "$DB" "UPDATE messages SET team='$NEW_LIT' WHERE team='$OLD_LIT';"
-  # events may not exist yet on an install that has not sent since the storage
-  # flip — best-effort, never abort the rename over a missing optional table.
-  agmsg_sqlite "$DB" "UPDATE events SET team='$NEW_LIT' WHERE team='$OLD_LIT';" 2>/dev/null || true
+  RENAME_SQL=""
+  for TABLE in events read_cursors sync_bindings sync_messages sync_quarantine \
+    sync_conflicts sync_read_members sync_read_remote_exact sync_read_aliases \
+    sync_read_prepared; do
+    if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$TABLE';" | tr -d '\r')" = 1 ]; then
+      case "$TABLE" in
+        events|read_cursors) COLUMN=team ;;
+        *) COLUMN=local_team ;;
+      esac
+      RENAME_SQL="$RENAME_SQL UPDATE $TABLE SET $COLUMN='$NEW_LIT' WHERE $COLUMN='$OLD_LIT';"
+    fi
+  done
+  agmsg_sqlite "$DB" "BEGIN IMMEDIATE;
+    UPDATE messages SET team='$NEW_LIT' WHERE team='$OLD_LIT';
+    $RENAME_SQL
+    COMMIT;"
+fi
+
+
+if [ "$(agmsg_storage_driver)" = jsonl ]; then
+  agmsg_storage_load
+  storage_rename_team "$OLD_TEAM" "$NEW_TEAM" >/dev/null
+fi
+
+SYNC_CONFIG_DIR="$(agmsg_storage_dir)/remote-sync"
+if [ -d "$SYNC_CONFIG_DIR" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/node.sh"
+  NODE_BIN=$(agmsg_resolve_node)
+  "$NODE_BIN" "$SCRIPT_DIR/internal/rename-sync-config.mjs" \
+    "$(agmsg_storage_dir)" "$OLD_TEAM" "$NEW_TEAM"
 fi
 
 agmsg_lock_release

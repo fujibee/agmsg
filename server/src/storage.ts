@@ -5,6 +5,7 @@ import {
   envelopeDigest,
   type Envelope,
   type MessageInput,
+  type ReadStateSyncInput,
 } from "./protocol.js";
 import { inTransaction } from "./db.js";
 
@@ -37,6 +38,8 @@ type ExistingRecord =
 
 const timestampSql = `to_char(server_received_at AT TIME ZONE 'UTC',
   'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+const MAX_EXACT_PER_MEMBER = 4096;
+const MAX_EXACT_PER_TEAM = 65536;
 
 async function serverInstanceId(client: PoolClient): Promise<string> {
   const result = await client.query<{ server_instance_id: string }>(
@@ -280,6 +283,256 @@ export async function postMessages(
   });
 }
 
+export async function syncReadState(
+  pool: Pool,
+  teamId: string,
+  input: ReadStateSyncInput,
+): Promise<Record<string, unknown>> {
+  return inTransaction(pool, async (client) => {
+    const serverId = await serverInstanceId(client);
+    const team = await teamRow(client, teamId, true);
+    if (!team) throw notFound(serverId, teamId);
+    const binding = { serverInstanceId: serverId, teamId };
+    const floor = BigInt(team.min_available_seq);
+    const current = BigInt(team.current_seq);
+
+    const memberIds = input.updates.map((update) => update.member_id);
+    if (memberIds.length > 0) {
+      const members = await client.query<{ member_id: string }>(
+        `SELECT member_id::text FROM members
+          WHERE team_id = $1 AND member_id = ANY($2::uuid[])`,
+        [teamId, memberIds],
+      );
+      if (members.rows.length !== memberIds.length) {
+        throw new ProtocolError(
+          400,
+          "invalid-request",
+          "read-state update contains an inactive member",
+          {},
+          binding,
+        );
+      }
+    }
+
+    for (const update of input.updates) {
+      if (BigInt(update.server_seq) > current) {
+        throw new ProtocolError(
+          400,
+          "invalid-request",
+          "read frontier exceeds the current team sequence",
+          { member_id: update.member_id, server_seq: update.server_seq },
+          binding,
+        );
+      }
+    }
+
+    const exactMembers: string[] = [];
+    const exactWires: string[] = [];
+    for (const update of input.updates) {
+      for (const wireId of update.exact_wire_ids) {
+        exactMembers.push(update.member_id);
+        exactWires.push(wireId);
+      }
+    }
+    const exactIds = [...new Set(exactWires)];
+    const novelExactPairs = new Set<string>();
+    if (exactIds.length > 0) {
+      const resolved = await client.query<{ id: string }>(
+        `SELECT id::text FROM messages WHERE team_id = $1 AND id = ANY($2::uuid[])
+         UNION
+         SELECT id::text FROM message_tombstones
+          WHERE team_id = $1 AND id = ANY($2::uuid[])`,
+        [teamId, exactIds],
+      );
+      const found = new Set(resolved.rows.map((row) => row.id));
+      const missing = exactIds.find((id) => !found.has(id));
+      if (missing) {
+        throw new ProtocolError(
+          400,
+          "invalid-request",
+          "exact read refers to an unknown wire id",
+          { wire_id: missing },
+          binding,
+        );
+      }
+      const novel = await client.query<{ member_id: string; wire_id: string }>(
+        `SELECT incoming.member_id::text, incoming.wire_id::text
+           FROM unnest($2::uuid[], $3::uuid[]) AS incoming(member_id, wire_id)
+           LEFT JOIN read_exact existing
+             ON existing.team_id=$1 AND existing.member_id=incoming.member_id
+            AND existing.wire_id=incoming.wire_id
+          WHERE existing.wire_id IS NULL`,
+        [teamId, exactMembers, exactWires],
+      );
+      for (const row of novel.rows) novelExactPairs.add(`${row.member_id}:${row.wire_id}`);
+    }
+
+    // The authenticated retention floor is a safe baseline for every existing
+    // row. Members without a row receive the same floor logically in the page
+    // query below.
+    await client.query(
+      `UPDATE read_frontiers SET server_seq = GREATEST(server_seq, $2)
+        WHERE team_id = $1`,
+      [teamId, floor.toString()],
+    );
+
+    if (input.updates.length > 0) {
+      await client.query(
+        `INSERT INTO read_frontiers(team_id, member_id, server_seq)
+         SELECT $1, member_id, GREATEST(server_seq, $4::bigint)
+           FROM unnest($2::uuid[], $3::bigint[]) AS incoming(member_id, server_seq)
+         ON CONFLICT (team_id, member_id) DO UPDATE
+           SET server_seq = GREATEST(read_frontiers.server_seq, EXCLUDED.server_seq, $4::bigint)`,
+        [
+          teamId,
+          input.updates.map((update) => update.member_id),
+          input.updates.map((update) => update.server_seq),
+          floor.toString(),
+        ],
+      );
+    }
+
+    if (exactWires.length > 0) {
+      await client.query(
+        `INSERT INTO read_exact(team_id, member_id, wire_id)
+         SELECT $1, member_id, wire_id
+           FROM unnest($2::uuid[], $3::uuid[]) AS incoming(member_id, wire_id)
+         ON CONFLICT DO NOTHING`,
+        [teamId, exactMembers, exactWires],
+      );
+    }
+
+    await deleteCoveredExact(client, teamId, floor);
+
+    const survivingRequestExact = exactWires.length === 0
+      ? new Set<string>()
+      : new Set((await client.query<{ member_id: string; wire_id: string }>(
+        `SELECT incoming.member_id::text, incoming.wire_id::text
+           FROM unnest($2::uuid[], $3::uuid[]) AS incoming(member_id, wire_id)
+           JOIN read_exact current
+             ON current.team_id=$1 AND current.member_id=incoming.member_id
+            AND current.wire_id=incoming.wire_id`,
+        [teamId, exactMembers, exactWires],
+      )).rows
+        .filter((row) => novelExactPairs.has(`${row.member_id}:${row.wire_id}`))
+        .map((row) => row.member_id));
+
+    const memberOverflow = await client.query<{ member_id: string; exact_count: string }>(
+      `SELECT member_id::text, COUNT(*)::text AS exact_count
+         FROM read_exact WHERE team_id = $1
+        GROUP BY member_id HAVING COUNT(*) > $2
+        ORDER BY COUNT(*) DESC, member_id LIMIT 1`,
+      [teamId, MAX_EXACT_PER_MEMBER],
+    );
+    const teamCountResult = await client.query<{ exact_count: string }>(
+      "SELECT COUNT(*)::text AS exact_count FROM read_exact WHERE team_id = $1",
+      [teamId],
+    );
+    const teamCount = Number(teamCountResult.rows[0]?.exact_count ?? "0");
+    if (memberOverflow.rows[0] || teamCount > MAX_EXACT_PER_TEAM) {
+      const causalMemberId = input.updates.find((update) =>
+        survivingRequestExact.has(update.member_id))?.member_id;
+      const offender = memberOverflow.rows[0] ?? (await client.query<{ member_id: string; exact_count: string }>(
+        `SELECT member_id::text, COUNT(*)::text AS exact_count
+           FROM read_exact WHERE team_id = $1
+            AND ($2::uuid IS NULL OR member_id=$2::uuid)
+          GROUP BY member_id ORDER BY COUNT(*) DESC, member_id LIMIT 1`,
+        [teamId, causalMemberId ?? null],
+      )).rows[0];
+      throw new ProtocolError(
+        409,
+        "read-state-limit-exceeded",
+        "unabsorbed exact read state exceeds the protocol limit",
+        {
+          member_id: offender?.member_id ?? null,
+          member_exact_count: offender?.exact_count ?? "0",
+          team_exact_count: String(teamCount),
+          max_exact_per_member: MAX_EXACT_PER_MEMBER,
+          max_exact_per_team: MAX_EXACT_PER_TEAM,
+        },
+        binding,
+      );
+    }
+
+    const after = input.page_after;
+    const afterKind = after?.kind === "exact" ? 1 : 0;
+    const afterWire = after?.kind === "exact" ? after.wire_id : null;
+    const result = await client.query<{
+      member_id: string;
+      kind_order: number;
+      server_seq: string | null;
+      wire_id: string | null;
+    }>(
+      `WITH items AS (
+         SELECT m.member_id, 0 AS kind_order,
+                GREATEST(COALESCE(f.server_seq, 0), $2::bigint) AS server_seq,
+                NULL::uuid AS wire_id
+           FROM members m LEFT JOIN read_frontiers f
+             ON f.team_id=m.team_id AND f.member_id=m.member_id
+          WHERE m.team_id=$1
+         UNION ALL
+         SELECT e.member_id, 1 AS kind_order, NULL::bigint AS server_seq, e.wire_id
+           FROM read_exact e WHERE e.team_id=$1
+       )
+       SELECT member_id::text, kind_order, server_seq::text, wire_id::text
+         FROM items
+        WHERE $3::uuid IS NULL OR member_id > $3::uuid
+           OR (member_id = $3::uuid AND
+               (kind_order > $4 OR
+                (kind_order = $4 AND kind_order = 1 AND wire_id > $5::uuid)))
+        ORDER BY member_id, kind_order, wire_id NULLS FIRST
+        LIMIT $6`,
+      [
+        teamId,
+        floor.toString(),
+        after?.member_id ?? null,
+        afterKind,
+        afterWire,
+        input.page_limit + 1,
+      ],
+    );
+    const hasMore = result.rows.length > input.page_limit;
+    const page = result.rows.slice(0, input.page_limit);
+    const items = page.map((row) => row.kind_order === 0
+      ? { kind: "frontier", member_id: row.member_id, server_seq: row.server_seq }
+      : { kind: "exact", member_id: row.member_id, wire_id: row.wire_id });
+    const last = items.at(-1);
+    const nextPageAfter = hasMore && last
+      ? last.kind === "frontier"
+        ? { member_id: last.member_id, kind: "frontier" }
+        : { member_id: last.member_id, kind: "exact", wire_id: last.wire_id }
+      : null;
+
+    return {
+      ...common(serverId, team),
+      current_seq: team.current_seq,
+      items,
+      next_page_after: nextPageAfter,
+      has_more: hasMore,
+    };
+  });
+}
+
+async function deleteCoveredExact(
+  client: PoolClient,
+  teamId: string,
+  floor: bigint,
+): Promise<void> {
+  await client.query(
+    `DELETE FROM read_exact e
+      WHERE e.team_id = $1
+        AND COALESCE(
+          (SELECT m.team_seq FROM messages m
+            WHERE m.team_id=e.team_id AND m.id=e.wire_id),
+          (SELECT t.original_team_seq FROM message_tombstones t
+            WHERE t.team_id=e.team_id AND t.id=e.wire_id)
+        ) <= GREATEST(COALESCE(
+          (SELECT f.server_seq FROM read_frontiers f
+            WHERE f.team_id=e.team_id AND f.member_id=e.member_id), 0), $2::bigint)`,
+    [teamId, floor.toString()],
+  );
+}
+
 export async function retainThrough(
   pool: Pool,
   teamId: string,
@@ -325,6 +578,12 @@ export async function retainThrough(
       "UPDATE teams SET min_available_seq = $2 WHERE team_id = $1",
       [teamId, through.toString()],
     );
+    await client.query(
+      `UPDATE read_frontiers SET server_seq = GREATEST(server_seq, $2)
+        WHERE team_id = $1`,
+      [teamId, through.toString()],
+    );
+    await deleteCoveredExact(client, teamId, through);
     return {
       ...common(serverId, { ...team, min_available_seq: through.toString() }),
       retained_through: through.toString(),

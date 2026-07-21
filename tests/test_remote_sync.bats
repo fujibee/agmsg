@@ -212,3 +212,121 @@ prepare_push() {
   db=$(agmsg_db_path)
   [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" = imported ]
 }
+
+@test "Stage-2 sync exports exact reads across holes and applies remote frontier separately" {
+  local first second page ids second_local context prepared applied db
+  first=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440031",
+     server_received_at:"2026-07-21T06:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+     policy_revision:"0",local_security_revision:"0",
+     projection:{body:"leave unread",created_at:"2026-07-21T06:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  second=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"2",id:"550e8400-e29b-41d4-a716-446655440032",
+     server_received_at:"2026-07-21T06:00:01.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+     policy_revision:"0",local_security_revision:"0",
+     projection:{body:"read out of order",created_at:"2026-07-21T06:00:01.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n%s\n' "$first" "$second" \
+    '{"type":"sync_pull_cursor","next_after":"2"}')
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  ids=$(storage_history demo | jq -r 'select(.to=="bob")|.id')
+  second_local=$(printf '%s\n' "$ids" | sed -n '2p')
+  storage_read_cursor_consume demo bob "$(storage_watch_tip demo:bob)" "$second_local" >/dev/null
+  context=$(jq -nc --arg member "018f3f7e-0000-7000-8000-000000000010" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"2",local_agents:["bob"],
+     members:[{member_id:$member,name:"bob"}]}')
+  prepared=$(printf '%s\n' "$context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_frontier")|.server_seq')" = 0 ]
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_exact")|.wire_id')" = \
+    550e8400-e29b-41d4-a716-446655440032 ]
+
+  applied=$(printf '%s\n%s\n' \
+    '{"type":"sync_read_snapshot","min_available_seq":"0","current_seq":"2"}' \
+    '{"type":"sync_read_frontier","member_id":"018f3f7e-0000-7000-8000-000000000010","server_seq":"2"}' |
+    storage_sync_apply_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$applied" | jq -r '.member_count')" = 1 ]
+  [ "$(storage_list_unread demo bob | jq -s 'length')" -eq 0 ]
+  db=$(agmsg_db_path)
+  [ "$(agmsg_sqlite "$db" "SELECT transport_cursor FROM sync_bindings;" | tr -d '\r')" = 2 ]
+}
+
+@test "Stage-2 rename mismatch blocks remote frontier in either ordering" {
+  local old_context new_context local_first_context prepared db member
+  member=018f3f7e-0000-7000-8000-000000000010
+  storage_send demo alice bob "local bob authority" >/dev/null
+  old_context=$(jq -nc --arg member "$member" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"0",local_agents:["bob"],
+     members:[{member_id:$member,name:"bob"}]}')
+  new_context=$(jq -nc --arg member "$member" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"0",local_agents:["bob"],
+     members:[{member_id:$member,name:"robert"}]}')
+  local_first_context=$(jq -nc --arg member "$member" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"0",local_agents:["robert"],
+     members:[{member_id:$member,name:"bob"}]}')
+
+  printf '%s\n' "$old_context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  prepared=$(printf '%s\n' "$new_context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_blocked")|.reason')" = \
+    member-name-mismatch ]
+  [ "$(printf '%s\n' "$prepared" | jq -s '[.[]|select(.type=="sync_read_frontier")]|length')" -eq 0 ]
+
+  db=$(agmsg_db_path)
+  agmsg_sqlite "$db" "UPDATE events SET to_agent='robert' WHERE team='demo' AND to_agent='bob';" >/dev/null
+  agmsg_sqlite "$db" "UPDATE sync_read_members SET agent='robert',
+    name_mismatch=CASE WHEN remote_agent='robert' THEN 0 ELSE 1 END
+    WHERE local_team='demo' AND member_id='$member';" >/dev/null
+  prepared=$(printf '%s\n' "$local_first_context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_blocked")|.reason')" = \
+    member-name-mismatch ]
+  [ "$(printf '%s\n' "$prepared" | jq -s '[.[]|select(.type=="sync_read_frontier")]|length')" -eq 0 ]
+}
+
+@test "Stage-2 initial remote name without local authority is blocked" {
+  local context prepared member
+  member=018f3f7e-0000-7000-8000-000000000010
+  storage_send demo bob alice "local alice only" >/dev/null
+  storage_send demo alice bob "remote projection cannot self-authorize bob" >/dev/null
+  context=$(jq -nc --arg member "$member" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"0",local_agents:["alice"],
+     members:[{member_id:$member,name:"bob"}]}')
+  prepared=$(printf '%s\n' "$context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_blocked")|.reason')" = \
+    member-name-mismatch ]
+  [ "$(printf '%s\n' "$prepared" | jq -s '[.[]|select(.type=="sync_read_frontier" or .type=="sync_read_exact")]|length')" -eq 0 ]
+}
+
+@test "Stage-2 exact limit block persists until explicit operator unblock" {
+  local context member db result prepared
+  member=018f3f7e-0000-7000-8000-000000000010
+  storage_send demo alice bob "local bob authority" >/dev/null
+  context=$(jq -nc --arg member "$member" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:"0",local_agents:["bob"],
+     members:[{member_id:$member,name:"bob"}]}')
+  printf '%s\n' "$context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  result=$(jq -nc --arg member "$member" '
+    {type:"sync_read_block",member_id:$member,reason:"read-state-limit-exceeded"}' |
+    storage_sync_block_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -r '.reason')" = read-state-limit-exceeded ]
+  db=$(agmsg_db_path)
+  [ "$(agmsg_sqlite "$db" "SELECT blocked_reason FROM sync_read_members WHERE member_id='$member';" | tr -d '\r')" = \
+    read-state-limit-exceeded ]
+  prepared=$(printf '%s\n' "$context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -r 'select(.type=="sync_read_blocked")|.reason')" = \
+    read-state-limit-exceeded ]
+  result=$(jq -nc --arg member "$member" '{type:"sync_read_unblock",member_id:$member}' |
+    storage_sync_unblock_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -r '.type')" = sync_read_unblocked ]
+  prepared=$(printf '%s\n' "$context" |
+    storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$prepared" | jq -s '[.[]|select(.type=="sync_read_frontier")]|length')" -eq 1 ]
+}

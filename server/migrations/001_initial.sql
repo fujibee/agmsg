@@ -84,6 +84,29 @@ CREATE TABLE IF NOT EXISTS registrations (
     REFERENCES members(team_id, member_id) ON DELETE CASCADE
 );
 
+-- Stage-2 read state stays opaque: the server stores only immutable member and
+-- wire identities plus monotonic sequence frontiers, never message recipients.
+CREATE TABLE IF NOT EXISTS read_frontiers (
+  team_id UUID NOT NULL,
+  member_id UUID NOT NULL,
+  server_seq BIGINT NOT NULL CHECK (server_seq >= 0),
+  PRIMARY KEY (team_id, member_id),
+  FOREIGN KEY (team_id, member_id)
+    REFERENCES members(team_id, member_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS read_exact (
+  team_id UUID NOT NULL,
+  member_id UUID NOT NULL,
+  wire_id UUID NOT NULL,
+  PRIMARY KEY (team_id, member_id, wire_id),
+  FOREIGN KEY (team_id, member_id)
+    REFERENCES members(team_id, member_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS read_exact_team_wire_idx
+  ON read_exact(team_id, wire_id);
+
 CREATE TABLE IF NOT EXISTS registration_identity_history (
   team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE RESTRICT,
   registration_id UUID NOT NULL,

@@ -80,7 +80,7 @@ storage_check() {
 storage_describe() {
   printf 'name=sqlite\n'
   printf 'backend=SQLite (WAL) event log + legacy messages table\n'
-  printf 'capabilities=stage1-sync\n'
+  printf 'capabilities=stage1-sync,stage2-read-state\n'
   printf 'db=%s\n' "$(_sqlite_db)"
 }
 
@@ -107,6 +107,16 @@ storage_init() {
     );
     CREATE INDEX IF NOT EXISTS events_sent ON events(type, team, to_agent, seq);
     CREATE INDEX IF NOT EXISTS events_read ON events(type, team, agent, msg_id);
+    CREATE TABLE IF NOT EXISTS read_cursors (
+      team TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      local_position INTEGER NOT NULL DEFAULT 0 CHECK(local_position >= 0),
+      PRIMARY KEY(team, agent)
+    );
+    CREATE TABLE IF NOT EXISTS storage_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
     -- Legacy store (read-only here). Created so the UNION queries always parse
     -- even on a brand-new install with no pre-event-log data.
     CREATE TABLE IF NOT EXISTS messages (
@@ -118,6 +128,38 @@ storage_init() {
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
       read_at TEXT
     );
+    -- Phase-3 adoption is intentionally storm-proof. Everything that existed
+    -- before the cursor model is treated as already delivered. Legacy rows get
+    -- an exact audit marker without mutating read_at; event-log recipients start
+    -- at the current global high-water. Fresh stores have no rows, so they start
+    -- naturally at cursor zero.
+    INSERT INTO events(type,id,team,agent,msg_id,at)
+      SELECT 'message_read',
+             'read-cursor-v1:' || m.team || ':' || m.to_agent || ':' || m.id,
+             m.team,m.to_agent,CAST(m.id AS TEXT),
+             strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        FROM messages m
+       WHERE NOT EXISTS(SELECT 1 FROM storage_metadata
+                         WHERE key='read_cursor_v1')
+         AND NOT EXISTS(SELECT 1 FROM events r
+                         WHERE r.type='message_read' AND r.team=m.team
+                           AND r.agent=m.to_agent
+                           AND r.msg_id=CAST(m.id AS TEXT));
+    INSERT INTO read_cursors(team,agent,local_position)
+      SELECT recipients.team,recipients.agent,
+             COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0)
+        FROM (
+          SELECT team,to_agent AS agent FROM events
+           WHERE type='message_sent' AND team IS NOT NULL AND to_agent IS NOT NULL
+          UNION
+          SELECT team,to_agent AS agent FROM messages
+        ) recipients
+       WHERE NOT EXISTS(SELECT 1 FROM storage_metadata
+                         WHERE key='read_cursor_v1')
+      ON CONFLICT(team,agent) DO UPDATE SET local_position=MAX(
+        read_cursors.local_position,excluded.local_position);
+    INSERT OR IGNORE INTO storage_metadata(key,value)
+      VALUES('read_cursor_v1','1');
   " >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
 }
@@ -145,8 +187,53 @@ storage_send() {
   printf '%s\n' "$id"
 }
 
+# storage_read_cursor_get <team> <agent> — opaque local read frontier.
+storage_read_cursor_get() {
+  local team="$1" agent="$2"
+  storage_init >/dev/null || return 13
+  _sqlite_data "SELECT COALESCE((SELECT local_position FROM read_cursors
+    WHERE team='$(_sqlite_lit "$team")' AND agent='$(_sqlite_lit "$agent")'),0);"
+}
+
+# Advance one recipient's local read frontier after a successful driver scan.
+# Exact IDs are recorded first; the frontier is then capped immediately before
+# the first still-unread addressed message, so a stale/malformed caller cannot
+# skip an unseen row merely by presenting a later cursor.
+storage_read_cursor_consume() {
+  local team="$1" agent="$2" target="$3"; shift 3
+  case "$target" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
+  storage_init >/dev/null || { echo runtime_error; return 13; }
+  local db tl al at id sql=""
+  db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  at="$(_sqlite_now)"
+  for id in "$@"; do
+    sql="$sql
+      INSERT INTO events(type,id,team,agent,msg_id,at)
+      SELECT 'message_read','$(_sqlite_lit "$(_sqlite_uuid7)")','$tl','$al',
+             '$(_sqlite_lit "$id")','$(_sqlite_lit "$at")'
+       WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+         AND r.team='$tl' AND r.agent='$al' AND r.msg_id='$(_sqlite_lit "$id")');"
+  done
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+    $sql
+    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
+      VALUES('$tl','$al',0);
+    UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
+      SELECT MIN(e.seq)-1 FROM events e
+       WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
+         AND e.seq>read_cursors.local_position
+         AND e.seq<=MIN($target,$(_sqlite_highwater))
+         AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+           AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
+    ),MIN($target,$(_sqlite_highwater))))
+    WHERE team='$tl' AND agent='$al';
+    COMMIT;" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  echo ok
+}
+
 # storage_list_unread <team> <agent> [--limit N]
-# events-unread ∪ legacy-unread (read_at IS NULL, not superseded by a read event).
+# The local cursor is the fast contiguous boundary; exact message_read events
+# cover safe out-of-order reads. Legacy rows remain a frozen compatibility path.
 storage_list_unread() {
   local team="$1" agent="$2" limit=""
   shift 2
@@ -161,6 +248,8 @@ storage_list_unread() {
              e.at AS ts, 1 AS src, e.seq AS ord
       FROM events e
       WHERE e.type='message_sent' AND e.team='$tl' AND e.to_agent='$al'
+        AND e.seq>COALESCE((SELECT local_position FROM read_cursors
+          WHERE team='$tl' AND agent='$al'),0)
         AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type='message_read'
                         AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
       UNION ALL
@@ -180,20 +269,8 @@ storage_list_unread() {
 storage_mark_read_batch() {
   local team="$1" agent="$2"; shift 2
   [ $# -gt 0 ] || { echo ok; return 0; }
-  local db at tl al; db="$(_sqlite_db)"; at="$(_sqlite_now)"
-  tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
-  storage_init >/dev/null
-  local id sql=""
-  for id in "$@"; do
-    local idl rid; idl="$(_sqlite_lit "$id")"; rid="$(_sqlite_uuid7)"
-    sql="$sql
-    INSERT INTO events (type,id,team,agent,msg_id,at)
-    SELECT 'message_read','$(_sqlite_lit "$rid")','$tl','$al','$idl','$(_sqlite_lit "$at")'
-    WHERE NOT EXISTS (SELECT 1 FROM events r WHERE r.type='message_read'
-                      AND r.team='$tl' AND r.agent='$al' AND r.msg_id='$idl');"
-  done
-  agmsg_sqlite "$db" "$sql" >/dev/null 2>&1 || { echo runtime_error; return 13; }
-  echo ok
+  local tip; tip=$(storage_watch_tip "$team:$agent") || { echo runtime_error; return 13; }
+  storage_read_cursor_consume "$team" "$agent" "$tip" "$@"
 }
 
 # --- contract: delivery cursor ---------------------------------------------
@@ -228,6 +305,9 @@ storage_watch_after() {
     FROM events
     WHERE type='message_sent' AND seq > $cursor
       AND (team || ':' || to_agent) IN ($pairs)
+      AND NOT EXISTS(SELECT 1 FROM events r
+        WHERE r.type='message_read' AND r.team=events.team
+          AND r.agent=events.to_agent AND r.msg_id=events.id)
     ORDER BY seq ASC;
     SELECT json_object('type','cursor','cursor',
                        CAST(MAX($cursor, $(_sqlite_highwater)) AS TEXT));

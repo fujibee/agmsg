@@ -71,7 +71,7 @@ Directives are advisory: the host agent decides whether to surface them to the u
 
 The storage axis is **messages only**: the durable message log and its read /
 replay state. The team registry (`teams/<team>/config.json`) and run-state
-(pidfiles, the per-session delivery cursor, actas locks, ready sentinels) are
+(pidfiles, actas locks, ready sentinels) are
 **not** part of this contract — they stay file-based and form a separate axis
 (see [ADR 0003](../adr/0003-storage-axis-driver-abi-and-scope.md)). A storage driver
 must implement the *entire* contract below: "this driver does only messages,
@@ -88,6 +88,8 @@ storage_store_exists
 storage_send <team> <from> <to> <body>
 storage_list_unread <team> <agent> [--limit N]
 storage_mark_read_batch <team> <agent> <id> [<id> ...]
+storage_read_cursor_get <team> <agent>
+storage_read_cursor_consume <team> <agent> <delivery-cursor> [<id> ...]
 storage_watch_tip <team:agent> [<team:agent> ...]
 storage_watch_after <cursor> <team:agent> [<team:agent> ...]
 storage_history <team> [agent] [--limit N]
@@ -120,11 +122,13 @@ by cross-referencing `storage_list_unread` for the relevant recipient rather tha
 from the history record itself.
 
 **stdout framing.** The **control ops** — `storage_check`, `storage_init`,
-`storage_mark_read_batch`, `storage_compact` — **must** use the §1.4 convention:
+`storage_mark_read_batch`, `storage_read_cursor_consume`, `storage_compact` —
+**must** use the §1.4 convention:
 a status name (`ok` / `missing_deps` / `runtime_error` / …) on the last stdout
 line, with the matching exit code. The **record-returning ops** —
-`storage_send`, `storage_list_unread`, `storage_history`, `storage_watch_tip`,
-`storage_watch_after` — write **data only** to stdout (JSONL records, or a bare
+`storage_send`, `storage_list_unread`, `storage_read_cursor_get`,
+`storage_history`, `storage_watch_tip`, `storage_watch_after` — write **data
+only** to stdout (JSONL records, or a bare
 id / cursor token; one record per line) and signal outcome with the **exit code**
 alone: `0` on success, non-zero with a message on **stderr** on failure. They
 never emit a §1.4 status name to stdout, so a status word can never be misread as
@@ -137,14 +141,14 @@ name, which a metadata consumer would otherwise misread.
 
 ### 2.2 Delivery cursor (watch / replay)
 
-Live delivery (`watch.sh`, `check-inbox.sh`) resumes from a checkpoint instead of
-re-reading the whole log. That checkpoint is an **opaque, driver-issued cursor**
-— a position in the driver's global message order. Core treats it as an opaque
-string: it persists the latest cursor (per session — the successor to the old
-`watch.<sid>.watermark` file) and passes it back unchanged. **Core never parses,
-compares, or orders cursors.** This is what lets one contract serve sqlite
-integer ids, UUIDv7, Redis stream ids, and JSONL byte offsets — the
-`id > watermark` integer assumption is removed from core entirely.
+Live delivery (`watch.sh`, `check-inbox.sh`, and `inbox.sh`) resumes from the
+store-owned read frontier instead of re-reading the whole log. Its local
+component is an **opaque, driver-issued cursor** in the driver's global message
+order, persisted per `(team, agent)`. Core reads it with
+`storage_read_cursor_get`, passes it unchanged to `storage_watch_after`, and
+commits a successfully displayed scan with `storage_read_cursor_consume`.
+**Core never parses, compares, or orders cursors.** This lets one contract serve
+sqlite integer positions, Redis stream IDs, and JSONL logical ordinals.
 
 The cursor is opaque to core but constrained for transport: it must be a
 **single-line, whitespace-free, printable token** that survives being written to
@@ -155,9 +159,7 @@ characters (e.g. a JSONL byte offset bundled with metadata) must encode it
 (base64url or similar) into a single safe token.
 
 - `storage_watch_tip <pairs...>` — print the cursor for "now" (the current tip of
-  the global order) as a single bare line. A fresh watcher starts here, so it
-  delivers only messages that arrive *after* it attached (no history replay; the
-  no-arg inbox check covers the backlog).
+  the global order) as a single bare line.
 - `storage_watch_after <cursor> <pairs...>` — print, as JSONL and in delivery
   order, every `message_sent` after `<cursor>` addressed to one of the
   subscription pairs; then print a final cursor record
@@ -169,6 +171,20 @@ characters (e.g. a JSONL byte offset bundled with metadata) must encode it
   the same span on every poll. Poll-once: it returns what is currently available
   and exits — core loops on its own interval; a streaming backend may implement
   it as one non-blocking drain.
+
+- `storage_read_cursor_get <team> <agent>` — print the local-position component
+  for the pair, defaulting to the driver's zero cursor.
+- `storage_read_cursor_consume <team> <agent> <cursor> [ids...]` — atomically
+  record the exact displayed IDs, then max-merge the pair's local frontier only
+  through the contiguous covered prefix ending no later than `<cursor>`. A
+  missing unread message is a hard gap: a later exact read is retained as an
+  exception and MUST NOT move the frontier across that gap.
+
+The same pair cursor is shared by inbox and monitor delivery and survives
+session termination. A successful empty scan may advance across
+off-subscription traffic. A crash before consume re-delivers; a crash after the
+atomic consume does not. A one-time driver migration treats pre-cursor backlog
+as consumed to avoid a full-history monitor storm; new stores start at zero.
 
 Each `<pair>` is `<team>:<agent>`. Team and agent names cannot contain `:` (the
 name rules enforce this); a driver may additionally reject a pair it cannot split
@@ -186,11 +202,12 @@ storage axis (team membership does not; see the §2 intro):
 ```
 
 `storage_list_unread <team> <agent>` returns the `message_sent` events addressed
-to `<agent>` in `<team>` that have no matching `message_read` for that same
-`(team, agent)`. Read-marking is **recipient-scoped**: a `message_read` names the
-`(team, agent)` that read the message, so marking one recipient's copy never
-affects another's, and re-marking an already-read id is **idempotent** (a no-op,
-or a duplicate event the projection collapses).
+to `<agent>` in `<team>` that are not covered by the pair's contiguous read
+frontier or an exact `message_read` exception. Read-marking is
+**recipient-scoped**: a `message_read` names the `(team, agent)` that read the
+message, so marking one recipient's copy never affects another's, and re-marking
+an already-read id is **idempotent**. The legacy mutable `messages.read_at`
+field is compatibility/audit input only; new read progress never mutates it.
 
 **Schema version.** This is **event-log schema v1**. The two event types above
 and their fields are the v1 contract. Forward compatibility is a hard rule, not a
@@ -314,6 +331,24 @@ independent. Reprocess emits blocking quarantine records for explicit policy/key
 reevaluation without rewinding transport. The complete framing, record schemas,
 crash boundaries, and future reserved operation names are defined by
 [ADR 0005](../adr/0005-stage-1-remote-sync.md).
+
+The independent Stage-2 extension from
+[ADR 0008](../adr/0008-stage-2-read-cursor-sync.md) is advertised as
+`capabilities=stage1-sync,stage2-read-state` and adds:
+
+```text
+storage_sync_prepare_read_state <local-team> <server-instance-id> <remote-team-id> <protocol-version>
+storage_sync_apply_read_state <local-team> <server-instance-id> <remote-team-id> <protocol-version>
+```
+
+Prepare exports a safe
+contiguous remote `server_seq` frontier plus out-of-order exact `wire_id` reads;
+apply max-merges the frontier and set-unions exact reads. Local-only exact reads
+are promoted from stable local ID to wire ID in the same transaction that
+publishes or reconciles the mapping. Neither operation may change transport or
+decrypt/import progress. Exact remote state is bounded and paginated, and may
+be garbage-collected only after a durable mapping proves that its own sequence
+is covered by the merged remote frontier.
 
 ## 3. CLI mapping
 

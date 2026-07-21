@@ -30,7 +30,7 @@ const manifestSchema = z
   .object({
     team_id: uuidV7Schema,
     team_name: teamNameSchema,
-    members: z.array(memberSchema),
+    members: z.array(memberSchema).max(1000),
   })
   .strict();
 
@@ -158,10 +158,14 @@ try {
     }
 
     await client.query("DELETE FROM registrations WHERE team_id = $1", [manifest.team_id]);
-    await client.query("DELETE FROM members WHERE team_id = $1", [manifest.team_id]);
+    await client.query(
+      "DELETE FROM members WHERE team_id = $1 AND NOT (member_id = ANY($2::uuid[]))",
+      [manifest.team_id, manifest.members.map((member) => member.member_id)],
+    );
     for (const member of manifest.members) {
       await client.query(
-        "INSERT INTO members (team_id, member_id, name) VALUES ($1, $2, $3)",
+        `INSERT INTO members (team_id, member_id, name) VALUES ($1, $2, $3)
+         ON CONFLICT (team_id, member_id) DO UPDATE SET name = EXCLUDED.name`,
         [manifest.team_id, member.member_id, member.name],
       );
       for (const registration of member.registrations) {

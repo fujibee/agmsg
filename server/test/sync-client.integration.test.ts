@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,8 @@ describeDatabase("Stage-1 polling sync client", () => {
   const schema = `agmsg_sync_${randomBytes(8).toString("hex")}`;
   let token: string;
   const teamId = "018f3f7e-0000-7000-8000-000000000101";
+  const memberA = "018f3f7e-0000-7000-8000-000000000110";
+  const memberB = "018f3f7e-0000-7000-8000-000000000120";
   const localTeam = "dogfood-team";
   let admin: Pool;
   let pool: Pool;
@@ -30,6 +32,7 @@ describeDatabase("Stage-1 polling sync client", () => {
   let root: string;
   let storeA: string;
   let storeB: string;
+  let rosterFile: string;
 
   beforeAll(async () => {
     admin = new Pool({ connectionString: databaseUrl });
@@ -44,6 +47,11 @@ describeDatabase("Stage-1 polling sync client", () => {
        VALUES($1,0,1,ARRAY[1],ARRAY['none','age-v1']::TEXT[])`,
       [teamId],
     );
+    await pool.query(
+      `INSERT INTO members(team_id,member_id,name) VALUES
+       ($1,$2,'machine-a'),($1,$3,'machine-b')`,
+      [teamId, memberA, memberB],
+    );
     const config: Config = {
       databaseUrl: databaseUrl ?? "",
       host: "127.0.0.1", port: 8787, logLevel: "silent",
@@ -55,6 +63,10 @@ describeDatabase("Stage-1 polling sync client", () => {
     root = await mkdtemp(join(tmpdir(), "agmsg-stage1-sync-"));
     storeA = join(root, "machine-a");
     storeB = join(root, "machine-b");
+    rosterFile = join(root, "local-roster.json");
+    await writeFile(rosterFile, JSON.stringify({
+      agents: { "machine-a": {}, "machine-b": {} },
+    }));
   });
 
   afterAll(async () => {
@@ -73,6 +85,7 @@ describeDatabase("Stage-1 polling sync client", () => {
       AGMSG_STORAGE_PATH: store,
       AGMSG_STORAGE_DRIVER: "sqlite",
       AGMSG_SYNC_TOKEN: token,
+      AGMSG_SYNC_LOCAL_ROSTER_FILE: rosterFile,
       AGMSG_NODE: process.execPath,
       HOME: join(store, "home"),
     };
@@ -108,6 +121,23 @@ storage_history "$2"`;
     return result.stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
   }
 
+  async function markRead(store: string, agent: string, id: string) {
+    const script = `. "$1/scripts/lib/storage.sh"
+agmsg_storage_load
+storage_mark_read_batch "$2" "$3" "$4" >/dev/null`;
+    await execFileAsync("bash", ["-c", script, "stage2-test", repositoryRoot,
+      localTeam, agent, id], { cwd: repositoryRoot, env: environment(store) });
+  }
+
+  async function unread(store: string, agent: string) {
+    const script = `. "$1/scripts/lib/storage.sh"
+agmsg_storage_load
+storage_list_unread "$2" "$3"`;
+    const result = await execFileAsync("bash", ["-c", script, "stage2-test", repositoryRoot,
+      localTeam, agent], { cwd: repositoryRoot, env: environment(store) });
+    return result.stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  }
+
   it("synchronizes two isolated AGMSG_STORAGE_PATH stores without echo duplicates", async () => {
     for (const store of [storeA, storeB]) {
       await sync(store, "configure", "--team", localTeam, "--server", serverUrl,
@@ -124,6 +154,11 @@ storage_history "$2"`;
     expect(await history(storeB)).toMatchObject([
       { from: "machine-a", to: "machine-b", body: "fixture from machine A" },
     ]);
+    const receivedOnB = (await history(storeB))[0];
+    await markRead(storeB, "machine-b", receivedOnB.id);
+    await sync(storeB, "once", "--team", localTeam);
+    await sync(storeA, "once", "--team", localTeam);
+    expect(await unread(storeA, "machine-b")).toEqual([]);
 
     await localSend(storeB, "machine-b", "machine-a", "fixture reply from machine B");
     await sync(storeB, "once", "--team", localTeam);

@@ -25,6 +25,7 @@ function usage() {
   remote-sync.sh once --team NAME [--limit N]
   remote-sync.sh run --team NAME [--limit N] [--interval SECONDS]
   remote-sync.sh reprocess --team NAME [--limit N]
+  remote-sync.sh unblock-read --team NAME --member-id UUID
 
 AGMSG_SYNC_TOKEN is required and is never written to config or argv.`;
 }
@@ -49,7 +50,7 @@ function options(args) {
 }
 
 function requireName(value, label) {
-  if (typeof value !== "string" || value.length < 1 || value.length > 128 ||
+  if (typeof value !== "string" || [...value].length < 1 || [...value].length > 128 ||
       value.startsWith("-") || value === "." || value === ".." ||
       /[./\\"\[\]\u0000-\u001f\u007f]/u.test(value) || value !== value.normalize("NFC")) {
     throw new Error(`${label} is invalid`);
@@ -104,6 +105,22 @@ async function loadConfig(team) {
   }
   else if (value.cipher_profile !== "none") throw new Error("sync cipher profile is unsupported");
   return value;
+}
+
+async function localAgentRoster(team) {
+  const supplied = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
+  const skillRoot = process.env.SKILL_DIR;
+  const path = supplied || (skillRoot ? join(skillRoot, "teams", team, "config.json") : "");
+  if (!path) throw new Error("local team roster path is unavailable");
+  const value = JSON.parse(await readFile(path, "utf8"));
+  if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) {
+    throw new Error("local team roster is invalid");
+  }
+  const names = Object.keys(value.agents).map((name) => requireName(name, "local agent name")).sort();
+  if (names.length > 1000 || new Set(names).size !== names.length) {
+    throw new Error("local team roster is invalid");
+  }
+  return names;
 }
 
 function requireUnicodeScalars(value, label) {
@@ -423,6 +440,44 @@ function validateBinding(config, body) {
   }
 }
 
+export function validateMembers(config, value) {
+  validateBinding(config, value);
+  sequence(value.min_available_seq, "members min_available_seq");
+  sequence(value.members_revision, "members_revision");
+  if (!Array.isArray(value.members) || value.members.length > 1000) {
+    throw new Error("members response is invalid");
+  }
+  const ids = new Set();
+  const names = new Set();
+  const registrationIds = new Set();
+  let previous = "";
+  for (const member of value.members) {
+    if (!member || !UUID_V7.test(member.member_id) ||
+        requireName(member.name, "member name") !== member.name ||
+        !Array.isArray(member.registrations) || ids.has(member.member_id) ||
+        names.has(member.name) || (previous && member.member_id <= previous)) {
+      throw new Error("members response is not canonical");
+    }
+    let priorRegistration = "";
+    for (const registration of member.registrations) {
+      if (Object.keys(registration).sort().join(",") !==
+          "installation_id,registration_id,type" ||
+          !UUID_V7.test(registration.registration_id) ||
+          !UUID_V7.test(registration.installation_id) ||
+          typeof registration.type !== "string" ||
+          !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(registration.type) ||
+          registrationIds.has(registration.registration_id) ||
+          (priorRegistration && registration.registration_id <= priorRegistration)) {
+        throw new Error("member registrations are not canonical");
+      }
+      registrationIds.add(registration.registration_id);
+      priorRegistration = registration.registration_id;
+    }
+    ids.add(member.member_id); names.add(member.name); previous = member.member_id;
+  }
+  return value.members.map(({ member_id, name }) => ({ member_id, name }));
+}
+
 export async function driver(operation, config, input, extra = []) {
   const script = process.env.AGMSG_SYNC_DRIVER;
   if (!script) throw new Error("AGMSG_SYNC_DRIVER is not set");
@@ -682,6 +737,129 @@ export function validateAckMapping(candidates, acks) {
   });
 }
 
+export function readStateUpdateBatches(members, records) {
+  const memberIds = new Set(members.map((member) => member.member_id));
+  const frontiers = new Map();
+  const exact = new Map(members.map((member) => [member.member_id, []]));
+  const blocked = new Map();
+  for (const record of records) {
+    if (!memberIds.has(record.member_id)) throw new Error("driver emitted an unknown read member");
+    if (record.type === "sync_read_frontier") {
+      if (frontiers.has(record.member_id)) throw new Error("driver emitted duplicate read frontier");
+      frontiers.set(record.member_id, sequence(record.server_seq, "prepared read frontier"));
+    } else if (record.type === "sync_read_exact") {
+      if (!UUID_V4.test(record.wire_id)) throw new Error("driver emitted an invalid exact wire ID");
+      exact.get(record.member_id).push(record.wire_id);
+    } else if (record.type === "sync_read_blocked") {
+      if (blocked.has(record.member_id) ||
+          !["member-name-mismatch", "read-state-limit-exceeded"].includes(record.reason)) {
+        throw new Error("driver emitted an invalid blocked read member");
+      }
+      blocked.set(record.member_id, record.reason);
+    } else {
+      throw new Error("driver emitted an unknown read-state record");
+    }
+  }
+  const entries = [];
+  for (const member of members) {
+    if (blocked.has(member.member_id)) {
+      if (frontiers.has(member.member_id) || exact.get(member.member_id).length > 0) {
+        throw new Error("driver emitted updates for a blocked read member");
+      }
+      continue;
+    }
+    const serverSeq = frontiers.get(member.member_id);
+    if (serverSeq === undefined) throw new Error("driver omitted a member read frontier");
+    const wires = exact.get(member.member_id);
+    if (new Set(wires).size !== wires.length) throw new Error("driver emitted duplicate exact reads");
+    if (wires.length === 0) {
+      entries.push({ member_id: member.member_id, server_seq: serverSeq, exact_wire_ids: [] });
+    } else {
+      for (let offset = 0; offset < wires.length; offset += 1000) {
+        entries.push({ member_id: member.member_id, server_seq: serverSeq,
+          exact_wire_ids: wires.slice(offset, offset + 1000) });
+      }
+    }
+  }
+  const batches = [];
+  let batch = []; let exactCount = 0; let batchMembers = new Set();
+  for (const entry of entries) {
+    if (batch.length >= 1000 || exactCount + entry.exact_wire_ids.length > 1000 ||
+        batchMembers.has(entry.member_id)) {
+      batches.push(batch); batch = []; exactCount = 0; batchMembers = new Set();
+    }
+    batch.push(entry); exactCount += entry.exact_wire_ids.length; batchMembers.add(entry.member_id);
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches.length > 0 ? batches : [[]];
+}
+
+export function stage2ReadStateSupported(records) {
+  if (!Array.isArray(records) || records.length !== 1 ||
+      records[0]?.type !== "sync_driver_capabilities" ||
+      !Array.isArray(records[0].capabilities) ||
+      records[0].capabilities.some((value) => typeof value !== "string")) {
+    throw new Error("driver capability response is invalid");
+  }
+  return records[0].capabilities.includes("stage2-read-state");
+}
+
+export function validateReadStatePage(config, value, pageLimit, pageAfter = null) {
+  validateBinding(config, value);
+  const floor = BigInt(sequence(value.min_available_seq, "read-state floor"));
+  const current = BigInt(sequence(value.current_seq, "read-state current_seq"));
+  if (floor > current || !Array.isArray(value.items) || value.items.length > pageLimit ||
+      (value.has_more === true && value.items.length === 0) ||
+      typeof value.has_more !== "boolean") {
+    throw new Error("read-state response is invalid");
+  }
+  const afterKey = pageAfter === null ? null : [pageAfter.member_id,
+    pageAfter.kind === "frontier" ? 0 : 1, pageAfter.wire_id ?? ""];
+  let prior = afterKey;
+  for (const item of value.items) {
+    const fields = Object.keys(item).sort().join(",");
+    if (!UUID_V7.test(item?.member_id) ||
+        (item.kind === "frontier" && (fields !== "kind,member_id,server_seq" ||
+          BigInt(sequence(item.server_seq, "read-state frontier")) < floor ||
+          BigInt(item.server_seq) > current)) ||
+        (item.kind === "exact" && (fields !== "kind,member_id,wire_id" || !UUID_V4.test(item.wire_id))) ||
+        !["frontier", "exact"].includes(item.kind)) {
+      throw new Error("read-state item is invalid");
+    }
+    const key = [item.member_id, item.kind === "frontier" ? 0 : 1, item.wire_id ?? ""];
+    if (prior && (key[0] < prior[0] || (key[0] === prior[0] &&
+        (key[1] < prior[1] || (key[1] === prior[1] && key[2] <= prior[2]))))) {
+      throw new Error("read-state page order is not canonical");
+    }
+    prior = key;
+  }
+  const expectedNext = value.has_more && value.items.length > 0 ? (() => {
+    const last = value.items.at(-1);
+    return last.kind === "frontier" ? { member_id: last.member_id, kind: "frontier" } :
+      { member_id: last.member_id, kind: "exact", wire_id: last.wire_id };
+  })() : null;
+  if (JSON.stringify(value.next_page_after) !== JSON.stringify(expectedNext)) {
+    throw new Error("read-state next page key is inconsistent");
+  }
+  return value;
+}
+
+export async function consistentReadStateContext(config, initialCapabilities, fetcher = request) {
+  let capabilities = initialCapabilities;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const roster = await fetcher(config, "/v1/members");
+    const members = validateMembers(config, roster);
+    if (roster.min_available_seq === capabilities.min_available_seq) {
+      return { capabilities, members };
+    }
+    capabilities = await fetcher(config, "/v1/capabilities");
+    validateCapabilities(config, capabilities);
+  }
+  const error = new Error("retention changed while loading the read-state context");
+  error.retryable = true;
+  throw error;
+}
+
 function parseCheckpoint(value) {
   const match = /^(0|[1-9][0-9]*):([0-9a-f]{64})$/u.exec(value ?? "");
   if (!match) throw new Error("age-checkpoint must be REVISION:SHA256");
@@ -784,6 +962,93 @@ async function configure(args) {
     remote_team_id: config.remote_team_id });
 }
 
+export async function readStateCycle(config, limit, dependencies = {}) {
+  const driverCall = dependencies.driverCall ?? driver;
+  const requestCall = dependencies.requestCall ?? request;
+  const eventCall = dependencies.eventCall ?? event;
+  const localAgentsCall = dependencies.localAgentsCall ?? localAgentRoster;
+  const driverCapabilities = await driverCall("capabilities", config, []);
+  if (!stage2ReadStateSupported(driverCapabilities)) {
+    await eventCall("read-state.skipped", { reason: "driver-capability-not-advertised" });
+    return;
+  }
+  const initialCapabilities = await requestCall(config, "/v1/capabilities");
+  validateCapabilities(config, initialCapabilities);
+  const { capabilities, members } = await consistentReadStateContext(
+    config, initialCapabilities, requestCall,
+  );
+  const localAgents = await localAgentsCall(config.local_team);
+  const prepared = await driverCall("read-prepare", config, [{ type: "sync_read_context",
+    min_available_seq: capabilities.min_available_seq, current_seq: capabilities.current_seq,
+    members, local_agents: localAgents }]);
+  const batches = readStateUpdateBatches(members, prepared);
+  const pageLimit = Math.min(limit, 1000);
+  let page;
+  const blockedThisCycle = new Set();
+  for (const updates of batches) {
+    let remaining = updates.filter((update) => !blockedThisCycle.has(update.member_id));
+    for (;;) {
+      try {
+        page = await requestCall(config, "/v1/read-state/sync", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ updates: remaining, page_after: null, page_limit: pageLimit }) });
+        break;
+      } catch (error) {
+        const reportedMemberId = error?.body?.error?.details?.member_id;
+        const memberId = remaining.some((update) => update.member_id === reportedMemberId)
+          ? reportedMemberId
+          : remaining.find((update) => update.exact_wire_ids.length > 0)?.member_id;
+        if (error?.code !== "read-state-limit-exceeded" || !UUID_V7.test(reportedMemberId ?? "") ||
+            !members.some((member) => member.member_id === reportedMemberId) ||
+            !UUID_V7.test(memberId ?? "") || blockedThisCycle.has(memberId)) {
+          throw error;
+        }
+        blockedThisCycle.add(memberId);
+        await driverCall("read-block", config, [{ type: "sync_read_block", member_id: memberId,
+          reason: "read-state-limit-exceeded" }]);
+        remaining = remaining.filter((update) => update.member_id !== memberId);
+        await eventCall("read-state.blocked", { member_id: memberId,
+          reported_member_id: reportedMemberId, reason: "read-state-limit-exceeded" });
+      }
+    }
+  }
+  let pageAfter = null;
+  let pageCount = 0;
+  const seenFrontiers = new Set();
+  for (;;) {
+    if (pageAfter !== null) {
+      page = await requestCall(config, "/v1/read-state/sync", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates: [], page_after: pageAfter, page_limit: pageLimit }) });
+    }
+    validateReadStatePage(config, page, pageLimit, pageAfter);
+    for (const item of page.items) {
+      if (item.kind === "frontier" && seenFrontiers.has(item.member_id)) {
+        throw new Error("read-state stream repeated a member frontier");
+      }
+      if (item.kind === "frontier") seenFrontiers.add(item.member_id);
+    }
+    const records = [{ type: "sync_read_snapshot",
+      min_available_seq: page.min_available_seq, current_seq: page.current_seq },
+    ...page.items.map((item) => item.kind === "frontier" ?
+      { type: "sync_read_frontier", member_id: item.member_id, server_seq: item.server_seq } :
+      { type: "sync_read_exact", member_id: item.member_id, wire_id: item.wire_id })];
+    const applied = await driverCall("read-apply", config, records);
+    pageCount += 1;
+    if (pageCount > 65_536 + members.length + 1) {
+      throw new Error("read-state pagination exceeded the bounded stream size");
+    }
+    await eventCall("read-state.applied", { page: pageCount, item_count: page.items.length,
+      result: applied[0] ?? null });
+    if (!page.has_more) break;
+    pageAfter = page.next_page_after;
+  }
+  if (seenFrontiers.size !== members.length ||
+      members.some((member) => !seenFrontiers.has(member.member_id))) {
+    throw new Error("read-state stream omitted a member frontier");
+  }
+}
+
 async function cycle(config, limit) {
   const ready = await health(config.server_url);
   if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
@@ -855,6 +1120,7 @@ async function cycle(config, limit) {
     cursor = page.next_after;
     if (!page.has_more) break;
   }
+  await readStateCycle(config, limit);
 }
 
 async function reprocessCycle(config, limit) {
@@ -892,12 +1158,22 @@ async function reprocessCycle(config, limit) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = options(rest);
-  if (!["configure", "once", "run", "reprocess"].includes(command)) throw new Error(usage());
+  if (!["configure", "once", "run", "reprocess", "unblock-read"].includes(command)) {
+    throw new Error(usage());
+  }
   if (command === "configure") { await configure(args); return; }
   const team = requireName(args.team, "team");
   const limit = Number(args.limit ?? 100);
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("limit must be 1..1000");
   const config = await loadConfig(team);
+  if (command === "unblock-read") {
+    if (!UUID_V7.test(args["member-id"] ?? "")) throw new Error("member-id must be a canonical UUIDv7");
+    const result = await driver("read-unblock", config, [{
+      type: "sync_read_unblock", member_id: args["member-id"],
+    }]);
+    await event("read-state.unblocked", { member_id: args["member-id"], result: result[0] ?? null });
+    return;
+  }
   if (command === "reprocess") { await reprocessCycle(config, limit); return; }
   if (command === "once") { await cycle(config, limit); return; }
   const interval = Number(args.interval ?? 5);

@@ -110,6 +110,53 @@ export const messagesQuerySchema = z.object({
   ),
 }).strict();
 
+const readFrontierKeySchema = z
+  .object({ member_id: uuidV7Schema, kind: z.literal("frontier") })
+  .strict();
+const readExactKeySchema = z
+  .object({
+    member_id: uuidV7Schema,
+    kind: z.literal("exact"),
+    wire_id: uuidV4Schema,
+  })
+  .strict();
+
+export const readStateSyncSchema = z
+  .object({
+    updates: z
+      .array(
+        z
+          .object({
+            member_id: uuidV7Schema,
+            server_seq: sequenceSchema,
+            exact_wire_ids: z.array(uuidV4Schema).max(1000),
+          })
+          .strict()
+          .refine(
+            (value) => new Set(value.exact_wire_ids).size === value.exact_wire_ids.length,
+            { message: "exact_wire_ids must be distinct" },
+          ),
+      )
+      .max(1000),
+    page_after: z.union([readFrontierKeySchema, readExactKeySchema]).nullable(),
+    page_limit: z.number().int().min(1).max(1000),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.updates.map((update) => update.member_id)).size !== value.updates.length) {
+      context.addIssue({ code: "custom", path: ["updates"], message: "member IDs must be distinct" });
+    }
+    const exactCount = value.updates.reduce(
+      (count, update) => count + update.exact_wire_ids.length,
+      0,
+    );
+    if (exactCount > 1000) {
+      context.addIssue({ code: "custom", path: ["updates"], message: "too many exact reads" });
+    }
+  });
+
+export type ReadStateSyncInput = z.infer<typeof readStateSyncSchema>;
+
 export const agentNameSchema = z.string().refine((value) => {
   const scalars = [...value];
   return (

@@ -61,6 +61,81 @@ _cursor_of() { printf '%s\n' "$1" | sed -n 's/.*"type":"cursor","cursor":"\([^"]
   [[ "$output" == *"for carol"* ]]
 }
 
+@test "contract: read cursor is per-pair and advances only through a covered prefix" {
+  local first second tip
+  first=$(storage_send agsuite alice bob "cursor-first")
+  second=$(storage_send agsuite alice bob "cursor-second")
+  tip=$(storage_watch_tip agsuite:bob)
+
+  [ "$(storage_read_cursor_get agsuite bob)" = "0" ]
+  storage_read_cursor_consume agsuite bob "$tip" "$second" >/dev/null
+  # Reading the later row creates an exact exception but cannot cross the first
+  # unread hole. The later row is nevertheless not redelivered.
+  [ "$(storage_read_cursor_get agsuite bob)" = "0" ]
+  run storage_list_unread agsuite bob
+  [[ "$output" == *cursor-first* ]]
+  [[ "$output" != *cursor-second* ]]
+
+  storage_read_cursor_consume agsuite bob "$tip" "$first" >/dev/null
+  [ "$(storage_read_cursor_get agsuite bob)" = "$tip" ]
+  [ "$(storage_read_cursor_get agsuite carol)" = "0" ]
+  run storage_list_unread agsuite bob
+  [ -z "$output" ]
+}
+
+@test "contract: read cursor max-merges and never moves backwards" {
+  local first tip
+  first=$(storage_send agsuite alice bob "cursor-monotonic")
+  tip=$(storage_watch_tip agsuite:bob)
+  storage_read_cursor_consume agsuite bob "$tip" "$first" >/dev/null
+  storage_read_cursor_consume agsuite bob 0 >/dev/null
+  [ "$(storage_read_cursor_get agsuite bob)" = "$tip" ]
+}
+
+@test "contract: read cursor cannot advance beyond the current driver tip" {
+  storage_read_cursor_consume agsuite bob 999999 >/dev/null
+  [ "$(storage_read_cursor_get agsuite bob)" = "0" ]
+  storage_send agsuite alice bob "not-skipped-by-future-cursor" >/dev/null
+  run storage_list_unread agsuite bob
+  [[ "$output" == *not-skipped-by-future-cursor* ]]
+}
+
+@test "contract: watch_after excludes an exact read beyond an earlier gap" {
+  local first second tip
+  first=$(storage_send agsuite alice bob "watch-gap")
+  second=$(storage_send agsuite alice bob "watch-exact")
+  tip=$(storage_watch_tip agsuite:bob)
+  storage_read_cursor_consume agsuite bob "$tip" "$second" >/dev/null
+
+  run storage_watch_after 0 agsuite:bob
+  [[ "$output" == *"$first"* ]]
+  [[ "$output" != *"$second"* ]]
+  [[ "$output" == *watch-gap* ]]
+  [[ "$output" != *watch-exact* ]]
+}
+
+@test "contract: cursor migration consumes existing backlog but not later messages" {
+  storage_send agsuite alice bob "before-cursor-migration" >/dev/null
+
+  if [ "${AGMSG_STORAGE_DRIVER:-sqlite}" = jsonl ]; then
+    local store_dir; store_dir="$(dirname "$(agmsg_db_path)")"
+    rm -f "$store_dir/.read-cursor-v1" "$store_dir/read-cursors.tsv"
+  else
+    agmsg_sqlite "$(agmsg_db_path)" "
+      DELETE FROM storage_metadata WHERE key='read_cursor_v1';
+      DELETE FROM read_cursors;" >/dev/null
+  fi
+
+  storage_init >/dev/null
+  run storage_list_unread agsuite bob
+  [[ "$output" != *before-cursor-migration* ]]
+
+  storage_send agsuite alice bob "after-cursor-migration" >/dev/null
+  run storage_list_unread agsuite bob
+  [[ "$output" == *after-cursor-migration* ]]
+  [[ "$output" != *before-cursor-migration* ]]
+}
+
 @test "contract: watch_tip + watch_after deliver only post-tip messages, with a cursor" {
   storage_send agsuite alice bob "before"
   local tip; tip=$(storage_watch_tip agsuite:bob)

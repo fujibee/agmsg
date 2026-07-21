@@ -361,6 +361,47 @@ EOF
   [[ "$output" =~ "hello" ]]
 }
 
+@test "rename-team: atomically migrates cursor and sync sidecars" {
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=sqlite
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init >/dev/null
+  storage_read_cursor_consume oldteam alice 0 >/dev/null
+  _sqlite_sync_schema
+  local generation db store_dir
+  generation=$(_sqlite_sync_generation)
+  db=$(agmsg_db_path)
+  store_dir=$(agmsg_storage_dir)
+  agmsg_sqlite "$db" "INSERT INTO sync_bindings
+    (local_team,server_instance_id,remote_team_id,protocol_version,driver_generation)
+    VALUES('oldteam','018f3f7e-0000-7000-8000-000000000000',
+      '018f3f7e-0000-7000-8000-000000000001',1,'$generation');"
+  mkdir -p "$store_dir/remote-sync"
+  printf '{"local_team":"oldteam","binding":"fixture"}\n' \
+    > "$store_dir/remote-sync/oldteam.json"
+  chmod 600 "$store_dir/remote-sync/oldteam.json"
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$(agmsg_sqlite "$db" "SELECT team FROM read_cursors;" | tr -d '\r')" = newteam ]
+  [ "$(agmsg_sqlite "$db" "SELECT local_team FROM sync_bindings;" | tr -d '\r')" = newteam ]
+  [ ! -e "$store_dir/remote-sync/oldteam.json" ]
+  [ "$(jq -r '.local_team' "$store_dir/remote-sync/newteam.json")" = newteam ]
+}
+
+@test "rename-team: JSONL keeps the cursor with the renamed event stream" {
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj-a
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  local id tip
+  id=$(storage_send oldteam bob alice hello)
+  tip=$(storage_watch_tip oldteam:alice)
+  storage_read_cursor_consume oldteam alice "$tip" "$id" >/dev/null
+  bash "$SCRIPTS/rename-team.sh" oldteam newteam
+  [ "$(storage_read_cursor_get newteam alice)" = "$tip" ]
+  [ "$(storage_history newteam | jq -r '.team')" = newteam ]
+}
+
 @test "rename-team: fails when old team is missing" {
   run bash "$SCRIPTS/rename-team.sh" nope newname
   [ "$status" -ne 0 ]
@@ -416,6 +457,44 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" =~ "hello" ]]
   [[ "$output" =~ "claude-orchestrator" ]]
+}
+
+@test "rename: atomically migrates cursor and remote member association" {
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-a
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=sqlite
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init >/dev/null
+  storage_read_cursor_consume myteam claude 0 >/dev/null
+  _sqlite_sync_schema
+  local generation db
+  generation=$(_sqlite_sync_generation)
+  db=$(agmsg_db_path)
+  agmsg_sqlite "$db" "INSERT INTO sync_read_members
+    (local_team,server_instance_id,remote_team_id,protocol_version,
+     driver_generation,member_id,agent,remote_agent)
+    VALUES('myteam','018f3f7e-0000-7000-8000-000000000000',
+      '018f3f7e-0000-7000-8000-000000000001',1,'$generation',
+      '018f3f7e-0000-7000-8000-000000000010','claude','claude');"
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$(agmsg_sqlite "$db" "SELECT agent FROM read_cursors;" | tr -d '\r')" = claude-orchestrator ]
+  [ "$(agmsg_sqlite "$db" "SELECT agent FROM sync_read_members;" | tr -d '\r')" = claude-orchestrator ]
+  [ "$(agmsg_sqlite "$db" "SELECT name_mismatch FROM sync_read_members;" | tr -d '\r')" = 1 ]
+}
+
+@test "rename: JSONL keeps exact reads and cursor with the new agent name" {
+  export SKILL_DIR="$TEST_SKILL_DIR" AGMSG_STORAGE_DRIVER=jsonl
+  bash "$SCRIPTS/join.sh" myteam claude claude-code /tmp/proj-a
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  local id tip
+  id=$(storage_send myteam bob claude hello)
+  tip=$(storage_watch_tip myteam:claude)
+  storage_read_cursor_consume myteam claude "$tip" "$id" >/dev/null
+  bash "$SCRIPTS/rename.sh" myteam claude claude-orchestrator
+  [ "$(storage_read_cursor_get myteam claude-orchestrator)" = "$tip" ]
+  [ "$(storage_history myteam | jq -r '.to')" = claude-orchestrator ]
+  [ "$(storage_list_unread myteam claude-orchestrator | jq -s 'length')" -eq 0 ]
 }
 
 @test "rename: fails when old agent is missing" {

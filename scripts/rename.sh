@@ -88,12 +88,34 @@ if [ -f "$DB" ]; then
   TEAM_LIT=$(agmsg_sqlesc "$TEAM")
   OLD_LIT=$(agmsg_sqlesc "$OLD_NAME")
   NEW_LIT=$(agmsg_sqlesc "$NEW_NAME")
-  agmsg_sqlite "$DB" "UPDATE messages SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';"
-  agmsg_sqlite "$DB" "UPDATE messages SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';"
-  # events may not exist yet on an install that has not sent since the storage
-  # flip — best-effort, never abort the rename over a missing optional table.
-  agmsg_sqlite "$DB" "UPDATE events SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';" 2>/dev/null || true
-  agmsg_sqlite "$DB" "UPDATE events SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';" 2>/dev/null || true
+  RENAME_SQL=""
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events';" | tr -d '\r')" = 1 ]; then
+    RENAME_SQL="$RENAME_SQL
+      UPDATE events SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';
+      UPDATE events SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';
+      UPDATE events SET agent='$NEW_LIT' WHERE type='message_read' AND team='$TEAM_LIT' AND agent='$OLD_LIT';"
+  fi
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='read_cursors';" | tr -d '\r')" = 1 ]; then
+    RENAME_SQL="$RENAME_SQL
+      UPDATE read_cursors SET agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND agent='$OLD_LIT';"
+  fi
+  if [ "$(agmsg_sqlite "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_read_members';" | tr -d '\r')" = 1 ]; then
+    RENAME_SQL="$RENAME_SQL
+      UPDATE sync_read_members SET agent='$NEW_LIT',
+        name_mismatch=CASE WHEN remote_agent='$NEW_LIT' THEN 0 ELSE 1 END
+        WHERE local_team='$TEAM_LIT' AND agent='$OLD_LIT';
+      UPDATE sync_read_aliases SET agent='$NEW_LIT' WHERE local_team='$TEAM_LIT' AND agent='$OLD_LIT';"
+  fi
+  agmsg_sqlite "$DB" "BEGIN IMMEDIATE;
+    UPDATE messages SET from_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND from_agent='$OLD_LIT';
+    UPDATE messages SET to_agent='$NEW_LIT' WHERE team='$TEAM_LIT' AND to_agent='$OLD_LIT';
+    $RENAME_SQL
+    COMMIT;"
+fi
+
+if [ "$(agmsg_storage_driver)" = jsonl ]; then
+  agmsg_storage_load
+  storage_rename_agent "$TEAM" "$OLD_NAME" "$NEW_NAME" >/dev/null
 fi
 
 agmsg_lock_release

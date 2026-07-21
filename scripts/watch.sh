@@ -17,12 +17,9 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 #     of those pairs.
 #   - When [active_name] is given, narrows the subscription to only pairs
 #     whose agent name matches — useful for `actas` exclusive role mode.
-#   - A fresh session sets the high-water mark to the current MAX(id) at
-#     startup, so the stream begins with whatever arrives after launch — no
-#     replay of historical messages. The mark is persisted per session_id, so
-#     a restart of this session's watcher (actas/drop/clear/self-restart)
-#     resumes from the last delivered id and does not drop messages that
-#     arrived during the restart gap. See #107.
+#   - Inbox and monitor share the driver's persistent per-(team,agent) read
+#     cursor. A restart resumes from consumed state, and a fresh watcher delivers
+#     existing unread messages instead of jumping over them. See ADR 0008.
 #   - Polls the SQLite DB at AGMSG_WATCH_INTERVAL seconds (default 5, also
 #     overridable via the delivery.monitor.poll_interval config key).
 #   - Emits one line per new message:
@@ -84,7 +81,7 @@ fi
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
 # Disambiguate parallel --continue/--resume sessions that share a session_id
-# (#93). All per-process state below — pidfile, watermark, actas owner, ready
+# (#93). All per-process state below — pidfile, actas owner, ready
 # sentinel — keys on this per-process instance id rather than the bare
 # session_id, so two processes that share a session_id no longer collide on the
 # same pidfile and kill each other (#66 was a within-session dedup; here it must
@@ -231,48 +228,10 @@ if [ -z "$PAIRS" ]; then
   exit 0
 fi
 
-# SUB_PAIRS holds the subscription as <team>:<agent> tokens — the argument form
-# the storage facade's watch ops take (§2.2). Live delivery goes entirely through
-# storage_watch_tip / storage_watch_after now, so no SQL WHERE clause is built here.
-SUB_PAIRS=()
-while IFS=$'\t' read -r team agent; do
-  [ -z "$team" ] && continue
-  SUB_PAIRS+=("$team:$agent")
-done <<< "$PAIRS"
-
-# Determine the starting watermark.
-#
-# The watermark is persisted per session_id so that a *restart* of this
-# session's watcher resumes from the last delivered id instead of jumping to
-# the current MAX(id). Monitor restarts are routine — `actas`/`drop` do
-# TaskStop + relaunch, `/clear`/resume re-fires the SessionStart directive, and
-# a killed watcher self-restarts — and the old "start from MAX(id)" behavior
-# silently dropped every message that landed in the gap between the previous
-# watcher stopping and the new one taking its mark. Resuming from the persisted
-# watermark closes that gap; staying strictly after the last delivered id
-# avoids re-streaming anything already seen. See #107.
-#
-# A *fresh* session (no persisted watermark) still starts from the current
-# MAX(id) — live push, no replay of history (the no-arg inbox check covers
-# historical unread, not this stream).
-# The watermark is now an OPAQUE delivery cursor (§2.2), not an integer id — the
-# active storage driver issues and interprets it; this script only persists the
-# latest token and passes it back unchanged.
-WATERMARK_FILE="$RUN_DIR/watch.$SESSION_ID.watermark"
-persist_watermark() { printf '%s\n' "$LAST" > "$WATERMARK_FILE" 2>/dev/null || true; }
-
-LAST=""
-if [ -f "$WATERMARK_FILE" ]; then
-  # Opaque token: a single whitespace-free line. No integer validation — just
-  # strip stray surrounding whitespace.
-  LAST="$(tr -d '[:space:]' < "$WATERMARK_FILE" 2>/dev/null || true)"
-fi
-if [ -z "$LAST" ]; then
-  # A fresh watcher starts from the current tip (live push, no history replay).
-  LAST="$(storage_watch_tip "${SUB_PAIRS[@]}" 2>/dev/null || true)"
-  case "$LAST" in '') LAST=0 ;; esac
-  persist_watermark
-fi
+# The read frontier lives in the storage driver, once per (team,agent). Core
+# never compares its opaque local-position component. Each pair is scanned and
+# consumed independently so a broad watcher cannot advance one role merely by
+# delivering another role's traffic.
 
 # DB-open healthcheck (#197). The main loop guards every query with
 # `2>/dev/null || true`, so when sqlite3 cannot open the store the watcher keeps
@@ -289,7 +248,7 @@ if [ -f "$DB" ] && ! agmsg_sqlite "$DB" "SELECT 1;" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Signal readiness. Once the subscription is resolved and the watermark is set,
+# Signal readiness. Once the subscription is resolved and the watcher is live,
 # this watcher will deliver anything that arrives from here on, so it is safe
 # for a leader to start sending. Only exclusive (actas) watchers signal — a
 # spawned agent always starts its watcher in actas mode — and the sentinel is
@@ -320,14 +279,13 @@ while true; do
   if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
     exit 0
   fi
-  if [ -f "$DB" ]; then
-    # Pull messages after the cursor via the storage facade (§2.2). The output is
-    # JSONL: zero or more message_sent records in delivery order, then a trailing
-    # {"type":"cursor","cursor":"<token>"} as the LAST line — the position to
-    # resume from. Parse every record in one pass with sqlite's JSON funcs (the
-    # repo idiom; no jq). Newlines/tabs in the body are escaped to keep one line.
-    OUT="$(storage_watch_after "$LAST" "${SUB_PAIRS[@]}" 2>/dev/null || true)"
-    if [ -n "$OUT" ]; then
+  if storage_store_exists; then
+    while IFS=$'\t' read -r pair_team pair_agent; do
+      [ -z "$pair_team" ] && continue
+      READ_CURSOR="$(storage_read_cursor_get "$pair_team" "$pair_agent" 2>/dev/null || true)"
+      [ -n "$READ_CURSOR" ] || READ_CURSOR=0
+      OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null || true)"
+      if [ -n "$OUT" ]; then
       _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
       ROWS="$(agmsg_sqlite ':memory:' "
         SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||
@@ -341,13 +299,13 @@ while true; do
         FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
       " 2>/dev/null || true)"
 
+      FINAL_CURSOR=""
+      DELIVERED_IDS=()
+      DESPAWN_TARGET=""
       while IFS=$'\x1f' read -r kind id ts team from to body cursor; do
         [ -z "$kind" ] && continue
         if [ "$kind" = "cursor" ]; then
-          # Trailing cursor = the resume point. Advance + persist only after the
-          # batch's messages were delivered above; a crash mid-batch re-delivers
-          # from the old cursor (at-least-once, never skip — §2.2).
-          LAST="$cursor"; persist_watermark
+          FINAL_CURSOR="$cursor"
           continue
         fi
         [ "$kind" = "message_sent" ] || continue
@@ -358,6 +316,7 @@ while true; do
         # which also ends the agent CLI sharing it. Deterministic teardown, no
         # dependence on the agent LLM noticing the message. See #109.
         if [ "$body" = "ctrl:despawn" ]; then
+          DELIVERED_IDS+=("$id")
           # Only an EXCLUSIVE watcher dedicated to exactly this role tears
           # itself down. A broad-subscription watcher (e.g. a leader whose
           # default watcher subscribes to every project role, including the
@@ -365,28 +324,35 @@ while true; do
           # own pane, so killing it would take down the leader's session. The
           # spawned member's watcher runs in actas mode (ACTIVE_NAME=$to) in its
           # own pane; that's the one meant to respond. A broad watcher `continue`s
-          # and reaches the trailing cursor at batch end, so its watermark advances
-          # past this control message. The target watcher below exits BEFORE the
-          # cursor record, so it does not persist a cursor — harmless, since it
-          # drops the role and won't resume as it; a same-session resume would
-          # re-read the despawn (at-least-once) and re-tear-down idempotently. See #109.
+          # and consumes the control row without acting. An exclusive target
+          # consumes the complete scanned batch before teardown.
           if [ -z "$ACTIVE_NAME" ] || [ "$to" != "$ACTIVE_NAME" ]; then
             continue
           fi
-          "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
-          if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
-            tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
-          else
-            echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
-          fi
-          exit 0
+          DESPAWN_TARGET="$to"
+          continue
         fi
         if ! printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"; then
           cleanup
           exit 0
         fi
+        DELIVERED_IDS+=("$id")
       done <<< "$ROWS"
-    fi
+      if [ -n "$FINAL_CURSOR" ]; then
+        storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" \
+          "${DELIVERED_IDS[@]}" >/dev/null 2>&1 || true
+      fi
+      if [ -n "$DESPAWN_TARGET" ]; then
+        "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$DESPAWN_TARGET" "$SESSION_ID" >/dev/null 2>&1 || true
+        if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+          tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
+        else
+          echo "agmsg watch: despawned '$DESPAWN_TARGET' (role dropped); close this window manually" >&2
+        fi
+        exit 0
+      fi
+      fi
+    done <<< "$PAIRS"
   fi
 
   # Run sleep in the background and `wait` for it so signal traps fire
