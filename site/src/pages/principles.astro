@@ -66,14 +66,14 @@ const canonicalUrl = `${siteUrl}/principles`;
     <h1 class="mt-6 text-3xl sm:text-4xl font-bold tracking-tight">Principles</h1>
     <p class="mt-4 text-muted leading-relaxed">{intro.trim()}</p>
 
-    <ol class="mt-10 space-y-8 border-t border-border pt-8">
+    <div class="mt-10 space-y-8 border-t border-border pt-8">
       {sections.map((s) => (
-        <li>
+        <section>
           <h2 class="text-lg font-semibold text-fg">{s.heading}</h2>
           <p class="mt-2 text-muted leading-relaxed">{s.body}</p>
-        </li>
+        </section>
       ))}
-    </ol>
+    </div>
 
     {closingText && (
       <p class="mt-10 border-t border-border pt-8 text-sm italic text-muted">{closingText}</p>
