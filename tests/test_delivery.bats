@@ -1203,6 +1203,66 @@ JSON
 
 # --- Windows support: codex hooks emit commandWindows; other types do not ---
 
+@test "delivery set monitor (codex): Session hooks use native queue commandWindows" {
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.codex/hooks.json"
+  [ -f "$hook_file" ]
+  local start end
+  start=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.SessionStart[0].hooks[0].commandWindows');")
+  end=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.SessionEnd[0].hooks[0].commandWindows');")
+  [[ "$start" == *"hook-enqueue.ps1"* ]]
+  [[ "$start" == *"session-start"* ]]
+  [[ "$start" == *"codex"* ]]
+  [[ "$start" == *"$TEST_PROJECT"* ]]
+  [[ "$end" == *"hook-enqueue.ps1"* ]]
+  [[ "$end" == *"session-end"* ]]
+  [[ "$start" != *"bash.exe"* ]]
+  [[ "$start" != *"-lc"* ]]
+  [[ "$end" != *"bash.exe"* ]]
+  [[ "$end" != *"-lc"* ]]
+}
+
+@test "delivery set monitor: type without hook_windows_transport keeps Git Bash commandWindows" {
+  local type_dir="$TYPES/legacy-win"
+  mkdir -p "$type_dir"
+  cat > "$type_dir/type.conf" <<'EOF'
+name=legacy-win
+hooks_file=.legacy/hooks.json
+hook_windows_wrap=yes
+delivery_modes=monitor off
+EOF
+
+  run bash "$SCRIPTS/delivery.sh" set monitor legacy-win "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hook_file="$TEST_PROJECT/.legacy/hooks.json"
+  [ -f "$hook_file" ]
+  local cw
+  cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.SessionStart[0].hooks[0].commandWindows');")
+  [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
+  [[ "$cw" == *"GIT_BASH"* ]]
+  [[ "$cw" == *"-lc"* ]]
+  [[ "$cw" == *"session-start.sh"* ]]
+  [[ "$cw" != *"hook-enqueue.ps1"* ]]
+}
+
+@test "delivery set monitor/off (codex): hook project list deduplicates and removes only target" {
+  local other_project="$TEST_SKILL_DIR/other-project"
+  local list="$TEST_SKILL_DIR/run/hook-projects.list"
+  mkdir -p "$other_project"
+
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  [ "$(grep -Fxc -- "$TEST_PROJECT" "$list")" = "1" ]
+
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$other_project" >/dev/null
+  [ "$(grep -Fxc -- "$other_project" "$list")" = "1" ]
+
+  bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT" >/dev/null
+  ! grep -Fxq -- "$TEST_PROJECT" "$list"
+  [ "$(grep -Fxc -- "$other_project" "$list")" = "1" ]
+}
+
 @test "delivery set turn (codex): Stop entry carries commandWindows wrapping Git Bash" {
   skip_on_windows "commandWindows not written on native Windows (#182)"
   run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"

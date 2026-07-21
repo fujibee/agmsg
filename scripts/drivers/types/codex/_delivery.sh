@@ -2,14 +2,51 @@
 # codex delivery plug.
 #
 # codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
-# enable/disable side effects (print the monitor shim setup on enable, stop the
-# bridge on disable) and replaces the runtime status summary with Codex bridge
-# liveness. Sourced into delivery.sh's context, so SKILL_DIR, SCRIPT_DIR,
+# enable/disable side effects (maintain the Windows hook project list, print the
+# monitor shim setup on enable, stop the bridge on disable) and replaces the
+# runtime status summary with Codex bridge liveness. Sourced into delivery.sh's
+# context, so SKILL_DIR, SCRIPT_DIR,
 # RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL and stop_codex_bridge are
 # in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
+agmsg_codex_hook_project_add() {
+  local project="$1"
+  local list="$RUN_DIR/hook-projects.list"
+  local tmp line found=0
+  mkdir -p "$RUN_DIR"
+  tmp=$(mktemp "$RUN_DIR/hook-projects.XXXXXX") || return 1
+  if [ -f "$list" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [ "$line" = "$project" ]; then
+        if [ "$found" -eq 0 ]; then
+          printf '%s\n' "$line" >> "$tmp"
+          found=1
+        fi
+      else
+        printf '%s\n' "$line" >> "$tmp"
+      fi
+    done < "$list"
+  fi
+  [ "$found" -eq 1 ] || printf '%s\n' "$project" >> "$tmp"
+  mv "$tmp" "$list"
+}
+
+agmsg_codex_hook_project_remove() {
+  local project="$1"
+  local list="$RUN_DIR/hook-projects.list"
+  local tmp line
+  [ -f "$list" ] || return 0
+  tmp=$(mktemp "$RUN_DIR/hook-projects.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$project" ] || printf '%s\n' "$line" >> "$tmp"
+  done < "$list"
+  mv "$tmp" "$list"
+}
+
 agmsg_delivery_on_enable() {
+  local project="$3"
+  agmsg_codex_hook_project_add "$project"
   echo "Codex monitor beta is enabled."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
@@ -37,6 +74,7 @@ agmsg_delivery_on_enable() {
 
 agmsg_delivery_on_disable() {
   local project="$2"
+  agmsg_codex_hook_project_remove "$project"
   local stopped
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then

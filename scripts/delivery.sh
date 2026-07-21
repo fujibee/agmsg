@@ -92,12 +92,17 @@ agmsg_delivery_apply_default() {
   hooks_file=$(resolve_hooks_file "$type" "$project")
   mkdir -p "$(dirname "$hooks_file")"
 
-  # Whether hook entries also need a Windows-native "commandWindows" variant is
-  # a per-type manifest fact (hook_windows_wrap=yes). Resolve it here — the layer
-  # that knows agent types — and pass a plain flag down to add_event_entry_file,
-  # which stays type-agnostic (see hooks-json.sh header).
+  # Windows hook handling is manifest data: hook_windows_wrap=yes enables the
+  # legacy Git Bash wrapper, while hook_windows_transport=queue routes only
+  # SessionStart/SessionEnd through the native enqueue command. Resolve that
+  # policy here, where agent types are known, and pass plain values to the JSON
+  # helper.
   local ww
   ww=$(agmsg_type_get "$type" hook_windows_wrap 2>/dev/null || true)
+  local windows_transport session_windows
+  windows_transport=$(agmsg_type_get "$type" hook_windows_transport 2>/dev/null || true)
+  session_windows="$ww"
+  [ "$windows_transport" = "queue" ] && session_windows="queue"
 
   # Work on a temp copy so a partially-modified file never replaces the
   # original until the whole chain succeeds.
@@ -119,8 +124,8 @@ agmsg_delivery_apply_default() {
     monitor)
       local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
       local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
-      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
-      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
+      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$session_windows" "$type" "$project"
+      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$session_windows" "$type" "$project"
       ;;
     turn)
       local cmd="'$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'"
@@ -130,8 +135,8 @@ agmsg_delivery_apply_default() {
       local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
       local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
       local st="'$SKILL_DIR/scripts/check-inbox.sh'   '$type' '$project'"
-      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
-      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
+      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$session_windows" "$type" "$project"
+      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$session_windows" "$type" "$project"
       add_event_entry_file "$tmp_state" "Stop"         "$st" "$ww"
       ;;
     off)
