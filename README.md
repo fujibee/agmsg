@@ -591,6 +591,10 @@ See [Design & Architecture](docs/design.md) for developer documentation — iden
 
 If agmsg saves you copy-paste round-trips, a GitHub star helps other people find it.
 
+## Principles
+
+The commitments agmsg holds itself to as it grows — local-first as a design rule, an open sync protocol, no lock-in on your data, structural encryption. See [PRINCIPLES.md](PRINCIPLES.md).
+
 ## License
 
 MIT
