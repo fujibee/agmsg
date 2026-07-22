@@ -135,18 +135,25 @@ _remote_http_post_bearer() {
 }
 
 # _remote_revoke <endpoint> <credential_id> <credential> -> 0 revoked, 1 not
-# 404 counts as success (D2): a retry after a crash right after a prior
-# successful revoke would otherwise see "unknown credential_id" and be
-# unable to ever make progress — 404 for a credential_id we ourselves
-# issued and are trying to revoke is just as strong evidence that it's
-# not active anymore as a 200 is.
+# STRICTLY 200 only (E2 — reverted from an earlier "200 or 404 both
+# count" version): a bare HTTP 404 status is not trustworthy proof the
+# credential is actually gone. It's equally consistent with a wrong
+# path/protocol-version mismatch, a proxy returning 404, or a server that
+# doesn't implement this route at all — none of which mean the credential
+# is inactive. Treating any of those as "revoked" would let the CLI
+# report success while the credential stays fully active server-side,
+# exactly the failure this check exists to prevent. Absent a pinned
+# server contract for an authenticated "credential not found" response
+# body distinct from a generic 404, the safe default is fail-closed on
+# anything but 200 — a stuck retry (requiring a console-side revoke) is
+# the correct failure mode here, not a false "confirmed revoked."
 _remote_revoke() {
   local endpoint="$1" credential_id="$2" credential="$3" http_code
   http_code="$(_remote_http_post_bearer "$endpoint/v1/credentials/$credential_id/revoke" "$credential")"
-  [ "$http_code" = "200" ] || [ "$http_code" = "404" ]
+  [ "$http_code" = "200" ]
 }
 
-# _remote_local_disconnect <team> <cfg>
+# _remote_local_disconnect <team> <cfg> [expected_credential_id]
 # The local-state half of disconnect (credential file removal + marking
 # the binding disconnected) — factored out so the --force rebind path can
 # apply it immediately after a successful revoke, before ever attempting
@@ -154,11 +161,33 @@ _remote_revoke() {
 # revoked" and "new connection fully committed" leaves local state
 # claiming to still be connected to a credential that the server has
 # already invalidated, with no way to tell from local state alone.
+#
+# When <expected_credential_id> is given, the credential_id check AND the
+# cred-file removal AND the disconnected_at write all happen under ONE
+# lock acquisition, and only if the binding's CURRENT credential_id still
+# equals it (E1): the earlier version removed the cred file before ever
+# taking the lock and unmarked "whatever binding is currently there"
+# unconditionally, with no check that it was still the same one this
+# caller revoked — a second concurrent operation's legitimately newer
+# binding (for a different credential this call never touched or
+# revoked) could get silently clobbered and its own credential file
+# deleted, orphaning it exactly like the bug this was meant to fix.
+# Returns 0 on success, 1 on lock failure, 2 if <expected_credential_id>
+# no longer matches (caller must treat this as "someone else already
+# changed this team's binding — abort, don't proceed").
 _remote_local_disconnect() {
-  local team="$1" cfg="$2" cred_file escaped updated disconnected_at
+  local team="$1" cfg="$2" expected_credential_id="${3:-}" \
+    cred_file escaped updated disconnected_at current_credential_id
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
+  if [ -n "$expected_credential_id" ]; then
+    current_credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
+    if [ "$current_credential_id" != "$expected_credential_id" ]; then
+      agmsg_lock_release
+      return 2
+    fi
+  fi
   cred_file="$(_remote_cred_file "$team")"
   rm -f "$cred_file"
-  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
   disconnected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   escaped=$(sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
@@ -261,13 +290,19 @@ _remote_commit() {
   mkdir -p "$CRED_ROOT"
   chmod 700 "$CRED_ROOT" 2>/dev/null || true
   cred_file="$(_remote_cred_file "$team")"
-  # Escape backslash BEFORE quote (order matters: escaping quote first
-  # would double-escape any backslash the first substitution just
-  # inserted) — the previous version only escaped quotes, so a credential
-  # containing a literal backslash would have produced invalid JSON (D3).
-  cred_json="$(printf '{"credential":"%s","credential_id":"%s"}' \
-    "$(printf '%s' "$credential" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
-    "$(printf '%s' "$credential_id" | sed 's/\\/\\\\/g; s/"/\\"/g')")"
+  # A real JSON serializer (python3 json.dumps), not hand-rolled sed
+  # escaping (E3): sed only ever escaped backslash/quote, so a credential
+  # containing any OTHER JSON control character (tab, CR, etc. — an
+  # opaque bearer string is never validated against a fixed alphabet, per
+  # this ADR's own "opaque to core" principle, so nothing rules these
+  # out) would have produced invalid JSON — permanently unreadable on the
+  # next load, discovered only when the credential was needed. The value
+  # is piped in via stdin, never passed as a python3 argv element, so
+  # this doesn't reopen R1's credential-in-argv leak.
+  local credential_json_str credential_id_json_str
+  credential_json_str="$(printf '%s' "$credential" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+  credential_id_json_str="$(printf '%s' "$credential_id" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+  cred_json="{\"credential\":${credential_json_str},\"credential_id\":${credential_id_json_str}}"
   # Atomic write (temp file in the same dir, 0600 before any content is
   # written, best-effort fsync, then rename) — never truncate the real
   # path in place (D3): a crash mid-write, or a re-commit racing another
@@ -432,15 +467,25 @@ cmd_connect() {
           exit 1
         fi
         unset old_credential
-        # D2: durably reflect the revoke locally right now, before the new
-        # exchange even starts — otherwise a crash between here and the
-        # new connection's commit leaves local state claiming to still be
-        # connected to a credential the server has already invalidated,
-        # with no local signal that anything is wrong. This also makes a
-        # retry idempotent: a second attempt sees the team as already
-        # (locally) disconnected and skips straight to a fresh exchange
-        # instead of trying to revoke an already-revoked credential again.
-        _remote_local_disconnect "$team" "$(_remote_team_config "$team")" || exit 1
+        # D2/E1: durably reflect the revoke locally right now, before the
+        # new exchange even starts — otherwise a crash between here and
+        # the new connection's commit leaves local state claiming to
+        # still be connected to a credential the server has already
+        # invalidated, with no local signal that anything is wrong. Pass
+        # the credential_id we just confirmed revoked as the expected
+        # value so this only touches the SAME binding — a concurrent
+        # operation's already-newer binding for a different credential
+        # must not be clobbered (E1: an earlier version had no such CAS
+        # check here at all, and could disconnect/delete a legitimately
+        # different concurrent connection's state).
+        _remote_local_disconnect "$team" "$(_remote_team_config "$team")" "$existing_credential_id"
+        local local_disconnect_status=$?
+        if [ "$local_disconnect_status" -eq 2 ]; then
+          echo "agmsg: team '$team's binding changed to something else during this operation — aborting rather than risk clobbering a concurrent connection." >&2
+          exit 1
+        elif [ "$local_disconnect_status" -ne 0 ]; then
+          exit 1
+        fi
         # D1: remember exactly which credential we confirmed revoked, so
         # the post-exchange CAS check (below) only proceeds if nothing
         # else has touched this team's binding since — --force authorizes
@@ -743,7 +788,24 @@ cmd_disconnect() {
     unset credential
   fi
 
-  _remote_local_disconnect "$team" "$cfg" || exit 1
+  # Pass the credential_id we just (attempted to) revoke as the expected
+  # value (E1) — if the binding changed to something else in the window
+  # since we read it above (a concurrent reconnect), disconnecting THAT
+  # would silently tear down a connection this call never touched. Only
+  # pass it when it's a real value — "null"/empty means this binding
+  # never had one, so there's nothing meaningful to CAS against.
+  local expected_credential_id_for_disconnect=""
+  if [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; then
+    expected_credential_id_for_disconnect="$credential_id"
+  fi
+  _remote_local_disconnect "$team" "$cfg" "$expected_credential_id_for_disconnect"
+  local local_disconnect_status=$?
+  if [ "$local_disconnect_status" -eq 2 ]; then
+    echo "agmsg: team '$team's binding changed to something else during disconnect — aborting rather than risk clobbering a concurrent connection. Retry if you still want to disconnect the CURRENT binding." >&2
+    exit 1
+  elif [ "$local_disconnect_status" -ne 0 ]; then
+    exit 1
+  fi
 
   if [ "$revoke_ok" -eq 1 ]; then
     echo "Revoking credential with server... ok."

@@ -155,8 +155,15 @@ def main():
         str(current_seq if current_seq is not None else -1),
     ]
     for f in fields:
-        if "\n" in f:
-            fail("a response field unexpectedly contains a newline")
+        # Reject every ASCII control character (0x00-0x1F, 0x7F), not
+        # just newline (E3) — a raw tab/CR/etc. reaching a downstream
+        # hand-built JSON string (e.g. the credential file) that only
+        # escapes backslash/quote produces invalid JSON, discovered only
+        # when that file is next read. Rejecting here means a
+        # conforming server payload never contains one in the first
+        # place, on top of any downstream escaping fix.
+        if re.search(r"[\x00-\x1f\x7f]", f):
+            fail("a response field unexpectedly contains a control character")
 
     sys.stdout.write("\n".join(fields) + "\n")
 

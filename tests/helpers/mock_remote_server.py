@@ -124,6 +124,23 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if token == "control-char-credential-token":
+                # A tab in the credential is what previously survived the
+                # newline-only check and then broke the hand-rolled
+                # sed-based JSON escaping in _remote_commit (E3) — reject
+                # it at the validator instead of relying only on the
+                # downstream write being fixed.
+                self._send_json(200, {
+                    "credential": "session-credential\twith-a-tab",
+                    "credential_id": "cred-control-char",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
+                    "remote_team_name": "myteam",
+                    "protocol_version": 1,
+                    "capabilities": {"write_allowed_ciphers": ["none"]},
+                })
+                return
+
             ciphers = ["age-v1"] if token == "good-token-enc" else ["none"]
             credential_id = "cred-" + re.sub(r"[^A-Za-z0-9_-]", "-", token)
             ISSUED_CREDENTIAL_IDS.add(credential_id)

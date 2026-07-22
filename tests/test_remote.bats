@@ -109,6 +109,16 @@ teardown() {
   [[ "$output" == *"unrecognized"* ]]
 }
 
+@test "connect: rejects a credential containing a raw control character (E3)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" control-char-credential-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid exchange response"* ]]
+  [[ "$output" == *"control character"* ]]
+  run bash "$SCRIPTS/remote.sh" status myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"never been connected"* ]]
+}
+
 # --- connect -------------------------------------------------------------
 
 @test "connect: happy path, no encryption required" {
