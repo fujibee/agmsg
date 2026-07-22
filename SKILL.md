@@ -157,6 +157,83 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
+### Remote sync & end-to-end encryption (ADR 0007)
+
+Connects a local team to a cloud/self-hosted sync endpoint and manages the
+team's `age-v1` encryption key. Additive to everything above — a team works
+purely locally without ever touching this. Login/token acquisition is out
+of this script's scope (some provider tooling, or a self-hosted server's
+own admin command, obtains the token); `connect` only ever receives one.
+
+```bash
+# Connect a team to a sync endpoint. <token> is a short-lived, single-use
+# exchange code (never the long-lived credential itself). Prefer
+# --token-stdin over the positional form — a bare positional token is
+# visible in shell history and `ps`; --token-stdin reads it from stdin
+# instead and is the required form for any programmatic caller.
+#   --force    rebind an already-connected team to a new token
+~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> <token> [<team>] [--force]
+~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
+
+# If the team's capability response requires encryption and no local key
+# exists yet, connect pauses to generate or import one before finishing —
+# see the `key` commands below.
+
+# Show connection state. With no <team>, lists every locally-known
+# connected team (and whether each still needs a local encryption key).
+~/.agents/skills/agmsg/scripts/remote.sh status [<team>]
+
+# Disconnect a team: revokes the credential server-side (best-effort —
+# local state is always cleared even if the server is unreachable), then
+# clears the local sync driver override. Sends/reads keep working locally
+# afterward; this does not touch the team's encryption key.
+~/.agents/skills/agmsg/scripts/remote.sh disconnect <team>
+
+# Read-only preflight check (currently: is `age` installed?). No token, no
+# state change — safe to run any time, and the thing to point a user at
+# when troubleshooting a missing dependency.
+~/.agents/skills/agmsg/scripts/remote.sh doctor [<team>]
+
+# Generate the first age-v1 key for a team (single-writer onboarding only —
+# NOT the multi-writer cutover protocol). Prints a mandatory backup notice:
+# there is no server-side recovery, and losing the device loses the key.
+~/.agents/skills/agmsg/scripts/key.sh generate [<team>]
+
+# Show the team's public recipient + fingerprint. --reveal-secret prints
+# the private identity instead, after an interactive typed confirmation —
+# refused outright when there's no TTY (i.e. never usable from agent mode).
+~/.agents/skills/agmsg/scripts/key.sh show [<team>] [--reveal-secret]
+
+# Install a private age identity obtained out-of-band (e.g. via
+# `key.sh show <team> --reveal-secret` on another device that already has
+# it). Rejected if it doesn't match the team's already-authorized key.
+~/.agents/skills/agmsg/scripts/key.sh import <team> <identity>
+
+# Start a new epoch for a team with exactly one active writer (this
+# device). Never re-encrypts existing history — only messages sent after
+# rotation use the new key; every prior epoch's key is retained locally.
+~/.agents/skills/agmsg/scripts/key.sh rotate [<team>]
+```
+
+Slash-command surface (SKILL.md / per-type templates), same mapping
+pattern as every command above:
+
+```
+/agmsg remote connect --endpoint <url> <token>
+/agmsg remote status
+/agmsg remote disconnect <team>
+/agmsg remote doctor
+/agmsg key generate [<team>]
+/agmsg key show [<team>] [--reveal-secret]
+/agmsg key import <team> <identity>
+/agmsg key rotate [<team>]
+```
+
+Additional dependencies beyond bash/sqlite3 (only needed if these commands
+are used): `curl` (the exchange/revoke calls), `python3` (parsing the
+exchange response), and `age`/`age-keygen` (E2EE — `remote.sh doctor`
+checks for these and `key.sh`'s own commands refuse to run without them).
+
 ## Sandbox compatibility (Claude Code)
 
 When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/agmsg/`. Add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
@@ -183,4 +260,4 @@ The allowlist merges across scopes and takes effect immediately — no restart n
 - **Teams**: `~/.agents/skills/agmsg/teams/<name>/config.json`
 - **Concurrency**: WAL allows multiple readers + 1 writer without conflicts
 - **No daemon**: Direct DB access via `sqlite3` CLI
-- **Dependencies**: bash, sqlite3 (no python3 required)
+- **Dependencies**: bash, sqlite3 (no python3 required) for core messaging; `remote`/`key` (ADR 0007) additionally need `curl`, `python3`, and `age`/`age-keygen`, but only if those commands are used
