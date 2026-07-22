@@ -67,8 +67,12 @@ An `age-v1` envelope has:
 - A GREASE stanza tag MUST match `[!-~]{1,8}-grease`. It has zero to four
   arguments, each 1–8 bytes of ASCII VCHAR (`0x21`–`0x7e`), and a 0–100-byte
   body in age's canonical unpadded-base64 wrapping. These are the bounds emitted
-  by `age_core::format::grease_the_joint` in Rust `age` 0.12.1. A stanza outside
-  that grammar is not treated as GREASE and is rejected.
+  by `age_core::format::grease_the_joint` in Rust `age` 0.12.1. Active age
+  namespaces take precedence over that suffix grammar: `scrypt`, `ssh-rsa`,
+  `ssh-ed25519`, and every `plugin-` tag are always rejected. Consequently, the
+  profile accepts a bounded safe subset of Rust-generated GREASE; a random tag
+  that collides with an active namespace is rejected. A stanza outside this
+  safe grammar is not treated as GREASE and is rejected.
 - A header may contain at most 256 X25519 stanzas, 512 total stanzas, and 65536
   bytes through the terminating header MAC line. Each header line remains
   limited to 4096 bytes. A reader MUST reject the file before decryption when

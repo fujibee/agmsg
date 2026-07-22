@@ -203,7 +203,8 @@ test("age-v1 rejects active non-X25519 stanzas before spawning the decryptor", a
       { mode: 0o700 });
     process.env.AGMSG_AGE_BIN = fakeAge;
     process.env.AGMSG_AGE_SPAWN_MARKER = marker;
-    const active = ["scrypt salt 10", "ssh-rsa key", "plugin-example data", "future-recipient data"];
+    const active = ["scrypt salt 10", "ssh-rsa key", "ssh-ed25519 key",
+      "plugin-example data", "plugin-x-grease data", "future-recipient data"];
     for (const stanza of active) {
       const bytes = Buffer.concat([Buffer.from([
         "age-encryption.org/v1",
@@ -221,6 +222,47 @@ test("age-v1 rejects active non-X25519 stanzas before spawning the decryptor", a
         expected_recipients: [manifest.recipient_sets.team_a.recipient],
         max_blob_bytes: 1_048_576,
       }), (error) => error.state === "malformed");
+      await assert.rejects(readFile(marker), (error) => error.code === "ENOENT");
+    }
+  } finally {
+    if (originalAgeBin === undefined) delete process.env.AGMSG_AGE_BIN;
+    else process.env.AGMSG_AGE_BIN = originalAgeBin;
+    if (originalMarker === undefined) delete process.env.AGMSG_AGE_SPAWN_MARKER;
+    else process.env.AGMSG_AGE_SPAWN_MARKER = originalMarker;
+    await rm(scratch, { recursive: true });
+  }
+});
+
+test("age-v1 rejects noncanonical GREASE base64 before spawning the decryptor", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "agmsg-age-v1-grease-base64-"));
+  const originalAgeBin = process.env.AGMSG_AGE_BIN;
+  const originalMarker = process.env.AGMSG_AGE_SPAWN_MARKER;
+  try {
+    const identity = join(scratch, "identity");
+    const fakeAge = join(scratch, "fake-age");
+    const marker = join(scratch, "spawned");
+    await writeFile(identity, `${manifest.recipient_sets.team_a.identity}\n`, { mode: 0o600 });
+    await writeFile(fakeAge, "#!/bin/sh\nprintf invoked > \"$AGMSG_AGE_SPAWN_MARKER\"\nexit 99\n",
+      { mode: 0o700 });
+    process.env.AGMSG_AGE_BIN = fakeAge;
+    process.env.AGMSG_AGE_SPAWN_MARKER = marker;
+    for (const body of ["AB", "AAB"]) {
+      const bytes = Buffer.concat([Buffer.from([
+        "age-encryption.org/v1",
+        "-> x-grease",
+        body,
+        "-> X25519 UHwSYuqz0nETnk0k8pTzWX5dUSwX32+mdzrgiooZ5FM",
+        "fHRC1X2S0nMkexfGaMYo7k1WeRjMXouDB6VI1ERX1ho",
+        "--- 1D+zVTAq2TisMsHnBKk0agnk0N0xNzkdHc07l8O8we0",
+        "",
+      ].join("\n"), "ascii"), Buffer.from([0xde, 0xad, 0xbe, 0xef])]);
+      await assert.rejects(openEnvelope({
+        envelope: { ...rustGrease.envelope, blob: bytes.toString("base64") },
+        protocol_version: 1, team_id: manifest.binding.team_id,
+        wire_id: manifest.binding.wire_id, identity_file: identity,
+        expected_recipients: [manifest.recipient_sets.team_a.recipient],
+        max_blob_bytes: 1_048_576,
+      }), (error) => error.state === "malformed" && /canonical base64/u.test(error.message));
       await assert.rejects(readFile(marker), (error) => error.code === "ENOENT");
     }
   } finally {

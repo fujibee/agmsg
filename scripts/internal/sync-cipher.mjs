@@ -169,7 +169,18 @@ export function validateAgeHeader(ageFile) {
   let stanzaHasBody = false;
   let stanzaIsGrease = false;
   let stanzaBodyBytes = 0;
+  let greaseBodyBase64 = "";
   let greaseShortBodySeen = false;
+  function finishStanza() {
+    if (!insideStanza || !stanzaHasBody) malformed("age recipient stanza header is invalid");
+    if (stanzaIsGrease) {
+      const canonical = Buffer.from(greaseBodyBase64, "base64")
+        .toString("base64").replace(/=+$/u, "");
+      if (canonical !== greaseBodyBase64) {
+        malformed("age GREASE stanza body is not canonical base64");
+      }
+    }
+  }
   function line() {
     const end = ageFile.indexOf(0x0a, offset);
     if (end === -1 || end - offset > 4096) malformed("age header is incomplete");
@@ -184,8 +195,8 @@ export function validateAgeHeader(ageFile) {
     const value = line();
     if (value.startsWith("-> ")) {
       const fields = value.split(" ");
-      if ((insideStanza && !stanzaHasBody) || fields.length < 2 ||
-          fields.some((field) => field.length < 1)) {
+      if (insideStanza) finishStanza();
+      if (fields.length < 2 || fields.some((field) => field.length < 1)) {
         malformed("age recipient stanza header is invalid");
       }
       totalStanzaCount += 1;
@@ -198,17 +209,20 @@ export function validateAgeHeader(ageFile) {
         }
         stanzaIsGrease = false;
       } else {
-        stanzaIsGrease = /^[!-~]{1,8}-grease$/u.test(fields[1]) &&
+        const activeType = fields[1] === "scrypt" || fields[1] === "ssh-rsa" ||
+          fields[1] === "ssh-ed25519" || fields[1].startsWith("plugin-");
+        stanzaIsGrease = !activeType && /^[!-~]{1,8}-grease$/u.test(fields[1]) &&
           fields.length <= 6 && fields.slice(2).every((field) => /^[!-~]{1,8}$/u.test(field));
         if (!stanzaIsGrease) malformed("age-v1 rejects active non-X25519 recipient stanzas");
       }
       insideStanza = true;
       stanzaHasBody = false;
       stanzaBodyBytes = 0;
+      greaseBodyBase64 = "";
       greaseShortBodySeen = false;
     } else if (value.startsWith("--- ")) {
-      if (!insideStanza || !stanzaHasBody || x25519StanzaCount < 1 ||
-          value.split(" ").length !== 2 || offset >= ageFile.length) {
+      finishStanza();
+      if (x25519StanzaCount < 1 || value.split(" ").length !== 2 || offset >= ageFile.length) {
         malformed("age header footer is invalid");
       }
       return { totalStanzaCount, x25519StanzaCount };
@@ -223,6 +237,7 @@ export function validateAgeHeader(ageFile) {
         }
         stanzaBodyBytes += Math.floor(value.length * 3 / 4);
         if (stanzaBodyBytes > 100) malformed("age GREASE stanza body limit exceeded");
+        greaseBodyBase64 += value;
         greaseShortBodySeen = value.length < 64;
       }
     }
