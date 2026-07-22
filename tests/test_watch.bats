@@ -523,6 +523,157 @@ _wait_pidfile() {
   done
 }
 
+# --- #229: opt-in catch-up drain of unread inbox on fresh attach ---
+# Default-OFF behavior is pinned by "watch: a fresh session starts from now
+# and does not replay history" above — these tests cover the opt-in path.
+
+@test "watch: catch-up ON drains queued unread on fresh attach, exactly once (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup"
+  local out="$TEST_SKILL_DIR/catchup.log"
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+
+  # Queued BEFORE the watcher ever attaches — the #229 miss.
+  bash "$SCRIPTS/send.sh" team bob alice "M0-queued" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file "$wm"
+  bash "$SCRIPTS/send.sh" team bob alice "M-live-after" >/dev/null
+  _wait_for_file_contains "$out" "M-live-after" || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  # Queued message drained once (not doubled by the live loop), live still works.
+  [ "$(grep -c "M0-queued" "$out")" -eq 1 ]
+  grep -q "M-live-after" "$out"
+}
+
+@test "watch: catch-up ON does not re-drain on reconnect with a persisted watermark (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-reconnect"
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M0-queued" >/dev/null
+
+  # First attach: fresh, drains M0 and streams M1.
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$TEST_SKILL_DIR/cu1.log" 2>/dev/null 3>&- &
+  local w1=$!
+  _wait_for_file "$wm"
+  bash "$SCRIPTS/send.sh" team bob alice "M1-live" >/dev/null
+  _wait_for_file_contains "$TEST_SKILL_DIR/cu1.log" "M1-live" || { kill "$w1" 2>/dev/null || true; false; }
+  kill "$w1" 2>/dev/null || true
+  wait "$w1" 2>/dev/null || true
+  grep -q "M0-queued" "$TEST_SKILL_DIR/cu1.log"
+
+  # M0/M1 are still unread (the drain does not mark read); a reconnect with the
+  # persisted watermark must NOT re-drain them — only the in-gap row arrives.
+  bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$TEST_SKILL_DIR/cu2.log" 2>/dev/null 3>&- &
+  local w2=$!
+  _wait_for_file_contains "$TEST_SKILL_DIR/cu2.log" "M2-in-gap" || { kill "$w2" 2>/dev/null || true; false; }
+  kill "$w2" 2>/dev/null || true
+  wait "$w2" 2>/dev/null || true
+
+  ! grep -q "M0-queued" "$TEST_SKILL_DIR/cu2.log"
+  ! grep -q "M1-live" "$TEST_SKILL_DIR/cu2.log"
+}
+
+@test "watch: catch-up drain skips already-read messages (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-read"
+  local out="$TEST_SKILL_DIR/catchup-read.log"
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-was-read" >/dev/null
+  bash "$SCRIPTS/inbox.sh" team alice >/dev/null   # displays + marks read
+  bash "$SCRIPTS/send.sh" team bob alice "M-still-unread" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file_contains "$out" "M-still-unread" || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  ! grep -q "M-was-read" "$out"
+}
+
+@test "watch: catch-up drain caps at the newest N with a notice (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-cap"
+  local out="$TEST_SKILL_DIR/catchup-cap.log"
+
+  local n
+  for n in 1 2 3 4 5; do
+    bash "$SCRIPTS/send.sh" team bob alice "CAP-$n" >/dev/null
+  done
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_CATCHUP_CAP=3 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file_contains "$out" 'CAP-5$' || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  # Newest 3 kept, oldest 2 dropped, and the notice says so.
+  grep -q 'CAP-3$' "$out"
+  grep -q 'CAP-4$' "$out"
+  grep -q 'CAP-5$' "$out"
+  ! grep -q 'CAP-1$' "$out"
+  ! grep -q 'CAP-2$' "$out"
+  grep -q "catch-up drained the newest 3 of 5 unread" "$out"
+}
+
+@test "watch: catch-up drain never replays control messages (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-ctrl"
+  local out="$TEST_SKILL_DIR/catchup-ctrl.log"
+  local ready="$TEST_SKILL_DIR/run/ready.team__alice"
+
+  # A stale, unread despawn directive queued before attach. Replaying it would
+  # tear down the fresh actas watcher for the same role.
+  bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "M-normal-queued" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- &
+  local w=$! i
+  for i in $(seq 1 20); do [ -e "$ready" ] && break; sleep 0.5; done
+  [ -e "$ready" ]
+
+  # The watcher survived attach (did not act on the stale despawn) and still
+  # delivers live traffic.
+  bash "$SCRIPTS/send.sh" team bob alice "M-live-ctrl-test" >/dev/null
+  _wait_for_file_contains "$out" "M-live-ctrl-test" || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  grep -q "M-normal-queued" "$out"
+  ! grep -q "ctrl:despawn" "$out"
+}
+
+@test "watch: catch-up via the delivery.monitor.catchup config key (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-cfg"
+  local out="$TEST_SKILL_DIR/catchup-cfg.log"
+
+  bash "$SCRIPTS/config.sh" set delivery.monitor.catchup true >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "M-cfg-queued" >/dev/null
+
+  AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file_contains "$out" "M-cfg-queued" || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  grep -q "M-cfg-queued" "$out"
+}
+
 @test "watch: empty session_id gets a generated fallback instead of a Usage error (#236)" {
   local out="$BATS_TEST_TMPDIR/empty-sid.out"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 3>&- &

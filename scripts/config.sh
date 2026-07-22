@@ -139,6 +139,13 @@ delivery:
   monitor:
     # watch.sh SQLite poll interval, seconds
     poll_interval: 5
+    # Opt-in catch-up (#229): a FRESH watcher attach emits the current unread
+    # backlog once (capped) before the live stream. Off by default (the stream
+    # starts from "now"); enable with AGMSG_WATCH_CATCHUP=1 or
+    # `config.sh set delivery.monitor.catchup true`. Comment only, no value
+    # line: yaml_get reads one nesting level, so `set` stores the key as a
+    # flat `monitor.catchup:` entry under delivery — a nested default here
+    # would linger unread next to it and mislead.
   turn:
     # Stop hook cooldown, seconds. Legacy alias: hook.check_interval
     check_interval: 60

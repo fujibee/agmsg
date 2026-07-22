@@ -23,6 +23,11 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 #     a restart of this session's watcher (actas/drop/clear/self-restart)
 #     resumes from the last delivered id and does not drop messages that
 #     arrived during the restart gap. See #107.
+#   - Opt-in catch-up (#229): when AGMSG_WATCH_CATCHUP=1 (or the
+#     delivery.monitor.catchup config key is true), a FRESH session first
+#     emits its current unread backlog once — capped, newest kept — before
+#     entering the live stream. Default stays "start from now". A reconnect
+#     (persisted watermark present) never drains, so history is not replayed.
 #   - Polls the SQLite DB at AGMSG_WATCH_INTERVAL seconds (default 5, also
 #     overridable via the delivery.monitor.poll_interval config key).
 #   - Emits one line per new message:
@@ -150,6 +155,24 @@ if [ -z "$INTERVAL" ]; then
   INTERVAL="$("$SCRIPT_DIR/config.sh" get delivery.monitor.poll_interval 5 2>/dev/null || echo 5)"
 fi
 case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=5 ;; esac
+
+# Resolve the opt-in catch-up drain gate (#229). Env var wins over config,
+# default OFF — the pinned "stream from now, do not replay history" contract
+# is unchanged unless the operator explicitly asks for catch-up.
+CATCHUP="${AGMSG_WATCH_CATCHUP:-}"
+if [ -z "$CATCHUP" ]; then
+  CATCHUP="$("$SCRIPT_DIR/config.sh" get delivery.monitor.catchup 0 2>/dev/null || echo 0)"
+fi
+case "$CATCHUP" in 1|true|yes|on) CATCHUP=1 ;; *) CATCHUP=0 ;; esac
+
+# Hard cap on drained rows so an old, never-read backlog cannot flood the
+# Monitor stream at attach. The env override is a tuning/test seam. The 10#
+# normalization strips leading zeros — bash arithmetic would otherwise parse
+# a value like "08" as bad octal and kill the watcher under set -u.
+CATCHUP_CAP="${AGMSG_WATCH_CATCHUP_CAP:-50}"
+case "$CATCHUP_CAP" in ''|*[!0-9]*) CATCHUP_CAP=50 ;; *) CATCHUP_CAP=$((10#$CATCHUP_CAP)) ;; esac
+# -le also catches a wrapped-negative from an absurdly long digit string.
+[ "$CATCHUP_CAP" -le 0 ] && CATCHUP_CAP=50
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 
@@ -352,7 +375,9 @@ if [ -f "$WATERMARK_FILE" ]; then
   LAST="$(cat "$WATERMARK_FILE" 2>/dev/null || true)"
   case "$LAST" in ''|*[!0-9]*) LAST="" ;; esac
 fi
+FRESH_ATTACH=0
 if [ -z "$LAST" ]; then
+  FRESH_ATTACH=1
   LAST=0
   if [ -f "$DB" ]; then
     LAST="$(agmsg_sqlite "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
@@ -374,6 +399,62 @@ fi
 if [ -f "$DB" ] && ! agmsg_sqlite "$DB" "SELECT 1;" >/dev/null 2>&1; then
   echo "ERROR: cannot open message DB $DB"
   exit 1
+fi
+
+# Opt-in catch-up drain (#229). "Unread at attach" is defined against the
+# watermark model as: rows addressed to this subscription with read_at IS NULL
+# and id <= the just-seeded watermark. Draining is gated on a FRESH attach
+# (no persisted watermark existed at startup): the seed already pinned LAST to
+# MAX(id) and persisted it, so a later reconnect resumes from the watermark
+# and never re-drains — the #107 gap-fill covers a reconnect instead. Rows
+# with id > LAST (sent while we were arming) belong to the live loop, so the
+# id <= LAST bound also makes drain + live stream mutually exclusive: nothing
+# is delivered twice.
+#
+# Control messages (ctrl:*) are excluded: they are live teardown directives,
+# and replaying a stale ctrl:despawn at attach could tear down a freshly
+# spawned successor for the same role. They stay unread for the live loop
+# semantics they were designed for.
+#
+# The drain does NOT mark rows read: watch.sh streaming has never advanced
+# read_at (that is inbox.sh's job on display), and keeping that invariant
+# leaves this change orthogonal to any future live-delivery read-marking.
+# Done before the ready sentinel so "ready" implies the backlog notice went
+# out first, and after the DB healthcheck so we never drain from a store the
+# live loop cannot read.
+if [ "$CATCHUP" = 1 ] && [ "$FRESH_ATTACH" = 1 ] && [ -f "$DB" ]; then
+  UNREAD_TOTAL="$(agmsg_sqlite "$DB" "
+    SELECT COUNT(*) FROM messages
+    WHERE id <= $LAST AND read_at IS NULL
+      AND body NOT LIKE 'ctrl:%' AND ($WHERE_PAIRS);
+  " 2>/dev/null || echo 0)"
+  case "$UNREAD_TOTAL" in ''|*[!0-9]*) UNREAD_TOTAL=0 ;; esac
+  if [ "$UNREAD_TOTAL" -gt "$CATCHUP_CAP" ]; then
+    # Keep the NEWEST rows under the cap — recent context is what an
+    # attaching agent needs; the full backlog stays reachable via inbox.sh.
+    echo "agmsg watch: catch-up drained the newest $CATCHUP_CAP of $UNREAD_TOTAL unread messages ($((UNREAD_TOTAL - CATCHUP_CAP)) older not shown; use inbox.sh)"
+  fi
+  if [ "$UNREAD_TOTAL" -gt 0 ]; then
+    DRAIN_ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "
+      SELECT id, created_at, team, from_agent, to_agent,
+             replace(replace(body, char(13), ''), char(10), '\\n')
+      FROM (
+        SELECT * FROM messages
+        WHERE id <= $LAST AND read_at IS NULL
+          AND body NOT LIKE 'ctrl:%' AND ($WHERE_PAIRS)
+        ORDER BY id DESC LIMIT $CATCHUP_CAP
+      ) ORDER BY id;
+    " 2>/dev/null || true)"
+    if [ -n "$DRAIN_ROWS" ]; then
+      while IFS=$'\x1f' read -r _cid _cts _cteam _cfrom _cto _cbody; do
+        [ -z "$_cid" ] && continue
+        if ! printf '%s | %s | %s → %s | %s\n' "$_cts" "$_cteam" "$_cfrom" "$_cto" "$_cbody"; then
+          cleanup
+          exit 0
+        fi
+      done <<< "$DRAIN_ROWS"
+    fi
+  fi
 fi
 
 # Signal readiness. Once the subscription is resolved and the watermark is set,
