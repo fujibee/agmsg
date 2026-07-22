@@ -24,6 +24,7 @@ source "$SCRIPT_DIR/lib/validate.sh"
 
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 CRED_ROOT="$SKILL_DIR/run/remote-credentials"
+PENDING_DIR="$SKILL_DIR/run/remote-connect-pending"
 
 _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 
@@ -39,7 +40,7 @@ _remote_read_config_field() {
 
 # Bootstrap a brand-new local team dir/config, mirroring join.sh's own
 # initial-config shape exactly (no agents registered yet — connect only
-# establishes the sync binding, not a agent identity in the team).
+# establishes the sync binding, not an agent identity in the team).
 _remote_ensure_team() {
   local team="$1" cfg
   cfg="$(_remote_team_config "$team")"
@@ -50,6 +51,23 @@ _remote_ensure_team() {
       "$team" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     agmsg_write_atomic "$cfg" "$initial"
   fi
+}
+
+# Reject a non-HTTPS endpoint (token/credential would cross the wire in
+# plaintext) except for loopback, which self-host/dev setups need without a
+# cert (ADR 0007 review finding B6).
+_remote_validate_endpoint() {
+  local endpoint="$1"
+  case "$endpoint" in
+    https://*) return 0 ;;
+    http://127.0.0.1*|http://localhost*|http://\[::1\]*) return 0 ;;
+    http://*)
+      echo "agmsg: --endpoint must be https:// (plaintext http:// would send the token/credential unencrypted) — loopback (127.0.0.1/localhost) is the only exception" >&2
+      return 1 ;;
+    *)
+      echo "agmsg: --endpoint must start with https://" >&2
+      return 1 ;;
+  esac
 }
 
 # --- doctor ------------------------------------------------------------
@@ -80,16 +98,124 @@ cmd_doctor() {
   fi
 }
 
+# --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
+
+# _remote_http_post_json <url> <body_file> <out_body_file> -> prints http_code
+# Posts <body_file> as the request body via a curl -K config file, so the
+# body (which holds the token) never appears in curl's own argv/ps. The
+# config file is 0600 and removed immediately after the call.
+_remote_http_post_json() {
+  local url="$1" body_file="$2" out_file="$3" cfg http_code
+  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  chmod 600 "$cfg"
+  {
+    printf 'url = "%s"\n' "$url"
+    printf 'request = "POST"\n'
+    printf 'header = "Content-Type: application/json"\n'
+    printf 'data = "@%s"\n' "$body_file"
+  } > "$cfg"
+  http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
+  rm -f "$cfg"
+  printf '%s' "$http_code"
+}
+
+# _remote_http_post_bearer <url> <bearer_token> -> prints http_code
+# Same argv-safety property for the Authorization header (revoke calls).
+_remote_http_post_bearer() {
+  local url="$1" token="$2" cfg http_code
+  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  chmod 600 "$cfg"
+  {
+    printf 'url = "%s"\n' "$url"
+    printf 'request = "POST"\n'
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+  } > "$cfg"
+  http_code=$(curl -sS -o /dev/null -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
+  rm -f "$cfg"
+  printf '%s' "$http_code"
+}
+
+# _remote_revoke <endpoint> <credential_id> <credential> -> 0 revoked, 1 not
+_remote_revoke() {
+  local endpoint="$1" credential_id="$2" credential="$3" http_code
+  http_code="$(_remote_http_post_bearer "$endpoint/v1/credentials/$credential_id/revoke" "$credential")"
+  [ "$http_code" = "200" ]
+}
+
 # --- connect -------------------------------------------------------------
 
-_remote_write_binding() {
-  # _remote_write_binding <team> <cfg> <endpoint> <credential_id> <server_instance_id>
-  #   <remote_team_id> <remote_team_name> <protocol_version> <capabilities_json>
-  local team="$1" cfg="$2" endpoint="$3" credential_id="$4" server_instance_id="$5" \
-    remote_team_id="$6" remote_team_name="$7" protocol_version="$8" capabilities_json="$9" \
-    connected_at escaped updated
+# A resumability key derived from (endpoint, token) — known BEFORE any
+# network call, so it doesn't depend on the local team name, which may not
+# be known until the exchange response comes back (B5: the earlier design
+# keyed pending state by team name, which couldn't cover that case at all).
+# The token itself is never written to disk or logged — only this
+# irreversible digest of it, so the pending record can't be used to recover
+# the token, and repeating the exact same (endpoint, token) pair after a
+# crash resumes instead of re-consuming a token that may already be spent.
+_remote_pending_key() {
+  local endpoint="$1" token="$2"
+  printf '%s\0%s' "$endpoint" "$token" | python3 -c "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"
+}
+
+_remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
+
+# _remote_write_pending <key> <credential> <credential_id> <server_instance_id>
+#   <remote_team_id> <remote_team_name> <protocol_version> <capabilities_json> <endpoint>
+# Durable, atomic (temp+rename), 0600 record of a successful exchange whose
+# local commit has not (yet) fully completed — deliberately does NOT
+# include the token. A crash between the exchange and _remote_commit
+# finishing resumes from here on a retry with the same (endpoint, token),
+# instead of needing (and orphaning a credential for) a fresh single-use
+# token (B5).
+_remote_write_pending() {
+  local key="$1" credential="$2" credential_id="$3" server_instance_id="$4" \
+    remote_team_id="$5" remote_team_name="$6" protocol_version="$7" \
+    capabilities_json="$8" endpoint="$9" pending_file tmp json
+  mkdir -p "$PENDING_DIR"
+  chmod 700 "$PENDING_DIR" 2>/dev/null || true
+  pending_file="$(_remote_pending_file "$key")"
+  json=$(python3 -c '
+import json, sys
+credential, credential_id, server_instance_id, remote_team_id, remote_team_name, protocol_version, capabilities_json, endpoint = sys.argv[1:9]
+print(json.dumps({
+    "credential": credential,
+    "credential_id": credential_id,
+    "server_instance_id": server_instance_id,
+    "remote_team_id": remote_team_id,
+    "remote_team_name": remote_team_name,
+    "protocol_version": int(protocol_version),
+    "capabilities": json.loads(capabilities_json),
+    "endpoint": endpoint,
+}))
+' "$credential" "$credential_id" "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json" "$endpoint")
+  tmp="$(mktemp "$PENDING_DIR/.pending-XXXXXX")"
+  chmod 600 "$tmp"
+  printf '%s\n' "$json" > "$tmp"
+  sync 2>/dev/null || true
+  mv "$tmp" "$pending_file"
+}
+
+# _remote_commit <team> <cfg> <endpoint> <credential> <credential_id>
+#   <server_instance_id> <remote_team_id> <remote_team_name> <protocol_version>
+#   <capabilities_json>
+# Assumes the caller ALREADY holds this team's config lock. Writes the 0600
+# credential file and the (secret-free) binding record.
+_remote_commit() {
+  local team="$1" cfg="$2" endpoint="$3" credential="$4" credential_id="$5" \
+    server_instance_id="$6" remote_team_id="$7" remote_team_name="$8" \
+    protocol_version="$9" capabilities_json="${10}" \
+    cred_file cred_json connected_at escaped updated
+
+  mkdir -p "$CRED_ROOT"
+  chmod 700 "$CRED_ROOT" 2>/dev/null || true
+  cred_file="$(_remote_cred_file "$team")"
+  cred_json="$(printf '{"credential":"%s","credential_id":"%s"}' \
+    "$(printf '%s' "$credential" | sed 's/"/\\"/g')" \
+    "$(printf '%s' "$credential_id" | sed 's/"/\\"/g')")"
+  ( umask 077; printf '%s\n' "$cred_json" > "$cred_file" )
+  unset cred_json
+
   connected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
   escaped=$(sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" ".param set :caps '$(printf '%s' "$capabilities_json" | sed "s/'/''/g")'" \
     "SELECT json_set(:json, '\$.remote_binding', json_object(
@@ -98,13 +224,12 @@ _remote_write_binding() {
        'server_instance_id', '$(_agmsg_sqlesc "$server_instance_id")',
        'remote_team_id', '$(_agmsg_sqlesc "$remote_team_id")',
        'remote_team_name', '$(_agmsg_sqlesc "$remote_team_name")',
-       'protocol_version', '$(_agmsg_sqlesc "$protocol_version")',
+       'protocol_version', $protocol_version,
        'capabilities', json(:caps),
        'connected_at', '$(_agmsg_sqlesc "$connected_at")',
        'disconnected_at', null
      ));")
   agmsg_write_atomic "$cfg" "$updated"
-  agmsg_lock_release
 }
 
 cmd_connect() {
@@ -119,6 +244,12 @@ cmd_connect() {
     esac
   done
   : "${endpoint:?Usage: remote.sh connect --endpoint <url> [<token>] [--token-stdin] [<team>] [--force]}"
+  _remote_validate_endpoint "$endpoint" || exit 1
+  # Canonicalize once (strip a trailing slash) so every use below — the
+  # pending-key hash, the exchange/revoke URLs, and the stored binding —
+  # agrees on the same endpoint string; a mismatch here would silently
+  # break pending-record resumability (B5) for no user-visible reason.
+  endpoint="${endpoint%/}"
 
   if [ "$token_stdin" -eq 1 ]; then
     if [ "${#positional[@]}" -gt 1 ]; then
@@ -144,58 +275,126 @@ cmd_connect() {
 
   if [ -n "$team" ]; then
     agmsg_validate_team_name "$team" || exit 1
-    local existing_disconnected
-    existing_disconnected="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.disconnected_at')"
-    local existing_connected_at
-    existing_connected_at="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.connected_at')"
-    if [ -n "$existing_connected_at" ] && [ "$existing_connected_at" != "null" ] \
-      && { [ -z "$existing_disconnected" ] || [ "$existing_disconnected" = "null" ]; } \
-      && [ "$force" -ne 1 ]; then
-      echo "agmsg: team '$team' is already connected (since $existing_connected_at) — run 'remote.sh disconnect $team' first, or pass --force to rebind." >&2
+  fi
+
+  # Resumability key, known before any network call regardless of whether
+  # <team> was given (B5).
+  local pending_key pending_file
+  pending_key="$(_remote_pending_key "$endpoint" "$token")"
+  pending_file="$(_remote_pending_file "$pending_key")"
+
+  local credential credential_id server_instance_id remote_team_id remote_team_name \
+    protocol_version capabilities_json write_allowed_ciphers current_seq
+
+  if [ -f "$pending_file" ]; then
+    echo "agmsg: resuming an exchange that already succeeded but wasn't fully committed locally (avoids consuming a fresh token)." >&2
+    credential="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('credential',''))" 2>/dev/null)"
+    credential_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('credential_id',''))" 2>/dev/null)"
+    server_instance_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('server_instance_id',''))" 2>/dev/null)"
+    remote_team_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('remote_team_id',''))" 2>/dev/null)"
+    remote_team_name="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('remote_team_name',''))" 2>/dev/null)"
+    protocol_version="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('protocol_version',0))" 2>/dev/null)"
+    capabilities_json="$(python3 -c "import json,sys; print(json.dumps(json.load(open('$pending_file')).get('capabilities',{})))" 2>/dev/null)"
+    write_allowed_ciphers="$(python3 -c "import json,sys; print(','.join(json.load(open('$pending_file')).get('capabilities',{}).get('write_allowed_ciphers',[])))" 2>/dev/null)"
+    current_seq="$(python3 -c "import json,sys; v=json.load(open('$pending_file')).get('capabilities',{}).get('current_seq'); print(v if v is not None else -1)" 2>/dev/null)"
+    unset token
+  else
+    # --force pre-check only applies when <team> is known upfront — when
+    # omitted, whether "this team" is already connected can't be known
+    # until the exchange response names it (checked again post-exchange
+    # under the lock either way).
+    if [ -n "$team" ]; then
+      local existing_disconnected existing_connected_at existing_credential_id
+      existing_disconnected="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.disconnected_at')"
+      existing_connected_at="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.connected_at')"
+      existing_credential_id="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.credential_id')"
+      if [ -n "$existing_connected_at" ] && [ "$existing_connected_at" != "null" ] \
+        && { [ -z "$existing_disconnected" ] || [ "$existing_disconnected" = "null" ]; }; then
+        if [ "$force" -ne 1 ]; then
+          echo "agmsg: team '$team' is already connected (since $existing_connected_at) — run 'remote.sh disconnect $team' first, or pass --force to rebind." >&2
+          exit 1
+        fi
+        # --force: revoke the OLD credential before ever asking for a new
+        # one. If revoke can't be confirmed, abort rather than leaving the
+        # old credential active-but-unreferenced (B5). This intentionally
+        # does not yet build a durable orphan/revocation-pending queue for
+        # the unreachable case; it fails closed and asks the operator to
+        # retry or revoke from the console/admin side.
+        local old_endpoint old_credential
+        old_endpoint="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.endpoint')"
+        old_credential="$(python3 -c "import json,sys; print(json.load(open('$(_remote_cred_file "$team")')).get('credential',''))" 2>/dev/null || true)"
+        if [ -z "$existing_credential_id" ] || [ "$existing_credential_id" = "null" ] \
+          || [ -z "$old_endpoint" ] || [ "$old_endpoint" = "null" ] || [ -z "$old_credential" ] \
+          || ! _remote_revoke "$old_endpoint" "$existing_credential_id" "$old_credential"; then
+          echo "agmsg: --force rebind refused — could not confirm the existing credential ($existing_credential_id) was revoked. Revoke it from the console/admin side, or retry once the server is reachable, before rebinding." >&2
+          exit 1
+        fi
+        unset old_credential
+      fi
+    fi
+
+    # The only network call that can fail before any local state changes.
+    local body_file resp_file http_code token_json
+    body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-body.XXXXXX")"
+    chmod 600 "$body_file"
+    resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-resp.XXXXXX")"
+    chmod 600 "$resp_file"
+    trap 'rm -f "$body_file" "$resp_file"' EXIT INT TERM
+
+    token_json="$(printf '%s' "$token" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)"
+    unset token
+    if [ -z "$token_json" ]; then
+      echo "agmsg: internal error encoding token" >&2
       exit 1
     fi
-  fi
+    printf '{"token":%s}' "$token_json" > "$body_file"
+    unset token_json
 
-  # The only network call that can fail before any local state changes.
-  local resp_body http_code tmp_body token_escaped
-  tmp_body="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-resp.XXXXXX")"
-  token_escaped="$(printf '%s' "$token" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)"
-  unset token
-  if [ -z "$token_escaped" ]; then
-    rm -f "$tmp_body"
-    echo "agmsg: internal error encoding token" >&2
-    exit 1
-  fi
-  http_code=$(curl -sS -o "$tmp_body" -w '%{http_code}' \
-    -X POST "${endpoint%/}/v1/pairing/exchange" \
-    -H 'Content-Type: application/json' \
-    -d "{\"token\":$token_escaped}" \
-    2>/dev/null) || http_code="000"
-  unset token_escaped
+    http_code="$(_remote_http_post_json "$endpoint/v1/pairing/exchange" "$body_file" "$resp_file")"
+    rm -f "$body_file"
 
-  if [ "$http_code" != "200" ]; then
-    echo "agmsg: connect failed — exchange endpoint returned HTTP $http_code" >&2
-    rm -f "$tmp_body"
-    exit 1
-  fi
+    if [ "$http_code" != "200" ]; then
+      echo "agmsg: connect failed — exchange endpoint returned HTTP $http_code" >&2
+      rm -f "$resp_file"
+      exit 1
+    fi
 
-  resp_body="$(cat "$tmp_body")"
-  rm -f "$tmp_body"
+    # Strict validation (B6) BEFORE any field is used — a malformed/
+    # malicious response must not reach state mutation, and credential_id
+    # in particular must be shape-checked before it's ever spliced into a
+    # revoke URL. Parsed fields go to a FILE, not a command substitution —
+    # bash's `$(...)` silently strips embedded NUL bytes from its captured
+    # output, which would have destroyed NUL-delimited field boundaries
+    # before `read` ever saw them (caught in testing). Newline-delimited
+    # and file-based avoids that entirely.
+    local parsed_file
+    parsed_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-parsed.XXXXXX")"
+    chmod 600 "$parsed_file"
+    if ! python3 "$SCRIPT_DIR/internal/parse-exchange-response.py" < "$resp_file" > "$parsed_file"; then
+      rm -f "$resp_file" "$parsed_file"
+      exit 1
+    fi
+    rm -f "$resp_file"
+    {
+      IFS= read -r credential
+      IFS= read -r credential_id
+      IFS= read -r server_instance_id
+      IFS= read -r remote_team_id
+      IFS= read -r remote_team_name
+      IFS= read -r protocol_version
+      IFS= read -r capabilities_json
+      IFS= read -r write_allowed_ciphers
+      IFS= read -r current_seq
+    } < "$parsed_file"
+    rm -f "$parsed_file"
+    trap - EXIT INT TERM
 
-  local credential credential_id server_instance_id remote_team_id remote_team_name protocol_version capabilities_json write_allowed_ciphers
-  credential="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('credential',''))" 2>/dev/null)"
-  credential_id="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('credential_id',''))" 2>/dev/null)"
-  server_instance_id="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('server_instance_id',''))" 2>/dev/null)"
-  remote_team_id="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('remote_team_id',''))" 2>/dev/null)"
-  remote_team_name="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('remote_team_name',''))" 2>/dev/null)"
-  protocol_version="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.load(sys.stdin).get('protocol_version',''))" 2>/dev/null)"
-  capabilities_json="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('capabilities',{})))" 2>/dev/null)"
-  write_allowed_ciphers="$(printf '%s' "$resp_body" | python3 -c "import json,sys; print(','.join(json.load(sys.stdin).get('capabilities',{}).get('write_allowed_ciphers',[])))" 2>/dev/null)"
-  unset resp_body
-
-  if [ -z "$credential" ] || [ -z "$credential_id" ]; then
-    echo "agmsg: connect failed — exchange response missing credential/credential_id" >&2
-    exit 1
+    # Durable pending record before the local commit (B5): if the process
+    # dies between here and _remote_commit finishing, retrying with the
+    # same (endpoint, token) resumes from this file instead of needing a
+    # fresh token.
+    _remote_write_pending "$pending_key" "$credential" "$credential_id" "$server_instance_id" \
+      "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json" "$endpoint"
   fi
 
   [ -n "$team" ] || team="$remote_team_name"
@@ -208,21 +407,27 @@ cmd_connect() {
   local cfg
   cfg="$(_remote_team_config "$team")"
 
-  # The secret never touches config.json or any other read/diffed/logged
-  # file — a dedicated, 0600, engine-side credential file (ADR 0007 §3.4).
-  mkdir -p "$CRED_ROOT"
-  chmod 700 "$CRED_ROOT" 2>/dev/null || true
-  local cred_file cred_json
-  cred_file="$(_remote_cred_file "$team")"
-  cred_json="$(printf '{"credential":"%s","credential_id":"%s"}' \
-    "$(printf '%s' "$credential" | sed 's/"/\\"/g')" \
-    "$(printf '%s' "$credential_id" | sed 's/"/\\"/g')")"
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  # Re-check under the lock (CAS): if something else connected this team
+  # in the window since our pre-flight check (or since the exchange, for
+  # the omitted-team case where no pre-check was possible), fail closed
+  # rather than mixing old/new bindings (B5) — the pending record survives
+  # this abort so a deliberate retry can still resume it.
+  local recheck_connected recheck_disconnected
+  recheck_connected="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
+  recheck_disconnected="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  if [ -n "$recheck_connected" ] && [ "$recheck_connected" != "null" ] \
+    && { [ -z "$recheck_disconnected" ] || [ "$recheck_disconnected" = "null" ]; } \
+    && [ "$force" -ne 1 ]; then
+    agmsg_lock_release
+    echo "agmsg: team '$team' became connected by another process just now — the credential just issued for it was NOT committed locally. Revoke it (credential_id=$credential_id) via the console/admin side if it should not remain active, then retry." >&2
+    exit 1
+  fi
+  _remote_commit "$team" "$cfg" "$endpoint" "$credential" "$credential_id" \
+    "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json"
+  rm -f "$pending_file"
+  agmsg_lock_release
   unset credential
-  ( umask 077; printf '%s\n' "$cred_json" > "$cred_file" )
-  unset cred_json
-
-  _remote_write_binding "$team" "$cfg" "$endpoint" "$credential_id" "$server_instance_id" \
-    "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json" || exit 1
 
   # E2EE insertion point (ADR 0007 §6/§8): only when the capability response
   # actually requires encryption and no local key exists yet for this team.
@@ -245,25 +450,29 @@ cmd_connect() {
         exit 1
       fi
 
-      local db msg_count default_choice
-      db="$(agmsg_db_path)"
-      msg_count=0
-      if [ -f "$db" ]; then
-        msg_count="$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM messages WHERE team='$(_agmsg_sqlesc "$team")';" 2>/dev/null || echo 0)"
-      fi
-      if [ "$msg_count" -eq 0 ] 2>/dev/null; then
-        default_choice="g"
-      else
-        default_choice="i"
+      # STATUS: current_seq==0 only ever SUGGESTS the generate option — it
+      # is never chosen as an automatic default. An adversarial review
+      # found that local-only signals (message counts, and even an honest
+      # server's current_seq==0) cannot prove "I am the first writer": two
+      # devices can both see an empty/unseeded stream at once and both
+      # auto-generate, producing two incompatible keys with no way to tell
+      # which is authoritative (split-brain) — and a malicious/equivocating
+      # server can trivially induce the same outcome on purpose. Until a
+      # trusted, transactional first-writer claim exists, the only safe
+      # defaults are import or abort; generate requires an explicit,
+      # deliberate 'g' and is never selected on empty/EOF input.
+      local seq_hint=""
+      if [ "$current_seq" = "0" ]; then
+        seq_hint=" (this team's stream looks empty — (g) may be safe, but only you can be sure no one else is the first writer)"
       fi
 
-      echo "This team requires end-to-end encryption. No key found for this device."
-      echo "  (g) Generate a new key — do this if you are the first person connecting this team"
-      echo "  (i) Import a key you already have — do this if a teammate gave you one, or if this team already has message history"
+      echo "This team requires end-to-end encryption. No key found for this device.${seq_hint}"
+      echo "  (g) Generate a new key — ONLY if you are certain you are the first person connecting this team"
+      echo "  (i) Import a key you already have — do this if a teammate gave you one, or if unsure"
       echo "  (a) Abort — don't connect yet"
       local choice
-      read -r -p "[g/i/a] (default: $default_choice): " choice || choice=""
-      choice="${choice:-$default_choice}"
+      read -r -p "[i/g/a] (default: a): " choice || choice=""
+      choice="${choice:-a}"
 
       case "$choice" in
         g)
@@ -276,10 +485,11 @@ cmd_connect() {
           local identity
           read -r -p "Paste identity: " identity || identity=""
           if [ -z "$identity" ]; then
-            echo "agmsg: no identity provided — if the only device that ever held this team's key is gone entirely, there is nothing to import. The historical stream stays permanently unreadable under the lost key. The only forward path is 'key.sh rotate $team' to start a fresh epoch for messages sent from now on." >&2
+            echo "agmsg: no identity provided — if the only device that ever held this team's key is gone entirely, there is nothing to import. The historical stream stays permanently unreadable under the lost key, and rotation to start a fresh epoch is not available in this release." >&2
             exit 1
           fi
-          bash "$SCRIPT_DIR/key.sh" import "$team" "$identity" || exit 1
+          printf '%s' "$identity" | bash "$SCRIPT_DIR/key.sh" import "$team" --identity-stdin || exit 1
+          unset identity
           ;;
         a|*)
           echo "Aborted. No driver switch performed; the binding record is present but the team is not fully connected until a key exists — see 'remote status $team'." >&2
@@ -319,7 +529,7 @@ _remote_status_one() {
   echo "$team	connected (since $connected_at)"
   if [ "$needs_encryption" -eq 1 ]; then
     if [ -z "$key_id" ] || [ "$key_id" = "null" ]; then
-      echo "		encryption: required, no local key — run 'key.sh generate $team' or 'key.sh import $team <identity>'"
+      echo "		encryption: required, no local key — run 'key.sh generate $team' or 'key.sh import $team'"
     else
       echo "		encryption: age-v1, key present"
     fi
@@ -373,15 +583,10 @@ cmd_disconnect() {
   local revoke_ok=0
   if [ -f "$cred_file" ] && [ -n "$endpoint" ] && [ "$endpoint" != "null" ] && [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; then
     credential="$(python3 -c "import json,sys; print(json.load(open('$cred_file')).get('credential',''))" 2>/dev/null)"
-    if [ -n "$credential" ]; then
-      local http_code
-      http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-        -X POST "${endpoint%/}/v1/credentials/$credential_id/revoke" \
-        -H "Authorization: Bearer $credential" \
-        2>/dev/null) || http_code="000"
-      unset credential
-      [ "$http_code" = "200" ] && revoke_ok=1
+    if [ -n "$credential" ] && _remote_revoke "$endpoint" "$credential_id" "$credential"; then
+      revoke_ok=1
     fi
+    unset credential
   fi
 
   rm -f "$cred_file"
