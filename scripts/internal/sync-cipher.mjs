@@ -157,16 +157,23 @@ export function agePlaintextFrame(binding, projection) {
   return Buffer.concat([MAGIC, u32(context.length), context, u32(message.length), message]);
 }
 
-function validateAgeHeader(ageFile) {
+const MAX_AGE_HEADER_BYTES = 65_536;
+const MAX_AGE_STANZAS = 512;
+const MAX_AGE_X25519_STANZAS = 256;
+
+export function validateAgeHeader(ageFile) {
   let offset = 0;
-  let stanzaCount = 0;
+  let totalStanzaCount = 0;
+  let x25519StanzaCount = 0;
   let insideStanza = false;
+  let stanzaHasBody = false;
   function line() {
     const end = ageFile.indexOf(0x0a, offset);
     if (end === -1 || end - offset > 4096) malformed("age header is incomplete");
     const value = ageFile.subarray(offset, end).toString("ascii");
     if (!/^[\x20-\x7e]+$/u.test(value)) malformed("age header is not canonical ASCII");
     offset = end + 1;
+    if (offset > MAX_AGE_HEADER_BYTES) malformed("age header size limit exceeded");
     return value;
   }
   if (line() !== "age-encryption.org/v1") malformed("blob is not an age v1 file");
@@ -174,19 +181,31 @@ function validateAgeHeader(ageFile) {
     const value = line();
     if (value.startsWith("-> ")) {
       const fields = value.split(" ");
-      if (fields.length !== 3 || fields[1] !== "X25519" || fields[2].length < 1) {
-        malformed("age-v1 permits only native X25519 recipient stanzas");
+      if ((insideStanza && !stanzaHasBody) || fields.length < 3 ||
+          fields.some((field) => field.length < 1)) {
+        malformed("age recipient stanza header is invalid");
       }
-      stanzaCount += 1;
-      if (stanzaCount > 256) malformed("age-v1 recipient stanza limit exceeded");
+      totalStanzaCount += 1;
+      if (totalStanzaCount > MAX_AGE_STANZAS) malformed("age total stanza limit exceeded");
+      if (fields[1] === "X25519") {
+        if (fields.length !== 3) malformed("age X25519 stanza header is invalid");
+        x25519StanzaCount += 1;
+        if (x25519StanzaCount > MAX_AGE_X25519_STANZAS) {
+          malformed("age-v1 X25519 stanza limit exceeded");
+        }
+      }
       insideStanza = true;
+      stanzaHasBody = false;
     } else if (value.startsWith("--- ")) {
-      if (!insideStanza || stanzaCount < 1 || value.split(" ").length !== 2 || offset >= ageFile.length) {
+      if (!insideStanza || !stanzaHasBody || x25519StanzaCount < 1 ||
+          value.split(" ").length !== 2 || offset >= ageFile.length) {
         malformed("age header footer is invalid");
       }
-      return stanzaCount;
+      return { totalStanzaCount, x25519StanzaCount };
     } else if (!insideStanza || !/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
       malformed("age recipient stanza body is invalid");
+    } else {
+      stanzaHasBody = true;
     }
   }
   malformed("age header footer is missing");
@@ -346,7 +365,7 @@ function sealAge(input) {
   if (result.stdout.length > input.max_blob_bytes || result.stdout.length > MAX_BLOB_BYTES) {
     malformed("encrypted age file exceeds max_blob_bytes");
   }
-  if (validateAgeHeader(result.stdout) !== input.recipients.length) {
+  if (validateAgeHeader(result.stdout).x25519StanzaCount !== input.recipients.length) {
     malformed("age recipient stanza count differs from the manifest");
   }
   return { v: 1, cipher: "age-v1", key_id: input.key_id, blob: result.stdout.toString("base64") };
@@ -394,7 +413,7 @@ async function openAge({ envelope, protocol_version: protocolVersion, team_id: t
     authenticationFailed("age identity does not match the expected recipient manifest");
   }
   const ageFile = canonicalBlob(envelope.blob, maxBlobBytes);
-  if (validateAgeHeader(ageFile) !== expectedRecipients.length) {
+  if (validateAgeHeader(ageFile).x25519StanzaCount !== expectedRecipients.length) {
     authenticationFailed("age recipient stanza count differs from the manifest");
   }
   const result = runAgeWithIdentity(ageFile, identity.bytes);

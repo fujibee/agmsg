@@ -4,10 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { evaluatePull } from "../scripts/internal/remote-sync.mjs";
-import { nativeAgeIdentity, openEnvelope, sealEnvelope } from "../scripts/internal/sync-cipher.mjs";
+import { nativeAgeIdentity, openEnvelope, sealEnvelope,
+  validateAgeHeader } from "../scripts/internal/sync-cipher.mjs";
 
 const manifest = JSON.parse(await readFile(
   new URL("../docs/spec/vectors/age-v1-vectors.json", import.meta.url), "utf8"));
+const rustGrease = JSON.parse(await readFile(
+  new URL("../docs/spec/vectors/age-v1-rust-grease.json", import.meta.url), "utf8"));
 const byName = new Map(manifest.vectors.map((vector) => [vector.name, vector]));
 
 function resolveEnvelope(vector) {
@@ -134,6 +137,51 @@ test("age-v1 recipient stanza count must match the effective manifest", async ()
       team_id: base.team_id, wire_id: base.wire_id, identity_file: identity,
       expected_recipients: [manifest.recipient_sets.team_a.recipient], max_blob_bytes: 1_048_576 }),
     (error) => error.state === "authentication_failed");
+  } finally {
+    await rm(scratch, { recursive: true });
+  }
+});
+
+test("age-v1 ignores bounded GREASE stanzas without weakening X25519 count", () => {
+  const header = (...lines) => Buffer.concat([
+    Buffer.from(`${lines.join("\n")}\n`, "ascii"), Buffer.from([0xde, 0xad, 0xbe, 0xef]),
+  ]);
+  const x25519 = [
+    "-> X25519 UHwSYuqz0nETnk0k8pTzWX5dUSwX32+mdzrgiooZ5FM",
+    "fHRC1X2S0nMkexfGaMYo7k1WeRjMXouDB6VI1ERX1ho",
+  ];
+  const grease = ["-> grease test-extension", "ZmFrZS13cmFwcGVkLWZpbGUta2V5"];
+  const footer = "--- 1D+zVTAq2TisMsHnBKk0agnk0N0xNzkdHc07l8O8we0";
+  assert.deepEqual(validateAgeHeader(header("age-encryption.org/v1", ...grease,
+    ...x25519, footer)), { totalStanzaCount: 2, x25519StanzaCount: 1 });
+  assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...grease, footer)),
+    /footer/u);
+  const excessive = Array.from({ length: 513 }, (_, index) => [
+    `-> grease extension-${index}`, "YQ==",
+  ]).flat();
+  assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
+    ...excessive, footer)), /total stanza limit/u);
+  assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
+    `-> grease ${"a".repeat(4090)}`, "YQ==", footer)), /incomplete/u);
+  assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
+    "-> grease bounded-extension", ...Array(17).fill("A".repeat(4000)), footer)),
+  /size limit/u);
+});
+
+test("age-v1 opens the Rust age 0.12.1 GREASE interoperability fixture", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "agmsg-age-v1-rust-grease-"));
+  try {
+    const identity = join(scratch, "identity");
+    await writeFile(identity, `${manifest.recipient_sets.team_a.identity}\n`, { mode: 0o600 });
+    assert.deepEqual(validateAgeHeader(Buffer.from(rustGrease.envelope.blob, "base64")), {
+      totalStanzaCount: rustGrease.total_stanza_count,
+      x25519StanzaCount: rustGrease.x25519_stanza_count,
+    });
+    assert.deepEqual(await openEnvelope({ envelope: rustGrease.envelope,
+      protocol_version: 1, team_id: manifest.binding.team_id,
+      wire_id: manifest.binding.wire_id, identity_file: identity,
+      expected_recipients: [manifest.recipient_sets.team_a.recipient],
+      max_blob_bytes: 1_048_576 }), manifest.canonical_message);
   } finally {
     await rm(scratch, { recursive: true });
   }

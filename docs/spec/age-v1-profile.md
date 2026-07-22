@@ -55,9 +55,18 @@ An `age-v1` envelope has:
 - `blob` MUST be canonical padded RFC 4648 base64 of one complete, unarmored,
   binary age v1 file. ASCII armor, concatenated age files, trailing bytes,
   compression, and profile-level padding are forbidden.
-- The age header MUST contain one or more native X25519 recipient stanzas and
-  no other recipient stanza type. Scrypt/passphrase recipients, plugins, SSH
-  recipients, and hybrid stanza sets are not part of `age-v1`.
+- The age header MUST contain one or more native X25519 recipient stanzas.
+  Writers MUST use the epoch's X25519 manifest as their only real recipient
+  set. Readers MUST ignore non-X25519 stanza types for age-format extension and
+  GREASE interoperability; ignored stanzas do not satisfy or weaken the X25519
+  manifest check and MUST NOT trigger plugin, passphrase, SSH, or trial-decrypt
+  dispatch. This follows age's unknown-stanza rule while keeping native X25519
+  identities as the only decryption mechanism in this profile.
+- A header may contain at most 256 X25519 stanzas, 512 total stanzas, and 65536
+  bytes through the terminating header MAC line. Each header line remains
+  limited to 4096 bytes. A reader MUST reject the file before decryption when
+  any bound is exceeded, when a stanza has no body, or when the header framing
+  is malformed.
 
 The decoded age file must fit the smaller of the HTTP protocol blob limit and
 the authenticated `max_blob_bytes` capability. The server validates only the
@@ -72,9 +81,10 @@ recipient-set manifest MUST bind the remote `server_instance_id`, `team_id`,
 `key_id`, recipient list, and profile identifier and MUST be distributed over
 an authenticated out-of-band channel. The server never receives private
 identities. A writer MUST encrypt each new envelope to every recipient in the
-selected immutable manifest and to no recipient outside it. The manifest MUST
-contain 1–256 distinct recipients; the age header contains exactly one X25519
-stanza for each. Age intentionally hides recipient identity, so a recipient
+selected immutable manifest and to no real recipient outside it. The manifest
+MUST contain 1–256 distinct recipients; the age header contains exactly one
+X25519 stanza for each, in addition to any ignored extension/GREASE stanzas.
+Age intentionally hides recipient identity, so a recipient
 cannot prove from a ciphertext that the writer included the complete manifest
 or excluded an outsider. This is a writer-side obligation. A malicious writer
 already holds plaintext and is outside the confidentiality boundary; conforming
@@ -387,6 +397,11 @@ byte-for-byte, `envelope_override` mutates trusted outer metadata,
 generating age implementation, SHA-256 of every decoded age file and decrypted
 frame, and exact expected states. The accompanying verifier independently
 checks that provenance and every attack.
+
+[`vectors/age-v1-rust-grease.json`](vectors/age-v1-rust-grease.json) is the
+cross-implementation fixture produced by the Rust `age` crate 0.12.1. It pins a
+valid header containing one X25519 stanza and one GREASE stanza and MUST decrypt
+to the same canonical frame as the primary vector.
 
 Regenerate the randomized ciphertext fixtures with
 [`generate-age-v1-vectors.mjs`](vectors/generate-age-v1-vectors.mjs) and verify
