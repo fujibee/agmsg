@@ -528,10 +528,15 @@ launch_in_tmux() {
 launch_macos_terminal() {
   # `open -a` is a launch, not an AppleEvent, so it does not trip the
   # Automation (TCC) consent prompts that `osascript ... do script` does.
+  # `-g`/`--background` keeps the newly opened terminal from stealing focus.
+  # This path is taken whenever $TMUX is unset -- notably when the spawning
+  # process itself has no tmux context (e.g. a GUI app, or any non-terminal
+  # caller), where a foreground terminal popup interrupts whatever the user
+  # is currently doing in the foreground app.
   local app="${1:-Terminal}"
   case "$app" in
-    iterm|iterm2|iTerm|iTerm2) open -a iTerm "$BOOT" ;;
-    *)                         open -a Terminal "$BOOT" ;;
+    iterm|iterm2|iTerm|iTerm2) open -g -a iTerm "$BOOT" ;;
+    *)                         open -g -a Terminal "$BOOT" ;;
   esac
 }
 

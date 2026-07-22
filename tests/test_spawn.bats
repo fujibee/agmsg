@@ -736,6 +736,44 @@ YAML
   fi
 }
 
+@test "spawn: macOS terminal launch does not steal focus (Terminal and iTerm)" {
+  # A no-op-Terminal spawn (no $TMUX, no AGMSG_TERMINAL override) exercises
+  # launch_macos_terminal() itself, which every other test in this file
+  # bypasses via the record.sh {cmd} template. `-g`/`--background` must be
+  # present so `open` never brings the newly launched terminal to the front
+  # -- without it, spawning from a caller with no tmux context (e.g. a GUI
+  # app) interrupts whatever the user is doing in the foreground app.
+  if [ "$(uname -s)" != "Darwin" ]; then
+    skip "launch_macos_terminal() is Darwin-only"
+  fi
+  unset AGMSG_TERMINAL
+  # Deterministic regardless of which terminal actually runs this test suite
+  # (launch_macos_terminal defaults to "iterm" when $TERM_PROGRAM is
+  # iTerm.app, which would otherwise make this assertion flaky on an iTerm
+  # dev machine).
+  unset TERM_PROGRAM
+  cat > "$STUB_BIN/open" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$CAPTURE"
+EOF
+  chmod +x "$STUB_BIN/open"
+
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  run cat "$CAPTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-g -a Terminal"* ]]
+
+  rm -f "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  AGMSG_TERMINAL=iterm run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  run cat "$CAPTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-g -a iTerm"* ]]
+}
+
 # --- pre-flight exclusivity check ---
 
 @test "spawn: refuses when the name is held by another live session" {
