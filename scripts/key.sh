@@ -4,14 +4,15 @@ set -euo pipefail
 # Usage:
 #   key.sh generate [<team>]
 #   key.sh show [<team>] [--reveal-secret]
-#   key.sh import <team> <identity>
-#   key.sh rotate [<team>]
+#   key.sh import <team> [<identity>] [--identity-stdin]
+#   key.sh rotate [<team>]   -- NOT READY, see cmd_rotate
 #
 # Team-scoped end-to-end encryption key management (age-v1 profile,
-# docs/spec/age-v1-profile.md). Scope: single-writer-per-team onboarding and
-# rotation only (ADR 0007 §8) — NOT the multi-writer cutover protocol
-# (adding/removing a device from a team that already has other active
-# writers needs its own quiesce/fence/commit design, not this script).
+# docs/spec/age-v1-profile.md). Scope: initial single-writer onboarding
+# (generate the very first key, or import one obtained out-of-band) — NOT
+# key rotation (see cmd_rotate) and NOT the multi-writer cutover protocol.
+# This script does not implement age-v1's anti-rollback epoch-snapshot
+# hash chain; it only manages key *files* for a team's first epoch.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -69,7 +70,7 @@ _key_fingerprint() {
   printf '%s' "$1" | shasum -a 256 | cut -c1-16 | sed 's/\(....\)/\1-/g;s/-$//'
 }
 
-# A timestamp alone collides when generate/rotate run twice within the same
+# A timestamp alone collides when two epochs are minted within the same
 # second (age-keygen refuses to overwrite an existing identity file, which
 # would otherwise fail *silently* under our error handling) — append a short
 # random suffix so the key_id (and its identity filename) is always unique.
@@ -89,12 +90,12 @@ _key_epoch_json() {
     "$(_agmsg_sqlesc "$1")" "$2" "$3" "$(_agmsg_sqlesc "$4")" "$prev_sql" "$(_agmsg_sqlesc "$6")"
 }
 
-# _key_write_epoch <team> <config_json_path> <epoch_json_expr> [existing_epochs_array_or_empty]
-# Writes remote_key.current = the new epoch and appends it to remote_key.epochs,
-# under the per-team config lock.
-_key_write_epoch() {
-  local team="$1" cfg="$2" epoch_expr="$3" escaped updated
-  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
+# _key_write_epoch_locked <config_json_path> <epoch_json_expr>
+# Assumes the caller ALREADY holds this team's config lock (agmsg_lock_acquire)
+# — does not acquire/release it itself. Writes remote_key.current = the new
+# epoch and appends it to remote_key.epochs.
+_key_write_epoch_locked() {
+  local cfg="$1" epoch_expr="$2" escaped updated
   escaped=$(sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
     "SELECT json_set(:json,
@@ -107,7 +108,24 @@ _key_write_epoch() {
          )
      );")
   agmsg_write_atomic "$cfg" "$updated"
-  agmsg_lock_release
+}
+
+# _key_write_identity_atomic <dest_path> <content>
+# Writes <content> to <dest_path> without ever truncating an existing file
+# in place: create a same-directory temp file with mktemp (which itself
+# opens O_EXCL, so it can never collide with or follow an existing path —
+# in particular never follows a symlink at <dest_path>), 0600 it before any
+# content touches disk, write, best-effort fsync, then atomically rename
+# over the destination. A crash or full disk during the write leaves the
+# temp file incomplete and the real <dest_path> (if any) untouched (B4).
+_key_write_identity_atomic() {
+  local dest="$1" content="$2" dir tmp
+  dir="$(dirname "$dest")"
+  tmp="$(mktemp "$dir/.identity-XXXXXX")"
+  chmod 600 "$tmp"
+  printf '%s\n' "$content" > "$tmp"
+  sync 2>/dev/null || true
+  mv "$tmp" "$dest"
 }
 
 cmd_generate() {
@@ -122,24 +140,32 @@ cmd_generate() {
     exit 1
   fi
 
-  local existing
-  existing="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
-  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-    echo "agmsg: team '$team' already has a key (key_id=$existing) — use 'key.sh rotate $team' to start a new epoch, or 'key.sh show $team' to view the current one." >&2
-    exit 1
-  fi
-
-  local cred_dir key_id created_at identity_file recipient
+  local cred_dir
   cred_dir="$(_key_cred_dir "$team")"
   mkdir -p "$cred_dir"
   chmod 700 "$cred_dir" 2>/dev/null || true
+
+  # The existence check and the write happen inside the SAME team-config
+  # lock (B4) — otherwise two concurrent `generate` (or `generate` racing
+  # `import`) calls can both pass the check before either writes, minting
+  # two unrelated epoch-0 keys for the same team.
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  local existing
+  existing="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
+  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+    agmsg_lock_release
+    echo "agmsg: team '$team' already has a key (key_id=$existing) — use 'key.sh show $team' to view it (rotation is not available in this release)." >&2
+    exit 1
+  fi
+
+  local key_id created_at identity_file recipient keygen_err
   key_id="$(_key_new_key_id)"
   created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   identity_file="$cred_dir/$key_id.key"
 
-  local keygen_err
   keygen_err="$(mktemp "${TMPDIR:-/tmp}/agmsg-keygen-err.XXXXXX")"
   if ! age-keygen -o "$identity_file" 2>"$keygen_err"; then
+    agmsg_lock_release
     echo "agmsg: age-keygen failed: $(cat "$keygen_err" 2>/dev/null)" >&2
     rm -f "$keygen_err"
     exit 1
@@ -148,7 +174,8 @@ cmd_generate() {
   chmod 600 "$identity_file"
   recipient="$(grep '^# public key:' "$identity_file" | sed 's/^# public key: //')"
 
-  _key_write_epoch "$team" "$cfg" "$(_key_epoch_json "$key_id" 0 0 "$recipient" null "$created_at")" || exit 1
+  _key_write_epoch_locked "$cfg" "$(_key_epoch_json "$key_id" 0 0 "$recipient" null "$created_at")"
+  agmsg_lock_release
 
   echo "Generated a new key for team '$team'."
   echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
@@ -181,7 +208,7 @@ cmd_show() {
   key_id="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
   recipient="$(_key_read_config_field "$cfg" '$.remote_key.current.recipient')"
   if [ -z "$key_id" ] || [ "$key_id" = "null" ]; then
-    echo "agmsg: team '$team' has no key yet — run 'key.sh generate $team' or 'key.sh import $team <identity>'." >&2
+    echo "agmsg: team '$team' has no key yet — run 'key.sh generate $team' or 'key.sh import $team'." >&2
     exit 1
   fi
 
@@ -215,9 +242,27 @@ cmd_show() {
 }
 
 cmd_import() {
-  local team="${1:?Usage: key.sh import <team> <identity>}"
-  local identity="${2:?Missing identity}"
+  local identity_stdin=0 positional=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --identity-stdin) identity_stdin=1; shift ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  local team="${positional[0]:?Usage: key.sh import <team> [<identity>] [--identity-stdin]}"
   agmsg_validate_team_name "$team" || exit 1
+
+  local identity
+  if [ "$identity_stdin" -eq 1 ]; then
+    if [ "${#positional[@]}" -gt 1 ]; then
+      echo "agmsg: too many arguments with --identity-stdin (expected only <team>)" >&2
+      exit 1
+    fi
+    identity="$(cat)"
+  else
+    identity="${positional[1]:?Missing identity (positional argument, or use --identity-stdin)}"
+    echo "agmsg: passing the identity as an argument may expose it via shell history, 'ps', or a caller's own argv/transcript; prefer --identity-stdin" >&2
+  fi
 
   case "$identity" in
     AGE-SECRET-KEY-1*) : ;;
@@ -242,99 +287,63 @@ cmd_import() {
     exit 1
   fi
 
-  # Fail closed: if the team already has an authorized epoch, the imported
-  # identity's recipient must match it — an identity that decrypts nothing
-  # useful for this team is more confusing to discover later than to reject
-  # up front (ADR 0007 §8).
-  local cur_key_id cur_recipient
-  cur_key_id="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
-  cur_recipient="$(_key_read_config_field "$cfg" '$.remote_key.current.recipient')"
-  if [ -n "$cur_key_id" ] && [ "$cur_key_id" != "null" ] && [ "$cur_recipient" != "$recipient" ]; then
-    echo "agmsg: imported identity's recipient does not match team '$team's authorized key — refusing to import." >&2
-    exit 1
-  fi
-
-  local cred_dir key_id created_at identity_file
+  local cred_dir
   cred_dir="$(_key_cred_dir "$team")"
   mkdir -p "$cred_dir"
   chmod 700 "$cred_dir" 2>/dev/null || true
 
-  if [ -z "$cur_key_id" ] || [ "$cur_key_id" = "null" ]; then
-    # No epoch yet for this team: importing establishes the first one.
-    key_id="epoch-$(date -u +%Y%m%d%H%M%S)"
-    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    identity_file="$cred_dir/$key_id.key"
-    printf '%s\n' "$identity" > "$identity_file"
-    chmod 600 "$identity_file"
-    _key_write_epoch "$team" "$cfg" "$(_key_epoch_json "$key_id" 0 0 "$recipient" null "$created_at")" || exit 1
+  # Fail closed, and check-then-act atomically under the team lock (B4):
+  # if the team already has an authorized epoch, the imported identity's
+  # recipient must match it. Checking outside the lock would let a
+  # concurrent generate/import race land a different key in between.
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
+  local cur_key_id cur_recipient
+  cur_key_id="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
+  cur_recipient="$(_key_read_config_field "$cfg" '$.remote_key.current.recipient')"
+
+  if [ -n "$cur_key_id" ] && [ "$cur_key_id" != "null" ]; then
+    if [ "$cur_recipient" != "$recipient" ]; then
+      agmsg_lock_release
+      echo "agmsg: imported identity's recipient does not match team '$team's authorized key — refusing to import." >&2
+      exit 1
+    fi
+    # Matches the existing epoch: just store this device's copy of the
+    # identity under the existing key_id (idempotent re-import). Does not
+    # create a new epoch/snapshot — that only happens via generate.
+    _key_write_identity_atomic "$cred_dir/$cur_key_id.key" "$identity"
+    agmsg_lock_release
   else
-    # Matches the existing epoch (checked above): just store this device's
-    # copy of the identity under the existing key_id. Does not create a new
-    # epoch/snapshot — that only happens via generate (new team) or rotate.
-    key_id="$cur_key_id"
-    identity_file="$cred_dir/$key_id.key"
-    printf '%s\n' "$identity" > "$identity_file"
-    chmod 600 "$identity_file"
+    # No epoch yet for this team: importing establishes the first one.
+    local key_id created_at
+    key_id="$(_key_new_key_id)"
+    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _key_write_identity_atomic "$cred_dir/$key_id.key" "$identity"
+    _key_write_epoch_locked "$cfg" "$(_key_epoch_json "$key_id" 0 0 "$recipient" null "$created_at")"
+    agmsg_lock_release
   fi
+  unset identity
 
   echo "Imported key for team '$team'."
   echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
 }
 
+# key rotate — NOT READY.
+#
+# An adversarial design review found this scope's previous_snapshot_sha256
+# design insufficient: hashing only this script's own ad hoc epoch JSON
+# does not detect a wholesale rollback of config.json to a stale version
+# (the hash chain inside a rolled-back file still looks internally
+# consistent), and does not use the age-v1 profile's pinned canonical
+# epoch-snapshot shape. A real fix needs a durable, binding-scoped private
+# anchor (outside the regular synced config) tracking the highest-seen
+# epoch_revision + snapshot digest, checked on load/rotate, with a
+# crash-safe commit ordering relative to the new identity file — none of
+# which this script implements. Shipping rotate without that anchor would
+# present anti-rollback protection that isn't actually there. Deferred to
+# a follow-up design pass; this command intentionally refuses to run.
 cmd_rotate() {
-  local team="${1:?Usage: key.sh rotate [<team>]}"
-  agmsg_validate_team_name "$team" || exit 1
-  _key_require_age || exit 1
-
-  local cfg
-  cfg="$(_key_team_config "$team")"
-  if [ ! -f "$cfg" ]; then
-    echo "agmsg: team not found: $team" >&2
-    exit 1
-  fi
-
-  local cur_key_id cur_epoch cur_writer_gen
-  cur_key_id="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
-  if [ -z "$cur_key_id" ] || [ "$cur_key_id" = "null" ]; then
-    echo "agmsg: team '$team' has no existing key to rotate — run 'key.sh generate $team' first." >&2
-    exit 1
-  fi
-  cur_epoch="$(_key_read_config_field "$cfg" '$.remote_key.current.epoch_revision')"
-  cur_writer_gen="$(_key_read_config_field "$cfg" '$.remote_key.current.writer_generation')"
-
-  local cred_dir new_key_id created_at identity_file new_epoch recipient
-  cred_dir="$(_key_cred_dir "$team")"
-  mkdir -p "$cred_dir"
-  chmod 700 "$cred_dir" 2>/dev/null || true
-  new_key_id="$(_key_new_key_id)"
-  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  new_epoch=$((cur_epoch + 1))
-  identity_file="$cred_dir/$new_key_id.key"
-
-  local keygen_err
-  keygen_err="$(mktemp "${TMPDIR:-/tmp}/agmsg-keygen-err.XXXXXX")"
-  if ! age-keygen -o "$identity_file" 2>"$keygen_err"; then
-    echo "agmsg: age-keygen failed: $(cat "$keygen_err" 2>/dev/null)" >&2
-    rm -f "$keygen_err"
-    exit 1
-  fi
-  rm -f "$keygen_err"
-  chmod 600 "$identity_file"
-  recipient="$(grep '^# public key:' "$identity_file" | sed 's/^# public key: //')"
-
-  # Never re-encrypts existing envelopes (H1): only the config's "current"
-  # epoch pointer moves. Every prior epoch stays in remote_key.epochs and its
-  # identity file stays on disk — retaining old epochs is required to decrypt
-  # history (single-writer rotation, no cutover barrier needed).
-  _key_write_epoch "$team" "$cfg" "$(_key_epoch_json "$new_key_id" "$new_epoch" "$cur_writer_gen" "$recipient" null "$created_at")" || exit 1
-
-  echo "Started a new epoch for team '$team' (epoch_revision $cur_epoch -> $new_epoch)."
-  echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
-  echo
-  echo "This device's prior key is retained locally and still used to decrypt"
-  echo "older history. Messages sent from now on use the new key. Sharing the"
-  echo "new key with anyone else who needs to read new messages is a manual"
-  echo "'key.sh show' hand-off, same as initial onboarding."
+  echo "agmsg: 'key rotate' is not available in this release — it needs a durable anti-rollback anchor (age-v1 epoch-snapshot hash chain) this script does not yet implement. No state was changed." >&2
+  exit 1
 }
 
 case "${1:-}" in
