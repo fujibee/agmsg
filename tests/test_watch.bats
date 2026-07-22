@@ -490,6 +490,28 @@ _wait_pidfile() {
   ! ls "$TEST_SKILL_DIR/run"/watch.*.pid >/dev/null 2>&1
 }
 
+# A shifted THREE-argument launch (no active_name) leaves only two arguments.
+# The old ${3:?} guard died on stderr, which a monitor tool consuming stdout
+# never surfaces — the failure must land on stdout instead.
+@test "watch: shifted three-arg launch (missing agent_type) fails loudly on stdout" {
+  local out rc=0
+  out="$(bash "$SCRIPTS/watch.sh" "$PROJ" claude-code 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ]
+  [[ "$out" == *"ERROR: watch.sh needs"* ]]
+  [[ "$out" == *"shifted"* ]]
+  ! ls "$TEST_SKILL_DIR/run"/watch.*.pid >/dev/null 2>&1
+}
+
+# A path-like value in the type slot must be rejected outright, not fed to the
+# registry where it would concatenate into a filesystem path and could resolve
+# to a builtin manifest (e.g. ../types/claude-code).
+@test "watch: path-like agent type is rejected outright" {
+  run bash "$SCRIPTS/watch.sh" sid-path "$PROJ" "../types/claude-code"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR: invalid agent type"* ]]
+  ! ls "$TEST_SKILL_DIR/run"/watch.*.pid >/dev/null 2>&1
+}
+
 # The caller-side companion of the guard above: command templates pass the
 # sentinel "-" ("${GROK_SESSION_ID:--}") instead of a droppable empty string.
 # watch.sh must fold "-" into the same generated-fallback path as "" (#236).
