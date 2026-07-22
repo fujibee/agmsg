@@ -88,7 +88,7 @@ Four possible outputs:
 
 **Ensure the monitor is running first (monitor mode only).** If the project's delivery mode is `monitor` (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status grok-build "$(pwd)"`) and no `agmsg inbox stream` watcher is running in this session yet, invoke the `monitor` tool now (before the subcommand below):
 
-- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$GROK_SESSION_ID" "$(pwd)" grok-build`
+- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${GROK_SESSION_ID:--}" "$(pwd)" grok-build`
 - description: `agmsg inbox stream`
 - persistent: true
 
@@ -131,7 +131,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 4. **If delivery mode is `monitor`**, switch the watcher to the new role so receive is restricted to it:
    a. If an `agmsg inbox stream` watcher is already running in this session, stop it with `kill_command_or_subagent` on its task id.
    b. Launch a fresh watcher with the `monitor` tool (persistent):
-      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$GROK_SESSION_ID" "$(pwd)" grok-build <name>`
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${GROK_SESSION_ID:--}" "$(pwd)" grok-build <name>`
       - description: `agmsg inbox stream`
    The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
 5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
@@ -142,7 +142,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" grok-build <name>` to remove that role's registration.
 3. If the session's active FROM was `<name>`, clear that state.
 4. **If delivery mode is `monitor`** and an `agmsg inbox stream` watcher is running in this session, stop it with `kill_command_or_subagent`, then relaunch it with the `monitor` tool using the default (no 4th arg) subscription so receive covers the project's remaining roles:
-   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$GROK_SESSION_ID" "$(pwd)" grok-build`
+   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${GROK_SESSION_ID:--}" "$(pwd)" grok-build`
    - description: `agmsg inbox stream`
    - persistent: true
 5. Tell the user: "Dropped role `<name>` from this project."

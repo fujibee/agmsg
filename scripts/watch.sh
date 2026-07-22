@@ -36,8 +36,14 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 # GROK_SESSION_ID). An empty first arg is tolerated and resolved below (after the
 # libs are sourced) rather than failing hard, so a runtime that cannot bake one
 # in — notably Grok Build's `monitor` tool, where "$GROK_SESSION_ID" expands to
-# empty — still starts the watcher. project_path and agent_type are required.
+# empty — still starts the watcher. A literal `-` first arg is the caller-side
+# sentinel for the same "no session id" case: some launcher shells re-evaluate
+# the command line and DROP a quoted-but-empty argument entirely (shifting every
+# later argument one slot left), so command templates pass
+# "${GROK_SESSION_ID:--}" and `-` is folded into the empty-arg path here.
+# project_path and agent_type are required.
 SESSION_ID="${1:-}"
+[ "$SESSION_ID" = "-" ] && SESSION_ID=""
 PROJECT_PATH="${2:?Missing project_path}"
 AGENT_TYPE="${3:?Missing agent_type}"
 ACTIVE_NAME="${4:-}"
@@ -49,6 +55,35 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+
+# Fail loudly on an unknown agent_type instead of running with zero
+# subscriptions. The dominant real-world cause is a shifted argument list: a
+# launcher shell that drops an empty first argument (see the session_id note
+# above) makes project_path land in $2 and agent_type receive whatever was in
+# $4 — typically an agent/role name. identities.sh then resolves nothing and,
+# without this guard, the watcher keeps polling forever while delivering
+# nothing: a silent zero-subscription outage that looks alive from the
+# outside. Same shape as the DB-open healthcheck (#197): one loud line on
+# stdout (the monitor event stream), then exit.
+#
+# Hot path stays free: a built-in type is confirmed by a single manifest stat
+# (path-segment names only — a name with '/' or '..' never confirms). Only a
+# non-builtin name pays for the registry (trusted external plugins can
+# legitimately add types), and the full type enumeration runs only in the
+# error message.
+_agmsg_type_confirmed=""
+case "$AGENT_TYPE" in
+  */*|*..*) ;;
+  *) [ -f "$SCRIPT_DIR/drivers/types/$AGENT_TYPE/type.conf" ] && _agmsg_type_confirmed=1 ;;
+esac
+if [ -z "$_agmsg_type_confirmed" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/type-registry.sh"
+  if ! agmsg_type_dir "$AGENT_TYPE" >/dev/null 2>&1; then
+    echo "ERROR: unknown agent type '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g')). Arguments may have shifted: a caller shell can drop an empty session_id argument entirely. Pass the sentinel '-' (e.g. \"\${GROK_SESSION_ID:--}\") instead of an empty string."
+    exit 1
+  fi
+fi
 
 # Resolve a session id when the launcher could not bake one in (empty first arg).
 # Grok Build's `monitor` tool runs the watcher with $GROK_SESSION_ID unset, so

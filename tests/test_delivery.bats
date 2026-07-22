@@ -2078,6 +2078,10 @@ JSON
   [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
   [[ "$output" == *"monitor"* ]]
   [[ "$output" == *"watch.sh"* ]]
+  # The rule bakes the sentinel form, not a droppable empty expansion: grok's
+  # monitor tool re-evaluates the command line and deletes a quoted-but-empty
+  # "$GROK_SESSION_ID" argument, shifting every later argument one slot left.
+  [[ "$output" == *'watch.sh "${GROK_SESSION_ID:--}"'* ]]
 }
 
 @test "delivery status (grok-build): reports monitor when the monitor rule is present" {
