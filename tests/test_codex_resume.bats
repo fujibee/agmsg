@@ -105,3 +105,72 @@ recorded_uuid() {
   [ "$status" -eq 0 ]
   [ -z "$(recorded_uuid team alice)" ]
 }
+
+# Read back the recorded project for (team, agent).
+recorded_project() {
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_get "$1" "$2" project
+}
+
+@test "codex record: project arg is optional -- defaults to \$PWD, canonical form" {
+  local proj want; proj="$(mktemp -d)"
+  want="$(cd "$proj" && pwd -P)"
+  ( cd "$proj" && CODEX_THREAD_ID="pwd-thread-1" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice )
+  [ "$(recorded_uuid team alice)" = "pwd-thread-1" ]
+  [ "$(recorded_project team alice)" = "$want" ]
+}
+
+@test "codex record: no project arg + no env still finds the rollout via \$PWD" {
+  local proj; proj="$(mktemp -d)"
+  make_rollout "pwd-fallback-uuid" "$proj"
+  ( unset CODEX_THREAD_ID; cd "$proj" && \
+      bash "$TYPES/codex/codex-record-session.sh" team alice )
+  [ "$(recorded_uuid team alice)" = "pwd-fallback-uuid" ]
+}
+
+# The lone `\` a PowerShell-parsed \"$PWD\" collapses to (see the script
+# header). On MSYS it IS a real directory that canonicalizes to a drive root;
+# on POSIX it fails the -d check. Either way: no record.
+@test "codex record: backslash project (PowerShell quoting damage) records nothing" {
+  CODEX_THREAD_ID="poison-thread" \
+    run bash "$TYPES/codex/codex-record-session.sh" team alice '\'
+  [ "$status" -eq 0 ]
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: filesystem-root project records nothing" {
+  CODEX_THREAD_ID="root-thread" \
+    run bash "$TYPES/codex/codex-record-session.sh" team alice /
+  [ "$status" -eq 0 ]
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: drive-root project records nothing" {
+  # /c exists on MSYS (caught by the root check); on POSIX it usually doesn't
+  # (caught by -d). Both paths must end in "no record".
+  CODEX_THREAD_ID="drive-thread" \
+    run bash "$TYPES/codex/codex-record-session.sh" team alice /c
+  [ "$status" -eq 0 ]
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: nonexistent project records nothing" {
+  CODEX_THREAD_ID="ghost-thread" \
+    run bash "$TYPES/codex/codex-record-session.sh" team alice /no/such/dir
+  [ "$status" -eq 0 ]
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: symlinked project is recorded in canonical (physical) form" {
+  local real link want; real="$(mktemp -d)"
+  link="$HOME/proj-link"
+  ln -s "$real" "$link" 2>/dev/null || skip "symlinks unavailable"
+  [ -L "$link" ] || skip "ln -s fell back to copy (MSYS default)"
+  want="$(cd "$real" && pwd -P)"
+  CODEX_THREAD_ID="sym-thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$link"
+  [ "$(recorded_uuid team alice)" = "sym-thread" ]
+  [ "$(recorded_project team alice)" = "$want" ]
+}

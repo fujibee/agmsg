@@ -88,9 +88,13 @@ done <<< "$TEAMS"
 # failed record write must never fail the claim, and the record is written only
 # on full success — the held/rollback path above writes none.
 BARE_SID="$(agmsg_instance_bare_sid "$SESSION_ID")"
+# Record the canonical (physical) project form -- the same spelling
+# codex-record-session.sh writes -- so role-session records carry one path
+# form across agent types (consumers canonicalize on read either way).
+PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT")"
 while IFS= read -r team; do
   [ -z "$team" ] && continue
-  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT" "$TYPE" || true
+  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" || true
 done <<< "$TEAMS"
 
 # Print a line describing each claimed team. One team per most projects but

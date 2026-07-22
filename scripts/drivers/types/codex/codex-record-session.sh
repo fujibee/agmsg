@@ -8,7 +8,17 @@
 # calls it, and it writes the record so a later spawn/resume brings the role back
 # into its thread.
 #
-# Usage: codex-record-session.sh <team> <agent> <project>
+# Usage: codex-record-session.sh <team> <agent> [project]
+#
+# <project> is optional and defaults to this script's own $PWD. The default is
+# codex-specific and deliberate: on Windows codex's shell_command tool runs
+# through PowerShell, so a "$(pwd)"/"$PWD" argument in the calling prompt is
+# expanded -- or mangled: an escaped-double-quote form (\"$PWD\") collapses to
+# a lone `\` -- by PowerShell BEFORE bash ever sees it, and the model's quoting
+# choice is not controllable. This script itself always runs under bash in the
+# session's working directory, so its own $PWD is deterministically the correct
+# POSIX form. Other types must keep passing project explicitly -- they don't
+# share codex's shell_command cwd guarantee.
 #
 # Thread-id resolution — QUALITY GUARD (#339 review). The recorded id MUST be
 # THIS session's codex thread, never another's: a resume mis-fire (resuming the
@@ -24,7 +34,10 @@
 set -uo pipefail
 
 TEAM="${1:-}"; AGENT="${2:-}"; PROJECT="${3:-}"
-[ -n "$TEAM" ] && [ -n "$AGENT" ] && [ -n "$PROJECT" ] || exit 0
+[ -n "$TEAM" ] && [ -n "$AGENT" ] || exit 0
+# No <project> argument -> this script's own $PWD (see header: deterministic
+# under bash even when the caller's shell is PowerShell).
+[ -n "$PROJECT" ] || PROJECT="$PWD"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # types/codex/ -> up 4 (codex -> types -> drivers -> scripts -> skill root).
@@ -37,6 +50,19 @@ export SKILL_DIR
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/role-session.sh"
 
+# Poison-record guard (best-effort bias: record nothing when unsure). A mangled
+# <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
+# to -- must never be recorded: the launcher's project-mismatch safety valve
+# would then exclude the role and silently stop its delivery. Reject anything
+# that is not a real directory, and anything whose physical path is a
+# filesystem root (`/`, an MSYS drive root like `/c`, or a Windows drive root)
+# -- no real project lives there, so such a value can only be quoting damage.
+[ -d "$PROJECT" ] || exit 0
+project_phys="$(agmsg_canonical_path "$PROJECT")"
+case "$project_phys" in
+  / | /[A-Za-z] | [A-Za-z]: | [A-Za-z]:/ | [A-Za-z]:\\) exit 0 ;;
+esac
+
 thread=""
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   thread="$CODEX_THREAD_ID"
@@ -45,7 +71,6 @@ else
   # dir check below fails -> fresh), not an unbound-variable abort (co1 nit).
   sessions_dir="${HOME:-}/.codex/sessions"
   if [ -n "${HOME:-}" ] && [ -d "$sessions_dir" ]; then
-    project_phys="$(agmsg_canonical_path "$PROJECT")"
     # Distinct thread ids whose session_meta cwd (canonicalized -- codex records
     # the physical cwd while agmsg may hold a symlinked path, #160) matches the
     # project, among the most recent rollouts. Exactly one => unambiguously ours.
@@ -80,6 +105,8 @@ else
 fi
 
 [ -n "$thread" ] || exit 0
-# codex thread ids are already bare UUIDs (no composite pid form), so record as-is.
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$PROJECT" codex || true
+# codex thread ids are already bare UUIDs (no composite pid form), so record
+# as-is. The project is recorded in its canonical (physical) form so records
+# carry one path spelling regardless of how the caller spelled the argument.
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex || true
 exit 0
