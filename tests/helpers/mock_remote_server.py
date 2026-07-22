@@ -38,7 +38,10 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep test output quiet
 
     def _send_json(self, code, obj):
-        body = json.dumps(obj).encode()
+        self._send_raw(code, json.dumps(obj))
+
+    def _send_raw(self, code, text):
+        body = text.encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -86,6 +89,38 @@ class Handler(BaseHTTPRequestHandler):
                     "remote_team_name": "myteam",
                     "protocol_version": 1,
                     "capabilities": {"write_allowed_ciphers": ["none"]},
+                })
+                return
+
+            if token == "duplicate-key-token":
+                # json.dumps() can't produce a duplicate key from a dict
+                # (dicts can't have one) — hand-build the raw text so the
+                # SECOND "credential_id" is what a naive `.get()`-based
+                # parser would silently keep (python's own json.loads also
+                # keeps only the last occurrence unless duplicate-key
+                # detection is deliberately added).
+                self._send_raw(200, """{
+                    "credential": "session-credential-xyz",
+                    "credential_id": "cred-visible-in-review",
+                    "credential_id": "cred-smuggled-in-second-copy",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
+                    "remote_team_name": "myteam",
+                    "protocol_version": 1,
+                    "capabilities": {"write_allowed_ciphers": ["none"]}
+                }""")
+                return
+
+            if token == "unknown-field-token":
+                self._send_json(200, {
+                    "credential": "session-credential-xyz",
+                    "credential_id": "cred-unknown-field",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
+                    "remote_team_name": "myteam",
+                    "protocol_version": 1,
+                    "capabilities": {"write_allowed_ciphers": ["none"]},
+                    "unexpected_extra_field": "smuggled-value",
                 })
                 return
 

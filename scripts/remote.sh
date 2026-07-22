@@ -103,6 +103,7 @@ _remote_http_post_json() {
   local url="$1" body_file="$2" out_file="$3" cfg http_code
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   chmod 600 "$cfg"
+  trap 'rm -f "$cfg"' EXIT INT TERM
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
@@ -111,6 +112,7 @@ _remote_http_post_json() {
   } > "$cfg"
   http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
   rm -f "$cfg"
+  trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
 
@@ -120,6 +122,7 @@ _remote_http_post_bearer() {
   local url="$1" token="$2" cfg http_code
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   chmod 600 "$cfg"
+  trap 'rm -f "$cfg"' EXIT INT TERM
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
@@ -127,14 +130,41 @@ _remote_http_post_bearer() {
   } > "$cfg"
   http_code=$(curl -sS -o /dev/null -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
   rm -f "$cfg"
+  trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
 
 # _remote_revoke <endpoint> <credential_id> <credential> -> 0 revoked, 1 not
+# 404 counts as success (D2): a retry after a crash right after a prior
+# successful revoke would otherwise see "unknown credential_id" and be
+# unable to ever make progress — 404 for a credential_id we ourselves
+# issued and are trying to revoke is just as strong evidence that it's
+# not active anymore as a 200 is.
 _remote_revoke() {
   local endpoint="$1" credential_id="$2" credential="$3" http_code
   http_code="$(_remote_http_post_bearer "$endpoint/v1/credentials/$credential_id/revoke" "$credential")"
-  [ "$http_code" = "200" ]
+  [ "$http_code" = "200" ] || [ "$http_code" = "404" ]
+}
+
+# _remote_local_disconnect <team> <cfg>
+# The local-state half of disconnect (credential file removal + marking
+# the binding disconnected) — factored out so the --force rebind path can
+# apply it immediately after a successful revoke, before ever attempting
+# the new exchange (D2): otherwise a crash between "old credential
+# revoked" and "new connection fully committed" leaves local state
+# claiming to still be connected to a credential that the server has
+# already invalidated, with no way to tell from local state alone.
+_remote_local_disconnect() {
+  local team="$1" cfg="$2" cred_file escaped updated disconnected_at
+  cred_file="$(_remote_cred_file "$team")"
+  rm -f "$cred_file"
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
+  disconnected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  escaped=$(sed "s/'/''/g" "$cfg")
+  updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
+    "SELECT json_set(:json, '\$.remote_binding.disconnected_at', '$(_agmsg_sqlesc "$disconnected_at")');")
+  agmsg_write_atomic "$cfg" "$updated"
+  agmsg_lock_release
 }
 
 # --- connect -------------------------------------------------------------
@@ -162,14 +192,20 @@ _remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
 # instead of needing (and orphaning a credential for) a fresh single-use
 # token (B5).
 #
-# Takes the RAW response file and re-serializes its exact bytes as-is
-# (never the individually-extracted credential/credential_id/etc as their
-# own values) — <resp_file> and <endpoint> are passed to python3 by PATH
-# and as a non-secret string respectively, so the secret itself is read
-# only via file I/O inside the python process and never appears as any
-# process's own argv element (R1: an earlier version of this function
+# Takes the RAW response file and embeds its exact bytes VERBATIM as a
+# JSON string value (never re-parsed/re-serialized as a nested object,
+# and never the individually-extracted credential/credential_id/etc as
+# their own values) — <resp_file> and <endpoint> are passed to python3 by
+# PATH and as a non-secret string respectively, so the secret itself is
+# read only via file I/O inside the python process and never appears as
+# any process's own argv element (R1: an earlier version of this function
 # passed the credential as a positional python3 argument, which any
 # concurrent `ps` could read for as long as that process was alive).
+# Storing the raw bytes verbatim rather than round-tripping through
+# json.load()+json.dumps() also closes D4: a reparse/reserialize step
+# would silently collapse duplicate keys with no trace, before resume
+# ever gets a chance to run the duplicate-detecting strict validator
+# against them.
 _remote_write_pending() {
   local key="$1" resp_file="$2" endpoint="$3" pending_file tmp json
   mkdir -p "$PENDING_DIR"
@@ -179,8 +215,8 @@ _remote_write_pending() {
 import json, sys
 resp_path, endpoint = sys.argv[1], sys.argv[2]
 with open(resp_path) as f:
-    response = json.load(f)
-print(json.dumps({"endpoint": endpoint, "response": response}))
+    raw_response_text = f.read()
+print(json.dumps({"endpoint": endpoint, "raw_response_text": raw_response_text}))
 ' "$resp_file" "$endpoint")
   tmp="$(mktemp "$PENDING_DIR/.pending-XXXXXX")"
   chmod 600 "$tmp"
@@ -190,12 +226,14 @@ print(json.dumps({"endpoint": endpoint, "response": response}))
 }
 
 # _remote_load_pending <pending_file> <out_resp_file> -> prints endpoint
-# Extracts the embedded raw response back out to its own file (so it can
-# be re-run through the SAME strict parse-exchange-response.py validator
-# a fresh exchange uses — R5: a pending file is not inherently more
-# trustworthy than a live response and must not skip validation) and
-# prints the (non-secret) endpoint string. <pending_file>'s path is
-# passed by PATH, never its contents, as a python3 argument.
+# Extracts the embedded raw response bytes back out to its own file,
+# byte-for-byte as originally received, so it can be re-run through the
+# SAME strict parse-exchange-response.py validator (including its
+# duplicate-key detection) a fresh exchange uses (R5/D4) — a pending file
+# is not inherently more trustworthy than a live response and must not
+# skip validation, and nothing about the original bytes may have been
+# lost in between. <pending_file>'s path is passed by PATH, never its
+# contents, as a python3 argument.
 _remote_load_pending() {
   local pending_file="$1" out_resp_file="$2"
   python3 -c '
@@ -204,7 +242,7 @@ pending_path, out_path = sys.argv[1], sys.argv[2]
 with open(pending_path) as f:
     pending = json.load(f)
 with open(out_path, "w") as f:
-    json.dump(pending["response"], f)
+    f.write(pending["raw_response_text"])
 print(pending["endpoint"])
 ' "$pending_file" "$out_resp_file"
 }
@@ -223,10 +261,24 @@ _remote_commit() {
   mkdir -p "$CRED_ROOT"
   chmod 700 "$CRED_ROOT" 2>/dev/null || true
   cred_file="$(_remote_cred_file "$team")"
+  # Escape backslash BEFORE quote (order matters: escaping quote first
+  # would double-escape any backslash the first substitution just
+  # inserted) — the previous version only escaped quotes, so a credential
+  # containing a literal backslash would have produced invalid JSON (D3).
   cred_json="$(printf '{"credential":"%s","credential_id":"%s"}' \
-    "$(printf '%s' "$credential" | sed 's/"/\\"/g')" \
-    "$(printf '%s' "$credential_id" | sed 's/"/\\"/g')")"
-  ( umask 077; printf '%s\n' "$cred_json" > "$cred_file" )
+    "$(printf '%s' "$credential" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+    "$(printf '%s' "$credential_id" | sed 's/\\/\\\\/g; s/"/\\"/g')")"
+  # Atomic write (temp file in the same dir, 0600 before any content is
+  # written, best-effort fsync, then rename) — never truncate the real
+  # path in place (D3): a crash mid-write, or a re-commit racing another
+  # reader, must not leave a half-written/corrupt credential file as the
+  # only copy of the secret.
+  local cred_tmp
+  cred_tmp="$(mktemp "$CRED_ROOT/.cred-XXXXXX")"
+  chmod 600 "$cred_tmp"
+  printf '%s\n' "$cred_json" > "$cred_tmp"
+  sync 2>/dev/null || true
+  mv "$cred_tmp" "$cred_file"
   unset cred_json
 
   connected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -247,7 +299,8 @@ _remote_commit() {
 }
 
 cmd_connect() {
-  local endpoint="" token="" token_stdin=0 team="" force=0 positional=()
+  local endpoint="" token="" token_stdin=0 team="" force=0 positional=() \
+    expected_old_credential_id=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --endpoint) endpoint="${2:?--endpoint requires a value}"; shift 2 ;;
@@ -379,6 +432,21 @@ cmd_connect() {
           exit 1
         fi
         unset old_credential
+        # D2: durably reflect the revoke locally right now, before the new
+        # exchange even starts — otherwise a crash between here and the
+        # new connection's commit leaves local state claiming to still be
+        # connected to a credential the server has already invalidated,
+        # with no local signal that anything is wrong. This also makes a
+        # retry idempotent: a second attempt sees the team as already
+        # (locally) disconnected and skips straight to a fresh exchange
+        # instead of trying to revoke an already-revoked credential again.
+        _remote_local_disconnect "$team" "$(_remote_team_config "$team")" || exit 1
+        # D1: remember exactly which credential we confirmed revoked, so
+        # the post-exchange CAS check (below) only proceeds if nothing
+        # else has touched this team's binding since — --force authorizes
+        # overriding *this specific* old credential, not "whatever is
+        # there by the time the exchange finishes."
+        expected_old_credential_id="$existing_credential_id"
       fi
     fi
 
@@ -458,16 +526,26 @@ cmd_connect() {
   cfg="$(_remote_team_config "$team")"
 
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
-  # Re-check under the lock (CAS): if something else connected this team
-  # in the window since our pre-flight check (or since the exchange, for
-  # the omitted-team case where no pre-check was possible), fail closed
-  # rather than mixing old/new bindings (B5) — UNLESS the existing binding
-  # is EXACTLY this same operation's own prior (partial) commit (its
-  # credential_id/server_instance_id/remote_team_id all match what we're
-  # about to write) — that's the resume-after-commit-but-before-pending-
-  # cleanup crash case (R3): idempotently finish (drop the pending file,
-  # skip re-writing an identical binding) rather than treating our own
-  # completed work as a foreign conflict.
+  # Re-check under the lock (CAS). Three cases are safe to commit into;
+  # everything else fails closed, INCLUDING under --force (D1: force
+  # authorizes overriding the *specific* old credential this operation
+  # already confirmed revoked pre-exchange — it is not a blanket bypass
+  # of this check, or a third party's differing credential could get
+  # silently clobbered and permanently orphaned server-side):
+  #   1. Not currently connected (fresh connect, or --force's pre-check
+  #      already revoked-and-locally-disconnected the prior credential —
+  #      D2 — so nothing conflicting remains to protect).
+  #   2. Already connected, but to EXACTLY this same operation's own
+  #      prior (partial) commit (credential_id/server_instance_id/
+  #      remote_team_id all match) — the resume-after-commit-but-before-
+  #      pending-cleanup crash case (R3). Re-commits (self-healing —
+  #      D3 — rather than trusting the binding metadata alone and just
+  #      deleting pending: if the credential FILE write never finished,
+  #      re-running commit repairs it, since committing identical data
+  #      twice is always safe).
+  #   3. Already connected to a DIFFERENT credential, but --force is set
+  #      AND that credential is exactly the one we revoked pre-exchange
+  #      (nothing else touched this team's binding in between).
   local recheck_connected recheck_disconnected recheck_credential_id \
     recheck_server_instance_id recheck_remote_team_id
   recheck_connected="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
@@ -480,22 +558,28 @@ cmd_connect() {
     && { [ -z "$recheck_disconnected" ] || [ "$recheck_disconnected" = "null" ]; }; then
     already_connected=1
   fi
-  if [ "$already_connected" -eq 1 ] \
-    && [ "$recheck_credential_id" = "$credential_id" ] \
+
+  local safe_to_commit=0
+  if [ "$already_connected" -eq 0 ]; then
+    safe_to_commit=1
+  elif [ "$recheck_credential_id" = "$credential_id" ] \
     && [ "$recheck_server_instance_id" = "$server_instance_id" ] \
     && [ "$recheck_remote_team_id" = "$remote_team_id" ]; then
-    # Already fully committed by this exact operation — idempotent no-op.
-    rm -f "$pending_file"
-    agmsg_lock_release
-  elif [ "$already_connected" -eq 1 ] && [ "$force" -ne 1 ]; then
-    agmsg_lock_release
-    echo "agmsg: team '$team' became connected by another process just now — the credential just issued for it was NOT committed locally. Revoke it (credential_id=$credential_id) via the console/admin side if it should not remain active, then retry." >&2
-    exit 1
-  else
+    safe_to_commit=1
+  elif [ "$force" -eq 1 ] && [ -n "$expected_old_credential_id" ] \
+    && [ "$recheck_credential_id" = "$expected_old_credential_id" ]; then
+    safe_to_commit=1
+  fi
+
+  if [ "$safe_to_commit" -eq 1 ]; then
     _remote_commit "$team" "$cfg" "$endpoint" "$credential" "$credential_id" \
       "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json"
     rm -f "$pending_file"
     agmsg_lock_release
+  else
+    agmsg_lock_release
+    echo "agmsg: team '$team' has a different, unexpected binding than expected — the credential just issued for it was NOT committed locally. Revoke it (credential_id=$credential_id) via the console/admin side if it should not remain active, then retry." >&2
+    exit 1
   fi
   unset credential
 
@@ -659,16 +743,7 @@ cmd_disconnect() {
     unset credential
   fi
 
-  rm -f "$cred_file"
-
-  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
-  local escaped updated disconnected_at
-  disconnected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  escaped=$(sed "s/'/''/g" "$cfg")
-  updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
-    "SELECT json_set(:json, '\$.remote_binding.disconnected_at', '$(_agmsg_sqlesc "$disconnected_at")');")
-  agmsg_write_atomic "$cfg" "$updated"
-  agmsg_lock_release
+  _remote_local_disconnect "$team" "$cfg" || exit 1
 
   if [ "$revoke_ok" -eq 1 ]; then
     echo "Revoking credential with server... ok."

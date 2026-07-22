@@ -92,6 +92,23 @@ teardown() {
   [[ "$output" == *"invalid exchange response"* ]]
 }
 
+@test "connect: rejects an exchange response with a duplicate JSON key (D4)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" duplicate-key-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid exchange response"* ]]
+  [[ "$output" == *"duplicate"* ]]
+  run bash "$SCRIPTS/remote.sh" status myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"never been connected"* ]]
+}
+
+@test "connect: rejects an exchange response with an unrecognized field (D4)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" unknown-field-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid exchange response"* ]]
+  [[ "$output" == *"unrecognized"* ]]
+}
+
 # --- connect -------------------------------------------------------------
 
 @test "connect: happy path, no encryption required" {
@@ -166,6 +183,47 @@ teardown() {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token --force
   [ "$status" -ne 0 ]
   [[ "$output" == *"--force requires an explicit"* ]]
+}
+
+@test "connect: --force does not blindly overwrite an unexpected binding it never revoked (D1)" {
+  # Simulates the race D1 flagged: an exchange already completed (its
+  # result sits in a pending record — reachable without --force's own
+  # pre-check/revoke step, exactly like a resumed crash-recovery would
+  # be) for a credential the team's CURRENT binding was never revoked
+  # against. --force must still refuse here rather than treat "force" as
+  # an unconditional license to overwrite whatever's there.
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token-one myteam
+  current_credential_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/myteam/config.json'))['remote_binding']['credential_id'])")
+
+  local token="unrelated-inflight-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+response = {
+    'credential': 'unrelated-credential-value',
+    'credential_id': 'cred-unrelated-c',
+    'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
+    'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
+    'remote_team_name': 'myteam',
+    'protocol_version': 1,
+    'capabilities': {'write_allowed_ciphers': ['none']},
+}
+json.dump({
+    'endpoint': '$ENDPOINT',
+    'raw_response_text': json.dumps(response),
+}, open('$pending_dir/$key.json', 'w'))
+"
+  chmod 600 "$pending_dir/$key.json"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unexpected binding"* ]]
+  # The original binding must be untouched — no silent overwrite.
+  after_credential_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/myteam/config.json'))['remote_binding']['credential_id'])")
+  [ "$after_credential_id" = "$current_credential_id" ]
 }
 
 @test "connect: after disconnect, reconnecting the same team needs no --force" {
@@ -275,17 +333,18 @@ teardown() {
   mkdir -p "$pending_dir"
   python3 -c "
 import json
+response = {
+    'credential': 'resumed-credential-value',
+    'credential_id': 'cred-resumed-xyz',
+    'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
+    'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
+    'remote_team_name': 'resumedteam',
+    'protocol_version': 1,
+    'capabilities': {'write_allowed_ciphers': ['none']},
+}
 json.dump({
     'endpoint': '$ENDPOINT',
-    'response': {
-        'credential': 'resumed-credential-value',
-        'credential_id': 'cred-resumed-xyz',
-        'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
-        'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
-        'remote_team_name': 'resumedteam',
-        'protocol_version': 1,
-        'capabilities': {'write_allowed_ciphers': ['none']},
-    },
+    'raw_response_text': json.dumps(response),
 }, open('$pending_dir/$key.json', 'w'))
 "
   chmod 600 "$pending_dir/$key.json"
@@ -320,17 +379,18 @@ json.dump({
   mkdir -p "$pending_dir"
   python3 -c "
 import json
+response = {
+    'credential': 'session-credential-resume-idempotent-token',
+    'credential_id': '$committed_credential_id',
+    'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
+    'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
+    'remote_team_name': 'myteam',
+    'protocol_version': 1,
+    'capabilities': {'write_allowed_ciphers': ['none']},
+}
 json.dump({
     'endpoint': '$ENDPOINT',
-    'response': {
-        'credential': 'session-credential-resume-idempotent-token',
-        'credential_id': '$committed_credential_id',
-        'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
-        'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
-        'remote_team_name': 'myteam',
-        'protocol_version': 1,
-        'capabilities': {'write_allowed_ciphers': ['none']},
-    },
+    'raw_response_text': json.dumps(response),
 }, open('$pending_dir/$key.json', 'w'))
 "
   chmod 600 "$pending_dir/$key.json"

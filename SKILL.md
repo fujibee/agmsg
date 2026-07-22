@@ -165,15 +165,20 @@ purely locally without ever touching this. Login/token acquisition is out
 of this script's scope (some provider tooling, or a self-hosted server's
 own admin command, obtains the token); `connect` only ever receives one.
 
+**Always use the `--*-stdin` forms below from an agent context.** The bare
+positional forms (`<token>`, `<identity>`) exist only as a warned legacy
+path for a human typing directly into their own terminal — from an agent,
+they leak the secret into this session's own transcript/tool-result
+history, which is exactly the kind of exposure `--token-stdin`/
+`--identity-stdin` exist to avoid. Pipe the secret in; never pass it as
+a literal argument in a command you construct.
+
 ```bash
 # Connect a team to a sync endpoint. <token> is a short-lived, single-use
-# exchange code (never the long-lived credential itself). Prefer
-# --token-stdin over the positional form — a bare positional token is
-# visible in shell history and `ps`; --token-stdin reads it from stdin
-# instead and is the required form for any programmatic caller.
-#   --force    rebind an already-connected team to a new token
-~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> <token> [<team>] [--force]
-~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
+# exchange code (never the long-lived credential itself).
+#   --force    rebind an already-connected team to a new token (requires
+#              an explicit <team> — it cannot be inferred for this check)
+printf '%s' "$TOKEN" | ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
 
 # If the team's capability response requires encryption and no local key
 # exists yet, connect pauses to generate or import one before finishing —
@@ -195,8 +200,9 @@ own admin command, obtains the token); `connect` only ever receives one.
 ~/.agents/skills/agmsg/scripts/remote.sh doctor [<team>]
 
 # Generate the first age-v1 key for a team (single-writer onboarding only —
-# NOT the multi-writer cutover protocol). Prints a mandatory backup notice:
-# there is no server-side recovery, and losing the device loses the key.
+# NOT the multi-writer cutover protocol, and NOT key rotation — see below).
+# Prints a mandatory backup notice: there is no server-side recovery, and
+# losing the device loses the key.
 ~/.agents/skills/agmsg/scripts/key.sh generate [<team>]
 
 # Show the team's public recipient + fingerprint. --reveal-secret prints
@@ -207,26 +213,28 @@ own admin command, obtains the token); `connect` only ever receives one.
 # Install a private age identity obtained out-of-band (e.g. via
 # `key.sh show <team> --reveal-secret` on another device that already has
 # it). Rejected if it doesn't match the team's already-authorized key.
-~/.agents/skills/agmsg/scripts/key.sh import <team> <identity>
-
-# Start a new epoch for a team with exactly one active writer (this
-# device). Never re-encrypts existing history — only messages sent after
-# rotation use the new key; every prior epoch's key is retained locally.
-~/.agents/skills/agmsg/scripts/key.sh rotate [<team>]
+printf '%s' "$IDENTITY" | ~/.agents/skills/agmsg/scripts/key.sh import <team> --identity-stdin
 ```
+
+**`key rotate` is NOT available in this release.** It refuses
+unconditionally and changes no state — a design review found its
+anti-rollback metadata insufficient (it can't detect a wholesale
+config.json rollback, and doesn't use the age-v1 profile's pinned
+canonical epoch-snapshot shape), so it's held back rather than shipping a
+protection that isn't actually there. Do not suggest it as a working
+command.
 
 Slash-command surface (SKILL.md / per-type templates), same mapping
 pattern as every command above:
 
 ```
-/agmsg remote connect --endpoint <url> <token>
+/agmsg remote connect --endpoint <url>   (paste the token when prompted)
 /agmsg remote status
 /agmsg remote disconnect <team>
 /agmsg remote doctor
 /agmsg key generate [<team>]
 /agmsg key show [<team>] [--reveal-secret]
-/agmsg key import <team> <identity>
-/agmsg key rotate [<team>]
+/agmsg key import <team>   (paste the identity when prompted)
 ```
 
 Additional dependencies beyond bash/sqlite3 (only needed if these commands
