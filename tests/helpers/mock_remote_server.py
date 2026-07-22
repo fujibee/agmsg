@@ -70,8 +70,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     "credential": "session-credential-xyz",
                     "credential_id": "cred-missing-field",
-                    "server_instance_id": "srv-1",
-                    "remote_team_id": "rt-1",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
                     "remote_team_name": "myteam",
                     "capabilities": {"write_allowed_ciphers": ["none"]},
                 })
@@ -81,8 +81,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     "credential": "session-credential-xyz",
                     "credential_id": "../../etc/passwd",
-                    "server_instance_id": "srv-1",
-                    "remote_team_id": "rt-1",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
                     "remote_team_name": "myteam",
                     "protocol_version": 1,
                     "capabilities": {"write_allowed_ciphers": ["none"]},
@@ -95,8 +95,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "credential": "session-credential-" + token,
                 "credential_id": credential_id,
-                "server_instance_id": "srv-1",
-                "remote_team_id": "rt-1",
+                "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                "remote_team_id": "018f3f7e-2222-7000-8000-000000000002",
                 "remote_team_name": "myteam",
                 "protocol_version": 1,
                 "capabilities": {
@@ -119,8 +119,8 @@ class Handler(BaseHTTPRequestHandler):
                 REVOKED_CREDENTIAL_IDS.append(cred_id)
                 self._send_json(200, {
                     "protocol_version": 1,
-                    "server_instance_id": "srv-1",
-                    "team_id": "rt-1",
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "team_id": "018f3f7e-2222-7000-8000-000000000002",
                     "credential_id": cred_id,
                     "revoked": True,
                     "revoked_at": "2026-01-01T00:00:00Z",

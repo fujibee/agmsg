@@ -55,19 +55,14 @@ _remote_ensure_team() {
 
 # Reject a non-HTTPS endpoint (token/credential would cross the wire in
 # plaintext) except for loopback, which self-host/dev setups need without a
-# cert (ADR 0007 review finding B6).
+# cert (ADR 0007 review findings B6/R2). Delegates to a real URL parser —
+# a shell glob/prefix check here was bypassable by
+# http://127.0.0.1.evil.com, http://localhost.evil.com, and the userinfo
+# trick http://localhost@evil.com, all of which matched a naive
+# `http://127.0.0.1*`/`http://localhost*` case pattern while actually
+# pointing at a different host.
 _remote_validate_endpoint() {
-  local endpoint="$1"
-  case "$endpoint" in
-    https://*) return 0 ;;
-    http://127.0.0.1*|http://localhost*|http://\[::1\]*) return 0 ;;
-    http://*)
-      echo "agmsg: --endpoint must be https:// (plaintext http:// would send the token/credential unencrypted) — loopback (127.0.0.1/localhost) is the only exception" >&2
-      return 1 ;;
-    *)
-      echo "agmsg: --endpoint must start with https://" >&2
-      return 1 ;;
-  esac
+  python3 "$SCRIPT_DIR/internal/validate-endpoint.py" "$1"
 }
 
 # --- doctor ------------------------------------------------------------
@@ -159,40 +154,59 @@ _remote_pending_key() {
 
 _remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
 
-# _remote_write_pending <key> <credential> <credential_id> <server_instance_id>
-#   <remote_team_id> <remote_team_name> <protocol_version> <capabilities_json> <endpoint>
+# _remote_write_pending <key> <resp_file> <endpoint>
 # Durable, atomic (temp+rename), 0600 record of a successful exchange whose
 # local commit has not (yet) fully completed — deliberately does NOT
 # include the token. A crash between the exchange and _remote_commit
 # finishing resumes from here on a retry with the same (endpoint, token),
 # instead of needing (and orphaning a credential for) a fresh single-use
 # token (B5).
+#
+# Takes the RAW response file and re-serializes its exact bytes as-is
+# (never the individually-extracted credential/credential_id/etc as their
+# own values) — <resp_file> and <endpoint> are passed to python3 by PATH
+# and as a non-secret string respectively, so the secret itself is read
+# only via file I/O inside the python process and never appears as any
+# process's own argv element (R1: an earlier version of this function
+# passed the credential as a positional python3 argument, which any
+# concurrent `ps` could read for as long as that process was alive).
 _remote_write_pending() {
-  local key="$1" credential="$2" credential_id="$3" server_instance_id="$4" \
-    remote_team_id="$5" remote_team_name="$6" protocol_version="$7" \
-    capabilities_json="$8" endpoint="$9" pending_file tmp json
+  local key="$1" resp_file="$2" endpoint="$3" pending_file tmp json
   mkdir -p "$PENDING_DIR"
   chmod 700 "$PENDING_DIR" 2>/dev/null || true
   pending_file="$(_remote_pending_file "$key")"
   json=$(python3 -c '
 import json, sys
-credential, credential_id, server_instance_id, remote_team_id, remote_team_name, protocol_version, capabilities_json, endpoint = sys.argv[1:9]
-print(json.dumps({
-    "credential": credential,
-    "credential_id": credential_id,
-    "server_instance_id": server_instance_id,
-    "remote_team_id": remote_team_id,
-    "remote_team_name": remote_team_name,
-    "protocol_version": int(protocol_version),
-    "capabilities": json.loads(capabilities_json),
-    "endpoint": endpoint,
-}))
-' "$credential" "$credential_id" "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json" "$endpoint")
+resp_path, endpoint = sys.argv[1], sys.argv[2]
+with open(resp_path) as f:
+    response = json.load(f)
+print(json.dumps({"endpoint": endpoint, "response": response}))
+' "$resp_file" "$endpoint")
   tmp="$(mktemp "$PENDING_DIR/.pending-XXXXXX")"
   chmod 600 "$tmp"
   printf '%s\n' "$json" > "$tmp"
   sync 2>/dev/null || true
   mv "$tmp" "$pending_file"
+}
+
+# _remote_load_pending <pending_file> <out_resp_file> -> prints endpoint
+# Extracts the embedded raw response back out to its own file (so it can
+# be re-run through the SAME strict parse-exchange-response.py validator
+# a fresh exchange uses — R5: a pending file is not inherently more
+# trustworthy than a live response and must not skip validation) and
+# prints the (non-secret) endpoint string. <pending_file>'s path is
+# passed by PATH, never its contents, as a python3 argument.
+_remote_load_pending() {
+  local pending_file="$1" out_resp_file="$2"
+  python3 -c '
+import json, sys
+pending_path, out_path = sys.argv[1], sys.argv[2]
+with open(pending_path) as f:
+    pending = json.load(f)
+with open(out_path, "w") as f:
+    json.dump(pending["response"], f)
+print(pending["endpoint"])
+' "$pending_file" "$out_resp_file"
 }
 
 # _remote_commit <team> <cfg> <endpoint> <credential> <credential_id>
@@ -273,6 +287,16 @@ cmd_connect() {
   fi
   [ -n "$token" ] || { echo "agmsg: empty token" >&2; exit 1; }
 
+  # --force requires an explicit <team> (R4): the revoke-old-credential-
+  # first step below only runs when <team> is known upfront. If <team>
+  # were left to be discovered from the exchange response, that step
+  # would be skipped entirely and --force could silently overwrite an
+  # active binding without ever revoking its old credential.
+  if [ "$force" -eq 1 ] && [ -z "$team" ]; then
+    echo "agmsg: --force requires an explicit <team> — omitting it and letting the exchange response name the team would skip revoking any existing credential for that team first." >&2
+    exit 1
+  fi
+
   if [ -n "$team" ]; then
     agmsg_validate_team_name "$team" || exit 1
   fi
@@ -288,16 +312,41 @@ cmd_connect() {
 
   if [ -f "$pending_file" ]; then
     echo "agmsg: resuming an exchange that already succeeded but wasn't fully committed locally (avoids consuming a fresh token)." >&2
-    credential="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('credential',''))" 2>/dev/null)"
-    credential_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('credential_id',''))" 2>/dev/null)"
-    server_instance_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('server_instance_id',''))" 2>/dev/null)"
-    remote_team_id="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('remote_team_id',''))" 2>/dev/null)"
-    remote_team_name="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('remote_team_name',''))" 2>/dev/null)"
-    protocol_version="$(python3 -c "import json,sys; print(json.load(open('$pending_file')).get('protocol_version',0))" 2>/dev/null)"
-    capabilities_json="$(python3 -c "import json,sys; print(json.dumps(json.load(open('$pending_file')).get('capabilities',{})))" 2>/dev/null)"
-    write_allowed_ciphers="$(python3 -c "import json,sys; print(','.join(json.load(open('$pending_file')).get('capabilities',{}).get('write_allowed_ciphers',[])))" 2>/dev/null)"
-    current_seq="$(python3 -c "import json,sys; v=json.load(open('$pending_file')).get('capabilities',{}).get('current_seq'); print(v if v is not None else -1)" 2>/dev/null)"
     unset token
+
+    # A pending file is not inherently more trustworthy than a fresh
+    # response (R5) — extract its embedded raw response and run it
+    # through the SAME strict validator a live exchange uses, rather than
+    # reading fields ad hoc with no shape/type checks.
+    local pending_resp_file pending_endpoint parsed_file
+    pending_resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-resp.XXXXXX")"
+    chmod 600 "$pending_resp_file"
+    pending_endpoint="$(_remote_load_pending "$pending_file" "$pending_resp_file")"
+    if [ -z "$pending_endpoint" ] || [ "$pending_endpoint" != "$endpoint" ]; then
+      rm -f "$pending_resp_file"
+      echo "agmsg: pending record's endpoint does not match — refusing to resume." >&2
+      exit 1
+    fi
+    parsed_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-parsed.XXXXXX")"
+    chmod 600 "$parsed_file"
+    if ! python3 "$SCRIPT_DIR/internal/parse-exchange-response.py" < "$pending_resp_file" > "$parsed_file"; then
+      rm -f "$pending_resp_file" "$parsed_file"
+      echo "agmsg: pending record failed validation — refusing to resume." >&2
+      exit 1
+    fi
+    rm -f "$pending_resp_file"
+    {
+      IFS= read -r credential
+      IFS= read -r credential_id
+      IFS= read -r server_instance_id
+      IFS= read -r remote_team_id
+      IFS= read -r remote_team_name
+      IFS= read -r protocol_version
+      IFS= read -r capabilities_json
+      IFS= read -r write_allowed_ciphers
+      IFS= read -r current_seq
+    } < "$parsed_file"
+    rm -f "$parsed_file"
   else
     # --force pre-check only applies when <team> is known upfront — when
     # omitted, whether "this team" is already connected can't be known
@@ -374,7 +423,6 @@ cmd_connect() {
       rm -f "$resp_file" "$parsed_file"
       exit 1
     fi
-    rm -f "$resp_file"
     {
       IFS= read -r credential
       IFS= read -r credential_id
@@ -387,14 +435,16 @@ cmd_connect() {
       IFS= read -r current_seq
     } < "$parsed_file"
     rm -f "$parsed_file"
-    trap - EXIT INT TERM
 
     # Durable pending record before the local commit (B5): if the process
     # dies between here and _remote_commit finishing, retrying with the
     # same (endpoint, token) resumes from this file instead of needing a
-    # fresh token.
-    _remote_write_pending "$pending_key" "$credential" "$credential_id" "$server_instance_id" \
-      "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json" "$endpoint"
+    # fresh token. Takes resp_file by PATH — the raw bytes (including the
+    # secret) are read inside python3 via file I/O, never passed as any
+    # process's own argv element (R1).
+    _remote_write_pending "$pending_key" "$resp_file" "$endpoint"
+    rm -f "$resp_file"
+    trap - EXIT INT TERM
   fi
 
   [ -n "$team" ] || team="$remote_team_name"
@@ -411,22 +461,42 @@ cmd_connect() {
   # Re-check under the lock (CAS): if something else connected this team
   # in the window since our pre-flight check (or since the exchange, for
   # the omitted-team case where no pre-check was possible), fail closed
-  # rather than mixing old/new bindings (B5) — the pending record survives
-  # this abort so a deliberate retry can still resume it.
-  local recheck_connected recheck_disconnected
+  # rather than mixing old/new bindings (B5) — UNLESS the existing binding
+  # is EXACTLY this same operation's own prior (partial) commit (its
+  # credential_id/server_instance_id/remote_team_id all match what we're
+  # about to write) — that's the resume-after-commit-but-before-pending-
+  # cleanup crash case (R3): idempotently finish (drop the pending file,
+  # skip re-writing an identical binding) rather than treating our own
+  # completed work as a foreign conflict.
+  local recheck_connected recheck_disconnected recheck_credential_id \
+    recheck_server_instance_id recheck_remote_team_id
   recheck_connected="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
   recheck_disconnected="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  recheck_credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
+  recheck_server_instance_id="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
+  recheck_remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
+  local already_connected=0
   if [ -n "$recheck_connected" ] && [ "$recheck_connected" != "null" ] \
-    && { [ -z "$recheck_disconnected" ] || [ "$recheck_disconnected" = "null" ]; } \
-    && [ "$force" -ne 1 ]; then
+    && { [ -z "$recheck_disconnected" ] || [ "$recheck_disconnected" = "null" ]; }; then
+    already_connected=1
+  fi
+  if [ "$already_connected" -eq 1 ] \
+    && [ "$recheck_credential_id" = "$credential_id" ] \
+    && [ "$recheck_server_instance_id" = "$server_instance_id" ] \
+    && [ "$recheck_remote_team_id" = "$remote_team_id" ]; then
+    # Already fully committed by this exact operation — idempotent no-op.
+    rm -f "$pending_file"
+    agmsg_lock_release
+  elif [ "$already_connected" -eq 1 ] && [ "$force" -ne 1 ]; then
     agmsg_lock_release
     echo "agmsg: team '$team' became connected by another process just now — the credential just issued for it was NOT committed locally. Revoke it (credential_id=$credential_id) via the console/admin side if it should not remain active, then retry." >&2
     exit 1
+  else
+    _remote_commit "$team" "$cfg" "$endpoint" "$credential" "$credential_id" \
+      "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json"
+    rm -f "$pending_file"
+    agmsg_lock_release
   fi
-  _remote_commit "$team" "$cfg" "$endpoint" "$credential" "$credential_id" \
-    "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json"
-  rm -f "$pending_file"
-  agmsg_lock_release
   unset credential
 
   # E2EE insertion point (ADR 0007 §6/§8): only when the capability response

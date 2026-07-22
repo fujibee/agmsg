@@ -17,13 +17,26 @@ ever sees them. Every field is rejected if it contains a literal newline
 
 credential_id is validated against a bounded, URL-path-safe character set
 because it is spliced directly into the revoke endpoint's path — anything
-else risks path/query injection against a malicious or buggy server.
+else risks path/query injection against a malicious or buggy server; its
+exact format isn't pinned by any approved spec (pairing/credential
+exchange is this ADR's own addition), so a conservative bounded charset
+is the right baseline. server_instance_id and team_id (remote_team_id),
+by contrast, ARE pinned: the approved sync HTTP v1 spec (server/spec/v1.md
+@ d1a74db) requires both to be a canonical LOWERCASE UUIDv7 (RFC 9562) —
+validated here as such, not left to a loose bounded charset, since an
+invalid binding must never reach a local commit.
+
+This same validator is also used to re-check a previously-saved pending
+record before resuming a commit from it (ADR 0007 review finding R5) — a
+pending file is not inherently more trustworthy than a fresh response.
 """
 import json
 import re
 import sys
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+UUIDV7_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+SUPPORTED_PROTOCOL_VERSIONS = (1,)
 
 
 def fail(msg):
@@ -54,7 +67,11 @@ def main():
     if not ID_RE.match(credential_id):
         fail("credential_id has an unexpected shape")
     server_instance_id = req_str(d, "server_instance_id")
+    if not UUIDV7_RE.match(server_instance_id):
+        fail("server_instance_id must be a canonical lowercase UUIDv7")
     remote_team_id = req_str(d, "remote_team_id")
+    if not UUIDV7_RE.match(remote_team_id):
+        fail("remote_team_id must be a canonical lowercase UUIDv7")
 
     remote_team_name = d.get("remote_team_name", "")
     if not isinstance(remote_team_name, str):
@@ -63,6 +80,8 @@ def main():
     protocol_version = d.get("protocol_version")
     if not isinstance(protocol_version, int) or isinstance(protocol_version, bool):
         fail("protocol_version has an unexpected type")
+    if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        fail(f"unsupported protocol_version {protocol_version!r}")
 
     caps = d.get("capabilities", {})
     if not isinstance(caps, dict):

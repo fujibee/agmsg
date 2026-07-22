@@ -58,6 +58,24 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "connect: refuses subdomain-suffix bypass of the loopback exception (127.0.0.1.evil.com)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://127.0.0.1.evil.invalid:${MOCK_PORT}" good-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be https://"* ]]
+}
+
+@test "connect: refuses subdomain-suffix bypass of the loopback exception (localhost.evil.com)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://localhost.evil.invalid:${MOCK_PORT}" good-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be https://"* ]]
+}
+
+@test "connect: refuses the userinfo bypass of the loopback exception (localhost@evil.com)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://localhost@evil.invalid" good-token myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"userinfo"* ]]
+}
+
 @test "connect: rejects an exchange response with a path-injection-shaped credential_id" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" malformed-credential-id-token myteam
   [ "$status" -ne 0 ]
@@ -142,6 +160,12 @@ teardown() {
   # Old binding must still be intact — refusal must not have half-applied.
   run bash "$SCRIPTS/remote.sh" status myteam
   [[ "$output" == *"connected"* ]]
+}
+
+@test "connect: --force requires an explicit <team> (refuses when omitted)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--force requires an explicit"* ]]
 }
 
 @test "connect: after disconnect, reconnecting the same team needs no --force" {
@@ -252,14 +276,16 @@ teardown() {
   python3 -c "
 import json
 json.dump({
-    'credential': 'resumed-credential-value',
-    'credential_id': 'cred-resumed-xyz',
-    'server_instance_id': 'srv-1',
-    'remote_team_id': 'rt-resumed',
-    'remote_team_name': 'resumedteam',
-    'protocol_version': 1,
-    'capabilities': {'write_allowed_ciphers': ['none']},
     'endpoint': '$ENDPOINT',
+    'response': {
+        'credential': 'resumed-credential-value',
+        'credential_id': 'cred-resumed-xyz',
+        'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
+        'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
+        'remote_team_name': 'resumedteam',
+        'protocol_version': 1,
+        'capabilities': {'write_allowed_ciphers': ['none']},
+    },
 }, open('$pending_dir/$key.json', 'w'))
 "
   chmod 600 "$pending_dir/$key.json"
@@ -276,6 +302,42 @@ json.dump({
   credential_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/myteam/config.json'))['remote_binding']['credential_id'])")
   [ "$credential_id" = "cred-resumed-xyz" ]
   # Pending record consumed on success — not left behind.
+  [ ! -f "$pending_dir/$key.json" ]
+}
+
+@test "connect: resuming after the commit already fully succeeded is an idempotent no-op (R3)" {
+  # Simulates a crash AFTER _remote_commit finished but BEFORE the pending
+  # file was removed: the binding is already correct, so a retry must not
+  # treat its own prior work as a foreign "someone else connected this
+  # team" conflict.
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" resume-idempotent-token myteam
+  committed_credential_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/myteam/config.json'))['remote_binding']['credential_id'])")
+
+  local token="resume-idempotent-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+json.dump({
+    'endpoint': '$ENDPOINT',
+    'response': {
+        'credential': 'session-credential-resume-idempotent-token',
+        'credential_id': '$committed_credential_id',
+        'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
+        'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
+        'remote_team_name': 'myteam',
+        'protocol_version': 1,
+        'capabilities': {'write_allowed_ciphers': ['none']},
+    },
+}, open('$pending_dir/$key.json', 'w'))
+"
+  chmod 600 "$pending_dir/$key.json"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"became connected by another process"* ]]
   [ ! -f "$pending_dir/$key.json" ]
 }
 
