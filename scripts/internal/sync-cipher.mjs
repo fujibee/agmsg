@@ -167,11 +167,14 @@ export function validateAgeHeader(ageFile) {
   let x25519StanzaCount = 0;
   let insideStanza = false;
   let stanzaHasBody = false;
+  let stanzaIsGrease = false;
+  let stanzaBodyBytes = 0;
+  let greaseShortBodySeen = false;
   function line() {
     const end = ageFile.indexOf(0x0a, offset);
     if (end === -1 || end - offset > 4096) malformed("age header is incomplete");
     const value = ageFile.subarray(offset, end).toString("ascii");
-    if (!/^[\x20-\x7e]+$/u.test(value)) malformed("age header is not canonical ASCII");
+    if (!/^[\x20-\x7e]*$/u.test(value)) malformed("age header is not canonical ASCII");
     offset = end + 1;
     if (offset > MAX_AGE_HEADER_BYTES) malformed("age header size limit exceeded");
     return value;
@@ -181,7 +184,7 @@ export function validateAgeHeader(ageFile) {
     const value = line();
     if (value.startsWith("-> ")) {
       const fields = value.split(" ");
-      if ((insideStanza && !stanzaHasBody) || fields.length < 3 ||
+      if ((insideStanza && !stanzaHasBody) || fields.length < 2 ||
           fields.some((field) => field.length < 1)) {
         malformed("age recipient stanza header is invalid");
       }
@@ -193,19 +196,35 @@ export function validateAgeHeader(ageFile) {
         if (x25519StanzaCount > MAX_AGE_X25519_STANZAS) {
           malformed("age-v1 X25519 stanza limit exceeded");
         }
+        stanzaIsGrease = false;
+      } else {
+        stanzaIsGrease = /^[!-~]{1,8}-grease$/u.test(fields[1]) &&
+          fields.length <= 6 && fields.slice(2).every((field) => /^[!-~]{1,8}$/u.test(field));
+        if (!stanzaIsGrease) malformed("age-v1 rejects active non-X25519 recipient stanzas");
       }
       insideStanza = true;
       stanzaHasBody = false;
+      stanzaBodyBytes = 0;
+      greaseShortBodySeen = false;
     } else if (value.startsWith("--- ")) {
       if (!insideStanza || !stanzaHasBody || x25519StanzaCount < 1 ||
           value.split(" ").length !== 2 || offset >= ageFile.length) {
         malformed("age header footer is invalid");
       }
       return { totalStanzaCount, x25519StanzaCount };
-    } else if (!insideStanza || !/^[A-Za-z0-9+/]+={0,2}$/u.test(value)) {
+    } else if (!insideStanza ||
+        !(stanzaIsGrease ? /^[A-Za-z0-9+/]*$/u : /^[A-Za-z0-9+/]+={0,2}$/u).test(value)) {
       malformed("age recipient stanza body is invalid");
     } else {
       stanzaHasBody = true;
+      if (stanzaIsGrease) {
+        if (value.length > 64 || value.length % 4 === 1 || greaseShortBodySeen) {
+          malformed("age GREASE stanza body framing is invalid");
+        }
+        stanzaBodyBytes += Math.floor(value.length * 3 / 4);
+        if (stanzaBodyBytes > 100) malformed("age GREASE stanza body limit exceeded");
+        greaseShortBodySeen = value.length < 64;
+      }
     }
   }
   malformed("age header footer is missing");

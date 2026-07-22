@@ -150,22 +150,25 @@ test("age-v1 ignores bounded GREASE stanzas without weakening X25519 count", () 
     "-> X25519 UHwSYuqz0nETnk0k8pTzWX5dUSwX32+mdzrgiooZ5FM",
     "fHRC1X2S0nMkexfGaMYo7k1WeRjMXouDB6VI1ERX1ho",
   ];
-  const grease = ["-> grease test-extension", "ZmFrZS13cmFwcGVkLWZpbGUta2V5"];
+  const grease = ["-> test-grease ext", "ZmFrZS13cmFwcGVkLWZpbGUta2V5"];
   const footer = "--- 1D+zVTAq2TisMsHnBKk0agnk0N0xNzkdHc07l8O8we0";
   assert.deepEqual(validateAgeHeader(header("age-encryption.org/v1", ...grease,
     ...x25519, footer)), { totalStanzaCount: 2, x25519StanzaCount: 1 });
   assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...grease, footer)),
     /footer/u);
-  const excessive = Array.from({ length: 513 }, (_, index) => [
-    `-> grease extension-${index}`, "YQ==",
+  const excessive = Array.from({ length: 513 }, () => [
+    "-> x-grease", "",
   ]).flat();
   assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
     ...excessive, footer)), /total stanza limit/u);
   assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
-    `-> grease ${"a".repeat(4090)}`, "YQ==", footer)), /incomplete/u);
+    `-> x-grease ${"a".repeat(4090)}`, "", footer)), /incomplete/u);
+  const largeHeader = Array.from({ length: 400 }, () => [
+    "-> abcdefgh-grease abcdefgh abcdefgh abcdefgh abcdefgh",
+    "A".repeat(64), "A".repeat(64), "A".repeat(6),
+  ]).flat();
   assert.throws(() => validateAgeHeader(header("age-encryption.org/v1", ...x25519,
-    "-> grease bounded-extension", ...Array(17).fill("A".repeat(4000)), footer)),
-  /size limit/u);
+    ...largeHeader, footer)), /size limit/u);
 });
 
 test("age-v1 opens the Rust age 0.12.1 GREASE interoperability fixture", async () => {
@@ -183,6 +186,48 @@ test("age-v1 opens the Rust age 0.12.1 GREASE interoperability fixture", async (
       expected_recipients: [manifest.recipient_sets.team_a.recipient],
       max_blob_bytes: 1_048_576 }), manifest.canonical_message);
   } finally {
+    await rm(scratch, { recursive: true });
+  }
+});
+
+test("age-v1 rejects active non-X25519 stanzas before spawning the decryptor", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "agmsg-age-v1-active-stanza-"));
+  const originalAgeBin = process.env.AGMSG_AGE_BIN;
+  const originalMarker = process.env.AGMSG_AGE_SPAWN_MARKER;
+  try {
+    const identity = join(scratch, "identity");
+    const fakeAge = join(scratch, "fake-age");
+    const marker = join(scratch, "spawned");
+    await writeFile(identity, `${manifest.recipient_sets.team_a.identity}\n`, { mode: 0o600 });
+    await writeFile(fakeAge, "#!/bin/sh\nprintf invoked > \"$AGMSG_AGE_SPAWN_MARKER\"\nexit 99\n",
+      { mode: 0o700 });
+    process.env.AGMSG_AGE_BIN = fakeAge;
+    process.env.AGMSG_AGE_SPAWN_MARKER = marker;
+    const active = ["scrypt salt 10", "ssh-rsa key", "plugin-example data", "future-recipient data"];
+    for (const stanza of active) {
+      const bytes = Buffer.concat([Buffer.from([
+        "age-encryption.org/v1",
+        "-> X25519 UHwSYuqz0nETnk0k8pTzWX5dUSwX32+mdzrgiooZ5FM",
+        "fHRC1X2S0nMkexfGaMYo7k1WeRjMXouDB6VI1ERX1ho",
+        `-> ${stanza}`,
+        "YQ",
+        "--- 1D+zVTAq2TisMsHnBKk0agnk0N0xNzkdHc07l8O8we0",
+        "",
+      ].join("\n"), "ascii"), Buffer.from([0xde, 0xad, 0xbe, 0xef])]);
+      await assert.rejects(openEnvelope({
+        envelope: { ...rustGrease.envelope, blob: bytes.toString("base64") },
+        protocol_version: 1, team_id: manifest.binding.team_id,
+        wire_id: manifest.binding.wire_id, identity_file: identity,
+        expected_recipients: [manifest.recipient_sets.team_a.recipient],
+        max_blob_bytes: 1_048_576,
+      }), (error) => error.state === "malformed");
+      await assert.rejects(readFile(marker), (error) => error.code === "ENOENT");
+    }
+  } finally {
+    if (originalAgeBin === undefined) delete process.env.AGMSG_AGE_BIN;
+    else process.env.AGMSG_AGE_BIN = originalAgeBin;
+    if (originalMarker === undefined) delete process.env.AGMSG_AGE_SPAWN_MARKER;
+    else process.env.AGMSG_AGE_SPAWN_MARKER = originalMarker;
     await rm(scratch, { recursive: true });
   }
 });

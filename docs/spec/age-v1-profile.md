@@ -57,11 +57,18 @@ An `age-v1` envelope has:
   compression, and profile-level padding are forbidden.
 - The age header MUST contain one or more native X25519 recipient stanzas.
   Writers MUST use the epoch's X25519 manifest as their only real recipient
-  set. Readers MUST ignore non-X25519 stanza types for age-format extension and
-  GREASE interoperability; ignored stanzas do not satisfy or weaken the X25519
-  manifest check and MUST NOT trigger plugin, passphrase, SSH, or trial-decrypt
-  dispatch. This follows age's unknown-stanza rule while keeping native X25519
-  identities as the only decryption mechanism in this profile.
+  set. Readers MUST ignore only age GREASE stanzas whose tag and arguments
+  match the bounded grammar below. GREASE stanzas do not satisfy or weaken the
+  X25519 manifest check and MUST NOT trigger plugin, passphrase, SSH, or
+  trial-decrypt dispatch. Scrypt, SSH, plugin, and every other non-X25519 stanza
+  type are rejected before invoking the age decryptor. Here, "ignore" means
+  exclude the stanza from decryption dispatch while retaining its authenticated
+  bytes in the complete age header; it does not mean deleting bytes.
+- A GREASE stanza tag MUST match `[!-~]{1,8}-grease`. It has zero to four
+  arguments, each 1–8 bytes of ASCII VCHAR (`0x21`–`0x7e`), and a 0–100-byte
+  body in age's canonical unpadded-base64 wrapping. These are the bounds emitted
+  by `age_core::format::grease_the_joint` in Rust `age` 0.12.1. A stanza outside
+  that grammar is not treated as GREASE and is rejected.
 - A header may contain at most 256 X25519 stanzas, 512 total stanzas, and 65536
   bytes through the terminating header MAC line. Each header line remains
   limited to 4096 bytes. A reader MUST reject the file before decryption when
