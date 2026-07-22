@@ -123,9 +123,15 @@ _key_write_identity_atomic() {
   dir="$(dirname "$dest")"
   tmp="$(mktemp "$dir/.identity-XXXXXX")"
   chmod 600 "$tmp"
+  # Cleanup trap: a kill signal between mktemp and the rename below would
+  # otherwise leave a 0600-but-never-renamed temp copy of the key sitting
+  # in the credential store indefinitely (same nonblocking finding raised
+  # against remote.sh's analogous credential-file write).
+  trap 'rm -f "$tmp"' EXIT INT TERM
   printf '%s\n' "$content" > "$tmp"
   sync 2>/dev/null || true
   mv "$tmp" "$dest"
+  trap - EXIT INT TERM
 }
 
 cmd_generate() {

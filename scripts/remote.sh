@@ -249,9 +249,11 @@ print(json.dumps({"endpoint": endpoint, "raw_response_text": raw_response_text})
 ' "$resp_file" "$endpoint")
   tmp="$(mktemp "$PENDING_DIR/.pending-XXXXXX")"
   chmod 600 "$tmp"
+  trap 'rm -f "$tmp"' EXIT INT TERM
   printf '%s\n' "$json" > "$tmp"
   sync 2>/dev/null || true
   mv "$tmp" "$pending_file"
+  trap - EXIT INT TERM
 }
 
 # _remote_load_pending <pending_file> <out_resp_file> -> prints endpoint
@@ -311,9 +313,14 @@ _remote_commit() {
   local cred_tmp
   cred_tmp="$(mktemp "$CRED_ROOT/.cred-XXXXXX")"
   chmod 600 "$cred_tmp"
+  # Cleanup trap (nonblocking follow-up noted after E1-E3): a kill signal
+  # between mktemp and the rename below would otherwise leave a 0600-but-
+  # never-renamed temp copy of the secret sitting in CRED_ROOT indefinitely.
+  trap 'rm -f "$cred_tmp"' EXIT INT TERM
   printf '%s\n' "$cred_json" > "$cred_tmp"
   sync 2>/dev/null || true
   mv "$cred_tmp" "$cred_file"
+  trap - EXIT INT TERM
   unset cred_json
 
   connected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
