@@ -156,6 +156,26 @@ EOF
   [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
 }
 
+@test "leave: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local agent="al'ice"
+  bash "$SCRIPTS/join.sh" myteam "$agent" claude-code /tmp/proj
+  bash "$SCRIPTS/join.sh" myteam bob claude-code /tmp/proj-b
+  run bash "$SCRIPTS/leave.sh" myteam "$agent"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  run bash "$SCRIPTS/team.sh" myteam
+  [[ ! "$output" =~ "$agent" ]]
+  [[ "$output" =~ "bob" ]]
+}
+
+@test "leave: rejects an agent name containing path-hazard characters" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/leave.sh" myteam "al.ice"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "must not contain" ]]
+}
+
 # --- team.sh ---
 
 @test "team: shows team members with types" {
@@ -167,6 +187,17 @@ EOF
   [[ "$output" =~ "claude-code" ]]
   [[ "$output" =~ "bob" ]]
   [[ "$output" =~ "codex" ]]
+}
+
+@test "team: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local agent="al'ice"
+  bash "$SCRIPTS/join.sh" myteam "$agent" claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "$agent" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  [[ ! "$output" =~ "Manage SQL parameter bindings" ]]
+  [ "$(echo "$output" | grep -c "$agent")" -eq 1 ]
 }
 
 # --- whoami.sh ---
@@ -327,6 +358,23 @@ EOF
   [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
 }
 
+@test "reset: an explicit agent_id containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local agent="al'ice"
+  bash "$SCRIPTS/join.sh" myteam "$agent" claude-code /tmp/proj-a
+  run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code "$agent"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  [[ "$output" =~ "removed 1 registration" ]]
+  [ ! -d "$TEST_SKILL_DIR/teams/myteam" ]
+}
+
+@test "reset: rejects an explicit agent_id containing path-hazard characters" {
+  run bash "$SCRIPTS/reset.sh" /tmp/proj-a claude-code "al.ice"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "must not contain" ]]
+}
+
 # --- rename-team.sh ---
 
 @test "rename-team: renames the team dir and updates config.json name" {
@@ -338,6 +386,20 @@ EOF
   [ -f "$TEST_SKILL_DIR/teams/newteam/config.json" ]
   run sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/newteam/config.json")'), '\$.name');"
   [ "$output" = "newteam" ]
+}
+
+@test "rename-team: a new team name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local newteam="o'brien"
+  bash "$SCRIPTS/join.sh" oldteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/rename-team.sh" oldteam "$newteam"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  [ -f "$TEST_SKILL_DIR/teams/$newteam/config.json" ]
+  # The "name" field must be the exact, uncorrupted string — not truncated at
+  # the quote, and not left as the old name.
+  run sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_SKILL_DIR/teams/$newteam/config.json")'), '\$.name');"
+  [ "$output" = "$newteam" ]
 }
 
 @test "rename-team: preserves agents in the team" {
@@ -431,6 +493,28 @@ EOF
   run bash "$SCRIPTS/rename.sh" myteam alice bob
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Agent bob already exists" ]]
+}
+
+@test "rename: an old/new agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local old="al'ice" new="bob's-alt"
+  bash "$SCRIPTS/join.sh" myteam "$old" claude-code /tmp/proj
+  run bash "$SCRIPTS/rename.sh" myteam "$old" "$new"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  run bash "$SCRIPTS/team.sh" myteam
+  [[ "$output" =~ "$new" ]]
+  [[ ! "$output" =~ "$old" ]]
+}
+
+@test "rename: rejects an old/new agent name containing path-hazard characters" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/rename.sh" myteam alice "al.ice"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "must not contain" ]]
+  run bash "$SCRIPTS/rename.sh" myteam "al[0]" bob
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "must not contain" ]]
 }
 
 # --- rename.sh tombstone / actas revive guard (#360) ---
