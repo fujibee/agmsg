@@ -1206,36 +1206,128 @@ async function cycle(config, limit) {
   await readStateCycle(config, limit);
 }
 
-async function reprocessCycle(config, limit) {
-  const ready = await health(config.server_url);
-  if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
-  const capabilities = await request(config, "/v1/capabilities");
-  validateCapabilities(config, capabilities);
-  const pending = await driver("reprocess", config, [], [String(limit)]);
-  const state = pending.find((record) => record.type === "sync_state");
+function reprocessCandidateToken(candidate) {
+  return `${candidate.server_seq}:${candidate.id}`;
+}
+
+function validateReprocessDriverPage(pending, limit, requestedAfter) {
+  const recordKeys = (value) => Object.keys(value).sort().join(",");
+  const states = pending.filter((record) => record.type === "sync_state");
   const candidates = pending.filter((record) => record.type === "sync_reprocess_candidate");
-  if (!state) throw new Error("driver omitted sync_state while reprocessing");
-  sequence(state.transport_cursor, "transport_cursor");
-  const records = [];
+  const pages = pending.filter((record) => record.type === "sync_reprocess_page");
+  if (states.length !== 1 || pages.length !== 1 || candidates.length > limit ||
+      pending.length !== states.length + candidates.length + pages.length) {
+    throw new Error("driver reprocess page shape is invalid");
+  }
+  const page = pages[0];
+  if (recordKeys(page) !== "has_more,next_after,type" || typeof page.has_more !== "boolean" ||
+      (page.has_more ? typeof page.next_after !== "string" : page.next_after !== null) ||
+      (page.has_more && candidates.length === 0)) {
+    throw new Error("driver reprocess pagination is invalid");
+  }
+  let previous = requestedAfter;
   for (const candidate of candidates) {
-    sequence(candidate.server_seq, "reprocess server_seq");
-    if (BigInt(candidate.server_seq) > BigInt(capabilities.current_seq)) {
-      throw new Error("quarantine sequence exceeds authenticated server state");
+    if (recordKeys(candidate) !==
+        "envelope,id,prior_status,server_received_at,server_seq,type" ||
+        candidate.type !== "sync_reprocess_candidate" || !UUID_V4.test(candidate.id) ||
+        typeof candidate.server_received_at !== "string" ||
+        typeof candidate.prior_status !== "string" || !candidate.envelope) {
+      throw new Error("driver reprocess candidate is invalid");
     }
-    const message = { server_seq: candidate.server_seq, id: candidate.id,
-      server_received_at: candidate.server_received_at, envelope: candidate.envelope };
-    const evaluated = await evaluatePull(config, capabilities, message);
-    records.push({ type: "sync_pull_message", ...message, ...evaluated });
+    sequence(candidate.server_seq, "reprocess server_seq");
+    const token = reprocessCandidateToken(candidate);
+    if (previous !== null) {
+      const separator = previous.indexOf(":");
+      const previousSequence = sequence(previous.slice(0, separator), "reprocess page server_seq");
+      const previousId = previous.slice(separator + 1);
+      if (separator < 1 || !UUID_V4.test(previousId) ||
+          BigInt(candidate.server_seq) < BigInt(previousSequence) ||
+          (candidate.server_seq === previousSequence && candidate.id <= previousId)) {
+        throw new Error("driver reprocess page did not advance");
+      }
+    }
+    previous = token;
   }
-  if (records.length === 0) {
-    await event("reprocess.complete", { count: 0, transport_cursor: state.transport_cursor });
-    return;
+  if (page.has_more && page.next_after !== previous) {
+    throw new Error("driver reprocess next page token is inconsistent");
   }
-  records.push({ type: "sync_pull_cursor", next_after: state.transport_cursor });
-  const applied = await driver("apply", config, records);
-  await logApplyOutcomes(config, records, applied);
-  await event("reprocess.complete", { count: candidates.length,
-    transport_cursor: state.transport_cursor, result: applied[0] ?? null });
+  return { state: states[0], candidates, page };
+}
+
+export async function reprocessCycle(config, limit, dependencies = {}) {
+  const healthCall = dependencies.healthCall ?? health;
+  const requestCall = dependencies.requestCall ?? request;
+  const driverCall = dependencies.driverCall ?? driver;
+  const evaluateCall = dependencies.evaluateCall ?? evaluatePull;
+  const eventCall = dependencies.eventCall ?? event;
+  const logApplyCall = dependencies.logApplyCall ?? logApplyOutcomes;
+  const ready = await healthCall(config.server_url);
+  if (ready.server_instance_id !== config.server_instance_id) throw new Error("health server instance changed");
+  const capabilities = await requestCall(config, "/v1/capabilities");
+  validateCapabilities(config, capabilities);
+  let after = null;
+  let stableState = null;
+  let total = 0;
+  let pageCount = 0n;
+  const retentionFloor = BigInt(capabilities.min_available_seq);
+  // Locally retained quarantine may cover both the server-retained suffix and
+  // the unavailable prefix, so the authenticated lifetime sequence space is
+  // floor + (current-floor), rather than only the current retained window.
+  const authenticatedSequenceSpace = retentionFloor +
+    (BigInt(capabilities.current_seq) - retentionFloor);
+  const seenTokens = new Set();
+  const seenSequences = new Set();
+  for (;;) {
+    pageCount += 1n;
+    if (pageCount > authenticatedSequenceSpace + 1n) {
+      throw new Error("driver reprocess walk exceeds authenticated sequence space");
+    }
+    const extra = [String(limit), ...(after === null ? [] : [after])];
+    const pending = await driverCall("reprocess", config, [], extra);
+    const { state, candidates, page } = validateReprocessDriverPage(pending, limit, after);
+    sequence(state.transport_cursor, "transport_cursor");
+    if (stableState && (state.transport_cursor !== stableState.transport_cursor ||
+        state.driver_generation !== stableState.driver_generation)) {
+      throw new Error("driver reprocess state changed between pages");
+    }
+    stableState ??= state;
+    const records = [];
+    for (const candidate of candidates) {
+      const token = reprocessCandidateToken(candidate);
+      if (seenTokens.has(token)) throw new Error("driver reprocess repeated a candidate");
+      seenTokens.add(token);
+      if (candidate.server_seq === "0") {
+        throw new Error("driver reprocess candidate has no canonical server sequence");
+      }
+      if (seenSequences.has(candidate.server_seq)) {
+        throw new Error("driver reprocess mapped one server sequence to multiple wire ids");
+      }
+      seenSequences.add(candidate.server_seq);
+      if (BigInt(seenSequences.size) > authenticatedSequenceSpace) {
+        throw new Error("driver reprocess candidate count exceeds authenticated sequence space");
+      }
+      if (BigInt(candidate.server_seq) > BigInt(capabilities.current_seq)) {
+        throw new Error("quarantine sequence exceeds authenticated server state");
+      }
+      const message = { server_seq: candidate.server_seq, id: candidate.id,
+        server_received_at: candidate.server_received_at, envelope: candidate.envelope };
+      const evaluated = await evaluateCall(config, capabilities, message);
+      records.push({ type: "sync_pull_message", ...message, ...evaluated });
+    }
+    if (records.length > 0) {
+      records.push({ type: "sync_pull_cursor", next_after: state.transport_cursor });
+      const applied = await driverCall("apply", config, records);
+      await logApplyCall(config, records, applied);
+      total += candidates.length;
+    }
+    if (!page.has_more) break;
+    if (seenTokens.has(page.next_after) && page.next_after === after) {
+      throw new Error("driver reprocess pagination looped");
+    }
+    after = page.next_after;
+  }
+  await eventCall("reprocess.complete", { count: total,
+    transport_cursor: stableState.transport_cursor });
 }
 
 function resultFromResyncAudit(status) {

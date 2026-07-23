@@ -1,4 +1,10 @@
-reduce .[] as $event (
+def logical_events:
+  .[]
+  | if .type == "sync_pull_commit" then
+      .messages[]? | select(.status == "imported") | .local_event // empty
+    else . end;
+
+reduce logical_events as $event (
   {sent: 0, addressed: [], read: {}};
   if $event.type == "message_sent" then
     .sent += 1

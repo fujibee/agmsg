@@ -22,14 +22,14 @@ never advance a cursor ahead of durable local state.
 
 ### Optional synchronization extension
 
-A storage driver may advertise the Stage-1 extension and implement these three
+A storage driver may advertise the Stage-1 extension and implement these four
 operations in addition to the ADR 0003 ABI:
 
 ```text
 storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
 storage_sync_reconcile_push <local-team> <server-instance-id> <remote-team-id> <protocol-version>
 storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <protocol-version>
-storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
+storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
 ```
 
 The SQLite driver is the Stage-1 implementation. Drivers that do not advertise
@@ -52,6 +52,34 @@ local position is interpreted only together with that generation. Compaction
 that preserves the driver's cursor space preserves the generation; replacement
 or reinitialization of that position space creates a new generation. This
 prevents a reused local position from inheriting stale remote state.
+
+### JSONL journal realization (Gate C)
+
+The bundled JSONL driver realizes the same contract without a mutable sidecar
+database. `events.jsonl` is the single append journal for local events and sync
+state. Its Stage-1 local position is the byte offset immediately after the
+originating top-level `message_sent` record, paired with a persistent file
+generation. This sync position is separate from the driver's ordinal delivery
+cursor.
+
+Every Stage-1 operation holds the existing `events.jsonl.lock`, reads a complete
+snapshot through its locked EOF, folds the immutable state records, and appends
+at most one complete transition record with one append write followed by
+`fsync`. Reservation, acknowledgement, quarantine/import outcomes, and the
+transport cursor therefore become durable together. A pull page is one
+`sync_pull_commit`; imported local events are nested in that record and the
+normal inbox/history projection exposes each first committed local event once.
+Replay commits carry no second local event.
+
+Compaction and local rename preserve every sync record and rotate the file
+generation because byte offsets may change. The replacement journal contains
+the new generation before its atomic rename, so there is no rewritten-file /
+old-generation crash window. Durable reservations retain their
+local-ID/wire-ID/envelope identity across that rewrite. Position aliases permit
+an acknowledgement already in flight for the preceding generation to reconcile
+the same reservation, while the current generation's position is used for the
+new contiguous push prefix. A rewrite never creates a new wire ID or envelope
+for an existing reservation.
 
 ### Prepare push
 
@@ -154,6 +182,28 @@ existing atomic import transition. Reprocessing is explicit rather than part of
 every polling cycle, so a permanently invalid ciphertext cannot cause an
 automatic decrypt loop.
 
+Reprocess output is stable keyset pagination ordered by `(server_seq, wire_id)`.
+Each page contains at most `limit` `sync_reprocess_candidate` records and exactly
+one final `sync_reprocess_page` record:
+
+```json
+{"type":"sync_reprocess_page","next_after":"42:550e8400-e29b-41d4-a716-446655440000","has_more":true}
+```
+
+`next_after` is the canonical decimal server sequence, a colon, and the lowercase
+UUIDv4 wire ID of the last candidate. It is non-null exactly when `has_more` is
+true. The engine supplies it unchanged as the optional `page-after` argument and
+MUST reject a non-advancing, repeated, oversized, or malformed page. One explicit
+reprocess invocation walks pages until `has_more=false`; permanently blocking
+records in an early page therefore cannot starve a later newly recoverable record.
+Transport cursor and driver generation MUST remain unchanged across the walk.
+Candidate rows and the page trailer MUST come from one storage snapshot. Across
+the complete walk, each `server_seq` occurs at most once. The engine bounds both
+candidate and page counts by the authenticated lifetime sequence space: the
+locally retained prefix through `min_available_seq` plus the available suffix
+through `current_seq` (with at most one final empty page). This keeps a corrupt
+driver from manufacturing an unbounded walk with ever-changing wire IDs.
+
 ADR 0009 promotes the previously reserved recovery operation behind a separate
 optional `stage1-resync` capability:
 
@@ -174,8 +224,9 @@ transport cursor automatically.
   synthesizing new wire identities.
 - The transport engine is backend-neutral, while each participating driver can
   make remote reconciliation atomic with its own local message store.
-- SQLite is the initial dogfood backend. JSONL remains local-only until it can
-  provide the same atomic import and cursor guarantees.
+- SQLite and JSONL implement the dogfood contract. JSONL uses its locked,
+  single-record append journal rather than emulating a mutable transaction
+  outside the driver.
 - The client downloads the whole team stream and projects recipients locally;
   the opaque envelope prevents server-side recipient routing.
 

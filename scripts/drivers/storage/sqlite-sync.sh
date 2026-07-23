@@ -748,12 +748,22 @@ storage_sync_apply_pull() {
 # This never changes the transport cursor; apply performs any resulting state
 # transition atomically against that already-advanced cursor.
 storage_sync_reprocess() {
-  local team="$1" server="$2" remote="$3" protocol="$4" limit="$5"
+  local team="$1" server="$2" remote="$3" protocol="$4" limit="$5" after="${6:-}"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || return 13
   case "$limit" in ''|*[!0-9]*) return 13 ;; esac
   [ "$limit" -ge 1 ] && [ "$limit" -le 1000 ] || return 13
   _sqlite_sync_schema || return $?
-  local generation tl
+  local generation tl after_seq after_wire after_sql=""
+  if [ -n "$after" ]; then
+    case "$after" in *:*) ;; *) return 13 ;; esac
+    after_seq="${after%%:*}"; after_wire="${after#*:}"
+    case "$after_seq" in ''|*[!0-9]*) return 13 ;; esac
+    [ "$after_seq" = 0 ] || [ "${after_seq#0}" = "$after_seq" ] || return 13
+    [ "$after_seq" -le 9223372036854775807 ] 2>/dev/null || return 13
+    printf '%s' "$after_wire" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 13
+    after_sql="AND (CAST(server_seq AS INTEGER)>$after_seq OR
+      (CAST(server_seq AS INTEGER)=$after_seq AND wire_id>'$after_wire'))"
+  fi
   generation=$(_sqlite_sync_generation) || return 13
   tl=$(_sqlite_lit "$team")
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || return 13
@@ -762,16 +772,36 @@ storage_sync_reprocess() {
     FROM sync_bindings WHERE local_team='$tl' AND server_instance_id='$server'
       AND remote_team_id='$remote' AND protocol_version=$protocol
       AND driver_generation='$generation';
-    SELECT json_object('type','sync_reprocess_candidate','server_seq',server_seq,
-      'id',wire_id,'server_received_at',server_received_at,
-      'envelope',json_object('v',envelope_v,'cipher',cipher,'key_id',key_id,'blob',blob),
-      'prior_status',status)
-    FROM sync_quarantine WHERE local_team='$tl' AND server_instance_id='$server'
-      AND remote_team_id='$remote' AND protocol_version=$protocol
-      AND driver_generation='$generation'
-      AND status IN ('unsupported_cipher','pending_key','authentication_failed',
-                     'malformed','policy_violation')
-    ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT $limit;"
+    WITH candidates AS (
+      SELECT server_seq,wire_id,server_received_at,envelope_v,cipher,key_id,blob,status
+        FROM sync_quarantine
+       WHERE local_team='$tl' AND server_instance_id='$server'
+         AND remote_team_id='$remote' AND protocol_version=$protocol
+         AND driver_generation='$generation'
+         AND status IN ('unsupported_cipher','pending_key','authentication_failed',
+                        'malformed','policy_violation')
+         $after_sql
+       ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT $((limit + 1))
+    ), output AS (
+      SELECT 0 AS trailer,CAST(server_seq AS INTEGER) AS sequence_order,wire_id,
+        json_object('type','sync_reprocess_candidate','server_seq',server_seq,
+          'id',wire_id,'server_received_at',server_received_at,
+          'envelope',json_object('v',envelope_v,'cipher',cipher,'key_id',key_id,'blob',blob),
+          'prior_status',status) AS record
+      FROM candidates ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT $limit
+    ), trailer AS (
+      SELECT 1 AS trailer,NULL AS sequence_order,NULL AS wire_id,
+        json_object('type','sync_reprocess_page','next_after',
+          CASE WHEN COUNT(*)>$limit THEN (
+            SELECT server_seq||':'||wire_id FROM candidates
+             ORDER BY CAST(server_seq AS INTEGER),wire_id LIMIT 1 OFFSET $((limit - 1)))
+            ELSE NULL END,
+          'has_more',CASE WHEN COUNT(*)>$limit THEN json('true') ELSE json('false') END
+        ) AS record
+      FROM candidates
+    )
+    SELECT record FROM (SELECT * FROM output UNION ALL SELECT * FROM trailer)
+     ORDER BY trailer,sequence_order,wire_id;"
 }
 
 # Derive the remote read frontier and exact wire exceptions from durable local

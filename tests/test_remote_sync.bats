@@ -213,6 +213,30 @@ prepare_push() {
   [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440020';" | tr -d '\r')" = imported ]
 }
 
+@test "sync contract: reprocess candidate body and trailer share one keyset page" {
+  local records="" page first token second index wire
+  for index in 1 2 3; do
+    wire=$(printf '550e8400-e29b-41d4-a716-%012d' "$((40 + index))")
+    records="${records}$(jq -nc --arg seq "$index" --arg id "$wire" '
+      {type:"sync_pull_message",server_seq:$seq,id:$id,
+       server_received_at:"2026-07-20T13:04:00.000000Z",
+       envelope:{v:1,cipher:"age-v1",key_id:"epoch-1",blob:"YWdl"},
+       status:"authentication_failed",reason:"blocked",
+       policy_revision:"0",local_security_revision:"0"}')"$'\n'
+  done
+  page="${records}{\"type\":\"sync_pull_cursor\",\"next_after\":\"3\"}"
+  printf '%s\n' "$page" |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  first=$(storage_sync_reprocess demo "$SERVER_ID" "$TEAM_ID" 1 2)
+  [ "$(printf '%s\n' "$first" | jq -s '[.[]|select(.type=="sync_reprocess_candidate")]|length')" -eq 2 ]
+  token=$(printf '%s\n' "$first" | jq -r 'select(.type=="sync_reprocess_page")|.next_after')
+  [ "$token" = "2:550e8400-e29b-41d4-a716-000000000042" ]
+  [ "$(printf '%s\n' "$first" | jq -r 'select(.type=="sync_reprocess_page")|.has_more')" = true ]
+  second=$(storage_sync_reprocess demo "$SERVER_ID" "$TEAM_ID" 1 2 "$token")
+  [ "$(printf '%s\n' "$second" | jq -sr '[.[]|select(.type=="sync_reprocess_candidate")][0].server_seq')" = 3 ]
+  [ "$(printf '%s\n' "$second" | jq -r 'select(.type=="sync_reprocess_page")|.has_more')" = false ]
+}
+
 @test "sync contract: retention resync records one immutable gap and preserves local state" {
   storage_send demo alice bob "local survives retention" >/dev/null
   local prepared status input result repeated db wire

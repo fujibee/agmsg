@@ -27,6 +27,7 @@
 # time so the optional duckdb path can read the query from a data file rather than
 # carry apostrophe-laden SQL inline (which the macOS bash 3.2 parser mis-handles).
 _JSONL_DRIVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+_JSONL_SYNC_HELPER_DEFAULT="$_JSONL_DRIVER_DIR/../../internal/jsonl-sync.mjs"
 
 _jsonl_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _jsonl_log() { printf '%s\n' "$(dirname "$(agmsg_db_path)")/events.jsonl"; }
@@ -61,10 +62,16 @@ _jsonl_read_cursor_migrate() {
   if [ -f "$marker" ]; then rmdir "$lock" 2>/dev/null || true; return 0; fi
   log="$(_jsonl_log)"; cursors="$(_jsonl_read_cursors)"
   tmp=$(mktemp "${cursors}.tmp.XXXXXX") || { rmdir "$lock" 2>/dev/null || true; return 1; }
-  tip=$(jq -s '[.[] | select(.type=="message_sent")] | length' "$log") || {
+  tip=$(jq -s 'def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    [logical_events | select(.type=="message_sent")] | length' "$log") || {
     rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1;
   }
-  jq -r --argjson tip "$tip" -s '[.[] | select(.type=="message_sent") | [.team,.to]] | unique[] | @tsv + "\t" + ($tip|tostring)' "$log" > "$tmp" || { rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1; }
+  jq -r --argjson tip "$tip" -s 'def logical_events: .[] |
+    if .type=="sync_pull_commit" then .messages[]? | select(.status=="imported") |
+      .local_event // empty else . end;
+    [logical_events | select(.type=="message_sent") | [.team,.to]] | unique[] |
+    @tsv + "\t" + ($tip|tostring)' "$log" > "$tmp" || { rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1; }
   mv "$tmp" "$cursors" || { rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true; return 1; }
   : > "$marker.tmp.$$" || { rmdir "$lock" 2>/dev/null || true; return 1; }
   mv "$marker.tmp.$$" "$marker" || { rm -f "$marker.tmp.$$"; rmdir "$lock" 2>/dev/null || true; return 1; }
@@ -97,7 +104,7 @@ PY
 }
 
 # Serialize all log mutations (append / mark / compact / import) behind a portable
-# mkdir lock; record-returning reads take a single file read as their snapshot.
+# mkdir lock; record-returning reads hold the same lock through their snapshot EOF.
 _jsonl_with_lock() {
   local lock i=0 rc=0 max="${AGMSG_JSONL_LOCK_TRIES:-1000}"
   lock="$(_jsonl_log).lock"
@@ -114,12 +121,16 @@ _jsonl_with_lock() {
 # is byte-size based (file-direct I/O is size-bound, FINDINGS.md): ~5 MB ≈ tens of
 # thousands of events. AGMSG_JSONL_ENGINE=jq|duckdb forces a choice (tests/bench).
 _jsonl_use_duckdb() {
+  local log sz; log="$(_jsonl_log)"
+  # Imported messages live inside one atomic sync_pull_commit journal record.
+  # The jq projection understands that nested record; the optional flat DuckDB
+  # query does not. This correctness guard also overrides a forced engine.
+  grep -q '"type":"sync_pull_commit"' "$log" 2>/dev/null && return 1
   case "${AGMSG_JSONL_ENGINE:-}" in
     jq) return 1 ;;
     duckdb) command -v duckdb >/dev/null 2>&1 && return 0 || return 1 ;;
   esac
   command -v duckdb >/dev/null 2>&1 || return 1
-  local log sz; log="$(_jsonl_log)"
   sz=$(wc -c < "$log" 2>/dev/null | tr -d ' ') || return 1
   [ "${sz:-0}" -ge "${AGMSG_JSONL_DUCKDB_BYTES:-5242880}" ]
 }
@@ -139,6 +150,7 @@ storage_describe() {
   printf 'name=jsonl\n'
   printf 'backend=append-only JSONL event log (jq; duckdb opt-in accelerator)\n'
   printf 'log=%s\n' "$(_jsonl_log)"
+  if _jsonl_sync_available; then printf 'capabilities=stage1-sync\n'; fi
 }
 
 storage_init() {
@@ -149,6 +161,49 @@ storage_init() {
 # Does a store already exist? (does NOT create one.) The log is the store, so a
 # read call-site can answer "no messages yet" without lazily creating events.jsonl.
 storage_store_exists() { [ -f "$(_jsonl_log)" ]; }
+
+# --- optional Stage-1 remote synchronization -------------------------------
+
+_jsonl_sync_node() {
+  printf '%s\n' "${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
+}
+
+_jsonl_sync_helper() {
+  printf '%s\n' "$_JSONL_SYNC_HELPER_DEFAULT"
+}
+
+_jsonl_sync_available() {
+  local node helper; node="$(_jsonl_sync_node)"; helper="$(_jsonl_sync_helper)"
+  [ -f "$helper" ] || return 1
+  if [ "${node#*/}" != "$node" ]; then [ -x "$node" ]; else command -v "$node" >/dev/null 2>&1; fi
+}
+
+_jsonl_sync_exec_locked() {
+  local operation="$1"; shift
+  local node helper; node="$(_jsonl_sync_node)"; helper="$(_jsonl_sync_helper)"
+  _jsonl_sync_available || return 10
+  "$node" "$helper" "$operation" "$(_jsonl_log)" "$@"
+}
+
+storage_sync_prepare_push() {
+  _jsonl_init_file || return 13
+  _jsonl_with_lock _jsonl_sync_exec_locked prepare "$@"
+}
+
+storage_sync_reconcile_push() {
+  _jsonl_init_file || return 13
+  _jsonl_with_lock _jsonl_sync_exec_locked reconcile "$@"
+}
+
+storage_sync_apply_pull() {
+  _jsonl_init_file || return 13
+  _jsonl_with_lock _jsonl_sync_exec_locked apply "$@"
+}
+
+storage_sync_reprocess() {
+  _jsonl_init_file || return 13
+  _jsonl_with_lock _jsonl_sync_exec_locked reprocess "$@"
+}
 
 # --- contract: messages -----------------------------------------------------
 
@@ -165,18 +220,39 @@ storage_send() {
 }
 _jsonl_append() { printf '%s\n' "$1" >> "$(_jsonl_log)"; }
 
+_jsonl_prepare_rotated_generation_locked() {
+  local target="$1" log; log="$(_jsonl_log)"
+  grep -Eq '"type":"sync_generation"|"driver_generation":' "$log" 2>/dev/null || return 0
+  local node helper; node="$(_jsonl_sync_node)"; helper="$(_jsonl_sync_helper)"
+  _jsonl_sync_available || return 10
+  "$node" "$helper" rotate-generation "$target" >/dev/null
+}
+
 storage_list_unread() {
+  _jsonl_init_file || return 1
+  _jsonl_with_lock _jsonl_list_unread_locked "$@"
+}
+
+_jsonl_list_unread_locked() {
   local team="$1" agent="$2" limit=""
   shift 2
   while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
   case "$limit" in ''|*[!0-9]*) limit="" ;; esac
-  _jsonl_init_file
   local log out cursor; log="$(_jsonl_log)"
   cursor=$(storage_read_cursor_get "$team" "$agent") || return 1
   if _jsonl_use_duckdb; then
     out="$(_jsonl_unread_duckdb "$team" "$agent" "$log" "$cursor")" || return 1
   else
-    out="$(jq -c --arg team "$team" --arg agent "$agent" --argjson cursor "$cursor" -s '(reduce .[] as $e ({}; if $e.type=="message_read" and $e.team==$team and $e.agent==$agent then .[$e.msg_id]=true else . end)) as $read | [.[] | select(.type=="message_sent")] | to_entries[] | select((.key + 1) > $cursor and .value.team==$team and .value.to==$agent and ($read[.value.id] | not)) | .value | {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}' "$log")" || return 1
+    out="$(jq -c --arg team "$team" --arg agent "$agent" --argjson cursor "$cursor" -s '
+      def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+      [logical_events] as $events |
+      (reduce $events[] as $e ({}; if $e.type=="message_read" and
+        $e.team==$team and $e.agent==$agent then .[$e.msg_id]=true else . end)) as $read |
+      [$events[] | select(.type=="message_sent")] | to_entries[] |
+      select((.key + 1) > $cursor and .value.team==$team and .value.to==$agent and
+        ($read[.value.id] | not)) | .value |
+      {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}' "$log")" || return 1
   fi
   [ -n "$out" ] || return 0
   if [ -n "$limit" ]; then printf '%s\n' "$out" | head -n "$limit"; else printf '%s\n' "$out"; fi
@@ -233,7 +309,9 @@ _jsonl_read_cursor_consume_locked() {
   current=$(storage_read_cursor_get "$team" "$agent") || return 1
   _jsonl_mark "$team" "$agent" "$@" || return 1
   log="$(_jsonl_log)"
-  tip=$(jq -s '[.[] | select(.type=="message_sent")] | length' "$log") || return 1
+  tip=$(jq -s 'def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    [logical_events | select(.type=="message_sent")] | length' "$log") || return 1
   # Cap against the same locked log snapshot. Compare canonical decimal strings
   # instead of shell integers so a maliciously huge target cannot overflow the
   # host shell before it is reduced to the real tip.
@@ -288,22 +366,34 @@ _jsonl_mark() {
 # --- contract: watch (delivery cursor §2.2) ---------------------------------
 
 storage_watch_tip() {
-  _jsonl_init_file
+  _jsonl_init_file || return 1
+  _jsonl_with_lock _jsonl_watch_tip_locked
+}
+
+_jsonl_watch_tip_locked() {
   # An empty log makes jq return 0 with exit 0; a CORRUPT log makes jq fail, and
   # that must surface as a non-zero exit (data-op framing §2.1) — no `|| echo 0`
   # fallback that would mask a broken store as a fresh tip of 0.
-  jq -s '[.[] | select(.type=="message_sent")] | length' "$(_jsonl_log)"
+  jq -s 'def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    [logical_events | select(.type=="message_sent")] | length' "$(_jsonl_log)"
 }
 
 storage_watch_after() {
+  _jsonl_init_file || return 1
+  _jsonl_with_lock _jsonl_watch_after_locked "$@"
+}
+
+_jsonl_watch_after_locked() {
   local cursor="$1"; shift
   case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
-  _jsonl_init_file
   local pairs_json; pairs_json="$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length>0))')"
   # One file read = one snapshot: the trailing cursor (total message_sent count)
   # is computed from the same scan, so it never runs ahead of the rows returned.
   jq -c --argjson cursor "$cursor" --argjson pairs "$pairs_json" -s '
-    . as $events
+    def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    [logical_events] as $events
     | (reduce $events[] as $event ({};
         if $event.type=="message_read" then
           .[([$event.team,$event.agent,$event.msg_id] | tojson)] = true
@@ -323,14 +413,20 @@ storage_watch_after() {
 # --- contract: history ------------------------------------------------------
 
 storage_history() {
+  _jsonl_init_file || return 1
+  _jsonl_with_lock _jsonl_history_locked "$@"
+}
+
+_jsonl_history_locked() {
   local team="$1"; shift
   local agent="" limit=""
   if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then agent="$1"; shift; fi
   while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
   case "$limit" in ''|*[!0-9]*) limit="-1" ;; esac
-  _jsonl_init_file
   jq -c --arg team "$team" --arg agent "$agent" --argjson limit "$limit" -s '
-    [.[] | select(.type=="message_sent" and .team==$team
+    def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    [logical_events | select(.type=="message_sent" and .team==$team
             and ($agent=="" or .to==$agent or .from==$agent))
      | {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}]
     | (if $limit >= 0 and (length > $limit) then .[length-$limit:] else . end)
@@ -341,10 +437,17 @@ storage_history() {
 # --- contract: export / import / compact ------------------------------------
 
 storage_export() {
-  _jsonl_init_file
+  _jsonl_init_file || return 1
+  _jsonl_with_lock _jsonl_export_locked "$@"
+}
+
+_jsonl_export_locked() {
   # Forward-compat (§2.3): only the v1 event types are projected; unknown types
   # are dropped rather than leaked.
-  jq -c 'select(.type=="message_sent" or .type=="message_read")' "$(_jsonl_log)" > "$1"
+  jq -c -s 'def logical_events: .[] | if .type=="sync_pull_commit" then
+    .messages[]? | select(.status=="imported") | .local_event // empty else . end;
+    logical_events | select(.type=="message_sent" or .type=="message_read")' \
+    "$(_jsonl_log)" > "$1"
 }
 
 storage_import() {
@@ -375,7 +478,11 @@ _jsonl_rename_agent_locked() {
     rm -f "$log_tmp" "$dual_tmp"; return 1;
   }
   jq -c --arg team "$team" --arg old "$old" --arg new "$new" '
-    if .team != $team then .
+    if .type == "sync_pull_commit" then
+      .messages |= map(if .local_event != null and .local_event.team == $team then
+        .local_event |= ((if .from == $old then .from = $new else . end) |
+          (if .to == $old then .to = $new else . end)) else . end)
+    elif .team != $team then .
     elif .type == "message_sent" then
       (if .from == $old then .from = $new else . end) |
       (if .to == $old then .to = $new else . end)
@@ -383,6 +490,9 @@ _jsonl_rename_agent_locked() {
     else . end' "$log" > "$log_tmp" || {
       rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1;
     }
+  _jsonl_prepare_rotated_generation_locked "$log_tmp" || {
+    rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1;
+  }
   awk -F '\t' -v OFS='\t' -v team="$team" -v old="$old" -v new="$new" '
     $1==team && $2==old { print; $2=new; print; next } { print }' "$cursors" > "$dual_tmp" || {
       rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1;
@@ -412,8 +522,16 @@ _jsonl_rename_team_locked() {
   clean_tmp=$(mktemp "${cursors}.rename-clean.XXXXXX") || {
     rm -f "$log_tmp" "$dual_tmp"; return 1;
   }
-  jq -c --arg old "$old" --arg new "$new" 'if .team == $old then .team = $new else . end' \
+  jq -c --arg old "$old" --arg new "$new" '
+    if .binding.local_team == $old then .binding.local_team = $new else . end |
+    if .type == "sync_pull_commit" then
+      .messages |= map(if .local_event != null and .local_event.team == $old then
+        .local_event.team = $new else . end)
+    elif .team == $old then .team = $new else . end' \
     "$log" > "$log_tmp" || { rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1; }
+  _jsonl_prepare_rotated_generation_locked "$log_tmp" || {
+    rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1;
+  }
   awk -F '\t' -v OFS='\t' -v old="$old" -v new="$new" '
     $1==old { print; $1=new; print; next } { print }' "$cursors" > "$dual_tmp" || {
       rm -f "$log_tmp" "$dual_tmp" "$clean_tmp"; return 1;
@@ -441,6 +559,7 @@ _jsonl_compact_do() {
   # single-quoted jq string in this position desyncs the macOS system bash 3.2
   # parser and breaks the rest of the file (a no-error `bash -n`, but a real
   # source failure). Keep new jq one-liners here.
-  jq -c -s 'reduce .[] as $e ({out:[], seen:{}}; if $e.type=="message_sent" then .out += [$e] elif $e.type=="message_read" then ([$e.team,$e.agent,$e.msg_id]|tojson) as $k | if .seen[$k] then . else .seen[$k]=true | .out += [$e] end else . end) | .out[]' "$log" > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$log"
+  jq -c -s 'reduce .[] as $e ({out:[], seen:{}}; if $e.type=="message_read" then ([$e.team,$e.agent,$e.msg_id]|tojson) as $k | if .seen[$k] then . else .seen[$k]=true | .out += [$e] end else .out += [$e] end) | .out[]' "$log" > "$tmp" || { rm -f "$tmp"; return 1; }
+  _jsonl_prepare_rotated_generation_locked "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$log" || { rm -f "$tmp"; return 1; }
 }

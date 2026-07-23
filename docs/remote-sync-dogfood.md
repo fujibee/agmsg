@@ -131,5 +131,6 @@ on A only confirms its existing local-to-wire mapping and does not create a
 second local message.
 
 HTTP 410 (`resync-required`) is terminal. Stage 1 never rewinds or resets the
-transport cursor automatically. JSONL and other drivers that do not advertise
-`capabilities=stage1-sync` remain valid local-only drivers.
+transport cursor automatically. SQLite and JSONL advertise
+`capabilities=stage1-sync`; other drivers that do not advertise it remain valid
+local-only drivers.

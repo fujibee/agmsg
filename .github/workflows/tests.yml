@@ -181,6 +181,7 @@ jobs:
           age_bin="$(go env GOPATH)/bin/age"
           AGMSG_AGE_BIN="$age_bin" node --test tests/sync_cipher.test.mjs
           AGMSG_AGE_BIN="$age_bin" bats --print-output-on-failure tests/test_sync_cipher.bats
+          AGMSG_AGE_BIN="$age_bin" bats --print-output-on-failure tests/test_jsonl_remote_sync.bats
           AGE_BIN="$age_bin" node docs/spec/vectors/verify-age-v1-vectors.mjs
 
   # Continuously verify that the storage contract is backend-portable: run the
