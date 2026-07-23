@@ -100,6 +100,15 @@ recorded_uuid() {
   [ -z "$(recorded_uuid team alice)" ]
 }
 
+@test "codex record: zero matches are silent (grep -c prints 0 AND exits 1)" {
+  local proj; proj="$(mktemp -d)"
+  make_rollout "elsewhere-uuid" "/some/other/cwd"
+  run env -u CODEX_THREAD_ID bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]   # a two-line count would print "[: integer expected" here
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
 @test "codex record: missing args are a no-op" {
   run bash "$TYPES/codex/codex-record-session.sh" team "" /proj
   [ "$status" -eq 0 ]

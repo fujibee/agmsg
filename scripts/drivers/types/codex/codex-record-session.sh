@@ -71,7 +71,10 @@ else
         done | grep . | sort -u > "$tids_file"
       # Exactly one distinct matching id => unambiguously ours. 0 (nothing) or
       # >1 (concurrent codex sessions in this cwd -> ambiguous) => record nothing.
-      if [ "$(grep -c . "$tids_file" 2>/dev/null || echo 0)" -eq 1 ]; then
+      # grep -c already prints 0 on no match (exit 1), so no echo fallback --
+      # only the unreadable-file case (no output at all) needs the 0 default.
+      tid_count="$(grep -c . "$tids_file" 2>/dev/null || true)"
+      if [ "${tid_count:-0}" -eq 1 ]; then
         thread="$(head -1 "$tids_file")"
       fi
       rm -f "$tids_file"
