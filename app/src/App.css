@@ -1144,19 +1144,20 @@ body.resizing-row {
   color: #fff;
   cursor: grabbing;
 }
-/* Off-screen drag image for pane-header drags — see onDragStart in App.tsx.
-   Sized to its text content, not the label's flex-stretched box, so the
-   drag snapshot looks like a name chip instead of the whole header bar. */
-.pane-drag-ghost {
+/* Floating name chip that follows the cursor during a pane-header
+   pointer-drag — see startPaneDrag in App.tsx. pointer-events: none is load
+   -bearing: elementFromPoint-based hit-testing must see through this to
+   whatever's actually underneath (a tab, another pane cell, ...). */
+.pane-drag-chip {
   position: fixed;
-  top: -9999px;
-  left: -9999px;
+  z-index: 100;
   padding: 2px 8px;
   font-size: 11px;
   color: #fff;
   background: var(--accent);
   border-radius: 3px;
   white-space: nowrap;
+  pointer-events: none;
 }
 /* The pane a drag is currently over — see onDragOver in App.tsx. Dashed
    outline (not the focus ring's solid border) so a drop target reads as

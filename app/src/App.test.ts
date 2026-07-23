@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  joinDroppedPaths,
+  resolveFileDropTarget,
   shellPaneFrom,
   shellSplitStillValid,
   shellTabStillValid,
@@ -94,5 +96,58 @@ describe("shellSplitStillValid", () => {
     // it reproduces the same hidden-active bug shellTabStillValid guards
     // against on the new-tab path (co1, PR #431).
     expect(shellSplitStillValid(windows, "w-1", "teamB", "teamA")).toBe(false);
+  });
+});
+
+describe("joinDroppedPaths", () => {
+  it("joins multiple paths with a single space, unquoted", () => {
+    // Deliberately bare, not shell-quoted — see joinDroppedPaths' own doc:
+    // quoting broke Claude Code's own file-path recognition in live
+    // testing (koit), even though it's fine for Codex.
+    expect(joinDroppedPaths(["/a/b.txt", "/c/d.txt"])).toBe("/a/b.txt /c/d.txt");
+  });
+
+  it("passes a path with a space through unquoted", () => {
+    expect(joinDroppedPaths(["/Users/koit/my file.txt"])).toBe("/Users/koit/my file.txt");
+  });
+
+  it("returns an empty string for no paths", () => {
+    expect(joinDroppedPaths([])).toBe("");
+  });
+});
+
+describe("resolveFileDropTarget", () => {
+  const leaf = (paneId: string) => ({ kind: "leaf" as const, paneId });
+  const windows = [
+    {
+      id: "w-1",
+      root: { kind: "split" as const, axis: "col" as const, ratio: 0.5, a: leaf("p-1"), b: leaf("p-2") },
+    },
+  ];
+
+  it("prefers the pane directly under the cursor when there is one", () => {
+    expect(resolveFileDropTarget("p-hovered", windows, "w-1", null)).toBe("p-hovered");
+  });
+
+  it("falls back to the active tab's focused pane when nothing was hit", () => {
+    // e.g. dropped on the sidebar or tab bar, not any pane cell — koit's
+    // follow-up feedback: prefer the pane the user was actually using, not
+    // just whichever leaf happens to be first in the tree.
+    expect(resolveFileDropTarget(null, windows, "w-1", "p-2")).toBe("p-2");
+  });
+
+  it("falls back to the active window's first pane when nothing was hit and nothing is focused", () => {
+    expect(resolveFileDropTarget(null, windows, "w-1", null)).toBe("p-1");
+  });
+
+  it("ignores a focused pane that belongs to a different (inactive) tab", () => {
+    // lastFocusedPaneId is tracked globally, not per-tab — a stale value
+    // from another tab must not steer a drop away from the active one.
+    expect(resolveFileDropTarget(null, windows, "w-1", "p-from-another-tab")).toBe("p-1");
+  });
+
+  it("returns null when there's no active window to fall back to", () => {
+    // e.g. Team Room is showing (active === "room"), no panes at all.
+    expect(resolveFileDropTarget(null, windows, "room", null)).toBeNull();
   });
 });

@@ -25,6 +25,14 @@ type Props = {
   /** Reported on every fit — the pane's current cell size in CSS px, so a
    * divider drag elsewhere can snap to whole terminal rows/cols. */
   onCellSize?: (widthPx: number, heightPx: number) => void;
+  /** Fired when this pane's terminal actually receives keyboard focus (a
+   * click inside it, or Tab-focus) — xterm.js's hidden input textarea is a
+   * focusable descendant of the container div below, so a plain onFocus
+   * there catches it via the bubbled focusin React normalizes to. Lets the
+   * app track "which pane in this tab was last actually used" for the
+   * external file-drop fallback target (koit: prefer the focused pane over
+   * just the tab's first one). */
+  onFocusPane?: (id: string) => void;
 };
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -38,7 +46,17 @@ function b64ToBytes(b64: string): Uint8Array {
  * One embedded agent terminal: an xterm.js view bound to a backend PTY session.
  * Output streams in via `pty-output` events; keystrokes go back via `pty_write`.
  */
-export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, onAgentState, onCellSize }: Props) {
+export function TerminalPane({
+  id,
+  cmd,
+  args = [],
+  cwd,
+  fontSize = 12,
+  active,
+  onAgentState,
+  onCellSize,
+  onFocusPane,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   // Live handles to the current terminal/fit addon, for the font-size effect
   // below to reach — that effect must NOT be a dependency of the main effect
@@ -252,5 +270,5 @@ export function TerminalPane({ id, cmd, args = [], cwd, fontSize = 12, active, o
     return attachWebglAddon(term, () => new WebglAddon(), webglAddonRef);
   }, [active]);
 
-  return <div className="term-pane" ref={ref} />;
+  return <div className="term-pane" ref={ref} onFocus={() => onFocusPane?.(idRef.current)} />;
 }
