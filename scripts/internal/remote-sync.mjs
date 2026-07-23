@@ -168,12 +168,16 @@ async function writeConfig(path, value) {
   await rename(temporary, path);
 }
 
+async function readStoredSyncConfig(team) {
+  const bytes = await readFile(configPath(team));
+  return parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+
 export async function loadConfig(team) {
   const binding = await readConnectedBinding(team);
   let value;
   try {
-    const bytes = await readFile(configPath(team));
-    value = parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    value = await readStoredSyncConfig(team);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
     if (!binding.capabilities.write_allowed_ciphers.includes("none")) {
@@ -1074,7 +1078,10 @@ async function identityFiles(values) {
 }
 
 async function existingConfig(team) {
-  try { return await loadConfig(team); }
+  try {
+    await readStoredSyncConfig(team);
+    return await loadConfig(team);
+  }
   catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
