@@ -413,19 +413,27 @@ json.dump({
 
 # --- connect: pending/resume (B5) -----------------------------------------
 
-@test "connect: discards legacy pending records without a protocol-header verification fact" {
+@test "connect: quarantines legacy pending recovery material without committing it" {
   local token="legacy-pending-token"
   local key
   key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
   pending_dir="$SCRIPTS/../run/remote-connect-pending"
   mkdir -p "$pending_dir"
-  printf '%s\n' '{"endpoint":"'$ENDPOINT'","raw_response_text":"{}"}' > "$pending_dir/$key.json"
+  printf '%s\n' '{"endpoint":"'$ENDPOINT'","raw_response_text":"{\"credential_id\":\"018f3f7e-8888-7000-8000-000000000008\"}"}' > "$pending_dir/$key.json"
   chmod 600 "$pending_dir/$key.json"
 
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
   [ "$status" -ne 0 ]
-  [[ "$output" == *"discarded a legacy pending exchange"* ]]
+  [[ "$output" == *"refusing to resume a legacy pending exchange"* ]]
+  [[ "$output" == *"preserved the 0600 recovery record"* ]]
   [ ! -f "$pending_dir/$key.json" ]
+  local quarantined=("$pending_dir/$key.json.unverified."*)
+  [ "${#quarantined[@]}" -eq 1 ]
+  [ -f "${quarantined[0]}" ]
+  mode=$(stat -f '%Lp' "${quarantined[0]}" 2>/dev/null || stat -c '%a' "${quarantined[0]}")
+  [ "$mode" = "600" ]
+  recovered_id=$(python3 -c "import json; p=json.load(open('${quarantined[0]}')); print(json.loads(p['raw_response_text'])['credential_id'])")
+  [ "$recovered_id" = "018f3f7e-8888-7000-8000-000000000008" ]
 }
 
 @test "connect: resumes from a hand-crafted pending record without a fresh network call" {

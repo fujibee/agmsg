@@ -337,15 +337,44 @@ _remote_load_pending() {
   python3 -c '
 import json, sys
 pending_path, out_path = sys.argv[1], sys.argv[2]
-with open(pending_path) as f:
-    pending = json.load(f)
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate pending key")
+        value[key] = item
+    return value
+with open(pending_path, "rb") as f:
+    encoded = f.read(16 * 1024 * 1024 + 1)
+if len(encoded) > 16 * 1024 * 1024:
+    raise SystemExit(1)
+pending = json.loads(encoded.decode("utf-8"), object_pairs_hook=strict_object)
+if not isinstance(pending, dict) or not isinstance(pending.get("endpoint"), str) or \
+        not 1 <= len(pending["endpoint"].encode("utf-8")) <= 2048 or \
+        not isinstance(pending.get("raw_response_text"), str) or \
+        len(pending["raw_response_text"].encode("utf-8")) > 2 * 1024 * 1024:
+    raise SystemExit(1)
+if set(pending) == {"endpoint", "raw_response_text"}:
+    raise SystemExit(42)
 if set(pending) != {"endpoint", "protocol_header_verified", "raw_response_text"} or \
         pending["protocol_header_verified"] is not True:
-    raise SystemExit("pending record predates mandatory protocol-header verification")
+    raise SystemExit(1)
 with open(out_path, "w") as f:
     f.write(pending["raw_response_text"])
 print(pending["endpoint"])
 ' "$pending_file" "$out_resp_file"
+}
+
+# Preserve an exchange response that cannot be resumed automatically. It may
+# be the only remaining recovery material for an already-issued credential;
+# deleting it would orphan a still-active server credential. The path remains
+# inside the private pending directory and is forced to 0600.
+_remote_quarantine_pending() {
+  local pending_file="$1" reason="$2" target
+  target="${pending_file}.${reason}.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  mv "$pending_file" "$target" || return 1
+  chmod 600 "$target"
+  printf '%s' "$target"
 }
 
 # _remote_commit <team> <cfg> <endpoint> <credential> <credential_id>
@@ -486,9 +515,24 @@ cmd_connect() {
     local pending_resp_file pending_endpoint parsed_file
     pending_resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-resp.XXXXXX")"
     chmod 600 "$pending_resp_file"
-    if ! pending_endpoint="$(_remote_load_pending "$pending_file" "$pending_resp_file")"; then
-      rm -f "$pending_file" "$pending_resp_file"
-      echo "agmsg: discarded a legacy pending exchange without a verified protocol header; issue a fresh pairing token and retry." >&2
+    local pending_load_status=0 quarantine_reason quarantine_path
+    if pending_endpoint="$(_remote_load_pending "$pending_file" "$pending_resp_file")"; then
+      :
+    else
+      pending_load_status=$?
+      rm -f "$pending_resp_file"
+      if [ "$pending_load_status" -eq 42 ]; then
+        quarantine_reason="unverified"
+        echo "agmsg: refusing to resume a legacy pending exchange without a verified protocol header." >&2
+      else
+        quarantine_reason="invalid"
+        echo "agmsg: refusing to resume a malformed pending exchange record." >&2
+      fi
+      if quarantine_path="$(_remote_quarantine_pending "$pending_file" "$quarantine_reason")"; then
+        echo "agmsg: preserved the 0600 recovery record at $quarantine_path. Do not share it; use the server admin credential list/revoke workflow before issuing a fresh pairing token." >&2
+      else
+        echo "agmsg: could not quarantine the recovery record; it remains at $pending_file. Do not delete or share it." >&2
+      fi
       exit 1
     fi
     if [ -z "$pending_endpoint" ] || [ "$pending_endpoint" != "$endpoint" ]; then
