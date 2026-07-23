@@ -667,9 +667,16 @@ cmd_connect() {
       # trusted, transactional first-writer claim exists, the only safe
       # defaults are import or abort; generate requires an explicit,
       # deliberate 'g' and is never selected on empty/EOF input.
+      # Wording condition from maintainer sign-off on this default-removal
+      # (B3): a first-time user must be able to tell, at a glance, that
+      # (g) is the one for them — not just be warned that (g) *might* be
+      # risky. State the recommendation directly, then immediately follow
+      # it with the honest caveat (empty history is a strong hint, not
+      # proof) so the choice stays deliberate rather than becoming a new
+      # rubber-stamped default.
       local seq_hint=""
       if [ "$current_seq" = "0" ]; then
-        seq_hint=" (this team's stream looks empty — (g) may be safe, but only you can be sure no one else is the first writer)"
+        seq_hint=" This team has no message history yet — if you are the one setting it up for the first time, that's exactly when you choose (g). (Empty history is a strong hint, not proof: if you know someone else already has a key for this team, choose (i) instead.)"
       fi
 
       echo "This team requires end-to-end encryption. No key found for this device.${seq_hint}"
