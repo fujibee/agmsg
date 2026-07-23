@@ -135,7 +135,7 @@ If argument starts with "remote connect" (ADR 0007 — cloud/self-hosted sync co
    ```
 3. If that pauses for an encryption-bootstrap choice (`[i/g/a]`) or an identity paste, those also happen entirely within the user's own terminal session — they choose and paste directly, without your involvement.
 4. Ask the user to paste back only the command's final output (never the token or an identity) once it finishes, and continue from there.
-5. **Advanced/automation path**: only if the user says the token is already in an environment variable set *before this session started* (env vars set afterward, in another terminal, do not propagate into an already-running agent process — this path needs a fresh restart with the variable already in place), you may reference that variable by NAME only. Confirm the exact variable name with them explicitly first — never guess or invent one — and never ask them to reveal its value: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin <<< "$THEIR_CONFIRMED_VAR_NAME" [<team>] [--force]`.
+5. **Advanced/automation path**: only if the user says the token is already in an environment variable set *before this session started* (env vars set afterward, in another terminal, do not propagate into an already-running agent process — this path needs a fresh restart with the variable already in place), you may reference that variable by NAME only — never ask them to reveal its value. Confirm the exact variable name with them explicitly first (never guess or invent one). **Before using it, validate that the confirmed name matches a portable shell identifier: `^[A-Za-z_][A-Za-z0-9_]*$` (letters/digits/underscore, not starting with a digit).** If it fails this check, refuse the advanced path and use the default human-in-own-terminal flow instead — an unvalidated name becomes part of the shell command you construct, so anything else risks injection or misexpansion. Once validated, substitute the confirmed name itself in place of the variable name shown below (e.g. a confirmed name of `PAIRING_TOKEN` becomes `"$PAIRING_TOKEN"` — never leave the literal placeholder text in the command you run): `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin <<< "$CONFIRMED_VAR_NAME" [<team>] [--force]`.
 
 If argument is "remote status" (optionally followed by a team name):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>]`
@@ -167,5 +167,6 @@ If argument starts with "key import" followed by a team name:
    unset IDENTITY
    ```
 2. Ask them to paste back only the command's output (never the identity itself) once it's done.
+3. **No advanced/automation env-var path is offered for key import** — not even a pre-existing, before-session variable. Unlike a short-lived pairing token, an identity file is a permanent secret; always use the human-in-own-terminal flow above.
 
 `key rotate` and device-pairing `key request`/`key approve` are not available yet (they refuse unconditionally and change no state) — if the user asks for either, tell them so rather than attempting to run them.
