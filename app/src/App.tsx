@@ -149,14 +149,31 @@ export function shellSplitStillValid(
   return windows.some((w) => w.id === windowId && w.team === requestedTeam);
 }
 
-// Multiple dropped files become one space-separated line of bare paths.
-// Deliberately NOT shell-quoted: the target of a drop is almost always an
-// agent CLI's own prompt line (koit's framing — "same as cc/codex"), not a
-// literal shell command, and quoting broke path recognition there in live
-// testing — Claude Code's own file-path heuristic doesn't match a
-// quote-wrapped string, it just reads as plain text (Codex tolerated
-// quotes fine, but the common case has to work for both).
-export function joinDroppedPaths(paths: string[]): string {
+// C0 control characters (\u0000-\u001f) and DEL (\u007f) — legal in a
+// macOS/Linux filename, but this string is about to be written straight
+// into a PTY as literal input. A newline in a filename would submit
+// whatever's currently on the target prompt the instant the file is
+// dropped; ESC-prefixed bytes are terminal control sequences, not text.
+// The whole drop is rejected rather than stripping the offending bytes:
+// stripping would silently turn the dropped path into a DIFFERENT, wrong
+// path instead of the one actually dropped (co1 review, PR #481).
+const DROP_PATH_CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+
+export function hasUnsafeDropPath(paths: string[]): boolean {
+  return paths.some((p) => DROP_PATH_CONTROL_CHAR_RE.test(p));
+}
+
+// Multiple dropped files become one space-separated line of bare paths, or
+// null if any of them fails the control-character check above (the whole
+// drop is rejected, not just the unsafe path — see its doc). Deliberately
+// NOT shell-quoted: the target of a drop is almost always an agent CLI's
+// own prompt line (koit's framing — "same as cc/codex"), not a literal
+// shell command, and quoting broke path recognition there in live testing
+// — Claude Code's own file-path heuristic doesn't match a quote-wrapped
+// string, it just reads as plain text (Codex tolerated quotes fine, but
+// the common case has to work for both).
+export function joinDroppedPaths(paths: string[]): string | null {
+  if (hasUnsafeDropPath(paths)) return null;
   return paths.join(" ");
 }
 
@@ -527,6 +544,16 @@ export default function App() {
   // specific pane cell — see resolveFileDropTarget below.
   const activeRef = useRef<string>("room");
   activeRef.current = active;
+  // Force-cancels an in-flight pane-header pointer-drag (startPaneDrag
+  // below) if this component ever unmounts mid-gesture — App itself never
+  // does in practice (root component, lives for the whole session), but the
+  // event listeners it registers live on `document`/`window`, outside
+  // React's own teardown, so nothing else would ever clear them (co1
+  // review, PR #481).
+  const activePaneDragCancelRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    return () => activePaneDragCancelRef.current?.();
+  }, []);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -1064,6 +1091,8 @@ export default function App() {
           return;
         }
         setExternalDropPaneId(null);
+        const text = joinDroppedPaths(event.payload.paths);
+        if (text === null) return; // control chars in a path — reject the whole drop, write nothing
         const targetPaneId = resolveFileDropTarget(
           hitPaneId,
           windowsRef.current,
@@ -1071,7 +1100,7 @@ export default function App() {
           lastFocusedPaneIdRef.current,
         );
         if (!targetPaneId) return;
-        void invoke("pty_write", { id: targetPaneId, data: joinDroppedPaths(event.payload.paths) });
+        void invoke("pty_write", { id: targetPaneId, data: text });
       });
       if (cancelled) {
         u();
@@ -1290,11 +1319,32 @@ export default function App() {
   // bug). Deliberately does NOT call preventDefault or touch any state
   // until the pointer has actually moved past DRAG_THRESHOLD_PX: below that,
   // this is a plain click, and the existing onClick handler on the same
-  // button (unchanged) fires normally once pointerup lands back on it — the
-  // browser only suppresses that when the up-target differs from the
-  // down-target, i.e. exactly when a real drag moved the pointer elsewhere.
+  // button (unchanged) fires normally once pointerup lands back on it.
+  //
+  // Lifecycle robustness (co1 review, PR #481 — the first version only
+  // listened for pointermove/pointerup/Escape):
+  // - setPointerCapture on the source button, released on cleanup: without
+  //   it, the pointer leaving the OS window before release means pointerup
+  //   never reaches `document` at all, leaking swapSource/preview/chip and
+  //   the listeners themselves forever (a stuck "ghost" drag).
+  // - pointerId is captured at start and checked on every subsequent event
+  //   — a second pointer's events (another touch/pen input) must never
+  //   drive or finish someone else's gesture.
+  // - pointercancel and window blur (app loses focus mid-drag — e.g. an OS
+  //   dialog, Cmd-Tab) both force finish(false), same as Escape.
+  // - a real drag can still end with the pointer back over the SOURCE
+  //   button (drag out and back, or Escape-cancel then release there) —
+  //   that DOES fire a native click on it same as any other press/release
+  //   pair landing on the same element, which would otherwise also run
+  //   onClick's swap-arm toggle right after finish() already handled the
+  //   gesture as a drag. A one-shot capture-phase click listener added only
+  //   once dragging actually started consumes exactly that one click.
+  // - activePaneDragCancelRef (declared above) lets unmount force a cancel;
+  //   real listeners still live on document/window, outside React's tree.
   const startPaneDrag = useCallback(
-    (e: React.PointerEvent, paneId: string) => {
+    (e: React.PointerEvent<HTMLButtonElement>, paneId: string) => {
+      const pointerId = e.pointerId;
+      const target = e.currentTarget;
       const startX = e.clientX;
       const startY = e.clientY;
       let dragging = false;
@@ -1311,7 +1361,13 @@ export default function App() {
         });
       };
 
+      const consumeNextClick = (ev: MouseEvent) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      };
+
       const onMove = (ev: PointerEvent) => {
+        if (ev.pointerId !== pointerId) return;
         if (!dragging) {
           if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_THRESHOLD_PX) return;
           dragging = true;
@@ -1324,13 +1380,23 @@ export default function App() {
       const cleanup = () => {
         document.removeEventListener("pointermove", onMove);
         document.removeEventListener("pointerup", onUp);
+        document.removeEventListener("pointercancel", onCancel);
         document.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("blur", onBlur);
+        try {
+          target.releasePointerCapture(pointerId);
+        } catch {
+          // already released (e.g. pointercancel released it first) — fine
+        }
+        activePaneDragCancelRef.current = null;
       };
 
-      // commit=false is Escape-cancel: tear down without acting on lastHit.
+      // commit=false is Escape/blur/pointercancel: tear down without acting
+      // on lastHit.
       const finish = (commit: boolean) => {
         cleanup();
         if (!dragging) return; // was a click — let the native click event handle it
+        target.addEventListener("click", consumeNextClick, { capture: true, once: true });
         const hit = lastHit; // stable narrowed binding — lastHit is a mutable closure var
         if (commit && hit) {
           if (hit.kind === "tab") movePaneToWindow(paneId, hit.windowId);
@@ -1349,14 +1415,31 @@ export default function App() {
         setDragOverNewTab(false);
         setDragPointer(null);
       };
-      const onUp = () => finish(true);
+      const onUp = (ev: PointerEvent) => {
+        if (ev.pointerId !== pointerId) return;
+        finish(true);
+      };
+      const onCancel = (ev: PointerEvent) => {
+        if (ev.pointerId !== pointerId) return;
+        finish(false);
+      };
       const onKeyDown = (ev: KeyboardEvent) => {
         if (ev.key === "Escape") finish(false);
       };
+      const onBlur = () => finish(false);
 
       document.addEventListener("pointermove", onMove);
       document.addEventListener("pointerup", onUp);
+      document.addEventListener("pointercancel", onCancel);
       document.addEventListener("keydown", onKeyDown);
+      window.addEventListener("blur", onBlur);
+      try {
+        target.setPointerCapture(pointerId);
+      } catch {
+        // best-effort — document-level listeners above are the real
+        // delivery mechanism, capture just improves off-window reliability
+      }
+      activePaneDragCancelRef.current = () => finish(false);
     },
     [hitTestPaneDrag, movePaneToWindow, moveToNewWindow, swapPanesAcrossWindows, splitPaneBeside],
   );

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  hasUnsafeDropPath,
   joinDroppedPaths,
   resolveFileDropTarget,
   shellPaneFrom,
@@ -99,6 +100,32 @@ describe("shellSplitStillValid", () => {
   });
 });
 
+describe("hasUnsafeDropPath", () => {
+  it("is false for ordinary paths", () => {
+    expect(hasUnsafeDropPath(["/Users/koit/file.txt", "/a/b c.png"])).toBe(false);
+  });
+
+  it("catches a newline — could submit the target prompt on drop alone", () => {
+    expect(hasUnsafeDropPath(["/Users/koit/evil\nrm -rf ~.txt"])).toBe(true);
+  });
+
+  it("catches a carriage return", () => {
+    expect(hasUnsafeDropPath(["/Users/koit/evil\rfile.txt"])).toBe(true);
+  });
+
+  it("catches an ESC byte — terminal control sequence, not text", () => {
+    expect(hasUnsafeDropPath(["/Users/koit/evil\x1bfile.txt"])).toBe(true);
+  });
+
+  it("catches DEL (\\u007f), just outside the C0 range", () => {
+    expect(hasUnsafeDropPath(["/Users/koit/evil\x7ffile.txt"])).toBe(true);
+  });
+
+  it("is false for an empty list", () => {
+    expect(hasUnsafeDropPath([])).toBe(false);
+  });
+});
+
 describe("joinDroppedPaths", () => {
   it("joins multiple paths with a single space, unquoted", () => {
     // Deliberately bare, not shell-quoted — see joinDroppedPaths' own doc:
@@ -113,6 +140,15 @@ describe("joinDroppedPaths", () => {
 
   it("returns an empty string for no paths", () => {
     expect(joinDroppedPaths([])).toBe("");
+  });
+
+  it("rejects the WHOLE drop — returns null, not a sanitized string — when any path has a control character", () => {
+    // Regression (co1, PR #481): a crafted filename containing a newline
+    // written raw to the PTY would submit whatever's on the current prompt
+    // line the instant the file is dropped. Rejecting outright (not
+    // stripping the bad byte) avoids silently writing a DIFFERENT path than
+    // what was actually dropped.
+    expect(joinDroppedPaths(["/Users/koit/evil\nfile.txt", "/Users/koit/fine.txt"])).toBeNull();
   });
 });
 
