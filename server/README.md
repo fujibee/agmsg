@@ -15,12 +15,6 @@ non-secret `credential_id`.
 Use an endpoint that both machines can reach. Pairing tokens expire after 15
 minutes, are valid for one exchange, and create one device credential each.
 
-> Client dependency: the server-side flow in this branch is complete, but the
-> `agmsg remote connect` client command lands separately after its UX review.
-> Until that client branch is stacked, step 4 is the exact intended paste block
-> but is illustrative rather than executable. The cross-machine quickstart E2E
-> is gated on that dependency.
-
 1. Start the reference server and PostgreSQL:
 
    ```sh

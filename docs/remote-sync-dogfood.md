@@ -5,21 +5,31 @@ local SQLite store first. It is intentionally branch-only and is not installed
 by the released core yet.
 
 Requirements: Node.js 22+, SQLite, jq, base64, and a provisioned team on the
-reference server. The bearer token is accepted only through
-`AGMSG_SYNC_TOKEN`; it is never stored in sync config or passed as an argument.
+reference server. Connect each device with its own single-use pairing token
+before starting the polling engine:
 
-Configure each machine (or each isolated dogfood store) with an explicit local
-plaintext policy:
+```sh
+printf '%s' "$PAIRING_TOKEN" | scripts/remote.sh connect \
+  --endpoint https://sync.example --token-stdin example-team
+```
+
+`remote.sh connect` stores the non-secret binding under
+`teams/<team>/config.json` and the device's bearer credential in a separate
+`0600` file under `run/remote-credentials/`. The engine reads those artifacts
+directly. It does not accept credentials through argv or environment, and it
+never passes them to a storage driver child.
+
+An isolated dogfood client may set `AGMSG_SYNC_CONNECTION_DIR` before both
+`remote.sh` and `remote-sync.sh`; its `teams/` and `run/remote-credentials/`
+paths are then rooted there instead of in the checkout. This is useful for
+two-device rehearsals and must not point at a live fleet's data root.
+
+For a plaintext-capable binding, no second configure step is needed. Select the
+local storage driver and store as usual:
 
 ```sh
 export AGMSG_STORAGE_PATH=/path/to/machine-a-store
-export AGMSG_SYNC_TOKEN='deployment bearer token'
-
-scripts/remote-sync.sh configure \
-  --team example-team \
-  --server http://127.0.0.1:8787 \
-  --team-id 018f3f7e-0000-7000-8000-000000000001 \
-  --minimum-security plaintext-allowed
+export AGMSG_STORAGE_DRIVER=sqlite  # or jsonl
 ```
 
 Run one push/pull cycle:
@@ -78,8 +88,10 @@ below shows its minimum initial-epoch data shape:
 }
 ```
 
-After independently confirming the current revision and lowercase JCS SHA-256
-digest with the epoch authority, configure the binding:
+After connecting and independently confirming the current revision and
+lowercase JCS SHA-256 digest with the epoch authority, configure the
+encryption-specific state. HTTP authentication still comes only from the
+credential created by `remote.sh connect`:
 
 ```sh
 export AGMSG_AGE_BIN=/path/to/age       # optional when age is already on PATH

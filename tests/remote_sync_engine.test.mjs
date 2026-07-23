@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,9 +8,11 @@ import {
   consistentReadStateContext,
   driver,
   isRetryable,
+  loadConfig,
   plaintextWriteEligible,
   parseStrictJsonl,
   readStateCycle,
+  readConnectedCredential,
   readStateUpdateBatches,
   reprocessCycle,
   request,
@@ -45,6 +47,90 @@ const candidates = [
   { local_position: "1", id: "550e8400-e29b-41d4-a716-446655440001" },
   { local_position: "2", id: "550e8400-e29b-41d4-a716-446655440002" },
 ];
+
+const credentialId = "018f3f7e-0000-7000-8000-000000000020";
+
+async function withConnectedCredential(callback) {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-connected-credential-"));
+  const previous = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  await mkdir(join(root, "run", "remote-credentials"), { recursive: true });
+  await writeFile(join(root, "run", "remote-credentials", "demo.json"),
+    `${JSON.stringify({ credential: "fixture-token", credential_id: credentialId })}\n`,
+    { mode: 0o600 });
+  try {
+    return await callback(root);
+  } finally {
+    if (previous === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previous;
+    await rm(root, { recursive: true });
+  }
+}
+
+async function writeConnectedTeam(root, overrides = {}) {
+  await mkdir(join(root, "teams", "demo"), { recursive: true });
+  const remoteBinding = {
+    endpoint: "https://sync.example",
+    credential_id: credentialId,
+    server_instance_id: config.server_instance_id,
+    remote_team_id: config.remote_team_id,
+    remote_team_name: "demo",
+    protocol_version: 1,
+    capabilities: { write_allowed_ciphers: ["none", "age-v1"] },
+    connected_at: "2026-07-23T00:00:00Z",
+    disconnected_at: null,
+    ...overrides,
+  };
+  await writeFile(join(root, "teams", "demo", "config.json"),
+    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`);
+}
+
+test("connected binding and private credential are the default engine configuration", async () => {
+  await withConnectedCredential(async (root) => {
+    await writeConnectedTeam(root);
+    const previousStorage = process.env.AGMSG_SYNC_STORAGE_DIR;
+    const previousAmbient = process.env.AGMSG_SYNC_TOKEN;
+    process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
+    process.env.AGMSG_SYNC_TOKEN = "ambient-token-must-not-win";
+    try {
+      const loaded = await loadConfig("demo");
+      assert.equal(loaded.server_url, "https://sync.example");
+      assert.equal(loaded.remote_team_id, config.remote_team_id);
+      assert.equal(loaded.credential_id, credentialId);
+      assert.equal(loaded.cipher_profile, "none");
+      assert.equal(await readConnectedCredential(loaded), "fixture-token");
+    } finally {
+      if (previousStorage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
+      else process.env.AGMSG_SYNC_STORAGE_DIR = previousStorage;
+      if (previousAmbient === undefined) delete process.env.AGMSG_SYNC_TOKEN;
+      else process.env.AGMSG_SYNC_TOKEN = previousAmbient;
+    }
+  });
+});
+
+test("credential loader rejects binding mismatch and non-private files", async () => {
+  await withConnectedCredential(async (root) => {
+    const path = join(root, "run", "remote-credentials", "demo.json");
+    await writeFile(path, `${JSON.stringify({ credential: "fixture-token",
+      credential_id: "other-credential" })}\n`, { mode: 0o600 });
+    await assert.rejects(readConnectedCredential({ ...config, credential_id: credentialId }),
+      /does not match/u);
+    if (process.platform !== "win32") {
+      await writeFile(path, `${JSON.stringify({ credential: "fixture-token",
+        credential_id: credentialId })}\n`, { mode: 0o600 });
+      await chmod(path, 0o644);
+      await assert.rejects(readConnectedCredential({ ...config, credential_id: credentialId }),
+        /private regular file/u);
+      await unlink(path);
+      const target = join(root, "credential-target.json");
+      await writeFile(target, `${JSON.stringify({ credential: "fixture-token",
+        credential_id: credentialId })}\n`, { mode: 0o600 });
+      await symlink(target, path);
+      await assert.rejects(readConnectedCredential({ ...config, credential_id: credentialId }),
+        /private regular file/u);
+    }
+  });
+});
 
 test("ack mapping rejects reversed and duplicate server sequences", () => {
   assert.throws(() => validateAckMapping(candidates, [
@@ -430,43 +516,42 @@ test("run retry classification excludes permanent HTTP and validation failures",
 
 test("headerless non-JSON intermediary failures remain retryable", async () => {
   const previousFetch = globalThis.fetch;
-  const previousToken = process.env.AGMSG_SYNC_TOKEN;
-  process.env.AGMSG_SYNC_TOKEN = "fixture-token";
   try {
-    for (const status of [502, 503, 504]) {
-      globalThis.fetch = async () => new Response("temporary proxy failure", { status });
-      await assert.rejects(request({ ...config, server_url: "https://sync.example" }, "/v1/messages"),
+    await withConnectedCredential(async () => {
+      for (const status of [502, 503, 504]) {
+        globalThis.fetch = async () => new Response("temporary proxy failure", { status });
+        await assert.rejects(request({ ...config, credential_id: credentialId,
+          server_url: "https://sync.example" }, "/v1/messages"),
         (error) => error.status === status && error.retryable === true);
-    }
+      }
+    });
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousToken === undefined) delete process.env.AGMSG_SYNC_TOKEN;
-    else process.env.AGMSG_SYNC_TOKEN = previousToken;
   }
 });
 
 test("request distinguishes config errors from response transport loss", async () => {
   const previousFetch = globalThis.fetch;
-  const previousToken = process.env.AGMSG_SYNC_TOKEN;
-  process.env.AGMSG_SYNC_TOKEN = "fixture-token";
   let fetchCalled = false;
   try {
-    globalThis.fetch = async () => { fetchCalled = true; throw new Error("unexpected fetch"); };
-    await assert.rejects(request({ ...config, server_url: "not a URL" }, "/v1/messages"),
+    await withConnectedCredential(async () => {
+      globalThis.fetch = async () => { fetchCalled = true; throw new Error("unexpected fetch"); };
+      await assert.rejects(request({ ...config, credential_id: credentialId,
+        server_url: "not a URL" }, "/v1/messages"),
       (error) => error.retryable !== true);
-    assert.equal(fetchCalled, false);
+      assert.equal(fetchCalled, false);
 
-    globalThis.fetch = async () => ({
-      ok: true, status: 200,
-      headers: { get: () => "1" },
-      text: async () => { throw new Error("body stream reset"); },
-    });
-    await assert.rejects(request({ ...config, server_url: "https://sync.example" }, "/v1/messages"),
+      globalThis.fetch = async () => ({
+        ok: true, status: 200,
+        headers: { get: () => "1" },
+        text: async () => { throw new Error("body stream reset"); },
+      });
+      await assert.rejects(request({ ...config, credential_id: credentialId,
+        server_url: "https://sync.example" }, "/v1/messages"),
       (error) => error.retryable === true);
+    });
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousToken === undefined) delete process.env.AGMSG_SYNC_TOKEN;
-    else process.env.AGMSG_SYNC_TOKEN = previousToken;
   }
 });
 

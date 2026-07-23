@@ -56,11 +56,15 @@ function rejectDuplicateJsonKeys(source) {
   if (offset !== source.length) throw new Error("JSON framing is invalid");
 }
 
+export function parseStrictJson(value) {
+  rejectDuplicateJsonKeys(value);
+  return JSON.parse(value);
+}
+
 export function parseStrictJsonl(value) {
   const lines = value.split(/\r?\n/u).filter((line) => line.trim().length > 0);
   return lines.map((line) => {
-    rejectDuplicateJsonKeys(line);
-    return JSON.parse(line);
+    return parseStrictJson(line);
   });
 }
 

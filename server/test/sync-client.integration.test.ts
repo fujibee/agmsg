@@ -9,7 +9,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { Config } from "../src/config.js";
-import { exchangePairingToken, issuePairingToken } from "../src/credentials.js";
+import { issuePairingToken } from "../src/credentials.js";
 import { migrate } from "../src/db.js";
 import { envelopeDigest } from "../src/protocol.js";
 import { retainThrough } from "../src/storage.js";
@@ -21,7 +21,6 @@ const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 describeDatabase("Stage-1 polling sync client", () => {
   const schema = `agmsg_sync_${randomBytes(8).toString("hex")}`;
-  let token: string;
   const teamId = "018f3f7e-0000-7000-8000-000000000101";
   const memberA = "018f3f7e-0000-7000-8000-000000000110";
   const memberB = "018f3f7e-0000-7000-8000-000000000120";
@@ -33,6 +32,8 @@ describeDatabase("Stage-1 polling sync client", () => {
   let root: string;
   let storeA: string;
   let storeB: string;
+  let connectionA: string;
+  let connectionB: string;
   let rosterFile: string;
 
   beforeAll(async () => {
@@ -58,13 +59,21 @@ describeDatabase("Stage-1 polling sync client", () => {
       host: "127.0.0.1", port: 8787, logLevel: "silent",
       retentionMaxLiveMessages: null,
     };
-    const issued = await issuePairingToken(pool, teamId);
-    token = String((await exchangePairingToken(pool, issued.token)).credential);
     app = createApp(pool, config);
     serverUrl = await app.listen({ host: "127.0.0.1", port: 0 });
     root = await mkdtemp(join(tmpdir(), "agmsg-stage1-sync-"));
     storeA = join(root, "machine-a");
     storeB = join(root, "machine-b");
+    connectionA = join(root, "connection-a");
+    connectionB = join(root, "connection-b");
+    for (const connectionRoot of [connectionA, connectionB]) {
+      const issued = await issuePairingToken(pool, teamId);
+      await execFileAsync("bash", [join(repositoryRoot, "scripts/remote.sh"), "connect",
+        "--endpoint", serverUrl, issued.token, localTeam], {
+        cwd: repositoryRoot,
+        env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: connectionRoot },
+      });
+    }
     rosterFile = join(root, "local-roster.json");
     await writeFile(rosterFile, JSON.stringify({
       agents: { "machine-a": {}, "machine-b": {} },
@@ -82,11 +91,12 @@ describeDatabase("Stage-1 polling sync client", () => {
   });
 
   function environment(store: string) {
+    const connectionRoot = store === storeA ? connectionA : connectionB;
     return {
       ...process.env,
       AGMSG_STORAGE_PATH: store,
       AGMSG_STORAGE_DRIVER: "sqlite",
-      AGMSG_SYNC_TOKEN: token,
+      AGMSG_SYNC_CONNECTION_DIR: connectionRoot,
       AGMSG_SYNC_LOCAL_ROSTER_FILE: rosterFile,
       AGMSG_NODE: process.execPath,
       HOME: join(store, "home"),
@@ -141,11 +151,6 @@ storage_list_unread "$2" "$3"`;
   }
 
   it("synchronizes two isolated AGMSG_STORAGE_PATH stores without echo duplicates", async () => {
-    for (const store of [storeA, storeB]) {
-      await sync(store, "configure", "--team", localTeam, "--server", serverUrl,
-        "--team-id", teamId, "--minimum-security", "plaintext-allowed");
-    }
-
     await localSend(storeA, "machine-a", "machine-b", "fixture from machine A");
     const pushedA = await sync(storeA, "once", "--team", localTeam);
     expect(pushedA.stdout).toContain('"event":"push.ack"');
@@ -231,5 +236,15 @@ storage_list_unread "$2" "$3"`;
     const retried = await sync(storeB, "resync", "--team", localTeam,
       "--accept-floor", "3");
     expect(retried.stdout).toContain('"disposition":"already-accepted"');
+
+    const disconnected = await execFileAsync("bash", [join(repositoryRoot, "scripts/remote.sh"),
+      "disconnect", localTeam], {
+      cwd: repositoryRoot,
+      env: { ...process.env, AGMSG_SYNC_CONNECTION_DIR: connectionB },
+    });
+    expect(disconnected.stdout).toContain("Revoking credential with server... ok.");
+    await expect(sync(storeB, "once", "--team", localTeam)).rejects.toMatchObject({
+      stderr: expect.stringContaining("invalid or disconnected"),
+    });
   }, 20_000);
 });

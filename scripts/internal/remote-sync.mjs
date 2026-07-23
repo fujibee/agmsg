@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { appendFile, lstat, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -7,8 +8,8 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { ageExecutableVersion, CipherStateError, openEnvelope,
   readNativeAgeIdentity } from "./sync-cipher.mjs";
-import { parseStrictJsonl } from "./strict-jsonl.mjs";
-export { parseStrictJsonl } from "./strict-jsonl.mjs";
+import { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
+export { parseStrictJson, parseStrictJsonl } from "./strict-jsonl.mjs";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -16,10 +17,10 @@ const SEQUENCE = /^(0|[1-9][0-9]*)$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const PROTOCOL = "1";
 const MAX_SEQUENCE = 9_223_372_036_854_775_807n;
+const CREDENTIAL_ID = /^[A-Za-z0-9._-]{1,128}$/u;
 
 function usage() {
   return `usage:
-  remote-sync.sh configure --team NAME --server URL --team-id UUID --minimum-security plaintext-allowed
   remote-sync.sh configure --team NAME --server URL --team-id UUID --minimum-security e2ee-required \\
     --cipher age-v1 --age-snapshot FILE --age-checkpoint REVISION:SHA256 \\
     --age-confirmation operator-live \\
@@ -30,7 +31,8 @@ function usage() {
   remote-sync.sh resync --team NAME --accept-floor SEQUENCE
   remote-sync.sh unblock-read --team NAME --member-id UUID
 
-AGMSG_SYNC_TOKEN is required and is never written to config or argv.`;
+Run remote.sh connect first. The engine reads that team's private credential
+file directly; credentials are never accepted through argv or environment.`;
 }
 
 function options(args) {
@@ -74,6 +76,78 @@ function configPath(team) {
   return join(root, "remote-sync", `${encodeURIComponent(team)}.json`);
 }
 
+function teamConfigPath(team) {
+  const connectionRoot = process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR;
+  if (!connectionRoot) throw new Error("sync connection root is unavailable");
+  return join(connectionRoot, "teams", team, "config.json");
+}
+
+function credentialPath(team) {
+  const connectionRoot = process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR;
+  if (!connectionRoot) throw new Error("sync connection root is unavailable");
+  return join(connectionRoot, "run", "remote-credentials", `${team}.json`);
+}
+
+function connectedBinding(value, team) {
+  const binding = value?.remote_binding;
+  if (value?.name !== team || !binding || typeof binding !== "object" ||
+      typeof binding.endpoint !== "string" || binding.endpoint.length < 1 ||
+      !CREDENTIAL_ID.test(binding.credential_id ?? "") ||
+      !UUID_V7.test(binding.server_instance_id ?? "") ||
+      !UUID_V7.test(binding.remote_team_id ?? "") || binding.protocol_version !== 1 ||
+      typeof binding.connected_at !== "string" || Number.isNaN(Date.parse(binding.connected_at)) ||
+      binding.disconnected_at !== null || !binding.capabilities ||
+      !Array.isArray(binding.capabilities.write_allowed_ciphers) ||
+      binding.capabilities.write_allowed_ciphers.some((cipher) => typeof cipher !== "string")) {
+    throw new Error("connected team binding is invalid or disconnected");
+  }
+  const connectedEndpoint = new URL(binding.endpoint);
+  if (connectedEndpoint.protocol !== "https:" &&
+      (connectedEndpoint.protocol !== "http:" ||
+       !["127.0.0.1", "localhost", "[::1]"].includes(connectedEndpoint.hostname))) {
+    throw new Error("connected team endpoint must use HTTPS or exact loopback HTTP");
+  }
+  endpoint(binding.endpoint, "/v1/health");
+  return binding;
+}
+
+async function readConnectedBinding(team) {
+  const bytes = await readFile(teamConfigPath(team));
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return connectedBinding(parseStrictJson(source), team);
+}
+
+export async function readConnectedCredential(config) {
+  const path = credentialPath(config.local_team);
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() ||
+      (process.platform !== "win32" && (before.mode & 0o077) !== 0)) {
+    throw new Error("remote credential must be a private regular file");
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.dev !== before.dev || metadata.ino !== before.ino ||
+        (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)) {
+      throw new Error("remote credential changed while it was being opened");
+    }
+    const source = new TextDecoder("utf-8", { fatal: true }).decode(await handle.readFile());
+    const records = parseStrictJsonl(source);
+    const value = records[0];
+    if (records.length !== 1 || !value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).sort().join(",") !== "credential,credential_id" ||
+        typeof value.credential !== "string" || value.credential.length < 1 ||
+        /[\u0000-\u001f\u007f]/u.test(value.credential) ||
+        !CREDENTIAL_ID.test(value.credential_id) ||
+        (config.credential_id && value.credential_id !== config.credential_id)) {
+      throw new Error("remote credential file is invalid or does not match the binding");
+    }
+    return value.credential;
+  } finally {
+    await handle.close();
+  }
+}
+
 function ageTrustPath(config) {
   const root = process.env.AGMSG_SYNC_TRUST_DIR;
   if (!root) throw new Error("AGMSG_SYNC_TRUST_DIR is required for age-v1 and must survive sync-state reset");
@@ -94,8 +168,36 @@ async function writeConfig(path, value) {
   await rename(temporary, path);
 }
 
-async function loadConfig(team) {
-  const value = JSON.parse(await readFile(configPath(team), "utf8"));
+export async function loadConfig(team) {
+  const binding = await readConnectedBinding(team);
+  let value;
+  try {
+    const bytes = await readFile(configPath(team));
+    value = parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    if (!binding.capabilities.write_allowed_ciphers.includes("none")) {
+      throw new Error("connected team requires an authenticated age-v1 sync configuration");
+    }
+    value = {
+      format_version: 1,
+      local_team: team,
+      server_url: binding.endpoint,
+      server_instance_id: binding.server_instance_id,
+      remote_team_id: binding.remote_team_id,
+      protocol_version: binding.protocol_version,
+      cipher_profile: "none",
+      local_security_history: [{ local_security_revision: "0", effective_from_seq: "1",
+        minimum_security_mode: "plaintext-allowed" }],
+    };
+  }
+  if (value.server_url !== binding.endpoint ||
+      value.server_instance_id !== binding.server_instance_id ||
+      value.remote_team_id !== binding.remote_team_id ||
+      value.protocol_version !== binding.protocol_version) {
+    throw new Error("sync configuration does not match the connected team binding");
+  }
+  value.credential_id = binding.credential_id;
   if (value.local_team !== team || value.protocol_version !== 1 ||
       !UUID_V7.test(value.server_instance_id) || !UUID_V7.test(value.remote_team_id)) {
     throw new Error("sync config binding is invalid");
@@ -107,6 +209,7 @@ async function loadConfig(team) {
     await validateRetainedAgeCheckpoint(value);
   }
   else if (value.cipher_profile !== "none") throw new Error("sync cipher profile is unsupported");
+  await readConnectedCredential(value);
   return value;
 }
 
@@ -355,8 +458,7 @@ function endpoint(base, path) {
 }
 
 export async function request(config, path, init = {}) {
-  const token = process.env.AGMSG_SYNC_TOKEN;
-  if (!token) throw new Error("AGMSG_SYNC_TOKEN is required");
+  const token = await readConnectedCredential(config);
   const headers = {
     "Agmsg-Protocol-Version": PROTOCOL,
     "Agmsg-Team-ID": config.remote_team_id,
@@ -489,6 +591,7 @@ export async function driver(operation, config, input, extra = []) {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
     delete childEnvironment.AGMSG_SYNC_TOKEN;
+    delete childEnvironment.AGMSG_SYNC_CONNECTION_DIR;
     delete childEnvironment.AGMSG_SYNC_TRUST_DIR;
     for (const key of Object.keys(childEnvironment)) {
       if (/^(?:AGMSG_AGE_IDENTITY|AGMSG_SYNC_AGE_IDENTITY)/u.test(key)) {
@@ -988,13 +1091,19 @@ async function configure(args) {
       (cipherProfile === "age-v1" && minimumSecurity !== "e2ee-required")) {
     throw new Error(`${cipherProfile} requires its explicit matching minimum-security mode`);
   }
-  if (!process.env.AGMSG_SYNC_TOKEN) throw new Error("AGMSG_SYNC_TOKEN is required");
   const serverUrl = new URL(args.server).toString().replace(/\/$/, "");
+  const binding = await readConnectedBinding(team);
+  if (serverUrl !== binding.endpoint || args["team-id"] !== binding.remote_team_id) {
+    throw new Error("configure binding does not match remote.sh connect");
+  }
   const ready = await health(serverUrl);
+  if (ready.server_instance_id !== binding.server_instance_id) {
+    throw new Error("health server instance does not match remote.sh connect");
+  }
   const config = {
     format_version: 1, local_team: team, server_url: serverUrl,
     server_instance_id: ready.server_instance_id, remote_team_id: args["team-id"],
-    protocol_version: 1, cipher_profile: cipherProfile,
+    protocol_version: 1, credential_id: binding.credential_id, cipher_profile: cipherProfile,
     local_security_history: [{ local_security_revision: "0", effective_from_seq: "1",
       minimum_security_mode: minimumSecurity }],
   };
