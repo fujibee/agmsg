@@ -263,20 +263,29 @@ const TIMEZONE_KEY = "agmsg-app-timezone";
 const DRAG_THRESHOLD_PX = 4;
 // How long after a real pane-header drag ends its own onClick should still
 // no-op for a same-element native click that follows — see
-// dragJustFinishedAtRef's doc.
+// dragJustFinishedRef's doc.
 const CLICK_SUPPRESS_WINDOW_MS = 300;
+
+// What startPaneDrag's finish() records — which pane the drag was FOR, not
+// just when it ended. Scoping by pane matters: a global timestamp alone
+// would suppress a deliberate click on some OTHER pane header too, just
+// because it happens to land within the window of an unrelated pane's drag
+// finishing (co1 review, PR #481, 3rd round).
+export type DragFinishInfo = { paneId: string; finishedAt: number } | null;
 
 // Whether the pane-header's onClick should treat an incoming click as the
 // tail end of a just-finished drag gesture (no-op) rather than a genuine
-// new click on the button — see dragJustFinishedAtRef's doc for why this is
-// a short bounded window, not an unbounded "consume exactly one click"
-// listener. Pure so the two co1-requested regressions are unit-testable
-// without simulating real pointer/click event sequences: a click shortly
-// after a drag-related finish is suppressed; a click long after (or with no
-// drag having happened at all, i.e. dragFinishedAt still 0) is not (co1
-// review, PR #481, 2nd round).
-export function shouldSuppressClickAfterDrag(dragFinishedAt: number, now: number): boolean {
-  return now - dragFinishedAt < CLICK_SUPPRESS_WINDOW_MS;
+// new click on the button — true only for a click on the SAME pane the
+// drag was for, within a short window. The caller (onClick) is expected to
+// clear dragFinish (set it back to null) whenever this returns true —
+// "consuming" it — so a genuinely separate second click on the same pane,
+// even one that lands inside the same window, isn't ALSO wrongly
+// suppressed; an unbounded "consume exactly one click" native listener had
+// its own problems (see git history), but a per-pane bounded ref without
+// consuming still over-suppresses. Pure so the co1-requested regressions
+// are unit-testable without simulating real pointer/click event sequences.
+export function shouldSuppressClickAfterDrag(dragFinish: DragFinishInfo, paneId: string, now: number): boolean {
+  return dragFinish !== null && dragFinish.paneId === paneId && now - dragFinish.finishedAt < CLICK_SUPPRESS_WINDOW_MS;
 }
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
@@ -571,22 +580,18 @@ export default function App() {
   useEffect(() => {
     return () => activePaneDragCancelRef.current?.();
   }, []);
-  // When a real pane-header drag last finished (committed OR cancelled —
-  // Escape/blur/pointercancel can still end with the pointer back over the
-  // source button, which fires a native click there same as any other
-  // same-element press/release pair). The pane-header onClick below checks
-  // this and no-ops if it's recent, so that click doesn't ALSO re-run the
+  // Which pane a real pane-header drag last finished for, and when
+  // (committed OR cancelled — Escape/blur/pointercancel can still end with
+  // the pointer back over the source button, which fires a native click
+  // there same as any other same-element press/release pair). The dragged
+  // pane's own onClick below checks this (shouldSuppressClickAfterDrag) and
+  // no-ops + clears it if it matches, so that click doesn't ALSO re-run the
   // swap-arm toggle right after finish() already handled the gesture as a
-  // drag. A short bounded window, not an unbounded "consume the next click"
-  // listener: a drag that ends via blur/pointercancel/unmount with the
-  // release outside the app never gets a matching click AT ALL, so a
-  // pending single-shot listener would sit on the button forever and wrongly
-  // swallow the NEXT, wholly unrelated real click days later (co1 review,
-  // PR #481, 2nd round). The synthetic click reliably follows pointerup
-  // within the same task in every browser/webview this ships on, so this
-  // only needs to outlast that — generous margin, not a real risk of
-  // masking a genuinely separate later click.
-  const dragJustFinishedAtRef = useRef(0);
+  // drag. Scoped per-pane and consumed on use, not a global unbounded
+  // "consume the next click" listener or a bare timestamp — both over-
+  // suppress in different ways (see shouldSuppressClickAfterDrag's own doc
+  // and git history; co1 review, PR #481, rounds 2 and 3).
+  const dragJustFinishedRef = useRef<DragFinishInfo>(null);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -1370,10 +1375,10 @@ export default function App() {
   //   that DOES fire a native click on it same as any other press/release
   //   pair landing on the same element, which would otherwise also run
   //   onClick's swap-arm toggle right after finish() already handled the
-  //   gesture as a drag. dragJustFinishedAtRef (declared above, checked by
-  //   the pane-header's own onClick) is a short bounded window rather than
-  //   an unbounded "consume the next click" listener — see its own doc for
-  //   why (co1 review, PR #481, 2nd round: a drag that ends via
+  //   gesture as a drag. dragJustFinishedRef (declared above, checked by
+  //   the pane-header's own onClick) is a per-pane, short bounded window
+  //   rather than an unbounded "consume the next click" listener — see its
+  //   own doc for why (co1 review, PR #481, 2nd round: a drag that ends via
   //   blur/pointercancel/unmount with the pointer released outside the app
   //   never gets a matching click to consume at all, so a pending listener
   //   would sit on the button forever and wrongly swallow the next,
@@ -1434,7 +1439,7 @@ export default function App() {
       const finish = (commit: boolean) => {
         cleanup();
         if (!dragging) return; // was a click — let the native click event handle it
-        dragJustFinishedAtRef.current = Date.now();
+        dragJustFinishedRef.current = { paneId, finishedAt: Date.now() };
         const hit = lastHit; // stable narrowed binding — lastHit is a mutable closure var
         if (commit && hit) {
           if (hit.kind === "tab") movePaneToWindow(paneId, hit.windowId);
@@ -2327,9 +2332,14 @@ export default function App() {
                         // A real drag that just ended (committed or
                         // cancelled) can still fire this same-element
                         // native click if the pointer ended up back over
-                        // this button — see dragJustFinishedAtRef's doc.
-                        // Not this gesture's click to act on.
-                        if (shouldSuppressClickAfterDrag(dragJustFinishedAtRef.current, Date.now())) return;
+                        // THIS pane's own button — see dragJustFinishedRef's
+                        // doc. Not this gesture's click to act on; consume
+                        // it (clear the ref) so a genuinely separate second
+                        // click on this same pane isn't ALSO suppressed.
+                        if (shouldSuppressClickAfterDrag(dragJustFinishedRef.current, p.id, Date.now())) {
+                          dragJustFinishedRef.current = null;
+                          return;
+                        }
                         if (swapSource === p.id) {
                           setSwapSource(null);
                         } else if (swapSource && leaves(win.root).includes(swapSource)) {

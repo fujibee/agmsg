@@ -30,25 +30,39 @@ describe("shouldShowOutdatedBanner", () => {
 });
 
 describe("shouldSuppressClickAfterDrag", () => {
-  it("suppresses a click that lands immediately after a drag finished", () => {
-    expect(shouldSuppressClickAfterDrag(1_000, 1_010)).toBe(true);
+  it("suppresses a click on the SAME pane immediately after its drag finished", () => {
+    expect(shouldSuppressClickAfterDrag({ paneId: "p1", finishedAt: 1_000 }, "p1", 1_010)).toBe(true);
   });
 
   it("suppresses a click at the tail end of the window", () => {
-    expect(shouldSuppressClickAfterDrag(1_000, 1_299)).toBe(true);
+    expect(shouldSuppressClickAfterDrag({ paneId: "p1", finishedAt: 1_000 }, "p1", 1_299)).toBe(true);
+  });
+
+  it("does not suppress a click on a DIFFERENT pane, even immediately after", () => {
+    // Regression (co1, PR #481, 3rd round): a global timestamp with no pane
+    // identity would suppress a deliberate click on some other pane header
+    // too, just because it lands within the window of an unrelated pane's
+    // drag finishing.
+    expect(shouldSuppressClickAfterDrag({ paneId: "p1", finishedAt: 1_000 }, "p2", 1_010)).toBe(false);
+  });
+
+  it("does not suppress once consumed — a second click on the same pane isn't ALSO swallowed", () => {
+    // The caller is expected to clear the ref (set it to null) after this
+    // returns true — modeled here as the "already consumed" state.
+    expect(shouldSuppressClickAfterDrag(null, "p1", 1_010)).toBe(false);
   });
 
   it("does not suppress a genuinely separate click once the window has passed", () => {
-    // Regression (co1, PR #481, 2nd round): a drag that ends via blur or
-    // pointercancel with the pointer released outside the app never gets a
-    // matching click to consume — an unbounded "consume the next click"
-    // listener would sit on the button forever and wrongly swallow the
-    // next, wholly unrelated click. The bounded window must let it through.
-    expect(shouldSuppressClickAfterDrag(1_000, 1_301)).toBe(false);
+    // A drag that ends via blur or pointercancel with the pointer released
+    // outside the app never gets a matching click to consume — an
+    // unbounded "consume the next click" listener would sit on the button
+    // forever and wrongly swallow the next, wholly unrelated click. The
+    // bounded window must let it through.
+    expect(shouldSuppressClickAfterDrag({ paneId: "p1", finishedAt: 1_000 }, "p1", 1_301)).toBe(false);
   });
 
-  it("does not suppress when no drag has ever finished (dragFinishedAt still 0)", () => {
-    expect(shouldSuppressClickAfterDrag(0, 1_000_000)).toBe(false);
+  it("does not suppress when no drag has ever finished", () => {
+    expect(shouldSuppressClickAfterDrag(null, "p1", 1_000_000)).toBe(false);
   });
 });
 
