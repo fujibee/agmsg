@@ -261,6 +261,23 @@ const TIMEZONE_KEY = "agmsg-app-timezone";
 // Minimum pointer travel (px) before a pane-header pointerdown counts as a
 // drag rather than a click — see startPaneDrag.
 const DRAG_THRESHOLD_PX = 4;
+// How long after a real pane-header drag ends its own onClick should still
+// no-op for a same-element native click that follows — see
+// dragJustFinishedAtRef's doc.
+const CLICK_SUPPRESS_WINDOW_MS = 300;
+
+// Whether the pane-header's onClick should treat an incoming click as the
+// tail end of a just-finished drag gesture (no-op) rather than a genuine
+// new click on the button — see dragJustFinishedAtRef's doc for why this is
+// a short bounded window, not an unbounded "consume exactly one click"
+// listener. Pure so the two co1-requested regressions are unit-testable
+// without simulating real pointer/click event sequences: a click shortly
+// after a drag-related finish is suppressed; a click long after (or with no
+// drag having happened at all, i.e. dragFinishedAt still 0) is not (co1
+// review, PR #481, 2nd round).
+export function shouldSuppressClickAfterDrag(dragFinishedAt: number, now: number): boolean {
+  return now - dragFinishedAt < CLICK_SUPPRESS_WINDOW_MS;
+}
 // A spawnable agent type discovered from agmsg's type registry.
 export type AgentType = { name: string; cli: string; options: string[] };
 
@@ -554,6 +571,22 @@ export default function App() {
   useEffect(() => {
     return () => activePaneDragCancelRef.current?.();
   }, []);
+  // When a real pane-header drag last finished (committed OR cancelled —
+  // Escape/blur/pointercancel can still end with the pointer back over the
+  // source button, which fires a native click there same as any other
+  // same-element press/release pair). The pane-header onClick below checks
+  // this and no-ops if it's recent, so that click doesn't ALSO re-run the
+  // swap-arm toggle right after finish() already handled the gesture as a
+  // drag. A short bounded window, not an unbounded "consume the next click"
+  // listener: a drag that ends via blur/pointercancel/unmount with the
+  // release outside the app never gets a matching click AT ALL, so a
+  // pending single-shot listener would sit on the button forever and wrongly
+  // swallow the NEXT, wholly unrelated real click days later (co1 review,
+  // PR #481, 2nd round). The synthetic click reliably follows pointerup
+  // within the same task in every browser/webview this ships on, so this
+  // only needs to outlast that — generous margin, not a real risk of
+  // masking a genuinely separate later click.
+  const dragJustFinishedAtRef = useRef(0);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
   }, []);
@@ -1337,12 +1370,22 @@ export default function App() {
   //   that DOES fire a native click on it same as any other press/release
   //   pair landing on the same element, which would otherwise also run
   //   onClick's swap-arm toggle right after finish() already handled the
-  //   gesture as a drag. A one-shot capture-phase click listener added only
-  //   once dragging actually started consumes exactly that one click.
+  //   gesture as a drag. dragJustFinishedAtRef (declared above, checked by
+  //   the pane-header's own onClick) is a short bounded window rather than
+  //   an unbounded "consume the next click" listener — see its own doc for
+  //   why (co1 review, PR #481, 2nd round: a drag that ends via
+  //   blur/pointercancel/unmount with the pointer released outside the app
+  //   never gets a matching click to consume at all, so a pending listener
+  //   would sit on the button forever and wrongly swallow the next,
+  //   unrelated real click).
   // - activePaneDragCancelRef (declared above) lets unmount force a cancel;
   //   real listeners still live on document/window, outside React's tree.
+  //   Also force-cancels any still-active PRIOR gesture at the start of a
+  //   new one — multi-pointer input could otherwise overwrite the ref
+  //   without ever tearing down the first gesture's listeners.
   const startPaneDrag = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>, paneId: string) => {
+      activePaneDragCancelRef.current?.();
       const pointerId = e.pointerId;
       const target = e.currentTarget;
       const startX = e.clientX;
@@ -1359,11 +1402,6 @@ export default function App() {
           if (cur?.paneId === hit.paneId && sameZone(cur.zone, hit.zone)) return cur;
           return { paneId: hit.paneId, zone: hit.zone };
         });
-      };
-
-      const consumeNextClick = (ev: MouseEvent) => {
-        ev.preventDefault();
-        ev.stopPropagation();
       };
 
       const onMove = (ev: PointerEvent) => {
@@ -1396,7 +1434,7 @@ export default function App() {
       const finish = (commit: boolean) => {
         cleanup();
         if (!dragging) return; // was a click — let the native click event handle it
-        target.addEventListener("click", consumeNextClick, { capture: true, once: true });
+        dragJustFinishedAtRef.current = Date.now();
         const hit = lastHit; // stable narrowed binding — lastHit is a mutable closure var
         if (commit && hit) {
           if (hit.kind === "tab") movePaneToWindow(paneId, hit.windowId);
@@ -2286,6 +2324,12 @@ export default function App() {
                       }}
                       onClick={(e) => {
                         e.stopPropagation();
+                        // A real drag that just ended (committed or
+                        // cancelled) can still fire this same-element
+                        // native click if the pointer ended up back over
+                        // this button — see dragJustFinishedAtRef's doc.
+                        // Not this gesture's click to act on.
+                        if (shouldSuppressClickAfterDrag(dragJustFinishedAtRef.current, Date.now())) return;
                         if (swapSource === p.id) {
                           setSwapSource(null);
                         } else if (swapSource && leaves(win.root).includes(swapSource)) {

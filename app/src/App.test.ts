@@ -7,6 +7,7 @@ import {
   shellSplitStillValid,
   shellTabStillValid,
   shouldShowOutdatedBanner,
+  shouldSuppressClickAfterDrag,
   type LoginShellInfo,
 } from "./App";
 
@@ -25,6 +26,29 @@ describe("shouldShowOutdatedBanner", () => {
 
   it("hides once dismissed, independent of updatingCore", () => {
     expect(shouldShowOutdatedBanner({ installed: "1.1.0", pinned: "1.1.8" }, false, true)).toBe(false);
+  });
+});
+
+describe("shouldSuppressClickAfterDrag", () => {
+  it("suppresses a click that lands immediately after a drag finished", () => {
+    expect(shouldSuppressClickAfterDrag(1_000, 1_010)).toBe(true);
+  });
+
+  it("suppresses a click at the tail end of the window", () => {
+    expect(shouldSuppressClickAfterDrag(1_000, 1_299)).toBe(true);
+  });
+
+  it("does not suppress a genuinely separate click once the window has passed", () => {
+    // Regression (co1, PR #481, 2nd round): a drag that ends via blur or
+    // pointercancel with the pointer released outside the app never gets a
+    // matching click to consume — an unbounded "consume the next click"
+    // listener would sit on the button forever and wrongly swallow the
+    // next, wholly unrelated click. The bounded window must let it through.
+    expect(shouldSuppressClickAfterDrag(1_000, 1_301)).toBe(false);
+  });
+
+  it("does not suppress when no drag has ever finished (dragFinishedAt still 0)", () => {
+    expect(shouldSuppressClickAfterDrag(0, 1_000_000)).toBe(false);
   });
 });
 
