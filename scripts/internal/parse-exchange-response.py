@@ -42,6 +42,7 @@ CIPHER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 MAX_SEQUENCE = 9_223_372_036_854_775_807
 SUPPORTED_PROTOCOL_VERSIONS = (1,)
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_TOP_LEVEL_KEYS = {
     "credential", "credential_id", "server_instance_id", "remote_team_id",
     "remote_team_name", "protocol_version", "capabilities",
@@ -124,8 +125,11 @@ def validate_envelope_versions(value, label):
 
 
 def main():
-    raw = sys.stdin.read()
+    raw_bytes = sys.stdin.buffer.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw_bytes) > MAX_RESPONSE_BYTES:
+        fail("response body exceeds its byte limit")
     try:
+        raw = raw_bytes.decode("utf-8")
         d = strict_loads(raw)
     except SystemExit:
         raise

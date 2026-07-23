@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 REVOKE_FAIL = os.environ.get("MOCK_REVOKE_FAIL") == "1"
 REVOKE_BAD_HEADER = os.environ.get("MOCK_REVOKE_BAD_HEADER") == "1"
 REVOKE_BAD_BODY = os.environ.get("MOCK_REVOKE_BAD_BODY") == "1"
+REVOKE_LARGE_BODY = os.environ.get("MOCK_REVOKE_LARGE_BODY") == "1"
 ISSUED_CREDENTIAL_IDS = set()
 REVOKED_CREDENTIAL_IDS = []
 
@@ -39,15 +40,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # keep test output quiet
 
-    def _send_json(self, code, obj, protocol="1"):
-        self._send_raw(code, json.dumps(obj), protocol)
+    def _send_json(self, code, obj, protocol="1", oversized_header=False):
+        self._send_raw(code, json.dumps(obj), protocol, oversized_header)
 
-    def _send_raw(self, code, text, protocol="1"):
+    def _send_raw(self, code, text, protocol="1", oversized_header=False):
         body = text.encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         if protocol is not None:
             self.send_header("Agmsg-Protocol-Version", protocol)
+        if oversized_header:
+            self.send_header("X-Oversized-Header", "x" * 70_000)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -71,6 +74,12 @@ class Handler(BaseHTTPRequestHandler):
             token = data.get("token", "")
             if token == "bad-token":
                 self._send_json(401, {"error": "invalid token"})
+                return
+            if token == "large-body-token":
+                self._send_raw(200, "x" * (2 * 1024 * 1024 + 1))
+                return
+            if token == "large-header-token":
+                self._send_json(200, {"unexpected": "body"}, oversized_header=True)
                 return
 
             if token == "missing-field-token":
@@ -218,6 +227,8 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 if REVOKE_BAD_BODY:
                     response["team_id"] = "018f3f7e-9999-7000-8000-000000000009"
+                if REVOKE_LARGE_BODY:
+                    response["padding"] = "x" * 70_000
                 self._send_json(200, response, protocol=None if REVOKE_BAD_HEADER else "1")
             else:
                 self._send_json(404, {"error": "unknown credential_id"})

@@ -10,6 +10,7 @@ setup() {
   MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" \
   MOCK_REVOKE_BAD_HEADER="${MOCK_REVOKE_BAD_HEADER:-}" \
   MOCK_REVOKE_BAD_BODY="${MOCK_REVOKE_BAD_BODY:-}" \
+  MOCK_REVOKE_LARGE_BODY="${MOCK_REVOKE_LARGE_BODY:-}" \
     python3 "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" &
   MOCK_SERVER_PID=$!
@@ -33,6 +34,7 @@ restart_mock_server() {
   MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" \
   MOCK_REVOKE_BAD_HEADER="${MOCK_REVOKE_BAD_HEADER:-}" \
   MOCK_REVOKE_BAD_BODY="${MOCK_REVOKE_BAD_BODY:-}" \
+  MOCK_REVOKE_LARGE_BODY="${MOCK_REVOKE_LARGE_BODY:-}" \
     python3 "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" &
   MOCK_SERVER_PID=$!
@@ -91,6 +93,14 @@ restart_mock_server() {
 
 @test "connect: rejects capability limits that differ from the engine validator" {
   for token in max-blob-zero-token max-blob-over-token future-policy-boundary-token; do
+    run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
+    [ "$status" -ne 0 ]
+    [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
+  done
+}
+
+@test "connect: bounds response body and header capture before validation" {
+  for token in large-body-token large-header-token; do
     run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
     [ "$status" -ne 0 ]
     [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
@@ -239,6 +249,15 @@ restart_mock_server() {
   [[ "$output" == *"connected"* ]]
 }
 
+@test "connect: --force bounds revoke response before validation" {
+  MOCK_REVOKE_LARGE_BODY=1
+  restart_mock_server
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token-one myteam
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token-two myteam --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not confirm the existing credential"* ]]
+}
+
 @test "connect: --force requires an explicit <team> (refuses when omitted)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token --force
   [ "$status" -ne 0 ]
@@ -288,6 +307,7 @@ response = {
 }
 json.dump({
     'endpoint': '$ENDPOINT',
+    'protocol_header_verified': True,
     'raw_response_text': json.dumps(response),
 }, open('$pending_dir/$key.json', 'w'))
 "
@@ -364,7 +384,7 @@ json.dump({
   # by replacing all of $PATH (which would also break curl/python3/sqlite3
   # and make this fail for the wrong reason).
   fakebin=$(mktemp -d)
-  for tool in bash sh sqlite3 curl python3 mkdir chmod date mktemp rm cat sed mv grep dirname tr basename env sleep; do
+  for tool in bash sh sqlite3 curl python3 mkdir chmod date mktemp mkfifo rmdir rm cat sed mv grep dirname tr basename env sleep; do
     p="$(command -v "$tool" 2>/dev/null)" && ln -s "$p" "$fakebin/$tool"
   done
   run bash -c "PATH='$fakebin' bash '$SCRIPTS/remote.sh' connect --endpoint '$ENDPOINT' good-token-enc myteam"
@@ -392,6 +412,21 @@ json.dump({
 }
 
 # --- connect: pending/resume (B5) -----------------------------------------
+
+@test "connect: discards legacy pending records without a protocol-header verification fact" {
+  local token="legacy-pending-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  printf '%s\n' '{"endpoint":"'$ENDPOINT'","raw_response_text":"{}"}' > "$pending_dir/$key.json"
+  chmod 600 "$pending_dir/$key.json"
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"discarded a legacy pending exchange"* ]]
+  [ ! -f "$pending_dir/$key.json" ]
+}
 
 @test "connect: resumes from a hand-crafted pending record without a fresh network call" {
   # Simulates the crash-recovery scenario: an exchange already succeeded
@@ -434,6 +469,7 @@ response = {
 }
 json.dump({
     'endpoint': '$ENDPOINT',
+    'protocol_header_verified': True,
     'raw_response_text': json.dumps(response),
 }, open('$pending_dir/$key.json', 'w'))
 "
@@ -495,6 +531,7 @@ response = {
 }
 json.dump({
     'endpoint': '$ENDPOINT',
+    'protocol_header_verified': True,
     'raw_response_text': json.dumps(response),
 }, open('$pending_dir/$key.json', 'w'))
 "

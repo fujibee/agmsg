@@ -101,20 +101,43 @@ cmd_doctor() {
 # body (which holds the token) never appears in curl's own argv/ps. The
 # config file is 0600 and removed immediately after the call.
 _remote_http_post_json() {
-  local url="$1" body_file="$2" out_file="$3" header_file="$4" cfg http_code
+  local url="$1" body_file="$2" out_file="$3" header_file="$4" cfg http_code \
+    fifo_dir header_fifo copier_pid curl_output curl_status=0
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
+  header_fifo="$fifo_dir/header"
+  mkfifo "$header_fifo"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg"' EXIT INT TERM
+  trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+  python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" &
+  copier_pid=$!
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
-    printf 'dump-header = "%s"\n' "$header_file"
+    printf 'dump-header = "%s"\n' "$header_fifo"
+    printf 'connect-timeout = "10"\n'
+    printf 'max-time = "15"\n'
+    printf 'max-filesize = "2097152"\n'
     printf 'data = "@%s"\n' "$body_file"
   } > "$cfg"
-  http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
-  rm -f "$cfg"
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+    :
+  else
+    curl_status=$?
+  fi
+  if [ "$curl_status" -ne 0 ]; then
+    kill "$copier_pid" 2>/dev/null || true
+    wait "$copier_pid" 2>/dev/null || true
+    http_code="000"
+  elif wait "$copier_pid"; then
+    http_code="$curl_output"
+  else
+    http_code="000"
+  fi
+  rm -f "$cfg" "$header_fifo"
+  rmdir "$fifo_dir" 2>/dev/null || true
   trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
@@ -123,20 +146,43 @@ _remote_http_post_json() {
 # -> prints http_code
 # Same argv-safety property for the Authorization header (revoke calls).
 _remote_http_post_bearer() {
-  local url="$1" team_id="$2" token="$3" out_file="$4" header_file="$5" cfg http_code
+  local url="$1" team_id="$2" token="$3" out_file="$4" header_file="$5" cfg http_code \
+    fifo_dir header_fifo copier_pid curl_output curl_status=0
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
+  header_fifo="$fifo_dir/header"
+  mkfifo "$header_fifo"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg"' EXIT INT TERM
+  trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+  python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" &
+  copier_pid=$!
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
     printf 'header = "Authorization: Bearer %s"\n' "$token"
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
     printf 'header = "Agmsg-Team-ID: %s"\n' "$team_id"
-    printf 'dump-header = "%s"\n' "$header_file"
+    printf 'dump-header = "%s"\n' "$header_fifo"
+    printf 'connect-timeout = "10"\n'
+    printf 'max-time = "15"\n'
+    printf 'max-filesize = "65536"\n'
   } > "$cfg"
-  http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
-  rm -f "$cfg"
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+    :
+  else
+    curl_status=$?
+  fi
+  if [ "$curl_status" -ne 0 ]; then
+    kill "$copier_pid" 2>/dev/null || true
+    wait "$copier_pid" 2>/dev/null || true
+    http_code="000"
+  elif wait "$copier_pid"; then
+    http_code="$curl_output"
+  else
+    http_code="000"
+  fi
+  rm -f "$cfg" "$header_fifo"
+  rmdir "$fifo_dir" 2>/dev/null || true
   trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
@@ -265,7 +311,8 @@ import json, sys
 resp_path, endpoint = sys.argv[1], sys.argv[2]
 with open(resp_path) as f:
     raw_response_text = f.read()
-print(json.dumps({"endpoint": endpoint, "raw_response_text": raw_response_text}))
+print(json.dumps({"endpoint": endpoint, "protocol_header_verified": True,
+                  "raw_response_text": raw_response_text}))
 ' "$resp_file" "$endpoint")
   tmp="$(mktemp "$PENDING_DIR/.pending-XXXXXX")"
   chmod 600 "$tmp"
@@ -292,6 +339,9 @@ import json, sys
 pending_path, out_path = sys.argv[1], sys.argv[2]
 with open(pending_path) as f:
     pending = json.load(f)
+if set(pending) != {"endpoint", "protocol_header_verified", "raw_response_text"} or \
+        pending["protocol_header_verified"] is not True:
+    raise SystemExit("pending record predates mandatory protocol-header verification")
 with open(out_path, "w") as f:
     f.write(pending["raw_response_text"])
 print(pending["endpoint"])
@@ -436,7 +486,11 @@ cmd_connect() {
     local pending_resp_file pending_endpoint parsed_file
     pending_resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-resp.XXXXXX")"
     chmod 600 "$pending_resp_file"
-    pending_endpoint="$(_remote_load_pending "$pending_file" "$pending_resp_file")"
+    if ! pending_endpoint="$(_remote_load_pending "$pending_file" "$pending_resp_file")"; then
+      rm -f "$pending_file" "$pending_resp_file"
+      echo "agmsg: discarded a legacy pending exchange without a verified protocol header; issue a fresh pairing token and retry." >&2
+      exit 1
+    fi
     if [ -z "$pending_endpoint" ] || [ "$pending_endpoint" != "$endpoint" ]; then
       rm -f "$pending_resp_file"
       echo "agmsg: pending record's endpoint does not match — refusing to resume." >&2
