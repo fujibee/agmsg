@@ -141,11 +141,16 @@ If argument is "reset":
 2. Tell the user the result.
 
 If argument starts with "remote connect" (ADR 0007 — cloud/self-hosted sync connection):
-1. Parse `--endpoint <url>`, the token, and an optional `<team>`/`--force`.
-2. **Never pass the token as a literal argument you construct.** Pipe it via stdin instead:
-   `printf '%s' '<token>' | ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]`
-3. If the command pauses for an encryption-bootstrap choice (`[i/g/a]`) or an identity paste, relay the prompt to the user verbatim and wait for their real answer — never choose `g`/`i` or fabricate an identity on their behalf.
-4. Show the command's output to the user.
+1. Parse `--endpoint <url>` and an optional `<team>`/`--force`.
+2. **Do not ask the user to paste the token into this chat, and do not run this command yourself.** The token must never enter this session's own transcript — constructing and running a command that embeds it (even piped to `--token-stdin`) would do exactly that, since the command text itself becomes part of this session's tool-call record. Instead, tell the user to run this directly in their own terminal:
+   ```
+   read -rsp 'Token: ' TOKEN; echo
+   printf '%s' "$TOKEN" | ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
+   unset TOKEN
+   ```
+3. If that pauses for an encryption-bootstrap choice (`[i/g/a]`) or an identity paste, those also happen entirely within the user's own terminal session — they choose and paste directly, without your involvement.
+4. Ask the user to paste back only the command's final output (never the token or an identity) once it finishes, and continue from there.
+5. **Advanced/automation path**: only if the user says the token is already in an environment variable set *before this session started* (env vars set afterward, in another terminal, do not propagate into an already-running agent process — this path needs a fresh restart with the variable already in place), you may reference that variable by NAME only. Confirm the exact variable name with them explicitly first — never guess or invent one — and never ask them to reveal its value: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin <<< "$THEIR_CONFIRMED_VAR_NAME" [<team>] [--force]`.
 
 If argument is "remote status" (optionally followed by a team name):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>]`
@@ -170,9 +175,12 @@ If argument starts with "key show":
 4. Show the output to the user.
 
 If argument starts with "key import" followed by a team name:
-1. Ask the user to paste the private identity — never type or construct one yourself.
-2. **Never pass it as a literal argument.** Pipe it via stdin instead:
-   `printf '%s' '<identity>' | ~/.agents/skills/__SKILL_NAME__/scripts/key.sh import <team> --identity-stdin`
-3. Show the output to the user.
+1. **Do not ask the user to paste the private identity into this chat, and do not run this command yourself** — same reasoning as `remote connect` above, and more important here: this is a permanent key, not a short-lived token. Tell the user to run this directly in their own terminal:
+   ```
+   read -rsp 'Identity: ' IDENTITY; echo
+   printf '%s' "$IDENTITY" | ~/.agents/skills/__SKILL_NAME__/scripts/key.sh import <team> --identity-stdin
+   unset IDENTITY
+   ```
+2. Ask them to paste back only the command's output (never the identity itself) once it's done.
 
 `key rotate` and device-pairing `key request`/`key approve` are not available yet (they refuse unconditionally and change no state) — if the user asks for either, tell them so rather than attempting to run them.
