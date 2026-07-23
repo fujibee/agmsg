@@ -74,8 +74,21 @@ mv "$OLD_DIR/config.json" "$NEW_DIR/config.json"
 NEW_CONFIG="$NEW_DIR/config.json"
 if [ -f "$NEW_CONFIG" ]; then
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$NEW_CONFIG")
-  UPDATED=$(agmsg_sqlite_mem ".param set :json '$CONFIG_ESCAPED'" \
-    "SELECT json_set(:json, '\$.name', '$NEW_TEAM');")
+  # NEW_TEAM is a SQL string VALUE here (not a JSON path key), but it still
+  # needs the same single-quote escaping as every other interpolated
+  # identifier in this file — a team name with a quote would otherwise break
+  # out of the '$NEW_TEAM' literal below (#87 cluster; this call site had
+  # been missed).
+  NEW_TEAM_SQL=$(_agmsg_sqlesc "$NEW_TEAM")
+  # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT
+  # bound via `.param set`: the sqlite3 shell's dot-command tokenizer does
+  # not honour SQL '' escaping (unlike a real SQL statement's string
+  # literals), so `.param set :json '...'` silently mis-parses as soon as
+  # the config contains any single quote — e.g. an existing agent name like
+  # "al'ice" — corrupting :json (#87 cluster; see resolve-project.sh's
+  # `resolve_team` for the same caveat).
+  UPDATED=$(agmsg_sqlite_mem \
+    "SELECT json_set('$CONFIG_ESCAPED', '\$.name', '$NEW_TEAM_SQL');")
   agmsg_write_atomic "$NEW_CONFIG" "$UPDATED"
 fi
 

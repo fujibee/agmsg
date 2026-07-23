@@ -24,6 +24,15 @@ echo "Team: $TEAM"
 echo ""
 
 COUNT=0
+# CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT bound
+# via `.param set`: the sqlite3 shell's dot-command tokenizer does not
+# honour SQL '' escaping (unlike a real SQL statement's string literals), so
+# `.param set :json '...'` silently mis-parses as soon as the config
+# contains any single quote — e.g. an agent name like "al'ice" — and prints
+# `.parameter`'s own usage help as if it were query output, with exit 0
+# (#87 cluster; see resolve-project.sh's `resolve_team` for the same
+# caveat).
+CONFIG_ESCAPED=$(sed "s/'/''/g" "$CONFIG")
 while IFS='	' read -r name types project registrations; do
   if [ "${registrations:-0}" -gt 1 ]; then
     echo "  $name ($types) — $project (+$((registrations - 1)) more)"
@@ -34,21 +43,20 @@ while IFS='	' read -r name types project registrations; do
 # tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
 # the `registrations` field "N\r" and trip the integer test in the loop (#130).
 done < <(sqlite3 -separator '	' :memory: \
-  ".param set :json '$(sed "s/'/''/g" "$CONFIG")'" \
   "WITH agents AS (
      SELECT
        key AS name,
        CASE
-         WHEN json_type(json_extract(value, '$.registrations')) = 'array' THEN json_extract(value, '$.registrations')
-         ELSE json_array(json_object('type', json_extract(value, '$.type'), 'project', json_extract(value, '$.project')))
+         WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
+         ELSE json_array(json_object('type', json_extract(value, '\$.type'), 'project', json_extract(value, '\$.project')))
        END AS registrations
-     FROM json_each(json_extract(:json, '$.agents'))
+     FROM json_each(json_extract('$CONFIG_ESCAPED', '\$.agents'))
    )
    SELECT
      name,
-     group_concat(DISTINCT json_extract(r.value, '$.type')),
+     group_concat(DISTINCT json_extract(r.value, '\$.type')),
      COALESCE((
-       SELECT json_extract(r2.value, '$.project')
+       SELECT json_extract(r2.value, '\$.project')
        FROM json_each(agents.registrations) AS r2
        ORDER BY CAST(r2.key AS INTEGER) DESC
        LIMIT 1

@@ -37,6 +37,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
 
 _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 
@@ -158,6 +160,10 @@ route_get() {
         return
       fi
       local team="$1"
+      # Rejects path traversal ('/', '\', '..') before $team is ever spliced
+      # into a filesystem path (get_members below) — was previously
+      # unvalidated at this entry point (#87 cluster / F13-F15).
+      agmsg_validate_team_name "$team" || exit 1
       shift
       local sub="${1:?Usage: api.sh get teams <team> members|messages ...}"
       shift
