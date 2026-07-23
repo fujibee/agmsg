@@ -7,7 +7,10 @@ setup() {
   bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
 
   # Start the mock pairing-exchange/revoke server on an OS-assigned port.
-  MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" python3 "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+  MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" \
+  MOCK_REVOKE_BAD_HEADER="${MOCK_REVOKE_BAD_HEADER:-}" \
+  MOCK_REVOKE_BAD_BODY="${MOCK_REVOKE_BAD_BODY:-}" \
+    python3 "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" &
   MOCK_SERVER_PID=$!
   for _ in $(seq 1 50); do
@@ -21,6 +24,24 @@ setup() {
 teardown() {
   kill "$MOCK_SERVER_PID" 2>/dev/null || true
   teardown_test_env
+}
+
+restart_mock_server() {
+  kill "$MOCK_SERVER_PID" 2>/dev/null || true
+  wait "$MOCK_SERVER_PID" 2>/dev/null || true
+  : > "$TEST_SKILL_DIR/server.port"
+  MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" \
+  MOCK_REVOKE_BAD_HEADER="${MOCK_REVOKE_BAD_HEADER:-}" \
+  MOCK_REVOKE_BAD_BODY="${MOCK_REVOKE_BAD_BODY:-}" \
+    python3 "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+      > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" &
+  MOCK_SERVER_PID=$!
+  for _ in $(seq 1 50); do
+    [ -s "$TEST_SKILL_DIR/server.port" ] && break
+    sleep 0.05
+  done
+  MOCK_PORT="$(cat "$TEST_SKILL_DIR/server.port")"
+  ENDPOINT="http://127.0.0.1:$MOCK_PORT"
 }
 
 # --- doctor ------------------------------------------------------------
@@ -56,6 +77,24 @@ teardown() {
 @test "connect: http://127.0.0.1 (loopback) is accepted without https" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
   [ "$status" -eq 0 ]
+}
+
+@test "connect: requires the response protocol header" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" missing-protocol-header-token myteam
+  [ "$status" -ne 0 ]
+  [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
+
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" wrong-protocol-header-token myteam
+  [ "$status" -ne 0 ]
+  [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
+}
+
+@test "connect: rejects capability limits that differ from the engine validator" {
+  for token in max-blob-zero-token max-blob-over-token future-policy-boundary-token; do
+    run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" myteam
+    [ "$status" -ne 0 ]
+    [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
+  done
 }
 
 @test "connect: refuses subdomain-suffix bypass of the loopback exception (127.0.0.1.evil.com)" {
@@ -189,6 +228,17 @@ teardown() {
   [[ "$output" == *"connected"* ]]
 }
 
+@test "connect: --force rejects a 200 revoke body that does not match the binding" {
+  MOCK_REVOKE_BAD_BODY=1
+  restart_mock_server
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token-one myteam
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token-two myteam --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not confirm the existing credential"* ]]
+  run bash "$SCRIPTS/remote.sh" status myteam
+  [[ "$output" == *"connected"* ]]
+}
+
 @test "connect: --force requires an explicit <team> (refuses when omitted)" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token --force
   [ "$status" -ne 0 ]
@@ -214,7 +264,7 @@ teardown() {
 import json
 response = {
     'credential': 'unrelated-credential-value',
-    'credential_id': 'cred-unrelated-c',
+    'credential_id': '018f3f7e-5555-7000-8000-000000000005',
     'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
     'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
     'remote_team_name': 'myteam',
@@ -360,7 +410,7 @@ json.dump({
 import json
 response = {
     'credential': 'resumed-credential-value',
-    'credential_id': 'cred-resumed-xyz',
+    'credential_id': '018f3f7e-6666-7000-8000-000000000006',
     'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
     'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
     'remote_team_name': 'resumedteam',
@@ -399,7 +449,7 @@ json.dump({
   # Committed content must match the PENDING record's data, not a fresh
   # exchange (there was no live server to get one from).
   credential_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/myteam/config.json'))['remote_binding']['credential_id'])")
-  [ "$credential_id" = "cred-resumed-xyz" ]
+  [ "$credential_id" = "018f3f7e-6666-7000-8000-000000000006" ]
   # Pending record consumed on success — not left behind.
   [ ! -f "$pending_dir/$key.json" ]
 }
@@ -485,6 +535,17 @@ json.dump({
   run bash "$SCRIPTS/remote.sh" disconnect myteam
   [ "$status" -eq 0 ]
   [[ "$output" == *"could not be reached to revoke"* ]]
+  [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
+}
+
+@test "disconnect: does not claim revoke success without the protocol response header" {
+  MOCK_REVOKE_BAD_HEADER=1
+  restart_mock_server
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
+  run bash "$SCRIPTS/remote.sh" disconnect myteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not be reached to revoke"* ]]
+  [[ "$output" != *"Revoking credential with server... ok."* ]]
   [ ! -f "$SCRIPTS/../run/remote-credentials/myteam.json" ]
 }
 

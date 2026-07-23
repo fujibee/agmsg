@@ -96,12 +96,12 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
-# _remote_http_post_json <url> <body_file> <out_body_file> -> prints http_code
+# _remote_http_post_json <url> <body_file> <out_body_file> <out_header_file> -> prints http_code
 # Posts <body_file> as the request body via a curl -K config file, so the
 # body (which holds the token) never appears in curl's own argv/ps. The
 # config file is 0600 and removed immediately after the call.
 _remote_http_post_json() {
-  local url="$1" body_file="$2" out_file="$3" cfg http_code
+  local url="$1" body_file="$2" out_file="$3" header_file="$4" cfg http_code
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   chmod 600 "$cfg"
   trap 'rm -f "$cfg"' EXIT INT TERM
@@ -110,6 +110,7 @@ _remote_http_post_json() {
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
+    printf 'dump-header = "%s"\n' "$header_file"
     printf 'data = "@%s"\n' "$body_file"
   } > "$cfg"
   http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
@@ -118,10 +119,11 @@ _remote_http_post_json() {
   printf '%s' "$http_code"
 }
 
-# _remote_http_post_bearer <url> <team_id> <bearer_token> -> prints http_code
+# _remote_http_post_bearer <url> <team_id> <bearer_token> <out_body_file> <out_header_file>
+# -> prints http_code
 # Same argv-safety property for the Authorization header (revoke calls).
 _remote_http_post_bearer() {
-  local url="$1" team_id="$2" token="$3" cfg http_code
+  local url="$1" team_id="$2" token="$3" out_file="$4" header_file="$5" cfg http_code
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   chmod 600 "$cfg"
   trap 'rm -f "$cfg"' EXIT INT TERM
@@ -131,14 +133,16 @@ _remote_http_post_bearer() {
     printf 'header = "Authorization: Bearer %s"\n' "$token"
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
     printf 'header = "Agmsg-Team-ID: %s"\n' "$team_id"
+    printf 'dump-header = "%s"\n' "$header_file"
   } > "$cfg"
-  http_code=$(curl -sS -o /dev/null -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
+  http_code=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null) || http_code="000"
   rm -f "$cfg"
   trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
 
-# _remote_revoke <endpoint> <team_id> <credential_id> <credential> -> 0 revoked, 1 not
+# _remote_revoke <endpoint> <server_instance_id> <team_id> <credential_id> <credential>
+# -> 0 revoked and response-bound, 1 not
 # STRICTLY 200 only (E2 — reverted from an earlier "200 or 404 both
 # count" version): a bare HTTP 404 status is not trustworthy proof the
 # credential is actually gone. It's equally consistent with a wrong
@@ -152,9 +156,21 @@ _remote_http_post_bearer() {
 # anything but 200 — a stuck retry (requiring a console-side revoke) is
 # the correct failure mode here, not a false "confirmed revoked."
 _remote_revoke() {
-  local endpoint="$1" team_id="$2" credential_id="$3" credential="$4" http_code
-  http_code="$(_remote_http_post_bearer "$endpoint/v1/credentials/$credential_id/revoke" "$team_id" "$credential")"
-  [ "$http_code" = "200" ]
+  (
+    local endpoint="$1" server_instance_id="$2" team_id="$3" credential_id="$4" \
+      credential="$5" http_code body_file header_file
+    body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-revoke-body.XXXXXX")"
+    header_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-revoke-header.XXXXXX")"
+    chmod 600 "$body_file" "$header_file"
+    trap 'rm -f "$body_file" "$header_file"' EXIT INT TERM
+    http_code="$(_remote_http_post_bearer \
+      "$endpoint/v1/credentials/$credential_id/revoke" "$team_id" "$credential" \
+      "$body_file" "$header_file")"
+    [ "$http_code" = "200" ] || exit 1
+    python3 "$SCRIPT_DIR/internal/validate-protocol-header.py" < "$header_file" || exit 1
+    python3 "$SCRIPT_DIR/internal/parse-revoke-response.py" \
+      "$server_instance_id" "$team_id" "$credential_id" < "$body_file" || exit 1
+  )
 }
 
 # _remote_local_disconnect <team> <cfg> [expected_credential_id]
@@ -468,14 +484,17 @@ cmd_connect() {
         # does not yet build a durable orphan/revocation-pending queue for
         # the unreachable case; it fails closed and asks the operator to
         # retry or revoke from the console/admin side.
-        local old_endpoint old_remote_team_id old_credential
+        local old_endpoint old_server_instance_id old_remote_team_id old_credential
         old_endpoint="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.endpoint')"
+        old_server_instance_id="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.server_instance_id')"
         old_remote_team_id="$(_remote_read_config_field "$(_remote_team_config "$team")" '$.remote_binding.remote_team_id')"
         old_credential="$(python3 -c "import json,sys; print(json.load(open('$(_remote_cred_file "$team")')).get('credential',''))" 2>/dev/null || true)"
         if [ -z "$existing_credential_id" ] || [ "$existing_credential_id" = "null" ] \
           || [ -z "$old_endpoint" ] || [ "$old_endpoint" = "null" ] || [ -z "$old_credential" ] \
+          || [ -z "$old_server_instance_id" ] || [ "$old_server_instance_id" = "null" ] \
           || [ -z "$old_remote_team_id" ] || [ "$old_remote_team_id" = "null" ] \
-          || ! _remote_revoke "$old_endpoint" "$old_remote_team_id" "$existing_credential_id" "$old_credential"; then
+          || ! _remote_revoke "$old_endpoint" "$old_server_instance_id" "$old_remote_team_id" \
+            "$existing_credential_id" "$old_credential"; then
           echo "agmsg: --force rebind refused — could not confirm the existing credential ($existing_credential_id) was revoked. Revoke it from the console/admin side, or retry once the server is reachable, before rebinding." >&2
           exit 1
         fi
@@ -509,12 +528,14 @@ cmd_connect() {
     fi
 
     # The only network call that can fail before any local state changes.
-    local body_file resp_file http_code token_json
+    local body_file resp_file header_file http_code token_json
     body_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-body.XXXXXX")"
     chmod 600 "$body_file"
     resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-resp.XXXXXX")"
     chmod 600 "$resp_file"
-    trap 'rm -f "$body_file" "$resp_file"' EXIT INT TERM
+    header_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-connect-header.XXXXXX")"
+    chmod 600 "$header_file"
+    trap 'rm -f "$body_file" "$resp_file" "$header_file"' EXIT INT TERM
 
     token_json="$(printf '%s' "$token" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)"
     unset token
@@ -525,7 +546,8 @@ cmd_connect() {
     printf '{"token":%s}' "$token_json" > "$body_file"
     unset token_json
 
-    http_code="$(_remote_http_post_json "$endpoint/v1/pairing/exchange" "$body_file" "$resp_file")"
+    http_code="$(_remote_http_post_json "$endpoint/v1/pairing/exchange" \
+      "$body_file" "$resp_file" "$header_file")"
     rm -f "$body_file"
 
     if [ "$http_code" != "200" ]; then
@@ -533,6 +555,11 @@ cmd_connect() {
       rm -f "$resp_file"
       exit 1
     fi
+    if ! python3 "$SCRIPT_DIR/internal/validate-protocol-header.py" < "$header_file"; then
+      rm -f "$resp_file" "$header_file"
+      exit 1
+    fi
+    rm -f "$header_file"
 
     # Strict validation (B6) BEFORE any field is used — a malformed/
     # malicious response must not reach state mutation, and credential_id
@@ -784,9 +811,10 @@ cmd_disconnect() {
     exit 1
   fi
 
-  local cred_file endpoint remote_team_id credential_id credential
+  local cred_file endpoint server_instance_id remote_team_id credential_id credential
   cred_file="$(_remote_cred_file "$team")"
   endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
+  server_instance_id="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
   remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
   credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
 
@@ -796,8 +824,10 @@ cmd_disconnect() {
   local revoke_ok=0
   if [ -f "$cred_file" ] && [ -n "$endpoint" ] && [ "$endpoint" != "null" ] && [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; then
     credential="$(python3 -c "import json,sys; print(json.load(open('$cred_file')).get('credential',''))" 2>/dev/null)"
-    if [ -n "$credential" ] && [ -n "$remote_team_id" ] && [ "$remote_team_id" != "null" ] \
-      && _remote_revoke "$endpoint" "$remote_team_id" "$credential_id" "$credential"; then
+    if [ -n "$credential" ] && [ -n "$server_instance_id" ] && [ "$server_instance_id" != "null" ] \
+      && [ -n "$remote_team_id" ] && [ "$remote_team_id" != "null" ] \
+      && _remote_revoke "$endpoint" "$server_instance_id" "$remote_team_id" \
+        "$credential_id" "$credential"; then
       revoke_ok=1
     fi
     unset credential

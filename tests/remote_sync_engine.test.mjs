@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   ageSnapshotDigest,
   consistentReadStateContext,
+  configure,
   driver,
   isRetryable,
   loadConfig,
@@ -129,6 +130,27 @@ test("credential loader rejects binding mismatch and non-private files", async (
       await assert.rejects(readConnectedCredential({ ...config, credential_id: credentialId }),
         /private regular file/u);
     }
+  });
+});
+
+test("connected binding is a bounded non-writable nofollow authority", async () => {
+  await withConnectedCredential(async (root) => {
+    await writeConnectedTeam(root);
+    const path = join(root, "teams", "demo", "config.json");
+    if (process.platform !== "win32") {
+      await chmod(path, 0o666);
+      await assert.rejects(loadConfig("demo"), /non-writable regular file/u);
+      await unlink(path);
+      const target = join(root, "binding-target.json");
+      await writeConnectedTeam(root);
+      await rename(path, target);
+      await symlink(target, path);
+      await assert.rejects(loadConfig("demo"), /non-writable regular file/u);
+      await unlink(path);
+      await rename(target, path);
+    }
+    await writeFile(path, "x".repeat(2 * 1024 * 1024 + 1), { mode: 0o644 });
+    await assert.rejects(loadConfig("demo"), /non-writable regular file|byte limit/u);
   });
 });
 
@@ -530,6 +552,33 @@ test("headerless non-JSON intermediary failures remain retryable", async () => {
   }
 });
 
+test("request callers cannot override binding or credential headers", async () => {
+  const previousFetch = globalThis.fetch;
+  let captured;
+  try {
+    await withConnectedCredential(async () => {
+      globalThis.fetch = async (_url, init) => {
+        captured = init.headers;
+        return new Response(JSON.stringify({ protocol_version: 1,
+          server_instance_id: config.server_instance_id, team_id: config.remote_team_id }), {
+          status: 200, headers: { "Agmsg-Protocol-Version": "1" },
+        });
+      };
+      await request({ ...config, credential_id: credentialId,
+        server_url: "https://sync.example" }, "/v1/messages", { headers: {
+        Authorization: "Bearer attacker-value",
+        "Agmsg-Team-ID": "018f3f7e-9999-7000-8000-000000000009",
+        "Agmsg-Protocol-Version": "99",
+      } });
+      assert.equal(captured.Authorization, "Bearer fixture-token");
+      assert.equal(captured["Agmsg-Team-ID"], config.remote_team_id);
+      assert.equal(captured["Agmsg-Protocol-Version"], "1");
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("request distinguishes config errors from response transport loss", async () => {
   const previousFetch = globalThis.fetch;
   let fetchCalled = false;
@@ -761,6 +810,70 @@ test("retained age checkpoint survives sync config reset and rejects same-revisi
     else process.env.AGMSG_SYNC_STORAGE_DIR = previousStorage;
     await rm(root, { recursive: true });
   }
+});
+
+test("age configure authenticates the connected credential before retaining trust", async () => {
+  const previousFetch = globalThis.fetch;
+  await withConnectedCredential(async (root) => {
+    await writeConnectedTeam(root, { capabilities: { write_allowed_ciphers: ["age-v1"] } });
+    const snapshot = {
+      authorized_writers: ["writer-a"],
+      epoch_revision: "0",
+      history: [{ cipher: "age-v1", effective_from_seq: "1", epoch_revision: "0",
+        key_id: "epoch-1", recipients: [
+          "age1mmqjrejftea4f6xh47lhpc0jn4vw0yuhz349sw2e3sfl22k5gcjsv6xcvp",
+        ] }],
+      previous_snapshot_sha256: null,
+      profile: "age-v1",
+      server_instance_id: config.server_instance_id,
+      team_id: config.remote_team_id,
+      writer_generation: "0",
+    };
+    const snapshotPath = join(root, "snapshot.json");
+    await writeFile(snapshotPath, JSON.stringify(snapshot));
+    const fakeAge = join(root, "age");
+    await writeFile(fakeAge, "#!/bin/sh\necho v1.3.1\n", { mode: 0o700 });
+    const saved = {
+      storage: process.env.AGMSG_SYNC_STORAGE_DIR,
+      trust: process.env.AGMSG_SYNC_TRUST_DIR,
+      age: process.env.AGMSG_AGE_BIN,
+    };
+    process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
+    process.env.AGMSG_SYNC_TRUST_DIR = join(root, "trust");
+    process.env.AGMSG_AGE_BIN = fakeAge;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ status: "ok", database: "ok",
+          server_instance_id: config.server_instance_id }), {
+          status: 200, headers: { "Agmsg-Protocol-Version": "1" },
+        });
+      }
+      return new Response(JSON.stringify({ protocol_version: 1,
+        error: { code: "unauthenticated" } }), {
+        status: 401, headers: { "Agmsg-Protocol-Version": "1" },
+      });
+    };
+    try {
+      await assert.rejects(configure({ team: "demo", server: "https://sync.example",
+        "team-id": config.remote_team_id, "minimum-security": "e2ee-required",
+        cipher: "age-v1", "age-snapshot": snapshotPath,
+        "age-checkpoint": `0:${ageSnapshotDigest(snapshot)}`,
+        "age-confirmation": "operator-live" }), /unauthenticated/u);
+      assert.equal(calls, 2);
+      await assert.rejects(readdir(process.env.AGMSG_SYNC_TRUST_DIR),
+        (error) => error.code === "ENOENT");
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (saved.storage === undefined) delete process.env.AGMSG_SYNC_STORAGE_DIR;
+      else process.env.AGMSG_SYNC_STORAGE_DIR = saved.storage;
+      if (saved.trust === undefined) delete process.env.AGMSG_SYNC_TRUST_DIR;
+      else process.env.AGMSG_SYNC_TRUST_DIR = saved.trust;
+      if (saved.age === undefined) delete process.env.AGMSG_AGE_BIN;
+      else process.env.AGMSG_AGE_BIN = saved.age;
+    }
+  });
 });
 
 test("configured native identity must belong to its epoch recipient manifest", async () => {

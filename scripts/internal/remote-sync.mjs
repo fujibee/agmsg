@@ -17,7 +17,8 @@ const SEQUENCE = /^(0|[1-9][0-9]*)$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const PROTOCOL = "1";
 const MAX_SEQUENCE = 9_223_372_036_854_775_807n;
-const CREDENTIAL_ID = /^[A-Za-z0-9._-]{1,128}$/u;
+const MAX_CONNECTION_CONFIG_BYTES = 2 * 1024 * 1024;
+const MAX_CREDENTIAL_BYTES = 64 * 1024;
 
 function usage() {
   return `usage:
@@ -92,7 +93,7 @@ function connectedBinding(value, team) {
   const binding = value?.remote_binding;
   if (value?.name !== team || !binding || typeof binding !== "object" ||
       typeof binding.endpoint !== "string" || binding.endpoint.length < 1 ||
-      !CREDENTIAL_ID.test(binding.credential_id ?? "") ||
+      !UUID_V7.test(binding.credential_id ?? "") ||
       !UUID_V7.test(binding.server_instance_id ?? "") ||
       !UUID_V7.test(binding.remote_team_id ?? "") || binding.protocol_version !== 1 ||
       typeof binding.connected_at !== "string" || Number.isNaN(Date.parse(binding.connected_at)) ||
@@ -111,41 +112,59 @@ function connectedBinding(value, team) {
   return binding;
 }
 
+async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
+  const before = await lstat(path);
+  const unsafeMode = process.platform !== "win32" &&
+    (before.mode & (privateFile ? 0o077 : 0o022)) !== 0;
+  if (!before.isFile() || before.isSymbolicLink() || unsafeMode || before.size > maxBytes) {
+    throw new Error(privateFile ? "remote credential must be a private regular file" :
+      "connected team binding must be a non-writable regular file");
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const metadata = await handle.stat();
+    const changed = !metadata.isFile() || metadata.dev !== before.dev || metadata.ino !== before.ino ||
+      metadata.size > maxBytes || (process.platform !== "win32" &&
+      (metadata.mode & (privateFile ? 0o077 : 0o022)) !== 0);
+    if (changed) throw new Error("connection authority changed while it was being opened");
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const buffer = Buffer.alloc(Math.min(64 * 1024, maxBytes - total + 1));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error("connection authority exceeds its byte limit");
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readConnectedBinding(team) {
-  const bytes = await readFile(teamConfigPath(team));
+  const bytes = await readBoundedAuthorityFile(
+    teamConfigPath(team), MAX_CONNECTION_CONFIG_BYTES, false);
   const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   return connectedBinding(parseStrictJson(source), team);
 }
 
 export async function readConnectedCredential(config) {
   const path = credentialPath(config.local_team);
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() ||
-      (process.platform !== "win32" && (before.mode & 0o077) !== 0)) {
-    throw new Error("remote credential must be a private regular file");
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(
+    await readBoundedAuthorityFile(path, MAX_CREDENTIAL_BYTES, true));
+  const records = parseStrictJsonl(source);
+  const value = records[0];
+  if (records.length !== 1 || !value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "credential,credential_id" ||
+      typeof value.credential !== "string" || value.credential.length < 1 ||
+      /[\u0000-\u001f\u007f]/u.test(value.credential) ||
+      !UUID_V7.test(value.credential_id) ||
+      (config.credential_id && value.credential_id !== config.credential_id)) {
+    throw new Error("remote credential file is invalid or does not match the binding");
   }
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try {
-    const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.dev !== before.dev || metadata.ino !== before.ino ||
-        (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)) {
-      throw new Error("remote credential changed while it was being opened");
-    }
-    const source = new TextDecoder("utf-8", { fatal: true }).decode(await handle.readFile());
-    const records = parseStrictJsonl(source);
-    const value = records[0];
-    if (records.length !== 1 || !value || typeof value !== "object" || Array.isArray(value) ||
-        Object.keys(value).sort().join(",") !== "credential,credential_id" ||
-        typeof value.credential !== "string" || value.credential.length < 1 ||
-        /[\u0000-\u001f\u007f]/u.test(value.credential) ||
-        !CREDENTIAL_ID.test(value.credential_id) ||
-        (config.credential_id && value.credential_id !== config.credential_id)) {
-      throw new Error("remote credential file is invalid or does not match the binding");
-    }
-    return value.credential;
-  } finally {
-    await handle.close();
-  }
+  return value.credential;
 }
 
 function ageTrustPath(config) {
@@ -169,7 +188,8 @@ async function writeConfig(path, value) {
 }
 
 async function readStoredSyncConfig(team) {
-  const bytes = await readFile(configPath(team));
+  const bytes = await readBoundedAuthorityFile(
+    configPath(team), MAX_CONNECTION_CONFIG_BYTES, false);
   return parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
@@ -464,10 +484,10 @@ function endpoint(base, path) {
 export async function request(config, path, init = {}) {
   const token = await readConnectedCredential(config);
   const headers = {
+    ...init.headers,
     "Agmsg-Protocol-Version": PROTOCOL,
     "Agmsg-Team-ID": config.remote_team_id,
     Authorization: `Bearer ${token}`,
-    ...init.headers,
   };
   const url = endpoint(config.server_url, path);
   let response;
@@ -1088,7 +1108,7 @@ async function existingConfig(team) {
   }
 }
 
-async function configure(args) {
+export async function configure(args) {
   const team = requireName(args.team, "team");
   if (!UUID_V7.test(args["team-id"] ?? "")) throw new Error("team-id must be a canonical UUIDv7");
   const cipherProfile = args.cipher ?? "none";
@@ -1137,8 +1157,6 @@ async function configure(args) {
     };
     validateAgeConfiguration(config);
     validateConfiguredAgeIdentities(config);
-    const retained = await retainAgeCheckpoint(config, confirmation);
-    config.age_v1.checkpoint.confirmed_at = retained.confirmation.confirmed_at;
   } else if (args["age-snapshot"] || args["age-checkpoint"] || args["age-confirmation"] ||
       args["age-identity"]) {
     throw new Error("age options require --cipher age-v1");
@@ -1156,6 +1174,10 @@ async function configure(args) {
   }
   const capabilities = await request(config, "/v1/capabilities");
   validateCapabilities(config, capabilities);
+  if (cipherProfile === "age-v1") {
+    const retained = await retainAgeCheckpoint(config, args["age-confirmation"]);
+    config.age_v1.checkpoint.confirmed_at = retained.confirmation.confirmed_at;
+  }
   await writeConfig(configPath(team), config);
   await event("configured", { team, server_instance_id: config.server_instance_id,
     remote_team_id: config.remote_team_id });

@@ -15,16 +15,10 @@ which would silently destroy NUL-based field boundaries before the caller
 ever sees them. Every field is rejected if it contains a literal newline
 (none legitimately should), so newline is safe as the sole delimiter here.
 
-credential_id is validated against a bounded, URL-path-safe character set
-because it is spliced directly into the revoke endpoint's path — anything
-else risks path/query injection against a malicious or buggy server; its
-exact format isn't pinned by any approved spec (pairing/credential
-exchange is this ADR's own addition), so a conservative bounded charset
-is the right baseline. server_instance_id and team_id (remote_team_id),
-by contrast, ARE pinned: the approved sync HTTP v1 spec (server/spec/v1.md
-@ d1a74db) requires both to be a canonical LOWERCASE UUIDv7 (RFC 9562) —
-validated here as such, not left to a loose bounded charset, since an
-invalid binding must never reach a local commit.
+credential_id, server_instance_id, and team_id (remote_team_id) are all
+pinned to canonical lowercase UUIDv7. The credential identifier is also
+spliced into the revoke endpoint's path, so accepting a looser value here
+would both split client/server validation and risk path/query injection.
 
 This same validator is also used to re-check a previously-saved pending
 record before resuming a commit from it (ADR 0007 review finding R5) — a
@@ -43,8 +37,8 @@ import json
 import re
 import sys
 
-ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 UUIDV7_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+CIPHER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 MAX_SEQUENCE = 9_223_372_036_854_775_807
 SUPPORTED_PROTOCOL_VERSIONS = (1,)
@@ -108,8 +102,7 @@ def req_sequence(d, key, label=None):
 def validate_policy_set(value, label):
     if (
         not isinstance(value, list)
-        or not value
-        or not all(isinstance(item, str) and item for item in value)
+        or not all(isinstance(item, str) and CIPHER_RE.match(item) for item in value)
         or len(value) != len(set(value))
     ):
         fail(f"capabilities.{label} has an unexpected shape")
@@ -120,7 +113,10 @@ def validate_envelope_versions(value, label):
     if (
         not isinstance(value, list)
         or not value
-        or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 1 for item in value)
+        or not all(
+            isinstance(item, int) and not isinstance(item, bool)
+            and 0 <= item <= 0xFFFFFFFF for item in value
+        )
         or len(value) != len(set(value))
     ):
         fail(f"capabilities.{label} has an unexpected shape")
@@ -146,8 +142,8 @@ def main():
 
     credential = req_str(d, "credential")
     credential_id = req_str(d, "credential_id")
-    if not ID_RE.match(credential_id):
-        fail("credential_id has an unexpected shape")
+    if not UUIDV7_RE.match(credential_id):
+        fail("credential_id must be a canonical lowercase UUIDv7")
     server_instance_id = req_str(d, "server_instance_id")
     if not UUIDV7_RE.match(server_instance_id):
         fail("server_instance_id must be a canonical lowercase UUIDv7")
@@ -188,7 +184,9 @@ def main():
     min_available_seq = req_sequence(caps, "min_available_seq")
     policy_revision = req_sequence(caps, "policy_revision")
     effective_from_seq = req_sequence(caps, "effective_from_seq")
-    req_sequence(caps, "max_blob_bytes")
+    max_blob_bytes = req_sequence(caps, "max_blob_bytes")
+    if not 1 <= int(max_blob_bytes) <= 1_048_576:
+        fail("capabilities.max_blob_bytes is outside the protocol limit")
     if int(min_available_seq) > int(current_seq):
         fail("capabilities retention floor exceeds current_seq")
     next_boundary = caps.get("next_sequence_boundary")
@@ -206,8 +204,6 @@ def main():
         caps.get("accepted_envelope_versions"), "accepted_envelope_versions"
     )
     ciphers = validate_policy_set(caps.get("write_allowed_ciphers"), "write_allowed_ciphers")
-    if any("," in c for c in ciphers):
-        fail("capabilities.write_allowed_ciphers entries must not contain ','")
     history = caps.get("policy_history")
     if not isinstance(history, list) or not history or len(history) > 4096:
         fail("capabilities.policy_history has an unexpected shape")
@@ -230,6 +226,8 @@ def main():
         prior_boundary = int(boundary)
     if history[0]["effective_from_seq"] != "1":
         fail("capabilities.policy_history must begin at sequence 1")
+    if next_boundary is not None and prior_boundary > int(next_boundary):
+        fail("capabilities.policy_history starts beyond the next sequence boundary")
     final = history[-1]
     if (
         final["policy_revision"] != policy_revision
