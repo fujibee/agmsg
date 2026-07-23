@@ -216,3 +216,40 @@ If argument is "version":
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code`
 2. Tell the user the result.
+
+If argument starts with "remote connect" (ADR 0007 — cloud/self-hosted sync connection):
+1. Parse `--endpoint <url>`, the token, and an optional `<team>`/`--force`.
+2. **Never pass the token as a literal argument you construct.** Pipe it via stdin instead:
+   `printf '%s' '<token>' | ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]`
+3. If the command pauses for an encryption-bootstrap choice (`[i/g/a]`) or an identity paste, relay the prompt to the user verbatim and wait for their real answer — never choose `g`/`i` or fabricate an identity on their behalf.
+4. Show the command's output to the user.
+
+If argument is "remote status" (optionally followed by a team name):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>]`
+2. Show the output to the user.
+
+If argument starts with "remote disconnect" followed by a team name:
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh disconnect <team>`
+2. Show the output to the user.
+
+If argument starts with "remote doctor":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh doctor [<team>]`
+2. Show the output to the user.
+
+If argument starts with "key generate" followed by an optional team name:
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh generate [<team>]`
+2. Show the full output to the user, including the mandatory key-backup notice — do not summarize it away.
+
+If argument starts with "key show":
+1. Parse an optional team name and `--reveal-secret`.
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh show [<team>] [--reveal-secret]`
+3. `--reveal-secret` requires a real interactive terminal and is refused in agent mode — if the user wants to reveal a secret, tell them to run it themselves directly in their own terminal rather than through you.
+4. Show the output to the user.
+
+If argument starts with "key import" followed by a team name:
+1. Ask the user to paste the private identity — never type or construct one yourself.
+2. **Never pass it as a literal argument.** Pipe it via stdin instead:
+   `printf '%s' '<identity>' | ~/.agents/skills/__SKILL_NAME__/scripts/key.sh import <team> --identity-stdin`
+3. Show the output to the user.
+
+`key rotate` and device-pairing `key request`/`key approve` are not available yet (they refuse unconditionally and change no state) — if the user asks for either, tell them so rather than attempting to run them.
