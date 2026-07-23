@@ -152,12 +152,24 @@ class Handler(BaseHTTPRequestHandler):
                 "remote_team_name": "myteam",
                 "protocol_version": 1,
                 "capabilities": {
+                    "protocol_version": 1,
+                    "server_instance_id": "018f3f7e-1111-7000-8000-000000000001",
+                    "team_id": "018f3f7e-2222-7000-8000-000000000002",
+                    "team_name": "myteam",
                     "accepted_envelope_versions": [1],
                     "write_allowed_ciphers": ciphers,
-                    "policy_revision": 1,
-                    "effective_from_seq": 0,
-                    "current_seq": 0,
-                    "max_blob_bytes": 1048576,
+                    "policy_revision": "0",
+                    "effective_from_seq": "1",
+                    "current_seq": "0",
+                    "next_sequence_boundary": "1",
+                    "min_available_seq": "0",
+                    "max_blob_bytes": "1048576",
+                    "policy_history": [{
+                        "policy_revision": "0",
+                        "effective_from_seq": "1",
+                        "accepted_envelope_versions": [1],
+                        "write_allowed_ciphers": ciphers,
+                    }],
                 },
             })
             return

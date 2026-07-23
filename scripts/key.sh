@@ -16,6 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONNECTION_ROOT="${AGMSG_SYNC_CONNECTION_DIR:-$SKILL_DIR}"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
@@ -23,8 +24,8 @@ source "$SCRIPT_DIR/lib/registry-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
 
-TEAMS_DIR="$SCRIPT_DIR/../teams"
-CRED_ROOT="$SKILL_DIR/run/remote-credentials"
+TEAMS_DIR="$CONNECTION_ROOT/teams"
+CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
 
 # Escape interpolated identifiers as SQL string literals (parity with
 # rename.sh/send.sh): a value with a single quote would break the query.

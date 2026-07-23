@@ -219,7 +219,22 @@ response = {
     'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
     'remote_team_name': 'myteam',
     'protocol_version': 1,
-    'capabilities': {'write_allowed_ciphers': ['none']},
+    'capabilities': {
+        'protocol_version': 1,
+        'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
+        'team_id': '018f3f7e-2222-7000-8000-000000000002',
+        'team_name': 'myteam',
+        'accepted_envelope_versions': [1],
+        'write_allowed_ciphers': ['none'],
+        'policy_revision': '0', 'effective_from_seq': '1',
+        'current_seq': '0', 'next_sequence_boundary': '1',
+        'min_available_seq': '0', 'max_blob_bytes': '1048576',
+        'policy_history': [{
+            'policy_revision': '0', 'effective_from_seq': '1',
+            'accepted_envelope_versions': [1],
+            'write_allowed_ciphers': ['none'],
+        }],
+    },
 }
 json.dump({
     'endpoint': '$ENDPOINT',
@@ -350,7 +365,22 @@ response = {
     'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
     'remote_team_name': 'resumedteam',
     'protocol_version': 1,
-    'capabilities': {'write_allowed_ciphers': ['none']},
+    'capabilities': {
+        'protocol_version': 1,
+        'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
+        'team_id': '018f3f7e-4444-7000-8000-000000000004',
+        'team_name': 'resumedteam',
+        'accepted_envelope_versions': [1],
+        'write_allowed_ciphers': ['none'],
+        'policy_revision': '0', 'effective_from_seq': '1',
+        'current_seq': '0', 'next_sequence_boundary': '1',
+        'min_available_seq': '0', 'max_blob_bytes': '1048576',
+        'policy_history': [{
+            'policy_revision': '0', 'effective_from_seq': '1',
+            'accepted_envelope_versions': [1],
+            'write_allowed_ciphers': ['none'],
+        }],
+    },
 }
 json.dump({
     'endpoint': '$ENDPOINT',
@@ -396,7 +426,22 @@ response = {
     'remote_team_id': '018f3f7e-2222-7000-8000-000000000002',
     'remote_team_name': 'myteam',
     'protocol_version': 1,
-    'capabilities': {'write_allowed_ciphers': ['none']},
+    'capabilities': {
+        'protocol_version': 1,
+        'server_instance_id': '018f3f7e-1111-7000-8000-000000000001',
+        'team_id': '018f3f7e-2222-7000-8000-000000000002',
+        'team_name': 'myteam',
+        'accepted_envelope_versions': [1],
+        'write_allowed_ciphers': ['none'],
+        'policy_revision': '0', 'effective_from_seq': '1',
+        'current_seq': '0', 'next_sequence_boundary': '1',
+        'min_available_seq': '0', 'max_blob_bytes': '1048576',
+        'policy_history': [{
+            'policy_revision': '0', 'effective_from_seq': '1',
+            'accepted_envelope_versions': [1],
+            'write_allowed_ciphers': ['none'],
+        }],
+    },
 }
 json.dump({
     'endpoint': '$ENDPOINT',

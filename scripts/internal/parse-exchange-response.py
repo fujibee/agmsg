@@ -45,15 +45,22 @@ import sys
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 UUIDV7_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
+MAX_SEQUENCE = 9_223_372_036_854_775_807
 SUPPORTED_PROTOCOL_VERSIONS = (1,)
 ALLOWED_TOP_LEVEL_KEYS = {
     "credential", "credential_id", "server_instance_id", "remote_team_id",
     "remote_team_name", "protocol_version", "capabilities",
 }
 ALLOWED_CAPABILITY_KEYS = {
+    "protocol_version", "server_instance_id", "team_id", "team_name",
     "accepted_envelope_versions", "write_allowed_ciphers", "policy_revision",
     "effective_from_seq", "max_blob_bytes", "current_seq",
     "next_sequence_boundary", "min_available_seq", "policy_history",
+}
+POLICY_KEYS = {
+    "policy_revision", "effective_from_seq", "accepted_envelope_versions",
+    "write_allowed_ciphers",
 }
 
 
@@ -85,6 +92,39 @@ def req_str(d, key):
     if not isinstance(v, str) or not v:
         fail(f"missing or invalid '{key}'")
     return v
+
+
+def req_sequence(d, key, label=None):
+    value = d.get(key)
+    if (
+        not isinstance(value, str)
+        or not SEQUENCE_RE.match(value)
+        or int(value) > MAX_SEQUENCE
+    ):
+        fail(f"capabilities.{label or key} is not a canonical sequence")
+    return value
+
+
+def validate_policy_set(value, label):
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+        or len(value) != len(set(value))
+    ):
+        fail(f"capabilities.{label} has an unexpected shape")
+    return value
+
+
+def validate_envelope_versions(value, label):
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 1 for item in value)
+        or len(value) != len(set(value))
+    ):
+        fail(f"capabilities.{label} has an unexpected shape")
+    return value
 
 
 def main():
@@ -125,6 +165,10 @@ def main():
     if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
         fail(f"unsupported protocol_version {protocol_version!r}")
 
+    for field in (credential, credential_id, server_instance_id, remote_team_id, remote_team_name):
+        if re.search(r"[\x00-\x1f\x7f]", field):
+            fail("a response field unexpectedly contains a control character")
+
     caps = d.get("capabilities", {})
     if not isinstance(caps, dict):
         fail("capabilities has an unexpected type")
@@ -132,15 +176,68 @@ def main():
     if unknown_caps:
         fail(f"unrecognized capabilities field(s): {', '.join(sorted(unknown_caps))}")
 
-    ciphers = caps.get("write_allowed_ciphers", [])
-    if not isinstance(ciphers, list) or not all(isinstance(c, str) for c in ciphers):
-        fail("capabilities.write_allowed_ciphers has an unexpected shape")
+    if (
+        caps.get("protocol_version") != protocol_version
+        or caps.get("server_instance_id") != server_instance_id
+        or caps.get("team_id") != remote_team_id
+        or caps.get("team_name") != remote_team_name
+    ):
+        fail("capabilities binding does not match the exchange response")
+
+    current_seq = req_sequence(caps, "current_seq")
+    min_available_seq = req_sequence(caps, "min_available_seq")
+    policy_revision = req_sequence(caps, "policy_revision")
+    effective_from_seq = req_sequence(caps, "effective_from_seq")
+    req_sequence(caps, "max_blob_bytes")
+    if int(min_available_seq) > int(current_seq):
+        fail("capabilities retention floor exceeds current_seq")
+    next_boundary = caps.get("next_sequence_boundary")
+    if current_seq == str(MAX_SEQUENCE):
+        if next_boundary is not None:
+            fail("capabilities next_sequence_boundary must be null at exhaustion")
+    elif (
+        not isinstance(next_boundary, str)
+        or not SEQUENCE_RE.match(next_boundary)
+        or int(next_boundary) != int(current_seq) + 1
+    ):
+        fail("capabilities next_sequence_boundary is inconsistent")
+
+    versions = validate_envelope_versions(
+        caps.get("accepted_envelope_versions"), "accepted_envelope_versions"
+    )
+    ciphers = validate_policy_set(caps.get("write_allowed_ciphers"), "write_allowed_ciphers")
     if any("," in c for c in ciphers):
         fail("capabilities.write_allowed_ciphers entries must not contain ','")
-
-    current_seq = caps.get("current_seq")
-    if current_seq is not None and (not isinstance(current_seq, int) or isinstance(current_seq, bool)):
-        fail("capabilities.current_seq has an unexpected type")
+    history = caps.get("policy_history")
+    if not isinstance(history, list) or not history or len(history) > 4096:
+        fail("capabilities.policy_history has an unexpected shape")
+    prior_revision = -1
+    prior_boundary = 0
+    for entry in history:
+        if not isinstance(entry, dict) or set(entry.keys()) != POLICY_KEYS:
+            fail("capabilities.policy_history entry has an unexpected shape")
+        revision = req_sequence(entry, "policy_revision", "policy_history.policy_revision")
+        boundary = req_sequence(entry, "effective_from_seq", "policy_history.effective_from_seq")
+        entry_versions = validate_envelope_versions(
+            entry.get("accepted_envelope_versions"), "policy_history.accepted_envelope_versions"
+        )
+        entry_ciphers = validate_policy_set(
+            entry.get("write_allowed_ciphers"), "policy_history.write_allowed_ciphers"
+        )
+        if int(revision) <= prior_revision or int(boundary) <= prior_boundary:
+            fail("capabilities.policy_history is not canonical ascending")
+        prior_revision = int(revision)
+        prior_boundary = int(boundary)
+    if history[0]["effective_from_seq"] != "1":
+        fail("capabilities.policy_history must begin at sequence 1")
+    final = history[-1]
+    if (
+        final["policy_revision"] != policy_revision
+        or final["effective_from_seq"] != effective_from_seq
+        or final["accepted_envelope_versions"] != versions
+        or final["write_allowed_ciphers"] != ciphers
+    ):
+        fail("capabilities current policy does not match policy_history")
 
     caps_json = json.dumps(caps)
     fields = [
@@ -152,7 +249,7 @@ def main():
         str(protocol_version),
         caps_json,
         ",".join(ciphers),
-        str(current_seq if current_seq is not None else -1),
+        current_seq,
     ]
     for f in fields:
         # Reject every ASCII control character (0x00-0x1F, 0x7F), not
