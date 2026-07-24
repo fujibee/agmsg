@@ -235,6 +235,31 @@ _remote_pending_key() {
 
 _remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
 
+# A dedicated, empty per-pending-id directory used ONLY as a lock target —
+# never the `<id>.json` data file itself — so `pending list`'s `*.json` glob
+# never picks it up. Shared by `cmd_connect`'s resume path and
+# `cmd_pending_abort` (co1 delta review, ADR 0007 addendum): without a
+# shared lock, `connect` could read+validate a pending record, `abort` could
+# then delete that same record and report success, and `connect` would
+# still go on to commit a real binding from its own already-in-hand copy —
+# meaning "abort succeeded" and "an active binding now exists for that
+# exact operation" could both become true. Locking (not just reading) the
+# whole span from "does this pending record still exist" through to either
+# a successful commit (which itself deletes the file) or giving up makes
+# the two operations mutually exclusive: whichever acquires the lock first
+# determines the pending record's fate, and the other sees that outcome
+# once it gets the lock. Per-id (not PENDING_DIR-wide) so unrelated
+# connects/aborts for DIFFERENT pending records never serialize against
+# each other.
+_remote_pending_lock_dir() { printf '%s' "$PENDING_DIR/.locks/$1"; }
+
+_remote_pending_lock_acquire() {
+  local pending_id="$1" lock_dir
+  lock_dir="$(_remote_pending_lock_dir "$pending_id")"
+  mkdir -p "$lock_dir"
+  agmsg_lock_acquire "$lock_dir"
+}
+
 # _remote_write_pending <key> <resp_file> <endpoint>
 # Durable, atomic (temp+rename), 0600 record of a successful exchange whose
 # local commit has not (yet) fully completed — deliberately does NOT
@@ -430,6 +455,16 @@ cmd_connect() {
   local pending_key pending_file
   pending_key="$(_remote_pending_key "$endpoint" "$token")"
   pending_file="$(_remote_pending_file "$pending_key")"
+
+  # Claim this exact pending_id for the rest of this invocation (co1 delta
+  # review, ADR 0007 addendum) — held until process exit via the same
+  # EXIT/INT/TERM trap agmsg_lock_acquire always installs, so it covers
+  # every exit path below (both the resume branch and the fresh-exchange
+  # branch, through commit-or-fail) without needing an explicit release.
+  # Serializes only against `pending abort <pending_key>` and another
+  # `connect` for this exact (endpoint, token) — unrelated pending records
+  # never contend for this lock.
+  _remote_pending_lock_acquire "$pending_key" || exit 1
 
   local credential credential_id server_instance_id remote_team_id remote_team_name \
     protocol_version capabilities_json write_allowed_ciphers current_seq
@@ -792,46 +827,55 @@ _remote_status_one() {
 # "null on unknown" contract are load-bearing, not just a debugging aid.
 # credential_id/server_instance_id/remote_team_id are opaque ids, never the
 # credential itself — this stays exactly as secret-free as the human-text
-# status output above. Built with a real JSON serializer (python3
-# json.dumps, values passed as argv — none of these are secret, unlike
-# credential/identity elsewhere in this file, so argv exposure isn't a
-# concern here), not hand-rolled string concatenation: this is a strict
-# schema a driver parses, so a value containing a quote/backslash (e.g. a
-# server-supplied remote_team_name-adjacent field) must not silently
+# status output above.
+#
+# Reads config.json exactly ONCE (co1 delta review) — the original version
+# called `_remote_read_config_field` six separate times, each independently
+# re-opening the file from disk; a concurrent disconnect/reconnect/
+# force-rebind's atomic rename could swap in a new version in between any
+# two of those six reads, so the assembled object could mix fields from two
+# different on-disk versions that never actually coexisted at any instant —
+# a real defect for a strict ABI another process correlates fields against
+# (unlike the human-text status path above, which is read for a person to
+# glance at and where this same multi-read shape is only cosmetically
+# stale, not a spec violation). Also acquired under the team's own write
+# lock, so the single read can't land mid-write either. All six fields are
+# derived from that one in-memory snapshot by a single python parse — not
+# hand-rolled string concatenation, since this is a strict schema a driver
+# parses and a value containing a quote/backslash must not silently
 # produce malformed JSON the way E3's hand-rolled credential escaping once
 # did.
 _remote_status_json_one() {
-  local team="$1" cfg connected_at disconnected_at endpoint server_instance_id \
-    remote_team_id credential_id state
+  local team="$1" cfg raw
   cfg="$(_remote_team_config "$team")"
-  connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
-  if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
-    return 1
-  fi
-  disconnected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
-  endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
-  server_instance_id="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
-  remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
-  credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
-  if [ -n "$disconnected_at" ] && [ "$disconnected_at" != "null" ]; then
-    state="disconnected"
-  else
-    state="active"
-  fi
-  python3 -c '
+  [ -f "$cfg" ] || return 1
+
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
+  raw="$(cat "$cfg" 2>/dev/null)"
+  agmsg_lock_release
+
+  printf '%s' "$raw" | python3 -c '
 import json, sys
-local_team, endpoint, server_instance_id, remote_team_id, credential_id, state = sys.argv[1:7]
-def norm(v):
-    return None if v in ("", "null") else v
+team = sys.argv[1]
+try:
+    cfg = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(1)
+if not isinstance(cfg, dict):
+    sys.exit(1)
+binding = cfg.get("remote_binding")
+if not isinstance(binding, dict) or not binding.get("connected_at"):
+    sys.exit(1)
+state = "disconnected" if binding.get("disconnected_at") else "active"
 print(json.dumps({
-    "local_team": local_team,
-    "endpoint": norm(endpoint),
-    "server_instance_id": norm(server_instance_id),
-    "remote_team_id": norm(remote_team_id),
-    "credential_id": norm(credential_id),
+    "local_team": team,
+    "endpoint": binding.get("endpoint"),
+    "server_instance_id": binding.get("server_instance_id"),
+    "remote_team_id": binding.get("remote_team_id"),
+    "credential_id": binding.get("credential_id"),
     "state": state,
 }, sort_keys=True))
-' "$team" "$endpoint" "$server_instance_id" "$remote_team_id" "$credential_id" "$state"
+' "$team"
 }
 
 cmd_status() {
@@ -961,10 +1005,17 @@ _remote_validate_pending_id() {
 # recovery driver most needs to still be able to see and abort). "valid"
 # reports whether the embedded response passed that validator; when it
 # didn't (or the envelope itself couldn't even be read), server_instance_id/
-# remote_team_id/credential_id are null rather than guessed at. The
-# credential itself is never read into this function at all, let alone
-# printed — parse-exchange-response.py's first output field (the raw
-# credential) is deliberately discarded immediately after reading it.
+# remote_team_id/credential_id are null rather than guessed at.
+#
+# Calls parse-exchange-response.py with --metadata-only (co1 delta review):
+# an earlier version ran the validator's default (full) output, read its
+# first line (the raw credential) into a shell variable purely to discard
+# it, and — since that output was captured via `> parsed_file` — had
+# already written the credential to a 0600 temp file regardless of never
+# printing it further. Neither the temp file nor the shell variable is
+# needed at all for a metadata-only listing, so --metadata-only ensures
+# the credential is never emitted to that file, never read into this
+# function's process, in the first place.
 _remote_pending_json_one() {
   local pending_file="$1" pending_id endpoint="" valid="false" \
     credential_id="" server_instance_id="" remote_team_id="" \
@@ -976,16 +1027,13 @@ _remote_pending_json_one() {
   if endpoint="$(_remote_load_pending "$pending_file" "$resp_file" 2>/dev/null)"; then
     parsed_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-list-parsed.XXXXXX")"
     chmod 600 "$parsed_file"
-    if python3 "$SCRIPT_DIR/internal/parse-exchange-response.py" < "$resp_file" > "$parsed_file" 2>/dev/null; then
+    if python3 "$SCRIPT_DIR/internal/parse-exchange-response.py" --metadata-only < "$resp_file" > "$parsed_file" 2>/dev/null; then
       valid="true"
-      local _discard_credential
       {
-        IFS= read -r _discard_credential
         IFS= read -r credential_id
         IFS= read -r server_instance_id
         IFS= read -r remote_team_id
       } < "$parsed_file"
-      unset _discard_credential
     fi
     rm -f "$parsed_file"
   else
@@ -1041,34 +1089,28 @@ cmd_pending_list() {
   fi
 }
 
-# Locked against $PENDING_DIR (coarse — every pending record, not just this
-# one) rather than left unlocked: without it, an abort racing a `connect`
-# invocation that is mid-way through resuming this exact pending_id could
-# delete the file out from under that resume's read. `connect`'s resume
-# path itself does not take this lock (unchanged, already-reviewed
-# behavior) — a race there surfaces as connect's existing "pending record's
-# endpoint does not match"/read-failure handling, the same class of
-# tolerance the rest of that path already has for a vanished/changed file,
-# not a crash.
+# Uses the SAME per-pending-id lock `cmd_connect`'s resume path claims
+# (co1 delta review) — see `_remote_pending_lock_acquire`'s comment above
+# for why a shared lock (not an unlocked read, and not a PENDING_DIR-wide
+# one) is required: it's what makes "abort succeeded" and "connect went on
+# to commit a binding for that exact operation anyway" mutually exclusive,
+# while still letting abort/connect on UNRELATED pending records run fully
+# concurrently.
 cmd_pending_abort() {
   local pending_id="${1:?Usage: remote.sh pending abort <pending_id>}"
   _remote_validate_pending_id "$pending_id" || {
     echo "agmsg: invalid pending_id (expected a 64-character lowercase hex sha256 digest)" >&2
     exit 1
   }
-  mkdir -p "$PENDING_DIR"
-  chmod 700 "$PENDING_DIR" 2>/dev/null || true
   local pending_file
   pending_file="$(_remote_pending_file "$pending_id")"
 
-  agmsg_lock_acquire "$PENDING_DIR" || exit 1
+  _remote_pending_lock_acquire "$pending_id" || exit 1
   if [ ! -f "$pending_file" ]; then
-    agmsg_lock_release
     echo "agmsg: no pending connect record for pending_id=$pending_id (already aborted, already committed, or never existed)" >&2
     exit 1
   fi
   rm -f "$pending_file"
-  agmsg_lock_release
   echo "Aborted pending connect record $pending_id."
 }
 

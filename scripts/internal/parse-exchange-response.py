@@ -9,6 +9,17 @@ wrong-typed field, prints a one-line reason to stderr and exits 1 WITHOUT
 printing partial output — callers must not proceed past a non-zero exit
 here.
 
+--metadata-only: same full validation, but the `credential` field is
+never written to stdout at all (the other 8 fields keep their positions,
+shifted up by one). For a caller that only needs to know whether a
+record's content validates and to read its non-secret fields — e.g.
+`remote pending list` — printing the credential to stdout would put it in
+that caller's own captured output/temp file even though the caller never
+intends to use it (ADR 0007 addendum review finding: an earlier version
+of the pending-list path read and discarded this field, which still
+copied the secret into a 0600 temp file and a shell variable it never
+needed to touch).
+
 Newline-delimited rather than NUL-delimited deliberately: bash's command
 substitution `$(...)` strips embedded NUL bytes from captured output,
 which would silently destroy NUL-based field boundaries before the caller
@@ -88,6 +99,7 @@ def req_str(d, key):
 
 
 def main():
+    metadata_only = "--metadata-only" in sys.argv[1:]
     raw = sys.stdin.read()
     try:
         d = strict_loads(raw)
@@ -144,7 +156,6 @@ def main():
 
     caps_json = json.dumps(caps)
     fields = [
-        credential,
         credential_id,
         server_instance_id,
         remote_team_id,
@@ -154,6 +165,8 @@ def main():
         ",".join(ciphers),
         str(current_seq if current_seq is not None else -1),
     ]
+    if not metadata_only:
+        fields.insert(0, credential)
     for f in fields:
         # Reject every ASCII control character (0x00-0x1F, 0x7F), not
         # just newline (E3) — a raw tab/CR/etc. reaching a downstream

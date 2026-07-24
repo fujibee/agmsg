@@ -651,6 +651,75 @@ json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_d
   [[ "$output" == *"no pending connect record"* ]]
 }
 
+# --- pending/connect lock barrier (co1 delta review) ------------------------
+#
+# Deterministic, single-threaded simulation of the race co1 flagged: rather
+# than actually racing two live processes, pre-acquire the exact lock dir
+# `_remote_pending_lock_acquire` would take, then assert the OTHER
+# operation blocks (times out, changes nothing) instead of proceeding as if
+# uncontended. AGMSG_LOCK_TRIES keeps the timeout fast for a test.
+
+@test "pending abort: blocks (not deletes) when a concurrent connect resume already holds this pending_id's lock (barrier test)" {
+  local token="lock-barrier-abort-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_dir/$key.json', 'w'))
+"
+  # Simulate an in-flight connect resume already holding this exact
+  # pending_id's lock (same dir _remote_pending_lock_acquire would mkdir).
+  local lock_dir="$pending_dir/.locks/$key"
+  mkdir -p "$lock_dir/.config.lock"
+
+  AGMSG_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timed out acquiring"* ]]
+  # The pending record must still exist — abort never got past the lock,
+  # so it can never have raced ahead of an in-flight resume's decision.
+  [ -f "$pending_dir/$key.json" ]
+}
+
+@test "connect: blocks (does not resume/commit) when a concurrent pending abort already holds this pending_id's lock (barrier test)" {
+  local token="lock-barrier-connect-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+response = {
+    'credential': 'barrier-credential-value',
+    'credential_id': 'cred-barrier-xyz',
+    'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
+    'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
+    'remote_team_name': 'barrierteam',
+    'protocol_version': 1,
+    'capabilities': {'write_allowed_ciphers': ['none']},
+}
+json.dump({
+    'endpoint': '$ENDPOINT',
+    'raw_response_text': json.dumps(response),
+}, open('$pending_dir/$key.json', 'w'))
+"
+  # Simulate a concurrent `pending abort` already holding this exact
+  # pending_id's lock.
+  local lock_dir="$pending_dir/.locks/$key"
+  mkdir -p "$lock_dir/.config.lock"
+
+  AGMSG_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" barrierteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timed out acquiring"* ]]
+  # No binding was committed while the lock was contended — connect never
+  # got past claiming the pending_id, so it can never have raced ahead of
+  # a concurrent abort's decision.
+  [ ! -f "$SCRIPTS/../teams/barrierteam/config.json" ]
+  # The pending record itself is also untouched (neither side acted on it).
+  [ -f "$pending_dir/$key.json" ]
+}
+
 # --- dispatch --------------------------------------------------------------
 
 @test "remote.sh: unknown subcommand prints usage and exits non-zero" {
