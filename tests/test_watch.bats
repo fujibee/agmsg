@@ -54,6 +54,13 @@ _max_message_id() {
     agmsg_sqlite "$(agmsg_db_path)" "SELECT COALESCE(MAX(id), 0) FROM messages;" )
 }
 
+_message_read_at() {
+  local id="$1"
+  ( # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_sqlite "$(agmsg_db_path)" "SELECT COALESCE(read_at, '') FROM messages WHERE id=$id;" )
+}
+
 _wait_for_file() {
   local file="$1" i
   for i in $(seq 1 100); do
@@ -76,6 +83,15 @@ _wait_for_file_contains() {
   local file="$1" needle="$2" i
   for i in $(seq 1 100); do
     [ -f "$file" ] && grep -q "$needle" "$file" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+_wait_for_message_read() {
+  local id="$1" i
+  for i in $(seq 1 100); do
+    [ -n "$(_message_read_at "$id")" ] && return 0
     sleep 0.1
   done
   return 1
@@ -112,6 +128,7 @@ _wait_for_file_contains() {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   # Pre-existing message before any watcher for this session ever runs.
   bash "$SCRIPTS/send.sh" team bob alice "M0-history" >/dev/null
+  local history_id="$(_max_message_id)"
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-fresh" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null 3>&- &
@@ -125,6 +142,39 @@ _wait_for_file_contains() {
   # Live message after attach is delivered; pre-existing history is not replayed.
   grep -q "M-live" "$TEST_SKILL_DIR/fresh.log"
   ! grep -q "M0-history" "$TEST_SKILL_DIR/fresh.log"
+  # Starting a fresh watcher must not mark skipped history as read.
+  [ -z "$(_message_read_at "$history_id")" ]
+}
+
+@test "watch: marks only a message successfully emitted to stdout as read" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-read-at-success"
+  local iid="$(_iid "$sid")"
+  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
+  local out="$TEST_SKILL_DIR/read-at-success.log"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file "$wm"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-read-at-success" >/dev/null
+  local delivered_id="$(_max_message_id)"
+  _wait_for_file_contains "$out" "M-read-at-success" || {
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    false
+  }
+  _wait_for_message_read "$delivered_id" || {
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    false
+  }
+
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  [ -n "$(_message_read_at "$delivered_id")" ]
 }
 
 @test "watch: persists a watermark file for the session" {
@@ -201,6 +251,7 @@ _wait_for_file_contains() {
   local initial="$(cat "$wm")"
 
   bash "$SCRIPTS/send.sh" team bob alice "M-after-closed-stdout" >/dev/null
+  local undelivered_id="$(_max_message_id)"
 
   _wait_for_missing "$pf" || {
     kill "$w" 2>/dev/null || true
@@ -210,9 +261,57 @@ _wait_for_file_contains() {
   wait "$w" 2>/dev/null || true
 
   [ "$(cat "$wm")" = "$initial" ]
+  [ -z "$(_message_read_at "$undelivered_id")" ]
 
   run_watcher_for "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" 2
   grep -q "M-after-closed-stdout" "$TEST_SKILL_DIR/closed-redelivery.log"
+  [ -n "$(_message_read_at "$undelivered_id")" ]
+}
+
+@test "watch: DB read_at update failure exits nonzero and does not advance the watermark" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-read-at-db-failure"
+  local iid="$(_iid "$sid")"
+  local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
+  local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
+  local out="$TEST_SKILL_DIR/read-at-db-failure.log"
+  local db="$TEST_SKILL_DIR/db/messages.db"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  _wait_for_file "$wm"
+  local initial="$(cat "$wm")"
+
+  sqlite3 "$db" "
+    CREATE TRIGGER force_read_at_failure
+    BEFORE UPDATE OF read_at ON messages
+    WHEN NEW.read_at IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'forced read_at failure');
+    END;
+  "
+  bash "$SCRIPTS/send.sh" team bob alice "M-read-at-db-failure" >/dev/null
+  local failed_id="$(_max_message_id)"
+
+  _wait_for_file_contains "$out" "M-read-at-db-failure"
+  _wait_for_missing "$pf" || {
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    false
+  }
+  local rc=0
+  wait "$w" || rc=$?
+
+  [ "$rc" -ne 0 ]
+  [ "$(cat "$wm")" = "$initial" ]
+  [ -z "$(_message_read_at "$failed_id")" ]
+
+  sqlite3 "$db" "DROP TRIGGER force_read_at_failure;"
+  run_watcher_for "$sid" "$TEST_SKILL_DIR/read-at-db-replay.log" 2
+  grep -q "M-read-at-db-failure" "$TEST_SKILL_DIR/read-at-db-replay.log"
+  [ -n "$(_message_read_at "$failed_id")" ]
+  [ "$(cat "$wm")" = "$failed_id" ]
 }
 
 @test "session-end: removes the session watermark file" {

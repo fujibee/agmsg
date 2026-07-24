@@ -363,6 +363,18 @@ while true; do
           cleanup
           exit 0
         fi
+        # read_at records successful emission to the monitor stream. Update
+        # exactly this row only after stdout accepted the line, and before the
+        # watermark advances. If the write fails, leave the watermark in place
+        # so a restarted watcher can replay the row rather than losing it.
+        if ! agmsg_sqlite "$DB" "
+          UPDATE messages
+          SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+          WHERE id=$id;
+        " >/dev/null 2>&1; then
+          printf 'ERROR: cannot mark message %s as read\n' "$id"
+          exit 1
+        fi
         LAST="$id"
         persist_watermark
       done <<< "$ROWS"
