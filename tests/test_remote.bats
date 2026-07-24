@@ -449,10 +449,218 @@ json.dump({
   [[ "$output" == *"is not connected"* ]]
 }
 
+# --- status --json (ADR 0007 addendum) --------------------------------------
+
+@test "status --json: reports the strict schema for an active connection" {
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
+  run bash "$SCRIPTS/remote.sh" status myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.local_team');")" = "myteam" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.endpoint');")" = "$ENDPOINT" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.credential_id');")" = "cred-good-token" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.state');")" = "active" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.server_instance_id');")" != "" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.remote_team_id');")" != "" ]
+}
+
+@test "status --json: reports state=disconnected after disconnect" {
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
+  bash "$SCRIPTS/remote.sh" disconnect myteam
+  run bash "$SCRIPTS/remote.sh" status myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.state');")" = "disconnected" ]
+  # credential_id from the old binding is still informative, not a live secret.
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.credential_id');")" = "cred-good-token" ]
+}
+
+@test "status --json: errors for a team that has never been connected" {
+  run bash "$SCRIPTS/remote.sh" status ghostteam --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"has never been connected"* ]]
+}
+
+@test "status --json: with no <team>, empty output when nothing is connected" {
+  run bash "$SCRIPTS/remote.sh" status --json
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "status --json: with no <team>, emits one JSONL line per connected team" {
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
+  bash "$SCRIPTS/join.sh" otherteam bob claude-code /tmp/project-b
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token otherteam
+  run bash "$SCRIPTS/remote.sh" status --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 2 ]
+  local myteam_line otherteam_line
+  myteam_line="$(echo "$output" | grep myteam | grep -v otherteam)"
+  otherteam_line="$(echo "$output" | grep otherteam)"
+  [ -n "$myteam_line" ]
+  [ -n "$otherteam_line" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$myteam_line" | sed "s/'/''/g")', '\$.local_team');")" = "myteam" ]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$otherteam_line" | sed "s/'/''/g")', '\$.local_team');")" = "otherteam" ]
+}
+
+@test "status: a team name containing a single quote doesn't break status or status --json (#87-class / .param set fix)" {
+  local team="o'brien-team"
+  bash "$SCRIPTS/join.sh" "$team" carol claude-code /tmp/project-c
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token "$team"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ ".parameter" ]]
+  run bash "$SCRIPTS/remote.sh" status "$team"
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ ".parameter" ]]
+  [[ "$output" == *"connected"* ]]
+  run bash "$SCRIPTS/remote.sh" status "$team" --json
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ ".parameter" ]]
+  [ "$(sqlite_mem "SELECT json_extract('$(echo "$output" | sed "s/'/''/g")', '\$.local_team');")" = "$team" ]
+}
+
+# --- pending list / abort (ADR 0007 addendum) -------------------------------
+
+@test "pending list: reports nothing when there are no pending records" {
+  run bash "$SCRIPTS/remote.sh" pending list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No pending connect records"* ]]
+  run bash "$SCRIPTS/remote.sh" pending list --json
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pending list: does not list a record that already fully committed" {
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" good-token myteam
+  run bash "$SCRIPTS/remote.sh" pending list --json
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pending list --json: reports a valid orphaned record with its metadata, no credential" {
+  local token="orphan-test-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+response = {
+    'credential': 'super-secret-credential-value',
+    'credential_id': 'cred-orphan-xyz',
+    'server_instance_id': '018f3f7e-3333-7000-8000-000000000003',
+    'remote_team_id': '018f3f7e-4444-7000-8000-000000000004',
+    'remote_team_name': 'orphanteam',
+    'protocol_version': 1,
+    'capabilities': {'write_allowed_ciphers': ['none']},
+}
+json.dump({
+    'endpoint': '$ENDPOINT',
+    'raw_response_text': json.dumps(response),
+}, open('$pending_dir/$key.json', 'w'))
+"
+  run bash "$SCRIPTS/remote.sh" pending list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 1 ]
+  local escaped; escaped="$(echo "$output" | sed "s/'/''/g")"
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.pending_id');")" = "$key" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.endpoint');")" = "$ENDPOINT" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.credential_id');")" = "cred-orphan-xyz" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.valid');")" = "1" ]
+  # The raw credential must never appear anywhere in the listing output.
+  [[ "$output" != *"super-secret-credential-value"* ]]
+}
+
+@test "pending list --json: reports valid:false and null metadata for a record whose content fails validation" {
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  local key; key="$(printf 'a%.0s' $(seq 1 64))"
+  python3 -c "
+import json
+json.dump({
+    'endpoint': '$ENDPOINT',
+    'raw_response_text': '{not valid json',
+}, open('$pending_dir/$key.json', 'w'))
+"
+  run bash "$SCRIPTS/remote.sh" pending list --json
+  [ "$status" -eq 0 ]
+  local escaped; escaped="$(echo "$output" | sed "s/'/''/g")"
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.pending_id');")" = "$key" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.endpoint');")" = "$ENDPOINT" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.valid');")" = "0" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.credential_id');")" = "" ]
+}
+
+@test "pending list --json: still reports pending_id even when the envelope itself is corrupt" {
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  local key; key="$(printf 'b%.0s' $(seq 1 64))"
+  printf 'not even json' > "$pending_dir/$key.json"
+  run bash "$SCRIPTS/remote.sh" pending list --json
+  [ "$status" -eq 0 ]
+  local escaped; escaped="$(echo "$output" | sed "s/'/''/g")"
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.pending_id');")" = "$key" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.endpoint');")" = "" ]
+  [ "$(sqlite_mem "SELECT json_extract('$escaped', '\$.valid');")" = "0" ]
+}
+
+@test "pending abort: rejects a malformed pending_id" {
+  run bash "$SCRIPTS/remote.sh" pending abort "not-a-valid-id"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid pending_id"* ]]
+  run bash "$SCRIPTS/remote.sh" pending abort "../../escape"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid pending_id"* ]]
+}
+
+@test "pending abort: removes a valid pending record" {
+  local token="abort-test-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_dir/$key.json', 'w'))
+"
+  run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted pending connect record $key"* ]]
+  [ ! -f "$pending_dir/$key.json" ]
+}
+
+@test "pending abort: fails clearly for an unknown pending_id" {
+  local key; key="$(printf 'c%.0s' $(seq 1 64))"
+  run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no pending connect record"* ]]
+}
+
+@test "pending abort: aborting the same pending_id twice is not silently treated as success" {
+  local token="double-abort-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_dir/$key.json', 'w'))
+"
+  bash "$SCRIPTS/remote.sh" pending abort "$key"
+  run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no pending connect record"* ]]
+}
+
 # --- dispatch --------------------------------------------------------------
 
 @test "remote.sh: unknown subcommand prints usage and exits non-zero" {
   run bash "$SCRIPTS/remote.sh" bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage:"* ]]
+}
+
+@test "remote.sh: unknown pending subcommand prints usage and exits non-zero" {
+  run bash "$SCRIPTS/remote.sh" pending bogus
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage:"* ]]
 }

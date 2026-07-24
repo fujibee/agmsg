@@ -3,15 +3,27 @@ set -euo pipefail
 
 # Usage:
 #   remote.sh connect --endpoint <url> [<token>] [--token-stdin] [<team>] [--force]
-#   remote.sh status [<team>]
+#   remote.sh status [<team>] [--json]
 #   remote.sh disconnect <team>
 #   remote.sh doctor [<team>]
+#   remote.sh pending list [--json]
+#   remote.sh pending abort <pending_id>
 #
 # Team-scoped cloud/self-hosted sync connection (ADR 0007). The OSS CLI never
 # assumes or defaults to any particular server — <endpoint> is always
 # required. Login/token acquisition is out of this repo's scope (ADR 0007
 # §1a-§1c) — some provider tooling (or a self-hosted server's own admin
 # command) obtains the token; this script only ever receives one.
+#
+# `status --json` and `pending list/abort` (ADR 0007 addendum) are a
+# strict, secret-free ABI a cloud/self-hosted driver polls/acts on for crash
+# recovery: after a connect's exchange call, the driver may not know whether
+# its child `connect` invocation actually committed locally before dying.
+# `status --json` lets it correlate its own operation-status record against
+# the local binding by credential_id/server_instance_id/remote_team_id;
+# `pending list/abort` lets it enumerate and clean up an orphaned exchange
+# that never reached a local commit at all (so it isn't stuck holding a
+# server-issued credential neither side will ever use).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -31,11 +43,19 @@ _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 _remote_team_config() { printf '%s' "$TEAMS_DIR/$1/config.json"; }
 _remote_cred_file() { printf '%s' "$CRED_ROOT/$1.json"; }
 
+# <escaped> is spliced as a genuine SQL string literal below, NOT bound via
+# `.param set`: the sqlite3 shell's dot-command tokenizer does not honour SQL
+# '' escaping (unlike a real SQL statement's string literals), so
+# `.param set :json '...'` silently mis-parses as soon as the config
+# contains any single quote (#87 cluster; see resolve-project.sh's
+# `resolve_team` for the same caveat, and PR #482 for the sibling-script fix
+# this mirrors — e.g. a remote_team_name containing an apostrophe, which
+# _remote_commit below stores as ordinary, unremarkable JSON text).
 _remote_read_config_field() {
   local cfg="$1" path="$2" escaped
   [ -f "$cfg" ] || { echo "null"; return; }
   escaped=$(sed "s/'/''/g" "$cfg")
-  agmsg_sqlite_mem ".param set :json '$escaped'" "SELECT json_extract(:json, '$path');"
+  agmsg_sqlite_mem "SELECT json_extract('$escaped', '$path');"
 }
 
 # Bootstrap a brand-new local team dir/config, mirroring join.sh's own
@@ -190,8 +210,10 @@ _remote_local_disconnect() {
   rm -f "$cred_file"
   disconnected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   escaped=$(sed "s/'/''/g" "$cfg")
-  updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
-    "SELECT json_set(:json, '\$.remote_binding.disconnected_at', '$(_agmsg_sqlesc "$disconnected_at")');")
+  # <escaped> is spliced as a genuine SQL string literal, NOT bound via
+  # `.param set` (same tokenizer caveat as `_remote_read_config_field` above).
+  updated=$(agmsg_sqlite_mem \
+    "SELECT json_set('$escaped', '\$.remote_binding.disconnected_at', '$(_agmsg_sqlesc "$disconnected_at")');")
   agmsg_write_atomic "$cfg" "$updated"
   agmsg_lock_release
 }
@@ -325,15 +347,22 @@ _remote_commit() {
 
   connected_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   escaped=$(sed "s/'/''/g" "$cfg")
-  updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" ".param set :caps '$(printf '%s' "$capabilities_json" | sed "s/'/''/g")'" \
-    "SELECT json_set(:json, '\$.remote_binding', json_object(
+  local caps_escaped
+  caps_escaped=$(printf '%s' "$capabilities_json" | sed "s/'/''/g")
+  # <escaped>/<caps_escaped> are spliced as genuine SQL string literals below,
+  # NOT bound via `.param set` (same tokenizer caveat as
+  # `_remote_read_config_field` above) — capabilities_json in particular
+  # comes straight from the server's exchange response, so it is exactly
+  # the kind of value that could legitimately contain a quote.
+  updated=$(agmsg_sqlite_mem \
+    "SELECT json_set('$escaped', '\$.remote_binding', json_object(
        'endpoint', '$(_agmsg_sqlesc "$endpoint")',
        'credential_id', '$(_agmsg_sqlesc "$credential_id")',
        'server_instance_id', '$(_agmsg_sqlesc "$server_instance_id")',
        'remote_team_id', '$(_agmsg_sqlesc "$remote_team_id")',
        'remote_team_name', '$(_agmsg_sqlesc "$remote_team_name")',
        'protocol_version', $protocol_version,
-       'capabilities', json(:caps),
+       'capabilities', json('$caps_escaped'),
        'connected_at', '$(_agmsg_sqlesc "$connected_at")',
        'disconnected_at', null
      ));")
@@ -751,24 +780,100 @@ _remote_status_one() {
   fi
 }
 
+# _remote_status_json_one <team> — prints one JSONL object for <team>'s
+# binding, or returns 1 (no output) if the team has never been connected,
+# matching _remote_status_one's own gate exactly (same "never connected"
+# definition for both surfaces).
+#
+# Strict, machine-consumed ABI (ADR 0007 addendum): a cloud/self-hosted
+# driver correlates this against its own operation-status record to decide
+# whether a given connect attempt is the one that actually committed, or a
+# stale retry against an already-superseded binding — so the field set and
+# "null on unknown" contract are load-bearing, not just a debugging aid.
+# credential_id/server_instance_id/remote_team_id are opaque ids, never the
+# credential itself — this stays exactly as secret-free as the human-text
+# status output above. Built with a real JSON serializer (python3
+# json.dumps, values passed as argv — none of these are secret, unlike
+# credential/identity elsewhere in this file, so argv exposure isn't a
+# concern here), not hand-rolled string concatenation: this is a strict
+# schema a driver parses, so a value containing a quote/backslash (e.g. a
+# server-supplied remote_team_name-adjacent field) must not silently
+# produce malformed JSON the way E3's hand-rolled credential escaping once
+# did.
+_remote_status_json_one() {
+  local team="$1" cfg connected_at disconnected_at endpoint server_instance_id \
+    remote_team_id credential_id state
+  cfg="$(_remote_team_config "$team")"
+  connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
+  if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
+    return 1
+  fi
+  disconnected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.disconnected_at')"
+  endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
+  server_instance_id="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
+  remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
+  credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
+  if [ -n "$disconnected_at" ] && [ "$disconnected_at" != "null" ]; then
+    state="disconnected"
+  else
+    state="active"
+  fi
+  python3 -c '
+import json, sys
+local_team, endpoint, server_instance_id, remote_team_id, credential_id, state = sys.argv[1:7]
+def norm(v):
+    return None if v in ("", "null") else v
+print(json.dumps({
+    "local_team": local_team,
+    "endpoint": norm(endpoint),
+    "server_instance_id": norm(server_instance_id),
+    "remote_team_id": norm(remote_team_id),
+    "credential_id": norm(credential_id),
+    "state": state,
+}, sort_keys=True))
+' "$team" "$endpoint" "$server_instance_id" "$remote_team_id" "$credential_id" "$state"
+}
+
 cmd_status() {
-  local team="${1:-}"
+  local team="" json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) team="$1"; shift ;;
+    esac
+  done
+
   if [ -n "$team" ]; then
     agmsg_validate_team_name "$team" || exit 1
-    _remote_status_one "$team" || { echo "agmsg: team '$team' has never been connected" >&2; exit 1; }
+    if [ "$json" -eq 1 ]; then
+      _remote_status_json_one "$team" || { echo "agmsg: team '$team' has never been connected" >&2; exit 1; }
+    else
+      _remote_status_one "$team" || { echo "agmsg: team '$team' has never been connected" >&2; exit 1; }
+    fi
     return
   fi
 
   local any=0 t
-  [ -d "$TEAMS_DIR" ] || { echo "No teams found."; return; }
+  if [ ! -d "$TEAMS_DIR" ]; then
+    [ "$json" -eq 1 ] || echo "No teams found."
+    return
+  fi
   for t in "$TEAMS_DIR"/*/; do
     [ -d "$t" ] || continue
     t="$(basename "$t")"
-    if _remote_status_one "$t"; then
-      any=1
+    if [ "$json" -eq 1 ]; then
+      if _remote_status_json_one "$t"; then
+        any=1
+      fi
+    else
+      if _remote_status_one "$t"; then
+        any=1
+      fi
     fi
   done
-  [ "$any" -eq 1 ] || echo "No teams are connected."
+  if [ "$any" -ne 1 ] && [ "$json" -ne 1 ]; then
+    echo "No teams are connected."
+  fi
 }
 
 # --- disconnect ------------------------------------------------------------
@@ -830,12 +935,160 @@ cmd_disconnect() {
   echo "Disconnected '$team'. Local sync state cleared; sends/reads continue locally."
 }
 
+# --- pending ---------------------------------------------------------------
+
+# A cloud/self-hosted driver enumerates and (if orphaned by a crashed child
+# `connect` invocation) aborts pending exchange records independently of any
+# team name it can yet supply — the exchange may have succeeded server-side
+# with no local commit at all (ADR 0007 addendum). pending_id (the sha256
+# hex digest already used as the pending record's filename, see
+# `_remote_pending_key`) is the authoritative, opaque abort key: it is
+# derived from (endpoint, token) BEFORE the exchange ever ran, so
+# re-deriving the identical id requires the identical (endpoint, token)
+# pair — i.e. the identical logical retry, not an unrelated operation
+# coincidentally "reusing" an id. That content-derived uniqueness is why no
+# separate generation counter is introduced here for ABA protection.
+_remote_validate_pending_id() {
+  printf '%s' "$1" | grep -qE '^[0-9a-f]{64}$'
+}
+
+# _remote_pending_json_one <pending_file> — always prints exactly one JSONL
+# object (never skips a record just because its content doesn't validate):
+# pending_id and endpoint come from the pending envelope itself (written
+# before any exchange validation ever ran), so they're recoverable even for
+# a record whose raw_response_text fails parse-exchange-response.py's
+# strict checks (a legacy/corrupt record — exactly the case a crash-
+# recovery driver most needs to still be able to see and abort). "valid"
+# reports whether the embedded response passed that validator; when it
+# didn't (or the envelope itself couldn't even be read), server_instance_id/
+# remote_team_id/credential_id are null rather than guessed at. The
+# credential itself is never read into this function at all, let alone
+# printed — parse-exchange-response.py's first output field (the raw
+# credential) is deliberately discarded immediately after reading it.
+_remote_pending_json_one() {
+  local pending_file="$1" pending_id endpoint="" valid="false" \
+    credential_id="" server_instance_id="" remote_team_id="" \
+    resp_file parsed_file
+  pending_id="$(basename "$pending_file" .json)"
+
+  resp_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-list-resp.XXXXXX")"
+  chmod 600 "$resp_file"
+  if endpoint="$(_remote_load_pending "$pending_file" "$resp_file" 2>/dev/null)"; then
+    parsed_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-pending-list-parsed.XXXXXX")"
+    chmod 600 "$parsed_file"
+    if python3 "$SCRIPT_DIR/internal/parse-exchange-response.py" < "$resp_file" > "$parsed_file" 2>/dev/null; then
+      valid="true"
+      local _discard_credential
+      {
+        IFS= read -r _discard_credential
+        IFS= read -r credential_id
+        IFS= read -r server_instance_id
+        IFS= read -r remote_team_id
+      } < "$parsed_file"
+      unset _discard_credential
+    fi
+    rm -f "$parsed_file"
+  else
+    endpoint=""
+  fi
+  rm -f "$resp_file"
+
+  python3 -c '
+import json, sys
+pending_id, endpoint, credential_id, server_instance_id, remote_team_id, valid = sys.argv[1:7]
+def norm(v):
+    return None if v == "" else v
+print(json.dumps({
+    "pending_id": pending_id,
+    "endpoint": norm(endpoint),
+    "server_instance_id": norm(server_instance_id),
+    "remote_team_id": norm(remote_team_id),
+    "credential_id": norm(credential_id),
+    "valid": valid == "true",
+}, sort_keys=True))
+' "$pending_id" "$endpoint" "$credential_id" "$server_instance_id" "$remote_team_id" "$valid"
+}
+
+cmd_pending_list() {
+  local json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) echo "agmsg: unknown argument to 'pending list': $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [ ! -d "$PENDING_DIR" ]; then
+    [ "$json" -eq 1 ] || echo "No pending connect records."
+    return
+  fi
+
+  local any=0 f
+  for f in "$PENDING_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    any=1
+    if [ "$json" -eq 1 ]; then
+      _remote_pending_json_one "$f"
+    else
+      local pid ep
+      pid="$(basename "$f" .json)"
+      ep="$(_remote_load_pending "$f" /dev/null 2>/dev/null)" || ep="(unreadable record)"
+      echo "$pid	$ep"
+    fi
+  done
+  if [ "$any" -eq 0 ] && [ "$json" -eq 0 ]; then
+    echo "No pending connect records."
+  fi
+}
+
+# Locked against $PENDING_DIR (coarse — every pending record, not just this
+# one) rather than left unlocked: without it, an abort racing a `connect`
+# invocation that is mid-way through resuming this exact pending_id could
+# delete the file out from under that resume's read. `connect`'s resume
+# path itself does not take this lock (unchanged, already-reviewed
+# behavior) — a race there surfaces as connect's existing "pending record's
+# endpoint does not match"/read-failure handling, the same class of
+# tolerance the rest of that path already has for a vanished/changed file,
+# not a crash.
+cmd_pending_abort() {
+  local pending_id="${1:?Usage: remote.sh pending abort <pending_id>}"
+  _remote_validate_pending_id "$pending_id" || {
+    echo "agmsg: invalid pending_id (expected a 64-character lowercase hex sha256 digest)" >&2
+    exit 1
+  }
+  mkdir -p "$PENDING_DIR"
+  chmod 700 "$PENDING_DIR" 2>/dev/null || true
+  local pending_file
+  pending_file="$(_remote_pending_file "$pending_id")"
+
+  agmsg_lock_acquire "$PENDING_DIR" || exit 1
+  if [ ! -f "$pending_file" ]; then
+    agmsg_lock_release
+    echo "agmsg: no pending connect record for pending_id=$pending_id (already aborted, already committed, or never existed)" >&2
+    exit 1
+  fi
+  rm -f "$pending_file"
+  agmsg_lock_release
+  echo "Aborted pending connect record $pending_id."
+}
+
+cmd_pending() {
+  local sub="${1:?Usage: remote.sh pending <list|abort> ...}"
+  shift
+  case "$sub" in
+    list) cmd_pending_list "$@" ;;
+    abort) cmd_pending_abort "$@" ;;
+    *) echo "Usage: remote.sh pending <list|abort> ..." >&2; exit 1 ;;
+  esac
+}
+
 case "${1:-}" in
   connect) shift; cmd_connect "$@" ;;
   status) shift; cmd_status "$@" ;;
   disconnect) shift; cmd_disconnect "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  pending) shift; cmd_pending "$@" ;;
   *)
-    echo "Usage: remote.sh <connect|status|disconnect|doctor> ..." >&2
+    echo "Usage: remote.sh <connect|status|disconnect|doctor|pending> ..." >&2
     exit 1 ;;
 esac

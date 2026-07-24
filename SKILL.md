@@ -186,7 +186,11 @@ printf '%s' "$TOKEN" | ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoi
 
 # Show connection state. With no <team>, lists every locally-known
 # connected team (and whether each still needs a local encryption key).
-~/.agents/skills/agmsg/scripts/remote.sh status [<team>]
+# --json emits a strict, secret-free machine-readable object instead of
+# the human text above (ADR 0007 addendum) — for a driver correlating its
+# own operation-status record against the local binding, not for a human
+# to read; prefer the plain form above in normal use.
+~/.agents/skills/agmsg/scripts/remote.sh status [<team>] [--json]
 
 # Disconnect a team: revokes the credential server-side (best-effort —
 # local state is always cleared even if the server is unreachable), then
@@ -198,6 +202,16 @@ printf '%s' "$TOKEN" | ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoi
 # state change — safe to run any time, and the thing to point a user at
 # when troubleshooting a missing dependency.
 ~/.agents/skills/agmsg/scripts/remote.sh doctor [<team>]
+
+# List (and, if orphaned, clean up) a `connect` exchange that succeeded
+# server-side but never finished committing locally — e.g. the process died
+# between the exchange call and writing local state (ADR 0007 addendum).
+# pending_id is an opaque, content-derived key; abort always works on it
+# alone, even for a record whose content doesn't fully validate. Not a
+# normal-use command — this exists for a driver doing its own crash
+# recovery, not for a human to run routinely.
+~/.agents/skills/agmsg/scripts/remote.sh pending list [--json]
+~/.agents/skills/agmsg/scripts/remote.sh pending abort <pending_id>
 
 # Generate the first age-v1 key for a team (single-writer onboarding only —
 # NOT the multi-writer cutover protocol, and NOT key rotation — see below).
