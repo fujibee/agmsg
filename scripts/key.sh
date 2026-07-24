@@ -56,11 +56,18 @@ _key_require_age() {
 
 # _key_read_config_field <config_json_path> <json_path> — "null" (string) if
 # the file or the field doesn't exist, matching json_extract's own convention.
+# <escaped> is spliced as a genuine SQL string literal below, NOT bound via
+# `.param set`: the sqlite3 shell's dot-command tokenizer does not honour SQL
+# '' escaping (unlike a real SQL statement's string literals), so
+# `.param set :json '...'` silently mis-parses as soon as the config
+# contains any single quote (#87 cluster; see resolve-project.sh's
+# `resolve_team` for the same caveat, and PR #482 for the sibling-script
+# fix this mirrors).
 _key_read_config_field() {
   local cfg="$1" path="$2" escaped
   [ -f "$cfg" ] || { echo "null"; return; }
   escaped=$(sed "s/'/''/g" "$cfg")
-  agmsg_sqlite_mem ".param set :json '$escaped'" "SELECT json_extract(:json, '$path');"
+  agmsg_sqlite_mem "SELECT json_extract('$escaped', '$path');"
 }
 
 # Short, human-comparable digest of a recipient string (SSH-key-fingerprint
@@ -97,13 +104,15 @@ _key_epoch_json() {
 _key_write_epoch_locked() {
   local cfg="$1" epoch_expr="$2" escaped updated
   escaped=$(sed "s/'/''/g" "$cfg")
-  updated=$(agmsg_sqlite_mem ".param set :json '$escaped'" \
-    "SELECT json_set(:json,
+  # <escaped> is spliced as a genuine SQL string literal, NOT bound via
+  # `.param set` (same tokenizer caveat as `_key_read_config_field` above).
+  updated=$(agmsg_sqlite_mem \
+    "SELECT json_set('$escaped',
        '\$.remote_key.current', $epoch_expr,
        '\$.remote_key.epochs',
          json_insert(
-           CASE WHEN json_type(json_extract(:json, '\$.remote_key.epochs')) = 'array'
-                THEN json_extract(:json, '\$.remote_key.epochs') ELSE json('[]') END,
+           CASE WHEN json_type(json_extract('$escaped', '\$.remote_key.epochs')) = 'array'
+                THEN json_extract('$escaped', '\$.remote_key.epochs') ELSE json('[]') END,
            '\$[#]', $epoch_expr
          )
      );")
