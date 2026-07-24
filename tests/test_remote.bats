@@ -654,10 +654,26 @@ json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_d
 # --- pending/connect lock barrier (co1 delta review) ------------------------
 #
 # Deterministic, single-threaded simulation of the race co1 flagged: rather
-# than actually racing two live processes, pre-acquire the exact lock dir
-# `_remote_pending_lock_acquire` would take, then assert the OTHER
-# operation blocks (times out, changes nothing) instead of proceeding as if
-# uncontended. AGMSG_LOCK_TRIES keeps the timeout fast for a test.
+# than actually racing two live processes, pre-insert a row in the runtime
+# `locks` table matching exactly what `_remote_pending_lock_acquire` would
+# have written, then assert the OTHER operation either blocks (live owner)
+# or reclaims (dead owner) as appropriate. AGMSG_PENDING_LOCK_TRIES keeps
+# the timeout fast for a test.
+
+# Pre-insert a runtime-lock row for pending_id <key> owned by <owner_pid>,
+# matching lib/storage.sh's `locks` table schema exactly.
+_insert_pending_lock_row() {
+  local key="$1" owner_pid="$2" db="$SCRIPTS/../db/messages.db"
+  sqlite3 "$db" "
+CREATE TABLE IF NOT EXISTS locks (
+  resource TEXT PRIMARY KEY,
+  owner_pid INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL
+);
+INSERT OR REPLACE INTO locks(resource, owner_pid, acquired_at)
+VALUES ('remote-pending.$key', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+"
+}
 
 @test "pending abort: blocks (not deletes) when a concurrent connect resume already holds this pending_id's lock (barrier test)" {
   local token="lock-barrier-abort-token"
@@ -670,13 +686,12 @@ import json
 json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_dir/$key.json', 'w'))
 "
   # Simulate an in-flight connect resume already holding this exact
-  # pending_id's lock (same dir _remote_pending_lock_acquire would mkdir).
-  local lock_dir="$pending_dir/.locks/$key"
-  mkdir -p "$lock_dir/.config.lock"
+  # pending_id's lock, owned by this test's own (genuinely live) pid.
+  _insert_pending_lock_row "$key" "$$"
 
-  AGMSG_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  AGMSG_PENDING_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" pending abort "$key"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"timed out acquiring"* ]]
+  [[ "$output" == *"timed out acquiring pending lock"* ]]
   # The pending record must still exist — abort never got past the lock,
   # so it can never have raced ahead of an in-flight resume's decision.
   [ -f "$pending_dir/$key.json" ]
@@ -705,19 +720,44 @@ json.dump({
 }, open('$pending_dir/$key.json', 'w'))
 "
   # Simulate a concurrent `pending abort` already holding this exact
-  # pending_id's lock.
-  local lock_dir="$pending_dir/.locks/$key"
-  mkdir -p "$lock_dir/.config.lock"
+  # pending_id's lock, owned by this test's own (genuinely live) pid.
+  _insert_pending_lock_row "$key" "$$"
 
-  AGMSG_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" barrierteam
+  AGMSG_PENDING_LOCK_TRIES=3 run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" "$token" barrierteam
   [ "$status" -ne 0 ]
-  [[ "$output" == *"timed out acquiring"* ]]
+  [[ "$output" == *"timed out acquiring pending lock"* ]]
   # No binding was committed while the lock was contended — connect never
   # got past claiming the pending_id, so it can never have raced ahead of
   # a concurrent abort's decision.
   [ ! -f "$SCRIPTS/../teams/barrierteam/config.json" ]
   # The pending record itself is also untouched (neither side acted on it).
   [ -f "$pending_dir/$key.json" ]
+}
+
+@test "pending abort: reclaims a stale lock left by a dead owner instead of blocking forever (barrier test)" {
+  # This is the exact crash-recovery invariant co1 flagged: a lock whose
+  # owner died via SIGKILL/OOM/an OS crash (simulated here by spawning and
+  # immediately reaping a subshell, guaranteeing its pid is no longer
+  # live) must be reclaimable, not permanently stuck.
+  local token="lock-barrier-stale-token"
+  local key
+  key=$(python3 -c "import hashlib; print(hashlib.sha256('$ENDPOINT'.encode()+b'\x00'+'$token'.encode()).hexdigest())")
+  pending_dir="$SCRIPTS/../run/remote-connect-pending"
+  mkdir -p "$pending_dir"
+  python3 -c "
+import json
+json.dump({'endpoint': '$ENDPOINT', 'raw_response_text': '{}'}, open('$pending_dir/$key.json', 'w'))
+"
+  ( : ) &
+  local dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+
+  _insert_pending_lock_row "$key" "$dead_pid"
+
+  AGMSG_PENDING_LOCK_TRIES=20 run bash "$SCRIPTS/remote.sh" pending abort "$key"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted pending connect record $key"* ]]
+  [ ! -f "$pending_dir/$key.json" ]
 }
 
 # --- dispatch --------------------------------------------------------------

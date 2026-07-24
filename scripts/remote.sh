@@ -235,9 +235,7 @@ _remote_pending_key() {
 
 _remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
 
-# A dedicated, empty per-pending-id directory used ONLY as a lock target —
-# never the `<id>.json` data file itself — so `pending list`'s `*.json` glob
-# never picks it up. Shared by `cmd_connect`'s resume path and
+# Per-pending-id lock, shared by `cmd_connect`'s resume path and
 # `cmd_pending_abort` (co1 delta review, ADR 0007 addendum): without a
 # shared lock, `connect` could read+validate a pending record, `abort` could
 # then delete that same record and report success, and `connect` would
@@ -251,13 +249,57 @@ _remote_pending_file() { printf '%s' "$PENDING_DIR/$1.json"; }
 # once it gets the lock. Per-id (not PENDING_DIR-wide) so unrelated
 # connects/aborts for DIFFERENT pending records never serialize against
 # each other.
-_remote_pending_lock_dir() { printf '%s' "$PENDING_DIR/.locks/$1"; }
+#
+# Backed by the owner_pid-tracked runtime lock (agmsg_runtime_lock_*,
+# lib/storage.sh) rather than a plain `mkdir`-based one — a first version
+# of this used a bare mkdir lock dir, which has no owner/liveness concept
+# at all: if the process holding it died via SIGKILL/OOM/an OS crash
+# (exactly the scenario this whole pending/abort feature exists to help
+# recover from), the lock would never be cleaned up, permanently blocking
+# both resume and abort of that exact record forever (co1 delta review).
+# This is the same primitive and staleness-reclaim pattern the codex
+# dispatcher lock already uses (codex-bridge-launcher.sh's
+# acquire_dispatcher_lock): a dead owner_pid (`kill -0` fails) is
+# atomically replaced via compare-and-swap, so a crash simply leaves a
+# reclaimable row rather than a stuck lock — no separate release-on-exit
+# trap is needed for correctness, since a crash (or any exit that skips
+# the explicit release below) just leaves this process's owner_pid dead
+# for the NEXT acquire attempt to reclaim; the explicit release at the end
+# of a normal run is purely a promptness optimization. Accepts the same
+# bare-PID reuse risk window that primitive's existing caller already
+# does — no separate nonce/start-time disambiguation, matching established
+# precedent rather than inventing a stronger (and platform-fragile) scheme.
+_remote_pending_runtime_resource() { printf 'remote-pending.%s' "$1"; }
 
 _remote_pending_lock_acquire() {
-  local pending_id="$1" lock_dir
-  lock_dir="$(_remote_pending_lock_dir "$pending_id")"
-  mkdir -p "$lock_dir"
-  agmsg_lock_acquire "$lock_dir"
+  local pending_id="$1" resource owner attempt=0 max="${AGMSG_PENDING_LOCK_TRIES:-200}"
+  resource="$(_remote_pending_runtime_resource "$pending_id")"
+  while [ "$attempt" -lt "$max" ]; do
+    owner="$(agmsg_runtime_lock_acquire "$resource" "$$" 2>/dev/null || true)"
+    if [ "$owner" = "$$" ]; then
+      return 0
+    fi
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      attempt=$((attempt + 1))
+      sleep 0.05
+      continue
+    fi
+    # Dead (or missing) owner: reclaim only this EXACT stale generation via
+    # compare-and-swap, so a peer that raced in a live owner between our
+    # check above and now is never clobbered.
+    owner="$(agmsg_runtime_lock_acquire "$resource" "$$" "${owner:-0}" 2>/dev/null || true)"
+    if [ "$owner" = "$$" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.05
+  done
+  echo "agmsg: timed out acquiring pending lock for pending_id=$pending_id" >&2
+  return 1
+}
+
+_remote_pending_lock_release() {
+  agmsg_runtime_lock_release "$(_remote_pending_runtime_resource "$1")" "$$"
 }
 
 # _remote_write_pending <key> <resp_file> <endpoint>
@@ -692,8 +734,13 @@ cmd_connect() {
       "$server_instance_id" "$remote_team_id" "$remote_team_name" "$protocol_version" "$capabilities_json"
     rm -f "$pending_file"
     agmsg_lock_release
+    # Done with this pending_id — release promptly (not required for
+    # correctness: a crash here just leaves a reclaimable dead-owner row
+    # for the next attempt, see _remote_pending_lock_acquire's comment).
+    _remote_pending_lock_release "$pending_key"
   else
     agmsg_lock_release
+    _remote_pending_lock_release "$pending_key"
     echo "agmsg: team '$team' has a different, unexpected binding than expected — the credential just issued for it was NOT committed locally. Revoke it (credential_id=$credential_id) via the console/admin side if it should not remain active, then retry." >&2
     exit 1
   fi
@@ -1107,10 +1154,12 @@ cmd_pending_abort() {
 
   _remote_pending_lock_acquire "$pending_id" || exit 1
   if [ ! -f "$pending_file" ]; then
+    _remote_pending_lock_release "$pending_id"
     echo "agmsg: no pending connect record for pending_id=$pending_id (already aborted, already committed, or never existed)" >&2
     exit 1
   fi
   rm -f "$pending_file"
+  _remote_pending_lock_release "$pending_id"
   echo "Aborted pending connect record $pending_id."
 }
 
