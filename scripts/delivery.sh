@@ -60,6 +60,16 @@ RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/delivery-rulefile.sh"
 
+# Single-quote-escape $1 for splicing into a hook command string as its own
+# shell argument: replace each embedded ' with '\'' (close the quote, emit an
+# escaped literal quote, reopen the quote), matching the standard POSIX
+# technique. Unlike `'$var'`, this round-trips correctly through the shell
+# that later executes the resulting "command" value even when $var itself
+# contains a single quote.
+_agmsg_shq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 # The per-project delivery hooks file is the type's manifest `hooks_file=`
 # (project-relative), not a hardcoded per-type case. The hook FORMAT written into
 # it is still type-specific (apply_settings_* below).
@@ -115,21 +125,30 @@ agmsg_delivery_apply_default() {
   strip_agmsg_event_file "$tmp_state" "Stop"
 
   # 2) Re-add what this mode wants.
+  #
+  # Each hook argument is wrapped with _agmsg_shq rather than a plain '...'
+  # literal: $project (and, in principle, $type) is attacker-influenceable —
+  # e.g. an extracted archive's directory name — and a bare `'$project'`
+  # breaks out of its argument boundary as soon as the value itself contains
+  # a single quote, letting the rest of the string run as shell syntax on the
+  # next SessionStart/SessionEnd/Stop event. The JSON-string escaping
+  # add_event_entry_file applies below only keeps the *JSON* well-formed; it
+  # says nothing about the shell that later executes the "command" value.
   case "$mode" in
     monitor)
-      local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
-      local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
+      local ss="$(_agmsg_shq "$SKILL_DIR/scripts/session-start.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
+      local se="$(_agmsg_shq "$SKILL_DIR/scripts/session-end.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
       add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
       ;;
     turn)
-      local cmd="'$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'"
+      local cmd="$(_agmsg_shq "$SKILL_DIR/scripts/check-inbox.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       add_event_entry_file "$tmp_state" "Stop" "$cmd" "$ww"
       ;;
     both)
-      local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
-      local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
-      local st="'$SKILL_DIR/scripts/check-inbox.sh'   '$type' '$project'"
+      local ss="$(_agmsg_shq "$SKILL_DIR/scripts/session-start.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
+      local se="$(_agmsg_shq "$SKILL_DIR/scripts/session-end.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
+      local st="$(_agmsg_shq "$SKILL_DIR/scripts/check-inbox.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
       add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
       add_event_entry_file "$tmp_state" "Stop"         "$st" "$ww"

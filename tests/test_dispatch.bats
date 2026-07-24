@@ -54,6 +54,21 @@ teardown() {
   [[ "$output" =~ "$message" ]]
 }
 
+@test "dispatch: an agent name spoofing a 'teams=' field can't hijack team resolution (F19 hardening)" {
+  # A registered agent name is the one attacker-choosable field in whoami.sh's
+  # "agent=<n> teams=<t> type=<ty> project=<p>" line. A name containing a
+  # space and a fake "teams=" token used to shadow the real trailing teams=
+  # field once kv_get() word-split the line and returned on the first match.
+  local project="$BATS_TEST_TMPDIR/project-hijack"
+  mkdir -p "$project"
+  bash "$SCRIPTS/join.sh" realteam "x teams=hijacked" codex "$project"
+
+  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$project" -- team
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Team: realteam" ]]
+  [[ "$output" != *"Team: hijacked"* ]]
+}
+
 @test "dispatch: codex mode off and turn delegate to delivery" {
   run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" -- mode off
   [ "$status" -eq 0 ]

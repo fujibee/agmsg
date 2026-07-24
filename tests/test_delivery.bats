@@ -1267,7 +1267,15 @@ skip_if_no_special_fs() {
   local cmd
   cmd=$(sqlite_mem "SELECT json_extract(readfile('$hfq'), '\$.hooks.Stop[0].hooks[0].command');")
   [[ "$cmd" == *"check-inbox.sh"* ]]
-  [[ "$cmd" == *"o'brien \"x\""* ]]
+  # Beyond JSON validity: the "command" value is itself later executed by a
+  # shell (Claude Code's hook runner). The embedded ' and " must not be able
+  # to break out of their argument boundary — the shell must see exactly 3
+  # arguments, with the project path arriving back intact as one of them
+  # (F14 hardening; pre-fix, the embedded ' broke the naive `'$project'`
+  # wrap and the rest of the string ran as unintended shell syntax).
+  eval "set -- $cmd"
+  [ "$#" -eq 3 ]
+  [ "$3" = "$proj" ]
 }
 
 @test "delivery set turn: project path with quotes yields valid JSON + commandWindows (codex) (#134)" {
@@ -1302,6 +1310,22 @@ skip_if_no_special_fs() {
   local cmd
   cmd=$(sqlite_mem "SELECT json_extract(readfile('$hfq'), '\$.hooks.Stop[0].hooks[0].command');")
   [[ "$cmd" == *'a\b'* ]]
+}
+
+@test "delivery set monitor: project path with a single quote can't break SessionStart/SessionEnd argument boundaries (F14 hardening)" {
+  skip_if_no_special_fs
+  local proj="$TEST_PROJECT/al'ice"
+  mkdir -p "$proj"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$proj"
+  [ "$status" -eq 0 ]
+  local hf="$proj/.claude/settings.local.json"
+  local hfq; hfq=$(sql_lit "$hf")
+  [ "$(sqlite_mem "SELECT json_valid(readfile('$hfq'));")" = "1" ]
+  local ss se
+  ss=$(sqlite_mem "SELECT json_extract(readfile('$hfq'), '\$.hooks.SessionStart[0].hooks[0].command');")
+  se=$(sqlite_mem "SELECT json_extract(readfile('$hfq'), '\$.hooks.SessionEnd[0].hooks[0].command');")
+  eval "set -- $ss"; [ "$#" -eq 3 ]; [ "$3" = "$proj" ]
+  eval "set -- $se"; [ "$#" -eq 3 ]; [ "$3" = "$proj" ]
 }
 
 @test "delivery set monitor: existing settings with single-quoted hook commands stays valid JSON (#134)" {

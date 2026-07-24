@@ -85,13 +85,27 @@ require_args() {
 kv_get() {
   local line="$1"
   local key="$2"
-  local part
+  local part found=""
+  local matched=1
+  # whoami.sh's line is "agent=<n> teams=<t> type=<ty> project=<p>" — <n> is
+  # the only field an attacker can freely choose (a registered agent name),
+  # and it is always the FIRST field. A name containing a space and a fake
+  # "teams="/"type="/"project=" token therefore always sorts *before* the
+  # genuine trailing fields once this unquoted split runs. Keeping the LAST
+  # match (instead of returning on the first) means a spoofed field embedded
+  # in the name can never shadow the real one — mirrors the greedy `.*teams=`
+  # regex check-inbox.sh already uses for the same line, which is rightmost
+  # (last-match) by construction. See #87-class findings: this alone doesn't
+  # make the split fully quote-safe (a value containing the field's own key
+  # prefix could still confuse it), just immune to the reported name-injection
+  # path — the robust fix is a delimiter-safe whoami.sh output format.
   for part in $line; do
     case "$part" in
-      "$key="*) printf '%s\n' "${part#*=}"; return 0 ;;
+      "$key="*) found="${part#*=}"; matched=0 ;;
     esac
   done
-  return 1
+  [ "$matched" -eq 0 ] || return 1
+  printf '%s\n' "$found"
 }
 
 first_team() {
