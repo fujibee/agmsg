@@ -89,11 +89,22 @@ jobs:
     # block the PR). When changes failed, docs_only is empty → heavy steps run.
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
-    # Bound a hung runner/test: the suite normally finishes in ~5 min, so a job
-    # still running at 15 fails fast (and is re-runnable) instead of pinning this
-    # REQUIRED check for the GitHub default of 6h — seen with a stalled macOS
-    # runner. bats-windows already sets its own timeout; this covers ubuntu/macos.
-    timeout-minutes: 15
+    # Bound a hung runner/test so a stall fails fast (and is re-runnable) instead
+    # of pinning this REQUIRED check for the GitHub default of 6h.
+    #
+    # Keep this comfortably above the real suite time, not just above it. The
+    # cap was 15 when the suite ran in ~5 min; the suite has since grown to 728
+    # tests and macOS measures 11m57s-14m10s, leaving 1-3 min of headroom. The
+    # result was that ~47% of macOS runs (9 of 19 sampled) were killed mid-suite
+    # at ~15m18s, at whatever test happened to be running — a REQUIRED check
+    # behaving like a coin flip on PRs that changed nothing relevant. 25 matches
+    # the app-test-windows job below.
+    #
+    # If the suite grows enough that this cap starts firing again, raise it (or
+    # split the suite) rather than re-running until it passes: a job that always
+    # dies at the same elapsed time is a timeout, not a flaky test.
+    # bats-windows sets its own timeout; this covers ubuntu/macos.
+    timeout-minutes: 25
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
       # to sed/stat/mktemp/ps etc. whose flags differ between them.
@@ -175,10 +186,21 @@ jobs:
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the Windows bats legs."
 
+      # chocolatey's community feed intermittently returns 504, which leaves the
+      # runner with no sqlite3 at all ("Chocolatey installed 0/0 packages").
+      # Retry rather than let a transient feed outage redden an unrelated PR.
       - name: Install sqlite3
         if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
-        run: choco install sqlite -y --no-progress
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install sqlite -y --no-progress
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::choco install sqlite failed (attempt $attempt of 3); retrying"
+            Start-Sleep -Seconds 15
+          }
+          Write-Host "::error::sqlite3 could not be installed after 3 attempts"
+          exit 1
 
       - name: Put chocolatey shims on PATH (Git Bash form)
         if: needs.changes.outputs.docs_only != 'true'
@@ -191,11 +213,16 @@ jobs:
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
+      # Fail HERE if a tool is missing, not three minutes later inside the suite.
+      # The trailing `|| echo` this used to end with turned a missing sqlite3
+      # into a passing step, so the real symptom surfaced as unrelated install
+      # tests failing with "sqlite3 is required but not found" — which reads as
+      # a defect in whatever PR happened to be running.
       - name: Show tool versions
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash --version | head -1
-          sqlite3 --version || sqlite3.exe --version || echo "sqlite3 not found on PATH"
+          sqlite3 --version || sqlite3.exe --version
           bats --version
 
       - name: Run tests
