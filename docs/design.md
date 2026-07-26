@@ -168,8 +168,23 @@ Claude Code command is installed separately to `~/.claude/commands/<cmd>.md`.
 
 ## Dependencies
 
-- **bash** — shell
-- **sqlite3** — database and JSON manipulation (JSON1 extension)
-- **awk/sed** — text processing (config, TOML editing)
+Dependencies are scoped to the feature that needs them, not installed up
+front as one bundle (koit's ruling, 2026-07-25: "dependencies stay closed
+to the scope of the feature that needs them").
 
-No python3, no node, no network, no daemon.
+- **core (local-only messaging)** — `bash`, `sqlite3` (database and JSON
+  manipulation via the JSON1 extension), `awk`/`sed` (config, TOML
+  editing). Covers every script in the table above. No python3, no
+  network, no daemon.
+- **codex agent type / launcher-based spawn** — core, plus `node`
+  (`scripts/lib/node.sh` resolves it; the Codex monitor delivery bridge,
+  `codex-bridge.js`, is a Node program). `spawn.sh` dies explicitly
+  (`'node' not found on PATH — spawning '<type>' requires Node.js`) for
+  any agent type with a launcher.
+
+No persistent daemon at either tier. Core alone makes no network calls.
+
+(This is intentionally only 2 tiers. E2EE and remote-sync features that
+add `age`/`python3` dependencies exist on other branches, not `main` —
+their tiers get documented on whichever branch they land on, not here in
+advance.)

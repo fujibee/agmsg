@@ -148,8 +148,22 @@ Claude Code コマンドは別途 `~/.claude/commands/<cmd>.md` にインスト�
 
 ## 依存関係
 
-- **bash** — シェル
-- **sqlite3** — データベースおよび JSON 操作（JSON1 拡張）
-- **awk/sed** — テキスト処理（設定、TOML 編集）
+依存関係はそれを必要とする機能の範囲に閉じる。まとめて一括要求するのでは
+ない（koitの裁定、2026-07-25:「依存は機能の範囲に閉じる」）。
 
-python3 も node も、ネットワークもデーモンも不要。
+- **core（local-onlyのメッセージング）** — `bash`、`sqlite3`（JSON1拡張
+  経由のデータベース操作とJSON操作）、`awk`/`sed`（設定・TOML編集）。上記
+  の表にあるスクリプトすべてをカバーする。python3もネットワークもデーモン
+  も不要。
+- **codex agent type / launcher付きspawn** — coreに加えて `node`
+  （`scripts/lib/node.sh` が解決する。Codex monitorの配送ブリッジ
+  `codex-bridge.js` はNodeプログラム）。launcherを持つagent typeに対して
+  `spawn.sh` は明示的にdieする（`'node' not found on PATH — spawning
+  '<type>' requires Node.js`）。
+
+常駐デーモンはどちらの階層でも不要。coreだけならネットワーク通信も一切
+発生しない。
+
+（意図的に2階層のみとしている。`age`/`python3`依存を追加するE2EEや
+remote-sync機能は`main`ではなく別ブランチに存在するため、それらの階層は
+前もってここに書かず、実際に着地するブランチ側で文書化する。）
