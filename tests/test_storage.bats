@@ -192,3 +192,43 @@ SH
   n=$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 10 ]
 }
+
+@test "storage: the -escape probe is memoized, not re-run on every call (#462)" {
+  # `$(_agmsg_escape_flag)` ran the probe in a subshell, so the memo it set was
+  # discarded on exit and every agmsg_sqlite call spawned two sqlite3 processes
+  # instead of one. Count real invocations through a counting shim.
+  source "$SCRIPTS/lib/storage.sh"
+  local count="$BATS_TEST_TMPDIR/sqlite-calls"
+  : > "$count"
+  local real; real="$(command -v sqlite3)"
+  sqlite3() { echo call >> "$count"; "$real" "$@"; }
+
+  local i
+  for i in 1 2 3 4 5; do
+    agmsg_sqlite ":memory:" "SELECT 1;" >/dev/null 2>&1 || true
+  done
+
+  # 5 queries + exactly one probe. Before the fix this was 10.
+  [ "$(wc -l < "$count" | tr -d ' ')" -eq 6 ]
+}
+
+@test "storage: a memoized probe is inherited by command substitutions (#462)" {
+  # Subshells inherit shell variables, so once the probe has run in this shell
+  # every later $(agmsg_sqlite ...) reuses the memo instead of re-probing.
+  # (A call made before any probe still probes inside its own subshell — the
+  # memo is per shell, not per machine.)
+  source "$SCRIPTS/lib/storage.sh"
+  local count="$BATS_TEST_TMPDIR/sqlite-calls-sub"
+  local real; real="$(command -v sqlite3)"
+  sqlite3() { echo call >> "$count"; "$real" "$@"; }
+
+  agmsg_sqlite ":memory:" "SELECT 1;" >/dev/null 2>&1 || true   # primes the memo
+  : > "$count"
+
+  local i out
+  for i in 1 2 3 4 5; do
+    out="$(agmsg_sqlite ":memory:" "SELECT 1;" 2>/dev/null)" || true
+  done
+
+  [ "$(wc -l < "$count" | tr -d ' ')" -eq 5 ]
+}

@@ -89,8 +89,15 @@ _agmsg_escape_flag() {
 }
 
 agmsg_sqlite() {
-  # shellcheck disable=SC2046  # intentional split: "-escape off" → two args, or none
-  sqlite3 $(_agmsg_escape_flag) -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+  # Probe in THIS shell, not in a command substitution. `$(_agmsg_escape_flag)`
+  # ran the function in a subshell, so the memo it set was discarded on exit and
+  # the probe re-ran on every call — two sqlite3 processes per database access
+  # instead of one (#462). The memo now survives, so the probe runs once per
+  # shell. Note it is once per SHELL, not once per machine: a call made from
+  # inside a command substitution still probes in that subshell.
+  [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
+  # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
+  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
 }
 
 # Runtime ownership seam. This is the first run/-state-in-storage primitive for
