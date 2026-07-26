@@ -21,6 +21,8 @@ printf '%s\n' "\$*" >> "$CAPTURE"
 EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
+  export SQLITE_BIN_DIR
+  SQLITE_BIN_DIR="$(dirname "$(command -v sqlite3)")"
 
   # Never inherit a real tmux server or herdr env from the test runner —
   # force the OS-terminal path, which we redirect into record.sh via a {cmd}
@@ -136,7 +138,7 @@ assert_boot_reaches_cleanup() {
   done
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
 
-  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" winbare alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
@@ -154,7 +156,7 @@ assert_boot_reaches_cleanup() {
   printf '@echo off\r\n' > "$HOME/.local/bin/agmsg-test-win-exe.bat"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
 
-  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" winexe alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
@@ -180,7 +182,7 @@ assert_boot_reaches_cleanup() {
   printf '@echo off\r\n' > "$HOME/.local/bin/agmsg-test-win-cmd.bat"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
 
-  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" wincmd alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
@@ -206,7 +208,7 @@ assert_boot_reaches_cleanup() {
   fi
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
 
-  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" winbat alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
