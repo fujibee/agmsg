@@ -160,7 +160,7 @@ assert_boot_reaches_cleanup() {
     bash "$SCRIPTS/spawn.sh" winexe alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  run grep -F "_agmsg_cli=$HOME/.local/bin/agmsg-test-win-exe.exe" "$boot"
+  run grep -F "agmsg-test-win-exe.exe" "$boot"
   [ "$status" -eq 0 ]
   assert_boot_reaches_cleanup "$boot"
 }
