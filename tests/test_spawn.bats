@@ -146,7 +146,7 @@ assert_boot_reaches_cleanup() {
   [ "$status" -eq 0 ]
 }
 
-@test "spawn: Windows fallback selects and executes exe before cmd and bat" {
+@test "spawn: Windows fallback executes exe before cmd and bat" {
   add_spawnable_type winexe agmsg-test-win-exe
   force_windows_fallback_rules
   mkdir -p "$HOME/.local/bin"
@@ -160,8 +160,12 @@ assert_boot_reaches_cleanup() {
     bash "$SCRIPTS/spawn.sh" winexe alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  run grep -F "agmsg-test-win-exe.exe" "$boot"
+  run grep -F "agmsg-test-win-exe" "$boot"
   [ "$status" -eq 0 ]
+  run grep -F "agmsg-test-win-exe.cmd" "$boot"
+  [ "$status" -ne 0 ]
+  run grep -F "agmsg-test-win-exe.bat" "$boot"
+  [ "$status" -ne 0 ]
   assert_boot_reaches_cleanup "$boot"
 }
 
