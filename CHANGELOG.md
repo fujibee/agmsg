@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.11] - 2026-07-27
+
+### Added
+- Offer monitor as the default delivery mode, drop the beta framing (#497)
+- Support spawning into herdr panes (#495)
+- Drag files onto a pane to insert their path (#481)
+- Render terminals via WebGL, attached only to the active pane (#446)
+
+### Fixed
+- Stop the bridge launcher duplicating children and burning a core (#496)
+- Make the turn watchdog an idle timeout, not a fixed ceiling (#443)
+- Mark read_at on live delivery so a later inbox.sh does not replay it (#439)
+- Memoize the sqlite3 -escape probe instead of re-running it (#494)
+- Treat kill -0 EPERM as alive under the command sandbox (#447)
+- Fail loudly on shifted args instead of running with zero subscriptions (#477)
+- Add -g to macOS Terminal/iTerm launch so it doesn't steal focus (#470)
+- Make record-session project arg optional, reject poison records (#473)
+- Avoid two-line grep -c count breaking record-session integer test (#484)
+- Bound the self-clean race in the watcher re-invocation test (#440)
+- Shell-quote delivery hook command paths (F14) (#487)
+- Close #87-class SQLi/path-hazard gaps in rename/leave/reset/rename-team/team/api (#482)
+
+### Documentation
+- State how to pronounce agmsg (#498)
+
 ## [1.1.10] - 2026-07-19
 
 ### Fixed
@@ -311,6 +336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.11]: https://github.com/fujibee/agmsg/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/fujibee/agmsg/compare/app-v0.3.0...v1.1.10
 [1.1.9]: https://github.com/fujibee/agmsg/compare/app-v0.2.0...v1.1.9
 [1.1.8]: https://github.com/fujibee/agmsg/compare/app-v0.1.5...v1.1.8
