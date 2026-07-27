@@ -64,8 +64,13 @@ _AGMSG_INSTANCE_ID_SH=1
 # asking about liveness first can still refuse the values that do not name one
 # process.
 _agmsg_pid_valid() {
-  local pid="${1:-}"
+  local pid="${1:-}" max=2147483647
   case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  # The upper bound is the platform's, not one number. A Windows process id is a
+  # DWORD, and the liveness path there queries the native process table via
+  # tasklist rather than kill(1)'s signed pid_t — applying the POSIX bound to it
+  # would call a legitimate native pid dead and its live watcher stale.
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) max=4294967295 ;; esac
   # And it has to fit in pid_t. Past INT32_MAX, kill(1) rejects the ARGUMENT
   # ("not a pid or valid job spec") rather than reporting ESRCH — and
   # _agmsg_pid_alive reads every non-ESRCH failure as alive, so an oversized
@@ -77,7 +82,7 @@ _agmsg_pid_valid() {
   # zero, so at equal length a STRING compare is the numeric one. No `$(( ))`
   # and no `-gt` on the untrusted value: both evaluate what they are given.
   [ "${#pid}" -le 10 ] || return 1
-  if [ "${#pid}" -eq 10 ] && [ "$pid" \> "2147483647" ]; then return 1; fi
+  if [ "${#pid}" -eq 10 ] && [ "$pid" \> "$max" ]; then return 1; fi
   return 0
 }
 

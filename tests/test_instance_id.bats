@@ -506,6 +506,26 @@ require_eperm_pid() {
   run _agmsg_pid_valid 9999999;    [ "$status" -eq 0 ]
 }
 
+@test "instance-id: the pid ceiling is the platform's, not one number" {
+  # A Windows process id is a DWORD, and liveness there reads the native process
+  # table through tasklist rather than kill(1)'s signed pid_t. Applying the
+  # POSIX ceiling to it would call a legitimate native pid dead and its live
+  # watcher stale. Only the bound depends on MSYSTEM, so both sides are
+  # checkable from either host.
+  run env MSYSTEM=MINGW64 bash -c \
+    'SKILL_DIR="'"$SKILL_DIR"'"; . "$SKILL_DIR/scripts/lib/instance-id.sh"
+     _agmsg_pid_valid 2147483648 || exit 1
+     _agmsg_pid_valid 4294967295 || exit 2
+     _agmsg_pid_valid 4294967296 && exit 3
+     _agmsg_pid_valid 0 && exit 4
+     exit 0'
+  [ "$status" -eq 0 ]
+
+  # POSIX keeps the signed pid_t ceiling.
+  run _agmsg_pid_valid 2147483648; [ "$status" -ne 0 ]
+  run _agmsg_pid_valid 4294967295; [ "$status" -ne 0 ]
+}
+
 @test "instance-id: liveness answers alive on the builtin, before any subshell" {
   # The launcher polls liveness in loops that were deliberately made fork-free
   # (#466/#496). Routing them through a helper is only acceptable while the
