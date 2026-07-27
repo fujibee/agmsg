@@ -1,0 +1,86 @@
+name: bench (bulk seal)
+
+# Throwaway measurement harness for the bulk-sealing cost question: how long
+# does it take to seal an existing team's whole history when it is first
+# connected to a remote (or reconnected after a delete)? The open unknown is
+# Windows -- process spawn is known to be far more expensive there, and the
+# seal path spawns `age` once per message.
+#
+# Scoped to this bench branch on purpose. It never runs on main, on PRs, or on
+# integration/remote; the branch is deleted once the numbers are collected.
+on:
+  push:
+    branches:
+      - "bench/**"
+
+permissions:
+  contents: read
+
+jobs:
+  seal:
+    name: seal (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      AGE_VERSION: v1.3.1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install age
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/agebin"
+          case "$RUNNER_OS" in
+            Windows) asset="age-${AGE_VERSION}-windows-amd64.zip" ;;
+            macOS)   asset="age-${AGE_VERSION}-darwin-arm64.tar.gz" ;;
+            Linux)   asset="age-${AGE_VERSION}-linux-amd64.tar.gz" ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          url="https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/${asset}"
+          curl -fsSL -o "$RUNNER_TEMP/$asset" "$url"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            unzip -q -o "$RUNNER_TEMP/$asset" -d "$RUNNER_TEMP/agebin"
+          else
+            tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/agebin"
+          fi
+          # Both archives unpack into an `age/` directory.
+          find "$RUNNER_TEMP/agebin" -type f -name 'age*' -print
+
+      - name: Run the seal benchmark
+        env:
+          BENCH_N: "400"
+        run: |
+          set -euo pipefail
+          agedir="$RUNNER_TEMP/agebin/age"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export AGMSG_AGE_BIN="$agedir/age.exe"
+            keygen="$agedir/age-keygen.exe"
+          else
+            export AGMSG_AGE_BIN="$agedir/age"
+            keygen="$agedir/age-keygen"
+            chmod +x "$agedir/age" "$keygen"
+          fi
+          "$AGMSG_AGE_BIN" --version
+
+          key="$RUNNER_TEMP/bench-key.txt"
+          "$keygen" -o "$key" 2>/dev/null
+          recipient="$("$keygen" -y "$key")"
+
+          echo "::group::results"
+          for p in 1 2 4 8 cpus; do
+            node bench/seal-bench.mjs --n "$BENCH_N" --parallel "$p" --recipient "$recipient"
+          done
+          echo "::endgroup::"
+
+          rm -f "$key"
