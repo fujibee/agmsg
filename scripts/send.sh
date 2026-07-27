@@ -2,14 +2,144 @@
 set -euo pipefail
 
 # Usage: send.sh <team> <from> <to> <message> [--force]
+#    or: send.sh <team> <from> <to> --stdin [--force]
+#    or: send.sh <team> <from> <to> --body-file <path> [--force]
+#
+# #378: a message body passed positionally goes through the SENDER's shell
+# before it ever reaches this script — an unescaped `$(...)` in a quoted
+# body can execute, and backticks can be silently evaluated/emptied. On
+# Windows/MSYS a positional body is additionally routed through MSYS's
+# argv-conversion path (build_argv -> globify), which truncates silently at
+# exactly 8186 bytes (fixed MAXPATHLEN 8192 buffer in glob.cc). --stdin and
+# --body-file read the body verbatim from a file descriptor instead of
+# argv, so neither hazard applies — no shell re-interpretation, no argv
+# size limit. The positional form is unchanged and remains the default.
 
-TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
+USAGE="Usage: send.sh <team> <from> <to> <message> [--force]
+   or: send.sh <team> <from> <to> --stdin [--force]
+   or: send.sh <team> <from> <to> --body-file <path> [--force]"
+
+TEAM="${1:?$USAGE}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
-BODY="${4:?Missing message body}"
+shift 3
+
+MODE="positional"
+BODY=""
+BODY_FILE=""
 FORCE=0
-if [ "${5:-}" = "--force" ]; then
+
+if [ $# -eq 0 ]; then
+  echo "Error: missing message body. Provide it positionally, via --stdin, or via --body-file <path>." >&2
+  exit 1
+fi
+
+case "$1" in
+  --)
+    # Option terminator: everything after it is the body, verbatim. Without
+    # this, adding --stdin/--body-file silently broke a body that happens to
+    # BE the literal string "--stdin" (or "--body-file"/"--force"), which was
+    # a perfectly valid positional body before this change. `--` is the
+    # standard escape hatch and keeps that case working.
+    shift
+    if [ $# -eq 0 ]; then
+      echo "Error: missing message body after '--'." >&2
+      exit 1
+    fi
+    BODY="$1"
+    shift
+    ;;
+  --stdin)
+    MODE="stdin"
+    shift
+    ;;
+  --body-file)
+    shift
+    if [ $# -eq 0 ]; then
+      echo "Error: --body-file requires a path argument." >&2
+      exit 1
+    fi
+    # A leading '-' means the "path" is actually another flag that got
+    # swallowed here (e.g. `--body-file --stdin`, `--body-file --force`)
+    # instead of tripping the ambiguity check below. Reject it the same way
+    # validate.sh rejects a team/agent name starting with '-' — it would be
+    # parsed as an option by downstream tools. A real file named like that
+    # still works via an explicit './-foo' or absolute path.
+    case "$1" in
+      -*)
+        echo "Error: --body-file's argument '$1' looks like a flag, not a path. To use a file whose name starts with '-', pass './$1' or an absolute path." >&2
+        exit 1
+        ;;
+    esac
+    MODE="file"
+    BODY_FILE="$1"
+    shift
+    ;;
+  --force)
+    echo "Error: missing message body before --force. Provide it positionally, via --stdin, or via --body-file <path>." >&2
+    exit 1
+    ;;
+  *)
+    BODY="$1"
+    shift
+    ;;
+esac
+
+# Reject combining two input modes instead of silently picking one — e.g. a
+# positional body followed by --stdin, or --stdin followed by --body-file.
+if [ "${1:-}" = "--stdin" ] || [ "${1:-}" = "--body-file" ]; then
+  echo "Error: the message body was already given (positional argument, --stdin, or --body-file) — cannot also pass $1. Provide the body exactly one way." >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--force" ]; then
   FORCE=1
+  shift
+fi
+
+if [ $# -gt 0 ]; then
+  echo "Error: unexpected extra argument(s) after the message: $*" >&2
+  exit 1
+fi
+
+if [ "$MODE" = "positional" ] && [ -z "$BODY" ]; then
+  echo "Error: missing message body." >&2
+  exit 1
+fi
+
+# Read the body verbatim (no word-splitting, no glob expansion). `IFS= read
+# -r -d ''` slurps to EOF without stripping leading or trailing
+# whitespace/newlines — deliberately: whatever bytes are on stdin or in the
+# file land in the message exactly as given, including any trailing
+# newline(s). If you don't want a trailing newline in the sent message,
+# don't put one in the input. `read` returns non-zero at EOF even though it
+# captured the data, so failure here is expected and ignored.
+#
+# Caveat shared with every other bash variable in this script (not new
+# here): a NUL byte terminates both `read -d ''` and a bash string, so
+# anything after one is lost. That is a shell-wide limit, not something
+# --stdin/--body-file could relax — the old positional <message> path had
+# the exact same ceiling (argv strings can't hold NUL either).
+if [ "$MODE" = "stdin" ]; then
+  IFS= read -r -d '' BODY || true
+  if [ -z "$BODY" ]; then
+    echo "Error: --stdin was given but no data was read from standard input." >&2
+    exit 1
+  fi
+elif [ "$MODE" = "file" ]; then
+  if [ ! -f "$BODY_FILE" ]; then
+    echo "Error: --body-file '$BODY_FILE' does not exist or is not a regular file." >&2
+    exit 1
+  fi
+  if [ ! -r "$BODY_FILE" ]; then
+    echo "Error: --body-file '$BODY_FILE' is not readable." >&2
+    exit 1
+  fi
+  IFS= read -r -d '' BODY < "$BODY_FILE" || true
+  if [ -z "$BODY" ]; then
+    echo "Error: --body-file '$BODY_FILE' is empty." >&2
+    exit 1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,7 +203,21 @@ fi
 # team/agent name containing a single quote would otherwise break the INSERT
 # (correctness) or change its meaning (injection surface).
 _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
-INSERT="INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$(_agmsg_sqlesc "$TEAM")', '$(_agmsg_sqlesc "$FROM")', '$(_agmsg_sqlesc "$TO")', '$(_agmsg_sqlesc "$BODY")');"
+
+# #378: a command substitution — `$(...)` — always drops ALL of its trailing
+# newlines, no matter how many there are. TEAM/FROM/TO can never contain a
+# newline (validate.sh rejects control characters), but BODY legitimately
+# can now that --stdin/--body-file read it verbatim, and plugging it into
+# the INSERT below via a plain `$(_agmsg_sqlesc "$BODY")` would silently
+# eat any trailing newline(s) the caller asked to send. Appending a
+# non-newline sentinel before escaping moves the trailing newline(s) into
+# the middle of the captured text (where command substitution does not
+# touch them), then the sentinel is stripped back off — preserving BODY's
+# trailing newline(s) exactly instead of losing them the same way TEAM/
+# FROM/TO's escaping still does (harmlessly, since those can't have any).
+_BODY_SQL="$(_agmsg_sqlesc "${BODY}X")"
+_BODY_SQL="${_BODY_SQL%X}"
+INSERT="INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$(_agmsg_sqlesc "$TEAM")', '$(_agmsg_sqlesc "$FROM")', '$(_agmsg_sqlesc "$TO")', '$_BODY_SQL');"
 
 # Retry once after ensuring the schema. Under a concurrent first-write fan-out
 # (leader → N members against a fresh/override store), one process can see the

@@ -341,6 +341,8 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 `send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
+A positional message is parsed by your shell before agmsg sees it, so a body containing backticks, `$(...)`, or tricky quoting can be evaluated or mangled there. For those bodies, replace `"<message>"` with `--stdin` (feed it a heredoc) or `--body-file <path>` — both read the body verbatim, with no shell re-interpretation.
+
 ## FAQ / Design notes
 
 **Is this MCP? Do I need an MCP server?**

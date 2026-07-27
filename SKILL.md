@@ -61,6 +61,19 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 # Send a message (from/to must already be registered in <team>; add --force to bypass)
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>" [--force]
 
+# A positional message goes through YOUR shell before agmsg ever sees it — a
+# quoted body containing backticks or $(...) can be silently evaluated or
+# executed there (#378). If the message contains backticks, $, or quotes,
+# prefer --stdin (heredoc) or --body-file instead of fighting the shell with
+# escaping; a plain message with none of those is fine quoted normally.
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> --stdin <<'EOF'
+message body goes here, verbatim — backticks, $(...), quotes all pass through untouched
+EOF
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> --body-file /path/to/body.txt
+
+# A body that IS one of the flag names still works — put `--` before it.
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> -- --stdin
+
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
 

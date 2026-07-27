@@ -108,6 +108,169 @@ teardown() {
   [[ "$output" =~ "Sent to bob" ]]
 }
 
+# --- send.sh: --stdin / --body-file (#378) ---
+#
+# A positional body goes through the sender's shell (backticks / $(...) can
+# execute or vanish) and, on Windows, through MSYS's argv-conversion path
+# (silent truncation at 8186 bytes). --stdin/--body-file bypass both by
+# never touching argv.
+
+@test "send: -- keeps a body that is literally --stdin working (backwards compat)" {
+  # Before --stdin/--body-file existed, "--stdin" was just an ordinary body.
+  # Adding the flags must not silently reinterpret it.
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --stdin
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--stdin" ]
+}
+
+@test "send: -- keeps a body that is literally --force working, and --force after it still applies" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --force
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--force" ]
+}
+
+@test "send: -- with no body after it is an error, not an empty message" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing message body after" ]]
+}
+
+@test "send: --stdin delivers a body containing backticks and \$(...) byte-identical" {
+  local body='price is `echo hi` and $(whoami) literally'
+  run bash -c "printf '%s' \"\$1\" | bash \"\$2\" testteam alice bob --stdin" _ "$body" "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "$body" ]
+}
+
+@test "send: --body-file delivers a body containing backticks and \$(...) byte-identical" {
+  local body='price is `echo hi` and $(whoami) literally'
+  local f="$TEST_SKILL_DIR/body.txt"
+  printf '%s' "$body" > "$f"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "$body" ]
+}
+
+@test "send: --body-file delivers a body larger than 8192 chars complete (MSYS argv-truncation class, #378)" {
+  local f="$TEST_SKILL_DIR/big.txt"
+  # 9000 'a' characters — larger than MSYS's fixed 8192-byte glob.cc buffer
+  # (truncation point reported at 8186). Written directly to a file, so this
+  # never goes through argv regardless of platform.
+  printf 'a%.0s' $(seq 1 9000) > "$f"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+  local len
+  len=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT length(body) FROM messages WHERE to_agent='bob';")
+  [ "$len" -eq 9000 ]
+}
+
+@test "send: --stdin preserves an explicit trailing newline byte-for-byte" {
+  # A plain `stored=$(sqlite3 ... SELECT body ...)` capture would strip ALL
+  # trailing newlines via command substitution on the assertion side too,
+  # so it would pass whether the stored body kept zero, one, or several
+  # trailing newlines — it would not actually test what this test claims.
+  # hex()/length() sidestep that: the exact byte sequence of "line1\nline2\n"
+  # is 6c696e65310a6c696e65320a (12 bytes), independent of shell capture.
+  run bash -c "printf 'line1\nline2\n' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  local body_hex body_len
+  # sqlite3's hex() emits uppercase A-F.
+  body_hex=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM messages WHERE to_agent='bob';")
+  body_len=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT length(body) FROM messages WHERE to_agent='bob';")
+  [ "$body_hex" = "6C696E65310A6C696E65320A" ]
+  [ "$body_len" -eq 12 ]
+}
+
+@test "send: positional body still works unchanged alongside the new flags" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+}
+
+@test "send: --stdin composes with --force" {
+  run bash -c "printf 'hi' | bash \"\$1\" brandnewteam ghost nobody --stdin --force" _ "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to nobody" ]]
+}
+
+@test "send: rejects a positional body combined with --stdin instead of silently picking one" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello" --stdin
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "was already given" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects --stdin combined with --body-file instead of silently picking one" {
+  local f="$TEST_SKILL_DIR/body.txt"
+  printf 'x' > "$f"
+  run bash -c "printf 'y' | bash \"\$1\" testteam alice bob --stdin --body-file \"\$2\"" _ "$SCRIPTS/send.sh" "$f"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "was already given" ]]
+}
+
+@test "send: rejects --body-file without a path argument" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "requires a path argument" ]]
+}
+
+@test "send: rejects --body-file followed by another flag instead of swallowing it as the path" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --stdin
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "looks like a flag" ]]
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --force
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "looks like a flag" ]]
+}
+
+@test "send: rejects a missing --body-file target with a clear error, not an empty message" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$TEST_SKILL_DIR/does-not-exist.txt"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "does not exist" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects an empty --body-file with a clear error, not an empty message" {
+  local f="$TEST_SKILL_DIR/empty.txt"
+  : > "$f"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "is empty" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects empty stdin with a clear error, not an empty message" {
+  run bash -c "printf '' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "no data was read" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects an unexpected extra argument after the message" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello" extra
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "unexpected extra argument" ]]
+}
+
 # --- inbox.sh ---
 
 @test "inbox: shows no messages when empty" {
