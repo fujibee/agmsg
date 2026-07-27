@@ -52,7 +52,7 @@ await_barrier_reached() {
   # Pause the run between display and mark, land a message inside the window,
   # then release. With the old blanket "WHERE read_at IS NULL" mark, the late
   # message was silently marked read without ever having been displayed.
-  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/inbox.sh" testteam alice > "$TEST_SKILL_DIR/first-run.out" &
+  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/inbox.sh" testteam alice > "$TEST_SKILL_DIR/first-run.out" 3>&- &
   bg_pid=$!
   await_barrier_reached
   bash "$SCRIPTS/send.sh" testteam bob alice "late"
@@ -74,7 +74,7 @@ await_barrier_reached() {
 
 @test "check-inbox: a message arriving between display and mark is NOT marked read unseen" {
   bash "$SCRIPTS/send.sh" testteam bob alice "early"
-  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/check-inbox.sh" claude-code /tmp/project-a > "$TEST_SKILL_DIR/check-run.out" 2>/dev/null &
+  AGMSG_TEST_MARK_BARRIER="$BARRIER" bash "$SCRIPTS/check-inbox.sh" claude-code /tmp/project-a > "$TEST_SKILL_DIR/check-run.out" 2>/dev/null 3>&- &
   bg_pid=$!
   await_barrier_reached
   bash "$SCRIPTS/send.sh" testteam bob alice "late"

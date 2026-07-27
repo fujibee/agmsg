@@ -121,7 +121,7 @@ EOF
   bash "$SCRIPTS/join.sh" race seed claude-code /tmp/seed
   local pids=() i
   for i in $(seq 1 "$n"); do
-    bash "$SCRIPTS/join.sh" race "agent$i" claude-code "/tmp/p$i" >/dev/null 2>&1 &
+    bash "$SCRIPTS/join.sh" race "agent$i" claude-code "/tmp/p$i" >/dev/null 2>&1 3>&- &
     pids+=($!)
   done
   for i in "${pids[@]}"; do wait "$i"; done

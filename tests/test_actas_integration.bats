@@ -145,7 +145,7 @@ fake_session() {
 
   # Run watch.sh in background with a tiny interval, capture stderr quickly.
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-mine" /tmp/p1 claude-code \
-    >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" &
+    >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
   # Give it just enough time to resolve subscription and print stderr.
   sleep 1
@@ -176,7 +176,7 @@ fake_session() {
   fake_register T alice
 
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-me" /tmp/p1 claude-code alice \
-    >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" &
+    >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
   sleep 1
 

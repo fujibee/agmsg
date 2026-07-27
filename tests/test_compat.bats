@@ -23,7 +23,7 @@ setup() {
   printf '#!/usr/bin/env bash\nsleep 60\n' > "$_STUB"
   chmod +x "$_STUB"
 
-  bash "$_STUB" &
+  bash "$_STUB" 3>&- &
   _STUB_PID=$!
   # Brief pause so the process is visible to ps / CIM.
   sleep 1

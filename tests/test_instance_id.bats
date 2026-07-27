@@ -236,8 +236,8 @@ teardown() { teardown_test_env; }
 # treated as distinct owners — the collision that broke the actas lock is gone.
 @test "actas: same session_id, different pid -> distinct live owners (#93)" {
   skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
-  sleep 60 & local pa=$!
-  sleep 60 & local pb=$!
+  sleep 60 3>&- & local pa=$!
+  sleep 60 3>&- & local pb=$!
   local ta="sess.$pa" tb="sess.$pb"
 
   # pa claims; pb is refused because pa is a live, distinct owner.

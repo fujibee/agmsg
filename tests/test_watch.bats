@@ -153,7 +153,7 @@ _wait_for_file_contains() {
   # the composite instance id) makes that deterministic. Cross-restart
   # redelivery itself is covered by "watch: restart delivers messages that
   # arrived while the watcher was down".
-  local sesspid; sleep 600 & sesspid=$!
+  local sesspid; sleep 600 3>&- & sesspid=$!
   local iid="sess-liveness.$sesspid"
   local wm="$TEST_SKILL_DIR/run/watch.$iid.watermark"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
@@ -288,7 +288,7 @@ _wait_for_file_contains() {
 
   # Start a watcher so a pidfile exists with a live pid.
   AGMSG_WATCH_INTERVAL=60 bash "$SCRIPTS/watch.sh" "sess1" "$PROJ" claude-code \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$!
 
   # Resolve the instance id session-start.sh will compute for "sess1".
@@ -357,7 +357,7 @@ _wait_pidfile() {
   # whose session pid is dead, so use real stand-in session processes rather
   # than fabricated pids (which would pass or fail by accident of what pid
   # happens to exist on the host).
-  local sp1 sp2; sleep 600 & sp1=$!; sleep 600 & sp2=$!
+  local sp1 sp2; sleep 600 3>&- & sp1=$!; sleep 600 3>&- & sp2=$!
   local pf1="$TEST_SKILL_DIR/run/watch.shared.$sp1.pid"
   local pf2="$TEST_SKILL_DIR/run/watch.shared.$sp2.pid"
 
@@ -388,7 +388,7 @@ _wait_pidfile() {
   # liveness guard (#67) exits any watcher whose embedded session pid is dead, so
   # a fabricated dead pid (the old "solo.2002") would self-exit before the
   # relaunch could be observed. Use a real stand-in session process instead.
-  local sesspid; sleep 600 & sesspid=$!
+  local sesspid; sleep 600 3>&- & sesspid=$!
   local iid="solo.$sesspid"
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
 
@@ -653,7 +653,7 @@ _despawn_under_herdr() {
   setup_live_owner "$TEST_SKILL_DIR/run" sess-herdr
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE "$@" PATH="$stub_bin:$PATH" \
     bash "$SCRIPTS/watch.sh" sess-herdr "$PROJ" claude-code alice \
-    >/dev/null 2>"$errlog" &
+    >/dev/null 2>"$errlog" 3>&- &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.5

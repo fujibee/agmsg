@@ -169,7 +169,7 @@ SH
   # sends silently drop. With the wrapper they wait and all land. See #114.
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) 3>&- &
   done
   wait
   local n
@@ -185,7 +185,7 @@ SH
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/freshstore"
   local x
   for x in 1 2 3 4 5 6 7 8 9 10; do
-    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) &
+    ( bash "$SCRIPTS/send.sh" team leader "tgt$x" "job $x" --force >/dev/null 2>&1 ) 3>&- &
   done
   wait
   local n

@@ -252,7 +252,7 @@ JSON
 
 @test "pid-is-agent: excludes a 'claude daemon run' process even though argv0 matches" {
   skip_on_windows "process argv faking via exec -a (#349)"
-  bash -c 'exec -a "claude daemon run --json-path /tmp/agmsg-test-daemon.json" sleep 5' &
+  bash -c 'exec -a "claude daemon run --json-path /tmp/agmsg-test-daemon.json" sleep 5' 3>&- &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" claude-code
@@ -266,7 +266,7 @@ JSON
   # so it must NOT be an exclusion signal on its own — only "daemon run"
   # identifies the daemon. This is the actual reported shape:
   # ".../claude/versions/2.1.199 --bg-spare ...".
-  bash -c 'exec -a "2.1.199 --bg-spare" sleep 5' &
+  bash -c 'exec -a "2.1.199 --bg-spare" sleep 5' 3>&- &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" claude-code
@@ -276,7 +276,7 @@ JSON
 
 @test "pid-is-agent: accepts a version-named claude-code session binary" {
   skip_on_windows "process argv faking via exec -a (#349)"
-  bash -c 'exec -a "2.1.199" sleep 5' &
+  bash -c 'exec -a "2.1.199" sleep 5' 3>&- &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" claude-code
@@ -286,7 +286,7 @@ JSON
 
 @test "pid-is-agent: accepts a version-named session binary under a full versions/ path" {
   skip_on_windows "process argv faking via exec -a (#349)"
-  bash -c 'exec -a "/home/x/.local/share/claude/versions/2.1.199" sleep 5' &
+  bash -c 'exec -a "/home/x/.local/share/claude/versions/2.1.199" sleep 5' 3>&- &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" claude-code
@@ -296,7 +296,7 @@ JSON
 
 @test "pid-is-agent: a version-named binary is NOT accepted for a non-claude-code type" {
   skip_on_windows "process argv faking via exec -a (#349)"
-  bash -c 'exec -a "2.1.199" sleep 5' &
+  bash -c 'exec -a "2.1.199" sleep 5' 3>&- &
   local p=$!
   sleep 0.3
   run agmsg_pid_is_agent "$p" codex
@@ -356,7 +356,7 @@ JSON
   # Launch the actas watcher (ACTIVE_NAME=alice) from a subdir; without
   # resolution it would see no registration and exit immediately.
   bash "$SKILL_DIR/scripts/watch.sh" sid-w "$ROOT/sub/deep" claude-code alice \
-    >"$BATS_TEST_TMPDIR/w.out" 2>&1 &
+    >"$BATS_TEST_TMPDIR/w.out" 2>&1 3>&- &
   local wpid=$!
   sleep 1
   # A resolving watcher is still alive in its poll loop; an unresolved one has

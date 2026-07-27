@@ -38,7 +38,7 @@ teardown() {
   # manually" branch — role-drop is still asserted.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   # Wait for the watcher to attach (it claims the lock + writes the ready sentinel).
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
@@ -71,7 +71,7 @@ _read_at_for_body() {
   setup_live_owner "$RUN" sess-m
 
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
   [ -e "$RUN/ready.team__alice" ]
@@ -133,7 +133,7 @@ _read_at_for_body() {
   # Broad watcher (no actas arg) — subscribes to both alice and leader.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-broad "$PROJ" claude-code \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$wpid" 2>/dev/null && break; sleep 0.5; done
 

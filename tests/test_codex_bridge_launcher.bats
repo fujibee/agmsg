@@ -99,7 +99,7 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3
   printf '%s\n' 99999999 > "$RUN_DIR/codex-bridge.team.alice.pid"
-  run_launcher & local driver_pid=$!
+  run_launcher 3>&- & local driver_pid=$!
 
   local i recorded=""
   for i in {1..50}; do

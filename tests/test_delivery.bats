@@ -330,7 +330,7 @@ JSON
 
 @test "delivery stop: skips pid whose command line is not watch.sh (pid recycling safety)" {
   mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 &
+  sleep 30 3>&- &
   local unrelated_pid=$!
   echo "$unrelated_pid" > "$TEST_SKILL_DIR/run/watch.stale-sess.pid"
   run bash "$SCRIPTS/delivery.sh" stop
@@ -501,7 +501,7 @@ JSON
   mkdir -p "$TEST_SKILL_DIR/run"
 
   # Stand in for the previous watcher: a sleep that updates its own pidfile.
-  sleep 30 &
+  sleep 30 3>&- &
   local prev_pid=$!
   echo "$prev_pid" > "$TEST_SKILL_DIR/run/watch.session-A.pid"
   # Pin the cc-instance state to "session-A" for a fake CC pid we control.
@@ -622,7 +622,7 @@ has_session_end() {
 
 @test "session-end.sh kills the watcher matching session_id and removes pidfile" {
   mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 &
+  sleep 30 3>&- &
   local target_pid=$!
   echo "$target_pid" > "$TEST_SKILL_DIR/run/watch.sess-A.pid"
   echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
@@ -633,7 +633,7 @@ has_session_end() {
 
 @test "session-end.sh leaves other sessions' watchers alone" {
   mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 &
+  sleep 30 3>&- &
   local other_pid=$!
   echo "$other_pid" > "$TEST_SKILL_DIR/run/watch.sess-B.pid"
   echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
@@ -696,7 +696,7 @@ JSON
 JSON
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 &
+  sleep 30 3>&- &
   local alive_pid=$!
   echo "$alive_pid" > "$TEST_SKILL_DIR/run/watch.live-session.pid"
   # Bind this watcher to a live CC instance (use $$ as a stand-in).
@@ -711,7 +711,7 @@ JSON
 @test "emit monitor directive: skips when a live watcher already exists for this session" {
   mkdir -p "$TEST_SKILL_DIR/run"
   # Spawn a live process and pretend it's our watcher for this session_id.
-  sleep 30 &
+  sleep 30 3>&- &
   local live_pid=$!
   CLAUDE_CODE_SESSION_ID="live-test-sid"
   export CLAUDE_CODE_SESSION_ID
@@ -927,8 +927,8 @@ EOF
   cat > "$bindir/timeout" <<'EOF'
 #!/usr/bin/env bash
 secs="$1"; shift
-("$@") & cmd_pid=$!
-( sleep "$secs"; kill "$cmd_pid" 2>/dev/null ) & watchdog_pid=$!
+("$@") 3>&- & cmd_pid=$!
+( sleep "$secs"; kill "$cmd_pid" 2>/dev/null ) 3>&- & watchdog_pid=$!
 if wait "$cmd_pid" 2>/dev/null; then
   kill "$watchdog_pid" 2>/dev/null
   exit 0
@@ -1018,7 +1018,7 @@ JSON
   mkdir -p "$TEST_SKILL_DIR/run"
 
   # Orphan: watcher referenced by a cc-instance.<dead-pid> file.
-  sleep 30 &
+  sleep 30 3>&- &
   local orphan_pid=$!
   echo "$orphan_pid" > "$TEST_SKILL_DIR/run/watch.orphan-sid.pid"
   # Use a PID that's almost certainly not in use as the dead CC ancestor.
@@ -1027,7 +1027,7 @@ JSON
 
   # Untracked watcher: no cc-instance points to it. Conservative semantics
   # leave it alone (we have no evidence the CC is dead).
-  sleep 30 &
+  sleep 30 3>&- &
   local untracked_pid=$!
   echo "$untracked_pid" > "$TEST_SKILL_DIR/run/watch.untracked-sid.pid"
 
@@ -1054,7 +1054,7 @@ JSON
   # The session moved from one CC pid to another (claude --continue / resume).
   # cc-instance.<dead> still references the same session_id as
   # cc-instance.<live>. The watcher must NOT be killed.
-  sleep 30 &
+  sleep 30 3>&- &
   local watcher_pid=$!
   echo "$watcher_pid" > "$TEST_SKILL_DIR/run/watch.shared-sid.pid"
   local dead_cc=999999
@@ -1664,7 +1664,7 @@ EOF
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
 
-  sleep 60 &
+  sleep 60 3>&- &
   local bpid=$!
   # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
   trap "kill $bpid 2>/dev/null || true" EXIT
@@ -1828,7 +1828,7 @@ EOF
   printf '#!/usr/bin/env bash\necho real\n' > "$other_bin/codex"
   chmod +x "$other_bin/codex"
 
-  sleep 60 &
+  sleep 60 3>&- &
   local bpid=$!
   # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
   trap "kill $bpid 2>/dev/null || true" EXIT
@@ -1857,7 +1857,7 @@ EOF
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
 
-  sleep 60 &
+  sleep 60 3>&- &
   local bpid=$!
   # shellcheck disable=SC2064  # capture the current child pid for EXIT cleanup
   trap "kill $bpid 2>/dev/null || true" EXIT
@@ -1975,7 +1975,7 @@ EOF
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   # Stand in for a live bridge with a real process we can check kill -0 against.
-  sleep 60 &
+  sleep 60 3>&- &
   local bpid=$!
   echo "$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.pid"
   echo "pid=$bpid" > "$TEST_SKILL_DIR/run/codex-bridge.team.alice.meta"

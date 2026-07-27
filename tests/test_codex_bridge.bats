@@ -243,7 +243,7 @@ const server = net.createServer((socket) => {
 server.listen(sock);
 EOF
 
-  node "$fake" "$sock" "$log" &
+  node "$fake" "$sock" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -S "$sock" ] && break
@@ -376,7 +376,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break
@@ -428,7 +428,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break
@@ -496,7 +496,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break
