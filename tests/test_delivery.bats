@@ -1209,7 +1209,14 @@ JSON
 
   run bash "$SCRIPTS/delivery.sh" stop
   [[ "$output" =~ "Killed 2 watch" ]]
+  # BOTH watchers must be waited for. `stop` sends TERM to each and returns;
+  # the order they actually die in is not guaranteed, so waiting only on A and
+  # asserting B in the same breath races B's exit trap. The `sleep 1` this
+  # replaced happened to cover both — the two other project-scoped tests above
+  # wait on one pid only because their second watcher is asserted to still be
+  # ALIVE, which needs no grace period.
   wait_for_pid_exit "$pid_a"
+  wait_for_pid_exit "$pid_b"
   ! kill -0 "$pid_a" 2>/dev/null
   ! kill -0 "$pid_b" 2>/dev/null
 
