@@ -618,27 +618,42 @@ _read_at_for_body() {
   [ -z "$(_read_at_for_body "M-broad-guard-alice")" ]
 }
 
-@test "watch: ctrl:despawn calls herdr pane close when HERDR_PANE_ID is set" {
-  skip_on_windows "watcher background launch under Git Bash (#182)"
+# --- ctrl:despawn, herdr placement ---
+#
+# The watcher may only close a herdr pane that agmsg itself placed. HERDR_* is
+# inherited by every descendant of a pane, so "a pane id is in the environment"
+# proves nothing about ownership — a watcher started by hand inside herdr, or
+# by a test suite, carries the HOST pane's id. Acting on that closes the host,
+# which is exactly what happened to a real session while this branch was being
+# reviewed. The gate is HERDR_ENV=1 plus a placement record naming this pane.
 
-  # Set up a fake herdr binary.
-  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+# Stub `herdr` into a private bin dir; every call is appended to $2.
+_stub_herdr() {
+  local stub_bin="$1" log="$2"
   mkdir -p "$stub_bin"
-  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
   cat > "$stub_bin/herdr" <<STUB
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$herdr_log"
+printf '%s\n' "\$*" >> "$log"
 echo '{"id":"cli:pane:close","result":{"type":"ok"}}'
 STUB
   chmod +x "$stub_bin/herdr"
+}
 
+# Record a herdr placement for team/alice, as spawn would have written it.
+_record_herdr_placement() {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'herdr:%s\t%s\tclaude-code\n' "$1" "$PROJ" \
+    > "$TEST_SKILL_DIR/run/spawn.team__alice"
+}
+
+# Launch an actas watcher for alice under a synthetic herdr environment, send
+# ctrl:despawn, and wait for it to finish. Extra env assignments come from $@.
+_despawn_under_herdr() {
+  local stub_bin="$1" errlog="$2"; shift 2
   setup_live_owner "$TEST_SKILL_DIR/run" sess-herdr
-
-  # Launch watcher with HERDR_PANE_ID set (simulating a herdr-spawned agent).
-  AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE \
-    HERDR_PANE_ID="wC:p42" HERDR_ENV=1 PATH="$stub_bin:$PATH" \
+  AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE "$@" PATH="$stub_bin:$PATH" \
     bash "$SCRIPTS/watch.sh" sess-herdr "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>"$errlog" &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.5
@@ -646,14 +661,76 @@ STUB
   [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
-  # Wait for the watcher to process the message and exit.
   for i in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$wpid" 2>/dev/null || break; sleep 0.5
   done
+  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+}
 
-  # herdr pane close was called with the watcher's own pane id.
+@test "watch: ctrl:despawn closes the herdr pane agmsg placed for this role" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
+  _stub_herdr "$stub_bin" "$herdr_log"
+
+  # spawn recorded this pane as alice's placement, so the watcher owns it.
+  _record_herdr_placement wC:p42
+
+  _despawn_under_herdr "$stub_bin" "$errlog" HERDR_PANE_ID="wC:p42" HERDR_ENV=1
+
   [ -f "$herdr_log" ]
   grep -q "pane close wC:p42" "$herdr_log"
+}
 
-  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+@test "watch: ctrl:despawn does NOT close a herdr pane the watcher merely inherited (no placement record)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
+  _stub_herdr "$stub_bin" "$herdr_log"
+
+  # No spawn record: this role was never placed by agmsg, so wC:p42 is the
+  # host pane the watcher happened to start in.
+  [ ! -f "$TEST_SKILL_DIR/run/spawn.team__alice" ]
+
+  _despawn_under_herdr "$stub_bin" "$errlog" HERDR_PANE_ID="wC:p42" HERDR_ENV=1
+
+  [ ! -f "$herdr_log" ] || ! grep -q "pane close" "$herdr_log"
+  grep -q "close this window manually" "$errlog"
+}
+
+@test "watch: ctrl:despawn does NOT close a herdr pane when the placement record names a different pane" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
+  _stub_herdr "$stub_bin" "$herdr_log"
+
+  # agmsg placed alice in a DIFFERENT pane; this watcher is sitting somewhere
+  # else, so it must not close either one.
+  _record_herdr_placement wC:pOTHER
+
+  _despawn_under_herdr "$stub_bin" "$errlog" HERDR_PANE_ID="wC:p42" HERDR_ENV=1
+
+  [ ! -f "$herdr_log" ] || ! grep -q "pane close" "$herdr_log"
+  grep -q "close this window manually" "$errlog"
+}
+
+@test "watch: ctrl:despawn does NOT close a herdr pane when HERDR_ENV is unset (stale id only)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
+  _stub_herdr "$stub_bin" "$herdr_log"
+
+  # Record matches, but the watcher is not running under herdr — only a stale
+  # HERDR_PANE_ID survived in the environment. spawn requires HERDR_ENV=1 to
+  # treat a process as herdr-hosted; the close path must agree.
+  _record_herdr_placement wC:p42
+
+  _despawn_under_herdr "$stub_bin" "$errlog" HERDR_PANE_ID="wC:p42"
+
+  [ ! -f "$herdr_log" ] || ! grep -q "pane close" "$herdr_log"
+  grep -q "close this window manually" "$errlog"
 }

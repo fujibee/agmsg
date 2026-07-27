@@ -437,10 +437,29 @@ while true; do
           if [ -z "$ACTIVE_NAME" ] || [ "$to" != "$ACTIVE_NAME" ]; then
             continue
           fi
+          # Read the placement record BEFORE reset.sh. reset.sh releases the
+          # actas lock, and the leader's despawn deletes the record as soon as
+          # it observes that lock go free — so reading it afterwards races the
+          # cleanup and would intermittently see nothing.
+          placed_id=""
+          spawn_rec="$(agmsg_spawn_path "$team" "$to")"
+          [ -f "$spawn_rec" ] && IFS=$'\t' read -r placed_id _ _ < "$spawn_rec"
           "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
           if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
             tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
-          elif [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+          # Closing a herdr pane needs more than "a pane id is in the
+          # environment". HERDR_* is inherited by every descendant of a herdr
+          # pane, so a watcher merely STARTED inside one — a developer running
+          # the test suite, or any agent that actas'd by hand — carries the
+          # HOST pane's id. Acting on that closes the host. Require both the
+          # full herdr environment (matching spawn's own detection) and proof
+          # that agmsg itself placed this pane: the recorded placement for this
+          # (team, agent) must name exactly the pane we are sitting in.
+          # Otherwise fall through to the manual branch. This is the herdr
+          # counterpart of the tmux path's ACTIVE_NAME gating (#109).
+          elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
+               && [ "$placed_id" = "herdr:$HERDR_PANE_ID" ] \
+               && command -v herdr >/dev/null 2>&1; then
             herdr pane close "$HERDR_PANE_ID" 2>/dev/null || true
           else
             echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
