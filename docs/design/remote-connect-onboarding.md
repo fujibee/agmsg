@@ -2,9 +2,11 @@
 
 **Status:** implemented dogfood design — §1/§1a-§1c/§8's four key commands (generate/show/
 import) and §0-§7's connect/status/disconnect/doctor are approved and
-implemented (this PR). `key request`/`approve` (device-pairing key
-delivery) and `key rotate` remain NOT READY — see §8 — and are explicitly
-out of this PR's scope pending their own follow-up design/review passes.
+implemented (this PR). `key rotate` remains NOT READY — see §8 — and is
+explicitly out of this PR's scope pending its own follow-up design/review
+pass. `key request`/`approve` (device-pairing key delivery) has moved to
+`docs/design/device-pairing.md`, where its open findings are addressed; it
+is designed but not yet implemented, and is not in this PR either.
 **Date:** 2026-07-21 (implementation landed 2026-07-23)
 **Owner:** @fujibee
 
@@ -156,8 +158,8 @@ where it does**, not as OSS-implemented scope:
   and key generation follow automatically. A second device joining the
   same team goes through the same login, then `key request`, and the
   human manually carries the resulting confirmation code to the first
-  device to `approve` it (§8's `key request`/`approve`, still NOT READY
-  pending its own open findings).
+  device to `approve` it (`docs/design/device-pairing.md`, designed but
+  not yet implemented).
 - **Path B (new users, console-first):** console-driven, building on §7's
   existing copy-paste block — the block leads with instruction text meant
   to be pasted to an agent, with the raw shell command as a secondary
@@ -784,112 +786,26 @@ the key exist.
   literal definition of end-to-end encryption restated here because it is
   the one guarantee every other bullet above assumes.
 
-**`key request` / `key approve` (renamed from `send`/`receive`) —
-device-pairing key delivery. STATUS: NOT READY — under redesign, split
-off as a separate follow-on track, not part of this design's launch scope.**
-An internal adversarial design review found five separate, fundamental problems
-with the design as first drafted below (one-directional authentication
-only — a malicious server or writer could inject a fake team key toward
-the receiver; the confirmation code as originally specified is
-grind-able by a malicious server; no formal request/delivery state
-machine — replay and epoch-rollback are unaddressed; incompatibility
-with `age-v1`'s existing key_id policy gate, possibly requiring a
-dedicated profile/version; and undefined behavior for non-receiver
-clients encountering the pairing blob on a shared/broadcast stream).
-These are not fixable as a naming or UX tweak — see the review thread for
-detail. The flow below is kept as-drafted, for historical/reference
-context only, and should not be treated as a spec to implement against.
-The rename to `request`/`approve` (mirroring the AWS SSO / `gh` device-
-authorization-flow convention: the new device *requests*, the privileged
-device *approves*) and passing the confirmation code as `approve`'s
-argument (making the transcription itself the matching act, instead of a
-separately-clickable "yes it matches" that degrades into confirmation
-fatigue) are accepted UX directions for whenever the redesign lands, but
-neither addresses the five findings above on its own.
+**`key request` / `key approve` — device-pairing key delivery. Moved to
+its own document: `docs/design/device-pairing.md`.**
 
-**Status update — one finding closed, four still open.** The onboarding
-pivot's human-gate condition 4 (post-decryption bidirectional SAS
-confirmation — see "Human-in-the-loop gates" after §1) directly closes
-the one-directional-authentication finding (A2) above: both sides now
-independently derive and display the same post-decryption confirmation
-before the receiver commits, so a fake team-key injected by a malicious
-server or writer no longer decrypts-and-imports silently. **The other
-four findings are not confirmed closed by this pivot** and this command
-pair stays NOT READY until they are: the confirmation code's own
-grinding-resistance derivation (A1), the request/delivery state machine
-(B — CAS single-use states, replay/rollback defense), the `age-v1`
-policy-gate compatibility question (E1), and broadcast-stream quarantine
-behavior for non-receiver clients (E2). Treat A2-closed as one checkbox
-out of five, not as the redesign being done.
+That design closes the four findings this section left open (the
+confirmation code's grinding resistance, the request/delivery state
+machine, `age-v1` policy-gate compatibility, and broadcast-stream
+quarantine for non-receiver clients) and folds in the expiration
+requirements added afterwards. The fifth finding, one-directional
+authentication, was already closed by the post-decryption bidirectional
+SAS in "Human-in-the-loop gates" above.
 
-(Same `scripts/key.sh request|approve` dispatch shape as the rest of §8.)
+Pairing is now the **primary path for a second device**, with the recovery
+key demoted to the no-surviving-machine case, so this is launch-blocking
+rather than a follow-on track. The earlier `send`/`receive` draft that sat
+here has been removed rather than kept as reference: it was explicitly
+marked not-a-spec, and leaving a superseded flow inline next to a live one
+is how the wrong one gets implemented.
 
-Flow:
-
-1. **Machine 2 (receiver), `agmsg key receive <team>`:** generates a
-   **temporary, single-use** age identity — *not* the team's real key,
-   purely a one-time pairing keypair — registers a pairing request with
-   the server, and displays a short **confirmation code** derived from
-   the temporary public key's fingerprint. Then waits.
-2. **Machine 1 (sender), `agmsg key send <team>`:** lists pending pairing
-   requests for the team, shows the confirmation code for the selected
-   one, and pauses for **explicit human confirmation that this code
-   matches what machine 2 is showing**. This visual match is the *entire*
-   MITM defense: if the server substituted its own key material in the
-   pairing request to intercept the handoff, the fingerprint shown here
-   would not match what machine 2 generated locally. This step is
-   deliberately not skippable or auto-confirmable.
-3. On explicit confirm, machine 1 encrypts the team's current key
-   material to the temporary public key as an **age recipient** (age's
-   own native encrypt-to-recipient feature — no new cryptography) and
-   sends it as a new **control-message type** over the existing message
-   stream (server-blind preserved: the server relays only an opaque
-   encrypted blob, exactly like every other envelope it already handles).
-4. **Machine 2 completes automatically**: pulls the control message,
-   decrypts with its own temporary private identity, and runs the
-   equivalent of `key import` without any manual paste — validates and
-   stores the key, prints a completion confirmation, and discards the
-   now-spent temporary pairing identity (it is single-use, not part of
-   the team's ongoing key material).
-
-Constraints this design is built under (stated explicitly, not
-negotiable within this design):
-
-1. **Zero new cryptography.** The whole mechanism is age's existing
-   recipient-encryption feature, reused. No new key-exchange protocol,
-   no new primitive.
-2. **No new transport.** Delivery rides the existing message stream, as
-   one more control-message type — the same extension point `despawn`'s
-   control messages already established, not a new endpoint or channel.
-3. **The confirmation code's exact shape is the security-critical part of
-   this design — explicitly NOT finalized here.** Its length, what
-   fingerprint it's derived from, and what else it needs to bind (e.g. a
-   pairing-session nonce, to disambiguate concurrent pending requests
-   from being visually confused with each other) determine whether the
-   MITM defense in step 2 actually holds. This needs its own adversarial
-   review pass, the same way the `age-v1` profile itself got one (see
-   References) — this design proposes the flow's *skeleton* and explicitly
-   defers the code's cryptographic shape to that review, rather than
-   asserting a strawman as final.
-4. **Manual `key show --reveal-secret` / `key import` remain**, permanently
-   — not deprecated by this feature, since self-hosted/offline setups may
-   have no live pairing channel at all.
-5. **Power-user one-liner, documented as a fallback, not a replacement:**
-   `agmsg key show <team> --reveal-secret | ssh machine2 agmsg key import <team>`
-   — for a user who trusts their own already-established SSH channel more
-   than a new interactive flow.
-6. **The pairing skeleton is deliberately generic**: request-register →
-   out-of-band verify → approve → encrypted delivery. The "out-of-band
-   verify" step is visual code-matching in v1, but the skeleton is kept
-   general enough that a future QR-code scan (the same "device pairing"
-   concept mobile platforms already use for key handoff) could substitute
-   for it later without redesigning the rest of the flow.
-7. **Console dependency, not designed here:** onboarding step 5's current
-   "paste this" language (§3.4/§8 above) will need rewording once this
-   exists as an alternative path. The exact command name shown and the
-   screen copy is a contract point with whoever owns the console surface,
-   to be pinned on both sides once this design itself is finalized — flagged
-   here as a dependency, not resolved here.
+What this section still owns, unchanged: `generate`, `show`, `import`,
+`rotate`, key storage, and the connect-flow key-bootstrap prompt above.
 
 ## Alternatives considered
 
