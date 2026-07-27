@@ -43,10 +43,41 @@ fi
 
 # Compute the record file path for (team, agent). Same encoding + dir as the
 # actas lock, distinct prefix (role-session. vs actas.), no .session suffix.
+#
+# Memoized per process. The result is a pure function of (SKILL_DIR, team,
+# agent), but computing it costs three command substitutions and two awk
+# processes, and the codex bridge launcher re-derives it for the same handful of
+# pairs on every poll iteration for the lifetime of an app-server. SKILL_DIR is
+# part of the key so a caller that relocates the skill root mid-process (tests
+# do) simply misses the cache rather than reading a stale path.
+#
+# Parallel arrays, not an associative array: macOS ships bash 3.2, which has
+# none. The pair count is a handful, so the linear scan is cheaper than the
+# awk processes it replaces. Encoding itself is deliberately NOT reimplemented
+# here -- _actas_lock_encode is shared with the actas lock filenames, and any
+# divergence would orphan live state files.
+_AGMSG_RS_PATH_KEYS=()
+_AGMSG_RS_PATH_VALS=()
+_AGMSG_RS_PATH_MAX=64
+
 _agmsg_role_session_path() {
-  local team="$1" agent="$2" t a
+  local team="$1" agent="$2" t a key i n
+  key="${SKILL_DIR}"$'\x1f'"${team}"$'\x1f'"${agent}"
+  n=${#_AGMSG_RS_PATH_KEYS[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "${_AGMSG_RS_PATH_KEYS[$i]}" = "$key" ]; then
+      printf '%s' "${_AGMSG_RS_PATH_VALS[$i]}"
+      return 0
+    fi
+  done
+  local path
   t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
-  printf '%s/role-session.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
+  path="$(_actas_lock_dir)/role-session.${t}__${a}"
+  if [ "$n" -lt "$_AGMSG_RS_PATH_MAX" ]; then
+    _AGMSG_RS_PATH_KEYS[$n]="$key"
+    _AGMSG_RS_PATH_VALS[$n]="$path"
+  fi
+  printf '%s' "$path"
 }
 
 # Record (team, agent) -> <bare_sid> for <project>. Latest session wins
@@ -99,11 +130,21 @@ agmsg_role_session_get() {
 }
 
 # Read a single field from a record file. Empty if file/field absent.
+#
+# Builtins only. This was `sed -n | head -1`, i.e. two processes per field, and
+# the codex bridge launcher reads two fields per role on every poll iteration.
+# The record is a handful of short key=value lines, so reading it in the shell
+# is both cheaper and exactly equivalent: first match wins, and the value is
+# everything after the first '='.
 _agmsg_role_session_field() {
-  local path="$1" key="$2"
+  local path="$1" key="$2" line
   [ -f "$path" ] || return 0
-  # First match only; value is everything after the first '='.
-  sed -n "s/^${key}=//p" "$path" 2>/dev/null | head -1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key"=*) printf '%s\n' "${line#"$key"=}"; return 0 ;;
+    esac
+  done < "$path" 2>/dev/null
+  return 0
 }
 
 # Read back the recorded bare session id for (team, agent). Empty if no record.

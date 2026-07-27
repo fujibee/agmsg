@@ -317,3 +317,38 @@ count_child_launchers() {
   kill "$parent" 2>/dev/null || true
   wait "$parent" 2>/dev/null || true
 }
+
+@test "launcher: the identity cache still sees a role added mid-loop (#466)" {
+  # The poll no longer re-runs identities.sh every tick; it serves a cache
+  # guarded on the team configs' mtimes. This is the test that fails if that
+  # guard never invalidates: a role joined while the dispatcher is already
+  # looping has to be picked up anyway.
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=20
+  sleep 25 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$!
+  local i
+  for i in {1..80}; do
+    grep -q -- $'--pair team\talice' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- $'--pair team\talice' "$CAPTURE"
+
+  # Let the loop settle into its backed-off steady state before changing
+  # anything, so this exercises a cache hit being invalidated rather than a
+  # loop that happened to still be resolving every tick.
+  sleep 3
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team bob thread-bob "$PROJ" codex
+  for i in {1..100}; do
+    grep -q -- $'--pair team\tbob' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
+
+  kill "$dispatcher" 2>/dev/null || true
+  wait "$dispatcher" 2>/dev/null || true
+  kill "$parent" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+}
