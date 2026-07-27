@@ -181,6 +181,22 @@ test("a streamed batch is cut into windows bounded by count and by bytes", async
   assert.deepEqual(byBytes, Array.from({ length: 10 }, () => 1));
 });
 
+test("the byte bound counts utf-8 bytes, not utf-16 code units", async () => {
+  const value = request(0);
+  value.projection.body = "ほ".repeat(500);
+  const line = JSON.stringify(value);
+  assert.ok(Buffer.byteLength(line, "utf8") > line.length * 2, "fixture must be multi-byte");
+
+  const windows = [];
+  for await (const window of sealBatchWindows(Array(4).fill(line),
+    { requests: 1000, bytes: line.length + 50 })) {
+    windows.push(window.length);
+  }
+  // Each line alone is past the bound in bytes. Counted as code units it would
+  // take two of them, and the window would hold twice what it was told to.
+  assert.deepEqual(windows, [1, 1, 1, 1]);
+});
+
 test("windowing does not renumber results the caller has to match up", async () => {
   // Bodies large enough that the real byte bound cuts the batch into several
   // windows; indices must still run 0..n-1 across the whole input.

@@ -703,7 +703,10 @@ export async function* sealBatchWindows(lines, limits = {}) {
   for await (const line of lines) {
     if (!line) continue;
     window.push(JSON.parse(line));
-    bytes += line.length;
+    // Bytes, not code units: a body of non-ASCII text is up to three times its
+    // string length, so counting units would let the window grow past the bound
+    // by that factor on exactly the input the bound exists for.
+    bytes += Buffer.byteLength(line, "utf8");
     if (window.length >= maxRequests || bytes >= maxBytes) {
       yield window;
       window = [];
