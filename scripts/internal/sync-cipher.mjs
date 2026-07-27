@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import * as nodeOs from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Worker, isMainThread, parentPort, threadId, workerData } from "node:worker_threads";
 
@@ -445,6 +446,12 @@ export function sealEnvelope(input) {
 // the pre-existing sequential code down to the call.
 const MAX_BATCH_REQUESTS = 10_000;
 const MIN_REQUESTS_PER_WORKER = 8;
+// How much of a streamed batch the helper holds at once. The count keeps a
+// typical page (small bodies) in one window so the pool never drains mid-page;
+// the byte bound takes over when bodies are large, which is exactly when
+// holding the page would cost the most.
+const WINDOW_REQUESTS = 1_000;
+const WINDOW_BYTES = 8 * 1_048_576;
 // A task is re-dispatched once after the worker holding it dies. Bounded so a
 // request that kills workers (rather than throwing) cannot take the whole pool
 // down one thread at a time — after the last attempt it becomes an error result
@@ -668,15 +675,42 @@ async function readStdin() {
 // Human-facing progress for the bulk path only. A steady-state page is a
 // handful of messages and reporting on it would be noise, so anything under
 // PROGRESS_MIN_TOTAL stays silent. stdout carries the results, so this goes to
-// stderr.
+// stderr. `total` is what the caller said it would send — the batch is read as
+// a stream, so the helper itself never knows the count up front.
 function progressReporter(total) {
-  if (total < PROGRESS_MIN_TOTAL) return () => {};
+  if (!Number.isInteger(total) || total < PROGRESS_MIN_TOTAL) return () => {};
   const step = Math.max(1, Math.floor(total / PROGRESS_STEPS));
-  return (completed) => {
-    if (completed % step !== 0 && completed !== total) return;
-    const percent = Math.floor((completed / total) * 100);
-    process.stderr.write(`agmsg: sealing ${completed}/${total} (${percent}%)\n`);
+  let done = 0;
+  return () => {
+    done += 1;
+    if (done % step !== 0 && done !== total) return;
+    const percent = Math.min(100, Math.floor((done / total) * 100));
+    process.stderr.write(`agmsg: sealing ${done}/${total} (${percent}%)\n`);
   };
+}
+
+// Requests are read as a stream and sealed a window at a time. A page is only
+// bounded by its message count, and a message body is legal up to
+// max_blob_bytes, so holding the whole batch would mean holding a gigabyte for
+// input a caller is entitled to send. The scheduler has to keep a request until
+// its result is out — it re-dispatches the ones a dying worker was holding — so
+// what is bounded here is how much it is ever asked to keep at once.
+export async function* sealBatchWindows(lines, limits = {}) {
+  const maxRequests = limits.requests ?? WINDOW_REQUESTS;
+  const maxBytes = limits.bytes ?? WINDOW_BYTES;
+  let window = [];
+  let bytes = 0;
+  for await (const line of lines) {
+    if (!line) continue;
+    window.push(JSON.parse(line));
+    bytes += line.length;
+    if (window.length >= maxRequests || bytes >= maxBytes) {
+      yield window;
+      window = [];
+      bytes = 0;
+    }
+  }
+  if (window.length > 0) yield window;
 }
 
 async function cli() {
@@ -684,18 +718,33 @@ async function cli() {
     process.stdout.write(`${JSON.stringify(sealEnvelope(JSON.parse(await readStdin())))}\n`);
     return;
   }
-  if (process.argv[2] !== "seal-batch") throw new Error("usage: sync-cipher.mjs seal|seal-batch");
-  const requests = (await readStdin()).split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
-  if (requests.length > MAX_BATCH_REQUESTS) {
+  if (process.argv[2] !== "seal-batch") {
+    throw new Error("usage: sync-cipher.mjs seal | seal-batch [expected-count]");
+  }
+  const expected = process.argv[3] === undefined ? null : Number(process.argv[3]);
+  if (expected !== null && (!Number.isInteger(expected) || expected < 0 ||
+      expected > MAX_BATCH_REQUESTS)) {
     throw new Error(`seal-batch accepts at most ${MAX_BATCH_REQUESTS} requests`);
   }
+  const onProgress = progressReporter(expected);
+  let base = 0;
   // Per-request failures are results, not an exit code: the caller commits the
   // envelopes that succeeded and retries the rest on its next cycle.
-  await runSealBatch(requests, {
-    onResult: (result) => process.stdout.write(
-      `${JSON.stringify({ type: "sync_seal_result", ...result })}\n`),
-    onProgress: progressReporter(requests.length),
-  });
+  for await (const window of sealBatchWindows(
+    createInterface({ input: process.stdin, crlfDelay: Infinity }))) {
+    if (base + window.length > MAX_BATCH_REQUESTS) {
+      throw new Error(`seal-batch accepts at most ${MAX_BATCH_REQUESTS} requests`);
+    }
+    const offset = base;
+    await runSealBatch(window, {
+      // The window is an implementation detail of how much is held at once;
+      // callers index results against what they sent.
+      onResult: (result) => process.stdout.write(`${JSON.stringify(
+        { type: "sync_seal_result", ...result, index: offset + result.index })}\n`),
+      onProgress,
+    });
+    base += window.length;
+  }
 }
 
 if (!isMainThread && workerData?.role === SEAL_WORKER_ROLE) {

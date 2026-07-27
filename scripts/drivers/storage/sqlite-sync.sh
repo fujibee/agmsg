@@ -397,7 +397,7 @@ storage_sync_prepare_push() {
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || return 13
   db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
 
-  local rows unsealed joined meta requests uuids
+  local rows uuids
   local pos local_id wire idx status blob q cipher_lit chunk_sql="" chunk_count=0
   local cipher_helper node_bin pending=0 prepared=0 sealed=0
   local -a seal_pos seal_local seal_wire
@@ -427,45 +427,31 @@ storage_sync_prepare_push() {
 
   # A reservation an earlier call already produced is immutable: the final
   # SELECT republishes it verbatim and it is never re-sealed.
+  #
+  # `rows` already holds the whole page, as it did before this was batched, and
+  # a body is legal up to max_blob_bytes. So nothing below is allowed to keep a
+  # SECOND copy of it: the filtered rows, the uuid-joined rows and the seal
+  # requests are all produced as streams straight into the helper. The only
+  # thing retained per message is its position, local id and wire id — ids
+  # only, no body, a handful of bytes each.
   if [ -n "$rows" ]; then
-    unsealed=$(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') || return 13
-  fi
-  if [ -n "$unsealed" ]; then
-    pending=$(printf '%s\n' "$unsealed" | wc -l); pending=$((pending))
+    pending=$(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)' | wc -l) || return 13
+    pending=$((pending))
   fi
 
   if [ "$pending" -gt 0 ]; then
     uuids=$(_sqlite_sync_uuid4_bulk "$pending") || return 13
-    joined=$(paste <(printf '%s\n' "$uuids") <(printf '%s\n' "$unsealed")) || return 13
-    # Two passes over the joined rows: the commit metadata as TSV (all fields
-    # are ids, so @tsv is lossless there), and the seal requests as JSONL. The
-    # request must NOT ride in the TSV — @tsv escapes backslashes, which would
-    # corrupt every body containing a quote.
-    meta=$(printf '%s\n' "$joined" | jq -rR '
-      split("\t") as $pair | ($pair[1] | fromjson) as $row
-      | [$row.local_position, $row.local_id, $pair[0]] | @tsv') || return 13
-    requests=$(printf '%s\n' "$joined" | jq -cR \
-      --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
-      --argjson version "$version" --argjson protocol "$protocol" \
-      --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
-      split("\t") as $pair | ($pair[1] | fromjson) as $row
-      | (if ($row.body | length) == 0 then error("empty message body") else . end)
-      | (if ($row.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-           then ($row.at | .[0:19] + ".000000Z") else $row.at end) as $created
-      | {type:"sync_seal",envelope_v:$version,cipher:$cipher,
-         key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
-         wire_id:$pair[0],team_id:$team_id,protocol_version:$protocol,
-         recipients:$recipients,
-         projection:{body:$row.body,created_at:$created,
-                     from_agent:$row.from_agent,to_agent:$row.to_agent}}') || return 13
-
+    # @tsv is lossless for ids. The seal request must NOT ride in a TSV —
+    # @tsv escapes backslashes, which would corrupt every body containing a
+    # quote — so it is built separately, as JSONL.
     while IFS=$'\t' read -r pos local_id wire; do
       [ -n "$pos" ] || continue
       seal_pos[$prepared]="$pos"; seal_local[$prepared]="$local_id"
       seal_wire[$prepared]="$wire"; prepared=$((prepared + 1))
-    done <<EOF
-$meta
-EOF
+    done < <(paste <(printf '%s\n' "$uuids") \
+                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
+             | jq -rR 'split("\t") as $pair | ($pair[1] | fromjson) as $row
+                       | [$row.local_position, $row.local_id, $pair[0]] | @tsv')
     [ "$prepared" -eq "$pending" ] || return 13
     if [ -n "$key_id" ]; then q="'$(_sqlite_lit "$key_id")'"; else q="NULL"; fi
     cipher_lit="$(_sqlite_lit "$cipher")"
@@ -514,7 +500,23 @@ EOF
         _sqlite_sync_commit_chunk "$db" "$chunk_sql" || return 13
         sealed=$((sealed + chunk_count)); chunk_sql=""; chunk_count=0
       fi
-    done < <(printf '%s\n' "$requests" | "$node_bin" "$cipher_helper" seal-batch \
+    done < <(paste <(printf '%s\n' "$uuids") \
+                   <(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') \
+      | jq -cR \
+        --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
+        --argjson version "$version" --argjson protocol "$protocol" \
+        --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
+        split("\t") as $pair | ($pair[1] | fromjson) as $row
+        | (if ($row.body | length) == 0 then error("empty message body") else . end)
+        | (if ($row.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+             then ($row.at | .[0:19] + ".000000Z") else $row.at end) as $created
+        | {type:"sync_seal",envelope_v:$version,cipher:$cipher,
+           key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
+           wire_id:$pair[0],team_id:$team_id,protocol_version:$protocol,
+           recipients:$recipients,
+           projection:{body:$row.body,created_at:$created,
+                       from_agent:$row.from_agent,to_agent:$row.to_agent}}' \
+      | "$node_bin" "$cipher_helper" seal-batch "$pending" \
       | jq -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
           select(.type=="sync_seal_result")
           | [(.index|tostring),
