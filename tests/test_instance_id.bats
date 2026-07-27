@@ -406,3 +406,65 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   kill -0 $$
 }
+
+# --- liveness: "can I signal this" is not "is this running" ---
+
+# A pid that exists but this user cannot signal, so `kill -0` fails with EPERM
+# rather than ESRCH. pid 1 is that on any normal desktop or CI runner; when the
+# suite runs as root, or in a container where pid 1 is ours, there is no such
+# pid to borrow and the distinction under test cannot be staged.
+require_eperm_pid() {
+  local err
+  # An `A && skip` list is a FAILING command on exactly the run we want, which
+  # bats' errexit turns into a test failure instead of a skip.
+  if kill -0 1 2>/dev/null; then skip "pid 1 is signalable here; no EPERM fixture available"; fi
+  # `|| true`: the substitution's status is the failing kill, and a bare
+  # assignment carrying it trips errexit before the case can decide anything.
+  err="$(export LC_ALL=C; kill -0 1 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "pid 1 does not exist here" ;;
+  esac
+}
+
+@test "instance-id: an unsignalable pid is alive, not dead" {
+  require_eperm_pid
+  run _agmsg_pid_alive 1
+  [ "$status" -eq 0 ]
+}
+
+@test "instance-id: liveness rejects a dead pid, and anything that is not a pid" {
+  local dead
+  dead="$(bash -c 'echo $$')"
+  wait_for_pid_exit "$dead" || true
+  run _agmsg_pid_alive "$dead"; [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "";     [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "abc";  [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "12x";  [ "$status" -ne 0 ]
+  run _agmsg_pid_alive $$;     [ "$status" -eq 0 ]
+}
+
+@test "instance-id: liveness answers alive on the builtin, before any subshell" {
+  # The launcher polls liveness in loops that were deliberately made fork-free
+  # (#466/#496). Routing them through a helper is only acceptable while the
+  # common answer — alive — is still decided by the builtin, so the cheap check
+  # has to come first and has to be able to return on its own.
+  local body fast slow
+  body="$(declare -f _agmsg_pid_alive)"
+  fast="$(printf '%s\n' "$body" | grep -n 'kill -0 .*&& return 0;$' | grep -v '\$(' | head -1 | cut -d: -f1)"
+  slow="$(printf '%s\n' "$body" | grep -n 'kill -0 .*2>&1' | head -1 | cut -d: -f1)"
+  [ -n "$fast" ]
+  [ -n "$slow" ]
+  [ "$fast" -lt "$slow" ]
+}
+
+@test "no shipped script decides liveness with a bare kill -0" {
+  # #500's lesson: a partially-hardened file reads as a fixed one. Every
+  # liveness check must go through _agmsg_pid_alive, which is EPERM-aware and
+  # cross-checks ps; instance-id.sh is where that check is implemented, so it
+  # is the one file allowed to call kill -0 directly.
+  local offenders
+  offenders="$(cd "$BATS_TEST_DIRNAME/.." && grep -rn -e 'kill -0' -e 'kill -s 0' scripts bin 2>/dev/null \
+    | grep -v '^scripts/lib/instance-id.sh:' \
+    | grep -v ':[0-9]*: *#' || true)"
+  [ -z "$offenders" ] || { echo "$offenders"; false; }
+}

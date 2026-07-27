@@ -170,6 +170,52 @@ settings_file() {
   [[ "$output" == *"watch processes:"* ]]
 }
 
+# A pid that exists but this user cannot signal, so `kill -0` fails with EPERM
+# rather than ESRCH. pid 1 is that on any normal desktop or CI runner; when the
+# suite runs as root, or in a container where pid 1 is ours, there is no such
+# pid to borrow and the distinction under test cannot be staged.
+eperm_pid() {
+  local err
+  # An `A && skip` list is a FAILING command on exactly the run we want, which
+  # bats' errexit turns into a test failure instead of a skip.
+  if kill -0 1 2>/dev/null; then skip "pid 1 is signalable here; no EPERM fixture available"; fi
+  # `|| true`: the substitution's status is the failing kill, and a bare
+  # assignment carrying it trips errexit before the case can decide anything.
+  err="$(export LC_ALL=C; kill -0 1 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "pid 1 does not exist here" ;;
+  esac
+  echo 1
+}
+
+@test "delivery status: a live but unsignalable watcher is not counted as stale" {
+  local pid
+  pid="$(eperm_pid)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  printf '%s\n' "$pid" > "$TEST_SKILL_DIR/run/watch.eperm-session.pid"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # `kill -0` answers "can I signal this", not "is this running". Under a
+  # sandbox every watcher fails it, and reading the exit status alone printed
+  # every live watcher as a stale pidfile.
+  [[ "$output" == *"watch processes: 1 alive, 0 stale pidfiles"* ]]
+}
+
+@test "delivery status: a genuinely dead watcher is still counted as stale" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  local dead
+  dead="$(bash -c 'echo $$')"
+  wait_for_pid_exit "$dead" || true
+  printf '%s\n' "$dead" > "$TEST_SKILL_DIR/run/watch.dead-session.pid"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # The other half of the fix: treating EPERM as alive must not make everything
+  # look alive.
+  [[ "$output" == *"watch processes: 0 alive, 1 stale pidfiles"* ]]
+}
+
 @test "delivery status: derives 'turn' from settings with Stop only" {
   bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status claude-code "$TEST_PROJECT"

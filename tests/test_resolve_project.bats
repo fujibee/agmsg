@@ -226,14 +226,28 @@ JSON
   [ ! -f "$(agmsg_project_marker_path 4242)" ]
 }
 
+@test "marker-gc: sourcing resolve-project.sh alone provides the liveness helper" {
+  # The ancestor walk and the marker GC both decide liveness, and a bare
+  # `kill -0` calls a live-but-unsignalable agent dead. Leaving the helper to
+  # whoever sourced this file is what let that happen, so it is pulled in here.
+  run bash -c '
+    export SKILL_DIR="'"$SKILL_DIR"'"
+    source "$SKILL_DIR/scripts/lib/resolve-project.sh"
+    declare -F _agmsg_pid_alive >/dev/null
+  '
+  [ "$status" -eq 0 ]
+}
+
 @test "marker-gc: skips (keeps marker) when _agmsg_pid_alive is unavailable" {
-  # Guard: without the helper, GC must skip rather than `|| rm -f` a live marker.
-  # Isolated shell sources ONLY resolve-project.sh, so the helper is truly absent.
+  # Defense in depth, now that the helper is sourced above: a caller that unsets
+  # or shadows it must still not reach `|| rm -f`, where a command-not-found
+  # would delete a live agent's marker. Unset it to reach the guard.
   agmsg_write_project_marker 4242 "$ROOT"
   run bash -c '
     export SKILL_DIR="'"$SKILL_DIR"'"
     source "$SKILL_DIR/scripts/lib/resolve-project.sh"
-    declare -F _agmsg_pid_alive >/dev/null && { echo "helper unexpectedly present"; exit 2; }
+    unset -f _agmsg_pid_alive
+    declare -F _agmsg_pid_alive >/dev/null && { echo "helper still defined"; exit 2; }
     agmsg_marker_gc_stale
   '
   [ "$status" -eq 0 ]
