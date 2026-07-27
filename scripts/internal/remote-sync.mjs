@@ -626,7 +626,14 @@ export async function driver(operation, config, input, extra = []) {
     let stdout = ""; let stderr = "";
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      // Forwarded as it arrives, not just quoted back in the failure message: a
+      // bulk seal reports its progress here, and a backfill that only printed
+      // how it went once it had finished would not be progress at all. stdout
+      // is the JSONL event stream, so this is the only channel for it.
+      process.stderr.write(chunk);
+    });
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(["resync-status", "resync"].includes(operation) ?
