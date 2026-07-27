@@ -33,27 +33,48 @@
 [ -n "${_AGMSG_INSTANCE_ID_SH:-}" ] && return 0
 _AGMSG_INSTANCE_ID_SH=1
 
-# Cross-platform pid liveness check. Git Bash's kill(1) only sees MSYS2/Cygwin
-# PIDs; native Windows processes (Claude Code, etc.) are invisible to it, so
-# kill -0 always returns false for them (#134). On Windows we fall back to
-# tasklist.exe which queries the native process table.
+# Cross-platform pid liveness check, and the ONLY one any shipped script should
+# use. A bare `kill -0 "$pid" 2>/dev/null` is not a liveness check: it answers
+# "can I signal this", and the two differ exactly where it matters.
+#
+# Git Bash's kill(1) only sees MSYS2/Cygwin PIDs; native Windows processes
+# (Claude Code, etc.) are invisible to it, so kill -0 always returns false for
+# them (#134). On Windows we fall back to tasklist.exe, which queries the native
+# process table.
+#
+# Everywhere else, saying "dead" requires kill(2) and ps to agree. A failed
+# `kill -0` is ESRCH (dead) or EPERM (alive, but not signalable by us — a
+# sandbox does exactly this). Reading only the exit status reports a live
+# process as gone, which is how a running watcher or bridge gets printed as a
+# stale pidfile, how a live lock owner gets its lock reclaimed out from under
+# it, and how a second app-server gets started beside the first.
 _agmsg_pid_alive() {
-  local pid="$1"
+  local pid="$1" err stat
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   case "${MSYSTEM:-}" in
     MINGW*|MSYS*|CLANGARM*)
       MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
       return $?
       ;;
   esac
-  # A non-zero `kill -0` is ESRCH (dead) or EPERM (alive but unsignalable under
-  # the sandbox). Only ESRCH is dead. `export LC_ALL=C` (not a bare prefix, which
-  # misses the builtin on bash 3.2) forces English error text for the match.
-  local err
+  # Fast path, and the common answer: the builtin, no fork. Callers poll this in
+  # loops whose whole point is to be fork-free (#466), so the alive case must
+  # not cost a subshell.
+  kill -0 "$pid" 2>/dev/null && return 0
+  # Only now pay for the error text. `export LC_ALL=C` (not a bare prefix, which
+  # misses the builtin on bash 3.2) forces English for the match below.
   err="$(export LC_ALL=C; kill -0 "$pid" 2>&1)" && return 0
   case "$err" in
-    *[Nn]'o such process'*) return 1 ;;
-    *) return 0 ;;
+    *[Nn]'o such process'*) ;;
+    *) return 0 ;;   # EPERM and anything unrecognised mean "assume alive"
   esac
+  # kill(2) says gone. ps does not depend on signalling permission at all, so
+  # requiring it to agree is what keeps a sandbox from turning "cannot signal"
+  # into "not running".
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ -n "$stat" ] || return 1
+  case "$stat" in Z*) return 1 ;; esac   # exited, just not reaped yet
+  return 0
 }
 
 # Compose from an explicit pid. Bare sid when pid is empty/non-numeric.
