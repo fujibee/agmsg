@@ -72,6 +72,59 @@ bulk_store() {
   [ "$(cat "$AGMSG_SYNC_TEST_INVOCATION_LOG")" = "seal-batch 60" ]
 }
 
+@test "a batched page carries awkward and large bodies through byte for byte" {
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  export AGMSG_SYNC_NODE_BIN=node
+  export AGMSG_SYNC_CIPHER_HELPER="$SCRIPTS/internal/sync-cipher.mjs"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  storage_init >/dev/null
+  # The page is streamed through paste and two jq passes on its way to the
+  # helper, so a body has to survive a tab-delimited join, a JSON round trip and
+  # a shell here-document unchanged. Every character below has broken one of
+  # those at some point.
+  local -a bodies
+  bodies[0]='he said "hi" and left'
+  bodies[1]='a backslash \ and a \"quoted\" escape'
+  bodies[2]=$'tab\tseparated\tlooks like a delimiter'
+  bodies[3]=$'first line\nsecond line'
+  bodies[4]="$(printf 'x%.0s' $(seq 1 200000))"
+  bodies[5]='単一引用符 '"'"' と絵文字 🔐 と改行なし'
+  local i=0
+  while [ "$i" -lt 6 ]; do
+    storage_send demo alice bob "${bodies[$i]}" >/dev/null
+    i=$((i + 1))
+  done
+
+  local prepare published
+  prepare='{"type":"sync_prepare","envelope_v":1,"cipher":"none","key_id":null,
+            "recipients":[],"max_blob_bytes":1048576,"allow_new":true}'
+  published=$(printf '%s\n' "$prepare" | storage_sync_prepare_push demo \
+    018f3f7e-0000-7000-8000-000000000000 018f3f7e-0000-7000-8000-000000000001 1 100)
+  [ "$(printf '%s\n' "$published" | grep -c sync_push_candidate)" -eq 6 ]
+
+  # Open each envelope and compare the body against what was sent.
+  i=0
+  while [ "$i" -lt 6 ]; do
+    local opened
+    opened=$(printf '%s\n' "$published" | jq -sc --argjson n "$i" \
+        '[.[] | select(.type=="sync_push_candidate")] | sort_by(.local_position|tonumber)
+         | .[$n].envelope' \
+      | node --input-type=module -e '
+          const { openEnvelope } = await import(process.argv[1]);
+          let input = "";
+          for await (const chunk of process.stdin) input += chunk;
+          const message = await openEnvelope({ envelope: JSON.parse(input),
+            max_blob_bytes: 1048576 });
+          process.stdout.write(message.body);
+        ' "$SCRIPTS/internal/sync-cipher.mjs")
+    [ "$opened" = "${bodies[$i]}" ]
+    i=$((i + 1))
+  done
+}
+
 @test "an interrupted bulk seal keeps its committed page and resumes" {
   require_age
   local prepare server_instance remote_team

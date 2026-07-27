@@ -5,9 +5,32 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { driver } from "../scripts/internal/remote-sync.mjs";
-import { runSealBatch, sealBatchParallelism,
+import { runSealBatch, sealBatchParallelism, sealBatchWindows,
   sealEnvelope } from "../scripts/internal/sync-cipher.mjs";
+
+const HELPER = fileURLToPath(new URL("../scripts/internal/sync-cipher.mjs", import.meta.url));
+
+// Run the helper CLI end to end. The point of several of these tests is what
+// the process does with a stream it has not finished reading, so the input has
+// to arrive on a real pipe.
+function runHelper(args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HELPER, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  });
+}
 
 // cipher "none" is deterministic, so a batch envelope can be compared byte for
 // byte against the single-request seal the driver used before. What is under
@@ -135,6 +158,74 @@ test("a request that no worker can complete is reported, not dropped", async () 
   assert.equal(sink.order.length, requests.length);
   assert.deepEqual([...new Set(sink.order)].sort((a, b) => a - b),
     requests.map((_, index) => index));
+});
+
+// A page is bounded by its message count, but a body is legal up to
+// max_blob_bytes, so a legal 1000-message page can be a gigabyte. Holding all
+// of it would turn input a caller is entitled to send into an OOM.
+test("a streamed batch is cut into windows bounded by count and by bytes", async () => {
+  const lines = Array.from({ length: 10 }, (_, index) => JSON.stringify(request(index)));
+
+  const byCount = [];
+  for await (const window of sealBatchWindows(lines, { requests: 4, bytes: 1 << 30 })) {
+    byCount.push(window.length);
+  }
+  assert.deepEqual(byCount, [4, 4, 2]);
+
+  // Byte-bounded: each line here is well over the limit, so no window may hold
+  // more than the one request that crossed it.
+  const byBytes = [];
+  for await (const window of sealBatchWindows(lines, { requests: 1000, bytes: 8 })) {
+    byBytes.push(window.length);
+  }
+  assert.deepEqual(byBytes, Array.from({ length: 10 }, () => 1));
+});
+
+test("windowing does not renumber results the caller has to match up", async () => {
+  // Bodies large enough that the real byte bound cuts the batch into several
+  // windows; indices must still run 0..n-1 across the whole input.
+  const big = "x".repeat(600_000);
+  const requests = Array.from({ length: 30 }, (_, index) => {
+    const value = request(index);
+    value.projection.body = `${index}:${big}`;
+    return value;
+  });
+  const { code, stdout } = await runHelper(["seal-batch", String(requests.length)],
+    `${requests.map((value) => JSON.stringify(value)).join("\n")}\n`);
+  const results = stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+  assert.equal(code, 0);
+  assert.equal(results.length, requests.length);
+  assert.deepEqual(results.map((result) => result.index).sort((a, b) => a - b),
+    requests.map((_, index) => index));
+  for (const result of results) {
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.envelope, sealEnvelope(requests[result.index]));
+  }
+});
+
+// A thread that cannot be created at all — the process is out of them, the
+// system is out of memory. Distinct from a thread that dies while working, and
+// it used to escape the fallback entirely: spawning happened before the
+// try/finally, so a throw skipped both the cleanup and the main-thread sweep.
+test("a pool that cannot be spawned still seals every message", async () => {
+  const requests = Array.from({ length: 20 }, (_, index) => request(index));
+  for (const failFrom of [0, 2]) {
+    const sink = collect(requests.length);
+    let spawned = 0;
+    await runSealBatch(requests, { parallelism: 4, onResult: sink.onResult,
+      spawnWorker: () => {
+        if (spawned >= failFrom) throw new Error("EAGAIN: cannot create thread");
+        spawned += 1;
+        return dyingWorkerFactory({ dieAfter: 1000 })();
+      } });
+
+    assert.equal(sink.order.length, requests.length, `failFrom=${failFrom}`);
+    for (const [index, result] of sink.results.entries()) {
+      assert.equal(result.status, "ok");
+      assert.deepEqual(result.envelope, sealEnvelope(requests[index]));
+    }
+  }
 });
 
 // The seal progress a bulk page reports travels driver stderr -> engine stderr.
