@@ -71,12 +71,15 @@ _agmsg_pid_valid() {
   # tasklist rather than kill(1)'s signed pid_t — applying the POSIX bound to it
   # would call a legitimate native pid dead and its live watcher stale.
   case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) max=4294967295 ;; esac
-  # And it has to fit in pid_t. Past INT32_MAX, kill(1) rejects the ARGUMENT
-  # ("not a pid or valid job spec") rather than reporting ESRCH — and
+  # And it has to fit whichever of those the platform uses. The POSIX ceiling is
+  # what makes the rest of this library safe: past INT32_MAX, kill(1) rejects the
+  # ARGUMENT ("not a pid or valid job spec") rather than reporting ESRCH — and
   # _agmsg_pid_alive reads every non-ESRCH failure as alive, so an oversized
-  # value in a pidfile would read as alive forever: its lock never reclaimed,
-  # its bridge never restarted, its status line permanently wrong. Bounding the
-  # input is what keeps "not ESRCH" meaning "EPERM".
+  # value in a pidfile would read as alive forever: its lock never reclaimed, its
+  # bridge never restarted, its status line permanently wrong. Bounding the input
+  # is what keeps "not ESRCH" meaning "EPERM". The Windows ceiling is a plain
+  # range check on the value tasklist will be asked about; nothing there parses
+  # it as a signal target.
   #
   # Length is a builtin, and the digits are already known to have no leading
   # zero, so at equal length a STRING compare is the numeric one. No `$(( ))`
