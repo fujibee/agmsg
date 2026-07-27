@@ -288,7 +288,7 @@ $agmsg                          — または /skills → agmsg
 
 Codexは `mode monitor` をapp-serverブリッジ経由でサポートし、加えて `mode turn` と `mode off` にも対応している。
 
-> ⚠️ **monitorモードはCodexの起動方法を変える — それを承知した上で有効化すること。** CodexにはMonitorツールがないため、`mode monitor` はインタラクティブシェル内で `codex` をagmsgのmonitorシム経由にルーティングするシェル関数を表示する。monitorモードのプロジェクトでは、このシムがインタラクティブな起動を、受信したagmsgメッセージを現在のCodexスレッドのターンに変換するブリッジ経由にルーティングする。`codex exec` とmonitor対象外のプロジェクトは実物のCodexにそのまま通る。これはCodex app-serverの挙動に依存しており、既知の制限がある（TUIを閉じるとオーファンが残る — #149、プロジェクトごとに1アイデンティティのみ — #150）。
+> ⚠️ **monitorモードはCodexの起動方法を変える — それを承知した上で有効化すること。** CodexにはMonitorツールがないため、`mode monitor` はインタラクティブシェル内で `codex` をagmsgのmonitorシム経由にルーティングするシェル関数を表示する。monitorモードのプロジェクトでは、このシムがインタラクティブな起動を、受信したagmsgメッセージを現在のCodexスレッドのターンに変換するブリッジ経由にルーティングする。`codex exec` とmonitor対象外のプロジェクトは実物のCodexにそのまま通る。これはCodex app-serverの挙動に依存しており、既知の制限がある（TUIを閉じるとオーファンが残る — #149）。
 
 グローバルなPATHシムを好むなら、`~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` を実行し、`~/.agents/bin` を実物のCodexバイナリより前にPATHに置く。`~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh` で直接起動することもできる。Codexのサンドボックスはスキルの `db/`、`teams/`、`run/` ディレクトリへの書き込みを許可する必要がある — `~/.codex/config.toml` が存在する場合、`install.sh` がその `writable_roots` を設定する。セットアップの詳細と内部動作: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md)。
 
