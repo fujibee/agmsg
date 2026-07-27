@@ -152,16 +152,39 @@ teardown() { teardown_test_env; }
   _agmsg_pid_alive 12345
 }
 
+# A pid that is genuinely gone, so the real ps agrees with the stubbed kill.
+# Stubbing kill alone stopped being enough once "dead" required ps to agree:
+# a made-up number like 999 IS a running process on some hosts, which is
+# exactly the case the cross-check exists to catch.
+gone_pid() {
+  local pid
+  pid="$(bash -c 'echo $$')"
+  wait_for_pid_exit "$pid" || true
+  echo "$pid"
+}
+
 @test "pid_alive: ESRCH 'No such process' reads as dead" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
-  kill() { echo "bash: kill: (999) - No such process" >&2; return 1; }
-  ! _agmsg_pid_alive 999
+  local gone; gone="$(gone_pid)"
+  kill() { echo "bash: kill: ($gone) - No such process" >&2; return 1; }
+  ! _agmsg_pid_alive "$gone"
 }
 
 @test "pid_alive: lowercase 'no such process' (zsh wording) also reads as dead" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
-  kill() { echo "kill: (999) - no such process" >&2; return 1; }
-  ! _agmsg_pid_alive 999
+  local gone; gone="$(gone_pid)"
+  kill() { echo "kill: ($gone) - no such process" >&2; return 1; }
+  ! _agmsg_pid_alive "$gone"
+}
+
+@test "pid_alive: ESRCH is not enough while ps still shows the process" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # kill(2) and ps must agree before a pid is called dead. ps does not depend on
+  # signalling permission at all, so it is what stops "cannot signal" from
+  # becoming "not running" — and calling a live pid dead is how a running
+  # owner's lock gets reclaimed out from under it.
+  kill() { echo "bash: kill: ($$) - No such process" >&2; return 1; }
+  _agmsg_pid_alive $$
 }
 
 @test "pid_alive: EPERM 'Operation not permitted' reads as alive (sandbox)" {
@@ -459,6 +482,28 @@ require_eperm_pid() {
   run _agmsg_pid_valid $$;   [ "$status" -eq 0 ]
   run _agmsg_pid_valid "";   [ "$status" -ne 0 ]
   run _agmsg_pid_valid "1x"; [ "$status" -ne 0 ]
+}
+
+@test "instance-id: a pid too large for pid_t is dead, not alive forever" {
+  # Past INT32_MAX kill(1) rejects the ARGUMENT instead of reporting ESRCH, and
+  # everything that is not ESRCH is read as EPERM, i.e. alive. Unbounded, an
+  # oversized value in a pidfile reads as alive forever: its lock is never
+  # reclaimed and its bridge is never restarted.
+  local err
+  err="$(export LC_ALL=C; kill -0 2147483648 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "kill treats out-of-range pids as ESRCH here" ;;
+  esac
+  local bad
+  for bad in 2147483648 4294967296 999999999999999999999; do
+    run _agmsg_pid_valid "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_valid $bad accepted it"; false; }
+    run _agmsg_pid_alive "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive $bad reported alive"; false; }
+  done
+  # The boundary itself is a legal pid value and must still be accepted.
+  run _agmsg_pid_valid 2147483647; [ "$status" -eq 0 ]
+  run _agmsg_pid_valid 9999999;    [ "$status" -eq 0 ]
 }
 
 @test "instance-id: liveness answers alive on the builtin, before any subshell" {

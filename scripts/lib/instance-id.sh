@@ -64,7 +64,20 @@ _AGMSG_INSTANCE_ID_SH=1
 # asking about liveness first can still refuse the values that do not name one
 # process.
 _agmsg_pid_valid() {
-  case "${1:-}" in ''|*[!0-9]*|0*) return 1 ;; esac
+  local pid="${1:-}"
+  case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  # And it has to fit in pid_t. Past INT32_MAX, kill(1) rejects the ARGUMENT
+  # ("not a pid or valid job spec") rather than reporting ESRCH — and
+  # _agmsg_pid_alive reads every non-ESRCH failure as alive, so an oversized
+  # value in a pidfile would read as alive forever: its lock never reclaimed,
+  # its bridge never restarted, its status line permanently wrong. Bounding the
+  # input is what keeps "not ESRCH" meaning "EPERM".
+  #
+  # Length is a builtin, and the digits are already known to have no leading
+  # zero, so at equal length a STRING compare is the numeric one. No `$(( ))`
+  # and no `-gt` on the untrusted value: both evaluate what they are given.
+  [ "${#pid}" -le 10 ] || return 1
+  if [ "${#pid}" -eq 10 ] && [ "$pid" \> "2147483647" ]; then return 1; fi
   return 0
 }
 
