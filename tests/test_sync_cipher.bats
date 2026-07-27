@@ -103,7 +103,9 @@ RUN
   # count early on means "nothing committed yet", not a broken store.
   while [ "$waited" -lt 600 ]; do
     committed=$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_messages;" 2>/dev/null | tr -d '\r')
-    [ -n "$committed" ] && [ "$committed" -gt 0 ] && break
+    # An `A && B && break` list here would be a failing command under bats'
+    # errexit on every iteration that finds nothing yet.
+    if [ -n "$committed" ] && [ "$committed" -gt 0 ]; then break; fi
     sleep 0.1; waited=$((waited + 1))
   done
   kill -TERM "$pid" 2>/dev/null || true
@@ -122,6 +124,9 @@ RUN
   [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_messages;" | tr -d '\r')" -eq 200 ]
   [ "$(agmsg_sqlite "$db" \
      "SELECT COUNT(DISTINCT local_position) FROM sync_messages;" | tr -d '\r')" -eq 200 ]
+  # No message came back with a second wire id, and none went missing.
+  [ "$(agmsg_sqlite "$db" \
+     "SELECT COUNT(DISTINCT wire_id) FROM sync_messages;" | tr -d '\r')" -eq 200 ]
   # Reservations made before the interrupt are immutable — resuming re-seals
   # only what was left, it never re-issues a wire id that already exists.
   after=$(agmsg_sqlite "$db" \
