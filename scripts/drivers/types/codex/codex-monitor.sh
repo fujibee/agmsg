@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Launch Codex with agmsg's app-server bridge enabled.
 #
-# This is a beta convenience wrapper: it hides the shared app-server socket and
+# This is a convenience wrapper: it hides the shared app-server socket and
 # lets session-start.sh launch codex-bridge.js in the background once Codex
 # exposes CODEX_THREAD_ID to hooks.
 

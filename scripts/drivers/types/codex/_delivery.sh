@@ -10,7 +10,7 @@
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
 agmsg_delivery_on_enable() {
-  echo "Codex monitor beta is enabled."
+  echo "Codex monitor is enabled."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
     echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."

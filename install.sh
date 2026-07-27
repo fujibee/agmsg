@@ -68,7 +68,7 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 
 configure_codex_sandbox() {
   # --- Configure Codex sandbox (if Codex is installed) ---
-  # The Codex bridge (beta) writes pidfiles/sockets/request files under the
+  # The Codex bridge writes pidfiles/sockets/request files under the
   # skill's db/, teams/, run/ dirs; Codex's sandbox blocks those writes unless
   # they are listed as writable_roots. See docs/codex-monitor-beta.md.
   local code_config="$HOME/.codex/config.toml"

@@ -22,7 +22,7 @@ const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
 function usage() {
   console.log(`Usage: codex-bridge.js --project <path> [--type codex] [--team <team>] [--name <agent>]
 
-Beta Codex app-server bridge for agmsg pseudo-monitoring.
+Codex app-server bridge for agmsg pseudo-monitoring.
 
 Options:
   --project <path>        Project path to monitor.

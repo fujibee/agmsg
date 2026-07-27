@@ -409,7 +409,7 @@ do_set() {
   esac
   # Second: does THIS type accept the mode? A type declares the modes its CLI
   # accepts via the delivery_modes= manifest key (e.g. codex omits 'both' — the
-  # bridge beta has no both-mode; rule-file types like opencode omit
+  # the bridge has no both-mode; rule-file types like opencode omit
   # 'monitor'/'both'). Reject anything not listed, before any file is touched.
   # Types without the key fall back to the full set so an unconfigured manifest
   # still works.

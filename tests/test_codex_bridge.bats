@@ -58,7 +58,7 @@ EOF
 @test "codex-bridge: help exits successfully" {
   run node "$TYPES/codex/codex-bridge.js" --help
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Beta Codex app-server bridge" ]]
+  [[ "$output" =~ "Codex app-server bridge" ]]
 }
 
 @test "codex-bridge: toPosixPath maps Windows drive paths to POSIX paths" {

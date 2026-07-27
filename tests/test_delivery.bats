@@ -1637,7 +1637,7 @@ EOF
 @test "delivery set monitor (codex): installs SessionStart and prints Codex shell function" {
   run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Codex monitor beta is enabled"* ]]
+  [[ "$output" == *"Codex monitor is enabled"* ]]
   [[ "$output" == *"codex() {"* ]]
   [[ "$output" == *"codex-shim.sh"* ]]
   [[ "$output" == *"launch with codex"* ]]

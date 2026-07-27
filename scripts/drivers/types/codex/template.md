@@ -48,24 +48,25 @@ Four possible outputs:
      ```
      Choose delivery mode for incoming messages:
 
-       1) turn    — Check inbox at the end of each assistant turn
-                    Stop hook pulls after each response. Recommended for Codex.
-
-       2) off     — No automatic delivery
-                    Manual $__SKILL_NAME__ only.
-
-       3) monitor — Real-time push (BETA, advanced)
+       1) monitor — Real-time push
                     Prints a `codex` shell function that routes launches through an
-                    app-server bridge. Opt in ONLY if you accept experimental behavior.
+                    app-server bridge, so it changes how `codex` starts.
                     See docs/codex-monitor-beta.md.
+                    Recommended.
+
+       2) turn    — Check inbox at the end of each assistant turn
+                    Stop hook pulls after each response.
+
+       3) off     — No automatic delivery
+                    Manual $__SKILL_NAME__ only.
 
      [1]:
      ```
 
-     - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`, `3`→`monitor`) and run:
+     - **Wait for the user's answer before proceeding.** Empty input means `1` (monitor).
+     - Map the chosen number to a mode (`1`→`monitor`, `2`→`turn`, `3`→`off`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-     - If monitor is chosen, tell the user: "Codex monitor is a BETA that changes how `codex` starts — it prints a shell function to add to your shell profile. Add the printed function, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+     - If monitor is chosen, tell the user: "Codex monitor changes how `codex` starts — it prints a shell function to add to your shell profile. Add the printed function, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
 
   6. Then check inbox for the newly joined team.
 
@@ -144,9 +145,9 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode monitor"):
-1. Parse the mode. Codex supports `monitor` (beta bridge), `turn`, and `off` — reject `both` with: "Codex bridge beta supports `monitor`, `turn`, or `off`; `both` is not supported yet."
+1. Parse the mode. Codex supports `monitor` (app-server bridge), `turn`, and `off` — reject `both` with: "The Codex bridge supports `monitor`, `turn`, or `off`; `both` is not supported yet."
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> codex "$(pwd)"`
-3. If mode is `monitor`, tell the user: "Codex monitor beta is enabled. Add the printed shell function to your shell profile, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
+3. If mode is `monitor`, tell the user: "Codex monitor is enabled. Add the printed shell function to your shell profile, restart the shell, then launch future sessions with normal `codex`. If you prefer a global PATH shim, run `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` first on PATH. You can also use `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/codex/codex-monitor.sh` for explicit monitor launches. The bridge starts on the **first turn** of a new Codex session (the SessionStart hook fires on your first message, not the moment Codex opens), so **restart your Codex session and send one message for monitor to take effect** — this already-running session stays unmonitored until it restarts. For more info: https://github.com/fujibee/agmsg/blob/main/docs/codex-monitor-beta.md"
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn codex "$(pwd)"`

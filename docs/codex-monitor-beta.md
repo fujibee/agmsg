@@ -1,15 +1,15 @@
-# Codex Monitor Beta
+# Codex Monitor
 
-Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor beta
+Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor
 approximates the same experience by launching Codex through an app-server bridge.
 
-> ⚠️ **Experimental beta — read before enabling.** This changes how Codex starts.
+> ⚠️ **This changes how Codex starts — read before enabling.**
 > Enabling monitor mode prints a shell function that makes `codex` route through
 > agmsg's monitor shim in your interactive shell. In monitor-mode projects the
 > shim re-routes interactive launches through an app-server bridge; everywhere
 > else it passes straight through. **Only enable this if you are comfortable with
-> the `codex` command being intercepted in that shell.** It also depends on Codex
-> app-server behavior and may break as Codex changes. Known rough edges:
+> the `codex` command being intercepted in that shell.** It depends on Codex
+> app-server behavior and may need updating as Codex changes. Known limitations:
 > enabling monitor takes effect only after you **restart Codex and send your
 > first message** — the SessionStart hook fires on the first turn, not the
 > moment Codex opens, so the bridge is absent until you interact once; an

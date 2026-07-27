@@ -35,7 +35,7 @@ case "$cmd" in
     ;;
   function|print-function|shell-function)
     cat <<EOF
-# agmsg Codex monitor beta: put this in your interactive shell profile.
+# agmsg Codex monitor: put this in your interactive shell profile.
 codex() {
   $(shell_quote "$SCRIPT_DIR/codex-shim.sh") "\$@"
 }

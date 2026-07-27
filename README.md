@@ -60,7 +60,7 @@ npx agmsg
 #    OpenCode:     $agmsg
 ```
 
-That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code: `monitor` — real-time push; Codex offers a beta `monitor` bridge or `turn`). After that, you talk to your agent naturally — see [First run](#first-run) below.
+That's it. The slash command prompts you for a team name and an agent name on first use, then asks you to pick a [delivery mode](#delivery-modes) (default on Claude Code and Codex: `monitor` — real-time push; Codex delivers it through a bridge). After that, you talk to your agent naturally — see [First run](#first-run) below.
 
 Prefer to inspect the code first, track the latest `main`, or pick a custom command name? See [Install](#install) below for the `setup.sh` one-liner, `git clone`, and the Claude Code plugin marketplace paths.
 
@@ -300,9 +300,9 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` as a **beta** app-server bridge, plus `mode turn` and `mode off`.
+Codex supports `mode monitor` through an app-server bridge, plus `mode turn` and `mode off`.
 
-> ⚠️ **The monitor beta changes how Codex starts — opt in only if you understand it.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on experimental Codex app-server behavior and has known rough edges (orphans on TUI close — #149; one identity per project — #150).
+> ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has known limitations (orphans on TUI close — #149; one identity per project — #150).
 
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
