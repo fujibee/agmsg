@@ -12,6 +12,47 @@ _sqlite_sync_uuid4() {
     "${h:0:8}" "${h:8:4}" "${h:13:3}" "$variant" "${h:17:3}" "${h:20:12}"
 }
 
+# Reservations are committed in groups rather than one transaction per message:
+# a sqlite3 fork costs far more than the seal it records. The bounds are what
+# an interrupted backfill re-does — at most this many messages, or this much
+# accumulated SQL, are re-sealed by the next prepare. The byte bound also keeps
+# the statement inside ARG_MAX when bodies approach max_blob_bytes.
+_SQLITE_SYNC_COMMIT_CHUNK=50
+_SQLITE_SYNC_COMMIT_BYTES=131072
+
+_sqlite_sync_commit_chunk() {
+  local db="$1" sql="$2"
+  [ -n "$sql" ] || return 0
+  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+$sql
+COMMIT;" >/dev/null 2>&1
+}
+
+# Builtin single-quote escaping, assigned into _SQLITE_SYNC_LIT in the CALLER's
+# shell. _sqlite_lit forks printf|sed per call, which the bulk loop calls three
+# times per message; a `$( )` wrapper here would fork just as surely.
+_sqlite_sync_lit_into() { _SQLITE_SYNC_LIT="${1//\'/\'\'}"; }
+
+# Bulk form of _sqlite_sync_uuid4: one /dev/urandom read and builtin-only
+# formatting for `count` ids. A 1000-message catch-up page costs one fork here
+# instead of one per message.
+_sqlite_sync_uuid4_bulk() {
+  local count="$1" hex out="" i off n
+  local digits=0123456789abcdef
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -ge 1 ] || return 0
+  hex=$(od -An -N$((count * 16)) -tx1 /dev/urandom | tr -d ' \n') || return 1
+  [ "${#hex}" -eq $((count * 32)) ] || return 1
+  for ((i = 0; i < count; i++)); do
+    off=$((i * 32))
+    n=$((16#${hex:$((off + 16)):1}))
+    out="${out}${hex:$off:8}-${hex:$((off + 8)):4}-4${hex:$((off + 13)):3}"
+    out="${out}-${digits:$(((n & 3) | 8)):1}${hex:$((off + 17)):3}-${hex:$((off + 20)):12}
+"
+  done
+  printf '%s' "$out"
+}
+
 _sqlite_sync_valid_binding() {
   printf '%s\n' "$1" | grep -Eq \
     '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' || return 1
@@ -356,15 +397,19 @@ storage_sync_prepare_push() {
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || return 13
   db="$(_sqlite_db)"; tl="$(_sqlite_lit "$team")"
 
-  local rows line pos local_id body at created envelope blob wire
-  local cipher_helper node_bin seal_request q
+  local rows unsealed joined meta requests uuids
+  local pos local_id wire idx status blob q cipher_lit chunk_sql="" chunk_count=0
+  local cipher_helper node_bin pending=0 prepared=0 sealed=0
+  local -a seal_pos seal_local seal_wire
   cipher_helper="${AGMSG_SYNC_CIPHER_HELPER:-$SKILL_DIR/scripts/internal/sync-cipher.mjs}"
   node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
   [ -f "$cipher_helper" ] || return 13
+  # 'reserved' carries the LEFT JOIN's existing wire_id so the immutability
+  # check below is a filter on rows already in hand, not a lookup per message.
   rows=$(_sqlite_data "
     SELECT json_object('local_position',CAST(e.seq AS TEXT),'local_id',e.id,
                        'body',e.body,'at',e.at,'from_agent',e.from_agent,
-                       'to_agent',e.to_agent)
+                       'to_agent',e.to_agent,'reserved',m.wire_id)
       FROM events e
       JOIN sync_bindings b ON b.local_team='$tl'
        AND b.server_instance_id='$server' AND b.remote_team_id='$remote'
@@ -380,69 +425,115 @@ storage_sync_prepare_push() {
      ORDER BY e.seq LIMIT $limit;
   ") || return 13
 
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    pos=$(printf '%s\n' "$line" | jq -r '.local_position')
-    local_id=$(printf '%s\n' "$line" | jq -r '.local_id')
-    # A reservation already produced by an earlier call is immutable.
-    if [ -n "$(agmsg_sqlite "$db" "SELECT wire_id FROM sync_messages WHERE
-        local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
-        AND protocol_version=$protocol AND driver_generation='$generation'
-        AND local_position=$pos;" 2>/dev/null)" ]; then
-      continue
-    fi
-    body=$(printf '%s\n' "$line" | jq -r '.body')
-    [ -n "$body" ] || return 13
-    at=$(printf '%s\n' "$line" | jq -r '.at')
-    case "$at" in ????-??-??T??:??:??Z) created="${at%Z}.000000Z" ;; *) created="$at" ;; esac
-    wire=$(_sqlite_sync_uuid4) || return 13
-    seal_request=$(printf '%s\n' "$line" | jq -c \
-      --arg type sync_seal --arg cipher "$cipher" --arg key "$key_id" \
-      --arg wire "$wire" --arg team_id "$remote" --arg created "$created" \
+  # A reservation an earlier call already produced is immutable: the final
+  # SELECT republishes it verbatim and it is never re-sealed.
+  if [ -n "$rows" ]; then
+    unsealed=$(printf '%s\n' "$rows" | jq -c 'select(.reserved==null)') || return 13
+  fi
+  if [ -n "$unsealed" ]; then
+    pending=$(printf '%s\n' "$unsealed" | wc -l); pending=$((pending))
+  fi
+
+  if [ "$pending" -gt 0 ]; then
+    uuids=$(_sqlite_sync_uuid4_bulk "$pending") || return 13
+    joined=$(paste <(printf '%s\n' "$uuids") <(printf '%s\n' "$unsealed")) || return 13
+    # Two passes over the joined rows: the commit metadata as TSV (all fields
+    # are ids, so @tsv is lossless there), and the seal requests as JSONL. The
+    # request must NOT ride in the TSV — @tsv escapes backslashes, which would
+    # corrupt every body containing a quote.
+    meta=$(printf '%s\n' "$joined" | jq -rR '
+      split("\t") as $pair | ($pair[1] | fromjson) as $row
+      | [$row.local_position, $row.local_id, $pair[0]] | @tsv') || return 13
+    requests=$(printf '%s\n' "$joined" | jq -cR \
+      --arg cipher "$cipher" --arg key "$key_id" --arg team_id "$remote" \
       --argjson version "$version" --argjson protocol "$protocol" \
-      --argjson max_blob "$max_blob" --argjson recipients "$recipients" \
-      '{type:$type,envelope_v:$version,cipher:$cipher,
-        key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
-        wire_id:$wire,team_id:$team_id,protocol_version:$protocol,recipients:$recipients,
-        projection:{body:.body,created_at:$created,from_agent:.from_agent,to_agent:.to_agent}}') || return 13
-    envelope=$(printf '%s\n' "$seal_request" | "$node_bin" "$cipher_helper" seal) || return 13
-    if ! printf '%s\n' "$envelope" | jq -e --arg cipher "$cipher" --argjson key "$key_json" \
-      '.v==1 and .cipher==$cipher and .key_id==$key and (.blob|type)=="string" and (.blob|length)>0' \
-      >/dev/null 2>&1; then
-      printf 'agmsg: cipher helper returned an invalid envelope (%s)\n' \
-        "$(printf '%s\n' "$envelope" | jq -c '{v,cipher,key_id,blob_type:(.blob|type),blob_length:(.blob|length)}' 2>/dev/null || echo unparseable)" >&2
-      return 13
-    fi
-    blob=$(printf '%s\n' "$envelope" | jq -r '.blob // empty')
-    if [ "${AGMSG_SYNC_TEST_ABORT_AFTER_SEAL:-}" = 1 ]; then
-      return 75
-    fi
-    if [ -n "$key_id" ]; then q="'$(_sqlite_lit "$key_id")'"; else q="NULL"; fi
-    # INSERT OR IGNORE makes concurrent prepare calls converge on one winner;
-    # the final SELECT below always emits the committed winner's bytes.
-    agmsg_sqlite "$db" "BEGIN IMMEDIATE;
-      INSERT OR IGNORE INTO sync_messages
-        (local_team,server_instance_id,remote_team_id,protocol_version,
-         driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
-         key_id,blob,direction)
-      VALUES('$tl','$server','$remote',$protocol,'$generation',$pos,
-             '$(_sqlite_lit "$local_id")','$wire',1,'$(_sqlite_lit "$cipher")',$q,
-             '$(_sqlite_lit "$blob")','push');
-      INSERT OR IGNORE INTO sync_read_aliases
-        (local_team,server_instance_id,remote_team_id,protocol_version,
-         driver_generation,agent,local_id,wire_id,server_seq)
-      SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
-             m.driver_generation,e.to_agent,m.local_id,m.wire_id,m.server_seq
-        FROM sync_messages m JOIN events e ON e.seq=m.local_position
-       WHERE m.local_team='$tl' AND m.server_instance_id='$server'
-         AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
-         AND m.driver_generation='$generation' AND m.local_position=$pos
-         AND EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
-           AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id);
-      COMMIT;" >/dev/null 2>&1 || return 13
-  done <<EOF
-$rows
+      --argjson max_blob "$max_blob" --argjson recipients "$recipients" '
+      split("\t") as $pair | ($pair[1] | fromjson) as $row
+      | (if ($row.body | length) == 0 then error("empty message body") else . end)
+      | (if ($row.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+           then ($row.at | .[0:19] + ".000000Z") else $row.at end) as $created
+      | {type:"sync_seal",envelope_v:$version,cipher:$cipher,
+         key_id:(if $key=="" then null else $key end),max_blob_bytes:$max_blob,
+         wire_id:$pair[0],team_id:$team_id,protocol_version:$protocol,
+         recipients:$recipients,
+         projection:{body:$row.body,created_at:$created,
+                     from_agent:$row.from_agent,to_agent:$row.to_agent}}') || return 13
+
+    while IFS=$'\t' read -r pos local_id wire; do
+      [ -n "$pos" ] || continue
+      seal_pos[$prepared]="$pos"; seal_local[$prepared]="$local_id"
+      seal_wire[$prepared]="$wire"; prepared=$((prepared + 1))
+    done <<EOF
+$meta
 EOF
+    [ "$prepared" -eq "$pending" ] || return 13
+    if [ -n "$key_id" ]; then q="'$(_sqlite_lit "$key_id")'"; else q="NULL"; fi
+    cipher_lit="$(_sqlite_lit "$cipher")"
+
+    # The whole page is sealed by one helper invocation, which fans the work out
+    # over worker threads when the page is large enough to be worth it. Results
+    # arrive in COMPLETION order (each carries its request index) and are
+    # committed in groups as they land, so an interrupted run keeps every group
+    # it had already committed and the next prepare re-seals only what is left.
+    while IFS=$'\t' read -r idx status blob; do
+      case "$idx" in ''|*[!0-9]*) continue ;; esac
+      [ "$idx" -lt "$prepared" ] || continue
+      if [ "$status" != ok ] || [ -z "$blob" ]; then
+        printf 'agmsg: cipher helper did not seal message %s (%s)\n' "$idx" "$status" >&2
+        continue
+      fi
+      if [ "${AGMSG_SYNC_TEST_ABORT_AFTER_SEAL:-}" = 1 ]; then
+        return 75
+      fi
+      pos="${seal_pos[$idx]}"; wire="${seal_wire[$idx]}"
+      _sqlite_sync_lit_into "${seal_local[$idx]}"; local_id="$_SQLITE_SYNC_LIT"
+      _sqlite_sync_lit_into "$blob"; blob="$_SQLITE_SYNC_LIT"
+      # INSERT OR IGNORE makes concurrent prepare calls converge on one winner;
+      # the final SELECT below always emits the committed winner's bytes.
+      chunk_sql="$chunk_sql
+        INSERT OR IGNORE INTO sync_messages
+          (local_team,server_instance_id,remote_team_id,protocol_version,
+           driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
+           key_id,blob,direction)
+        VALUES('$tl','$server','$remote',$protocol,'$generation',$pos,
+               '$local_id','$wire',1,'$cipher_lit',$q,'$blob','push');
+        INSERT OR IGNORE INTO sync_read_aliases
+          (local_team,server_instance_id,remote_team_id,protocol_version,
+           driver_generation,agent,local_id,wire_id,server_seq)
+        SELECT m.local_team,m.server_instance_id,m.remote_team_id,m.protocol_version,
+               m.driver_generation,e.to_agent,m.local_id,m.wire_id,m.server_seq
+          FROM sync_messages m JOIN events e ON e.seq=m.local_position
+         WHERE m.local_team='$tl' AND m.server_instance_id='$server'
+           AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
+           AND m.driver_generation='$generation' AND m.local_position=$pos
+           AND EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+             AND r.team=e.team AND r.agent=e.to_agent AND r.msg_id=e.id);"
+      chunk_count=$((chunk_count + 1))
+      if [ "$chunk_count" -ge "$_SQLITE_SYNC_COMMIT_CHUNK" ] ||
+         [ "${#chunk_sql}" -ge "$_SQLITE_SYNC_COMMIT_BYTES" ]; then
+        _sqlite_sync_commit_chunk "$db" "$chunk_sql" || return 13
+        sealed=$((sealed + chunk_count)); chunk_sql=""; chunk_count=0
+      fi
+    done < <(printf '%s\n' "$requests" | "$node_bin" "$cipher_helper" seal-batch \
+      | jq -r --unbuffered --arg cipher "$cipher" --argjson key "$key_json" '
+          select(.type=="sync_seal_result")
+          | [(.index|tostring),
+             (if .status=="ok" and .envelope.v==1 and .envelope.cipher==$cipher
+                 and .envelope.key_id==$key and (.envelope.blob|type)=="string"
+                 and (.envelope.blob|length)>0
+               then "ok" else (.state // .status // "invalid") end),
+             (.envelope.blob // "")] | @tsv')
+    # The loop body runs in THIS shell (process substitution, not a pipeline),
+    # so the trailing partial chunk is still here to commit.
+    if [ "$chunk_count" -gt 0 ]; then
+      _sqlite_sync_commit_chunk "$db" "$chunk_sql" || return 13
+      sealed=$((sealed + chunk_count))
+    fi
+    # A message the helper could not seal stays unsealed and is retried by the
+    # next prepare; failing here keeps that identical to the pre-batch driver,
+    # which also aborted the call while keeping what it had committed.
+    [ "$sealed" -eq "$pending" ] || return 13
+  fi
 
   _sqlite_data "SELECT json_object('type','sync_state','driver_generation',
       '$generation','transport_cursor',transport_cursor)
