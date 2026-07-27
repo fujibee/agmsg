@@ -8,6 +8,14 @@ load test_helper
 
 setup() {
   setup_test_env
+  # Never inherit a real herdr environment from the test runner. A watcher
+  # started here that keeps the host's HERDR_PANE_ID will, on ctrl:despawn,
+  # close the developer's own pane — the suite kills the session running it.
+  # This belongs in setup, not on individual watch.sh launches: guarding each
+  # launch site means every test added later has to remember, and one that
+  # did not (the #439 read_at test, added after this file first grew herdr
+  # awareness) is exactly how a real host pane got closed.
+  unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
   export PROJ="/tmp/agmsg-despawn-proj"
   export RUN="$TEST_SKILL_DIR/run"
   mkdir -p "$RUN"
