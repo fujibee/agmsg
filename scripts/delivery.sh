@@ -9,6 +9,11 @@ set -euo pipefail
 #   delivery.sh stop
 #   delivery.sh restart [<project_path> <type>]
 #
+# `set`'s <project_path> must already exist as a directory, with no
+# surrounding whitespace/newlines -- it is never created implicitly, and a
+# malformed value is rejected rather than silently cleaned up. See
+# agmsg_validate_project_path below (#493).
+#
 # Modes:
 #   monitor  — SessionStart hook → Claude Code Monitor tool → watch.sh stream
 #   turn     — Stop hook → check-inbox.sh between turns (legacy)
@@ -396,10 +401,105 @@ EOF
   echo "$killed"
 }
 
+# Reject a malformed project_path before any delivery-apply implementation
+# gets to build a hooks/rule file path from it and `mkdir -p` the result
+# (#493). Every implementation -- agmsg_delivery_apply_default,
+# rulefile_apply, and the cursor/copilot/grok-build overrides -- shares this
+# file's resolve_hooks_file(), and apply_settings (this function's sole
+# caller) is the only place any of them get invoked from, so validating here
+# once covers every agent type without touching each apply implementation.
+#
+# agmsg's primary callers are LLM agents composing this command from a
+# SKILL.md, so a literal argument carrying a stray trailing newline (unlike a
+# `$(pwd)`-style substitution, which already strips one) is a realistic input,
+# not an exotic edge case -- that is exactly the #493 repro, where such a
+# value got concatenated verbatim into a hooks_file path and mkdir -p'd into a
+# bogus sibling directory nobody asked for.
+#
+# Policy: trim to DETECT (not silently absorb) surrounding whitespace/
+# newlines -- any difference between the raw argument and its trimmed form
+# means the argument was malformed, so it is rejected outright rather than
+# quietly "corrected" to what we guess was meant (a caller that built a bad
+# command deserves a loud error pointing at the exact value it passed, not a
+# value that happens to work this one time and hides the bug in whatever
+# generated it). The existence check + `cd && pwd` canonicalization below
+# mirrors spawn.sh's existing --project handling: an unvalidated project_path
+# must never cause a directory to be created implicitly, so anything that is
+# empty, carries an embedded newline, or does not already exist as a
+# directory is refused rather than created.
+#
+# Echoes the caller's own path spelling back on success (validated, not
+# rewritten); prints an error naming the offending value to stderr and returns
+# non-zero on failure.
+agmsg_validate_project_path() {
+  local raw="$1" trimmed="$1"
+  while :; do
+    case "$trimmed" in
+      " "*|$'\t'*|$'\r'*|$'\n'*) trimmed="${trimmed#?}" ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$trimmed" in
+      *" "|*$'\t'|*$'\r'|*$'\n') trimmed="${trimmed%?}" ;;
+      *) break ;;
+    esac
+  done
+
+  if [ -z "$trimmed" ]; then
+    echo "delivery.sh: project_path is empty or only whitespace: $(printf '%q' "$raw")" >&2
+    return 1
+  fi
+  if [ "$trimmed" != "$raw" ]; then
+    echo "delivery.sh: project_path has leading/trailing whitespace or a newline -- refusing to guess what was meant: $(printf '%q' "$raw")" >&2
+    echo "  pass a clean path (e.g. the output of \"\$(pwd)\")." >&2
+    return 1
+  fi
+  case "$raw" in
+    *$'\n'*|*$'\r'*)
+      # An embedded (not just leading/trailing) newline or CR -- the trim
+      # above only strips the ends, so this catches one hiding in the middle.
+      echo "delivery.sh: project_path contains an embedded newline or carriage return: $(printf '%q' "$raw")" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "$raw" ]; then
+    echo "delivery.sh: project path does not exist: $(printf '%q' "$raw")" >&2
+    echo "  agmsg will not create a project directory implicitly -- pass an existing path (e.g. the output of \"\$(pwd)\")." >&2
+    return 1
+  fi
+  # -d passes for a directory we cannot actually enter, and every apply
+  # implementation goes on to write inside it, so prove traversability here
+  # rather than failing later with a confusing mkdir error. `--` keeps a real
+  # directory named like an option (`-P`, `-L`) from being parsed as one.
+  #
+  # The status is checked explicitly instead of being folded into a
+  # `$(cd ... && pwd)` command substitution: printf returns 0 regardless, so
+  # that shape lets a permission failure sail through as a successful
+  # validation of an empty path -- a validator that fails open is worse than
+  # no validator.
+  if ! ( cd -- "$raw" ) >/dev/null 2>&1; then
+    echo "delivery.sh: project path exists but cannot be entered: $(printf '%q' "$raw")" >&2
+    return 1
+  fi
+
+  # Echo the caller's own spelling back. Canonicalizing here would be a second,
+  # unrequested behavioral change: it rewrites relative paths to absolute and
+  # collapses ./.., so anything downstream that compares or persists this value
+  # would start seeing a different string than the caller passed. #493 is about
+  # refusing malformed input, not about normalizing well-formed input.
+  printf '%s' "$raw"
+}
+
 do_set() {
   local MODE="${1:?Usage: delivery.sh set <mode> <type> <project_path>}"
   local TYPE="${2:?Missing type}"
   local PROJECT="${3:?Missing project_path}"
+
+  # Zeroth stage: the project path itself must be a real, unambiguous
+  # directory before any type-specific logic (which mkdir -p's a path built
+  # from it) runs. See agmsg_validate_project_path above (#493).
+  PROJECT="$(agmsg_validate_project_path "$PROJECT")" || exit 1
 
   # Two-stage validation. First: is this even a real mode? The four mode names
   # are engine vocabulary (not type-specific), so a typo is caught here with a

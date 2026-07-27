@@ -189,6 +189,91 @@ settings_file() {
   [[ "$output" =~ "Unknown mode" ]]
 }
 
+# --- project_path validation (#493) ---
+# `set` used to build a hooks/rule-file path directly from an unvalidated
+# project_path and `mkdir -p` it, so a malformed argument -- e.g. a literal
+# trailing newline byte, the kind an LLM-agent-composed command can produce,
+# as opposed to a `$(pwd)`-style substitution which already strips one --
+# silently created a bogus sibling directory (the exact "myproject\n" repro
+# in #493) and installed hooks into it. agmsg_validate_project_path now
+# rejects a malformed value before any file or directory is touched, rather
+# than silently correcting it -- a caller that built a bad command should see
+# a loud error naming the exact value it passed, not a value that happens to
+# work this one time and hides the bug in whatever generated it.
+
+@test "delivery set: rejects a project_path with a trailing newline and creates no directory (#493 exact repro)" {
+  # Adjacent-quote concatenation appends a literal newline byte to the
+  # argument -- this is the exact #493 repro shape, not a $(cmd) substitution
+  # (which would already have stripped it). $TEST_PROJECT itself exists, so
+  # this also proves the fix does not silently fall back to the trimmed,
+  # pre-existing directory -- it refuses the malformed value outright.
+  local bogus="$TEST_PROJECT"$'\n'
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "leading/trailing whitespace or a newline" ]]
+  # No sibling "<real project>\n" directory (or anything else) was created.
+  [ ! -e "$bogus" ]
+  ! has_session_start "$(settings_file)"
+}
+
+@test "delivery set: rejects a nonexistent project_path and creates no directory" {
+  local bogus="$TEST_PROJECT/does-not-exist"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "project path does not exist" ]]
+  [ ! -e "$bogus" ]
+}
+
+@test "delivery set: rejects an empty project_path" {
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code ""
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Missing project_path" ]]
+}
+
+@test "delivery set: rejects a project_path that exists but cannot be entered" {
+  # -d passes for a directory with no execute bit, but every apply
+  # implementation then writes inside it. Prove we fail here with a clear
+  # message instead of later with a confusing mkdir error.
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "running as root: permission bits do not restrict traversal"
+  fi
+  local locked="$TEST_PROJECT/locked"
+  mkdir -p "$locked"
+  chmod 000 "$locked"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$locked"
+  chmod 755 "$locked"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "cannot be entered" ]]
+}
+
+@test "delivery set: rejects a project_path that is only whitespace" {
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "   "
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "empty or only whitespace" ]]
+}
+
+@test "delivery set: rejects a project_path with leading/trailing spaces, even though the trimmed path exists" {
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "  $TEST_PROJECT  "
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "leading/trailing whitespace or a newline" ]]
+  ! has_session_start "$(settings_file)"
+}
+
+@test "delivery set: rejects a project_path with an embedded newline" {
+  local bogus="$TEST_PROJECT"$'\n'"extra"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "embedded newline" ]]
+  [ ! -e "$bogus" ]
+}
+
+@test "delivery set: a normal valid project_path (the documented \$(pwd) shape) still works end to end" {
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  has_session_start "$(settings_file)"
+}
+
 # --- in-session directives ---
 
 @test "delivery set monitor: emits AGMSG-DIRECTIVE for Monitor invocation" {
