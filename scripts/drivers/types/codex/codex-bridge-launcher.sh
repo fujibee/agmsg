@@ -60,16 +60,31 @@ if [ -z "$LIFETIME_PID" ] || ! kill -0 "$LIFETIME_PID" 2>/dev/null; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
-release_dispatcher_lock() {
-  agmsg_runtime_lock_release "$DISPATCHER_LOCK_RESOURCE" "$$"
+# Resource currently owned by this process, so the EXIT trap releases whichever
+# lock was taken (dispatcher or role child) without a second trap installer.
+HELD_LOCK_RESOURCE=""
+
+release_held_lock() {
+  [ -n "$HELD_LOCK_RESOURCE" ] || return 0
+  agmsg_runtime_lock_release "$HELD_LOCK_RESOURCE" "$$"
 }
 
-acquire_dispatcher_lock() {
+# Acquire <resource>, reclaiming it only from a provably dead owner. Returns 1
+# when a LIVE process already holds it — the caller is then a duplicate and must
+# exit. Used for both the per-project dispatcher lock and the per-role child
+# lock; the semantics (CAS reclaim of a stale generation) are identical.
+#
+# Re-entrant across `exec "$0" ...`: exec keeps the pid, so the row this process
+# already owns is re-acquired by the plain INSERT-OR-IGNORE path on the way back
+# in, which is also what re-installs the trap the exec discarded.
+acquire_runtime_lock() {
+  local resource="$1"
   local owner="" attempt _barrier_attempt _barrier_count
   for attempt in {1..20}; do
-    owner="$(agmsg_runtime_lock_acquire "$DISPATCHER_LOCK_RESOURCE" "$$" 2>/dev/null || true)"
+    owner="$(agmsg_runtime_lock_acquire "$resource" "$$" 2>/dev/null || true)"
     if [ "$owner" = "$$" ]; then
-      trap release_dispatcher_lock EXIT
+      HELD_LOCK_RESOURCE="$resource"
+      trap release_held_lock EXIT
       trap 'exit 0' INT TERM
       return 0
     fi
@@ -89,9 +104,10 @@ acquire_dispatcher_lock() {
     # Replace only the exact stale generation observed above. SQLite serializes
     # both statements with competing reclaimers, so once A replaces stale S
     # with live A, B's `owner = S` delete cannot remove A (true CAS semantics).
-    owner="$(agmsg_runtime_lock_acquire "$DISPATCHER_LOCK_RESOURCE" "$$" "${owner:-0}" 2>/dev/null || true)"
+    owner="$(agmsg_runtime_lock_acquire "$resource" "$$" "${owner:-0}" 2>/dev/null || true)"
     if [ "$owner" = "$$" ]; then
-      trap release_dispatcher_lock EXIT
+      HELD_LOCK_RESOURCE="$resource"
+      trap release_held_lock EXIT
       trap 'exit 0' INT TERM
       return 0
     fi
@@ -113,11 +129,15 @@ resolve_identity() {  # prints "team<TAB>name" lines for the project's codex rol
 # Any change here can change the safe subscription set. Include the request
 # thread plus each role's recorded session/project, not merely registrations:
 # actas/resume rewrites a role record without changing identities.sh output.
+# $1 is this tick's already-resolved identity list. It is passed in rather than
+# re-resolved so one iteration runs identities.sh once, not twice.
 safety_fingerprint() {
+  local identity="$1"
   local request="" team name rec rec_project
   [ -f "$REQUEST_FILE" ] && request="$(cat "$REQUEST_FILE" 2>/dev/null || true)"
   printf 'request=%s\n' "$request"
-  resolve_identity | while IFS="$TAB" read -r team name; do
+  printf '%s\n' "$identity" | while IFS="$TAB" read -r team name; do
+    [ -n "$team" ] || continue
     rec="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
     rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
     printf '%s\t%s\t%s\t%s\n' "$team" "$name" "$rec" "$rec_project"
@@ -129,11 +149,21 @@ safety_fingerprint() {
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
-  acquire_dispatcher_lock || exit 0
+  acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && kill -0 "$LIFETIME_PID" 2>/dev/null; do
     current_pairs="$(resolve_identity || true)"
+    # Forget pairs that are no longer registered. A child now exits by itself
+    # once its own registration is gone, so a stale known_pairs entry would
+    # suppress the respawn if that same pair were registered again later.
+    retained=""
+    while IFS= read -r seen_pair; do
+      [ -n "$seen_pair" ] || continue
+      printf '%s\n' "$current_pairs" | grep -Fxq "$seen_pair" || continue
+      retained="${retained:+$retained$'\n'}$seen_pair"
+    done <<< "$known_pairs"
+    known_pairs="$retained"
     while IFS="$TAB" read -r child_team child_name; do
       [ -n "$child_team" ] || continue
       child_pair="$child_team"$'\t'"$child_name"
@@ -148,14 +178,31 @@ if [ -z "$ROLE_PAIR" ]; then
   exit 0
 fi
 
+# One live child per (project, role) — #485. Children are `nohup`'d and bound to
+# the shared app-server, while the dispatcher runs in the TUI's process group and
+# is killed by the SIGHUP a pane teardown delivers. A replacement dispatcher
+# starts with an empty known_pairs and re-spawns the ENTIRE child set, so without
+# this lock every dispatcher generation left another full set of children behind.
+# The lock makes those re-spawns exit on arrival instead of accumulating.
+CHILD_LOCK_RESOURCE="codex-child:$PROJECT_HASH:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
+acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
+
+# Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
+# already seen registered, so an empty list here is either the brief actas write
+# lag or a role that has genuinely gone away — and the latter arrives via the
+# re-exec below, which would otherwise park the child in this loop for as long as
+# the app-server lives. Giving up is safe: the dispatcher now forgets a pair when
+# its registration disappears, so a re-registered role gets a fresh child.
 ids=""
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+startup_attempts=0
+while kill -0 "$PARENT_PID" 2>/dev/null && [ "$startup_attempts" -lt 20 ]; do
   ids="$(resolve_identity || true)"
   [ -n "$ids" ] && break
+  startup_attempts=$((startup_attempts + 1))
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
-safety_state="$(safety_fingerprint)"
+safety_state="$(safety_fingerprint "$ids")"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -237,11 +284,36 @@ else
   bridge_run=("$NODE_BIN" "$SCRIPT_DIR/codex-bridge.js")
 fi
 
+deregistered_ticks=0
 while kill -0 "$PARENT_PID" 2>/dev/null; do
+  # Resolved once per iteration and threaded through the fingerprint, so a tick
+  # runs identities.sh once rather than twice.
+  current_ids="$(resolve_identity || true)"
+  # This child is scoped to one role (`resolve_identity` filters on ROLE_PAIR),
+  # so an empty list means the role itself is gone. Nothing upstream retires a
+  # child: losing the registration only sends it back through the re-exec, whose
+  # pre-loop then spins for as long as the parent lives. Verified: the child was
+  # still running 10 s after its role was removed. Two consecutive empties are
+  # required because identities.sh also reports empty on a transient read
+  # failure, and exiting on one of those would drop a healthy role's delivery.
+  if [ -z "$current_ids" ]; then
+    deregistered_ticks=$((deregistered_ticks + 1))
+    if [ "$deregistered_ticks" -ge 2 ]; then
+      if [ -f "$pidfile" ]; then
+        old_pid="$(cat "$pidfile" 2>/dev/null || true)"
+        [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+      fi
+      exit 0
+    fi
+    sleep 0.3
+    continue
+  fi
+  deregistered_ticks=0
+
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  latest_state="$(safety_fingerprint)"
+  latest_state="$(safety_fingerprint "$current_ids")"
   if [ "$latest_state" != "$safety_state" ]; then
     if [ -f "$pidfile" ]; then
       old_pid="$(cat "$pidfile" 2>/dev/null || true)"
