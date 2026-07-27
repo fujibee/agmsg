@@ -329,11 +329,11 @@ PS1
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
   local sid="resue-sid-$$"
 
-  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
+  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code 3>&- &
   local first=$!
   wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$first"
 
-  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code &
+  bash "$SK/scripts/watch.sh" "$sid" /tmp/install-projA claude-code 3>&- &
   local second=$!
   wait_for_pidfile_pid "$SK/run/watch.$sid.pid" "$second"
   # The pidfile can flip to $second a beat before $first's TERM trap has

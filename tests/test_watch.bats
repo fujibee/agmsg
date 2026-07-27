@@ -445,7 +445,7 @@ _wait_pidfile() {
   local out="$TEST_SKILL_DIR/burst.log"
   local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
   _wait_for_file "$wm"          # ready to receive (watermark seeded)
 

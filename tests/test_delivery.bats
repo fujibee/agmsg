@@ -316,7 +316,7 @@ _seed_role_record() {
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-test "$TEST_PROJECT" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.stop-test.pid" ]
@@ -369,7 +369,7 @@ JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
   # A live claude-code watcher for this project.
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess "$TEST_PROJECT" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess.pid" ]
@@ -387,7 +387,7 @@ JSON
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess2 "$TEST_PROJECT" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" cc-sess2 "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.cc-sess2.pid" ]
@@ -409,7 +409,7 @@ JSON
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$sp"}]}}}
 JSON
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sp-sess "$sp" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sp-sess "$sp" claude-code 3>&- &
   local watch_pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.sp-sess.pid" ]
@@ -435,7 +435,7 @@ JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
 
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sigterm-test "$TEST_PROJECT" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sigterm-test "$TEST_PROJECT" claude-code 3>&- &
   local pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.sigterm-test.pid" ]
@@ -982,7 +982,7 @@ JSON
   sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'alice', 'for-alice');"
   sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'bob', 'for-bob');"
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code bob > /tmp/agmsg-as-bob 2>&1 &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code bob > /tmp/agmsg-as-bob 2>&1 3>&- &
   local pid=$!
   # High-water-mark = MAX(id) at startup, so prior messages aren't replayed.
   # Insert NEW messages and wait for several poll iterations.
@@ -1079,7 +1079,7 @@ JSON
 
   # Watcher starts with only `alice` registered. Default subscription set
   # is resolved at launch and not re-evaluated each poll.
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 3>&- &
   local pid=$!
   sleep 1
 
@@ -1116,9 +1116,9 @@ JSON
 {"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
 JSON
 
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-a "$proj_a" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-a "$proj_a" claude-code 3>&- &
   local pid_a=$!
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-b "$proj_b" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sid-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.sid-a.pid" ]
@@ -1154,9 +1154,9 @@ JSON
 {"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
 JSON
 
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-a "$proj_a" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-a "$proj_a" claude-code 3>&- &
   local pid_a=$!
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-b "$proj_b" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" off-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
   sleep 1
 
@@ -1186,9 +1186,9 @@ JSON
 {"name":"team-b","agents":{"bob":{"registrations":[{"type":"claude-code","project":"$proj_b"}]}}}
 JSON
 
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-a "$proj_a" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-a "$proj_a" claude-code 3>&- &
   local pid_a=$!
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-b "$proj_b" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" stop-b "$proj_b" claude-code 3>&- &
   local pid_b=$!
   sleep 1
 
@@ -2043,7 +2043,7 @@ EOF
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
-  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code &
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" hermes-preserve-test "$TEST_PROJECT" claude-code 3>&- &
   local watch_pid=$!
   sleep 1
   [ -f "$TEST_SKILL_DIR/run/watch.hermes-preserve-test.pid" ]

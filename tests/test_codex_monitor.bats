@@ -143,7 +143,7 @@ while True:
         c, _ = s.accept(); c.close()
     except Exception:
         pass
-' "$portf" &
+' "$portf" 3>&- &
   local foreign_pid=$!
   while [ ! -s "$portf" ]; do sleep 0.05; done
   local foreign_port; foreign_port="$(cat "$portf")"
