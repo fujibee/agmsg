@@ -74,6 +74,79 @@ rf() {
   printf '%s' "$p" | sed "s/'/''/g"
 }
 
+# --- Bounded condition waits -------------------------------------------------
+#
+# Wait for a condition to become true, polling, instead of sleeping a fixed
+# interval and hoping. A fixed `sleep 1` after launching a watcher is wrong in
+# both directions at once: it costs a whole second when the watcher was ready in
+# 40ms, and it still flakes on a loaded runner where the watcher needs 1.2s.
+# Polling is both faster and steadier, which is why the pattern already existed
+# ad hoc in test_watch.bats, test_install.bats and test_codex_bridge_launcher.bats
+# before it was hoisted here.
+#
+# Each returns non-zero on timeout, so a caller can fail with its own message or
+# clean up a background process first. The 10s ceiling is far above any real
+# local transition and well under the per-job CI timeout.
+#
+# NOTE: these replace waits for a condition that will become TRUE. A test that
+# asserts something does NOT happen cannot poll for it — see the comment at the
+# remaining fixed sleeps in test_delivery.bats.
+
+_WAIT_TICKS=100    # x 0.1s = 10s ceiling
+_WAIT_INTERVAL=0.1
+
+wait_for_file() {
+  local file="$1" i
+  for i in $(seq 1 $_WAIT_TICKS); do
+    [ -f "$file" ] && return 0
+    sleep $_WAIT_INTERVAL
+  done
+  return 1
+}
+
+wait_for_missing() {
+  local path="$1" i
+  for i in $(seq 1 $_WAIT_TICKS); do
+    [ ! -e "$path" ] && return 0
+    sleep $_WAIT_INTERVAL
+  done
+  return 1
+}
+
+wait_for_file_contains() {
+  local file="$1" needle="$2" i
+  for i in $(seq 1 $_WAIT_TICKS); do
+    [ -f "$file" ] && grep -q "$needle" "$file" && return 0
+    sleep $_WAIT_INTERVAL
+  done
+  return 1
+}
+
+# Wait for a process to actually be gone. Writing a pidfile and dying are not
+# atomic, so asserting `! kill -0 $pid` the instant a pidfile disappears races
+# the TERM trap (#124).
+wait_for_pid_exit() {
+  local pid="$1" i
+  for i in $(seq 1 $_WAIT_TICKS); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep $_WAIT_INTERVAL
+  done
+  return 1
+}
+
+# Wait for <file> to contain exactly <expected>, for pidfile handoffs where the
+# file exists throughout but its contents flip to the successor.
+wait_for_file_is() {
+  local file="$1" expected="$2" i
+  for i in $(seq 1 $_WAIT_TICKS); do
+    if [ -f "$file" ] && [ "$(cat "$file" 2>/dev/null)" = "$expected" ]; then
+      return 0
+    fi
+    sleep $_WAIT_INTERVAL
+  done
+  return 1
+}
+
 # Pin a fake-owned session_id under the given run/ directory so the lock
 # liveness check (which runs `kill -0` on cc-instance.<pid>) considers
 # <sid> alive for the duration of the bats process.

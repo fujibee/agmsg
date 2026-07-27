@@ -57,33 +57,6 @@ _max_message_id() {
     agmsg_sqlite "$(agmsg_db_path)" "SELECT COALESCE(MAX(id), 0) FROM messages;" )
 }
 
-_wait_for_file() {
-  local file="$1" i
-  for i in $(seq 1 100); do
-    [ -f "$file" ] && return 0
-    sleep 0.1
-  done
-  return 1
-}
-
-_wait_for_missing() {
-  local file="$1" i
-  for i in $(seq 1 100); do
-    [ ! -e "$file" ] && return 0
-    sleep 0.1
-  done
-  return 1
-}
-
-_wait_for_file_contains() {
-  local file="$1" needle="$2" i
-  for i in $(seq 1 100); do
-    [ -f "$file" ] && grep -q "$needle" "$file" && return 0
-    sleep 0.1
-  done
-  return 1
-}
-
 @test "watch: restart delivers messages that arrived while the watcher was down" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local sid="sess-restart"
@@ -92,9 +65,11 @@ _wait_for_file_contains() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out1.log" 2>/dev/null 3>&- &
   local w1=$!
-  sleep 1.5
+  # The watermark file appears as soon as the mark is taken, which is the
+  # condition the old fixed 1.5s was standing in for.
+  wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
   bash "$SCRIPTS/send.sh" team bob alice "M1-before-stop" >/dev/null
-  sleep 2
+  wait_for_file_contains "$TEST_SKILL_DIR/out1.log" "M1-before-stop"
   kill "$w1" 2>/dev/null || true
   wait "$w1" 2>/dev/null || true
   grep -q "M1-before-stop" "$TEST_SKILL_DIR/out1.log"
@@ -119,9 +94,12 @@ _wait_for_file_contains() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-fresh" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null 3>&- &
   local w=$!
-  sleep 1.5
+  wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "sess-fresh").watermark"
   bash "$SCRIPTS/send.sh" team bob alice "M-live" >/dev/null
-  sleep 2
+  # M-live has a higher id than M0-history, so once it has been streamed the
+  # watcher has passed the history row too — which is what makes the "history
+  # is not replayed" assertion below meaningful rather than merely untimed.
+  wait_for_file_contains "$TEST_SKILL_DIR/fresh.log" "M-live"
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -166,11 +144,11 @@ _wait_for_file_contains() {
   # message right after it appears would race the seed and the row would land at
   # or below the initial watermark and never be "new". The watermark file is
   # written once the watcher is ready to receive.
-  _wait_for_file "$wm"
+  wait_for_file "$wm"
   [ -f "$pf" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "M1-delivered" >/dev/null
-  _wait_for_file_contains "$out" "M1-delivered"
+  wait_for_file_contains "$out" "M1-delivered"
   local first_id="$(_max_message_id)"
 
   # Owning session dies (reap it so kill -0 reports gone, not a zombie), then a
@@ -181,7 +159,7 @@ _wait_for_file_contains() {
   bash "$SCRIPTS/send.sh" team bob alice "M2-undelivered" >/dev/null
   local second_id="$(_max_message_id)"
 
-  _wait_for_missing "$pf" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_missing "$pf" || { kill "$w" 2>/dev/null || true; false; }
   run kill -0 "$w"; [ "$status" -ne 0 ]
   [ "$first_id" != "$second_id" ]
   [ "$(cat "$wm")" = "$first_id" ]
@@ -199,13 +177,13 @@ _wait_for_file_contains() {
     1>&- 2>/dev/null 3>&- &
   local w=$!
 
-  _wait_for_file "$wm"
+  wait_for_file "$wm"
   [ -f "$pf" ]
   local initial="$(cat "$wm")"
 
   bash "$SCRIPTS/send.sh" team bob alice "M-after-closed-stdout" >/dev/null
 
-  _wait_for_missing "$pf" || {
+  wait_for_missing "$pf" || {
     kill "$w" 2>/dev/null || true
     wait "$w" 2>/dev/null || true
     false
@@ -235,9 +213,9 @@ _wait_for_file_contains() {
   local w=$!
   # Wait for the watcher to attach and signal readiness.
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 1 50); do
     [ -e "$ready" ] && break
-    sleep 0.5
+    sleep 0.1
   done
   [ -e "$ready" ]
   kill "$w" 2>/dev/null || true
@@ -259,7 +237,7 @@ _wait_for_file_contains() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-own" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local w=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
+  for i in $(seq 1 50); do [ -e "$ready" ] && break; sleep 0.1; done
   # watch.sh stamps the instance id (composite under an agent ancestor).
   [ "$(cat "$ready")" = "$(_iid sess-own)" ]
   kill "$w" 2>/dev/null || true
@@ -271,7 +249,7 @@ _wait_for_file_contains() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-old" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local w=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$ready" ] && break; sleep 0.5; done
+  for i in $(seq 1 50); do [ -e "$ready" ] && break; sleep 0.1; done
   # A successor watcher overwrites the sentinel with its own id.
   printf 'sess-new\n' > "$ready"
   kill "$w" 2>/dev/null || true
@@ -295,7 +273,7 @@ _wait_for_file_contains() {
   local iid
   iid=$(_iid "sess1")
   local pf="$TEST_SKILL_DIR/run/watch.$iid.pid"
-  _wait_for_file "$pf"
+  wait_for_file "$pf"
 
   # Record cc-instance so the dedup path sees "same instance".
   echo "$iid" > "$TEST_SKILL_DIR/run/cc-instance.$$"
@@ -423,7 +401,10 @@ _wait_pidfile() {
   local out="$BATS_TEST_TMPDIR/hc.out"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local pid=$!
-  sleep 2                     # > one poll interval; a spinning watcher would re-emit
+  # Stays a fixed sleep, deliberately: the assertion is that NOTHING further is
+  # emitted, and there is no event to poll for when the expected outcome is the
+  # absence of one. Must stay > one poll interval.
+  sleep 2
   kill "$pid" 2>/dev/null || true   # no-op if the healthcheck already exited
   wait "$pid" 2>/dev/null || true
   chmod 644 "$DB" 2>/dev/null || true
@@ -447,7 +428,7 @@ _wait_pidfile() {
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file "$wm"          # ready to receive (watermark seeded)
+  wait_for_file "$wm"          # ready to receive (watermark seeded)
 
   local n
   for n in 1 2 3 4 5 6 7 8; do
@@ -455,7 +436,7 @@ _wait_pidfile() {
   done
 
   # Wait for the last one to arrive, then assert EVERY message is present.
-  _wait_for_file_contains "$out" "BURST-8" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" "BURST-8" || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -470,9 +451,9 @@ _wait_pidfile() {
   local pid=$!
   # A fallback id means a watch.agmsg-*.pid appears under run/ as the watcher arms.
   local i started=0
-  for i in $(seq 1 25); do
+  for i in $(seq 1 50); do
     if ls "$TEST_SKILL_DIR/run"/watch.agmsg-*.pid >/dev/null 2>&1; then started=1; break; fi
-    sleep 0.2
+    sleep 0.1
   done
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   [ "$started" -eq 1 ]
@@ -524,9 +505,9 @@ _wait_pidfile() {
   local pid=$!
   # Folded to empty => a generated fallback id, so a watch.agmsg-*.pid appears.
   local i started=0
-  for i in $(seq 1 25); do
+  for i in $(seq 1 50); do
     if ls "$TEST_SKILL_DIR/run"/watch.agmsg-*.pid >/dev/null 2>&1; then started=1; break; fi
-    sleep 0.2
+    sleep 0.1
   done
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   [ "$started" -eq 1 ]
@@ -556,12 +537,12 @@ _read_at_for_body() {
   # Wait for the watcher to actually attach (watermark file appears) before
   # sending, instead of a fixed sleep — avoids flakiness on a slow/loaded CI
   # runner (2026-07-19 review finding).
-  _wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
+  wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
     || { kill "$w" 2>/dev/null || true; false; }
   bash "$SCRIPTS/send.sh" team bob alice "M-readat-check" >/dev/null
 
   # Delivered live...
-  _wait_for_file_contains "$out" "M-readat-check" \
+  wait_for_file_contains "$out" "M-readat-check" \
     || { kill "$w" 2>/dev/null || true; false; }
   # ...and read_at follows shortly after delivery — poll instead of a fixed
   # sleep for the same flakiness reason.
@@ -592,14 +573,14 @@ _read_at_for_body() {
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
+  wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" \
     || { kill "$w" 2>/dev/null || true; false; }
 
   bash "$SCRIPTS/send.sh" team bob alice "M-broad-guard-alice" >/dev/null
   bash "$SCRIPTS/send.sh" team bob bob "M-broad-guard-bob" >/dev/null
 
   # Both stream through this broad watcher (PAIRS covers every project role)...
-  _wait_for_file_contains "$out" "M-broad-guard-bob" \
+  wait_for_file_contains "$out" "M-broad-guard-bob" \
     || { kill "$w" 2>/dev/null || true; false; }
 
   # ...but only bob's (no exclusive owner) gets marked read by this watcher.
@@ -655,14 +636,14 @@ _despawn_under_herdr() {
     bash "$SCRIPTS/watch.sh" sess-herdr "$PROJ" claude-code alice \
     >/dev/null 2>"$errlog" 3>&- &
   local wpid=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.5
+  for i in $(seq 1 50); do
+    [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.1
   done
   [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "$wpid" 2>/dev/null || break; sleep 0.5
+  for i in $(seq 1 50); do
+    kill -0 "$wpid" 2>/dev/null || break; sleep 0.1
   done
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
