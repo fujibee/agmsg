@@ -645,7 +645,7 @@ STUB
   done
   [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
 
-  bash "$SCRIPTS/send.sh" team boss alice "ctrl:despawn" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
   # Wait for the watcher to process the message and exit.
   for i in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$wpid" 2>/dev/null || break; sleep 0.5
