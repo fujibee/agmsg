@@ -398,7 +398,10 @@ while _agmsg_pid_alive "$PARENT_PID"; do
       if [ -f "$pidfile" ]; then
         old_pid=""
         IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-        [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+        # _agmsg_pid_valid, not just non-empty: `kill 0` signals this
+        # launcher's own process group, so a corrupt pidfile would tear down
+        # the dispatcher and its siblings instead of one stale bridge.
+        _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
       fi
       exit 0
     fi
@@ -415,7 +418,7 @@ while _agmsg_pid_alive "$PARENT_PID"; do
     if [ -f "$pidfile" ]; then
       old_pid=""
       IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
     fi
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi

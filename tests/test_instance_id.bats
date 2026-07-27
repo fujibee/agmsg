@@ -443,6 +443,24 @@ require_eperm_pid() {
   run _agmsg_pid_alive $$;     [ "$status" -eq 0 ]
 }
 
+@test "instance-id: 0 is not a live pid, it is this process group" {
+  # `kill -0 0` SUCCEEDS: 0 addresses the caller's own process group, not pid 0.
+  # A digits-only check therefore called 0 alive, and callers kill whatever this
+  # reports alive — `kill 0` TERMs the group, the caller included. All it takes
+  # is a pidfile holding 0.
+  run kill -0 0; [ "$status" -eq 0 ]
+  local bad
+  for bad in 0 00 000 0123; do
+    run _agmsg_pid_alive "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive $bad reported alive"; false; }
+    run _agmsg_pid_valid "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_valid $bad accepted it"; false; }
+  done
+  run _agmsg_pid_valid $$;   [ "$status" -eq 0 ]
+  run _agmsg_pid_valid "";   [ "$status" -ne 0 ]
+  run _agmsg_pid_valid "1x"; [ "$status" -ne 0 ]
+}
+
 @test "instance-id: liveness answers alive on the builtin, before any subshell" {
   # The launcher polls liveness in loops that were deliberately made fork-free
   # (#466/#496). Routing them through a helper is only acceptable while the

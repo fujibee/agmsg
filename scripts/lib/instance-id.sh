@@ -48,9 +48,29 @@ _AGMSG_INSTANCE_ID_SH=1
 # process as gone, which is how a running watcher or bridge gets printed as a
 # stale pidfile, how a live lock owner gets its lock reclaimed out from under
 # it, and how a second app-server gets started beside the first.
+# True iff <value> is a plain positive decimal pid, i.e. a value that names one
+# process when handed to kill(1).
+#
+# Digits-only is NOT enough. `kill -0 0` does not ask about pid 0 — 0 means "the
+# caller's own process group" — so it succeeds, and a caller that then runs
+# `kill "$pid"` TERMs the whole group, itself included. A corrupt or hostile
+# pidfile holding 0 is all it takes. A leading zero is rejected for a related
+# reason: nothing here writes one, and kill(1) may read it as octal, so it names
+# an unpredictable process.
+#
+# Patterns only, never `$(( ))`: arithmetic evaluation runs its argument.
+#
+# Split out from _agmsg_pid_alive so a caller that kills a recorded pid WITHOUT
+# asking about liveness first can still refuse the values that do not name one
+# process.
+_agmsg_pid_valid() {
+  case "${1:-}" in ''|*[!0-9]*|0*) return 1 ;; esac
+  return 0
+}
+
 _agmsg_pid_alive() {
   local pid="$1" err stat
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  _agmsg_pid_valid "$pid" || return 1
   case "${MSYSTEM:-}" in
     MINGW*|MSYS*|CLANGARM*)
       MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
@@ -296,7 +316,7 @@ agmsg_reap_orphan_grok_watchers() {
   # Default IFS so `read` splits the leading pid column off the rest as args; an
   # empty IFS would put the whole line in $pid and match nothing.
   while read -r pid args; do
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    _agmsg_pid_valid "$pid" || continue
     [ -n "${args:-}" ] || continue
     [ "$pid" = "$self" ] && continue
     agmsg_args_is_grok_watcher "$args" "$project" || continue
