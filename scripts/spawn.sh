@@ -585,6 +585,33 @@ is_herdr_env() {
     && command -v herdr >/dev/null 2>&1
 }
 
+# Extract one string field from a herdr JSON response by explicit path.
+#
+# herdr returns structured JSON, so the pane id must be addressed by path, not
+# by text matching. A greedy regex over the whole response picks the LAST
+# "pane_id" in it, which succeeds against a response carrying more than one
+# pane object and hands back somebody else's pane — the caller would then
+# rename it, run the boot script in it, and persist that id as the placement
+# record. Key order is not a contract either: a reordered or nested field
+# breaks a `[^}]*`-delimited match. sqlite3's JSON1 is already a core
+# dependency (whoami.sh, api.sh), so address the value directly.
+#
+# Fail closed: invalid JSON, a missing path, a non-string value, or an empty
+# string all yield empty output, and every caller treats empty as fatal.
+herdr_json_str() {
+  local resp="$1" path="$2" esc
+  esc="$(printf '%s' "$resp" | sed "s/'/''/g")"
+  agmsg_sqlite_mem "
+    WITH raw(json) AS (SELECT '$esc'),
+    doc(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
+    SELECT CASE
+             WHEN json_type(json, '$path') = 'text'
+             THEN json_extract(json, '$path')
+           END
+    FROM doc;
+  " 2>/dev/null
+}
+
 launch_in_herdr() {
   local new_id resp
   if [ "$TMUX_TARGET" = "window" ]; then
@@ -597,14 +624,14 @@ launch_in_herdr() {
     fi
     resp="$(herdr tab create --workspace "$ws" --label "$NAME" --cwd "$PROJECT" 2>&1)" \
       || die "herdr tab create failed: $resp"
-    new_id="$(printf '%s' "$resp" | sed -n 's/.*"root_pane":{[^}]*"pane_id":"\([^"]*\)".*/\1/p')"
-    [ -n "$new_id" ] || die "herdr tab create: could not extract pane_id from response: $resp"
+    new_id="$(herdr_json_str "$resp" '$.result.root_pane.pane_id')"
+    [ -n "$new_id" ] || die "herdr tab create: could not read result.root_pane.pane_id from response: $resp"
   else
     local dir="right"; [ "$SPLIT" = "v" ] && dir="down"
     resp="$(herdr pane split "$HERDR_PANE_ID" --direction "$dir" --no-focus --cwd "$PROJECT" 2>&1)" \
       || die "herdr pane split failed: $resp"
-    new_id="$(printf '%s' "$resp" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')"
-    [ -n "$new_id" ] || die "herdr pane split: could not extract pane_id from response: $resp"
+    new_id="$(herdr_json_str "$resp" '$.result.pane.pane_id')"
+    [ -n "$new_id" ] || die "herdr pane split: could not read result.pane.pane_id from response: $resp"
   fi
   herdr pane rename "$new_id" "$NAME" >/dev/null 2>&1 || true
   herdr pane run "$new_id" "$BOOT" 2>/dev/null \
