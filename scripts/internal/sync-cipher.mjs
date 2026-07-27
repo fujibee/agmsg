@@ -557,7 +557,6 @@ export async function runSealBatch(requests, options = {}) {
 
   const spawn = options.spawnWorker ?? spawnSealWorker;
   const clients = [];
-  for (let worker = 0; worker < parallelism; worker += 1) clients.push(sealWorkerClient(spawn));
 
   const drive = async (client) => {
     for (let index = take(); index !== -1; index = take()) {
@@ -578,6 +577,13 @@ export async function runSealBatch(requests, options = {}) {
   };
 
   try {
+    // Spawning belongs inside this boundary. A thread that cannot be created —
+    // the process is out of them, the system is out of memory — must leave the
+    // workers already spawned terminable and must still reach the main-thread
+    // sweep below. Whatever was created is the pool; zero is a valid pool.
+    for (let worker = 0; worker < parallelism; worker += 1) {
+      try { clients.push(sealWorkerClient(spawn)); } catch { break; }
+    }
     await Promise.all(clients.map((client) => drive(client)));
   } finally {
     // Unconditional: a throw out of onResult must not leave live threads
