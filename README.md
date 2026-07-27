@@ -383,6 +383,10 @@ Yes. Messages live in SQLite and survive sessions. `history.sh <team>` replays t
 
 The message store is effectively a replay log. There's no one-shot "rehydrate from room X" command yet, but `history.sh` gives you the transcript and you can prompt a new agent with it. Treat persistence as the unlock that makes that possible.
 
+**How do you pronounce it?**
+
+"AG message" (ay-jee message), or spelled out as A-G-M-S-G. Either is fine.
+
 ## Update
 
 ```bash
