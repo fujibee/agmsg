@@ -209,19 +209,24 @@ poll_sleep() {
 # actas/resume rewrites a role record without changing identities.sh output.
 # $1 is this tick's already-resolved identity list. It is passed in rather than
 # re-resolved so one iteration runs identities.sh once, not twice.
-safety_fingerprint() {
+#
+# Assigns to SAFETY_STATE instead of printing, and reads the roles with a
+# herestring rather than a pipeline, so the whole thing runs in the caller's
+# shell. Both matter: agmsg_role_session_load memoizes the record path, and a
+# memo written inside a command substitution or a pipeline subshell is
+# discarded the moment it is useful.
+build_safety_state() {
   local identity="$1"
-  local request="" team name rec rec_project
+  local request="" team name
   if [ -f "$REQUEST_FILE" ]; then
     IFS= read -r request < "$REQUEST_FILE" 2>/dev/null || true
   fi
-  printf 'request=%s\n' "$request"
-  printf '%s\n' "$identity" | while IFS="$TAB" read -r team name; do
+  SAFETY_STATE="request=$request"
+  while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
-    rec="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
-    rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
-    printf '%s\t%s\t%s\t%s\n' "$team" "$name" "$rec" "$rec_project"
-  done
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT"
+  done <<< "$identity"
 }
 
 # actas may register the role a moment after launch, so retry while the parent
@@ -285,7 +290,8 @@ while kill -0 "$PARENT_PID" 2>/dev/null && [ "$startup_attempts" -lt 20 ]; do
   sleep 0.3
 done
 [ -n "$ids" ] || exit 0
-safety_state="$(safety_fingerprint "$ids")"
+build_safety_state "$ids"
+safety_state="$SAFETY_STATE"
 
 # Safety over delivery (#150): a role-session record identifies the thread that
 # owns a role. Never inject that role's inbox into a different live TUI. Roles
@@ -303,9 +309,12 @@ safe_ids=""
 raw_identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
 while IFS="$TAB" read -r candidate_team candidate_name; do
   [ -n "$candidate_team" ] || continue
-  candidate_thread="$(agmsg_role_session_uuid "$candidate_team" "$candidate_name" 2>/dev/null || true)"
+  # This loop runs in the launcher's own shell (herestring, not a pipeline), so
+  # it is also what warms the record-path memo for the rest of the process.
+  agmsg_role_session_load "$candidate_team" "$candidate_name" 2>/dev/null || true
+  candidate_thread="$AGMSG_ROLE_SESSION_UUID"
   if [ -n "$candidate_thread" ]; then
-    candidate_project="$(agmsg_role_session_get "$candidate_team" "$candidate_name" project 2>/dev/null || true)"
+    candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
     # A record for another project proves this role's current seat is elsewhere:
     # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
@@ -396,8 +405,8 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   # actas can join a second role after SessionStart. Re-exec through the same
   # safety filter when the registration set changes, replacing the old bridge
   # so the new role is actually subscribed instead of being stranded.
-  latest_state="$(safety_fingerprint "$current_ids")"
-  if [ "$latest_state" != "$safety_state" ]; then
+  build_safety_state "$current_ids"
+  if [ "$SAFETY_STATE" != "$safety_state" ]; then
     if [ -f "$pidfile" ]; then
       old_pid=""
       IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
@@ -424,8 +433,9 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
   IFS="$TAB" read -r team name <<EOF
 $ids
 EOF
-  rec_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
-  rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
+  agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+  rec_thread="$AGMSG_ROLE_SESSION_UUID"
+  rec_project="$AGMSG_ROLE_SESSION_PROJECT"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ]; then
     # A role with no record (or one seated in another project) stays

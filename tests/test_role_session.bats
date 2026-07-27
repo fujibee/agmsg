@@ -201,3 +201,69 @@ fake_session() {
   bash "$SKILL_DIR/scripts/actas-claim.sh" /tmp/p1 claude-code alice "sid-me" >/dev/null
   [ "$(agmsg_role_session_uuid T alice)" = "sid-me" ]
 }
+
+@test "role-session: resolving the same pair twice re-uses the memoized path (#466)" {
+  # The memo only counts if it survives the call. A helper that mutates state
+  # inside `$(...)` writes it into a subshell that is discarded immediately,
+  # which is the regression this pins: once a pair has been resolved in a shell,
+  # neither a repeat there nor a later subshell may re-run the encode.
+  run bash -c '
+    set -uo pipefail
+    export SKILL_DIR="'"$TEST_SKILL_DIR"'"
+    . "$SKILL_DIR/scripts/lib/role-session.sh"
+    eval "$(declare -f _actas_lock_encode | sed "1s/_actas_lock_encode/_orig_encode/")"
+    # The counter is a file, not a variable: _actas_lock_encode is itself
+    # invoked as $(...), so an in-memory counter would be incremented inside
+    # that subshell and never seen here.
+    TALLY="$(mktemp)"
+    _actas_lock_encode() { echo x >> "$TALLY"; _orig_encode "$@"; }
+    calls() { wc -l < "$TALLY" | tr -d " "; }
+
+    : > "$TALLY"
+    agmsg_role_session_load team alice
+    cold=$(calls)
+
+    : > "$TALLY"
+    agmsg_role_session_load team alice
+    repeat=$(calls)
+
+    # A subshell forked after the memo is warm inherits it and must stay free.
+    : > "$TALLY"
+    u="$(agmsg_role_session_uuid team alice)"
+    via_subshell=$(calls)
+
+    : > "$TALLY"
+    agmsg_role_session_load team bob
+    other=$(calls)
+
+    rm -f "$TALLY"
+    echo "cold=$cold repeat=$repeat via_subshell=$via_subshell other=$other"
+  '
+  [ "$status" -eq 0 ]
+  eval "$(printf '%s\n' "$output" | tr ' ' '\n')"
+  # A cold pair pays the encode; nothing after it does, in this shell or in a
+  # subshell forked from it. A different pair is cold again.
+  [ "$cold" -ge 1 ]
+  [ "$repeat" -eq 0 ]
+  [ "$via_subshell" -eq 0 ]
+  [ "$other" -ge 1 ]
+}
+
+@test "role-session: load returns the same values as the single-field getters" {
+  run bash -c '
+    set -uo pipefail
+    export SKILL_DIR="'"$TEST_SKILL_DIR"'"
+    . "$SKILL_DIR/scripts/lib/role-session.sh"
+    agmsg_role_session_record "team x" "エージェント/1" sid-9 "/p/q r" codex
+    agmsg_role_session_load "team x" "エージェント/1"
+    u="$(agmsg_role_session_uuid "team x" "エージェント/1")"
+    p="$(agmsg_role_session_get "team x" "エージェント/1" project)"
+    [ "$AGMSG_ROLE_SESSION_UUID" = "$u" ] || { echo "uuid mismatch: [$AGMSG_ROLE_SESSION_UUID] vs [$u]"; exit 1; }
+    [ "$AGMSG_ROLE_SESSION_PROJECT" = "$p" ] || { echo "project mismatch: [$AGMSG_ROLE_SESSION_PROJECT] vs [$p]"; exit 1; }
+    agmsg_role_session_load nosuch nobody
+    [ -z "$AGMSG_ROLE_SESSION_UUID" ] && [ -z "$AGMSG_ROLE_SESSION_PROJECT" ] || { echo "absent record not empty"; exit 1; }
+    echo "OK u=$u p=$p"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK u=sid-9 p=/p/q r"* ]]
+}

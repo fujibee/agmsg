@@ -44,12 +44,19 @@ fi
 # Compute the record file path for (team, agent). Same encoding + dir as the
 # actas lock, distinct prefix (role-session. vs actas.), no .session suffix.
 #
-# Memoized per process. The result is a pure function of (SKILL_DIR, team,
-# agent), but computing it costs three command substitutions and two awk
-# processes, and the codex bridge launcher re-derives it for the same handful of
-# pairs on every poll iteration for the lifetime of an app-server. SKILL_DIR is
-# part of the key so a caller that relocates the skill root mid-process (tests
-# do) simply misses the cache rather than reading a stale path.
+# Memoized per shell. The result is a pure function of (SKILL_DIR, team, agent),
+# but computing it costs three command substitutions and two awk processes, and
+# the codex bridge launcher re-derives it for the same handful of pairs on every
+# poll iteration for the lifetime of an app-server. SKILL_DIR is part of the key
+# so a caller that relocates the skill root mid-process (tests do) simply misses
+# the cache rather than reading a stale path.
+#
+# IMPORTANT: a cache entry is only kept when the helper runs in the caller's own
+# shell. `path="$(_agmsg_role_session_path ...)"` computes the entry inside a
+# command substitution and throws it away with the subshell, so a caller that
+# only ever invokes it that way pays full price every time. Use the _into form
+# below from a long-lived shell; subshells forked afterwards inherit the warm
+# cache and read from it.
 #
 # Parallel arrays, not an associative array: macOS ships bash 3.2, which has
 # none. The pair count is a handful, so the linear scan is cheaper than the
@@ -60,24 +67,57 @@ _AGMSG_RS_PATH_KEYS=()
 _AGMSG_RS_PATH_VALS=()
 _AGMSG_RS_PATH_MAX=64
 
-_agmsg_role_session_path() {
+# Sets _AGMSG_ROLE_SESSION_PATH in the CALLER's shell, so the memo survives.
+_agmsg_role_session_path_into() {
   local team="$1" agent="$2" t a key i n
   key="${SKILL_DIR}"$'\x1f'"${team}"$'\x1f'"${agent}"
   n=${#_AGMSG_RS_PATH_KEYS[@]}
   for ((i = 0; i < n; i++)); do
     if [ "${_AGMSG_RS_PATH_KEYS[$i]}" = "$key" ]; then
-      printf '%s' "${_AGMSG_RS_PATH_VALS[$i]}"
+      _AGMSG_ROLE_SESSION_PATH="${_AGMSG_RS_PATH_VALS[$i]}"
       return 0
     fi
   done
-  local path
   t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
-  path="$(_actas_lock_dir)/role-session.${t}__${a}"
+  _AGMSG_ROLE_SESSION_PATH="$(_actas_lock_dir)/role-session.${t}__${a}"
   if [ "$n" -lt "$_AGMSG_RS_PATH_MAX" ]; then
     _AGMSG_RS_PATH_KEYS[$n]="$key"
-    _AGMSG_RS_PATH_VALS[$n]="$path"
+    _AGMSG_RS_PATH_VALS[$n]="$_AGMSG_ROLE_SESSION_PATH"
   fi
-  printf '%s' "$path"
+  return 0
+}
+
+# stdout form, for callers that are not in a hot loop.
+_agmsg_role_session_path() {
+  _agmsg_role_session_path_into "$1" "$2"
+  printf '%s' "$_AGMSG_ROLE_SESSION_PATH"
+}
+
+# Read the two fields the codex bridge launcher needs in ONE pass, into the
+# caller's shell: AGMSG_ROLE_SESSION_UUID and AGMSG_ROLE_SESSION_PROJECT. Both
+# are empty when the record or the field is absent. This exists so the poll path
+# can resolve a role without a single command substitution -- the getters below
+# are fine one-shot, but each one costs a subshell and its own read of the same
+# file, and the launcher wants both fields for the same pair several times a
+# second. First match wins per field, matching the getters exactly.
+agmsg_role_session_load() {
+  local team="$1" agent="$2" line path have_uuid=0 have_project=0
+  AGMSG_ROLE_SESSION_UUID=""
+  AGMSG_ROLE_SESSION_PROJECT=""
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  [ -f "$path" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      session=*)
+        [ "$have_uuid" = "1" ] || { AGMSG_ROLE_SESSION_UUID="${line#session=}"; have_uuid=1; }
+        ;;
+      project=*)
+        [ "$have_project" = "1" ] || { AGMSG_ROLE_SESSION_PROJECT="${line#project=}"; have_project=1; }
+        ;;
+    esac
+  done < "$path" 2>/dev/null
+  return 0
 }
 
 # Record (team, agent) -> <bare_sid> for <project>. Latest session wins
@@ -102,7 +142,8 @@ agmsg_role_session_record() {
   local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts
-  path="$(_agmsg_role_session_path "$team" "$agent")" || return 0
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
   dir="$(_actas_lock_dir)"
   mkdir -p "$dir" 2>/dev/null || return 0
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
@@ -125,8 +166,8 @@ agmsg_role_session_record() {
 # hook reading `type`); mirrors agmsg_role_session_uuid's read of `session`.
 agmsg_role_session_get() {
   local team="$1" agent="$2" key="$3" path
-  path="$(_agmsg_role_session_path "$team" "$agent")" || return 0
-  _agmsg_role_session_field "$path" "$key"
+  _agmsg_role_session_path_into "$team" "$agent"
+  _agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" "$key"
 }
 
 # Read a single field from a record file. Empty if file/field absent.
@@ -151,8 +192,8 @@ _agmsg_role_session_field() {
 # This is the primary getter used by the boot wrapper (PR-C).
 agmsg_role_session_uuid() {
   local team="$1" agent="$2" path
-  path="$(_agmsg_role_session_path "$team" "$agent")" || return 0
-  _agmsg_role_session_field "$path" session
+  _agmsg_role_session_path_into "$team" "$agent"
+  _agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" session
 }
 
 # Scan run/role-session.* for the record whose name= field equals <name> and
