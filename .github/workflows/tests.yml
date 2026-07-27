@@ -1,20 +1,34 @@
 name: tests
 
-# Run the full Bats suite on every PR and on pushes to main. The suite is
-# fast (~2 min) and this repo is public, so GitHub-hosted runners are free —
-# running everything every time is simpler and safer than selectively running
-# "only the changed tests", which would miss regressions in shared libs
-# (lib/*.sh) that fan out across many scripts.
+# Run the full Bats suite on every PR and on pushes to main. This repo is
+# public, so GitHub-hosted runners are free — running everything every time is
+# simpler and safer than selectively running "only the changed tests", which
+# would miss regressions in shared libs (lib/*.sh) that fan out across many
+# scripts. What we do instead is run the whole suite in parallel shards.
+#
+# Sharding: the suite has grown to ~790 tests, 11 min on ubuntu and 12-17 on
+# macOS, which is the dominant wait on every PR. `bats-shard` splits it across
+# SHARD_TOTAL runners per OS. The split is computed from the tree by
+# .github/scripts/shard-tests.sh, NOT from a list in this file: a static list
+# would put a newly added test file in no shard at all, and CI would go on
+# reporting green while silently not running it. tests/test_ci_sharding.bats
+# pins that the shards stay a partition of tests/*.bats.
 #
 # Docs-only skip (without the paths-ignore trap):
-# `bats (ubuntu-latest)` and `bats (macos-latest)` are REQUIRED status checks
-# on main. A naive `paths-ignore` would mean those checks never report on a
-# docs-only PR, leaving it stuck "pending" forever and unmergeable. So instead
-# the `bats` jobs ALWAYS run and ALWAYS complete green — a `changes` job
-# decides whether the diff is docs-only, and only the heavy steps (install +
-# run) are skipped when it is. The required context is therefore always
-# reported; on docs-only PRs it just reports green in seconds without running
-# the suite.
+# the bats check is REQUIRED on main. A naive `paths-ignore` would mean it
+# never reports on a docs-only PR, leaving it stuck "pending" forever and
+# unmergeable. So instead the shard jobs ALWAYS run and ALWAYS complete green —
+# a `changes` job decides whether the diff is docs-only, and only the heavy
+# steps (install + run) are skipped when it is. The required context is
+# therefore always reported; on docs-only PRs it just reports green in seconds
+# without running the suite.
+#
+# The required context is the `bats` SUMMARY job, not the shards. Shard names
+# carry their index, so changing SHARD_TOTAL would rename every required check
+# and silently stop enforcing the ones branch protection still names. The
+# summary job's name is stable across any future re-shard, and it fails unless
+# the whole matrix succeeded — including when the matrix was skipped, which
+# must never read as green.
 #
 # What counts as "docs-only" (= safe to skip the bash suite): the docs tree
 # (`docs/**`), the marketing site (`site/**` — a standalone Astro app with no
@@ -33,6 +47,14 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # Number of parallel shards per OS. Kept in one place because the matrix, the
+  # job name, and the argument to shard-tests.sh must agree — if they drift, a
+  # shard silently runs the wrong slice of the suite. Raising it is safe (the
+  # split is recomputed, not hardcoded); it only changes the shard job names,
+  # which is exactly why the required check is the summary job below.
+  SHARD_TOTAL: 4
 
 jobs:
   # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
@@ -81,12 +103,17 @@ jobs:
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "app_changed=$app_changed" >> "$GITHUB_OUTPUT"
 
-  bats:
-    name: bats (${{ matrix.os }})
+  bats-shard:
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
-    # suite rather than leaving this REQUIRED check unreported (which would
+    # suite rather than leaving the required check unreported (which would
     # block the PR). When changes failed, docs_only is empty → heavy steps run.
+    #
+    # This is also why the matrix is a literal list rather than something the
+    # `changes` job computes: a dynamic matrix cannot be evaluated when the job
+    # that feeds it failed, so a broken `changes` would take the whole suite
+    # down instead of falling back to running everything.
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     # Bound a hung runner/test so a stall fails fast (and is re-runnable) instead
@@ -100,10 +127,16 @@ jobs:
     # behaving like a coin flip on PRs that changed nothing relevant. 25 matches
     # the app-test-windows job below.
     #
-    # If the suite grows enough that this cap starts firing again, raise it (or
-    # split the suite) rather than re-running until it passes: a job that always
-    # dies at the same elapsed time is a timeout, not a flaky test.
+    # If a shard starts firing this cap, re-shard (raise SHARD_TOTAL) rather
+    # than re-running until it passes: a job that always dies at the same
+    # elapsed time is a timeout, not a flaky test.
     # bats-windows sets its own timeout; this covers ubuntu/macos.
+    #
+    # Left at the pre-sharding value on purpose. A shard is a quarter of the
+    # suite, so this is now generous headroom rather than a tight bound — and
+    # a cap that only ever fires on a genuine hang is the one that carries no
+    # false positives. (It was 15 against a 12-14 min macOS suite, and killed
+    # ~47% of macOS runs mid-suite at whatever test was running.)
     timeout-minutes: 25
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
@@ -111,12 +144,35 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # Must list exactly 1..SHARD_TOTAL. The `bats` summary job verifies
+        # end-to-end that the shards actually covered every test file, so a
+        # drift here fails the required check instead of silently dropping a
+        # slice of the suite.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+
+      - name: Compute this shard's test files
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD" -gt "$SHARD_TOTAL" ]; then
+            echo "::error::matrix shard $SHARD exceeds SHARD_TOTAL=$SHARD_TOTAL — the matrix and SHARD_TOTAL have drifted apart"
+            exit 1
+          fi
+          .github/scripts/shard-tests.sh "$SHARD" "$SHARD_TOTAL" > shard-files.txt
+          if [ ! -s shard-files.txt ]; then
+            echo "::error::shard $SHARD of $SHARD_TOTAL was assigned no test files"
+            exit 1
+          fi
+          echo "Shard $SHARD/$SHARD_TOTAL runs $(wc -l < shard-files.txt) file(s):"
+          cat shard-files.txt
 
       - name: Ensure sqlite3 is available (Linux)
         if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true'
@@ -140,9 +196,100 @@ jobs:
           sqlite3 --version
           bats --version
 
-      - name: Run bats suite
+      - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
-        run: bats --print-output-on-failure tests/
+        run: |
+          set -euo pipefail
+          # Paths come from shard-tests.sh over tests/*.bats and contain no
+          # spaces; xargs keeps them as separate arguments to one bats run.
+          xargs bats --print-output-on-failure < shard-files.txt
+
+      # What the summary job checks the partition against. Uploaded only when
+      # the suite actually ran, so a docs-only PR produces none — and the
+      # summary skips the check for exactly that case.
+      - name: Record which files this shard ran
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-manifest-${{ matrix.os }}-${{ matrix.shard }}
+          path: shard-files.txt
+          retention-days: 1
+
+  # The REQUIRED status check. Shard job names carry their index, so making the
+  # shards required would mean branch protection had to be re-pointed every
+  # time SHARD_TOTAL changed — and until someone did, protection would be
+  # enforcing check names that no longer run. This job's name never changes.
+  #
+  # It fails unless the whole matrix succeeded. `skipped` is treated as failure
+  # too: a suite that did not run is not a suite that passed, and the whole
+  # point of the always-report pattern above is that green means something.
+  bats:
+    name: bats
+    needs: [changes, bats-shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shard results
+        env:
+          RESULT: ${{ needs.bats-shard.result }}
+        run: |
+          set -euo pipefail
+          echo "bats shard matrix result: $RESULT"
+          case "$RESULT" in
+            success) ;;
+            skipped) echo "::error::the bats shards did not run — refusing to report green"; exit 1 ;;
+            *)       echo "::error::the bats shards did not all pass (result: $RESULT)"; exit 1 ;;
+          esac
+
+      - name: Docs-only change — no shard manifests to verify
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Diff is documentation-only; the shards reported green without running, so there is no partition to verify."
+
+      - name: Download shard manifests
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bats-manifest-*
+          path: manifests
+
+      # The end-to-end guarantee: every tests/*.bats file was actually run, on
+      # every OS. A partition bug in shard-tests.sh, a matrix entry someone
+      # deleted, a new test file that landed nowhere — all of them show up here
+      # as a named missing file rather than as a green run that quietly tested
+      # less than it did yesterday.
+      - name: Verify the shards covered the whole suite
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          set -euo pipefail
+          expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
+          status=0
+          for os in ubuntu-latest macos-latest; do
+            actual="$(cat manifests/bats-manifest-"$os"-*/shard-files.txt | LC_ALL=C sort)"
+            if [ "$actual" = "$expected" ]; then
+              echo "$os: all $(printf '%s\n' "$expected" | wc -l | tr -d ' ') test file(s) ran."
+              continue
+            fi
+            status=1
+            missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual" | uniq))"
+            extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual" | uniq))"
+            dupes="$(printf '%s\n' "$actual" | uniq -d)"
+            # Plain `if`s, not `[ -n "$x" ] && echo`: under `set -e` a false
+            # test at the end of a && list exits the step, which would report
+            # only the first kind of discrepancy and swallow the rest.
+            if [ -n "$missing" ]; then
+              printf '::error::%s: test file(s) run by no shard:\n%s\n' "$os" "$missing"
+            fi
+            if [ -n "$extra" ]; then
+              printf '::error::%s: shard(s) ran file(s) not in tests/:\n%s\n' "$os" "$extra"
+            fi
+            if [ -n "$dupes" ]; then
+              printf '::error::%s: file(s) run by more than one shard:\n%s\n' "$os" "$dupes"
+            fi
+          done
+          exit "$status"
 
   # Windows coverage for the native helpers shipped in #103 (Git Bash runner,
   # sqlite3 compatibility shim, cygpath normalization). The POSIX-assuming suite
