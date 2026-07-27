@@ -245,7 +245,7 @@ agmsg_delivery_runtime_status_default() {
       [ -f "$f" ] || continue
       local pid
       pid=$(cat "$f" 2>/dev/null || echo "")
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
         alive=$((alive + 1))
       else
         dead=$((dead + 1))
@@ -356,7 +356,7 @@ stop_codex_bridge() {
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
       [ -f "$pidfile" ] || continue
       bpid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
+      if [ -n "$bpid" ] && _agmsg_pid_alive "$bpid"; then
         kill "$bpid" 2>/dev/null && killed=$((killed + 1))
       fi
       # .appserver records which app-server URL the bridge was bound to (the
@@ -380,7 +380,7 @@ EOF
     server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
     if [ -f "$server_pidfile" ]; then
       server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+      if [ -n "$server_pid" ] && _agmsg_pid_alive "$server_pid"; then
         server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
         case "$server_cmd" in
           *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
@@ -499,7 +499,7 @@ kill_all_watchers() {
       [ -f "$f" ] || continue
       local pid cmd
       pid=$(cat "$f" 2>/dev/null || echo "")
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
         # Defensive: only kill if the pid's command line still looks like
         # our watch.sh. Defends against pid recycling — a stale pidfile
         # could point at an unrelated process that reused the pid.

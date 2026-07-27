@@ -136,7 +136,7 @@ agmsg_delivery_runtime_status() {
       continue
     fi
 
-    if kill -0 "$pid" 2>/dev/null; then
+    if _agmsg_pid_alive "$pid"; then
       echo "Codex bridge: $team/$name alive (pid $pid)"
       any_alive=1
     else

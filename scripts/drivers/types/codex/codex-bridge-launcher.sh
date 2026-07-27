@@ -26,6 +26,11 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
+# _agmsg_pid_alive: every lifetime and lock-owner check below goes through it.
+# Sourced explicitly rather than relied on transitively through role-session.sh,
+# which only pulls it in when actas-lock.sh has not already been loaded.
+# shellcheck source=../../../lib/instance-id.sh
+source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
@@ -56,7 +61,7 @@ mkdir -p "$RUN_DIR"
 # to start first. Tests/older launchers without the sidecar retain parent-PID
 # fallback behavior.
 LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! kill -0 "$LIFETIME_PID" 2>/dev/null; then
+if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive "$LIFETIME_PID"; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
@@ -89,7 +94,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    if [ -n "$owner" ] && _agmsg_pid_alive "$owner"; then
       return 1
     fi
     if [ -n "${AGMSG_TEST_DISPATCHER_STALE_BARRIER:-}" ]; then
@@ -112,7 +117,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    if [ -n "$owner" ] && _agmsg_pid_alive "$owner"; then
       return 1
     fi
     sleep 0.05
@@ -237,7 +242,7 @@ if [ -z "$ROLE_PAIR" ]; then
   acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
-    && kill -0 "$LIFETIME_PID" 2>/dev/null; do
+    && _agmsg_pid_alive "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
@@ -283,7 +288,7 @@ acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 # its registration disappears, so a re-registered role gets a fresh child.
 ids=""
 startup_attempts=0
-while kill -0 "$PARENT_PID" 2>/dev/null && [ "$startup_attempts" -lt 20 ]; do
+while _agmsg_pid_alive "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
   ids="$(resolve_identity || true)"
   [ -n "$ids" ] && break
   startup_attempts=$((startup_attempts + 1))
@@ -333,7 +338,7 @@ ids="$safe_ids"
 # A role record may be written by actas later in this same first turn. An empty
 # safe set is therefore transient, not terminal: retry while the parent lives.
 if [ -z "$ids" ]; then
-  kill -0 "$PARENT_PID" 2>/dev/null || exit 0
+  _agmsg_pid_alive "$PARENT_PID" || exit 0
   sleep 0.3
   exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
 fi
@@ -373,7 +378,7 @@ else
 fi
 
 deregistered_ticks=0
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+while _agmsg_pid_alive "$PARENT_PID"; do
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
@@ -451,7 +456,7 @@ EOF
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
-    if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
       # Reuse only when the live bridge is bound to the CURRENT app-server. A
       # codex upgrade makes codex-monitor.sh kill the stale app-server and start a
       # fresh one on a new port (#237); a bridge still bound to the old URL stays
