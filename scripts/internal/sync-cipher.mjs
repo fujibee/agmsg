@@ -3,9 +3,14 @@
 import { createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
+// Namespace import, not `{ tmpdir, availableParallelism }`: availableParallelism
+// only exists from Node 18.14, and a missing NAMED export is a link error that
+// would break every seal, not just the batch path. Looked up defensively below.
+import * as nodeOs from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { Worker, isMainThread, parentPort, threadId, workerData } from "node:worker_threads";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -355,7 +360,7 @@ function runAge(args, input) {
 }
 
 function runAgeWithIdentity(ageFile, identityBytes) {
-  const scratch = mkdtempSync(join(tmpdir(), "agmsg-age-open."));
+  const scratch = mkdtempSync(join(nodeOs.tmpdir(), "agmsg-age-open."));
   const ciphertextPath = join(scratch, "message.age");
   try {
     writeFileSync(ciphertextPath, ageFile, { mode: 0o600, flag: "wx" });
@@ -426,6 +431,171 @@ export function sealEnvelope(input) {
   return profile.seal(input, message);
 }
 
+// --- bulk sealing -----------------------------------------------------------
+//
+// A first connect / reconnect / retention backfill seals a whole page at once,
+// and sealing is dominated by the per-message `age` fork. Bulk callers hand the
+// entire page to `seal-batch`, which fans the SAME sealEnvelope out over worker
+// threads. Threads, not a second implementation: each worker imports this file
+// and calls sealEnvelope, so there is exactly one crypto path and the bytes a
+// batch produces are the bytes `seal` produces.
+//
+// Steady-state sends never take the parallel path: sealBatchParallelism returns
+// 1 below MIN_REQUESTS_PER_WORKER, and 1 means "seal on this thread", which is
+// the pre-existing sequential code down to the call.
+const MAX_BATCH_REQUESTS = 10_000;
+const MIN_REQUESTS_PER_WORKER = 8;
+// A task is re-dispatched once after the worker holding it dies. Bounded so a
+// request that kills workers (rather than throwing) cannot take the whole pool
+// down one thread at a time — after the last attempt it becomes an error result
+// and the batch keeps going.
+const MAX_ATTEMPTS = 2;
+const PROGRESS_MIN_TOTAL = 50;
+const PROGRESS_STEPS = 20;
+
+function hostParallelism() {
+  // uv_available_parallelism honours the affinity mask; cpus() is the fallback
+  // for Node < 18.14 and reports every core the host has.
+  const reported = typeof nodeOs.availableParallelism === "function" ?
+    nodeOs.availableParallelism() : nodeOs.cpus().length;
+  return Number.isInteger(reported) && reported > 0 ? reported : 1;
+}
+
+// Workers to use for `count` requests. One worker per MIN_REQUESTS_PER_WORKER
+// requests, capped at the core count — a short page is not worth a thread, and
+// past the cap the age forks only contend.
+export function sealBatchParallelism(count, cores = hostParallelism()) {
+  if (!Number.isInteger(count) || count < 1) return 1;
+  return Math.max(1, Math.min(cores, Math.floor(count / MIN_REQUESTS_PER_WORKER)));
+}
+
+// `worker` is the thread that sealed the request — 0 on the main thread, the
+// worker's threadId otherwise. It is how a caller can tell a batch that really
+// fanned out from one that quietly ran everything on one thread, and it names
+// the thread to look at when one worker's results go wrong.
+function sealOne(index, request) {
+  try {
+    return { index, worker: threadId, status: "ok", envelope: sealEnvelope(request) };
+  } catch (error) {
+    return { index, worker: threadId, status: "error", state: error?.state ?? null,
+      message: String(error?.message ?? error) };
+  }
+}
+
+const SEAL_WORKER_ROLE = "agmsg-seal-worker";
+
+function spawnSealWorker() {
+  return new Worker(fileURLToPath(import.meta.url), { workerData: { role: SEAL_WORKER_ROLE } });
+}
+
+// One task in flight per worker. A worker that dies rejects the task it held so
+// the scheduler can re-dispatch it; every later seal() on that client rejects
+// immediately, which drops the client out of the pool without losing work.
+function sealWorkerClient(spawn) {
+  const worker = spawn();
+  let pending = null;
+  let dead = null;
+  const die = (error) => {
+    dead = dead ?? (error ?? new Error("seal worker exited"));
+    const settled = pending;
+    pending = null;
+    settled?.reject(dead);
+  };
+  worker.on("message", (result) => {
+    const settled = pending;
+    pending = null;
+    settled?.resolve(result);
+  });
+  worker.on("error", die);
+  worker.on("exit", () => die(new Error("seal worker exited")));
+  return {
+    seal(index, request) {
+      if (dead) return Promise.reject(dead);
+      return new Promise((resolve, reject) => {
+        pending = { resolve, reject };
+        worker.postMessage({ index, request });
+      });
+    },
+    stop() { worker.terminate(); },
+  };
+}
+
+// Seal `requests` and hand every result to onResult as it completes — in
+// COMPLETION order, each tagged with its input index, so a caller can commit
+// incrementally and keep whatever it committed if the run is interrupted.
+//
+// Contract: exactly one result per request, always, with status "ok" or
+// "error". Requests whose worker died are re-dispatched, and if the whole pool
+// dies the remainder is sealed on this thread. A batch never silently drops a
+// message; an "error" result simply leaves that message unsealed for the next
+// cycle to retry.
+export async function runSealBatch(requests, options = {}) {
+  const total = requests.length;
+  const onResult = options.onResult ?? (() => {});
+  const onProgress = options.onProgress ?? (() => {});
+  let completed = 0;
+  const emit = (result) => {
+    completed += 1;
+    onResult(result);
+    onProgress(completed, total);
+  };
+
+  const parallelism = options.parallelism ?? sealBatchParallelism(total);
+  if (total === 0) return;
+  if (parallelism <= 1) {
+    for (let index = 0; index < total; index += 1) emit(sealOne(index, requests[index]));
+    return;
+  }
+
+  const attempts = new Array(total).fill(0);
+  const requeued = [];
+  let next = 0;
+  const take = () => {
+    if (requeued.length > 0) return requeued.shift();
+    return next < total ? next++ : -1;
+  };
+
+  const spawn = options.spawnWorker ?? spawnSealWorker;
+  const clients = [];
+  for (let worker = 0; worker < parallelism; worker += 1) clients.push(sealWorkerClient(spawn));
+
+  const drive = async (client) => {
+    for (let index = take(); index !== -1; index = take()) {
+      attempts[index] += 1;
+      let result;
+      try {
+        result = await client.seal(index, requests[index]);
+      } catch (error) {
+        // This client is gone. Put the task back for a surviving client (or the
+        // main-thread sweep below) and retire the client.
+        if (attempts[index] < MAX_ATTEMPTS) requeued.unshift(index);
+        else emit({ index, worker: null, status: "error", state: "worker_failed",
+          message: `seal worker died: ${String(error?.message ?? error)}` });
+        return;
+      }
+      emit(result);
+    }
+  };
+
+  try {
+    await Promise.all(clients.map((client) => drive(client)));
+  } finally {
+    // Unconditional: a throw out of onResult must not leave live threads
+    // holding the process open.
+    for (const client of clients) client.stop();
+  }
+  // Re-dispatched work can outlive the pool — a client that had already drained
+  // the queue exits before another one dies and requeues. Whatever is left has
+  // no worker to run on, so it runs here rather than going missing.
+  for (let index = take(); index !== -1; index = take()) emit(sealOne(index, requests[index]));
+}
+
+function sealWorkerMain() {
+  parentPort.on("message", ({ index, request }) => {
+    parentPort.postMessage(sealOne(index, request));
+  });
+}
+
 function openNone(envelope, maxBlobBytes) {
   if (envelope.v !== 1 || envelope.key_id !== null) malformed("none envelope metadata is invalid");
   return parseCanonicalMessage(canonicalBlob(envelope.blob, maxBlobBytes));
@@ -483,15 +653,48 @@ export async function openEnvelope(input) {
   return profile.open(input);
 }
 
-async function cli() {
-  if (process.argv[2] !== "seal") throw new Error("usage: sync-cipher.mjs seal");
+async function readStdin() {
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
-  const value = JSON.parse(input);
-  process.stdout.write(`${JSON.stringify(sealEnvelope(value))}\n`);
+  return input;
 }
 
-if (process.argv[2] === "seal") {
+// Human-facing progress for the bulk path only. A steady-state page is a
+// handful of messages and reporting on it would be noise, so anything under
+// PROGRESS_MIN_TOTAL stays silent. stdout carries the results, so this goes to
+// stderr.
+function progressReporter(total) {
+  if (total < PROGRESS_MIN_TOTAL) return () => {};
+  const step = Math.max(1, Math.floor(total / PROGRESS_STEPS));
+  return (completed) => {
+    if (completed % step !== 0 && completed !== total) return;
+    const percent = Math.floor((completed / total) * 100);
+    process.stderr.write(`agmsg: sealing ${completed}/${total} (${percent}%)\n`);
+  };
+}
+
+async function cli() {
+  if (process.argv[2] === "seal") {
+    process.stdout.write(`${JSON.stringify(sealEnvelope(JSON.parse(await readStdin())))}\n`);
+    return;
+  }
+  if (process.argv[2] !== "seal-batch") throw new Error("usage: sync-cipher.mjs seal|seal-batch");
+  const requests = (await readStdin()).split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  if (requests.length > MAX_BATCH_REQUESTS) {
+    throw new Error(`seal-batch accepts at most ${MAX_BATCH_REQUESTS} requests`);
+  }
+  // Per-request failures are results, not an exit code: the caller commits the
+  // envelopes that succeeded and retries the rest on its next cycle.
+  await runSealBatch(requests, {
+    onResult: (result) => process.stdout.write(
+      `${JSON.stringify({ type: "sync_seal_result", ...result })}\n`),
+    onProgress: progressReporter(requests.length),
+  });
+}
+
+if (!isMainThread && workerData?.role === SEAL_WORKER_ROLE) {
+  sealWorkerMain();
+} else if (isMainThread && ["seal", "seal-batch"].includes(process.argv[2])) {
   cli().catch((error) => {
     process.stderr.write(`${error.state ? `${error.state}: ` : ""}${error.message}\n`);
     process.exitCode = 1;
