@@ -122,13 +122,45 @@ wait_for_file_contains() {
   return 1
 }
 
+# Positive evidence that a pid is gone. NOT `kill -0 || gone`.
+#
+# A failed `kill -0` is ESRCH (dead) or EPERM (alive, but not signalable by us —
+# sandboxes do exactly this, and a live instance of it was found in
+# delivery.sh status the same day this was written). Treating every failure as
+# "gone" is how a wait-for-exit helper reports success for a running process,
+# which turns every test built on it into a green that proves nothing. That is
+# the defect this file's own callers were just fixed for; the helper must not
+# reintroduce it one level down.
+#
+# Mirrors _agmsg_pid_alive in scripts/lib/instance-id.sh, then cross-checks the
+# process table, which does not depend on signalling permission at all. Saying
+# "gone" now requires kill(2) and ps to agree.
+_pid_gone() {
+  local pid="$1" err stat
+  # `export LC_ALL=C` rather than a bare prefix: a prefix misses the builtin on
+  # bash 3.2, and the ESRCH match below is on English text.
+  err="$(export LC_ALL=C; kill -0 "$pid" 2>&1)" && return 1
+  case "$err" in
+    *[Nn]'o such process'*) ;;
+    *) return 1 ;;   # EPERM and anything unrecognised mean "assume alive"
+  esac
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ -z "$stat" ] && return 0
+  case "$stat" in Z*) return 0 ;; esac   # terminated, just not reaped yet
+  return 1
+}
+
 # Wait for a process to actually be gone. Writing a pidfile and dying are not
 # atomic, so asserting `! kill -0 $pid` the instant a pidfile disappears races
 # the TERM trap (#124).
 wait_for_pid_exit() {
   local pid="$1" i
   for i in $(seq 1 $_WAIT_TICKS); do
-    kill -0 "$pid" 2>/dev/null || return 0
+    # Reap finished children first: an unreaped zombie still answers `kill -0`,
+    # so without this a process that HAS exited can keep looking alive for the
+    # whole timeout. `jobs` is what makes bash collect them.
+    jobs >/dev/null 2>&1 || true
+    _pid_gone "$pid" && return 0
     sleep $_WAIT_INTERVAL
   done
   return 1
