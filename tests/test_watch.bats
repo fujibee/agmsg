@@ -69,7 +69,14 @@ _max_message_id() {
   # condition the old fixed 1.5s was standing in for.
   wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
   bash "$SCRIPTS/send.sh" team bob alice "M1-before-stop" >/dev/null
+  local m1_id="$(_max_message_id)"
   wait_for_file_contains "$TEST_SKILL_DIR/out1.log" "M1-before-stop"
+  # Kill only once the watermark has been PERSISTED past M1. The stdout line is
+  # not enough: the watcher writes the line first and the mark after, so killing
+  # on the line alone can lose the mark and make the restart re-deliver M1 —
+  # exactly what this test denies. Waiting for the observable event is not the
+  # same as waiting for the durable one.
+  wait_for_file_is "$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark" "$m1_id"
   kill "$w1" 2>/dev/null || true
   wait "$w1" 2>/dev/null || true
   grep -q "M1-before-stop" "$TEST_SKILL_DIR/out1.log"
