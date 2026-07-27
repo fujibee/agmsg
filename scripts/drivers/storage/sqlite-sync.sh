@@ -15,17 +15,18 @@ _sqlite_sync_uuid4() {
 # Reservations are committed in groups rather than one transaction per message:
 # a sqlite3 fork costs far more than the seal it records. The bounds are what
 # an interrupted backfill re-does — at most this many messages, or this much
-# accumulated SQL, are re-sealed by the next prepare. The byte bound also keeps
-# the statement inside ARG_MAX when bodies approach max_blob_bytes.
+# accumulated SQL, are re-sealed by the next prepare.
 _SQLITE_SYNC_COMMIT_CHUNK=50
 _SQLITE_SYNC_COMMIT_BYTES=131072
 
+# The statement goes in on stdin, not in argv. A single encrypted blob is legal
+# up to max_blob_bytes, which is already larger than ARG_MAX once base64 and SQL
+# quoting are applied — so an argv statement could not hold even one such row,
+# and no group bound would have saved it.
 _sqlite_sync_commit_chunk() {
   local db="$1" sql="$2"
   [ -n "$sql" ] || return 0
-  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
-$sql
-COMMIT;" >/dev/null 2>&1
+  printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite "$db" >/dev/null 2>&1
 }
 
 # Builtin single-quote escaping, assigned into _SQLITE_SYNC_LIT in the CALLER's
