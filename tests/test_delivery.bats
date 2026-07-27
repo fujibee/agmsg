@@ -621,10 +621,20 @@ has_session_end() {
 # --- session-end.sh behavior ---
 
 @test "session-end.sh kills the watcher matching session_id and removes pidfile" {
-  mkdir -p "$TEST_SKILL_DIR/run"
-  sleep 30 3>&- &
+  # The fixture must be a REAL watcher. session-end.sh only kills a pid whose
+  # command line still looks like watch.sh (pid-recycling safety, see its
+  # comment), so the `sleep 30` stand-in this used to launch could never be
+  # killed — and the assertion passed anyway, so the test never checked what its
+  # name claims. Converting the wait to a poll is what surfaced it: polling
+  # reports the process is still there, where the single post-sleep check did
+  # not.
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" sess-A "$TEST_PROJECT" claude-code 3>&- &
   local target_pid=$!
-  echo "$target_pid" > "$TEST_SKILL_DIR/run/watch.sess-A.pid"
+  wait_for_file "$TEST_SKILL_DIR/run/watch.sess-A.pid"
   echo '{"session_id":"sess-A"}' | bash "$SCRIPTS/session-end.sh" claude-code "$TEST_PROJECT"
   wait_for_pid_exit "$target_pid"
   ! kill -0 "$target_pid" 2>/dev/null
