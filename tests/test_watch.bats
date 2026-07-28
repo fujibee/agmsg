@@ -85,7 +85,16 @@ _max_message_id() {
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
 
   # Restart the SAME session_id — should resume from the persisted watermark.
-  run_watcher_for "$sid" "$TEST_SKILL_DIR/out2.log" 2
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$TEST_SKILL_DIR/out2.log" 2>/dev/null 3>&- &
+  local w2=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/out2.log" "M2-in-gap" || {
+    kill "$w2" 2>/dev/null || true
+    wait "$w2" 2>/dev/null || true
+    false
+  }
+  kill "$w2" 2>/dev/null || true
+  wait "$w2" 2>/dev/null || true
 
   # In-gap message is delivered on restart...
   grep -q "M2-in-gap" "$TEST_SKILL_DIR/out2.log"
