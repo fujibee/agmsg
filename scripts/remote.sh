@@ -760,32 +760,24 @@ _remote_json_field() {
   agmsg_sqlite_mem "SELECT COALESCE(json_extract('$escaped', '$path'), '');"
 }
 
-_remote_json_fragment() {
-  local doc="$1" path="$2" escaped
-  escaped=$(printf '%s' "$doc" | sed "s/'/''/g")
-  agmsg_sqlite_mem "SELECT COALESCE(json_extract('$escaped', '$path'), '[]');"
-}
-
 # Writes the local team for a pull. Unlike _remote_ensure_team this does NOT
-# mint a team_id: the id and every member id came from the server and are
-# recorded as they arrived. Minting here would give one team two identities,
-# which is the whole reason ids exist.
+# mint a team_id: the id came from the server and is recorded as it arrived.
+# Minting here would give one team two identities, which is the whole reason
+# ids exist.
+#
+# The roster is deliberately left empty. The server does not hold one -- team
+# membership travels inside the envelope, so under e2ee it cannot -- and a
+# roster taken from anywhere else at this moment would be a guess presented as
+# fact. It is derived by replaying the team journal.
 _remote_write_pulled_team() {
-  local team="$1" team_id="$2" members="$3" cfg agents initial
+  local team="$1" team_id="$2" cfg initial
   cfg="$(_remote_team_config "$team")"
   mkdir -p "$TEAMS_DIR/$team"
   agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
-  # The roster arrives as an array and is stored keyed by name, the shape
-  # join.sh already writes, so team.sh and the delivery paths read it unchanged.
-  agents=$(agmsg_sqlite_mem "
-    SELECT COALESCE(json_group_object(json_extract(value, '\$.name'),
-             json_object('member_id', json_extract(value, '\$.member_id'),
-                         'registrations', json_array())), json_object())
-      FROM json_each('$(printf '%s' "$members" | sed "s/'/''/g")');")
   initial=$(agmsg_sqlite_mem "
     SELECT json_object('name','$(_agmsg_sqlesc "$team")',
                        'team_id','$(_agmsg_sqlesc "$team_id")',
-                       'agents', json('$(printf '%s' "$agents" | sed "s/'/''/g")'),
+                       'agents', json_object(),
                        'created_at','$(date -u +%Y-%m-%dT%H:%M:%SZ)');")
   agmsg_write_atomic "$cfg" "$initial"
   agmsg_lock_release
@@ -826,7 +818,7 @@ cmd_pull() {
     fi
   fi
 
-  local result pulled_id pulled_name imported members
+  local result pulled_id pulled_name imported
   result="$(AGMSG_SYNC_CONNECTION_DIR="$CONNECTION_ROOT" \
     "$SCRIPT_DIR/remote-sync.sh" pull-bootstrap \
       --team "$team" --team-id "$team_id" --endpoint "$endpoint")" || {
@@ -837,11 +829,10 @@ cmd_pull() {
   pulled_id="$(_remote_json_field "$result" '$.team_id')"
   pulled_name="$(_remote_json_field "$result" '$.team_name')"
   imported="$(_remote_json_field "$result" '$.imported')"
-  members="$(_remote_json_fragment "$result" '$.members')"
   [ "$pulled_id" = "$team_id" ] || {
     echo "agmsg: server answered with a different team id" >&2; exit 1; }
 
-  _remote_write_pulled_team "$team" "$pulled_id" "$members" || exit 1
+  _remote_write_pulled_team "$team" "$pulled_id" || exit 1
   echo "Pulled '$pulled_name' into local team '$team' ($imported message(s))."
 }
 

@@ -835,20 +835,23 @@ async function roster(
   }));
 }
 
-// Everything a machine that has none of this needs before it can read history:
-// which team it is, who is in it, and what the server will accept. One
-// repeatable-read transaction, so the roster and the capabilities it is
-// interpreted under cannot come from two different moments.
+// What a machine that has none of this needs before it can read history: which
+// team it is and what the server will accept.
+//
+// Deliberately NOT who is in it. Membership changes travel inside the envelope,
+// so under e2ee this server cannot read them -- a roster it handed out would be
+// the one frozen at connect, served confidently to every machine that arrives
+// later. Removing the roster from the answer removes that failure rather than
+// managing it, and it follows from what e2ee is for here: if encryption
+// protects you from whoever runs the server, who is on the team is theirs to
+// know too. Each machine derives the roster by replaying the team journal.
 export async function getTeamSnapshot(
   pool: Pool,
   teamId: string,
 ): Promise<Record<string, unknown>> {
   return inTransaction(
     pool,
-    async (client) => {
-      const snapshot = await capabilitySnapshot(client, teamId);
-      return { ...snapshot, members: await roster(client, teamId) };
-    },
+    (client) => capabilitySnapshot(client, teamId),
     { readOnly: true, repeatableRead: true },
   );
 }

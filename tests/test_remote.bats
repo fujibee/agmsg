@@ -1048,7 +1048,7 @@ VALUES ('remote-pending.$key', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 
 PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
 
-@test "remote pull: clones a team, keeping the ids the server gave" {
+@test "remote pull: clones a team, keeping the id the server gave" {
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
   [ "$status" -eq 0 ]
   local cfg
@@ -1056,11 +1056,22 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   [ -f "$cfg" ]
   # Not minted here: the id is the one the server answered with.
   [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.team_id');")" = "$PULL_TEAM_ID" ]
-  # The roster arrives with it, keyed by name the way join.sh writes it.
-  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.agents.alice.member_id');")" \
-    = "018f3f7e-2222-7000-8000-000000000010" ]
-  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.agents.bob.member_id');")" \
-    = "018f3f7e-2222-7000-8000-000000000011" ]
+}
+
+@test "remote pull: does not take a roster from the server" {
+  # The server holds no membership -- it travels inside the envelope, so under
+  # e2ee the server cannot read it. A roster invented here would be a guess
+  # presented as fact; it is derived by replaying the team journal instead.
+  #
+  # The mock deliberately still answers with a members array, so this fails if
+  # the client starts trusting one again rather than merely because none was
+  # offered.
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" cloned
+  [ "$status" -eq 0 ]
+  local cfg agents
+  cfg="$TEST_SKILL_DIR/teams/cloned/config.json"
+  agents="$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.agents');")"
+  [ "$agents" = "{}" ]
 }
 
 @test "remote pull: refuses a team that already has history" {

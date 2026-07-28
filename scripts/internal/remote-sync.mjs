@@ -1661,7 +1661,7 @@ export async function pullBootstrap(args) {
   };
   await event("pull.bootstrap.snapshot", {
     team_id: snapshot.team_id, team_name: snapshot.team_name,
-    members: snapshot.members.length, min_available_seq: snapshot.min_available_seq,
+    min_available_seq: snapshot.min_available_seq,
   });
 
   let cursor = String(snapshot.min_available_seq ?? "0");
@@ -1687,8 +1687,7 @@ export async function pullBootstrap(args) {
   process.stdout.write(`${JSON.stringify({
     type: "pull_bootstrap_result", team: config.local_team,
     team_id: config.remote_team_id, team_name: snapshot.team_name,
-    server_instance_id: config.server_instance_id,
-    members: snapshot.members, imported,
+    server_instance_id: config.server_instance_id, imported,
   })}\n`);
 }
 
@@ -1712,8 +1711,7 @@ async function publicSnapshot(serverUrl, teamId) {
     error.status = response.status;
     throw error;
   }
-  if (body.team_id !== teamId || !UUID_V7.test(body.server_instance_id ?? "") ||
-      !Array.isArray(body.members)) {
+  if (body.team_id !== teamId || !UUID_V7.test(body.server_instance_id ?? "")) {
     throw new Error("team snapshot is not bound to the requested team");
   }
   return body;
