@@ -35,4 +35,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_unread ON messages(team, to_agent, read_at) WHERE read_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_history ON messages(team, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS delivery_cursors (
+  team TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  type TEXT NOT NULL,
+  project TEXT NOT NULL,
+  last_id INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (team, agent, type, project)
+);
 SQL

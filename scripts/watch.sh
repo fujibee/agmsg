@@ -17,12 +17,10 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 #     of those pairs.
 #   - When [active_name] is given, narrows the subscription to only pairs
 #     whose agent name matches — useful for `actas` exclusive role mode.
-#   - A fresh session sets the high-water mark to the current MAX(id) at
-#     startup, so the stream begins with whatever arrives after launch — no
-#     replay of historical messages. The mark is persisted per session_id, so
-#     a restart of this session's watcher (actas/drop/clear/self-restart)
-#     resumes from the last delivered id and does not drop messages that
-#     arrived during the restart gap. See #107.
+#   - A persistent cursor per registered (team, agent, type, project) begins at
+#     join time and advances after delivery. Membership and cursors are reread
+#     every poll, so jobs sent after join survive watcher attach/restart gaps.
+#     Rows already marked read are not replayed.
 #   - Polls the SQLite DB at AGMSG_WATCH_INTERVAL seconds (default 5, also
 #     overridable via the delivery.monitor.poll_interval config key).
 #   - Emits one line per new message:
@@ -65,6 +63,10 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/subscription.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/delivery-cursor.sh"
 
 # Fail loudly on an unknown agent_type instead of running with zero
 # subscriptions. The dominant real-world cause is a shifted argument list: a
@@ -144,6 +146,22 @@ DB="$(agmsg_db_path)"
 RUN_DIR="$SKILL_DIR/run"
 PIDFILE="$RUN_DIR/watch.$SESSION_ID.pid"
 
+# DB-open healthcheck (#197). The main loop guards every query with
+# `2>/dev/null || true`, so when sqlite3 cannot open the store the watcher keeps
+# spinning and silently delivers nothing — a silent outage. The native
+# sqlite3.exe / Git Bash path mismatch behind #197 is one trigger (now fixed in
+# agmsg_db_path), but permissions, a missing binary, or a corrupt file fail the
+# same way. A *missing* DB file is normal (no messages sent yet), so only flag
+# the case where the file exists but a trivial query cannot run: emit one line
+# on stdout (the Monitor event stream) and exit, turning the silent failure into
+# a visible one. This must run before cursor schema initialization so that a
+# schema write failure cannot hide the health error.
+if [ -f "$DB" ] && ! agmsg_sqlite "$DB" "SELECT 1;" >/dev/null 2>&1; then
+  echo "ERROR: cannot open message DB $DB"
+  exit 1
+fi
+agmsg_delivery_cursor_ensure_schema || exit 1
+
 # Resolve poll interval. Env var wins over config, default 5s.
 INTERVAL="${AGMSG_WATCH_INTERVAL:-}"
 if [ -z "$INTERVAL" ]; then
@@ -207,12 +225,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
 
-# Resolve subscription set.
-PAIRS="$("$SCRIPT_DIR/identities.sh" "$PROJECT_PATH" "$AGENT_TYPE")"
-if [ -n "$ACTIVE_NAME" ]; then
-  PAIRS=$(printf '%s\n' "$PAIRS" | awk -v n="$ACTIVE_NAME" -F'\t' 'NF >= 2 && $2 == n')
-fi
-
 # Honor actas exclusivity locks. A (team, agent) pair currently owned by
 # another live session is removed from this watcher's subscription so
 # messages addressed to that role only reach the owning session. Pairs we
@@ -225,52 +237,54 @@ fi
 # claim fails because another live session beat us to it, exit with an
 # error — the user's host agent surfaces stderr and the original (broad)
 # watcher was already stopped by the actas flow, so this state is recoverable
-# by `drop` on the other session.
-if [ -n "$PAIRS" ]; then
-  filtered=""
-  skipped=""
-  held=""
-  while IFS=$'\t' read -r _team _agent; do
-    [ -z "$_team" ] && continue
-    state=$(actas_lock_state "$_team" "$_agent" "$SESSION_ID")
-    case "$state" in
-      other:*)
-        # If the caller is asking specifically for this name (actas flow),
-        # treat the conflict as a hard failure. Otherwise (broad subscribe)
-        # silently skip — peer owns the role, we don't need it.
-        if [ -n "$ACTIVE_NAME" ]; then
-          held="${held:+$held }${_team}/${_agent}(${state#other:})"
-        else
-          skipped="${skipped:+$skipped }${_team}/${_agent}(${state#other:})"
-        fi
-        continue
-        ;;
-    esac
-    if [ -n "$ACTIVE_NAME" ]; then
-      # Implicit claim — `actas` was the invoking flow. Covers the race
-      # where state-check said free but a peer claimed it between then and
-      # now.
-      result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null || true)
-      case "$result" in
-        held:*)
-          held="${held:+$held }${_team}/${_agent}(${result#held:})"
-          continue
-          ;;
-      esac
-    fi
-    filtered="${filtered:+$filtered$'\n'}${_team}"$'\t'"${_agent}"
-  done <<< "$PAIRS"
-  PAIRS="$filtered"
-  if [ -n "$skipped" ]; then
-    echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
-  fi
-  if [ -n "$held" ]; then
-    echo "agmsg watch: cannot claim (held by other sessions): $held" >&2
-    echo "agmsg watch: run \`/agmsg drop <name>\` in the owning session, then retry." >&2
-    exit 1
-  fi
-fi
+# Build the SQL WHERE clause. Each pair contributes:
+#   (team='<team>' AND to_agent='<agent>')
+# joined by OR. Single quotes inside team/agent names are doubled for SQL.
+sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
+PAIRS=""
+WHERE_DELIVERY=""
+READY_ACTIVE=0
+
+sync_ready_files() {
+  local desired="" ready_path old_path owner team agent
+  if [ "$READY_ACTIVE" -eq 1 ] && [ -n "$ACTIVE_NAME" ]; then
+    while IFS=$'\t' read -r team agent; do
+      [ -n "$team" ] || continue
+      ready_path="$(agmsg_ready_path "$team" "$agent")"
+      printf '%s\n' "$SESSION_ID" > "$ready_path" 2>/dev/null || true
+      desired="${desired:+$desired$'\n'}$ready_path"
+    done <<< "$PAIRS"
+  fi
+  while IFS= read -r old_path; do
+    [ -n "$old_path" ] || continue
+    printf '%s\n' "$desired" | grep -Fxq "$old_path" && continue
+    owner=""
+    [ -f "$old_path" ] && IFS= read -r owner < "$old_path" || true
+    [ "$owner" = "$SESSION_ID" ] && rm -f "$old_path" 2>/dev/null || true
+  done <<< "$READY_FILES"
+  READY_FILES="$desired"
+}
+
+refresh_subscription() {
+  local next_pairs next_where="" claim_mode="" team agent t_esc a_esc cursor pair
+  [ -n "$ACTIVE_NAME" ] && claim_mode=claim
+  next_pairs="$(agmsg_session_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "$SESSION_ID" "$SESSION_ID" "$ACTIVE_NAME" "$claim_mode")" || return 1
+  while IFS=$'\t' read -r team agent; do
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    cursor="$(agmsg_delivery_cursor_initialize_missing "$team" "$agent" "$AGENT_TYPE" "$PROJECT_PATH" 2>/dev/null || true)"
+    case "$cursor" in ''|*[!0-9]*) cursor=0 ;; esac
+    t_esc=$(sql_escape "$team")
+    a_esc=$(sql_escape "$agent")
+    pair="(team='$t_esc' AND to_agent='$a_esc' AND read_at IS NULL AND id > $cursor)"
+    next_where="${next_where:+$next_where OR }$pair"
+  done <<< "$next_pairs"
+  PAIRS="$next_pairs"
+  WHERE_DELIVERY="$next_where"
+  sync_ready_files
+}
+
+refresh_subscription || exit 1
 if [ -z "$PAIRS" ]; then
   if [ -n "$ACTIVE_NAME" ]; then
     echo "agmsg watch: no registration for agent '$ACTIVE_NAME' in $PROJECT_PATH ($AGENT_TYPE); nothing to do"
@@ -280,41 +294,13 @@ if [ -z "$PAIRS" ]; then
   exit 0
 fi
 
-# Build the SQL WHERE clause. Each pair contributes:
-#   (team='<team>' AND to_agent='<agent>')
-# joined by OR. Single quotes inside team/agent names are doubled for SQL.
-sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
-
-WHERE_PAIRS=""
-while IFS=$'\t' read -r team agent; do
-  [ -z "$team" ] && continue
-  t_esc=$(sql_escape "$team")
-  a_esc=$(sql_escape "$agent")
-  pair="(team='$t_esc' AND to_agent='$a_esc')"
-  WHERE_PAIRS="${WHERE_PAIRS:+$WHERE_PAIRS OR }$pair"
-done <<< "$PAIRS"
-
-# Determine the starting watermark.
-#
-# The watermark is persisted per session_id so that a *restart* of this
-# session's watcher resumes from the last delivered id instead of jumping to
-# the current MAX(id). Monitor restarts are routine — `actas`/`drop` do
-# TaskStop + relaunch, `/clear`/resume re-fires the SessionStart directive, and
-# a killed watcher self-restarts — and the old "start from MAX(id)" behavior
-# silently dropped every message that landed in the gap between the previous
-# watcher stopping and the new one taking its mark. Resuming from the persisted
-# watermark closes that gap; staying strictly after the last delivered id
-# avoids re-streaming anything already seen. See #107.
-#
-# A *fresh* session (no persisted watermark) still starts from the current
-# MAX(id) — live push, no replay of history (the no-arg inbox check covers
-# historical unread, not this stream).
+# The durable per-registration cursor selects rows. This session watermark is
+# retained for lifecycle compatibility and records the last output id.
 WATERMARK_FILE="$RUN_DIR/watch.$SESSION_ID.watermark"
 persist_watermark() { printf '%s\n' "$LAST" > "$WATERMARK_FILE" 2>/dev/null || true; }
 
 # Mark a row's read_at so a later inbox.sh call does not re-surface it as
-# unread — the watermark only stops THIS watcher from re-streaming a row, it
-# never touches read_at (see the call sites below for the full rationale).
+# unread, then advance the durable cursor for this registration.
 # Shared by both the normal delivery path and the ctrl:despawn control-row
 # path so the two do not drift (#review finding, 2026-07-19). $1 is trusted
 # to be a DB-sourced id everywhere this is called, but it is guarded anyway
@@ -341,10 +327,14 @@ mark_read() {
     ''|*[!0-9]*) return 0 ;;
   esac
   if [ -z "$ACTIVE_NAME" ] && [ -n "$team" ] && [ -n "$to" ]; then
-    [ -e "$(agmsg_ready_path "$team" "$to")" ] && return 0
+    [ -e "$(agmsg_ready_path "$team" "$to")" ] && return 1
   fi
-  agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=$mid AND read_at IS NULL;" 2>/dev/null \
-    || echo "agmsg watch: could not mark message $mid read (db busy/unavailable); a later inbox.sh call will re-surface it" >&2
+  if agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=$mid AND read_at IS NULL;" 2>/dev/null; then
+    agmsg_delivery_cursor_advance "$team" "$to" "$AGENT_TYPE" "$PROJECT_PATH" "$mid" 2>/dev/null || return 1
+    return 0
+  fi
+  echo "agmsg watch: could not mark message $mid read (db busy/unavailable); a later inbox.sh call will re-surface it" >&2
+  return 1
 }
 
 LAST=""
@@ -355,25 +345,10 @@ fi
 if [ -z "$LAST" ]; then
   LAST=0
   if [ -f "$DB" ]; then
-    LAST="$(agmsg_sqlite "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
+    LAST="$(agmsg_sqlite "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages;" 2>/dev/null || echo 0)"
   fi
   case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
   persist_watermark
-fi
-
-# DB-open healthcheck (#197). The main loop guards every query with
-# `2>/dev/null || true`, so when sqlite3 cannot open the store the watcher keeps
-# spinning and silently delivers nothing — a silent outage. The native
-# sqlite3.exe / Git Bash path mismatch behind #197 is one trigger (now fixed in
-# agmsg_db_path), but permissions, a missing binary, or a corrupt file fail the
-# same way. A *missing* DB file is normal (no messages sent yet), so only flag
-# the case where the file exists but a trivial query cannot run: emit one line
-# on stdout (the Monitor event stream) and exit, turning the silent failure into
-# a visible one. Done before the ready sentinel so we never signal "ready" for a
-# watcher that cannot read the store.
-if [ -f "$DB" ] && ! agmsg_sqlite "$DB" "SELECT 1;" >/dev/null 2>&1; then
-  echo "ERROR: cannot open message DB $DB"
-  exit 1
 fi
 
 # Signal readiness. Once the subscription is resolved and the watermark is set,
@@ -382,17 +357,8 @@ fi
 # spawned agent always starts its watcher in actas mode — and the sentinel is
 # removed on exit (cleanup), so it tracks "a live watcher is receiving for this
 # role". `spawn --wait-ready` polls for it. See #108.
-if [ -n "$ACTIVE_NAME" ]; then
-  while IFS=$'\t' read -r _rt _ra; do
-    [ -z "$_rt" ] && continue
-    _rp="$(agmsg_ready_path "$_rt" "$_ra")"
-    # Stamp our session_id so cleanup (and a successor watcher) can tell whose
-    # sentinel it is — keeps "present iff a live watcher is receiving" honest
-    # across a quick actas restart. See #108 review.
-    printf '%s\n' "$SESSION_ID" > "$_rp" 2>/dev/null || true
-    READY_FILES="${READY_FILES:+$READY_FILES$'\n'}$_rp"
-  done <<< "$PAIRS"
-fi
+READY_ACTIVE=1
+sync_ready_files
 
 while true; do
   # Liveness guard (#67): exit promptly once the originating agent session is
@@ -407,12 +373,13 @@ while true; do
   if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
     exit 0
   fi
-  if [ -f "$DB" ]; then
+  refresh_subscription || exit 1
+  if [ -f "$DB" ] && [ -n "$WHERE_DELIVERY" ]; then
     ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "
       SELECT id, created_at, team, from_agent, to_agent,
              replace(replace(body, char(13), ''), char(10), '\\n')
       FROM messages
-      WHERE id > $LAST AND ($WHERE_PAIRS)
+      WHERE $WHERE_DELIVERY
       ORDER BY id;
     " 2>/dev/null || true)"
 

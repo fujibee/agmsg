@@ -971,6 +971,86 @@ EOF
   [[ "$output" =~ "ping copilot" ]]
 }
 
+@test "check-inbox: multiple identities process only registered team-agent pairs" {
+  bash "$SCRIPTS/join.sh" task-a executor-task-a claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-a planner-task-a  claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b executor-task-b claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b planner-task-b  claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+
+  bash "$SCRIPTS/send.sh" task-a planner-task-a executor-task-a "job for task a" >/dev/null
+  bash "$SCRIPTS/send.sh" task-b planner-task-b executor-task-b "job for task b" >/dev/null
+  bash "$SCRIPTS/send.sh" task-b planner-task-b executor-task-a "nonexistent cross pair" --force >/dev/null
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"job for task a"* ]]
+  [[ "$output" == *"job for task b"* ]]
+  [[ "$output" != *"nonexistent cross pair"* ]]
+
+  local cross_read
+  cross_read=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+    "SELECT COALESCE(read_at, '') FROM messages WHERE body='nonexistent cross pair';")
+  [ -z "$cross_read" ]
+}
+
+@test "check-inbox: role-session record selects one exact pair" {
+  bash "$SCRIPTS/join.sh" task-a executor-task-a claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-a planner-task-a  claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b executor-task-b claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b planner-task-b  claude-code "$TEST_PROJECT" >/dev/null
+  _seed_role_record task-b executor-task-b session-b "$TEST_PROJECT" claude-code
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+
+  bash "$SCRIPTS/send.sh" task-a planner-task-a executor-task-a "leave task a unread" >/dev/null
+  bash "$SCRIPTS/send.sh" task-b planner-task-b executor-task-b "deliver task b only" >/dev/null
+
+  run bash -c "printf '%s' '{\"session_id\":\"session-b\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deliver task b only"* ]]
+  [[ "$output" != *"leave task a unread"* ]]
+
+  run bash "$SCRIPTS/inbox.sh" task-a executor-task-a --quiet
+  [[ "$output" == *"leave task a unread"* ]]
+}
+
+@test "check-inbox: ambiguous role-session records fall back to all registered pairs" {
+  bash "$SCRIPTS/join.sh" task-a executor-task-a claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-a planner-task-a  claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b executor-task-b claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b planner-task-b  claude-code "$TEST_PROJECT" >/dev/null
+  _seed_role_record task-a executor-task-a shared-session "$TEST_PROJECT" claude-code
+  _seed_role_record task-b executor-task-b shared-session "$TEST_PROJECT" claude-code
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+
+  bash "$SCRIPTS/send.sh" task-a planner-task-a executor-task-a "ambiguous task a" >/dev/null
+  bash "$SCRIPTS/send.sh" task-b planner-task-b executor-task-b "ambiguous task b" >/dev/null
+
+  run bash -c "printf '%s' '{\"session_id\":\"shared-session\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ambiguous task a"* ]]
+  [[ "$output" == *"ambiguous task b"* ]]
+}
+
+@test "check-inbox: cooldown is isolated by session and registered pair" {
+  bash "$SCRIPTS/join.sh" task-a executor-task-a claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-a planner-task-a  claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b executor-task-b claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" task-b planner-task-b  claude-code "$TEST_PROJECT" >/dev/null
+  _seed_role_record task-a executor-task-a session-a "$TEST_PROJECT" claude-code
+  _seed_role_record task-b executor-task-b session-b "$TEST_PROJECT" claude-code
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 60 >/dev/null
+
+  bash "$SCRIPTS/send.sh" task-a planner-task-a executor-task-a "first session job" >/dev/null
+  run bash -c "printf '%s' '{\"session_id\":\"session-a\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [[ "$output" == *"first session job"* ]]
+
+  bash "$SCRIPTS/send.sh" task-b planner-task-b executor-task-b "second session job" >/dev/null
+  run bash -c "printf '%s' '{\"session_id\":\"session-b\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"second session job"* ]]
+}
+
 @test "check-inbox: does not hang when stdin is a non-TTY pipe that never reaches EOF (#381)" {
   # A minimal `timeout` shim so this test exercises check-inbox.sh's own
   # `command -v timeout` code path deterministically, regardless of whether
@@ -1132,40 +1212,41 @@ JSON
   kill "$watcher_pid" 2>/dev/null || true
 }
 
-@test "watch.sh subscription is static — newly joined identities don't appear in a running watcher" {
+@test "watch.sh dynamically receives a job sent between join and subscription refresh" {
   mkdir -p "$TEST_SKILL_DIR/teams/myteam"
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
 {"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
 JSON
   DB="$TEST_SKILL_DIR/db/messages.db"
 
-  # Watcher starts with only `alice` registered. Default subscription set
-  # is resolved at launch and not re-evaluated each poll.
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code > /tmp/agmsg-static 2>&1 3>&- &
+  local out="$TEST_SKILL_DIR/dynamic-watch.out"
+  local watermark="$TEST_SKILL_DIR/run/watch.t-static.watermark"
+  AGMSG_WATCH_INTERVAL=2 bash "$SCRIPTS/watch.sh" t-static "$TEST_PROJECT" claude-code >"$out" 2>&1 3>&- &
   local pid=$!
-  wait_for_file "$TEST_SKILL_DIR/run/watch.t-static.watermark"
+  wait_for_file "$watermark"
 
-  # Join `bob` to the same (project, type) after the watcher is running.
+  # The job lands immediately after join, before the watcher's next poll.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/send.sh" myteam alice bob "for-bob-dynamic" >/dev/null
 
-  # Insert messages for both. alice should arrive (alice was in the original
-  # subscription set); bob should NOT arrive (joined after launch).
-  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'sys', 'alice', 'for-alice-static');"
-  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'sys', 'bob',   'for-bob-static');"
-
-  # A sentinel for alice inserted AFTER bob's row. Its arrival proves the
-  # watcher has already scanned past for-bob-static, which is what makes "bob
-  # never arrived" an assertion rather than a guess. Waiting on
-  # for-alice-static instead would not: it precedes bob's row, so seeing it
-  # says nothing about whether bob's had been reached yet.
-  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'sys', 'alice', 'static-sentinel');"
-  wait_for_file_contains /tmp/agmsg-static "static-sentinel"
+  wait_for_file_contains "$out" "for-bob-dynamic"
+  local cursor=""
+  local i
+  for i in {1..50}; do
+    if cursor=$(sqlite3 -cmd ".timeout 5000" "$DB" \
+      "SELECT last_id FROM delivery_cursors WHERE team='myteam' AND agent='bob' AND type='claude-code';" \
+      2>/dev/null); then
+      [ "${cursor:-0}" -gt 0 ] && break
+    fi
+    sleep 0.1
+  done
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null || true
 
-  grep -q "for-alice-static" /tmp/agmsg-static
-  ! grep -q "for-bob-static" /tmp/agmsg-static
-  rm -f /tmp/agmsg-static
+  cursor=$(sqlite3 -cmd ".timeout 5000" "$DB" \
+    "SELECT last_id FROM delivery_cursors WHERE team='myteam' AND agent='bob' AND type='claude-code';")
+  grep -q "for-bob-dynamic" "$out"
+  [ "$cursor" -gt 0 ]
 }
 
 # --- set turn/off is project-scoped: must not kill other projects' watchers ---

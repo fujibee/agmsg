@@ -27,6 +27,7 @@ if ! agmsg_is_known_type "$AGENT_TYPE"; then
   exit 1
 fi
 
+# shellcheck disable=SC2034  # consumed by sourced delivery-cursor.sh
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 
@@ -45,6 +46,8 @@ agmsg_validate_agent_name "$AGENT_ID" || exit 1
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/storage.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/delivery-cursor.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
 # Scope resolution to the join target team (#357): a poison registration in an
@@ -149,6 +152,10 @@ else
   if [ "$HAS_REGISTRATION" = "1" ]; then
     AGENT_OBJ="$NORMALIZED"
   else
+    # Publish the cursor before config.json makes this registration sendable.
+    # A job sent immediately after join therefore remains strictly after the
+    # cursor even when the watcher has not refreshed its membership yet.
+    agmsg_delivery_cursor_seed "$TEAM" "$AGENT_ID" "$AGENT_TYPE" "$PROJECT_PATH" >/dev/null
     AGENT_OBJ=$(agmsg_sqlite_mem "
       SELECT json_set(
         '$NORMALIZED_ESCAPED',
@@ -157,6 +164,10 @@ else
       );
     ")
   fi
+fi
+
+if [ -z "$EXISTING" ] || [ "$EXISTING" = "null" ]; then
+  agmsg_delivery_cursor_seed "$TEAM" "$AGENT_ID" "$AGENT_TYPE" "$PROJECT_PATH" >/dev/null
 fi
 
 AGENT_OBJ_ESCAPED=$(printf '%s' "$AGENT_OBJ" | sed "s/'/''/g")

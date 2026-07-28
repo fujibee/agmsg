@@ -6,6 +6,11 @@
 
 : "${SKILL_DIR:?subscription.sh requires SKILL_DIR}"
 
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/resolve-project.sh"
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/role-session.sh"
+
 agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 # Resolve the (team, agent) rows this process should receive for.
@@ -17,16 +22,9 @@ agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 # When `active_name` is set, only that agent name is kept. When the final
 # argument is `claim`, the helper attempts to claim each active pair for
 # `owner_id`, matching watch.sh actas mode.
-agmsg_subscription_pairs() {
-  local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}"
-  local scripts_dir="$SKILL_DIR/scripts"
-  local pairs filtered skipped held state result
-
-  pairs="$("$scripts_dir/identities.sh" "$project" "$type")"
-  if [ -n "$active_name" ]; then
-    pairs=$(printf '%s\n' "$pairs" | awk -v n="$active_name" -F'\t' 'NF >= 2 && $2 == n')
-  fi
-
+_agmsg_subscription_filter_locks() {
+  local pairs="$1" owner_id="$2" active_name="${3:-}" claim_mode="${4:-}"
+  local filtered skipped held state result
   [ -n "$pairs" ] || return 0
 
   filtered=""
@@ -70,6 +68,56 @@ agmsg_subscription_pairs() {
   fi
 
   printf '%s' "$filtered"
+}
+
+_agmsg_subscription_registered_pairs() {
+  local project="$1" type="$2" active_name="${3:-}" pairs
+  pairs="$("$SKILL_DIR/scripts/identities.sh" "$project" "$type")"
+  if [ -n "$active_name" ]; then
+    pairs=$(printf '%s\n' "$pairs" | awk -v n="$active_name" -F'\t' 'NF >= 2 && $2 == n')
+  fi
+  printf '%s' "$pairs"
+}
+
+# Narrow to a role-session record only when it identifies exactly one current
+# registration for this project/type. Zero or multiple matches remain broad.
+_agmsg_subscription_narrow_session() {
+  local pairs="$1" project="$2" type="$3" session_token="$4"
+  local bare_sid project_phys records matches="" team agent record_type record_project record_phys count
+  [ -n "$session_token" ] || { printf '%s' "$pairs"; return 0; }
+  bare_sid="$(agmsg_instance_bare_sid "$session_token")"
+  project_phys="$(agmsg_canonical_path "$project" 2>/dev/null || printf '%s' "$project")"
+  records="$(agmsg_role_session_pairs_by_sid "$bare_sid" 2>/dev/null || true)"
+  while IFS=$'\t' read -r team agent record_type record_project; do
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    [ -z "$record_type" ] || [ "$record_type" = "$type" ] || continue
+    if [ -n "$record_project" ]; then
+      record_phys="$(agmsg_canonical_path "$record_project" 2>/dev/null || printf '%s' "$record_project")"
+      [ "$record_phys" = "$project_phys" ] || continue
+    fi
+    printf '%s\n' "$pairs" | grep -Fxq "${team}"$'\t'"${agent}" || continue
+    printf '%s\n' "$matches" | grep -Fxq "${team}"$'\t'"${agent}" && continue
+    matches="${matches:+$matches$'\n'}${team}"$'\t'"${agent}"
+  done <<< "$records"
+  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "$matches"
+  else
+    printf '%s' "$pairs"
+  fi
+}
+
+agmsg_subscription_pairs() {
+  local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}" pairs
+  pairs="$(_agmsg_subscription_registered_pairs "$project" "$type" "$active_name")"
+  _agmsg_subscription_filter_locks "$pairs" "$owner_id" "$active_name" "$claim_mode"
+}
+
+agmsg_session_subscription_pairs() {
+  local project="$1" type="$2" owner_id="$3" session_token="${4:-}" active_name="${5:-}" claim_mode="${6:-}" pairs
+  pairs="$(_agmsg_subscription_registered_pairs "$project" "$type" "$active_name")"
+  pairs="$(_agmsg_subscription_narrow_session "$pairs" "$project" "$type" "$session_token")"
+  _agmsg_subscription_filter_locks "$pairs" "$owner_id" "$active_name" "$claim_mode"
 }
 
 # Build a SQL predicate for a tab-separated pair list.
