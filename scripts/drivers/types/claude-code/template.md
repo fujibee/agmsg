@@ -45,7 +45,7 @@ Four possible outputs:
   > - `/__SKILL_NAME__ actas <name>` — switch to another role in this project (creates if needed)
   > - `/__SKILL_NAME__ drop <name>` — remove a role from this project
   > - `/__SKILL_NAME__ spawn <type> <name>` — launch a new agent in a tmux pane / terminal and have it actas <name>
-  > - `/__SKILL_NAME__ despawn <name>` — tear down a member you spawned (graceful, or `--force`)
+  > - `/__SKILL_NAME__ despawn <name>` — release a spawned member's role (graceful; `--force` is recovery)
 
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
 
@@ -177,12 +177,12 @@ If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code
 3. Show the script's output. Do NOT TaskStop or relaunch this session's own Monitor — spawn affects a separate, newly launched agent, not this session's subscription.
 
 If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
-1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` is the inverse of `spawn` — it tears down a member you previously spawned.
+1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` asks a member you previously spawned to release its role; `--force` is a recovery path.
 2. Determine which team `<name>` belongs to (as with `send`), then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
-   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. The member's watcher drops its own role (releasing the actas lock + registration) and closes its own tmux pane, which ends the agent CLI. Blocks until the lock releases, up to `--timeout` (default 30s), then prints `status=ok`. On timeout it prints `status=timeout` and exits 3 — the member's watcher didn't respond (dead watcher, or a codex member with no Monitor); retry with `--force`.
-   - `--force`: skips the message and tears the member down from the placement recorded at spawn time — kills its tmux pane/window and drops its registration. Use when the member's watcher can't respond.
-3. Show the script's output. Do NOT TaskStop or relaunch this session's own Monitor — despawn affects the spawned member, not this session's subscription.
+   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. Its exclusive watcher attempts to drop the logical role. For a tmux placement it deliberately does not invoke tmux; tell the user to close the target pane/window manually. It waits up to `--timeout` (default 30s) for the role lock to become free, then prints `status=ok ... note=role-lock-free-close-manually`. `ok` confirms only that the lock was observed free, not registration cleanup or pane/window closure; end-to-end acknowledgement is tracked by #514. Non-tmux placements retain plain `status=ok` without that note. An exact-matching `herdr` placement is handled through the existing guarded close path, which attempts to close that pane. On timeout it prints `status=timeout` and exits 3 — the member's watcher did not respond (dead watcher, or a codex member with no Monitor); retry with `--force`.
+   - `--force`: explicit local recovery escape hatch. It skips the message and trusts the placement ID recorded at spawn time to close the recorded pane/window and drop registration. The ID is neither authenticated nor generation-bound, so a stale/recycled placement can be unsafe; hardening is tracked by #514. Use it when the member's watcher cannot respond.
+3. Show the script's output. Do NOT TaskStop or relaunch this session's own Monitor — `despawn` does not manage this session's subscription.
 
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`

@@ -11,19 +11,20 @@ set -euo pipefail
 #   <name>   the member to tear down
 #
 # Default (graceful): send a `ctrl:despawn` control message to <name>. The
-# member's watcher (watch.sh) sees it, drops its own role (releasing the actas
-# lock) and closes its own tmux pane — ending its CLI. We block until the lock
-# is released, up to --timeout (default 30s); on timeout the member didn't
-# respond (dead watcher, or a codex member with no Monitor) — re-run with
-# --force.
+# member's watcher (watch.sh) sees it and drops its own role (releasing the
+# actas lock). A tmux pane/window is deliberately left for manual close because
+# inherited ids and legacy placement records are not generation-bound ownership
+# proof; status=ok therefore means only that the role lock was observed free.
+# We block until the lock is released, up to --timeout (default 30s); on timeout
+# the member didn't respond (dead watcher, or a codex member with no Monitor) —
+# re-run with --force. Exact herdr placement retains its guarded close path.
 #
 # --force: skip the message and tear the member down from here using the
 # placement recorded at spawn time — kill its tmux pane/window and drop its
 # registration. For when the member's watcher can't respond.
 #
-# See #109. Graceful teardown's full pane-close is tmux-only (the member needs a
-# tmux pane to close); an OS-terminal member drops its role but its window must
-# be closed by hand.
+# See #109 and #514. `--force` remains a local recovery escape hatch that trusts
+# the recorded placement id; it is not authenticated or generation-bound.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
@@ -88,12 +89,30 @@ if [ "$FORCE" = "1" ]; then
 fi
 
 # --- Graceful ---
+# Snapshot only the placement scheme for caller-visible reporting. It is never
+# used as authority to close a tmux target, and the record is still deleted once
+# the role is free so stale ids cannot be reused by a later force operation.
+graceful_placed_id=""
+if [ -f "$SPAWN_REC" ]; then
+  IFS=$'\t' read -r graceful_placed_id _ _ < "$SPAWN_REC" || true
+fi
+
 state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
 case "$state" in
   free)
-    echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; a tmux member may already be gone). If a window remains, use --force." >&2
+    case "$graceful_placed_id" in
+      %*|@*)
+        echo "despawn: '$NAME' holds no live actas lock; close its tmux pane/window manually if it remains" >&2
+        ;;
+      *)
+        echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; the member may already be gone). Close any remaining window manually." >&2
+        ;;
+    esac
     rm -f "$SPAWN_REC" 2>/dev/null || true
-    echo "status=ok name=$NAME team=$TEAM note=no-live-lock"
+    case "$graceful_placed_id" in
+      %*|@*) echo "status=ok name=$NAME team=$TEAM note=no-live-lock-close-manually" ;;
+      *) echo "status=ok name=$NAME team=$TEAM note=no-live-lock" ;;
+    esac
     exit 0
     ;;
 esac
@@ -114,4 +133,12 @@ while true; do
 done
 
 rm -f "$SPAWN_REC" 2>/dev/null || true
-echo "status=ok name=$NAME team=$TEAM after=${waited}s"
+case "$graceful_placed_id" in
+  %*|@*)
+    echo "despawn: '$NAME' role lock is free; close its tmux pane/window manually" >&2
+    echo "status=ok name=$NAME team=$TEAM after=${waited}s note=role-lock-free-close-manually"
+    ;;
+  *)
+    echo "status=ok name=$NAME team=$TEAM after=${waited}s"
+    ;;
+esac

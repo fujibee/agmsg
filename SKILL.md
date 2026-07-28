@@ -142,16 +142,23 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/spawn.sh <claude-code|codex> <name> [options]
 
 # Tear down a spawned member — the inverse of spawn.
-# Default (graceful): sends a `ctrl:despawn` control message to <name>; the
-# member's watcher drops its own role (releasing the actas lock + registration)
-# and closes its own tmux pane, ending the agent. Blocks until the lock releases
-# (--timeout, default 30s) then prints `status=ok`; on timeout prints
-# status=timeout and exits 3 (retry with --force). Only an exclusive watcher
-# dedicated to <name> acts on it — the despawning session is never torn down.
-# --force: skip the message and tear the member down from the placement recorded
-# at spawn time (kill its tmux pane/window, drop its registration) — for a dead
-# watcher or a codex member (no Monitor). A hand-started member with no placement
-# record can't be --forced.
+# Default (graceful): sends a `ctrl:despawn` control message to <name>; its
+# exclusive watcher attempts to drop the logical role. For a tmux placement it
+# deliberately does not invoke tmux, so close the target pane/window manually.
+# Once the role lock is observed free, the caller prints
+# `status=ok ... note=role-lock-free-close-manually`; `ok` does not acknowledge
+# registration cleanup or pane/window closure. Non-tmux placements retain plain
+# `status=ok` without that note. An exact-matching herdr placement is handled
+# through the existing guarded close path, which attempts to close that pane.
+# On timeout it prints status=timeout and exits 3 (retry with --force). On the
+# graceful control path, only an exclusive watcher dedicated to <name> acts —
+# the despawning session is never torn down.
+# --force: explicit local recovery escape hatch. It skips the message and trusts
+# the placement ID recorded at spawn time to close the pane/window and drop its
+# registration — for a dead watcher or a codex member (no Monitor). That ID is
+# neither authenticated nor generation-bound, so a stale/recycled placement can
+# be unsafe; end-to-end lifecycle acknowledgement and hardening are tracked by
+# #514. A hand-started member with no placement record can't be --forced.
 #   --force              tear down from the recorded placement, no message
 #   --timeout N          seconds to wait for graceful teardown (default 30)
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]

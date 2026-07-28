@@ -14,15 +14,22 @@ setup() {
   # the walk can produce different instance IDs. Pin to bare-sid on MSYS2 so
   # both contexts agree deterministically.
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export AGMSG_AGENT_PID="" ;; esac
-  # Never inherit real herdr env from the test runner to prevent accidental
-  # pane close on ctrl:despawn.
-  unset HERDR_PANE_ID HERDR_ENV
+  # Never inherit real tmux/herdr env from the test runner to prevent
+  # accidental host-pane close on ctrl:despawn.
+  unset TMUX_PANE HERDR_PANE_ID HERDR_ENV
+  DESPAWN_WATCH_PID=""
   export PROJ="/tmp/agmsg-watch-proj"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
 }
 
 teardown() {
+  # Successful despawn tests reap the watcher themselves. This is only a
+  # failure-path guard so an assertion cannot leak a background watcher.
+  if [ -n "${DESPAWN_WATCH_PID:-}" ]; then
+    kill "$DESPAWN_WATCH_PID" 2>/dev/null || true
+    wait "$DESPAWN_WATCH_PID" 2>/dev/null || true
+  fi
   teardown_test_env
 }
 
@@ -606,6 +613,70 @@ _read_at_for_body() {
   [ -z "$(_read_at_for_body "M-broad-guard-alice")" ]
 }
 
+# --- ctrl:despawn, external placement ---
+#
+# A tmux pane id in the environment is inherited receiver context, not proof
+# that agmsg owns that pane. Even a matching legacy placement record has no
+# authenticated, generation-bound ownership proof, so graceful teardown must
+# drop the role without invoking tmux.
+
+_stub_tmux_fail_on_call() {
+  local stub_bin="$1" log="$2"
+  mkdir -p "$stub_bin"
+  export TMUX_CALL_LOG="$log"
+  : > "$log"
+  cat > "$stub_bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+exit 99
+STUB
+  chmod +x "$stub_bin/tmux"
+}
+
+_record_tmux_placement() {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '%s\t%s\tclaude-code\n' "$1" "$PROJ" \
+    > "$TEST_SKILL_DIR/run/spawn.team__alice"
+}
+
+_wait_for_despawn_watch_exit() {
+  wait_for_pid_exit "$DESPAWN_WATCH_PID" || return 1
+  wait "$DESPAWN_WATCH_PID" 2>/dev/null || true
+  DESPAWN_WATCH_PID=""
+}
+
+_assert_despawn_role_cleanup() {
+  [ ! -f "$TEST_SKILL_DIR/run/actas.team__alice.session" ]
+  [ ! -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\t'alice* ]]
+}
+
+@test "watch: ctrl:despawn never invokes tmux even for a matching recorded pane" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local tmux_log="$TEST_SKILL_DIR/tmux-calls.log"
+  local errlog="$TEST_SKILL_DIR/tmux-stderr.log"
+  _stub_tmux_fail_on_call "$stub_bin" "$tmux_log"
+  _record_tmux_placement %42
+  setup_live_owner "$TEST_SKILL_DIR/run" sess-tmux
+
+  AGMSG_WATCH_INTERVAL=1 env -u HERDR_PANE_ID -u HERDR_ENV \
+    TMUX_PANE=%42 PATH="$stub_bin:$PATH" \
+    bash "$SCRIPTS/watch.sh" sess-tmux "$PROJ" claude-code alice \
+    >/dev/null 2>"$errlog" 3>&- &
+  DESPAWN_WATCH_PID=$!
+  wait_for_file "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
+  _wait_for_despawn_watch_exit
+
+  [ ! -s "$tmux_log" ]
+  grep -q "close this window manually" "$errlog"
+  _assert_despawn_role_cleanup
+}
+
 # --- ctrl:despawn, herdr placement ---
 #
 # The watcher may only close a herdr pane that agmsg itself placed. HERDR_* is
@@ -642,17 +713,11 @@ _despawn_under_herdr() {
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE "$@" PATH="$stub_bin:$PATH" \
     bash "$SCRIPTS/watch.sh" sess-herdr "$PROJ" claude-code alice \
     >/dev/null 2>"$errlog" 3>&- &
-  local wpid=$! i
-  for i in $(seq 1 50); do
-    [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ] && break; sleep 0.1
-  done
-  [ -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
+  DESPAWN_WATCH_PID=$!
+  wait_for_file "$TEST_SKILL_DIR/run/ready.team__alice" || return 1
 
   bash "$SCRIPTS/send.sh" team bob alice "ctrl:despawn" >/dev/null
-  for i in $(seq 1 50); do
-    kill -0 "$wpid" 2>/dev/null || break; sleep 0.1
-  done
-  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+  _wait_for_despawn_watch_exit
 }
 
 @test "watch: ctrl:despawn closes the herdr pane agmsg placed for this role" {
@@ -669,6 +734,24 @@ _despawn_under_herdr() {
 
   [ -f "$herdr_log" ]
   grep -q "pane close wC:p42" "$herdr_log"
+}
+
+@test "watch: ctrl:despawn preserves exact herdr close when TMUX_PANE is inherited" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
+  local tmux_log="$TEST_SKILL_DIR/tmux-calls.log"
+  local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
+  _stub_tmux_fail_on_call "$stub_bin" "$tmux_log"
+  _stub_herdr "$stub_bin" "$herdr_log"
+  _record_herdr_placement wC:p42
+
+  _despawn_under_herdr "$stub_bin" "$errlog" \
+    HERDR_PANE_ID="wC:p42" HERDR_ENV=1 TMUX_PANE=%17
+
+  grep -q "pane close wC:p42" "$herdr_log"
+  [ ! -s "$tmux_log" ]
+  _assert_despawn_role_cleanup
 }
 
 @test "watch: ctrl:despawn does NOT close a herdr pane the watcher merely inherited (no placement record)" {

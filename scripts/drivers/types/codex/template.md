@@ -133,11 +133,11 @@ If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex re
 3. Show the script's output.
 
 If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
-1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` is the inverse of `spawn` — it tears down a member you previously spawned.
+1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` asks a member you previously spawned to release its role; `--force` is a recovery path.
 2. Determine which team `<name>` belongs to (as with `send`), then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
-   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. A claude-code member's watcher drops its own role and closes its own tmux pane, ending the agent. Blocks until the lock releases, up to `--timeout` (default 30s), then prints `status=ok`. On timeout it prints `status=timeout` and exits 3 — retry with `--force`. A codex member has no watcher to respond, so use `--force` for it.
-   - `--force`: skips the message and tears the member down from the placement recorded at spawn time — kills its tmux pane/window and drops its registration.
+   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. A claude-code member's exclusive watcher attempts to drop its logical role. For a tmux placement it deliberately does not invoke tmux; tell the user to close the target pane/window manually. It waits up to `--timeout` (default 30s) for the role lock to become free, then prints `status=ok ... note=role-lock-free-close-manually`. `ok` confirms only that the lock was observed free, not registration cleanup or pane/window closure; end-to-end acknowledgement is tracked by #514. Non-tmux placements retain plain `status=ok` without that note. An exact-matching `herdr` placement is handled through the existing guarded close path, which attempts to close that pane. On timeout it prints `status=timeout` and exits 3 — retry with `--force`. A codex member has no watcher to respond, so use `--force` for it.
+   - `--force`: explicit local recovery escape hatch. It skips the message and trusts the placement ID recorded at spawn time to close the recorded pane/window and drop registration. The ID is neither authenticated nor generation-bound, so a stale/recycled placement can be unsafe; hardening is tracked by #514.
 3. Show the script's output.
 
 If argument is "mode" (no further args):

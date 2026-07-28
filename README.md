@@ -213,18 +213,21 @@ Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-bu
 
 ### Tear down a spawned agent (`despawn`)
 
-`despawn` is the inverse of `spawn` — it cleanly tears down a member you brought up.
+`despawn` releases a spawned member's logical role. In the normal tmux case,
+you then close its pane or window manually.
 
 ```
-/agmsg despawn reviewer          # graceful: the member drops its role and closes its own pane
-/agmsg despawn alice --force     # force: tear it down from here when its watcher can't respond
+/agmsg despawn reviewer          # graceful: release its role; close a tmux pane/window manually
+/agmsg despawn alice --force     # force: local recovery using the recorded placement
 ```
 
-By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose watcher drops its own role (releasing the actas lock and registration) and closes its own tmux pane — ending the agent. It blocks until the role is released, up to `--timeout <secs>` (default 30), then prints `status=ok`. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
+By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose exclusive watcher attempts to drop its logical role. For a tmux placement it deliberately does not invoke tmux, so close the target pane/window manually. It waits up to `--timeout <secs>` (default 30) for the role lock to become free, then prints `status=ok ... note=role-lock-free-close-manually`. `ok` confirms only that the lock was observed free; it does not acknowledge registration cleanup or tmux closure. Non-tmux placements retain plain `status=ok` without that note. End-to-end lifecycle acknowledgement is tracked by #514. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
 
-`--force` skips the message and tears the member down from the placement recorded at spawn time: it kills the member's tmux pane/window and drops its registration. Use it when the member's watcher can't respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) can't be `--force`d; despawn says so and leaves it for you to close.
+An exact-matching `herdr` placement is handled through the existing guarded close path, which attempts to close that pane.
 
-Despawn only acts on the named member — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
+`--force` is an explicit local recovery escape hatch. It skips the message and trusts the placement ID recorded at spawn time to close the recorded pane/window and drop its registration. That ID is neither authenticated nor generation-bound, so a stale or recycled placement can target the wrong pane/window and be unsafe; hardening is tracked by #514. Use it when the member's watcher cannot respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) cannot be `--force`d; despawn says so and leaves it for you to close.
+
+On the graceful path, only a watcher exclusive to the named member acts — the session running `despawn` is never torn down, and a broad-subscription watcher ignores a `ctrl:despawn` aimed at another role.
 
 ### Bring a role back with its context (session resume)
 
@@ -288,7 +291,7 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
 /agmsg drop <name>                      — remove a role from this project
 /agmsg spawn <type> <name>              — launch a new agent (claude-code/codex) that takes <name>
-/agmsg despawn <name> [--force]         — tear down a member you spawned (graceful, or --force)
+/agmsg despawn <name> [--force]         — release a spawned member's role (graceful; --force is recovery)
 /agmsg hook on | off                    — legacy aliases (mode turn | off)
 /agmsg version                          — show the installed version (git-describe provenance)
 /agmsg reset                            — clear current project registration
