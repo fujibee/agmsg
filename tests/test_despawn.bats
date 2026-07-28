@@ -92,15 +92,47 @@ _read_at_for_body() {
   # Placement as spawn would have recorded it (pane %99 doesn't exist; kill is
   # best-effort/no-op here — we assert the registration + lock + record effects).
   printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
-  printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  printf 'bare-owner\n' > "$RUN/actas.team__alice.session"
 
-  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  # The leader can resolve a different composite instance id than this old bare
+  # record. Force must pass the raw owner into reset's internal exact-owner
+  # mode, not normalize it and leave the lock behind.
+  run env AGMSG_AGENT_PID=4242 bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=forced"* ]]
   [ ! -f "$RUN/spawn.team__alice" ]                 # placement record cleaned
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
+}
+
+@test "despawn --force: retains spawn, registration, and lock on reset release failure then recovers" {
+  local lock="$RUN/actas.team__alice.session"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+  printf 'somesid\n' > "$lock"
+  mkdir "${lock}.reclaim.d"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"status=error"* ]]
+  [[ "$output" == *"reason=reset-failed"* ]]
+  [[ "$output" == *"locked=team/alice"* ]]
+  [[ "$output" != *"status=forced"* ]]
+  [ -f "$RUN/spawn.team__alice" ]
+  [ -f "$lock" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" == *alice* ]]
+
+  rmdir "${lock}.reclaim.d"
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=forced"* ]]
+  [ ! -e "$RUN/spawn.team__alice" ]
+  [ ! -e "$lock" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" != *alice* ]]
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -119,6 +151,41 @@ _read_at_for_body() {
   run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
   [ "$status" -eq 3 ]
   [[ "$output" == *"status=timeout"* ]]
+}
+
+@test "despawn: graceful reset failure keeps watcher alive for a retry" {
+  local lock="$RUN/actas.team__alice.session"
+  local errlog="$BATS_TEST_TMPDIR/despawn-reset-failure.err"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  setup_live_owner "$RUN" sess-m
+
+  AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
+    bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
+    >/dev/null 2>"$errlog" 3>&- &
+  local wpid=$!
+  wait_for_file "$RUN/ready.team__alice"
+  [ -f "$lock" ]
+  mkdir "${lock}.reclaim.d"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=timeout"* ]]
+  [ -f "$lock" ]
+  kill -0 "$wpid" 2>/dev/null
+  wait_for_file_contains "$errlog" "despawn reset failed"
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" == *alice* ]]
+
+  rmdir "${lock}.reclaim.d"
+  run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=ok"* ]]
+  [ ! -e "$lock" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" != *alice* ]]
+
+  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
 
 @test "despawn: a broad (non-actas) watcher ignores ctrl:despawn and does not self-destruct" {

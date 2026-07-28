@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: reset.sh <project_path> <type> [agent_id] [session_id]
+# Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner]
 #
 # Removes registrations for the given project/type across all teams.
 # If agent_id is omitted, it is resolved from whoami.sh for the current project/type.
@@ -14,6 +14,19 @@ PROJECT_PATH="${1:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]
 AGENT_TYPE="${2:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]}"
 TARGET_AGENT="${3:-}"
 SESSION_ID="${4:-}"
+EXACT_OWNER=0
+case "${5:-}" in
+  '') ;;
+  --exact-owner) EXACT_OWNER=1 ;;
+  *)
+    echo "Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner]" >&2
+    exit 1
+    ;;
+esac
+[ "$#" -le 5 ] || {
+  echo "Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner]" >&2
+  exit 1
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -43,12 +56,17 @@ PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 # in any Windows/MSYS form, not just the exact resolved string.
 PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 
-# A drop releases the actas lock keyed under this session's per-process instance
-# id (#93). The template passes a bare $CLAUDE_CODE_SESSION_ID; normalize to the
-# same composite the watcher/claim used so the release matches the real owner
-# token (and doesn't no-op against a bare key). Empty stays empty (lock release
-# is then skipped, as before).
-if [ -n "$SESSION_ID" ]; then
+# A normal drop releases the actas lock keyed under this session's per-process
+# instance id (#93). The template passes a bare $CLAUDE_CODE_SESSION_ID;
+# normalize to the same composite the watcher/claim used so the release matches
+# the real owner token. `--exact-owner` is internal force-despawn plumbing: it
+# passes a record read from the lock itself, which must not be re-derived (a
+# stored bare owner could otherwise be upgraded to a different composite).
+RELEASE_REQUESTED=0
+if [ -n "$SESSION_ID" ] || [ "$EXACT_OWNER" -eq 1 ]; then
+  RELEASE_REQUESTED=1
+fi
+if [ "$RELEASE_REQUESTED" -eq 1 ] && [ "$EXACT_OWNER" -ne 1 ]; then
   SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$AGENT_TYPE")"
 fi
 
@@ -77,6 +95,9 @@ fi
 REMOVED=0
 TOUCHED_TEAMS=0
 LOCK_FAILED=0
+RELEASE_FAILED=0
+FINALIZE_FAILED=0
+RETAINED_LOCKS=""
 
 for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   [ -f "$TEAM_CONFIG" ] || continue
@@ -92,7 +113,14 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     LOCK_FAILED=1
     continue
   fi
-  CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+  # Keep the original complete config while the per-team registry lock is
+  # held.  When a session-scoped reset cannot prove that its actas lock was
+  # released, this is atomically restored below so the registration and lock
+  # remain retryable as one local outcome.  Do not delete a last config before
+  # the checked release: that used to turn an infrastructure failure into a
+  # successful-looking, irrecoverable drop.
+  ORIGINAL_CONFIG=$(<"$TEAM_CONFIG")
+  CONFIG_ESCAPED=$(printf '%s' "$ORIGINAL_CONFIG" | sed "s/'/''/g")
 
   # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT
   # bound via `.param set`: the sqlite3 shell's dot-command tokenizer does
@@ -167,35 +195,76 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     FROM json_each(json_extract('$(printf '%s' "$UPDATED" | sed "s/'/''/g")', '\$.agents'));
   ")
 
+  # Write the prospective registration set first while holding the team
+  # registry lock.  A release-first ordering creates a peer-claim window in
+  # which a failed reset would restore registration after another session had
+  # already claimed the role.  `agmsg_write_atomic` keeps unlocked readers from
+  # seeing a partial config; a failed checked release restores ORIGINAL_CONFIG
+  # before this registry lock is released.
+  if ! agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"; then
+    echo "Warning: could not update $TEAM_NAME, skipped" >&2
+    LOCK_FAILED=1
+    agmsg_lock_release
+    continue
+  fi
+
+  if [ "$RELEASE_REQUESTED" -eq 1 ] \
+    && ! actas_lock_release_checked "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID"; then
+    local_label="$(_actas_lock_encode "$TEAM_NAME")/$(_actas_lock_encode "$TARGET_AGENT")"
+    RETAINED_LOCKS="${RETAINED_LOCKS:+$RETAINED_LOCKS,}$local_label"
+    RELEASE_FAILED=1
+    # This write is deliberately checked too.  If the filesystem cannot
+    # restore the old config, never claim success: the retained lock is still
+    # reported explicitly for operator recovery.
+    if ! agmsg_write_atomic "$TEAM_CONFIG" "$ORIGINAL_CONFIG"; then
+      echo "Warning: could not restore $TEAM_NAME after retained actas lock" >&2
+      FINALIZE_FAILED=1
+    fi
+    agmsg_lock_release
+    continue
+  fi
+
+  # Only finalize an empty team after checked release succeeded.  The config
+  # stayed in place through the release above so a failure could restore the
+  # original registration atomically.  Keep the registry lock through removal
+  # too: releasing it first would let a concurrent join recreate config.json
+  # just before this reset unlinked it.
   if [ "$AGENT_COUNT" -eq 0 ]; then
-    rm -f "$TEAM_CONFIG"
+    if ! rm -f "$TEAM_CONFIG"; then
+      echo "Warning: could not finalize empty team $TEAM_NAME" >&2
+      FINALIZE_FAILED=1
+      agmsg_lock_release
+      continue
+    fi
     agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true
   else
-    agmsg_write_atomic "$TEAM_CONFIG" "$UPDATED"
     agmsg_lock_release
   fi
 
   REMOVED=$((REMOVED + MATCH_COUNT))
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
   echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
-
-  # Release the actas lock for this (team, agent) pair so peer sessions can
-  # claim it without waiting for owner-session-end / stale GC.
-  if [ -n "$SESSION_ID" ]; then
-    actas_lock_release "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID" 2>/dev/null || true
-  fi
 done
+
+if [ "$LOCK_FAILED" -ne 0 ] || [ "$RELEASE_FAILED" -ne 0 ] || [ "$FINALIZE_FAILED" -ne 0 ]; then
+  # A team we could not lock or whose checked lock release failed was left
+  # unprocessed.  Surface partial progress, but never call it complete.  Exact
+  # percent-encoded labels make the retained retry target unambiguous.
+  if [ "$REMOVED" -gt 0 ]; then
+    echo "Reset incomplete: removed $REMOVED registration(s) across $TOUCHED_TEAMS team(s)" >&2
+  fi
+  if [ "$LOCK_FAILED" -ne 0 ]; then
+    echo "Reset incomplete: one or more teams could not be locked." >&2
+  fi
+  if [ -n "$RETAINED_LOCKS" ]; then
+    echo "Reset incomplete: retained=$RETAINED_LOCKS" >&2
+  fi
+  exit 1
+fi
 
 if [ "$REMOVED" -eq 0 ]; then
   echo "No registrations removed."
 else
   echo "Reset complete: removed $REMOVED registration(s) across $TOUCHED_TEAMS team(s)"
-fi
-
-# A team we couldn't lock was left unprocessed — surface that as a failure rather
-# than reporting partial success.
-if [ "$LOCK_FAILED" -ne 0 ]; then
-  echo "Reset incomplete: one or more teams could not be locked." >&2
-  exit 1
 fi

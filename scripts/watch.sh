@@ -230,6 +230,15 @@ if [ -n "$PAIRS" ]; then
   filtered=""
   skipped=""
   held=""
+  claimed=""
+  rollback_watch_claims() {
+    local rollback_pairs="$1" retained
+    if retained="$(actas_lock_rollback_pairs "$rollback_pairs" "$SESSION_ID")"; then
+      return 0
+    fi
+    echo "agmsg watch: rollback=incomplete locked=$retained" >&2
+    return 1
+  }
   while IFS=$'\t' read -r _team _agent; do
     [ -z "$_team" ] && continue
     state=$(actas_lock_state "$_team" "$_agent" "$SESSION_ID")
@@ -250,13 +259,42 @@ if [ -n "$PAIRS" ]; then
       # Implicit claim — `actas` was the invoking flow. Covers the race
       # where state-check said free but a peer claimed it between then and
       # now.
-      result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null || true)
-      case "$result" in
-        held:*)
-          held="${held:+$held }${_team}/${_agent}(${result#held:})"
-          continue
-          ;;
-      esac
+      claim_status=0
+      if result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null); then
+        claim_status=0
+      else
+        claim_status=$?
+      fi
+      if [ "$claim_status" -eq 0 ] && [ -z "$result" ]; then
+        if [ "$state" = "free" ]; then
+          claimed="${claimed:+$claimed$'\n'}${_team}"$'\t'"${_agent}"
+        fi
+      elif [ "$claim_status" -eq 1 ]; then
+        case "$result" in
+          held:*)
+            held="${held:+$held }${_team}/${_agent}(${result#held:})"
+            continue
+            ;;
+          *) ;;
+        esac
+        rollback="$claimed"
+        [ "$state" = "free" ] \
+          && rollback="${rollback:+$rollback$'\n'}${_team}"$'\t'"${_agent}"
+        rollback_watch_claims "$rollback" || true
+        echo "agmsg watch: actas claim failed for ${_team}/${_agent}: claim-protocol" >&2
+        exit 2
+      else
+        rollback="$claimed"
+        [ "$state" = "free" ] \
+          && rollback="${rollback:+$rollback$'\n'}${_team}"$'\t'"${_agent}"
+        rollback_watch_claims "$rollback" || true
+        case "$result" in
+          error:*) claim_error="${result#error:}" ;;
+          *) claim_error="claim-protocol" ;;
+        esac
+        echo "agmsg watch: actas claim failed for ${_team}/${_agent}: $claim_error" >&2
+        exit 2
+      fi
     fi
     filtered="${filtered:+$filtered$'\n'}${_team}"$'\t'"${_agent}"
   done <<< "$PAIRS"
@@ -265,6 +303,7 @@ if [ -n "$PAIRS" ]; then
     echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
   fi
   if [ -n "$held" ]; then
+    rollback_watch_claims "$claimed" || true
     echo "agmsg watch: cannot claim (held by other sessions): $held" >&2
     echo "agmsg watch: run \`/agmsg drop <name>\` in the owning session, then retry." >&2
     exit 1
@@ -444,7 +483,18 @@ while true; do
           placed_id=""
           spawn_rec="$(agmsg_spawn_path "$team" "$to")"
           [ -f "$spawn_rec" ] && IFS=$'\t' read -r placed_id _ _ < "$spawn_rec"
-          "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
+          # reset.sh owns the registration+checked-lock transaction.  If it
+          # cannot prove release (for example the reclaim SQLite DB or a
+          # legacy marker is unavailable), do not close this watcher or report
+          # a successful graceful despawn.  Leaving it attached preserves the
+          # role and lets a later ctrl:despawn retry after recovery.  The
+          # successful path's existing placement cleanup is intentionally
+          # unchanged here; provider-operation policy belongs to #518.
+          if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" 2>&1)"; then
+            printf "agmsg watch: despawn reset failed for '%s/%s'; retaining watcher for retry: %s\n" \
+              "$team" "$to" "$reset_output" >&2
+            continue
+          fi
           if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
             tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
           # Closing a herdr pane needs more than "a pane id is in the

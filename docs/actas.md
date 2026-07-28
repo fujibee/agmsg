@@ -27,6 +27,16 @@ The lock is released by `drop`, by session end, or by garbage collection when th
 
 If `<name>` was the currently-active role, the watcher is restarted in default mode — no `actas` name filter, so it receives every `(team, agent)` pair registered for this project that isn't held by another session.
 
+If checked lock cleanup cannot run (for example, reclaim SQLite is unavailable
+or a legacy `.reclaim.d` marker remains), `drop` exits nonzero. In the normal
+checked-cleanup failure path, it restores the prior registration while retaining
+the lock so retry is safe after recovery; the diagnostic includes
+`retained=<team>/<name>` (or a comma-separated exact set). If that restoration
+write also fails, the command still exits nonzero and reports the retained pair,
+but inspect the team registry before retrying. Do not treat either outcome as a
+successful drop or remove the lock by hand—restore the reported infrastructure
+first.
+
 ## Session scope
 
 Switching is session-scoped state held by the agent. `/clear` or a new session resets back to the multiple-identities picker.
@@ -41,6 +51,61 @@ To unstick:
 - End the session.
 
 Either releases the lock so peers can pick it up.
+
+### Protocol upgrade and rollback boundary
+
+The current SQLite reclaim mutex and the older `.reclaim.d` mutator are not a
+mixed-version protocol. Before the first new-protocol mutation, stop every old
+agmsg agent, watcher, hook, and in-flight lock helper; upgrade every such
+process consistently; then restart them on the new version. Do not run old and
+new mutators together.
+
+Before rolling back code, first quiesce every new-protocol helper and process.
+Retain and inspect `run/actas-reclaim.db`; do not delete it to force a rollback
+or infer that its rows are stale from their age. Only after the helpers are
+known to have stopped should all processes move back to the older version.
+
+Legacy marker detection is diagnostic and fail-closed, not proof that the
+system is quiescent: an old mutator can begin after a new helper's final marker
+check. The absence of a marker likewise does not authorize a mixed-version
+operation.
+
+### Legacy `.reclaim.d` transition
+
+Older agmsg versions serialized stale-lock removal with an empty directory next
+to the lock, named `actas.<team>__<name>.session.reclaim.d`. An empty directory
+cannot reveal whether its old owner crashed or is merely paused, so the current
+version deliberately fails closed when one exists. SessionStart prints each
+affected path and never deletes it automatically.
+
+To recover safely:
+
+1. Stop every agent, watcher, hook, or other agmsg process that could still be
+   running the old lock mutator, then restart them on the upgraded version.
+2. Inspect the exact paths reported by SessionStart. Confirm each is the
+   affected empty `.reclaim.d` directory and that no old mutator remains able to
+   enter it.
+3. Remove only those confirmed empty directories. Do not recursively remove
+   the surrounding lock or run directory.
+4. Retry `actas` or restart the affected session.
+
+Never infer safety from a marker's age and never run age-based cleanup. A live
+old mutator may remain paused for an arbitrary amount of time.
+
+### Incomplete multi-team rollback
+
+A name may be registered in more than one team, so `actas-claim.sh` can claim
+one pair before a later pair encounters a filesystem or SQLite failure. Group
+claim and rollback are not atomic. The script aborts before changing the
+Monitor or recording role affinity and attempts a mutex-protected rollback. If
+that same infrastructure prevents cleanup, the error includes
+`rollback=incomplete locked=<pairs>` with the exact retained pairs.
+
+Do not delete those lock files directly. Restore the reported infrastructure
+and retry so checked cleanup can finish. Until infrastructure recovers—or a
+future #519 generation-bearing record protocol provides stronger fencing—the
+safe behavior is to diagnose and retain those locks, not claim rollback
+completed.
 
 ## Liveness and PID recycling
 

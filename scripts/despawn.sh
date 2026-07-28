@@ -72,16 +72,123 @@ kill_recorded_placement() {
   printf '%s\t%s\t%s' "$id" "$_proj" "$_type"   # echo back for the caller
 }
 
+# Preserve force despawn's existing best-effort placement cleanup.  This change
+# only makes lock/registration cleanup retryable: never claim the role dropped
+# while its exact actas record remains, and keep the spawn record on a checked
+# release or reset failure.  Placement-termination proof is outside this path.
+force_locked_error() {
+  local reason="$1" label="$2" detail="${3:-}"
+  echo "status=error name=$NAME team=$TEAM reason=$reason locked=$label"
+  [ -z "$detail" ] || echo "despawn: force teardown incomplete for $label: $detail" >&2
+  exit 1
+}
+
+force_reset_error() {
+  local label="$1" lock_path="$2" expected_owner="$3" detail="${4:-}"
+  local field="pair" read_status current_owner
+  if _actas_lock_read_path_checked "$lock_path"; then
+    current_owner="${AGMSG_ACTAS_LOCK_READ_RECORD%%$'\t'*}"
+    [ "$current_owner" = "$expected_owner" ] && field="locked"
+  else
+    read_status=$?
+    [ "$read_status" -eq 2 ] && field="locked"
+  fi
+  echo "status=error name=$NAME team=$TEAM reason=reset-failed $field=$label"
+  [ -z "$detail" ] || echo "despawn: force teardown incomplete for $label: $detail" >&2
+  exit 1
+}
+
+# After a checked release, success means the original owner path is absent or
+# a different owner replaced it.  A same-owner successor is the unresolved
+# #519 generation boundary, so force despawn fails closed rather than reporting
+# success while retaining a lock it cannot distinguish.
+force_verify_lock_absent_or_replaced() {
+  local lock_path="$1" expected_owner="$2" label="$3" read_status current_owner
+  if _actas_lock_read_path_checked "$lock_path"; then
+    current_owner="${AGMSG_ACTAS_LOCK_READ_RECORD%%$'\t'*}"
+    [ "$current_owner" != "$expected_owner" ] || force_locked_error "lock-retained" "$label"
+    return 0
+  else
+    read_status=$?
+  fi
+  [ "$read_status" -eq 1 ] && return 0
+  force_locked_error "lock-read" "$label"
+}
+
+force_verify_lock_absent() {
+  local lock_path="$1" label="$2" read_status
+  if _actas_lock_read_path_checked "$lock_path"; then
+    force_locked_error "lock-appeared" "$label"
+  else
+    read_status=$?
+  fi
+  [ "$read_status" -eq 1 ] && return 0
+  force_locked_error "lock-read" "$label"
+}
+
+force_release_exact_owner() {
+  local lock_path="$1" owner="$2" label="$3"
+  if ! actas_lock_release_checked "$TEAM" "$NAME" "$owner"; then
+    force_locked_error "lock-release" "$label"
+  fi
+  force_verify_lock_absent_or_replaced "$lock_path" "$owner" "$label"
+}
+
 if [ "$FORCE" = "1" ]; then
   [ -f "$SPAWN_REC" ] || die "no placement record for '$TEAM/$NAME' — nothing to force (was it launched via 'spawn'? graceful despawn does not need this)"
   IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC"
   kill_recorded_placement >/dev/null
-  # Drop the member's registration, and release its (now-stale) lock.
-  if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
-    "$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" >/dev/null 2>&1 || true
+  lock_path="$(actas_lock_path "$TEAM" "$NAME")"
+  lock_label="$(_actas_lock_encode "$TEAM")/$(_actas_lock_encode "$NAME")"
+  lock_was_present=0
+  lock_owner=""
+  if _actas_lock_read_path_checked "$lock_path"; then
+    lock_was_present=1
+    lock_owner="${AGMSG_ACTAS_LOCK_READ_RECORD%%$'\t'*}"
+  else
+    lock_read_status=$?
+    if [ "$lock_read_status" -eq 2 ]; then
+      force_locked_error "lock-read" "$lock_label"
+    fi
   fi
-  owner="$(actas_lock_owner "$TEAM" "$NAME")"
-  [ -n "$owner" ] && actas_lock_release "$TEAM" "$NAME" "$owner" 2>/dev/null || true
+
+  # The normal spawn-record path funnels the exact current lock owner through
+  # reset.sh's registry-lock transaction.  It must not be normalized: a legacy
+  # bare owner can differ from an instance id derived by this leader process.
+  # This keeps config mutation, checked release, and restoration on failure in
+  # one order, without reopening a release-before-registration peer-claim gap.
+  if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
+    if [ "$lock_was_present" -eq 1 ]; then
+      if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" "$lock_owner" --exact-owner 2>&1)"; then
+        force_reset_error "$lock_label" "$lock_path" "$lock_owner" "$reset_output"
+      fi
+    elif ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" 2>&1)"; then
+      force_reset_error "$lock_label" "$lock_path" "" "$reset_output"
+    fi
+
+    # If this target was no longer registered, reset has no pair on which to
+    # invoke checked release.  Only then use the direct exact-owner fallback;
+    # successful target resets rely on their single checked release and merely
+    # prove absence/replacement afterwards.
+    if [[ "$reset_output" == *" for $NAME from $TEAM"* ]]; then
+      if [ "$lock_was_present" -eq 1 ]; then
+        force_verify_lock_absent_or_replaced "$lock_path" "$lock_owner" "$lock_label"
+      else
+        force_verify_lock_absent "$lock_path" "$lock_label"
+      fi
+    elif [ "$lock_was_present" -eq 1 ]; then
+      force_release_exact_owner "$lock_path" "$lock_owner" "$lock_label"
+    else
+      force_verify_lock_absent "$lock_path" "$lock_label"
+    fi
+  elif [ "$lock_was_present" -eq 1 ]; then
+    # Malformed/legacy placement metadata cannot participate in reset's team
+    # transaction.  Retain the old narrow fallback, but require a checked exact
+    # release and post-check before saying forced teardown succeeded.
+    force_release_exact_owner "$lock_path" "$lock_owner" "$lock_label"
+  else
+    force_verify_lock_absent "$lock_path" "$lock_label"
+  fi
   rm -f "$SPAWN_REC" 2>/dev/null || true
   echo "status=forced name=$NAME team=$TEAM"
   exit 0
