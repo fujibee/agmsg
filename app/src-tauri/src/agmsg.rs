@@ -364,20 +364,72 @@ fn open_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
 ///
 /// Teams whose driver the app cannot read directly are absent here; their
 /// messages arrive through `api.sh` like everyone's history does.
-fn watchable_stores() -> Vec<PathBuf> {
+/// Live updates for a team the app cannot read directly, via `api.sh`.
+///
+/// Returns the messages after `last_seen` and the new watermark. `last_seen`
+/// is `None` the first time a team is seen, and then nothing is emitted —
+/// only the watermark is taken. The room loads its own history; replaying it
+/// here would duplicate everything already on screen.
+///
+/// Ids are opaque, so "after" cannot be a comparison. The list arrives
+/// oldest-first, so position in it is the only ordering available: find the
+/// watermark and take what follows. If it is not in the window at all —
+/// more than `limit` messages arrived between polls — the tail is emitted
+/// rather than nothing, since dropping messages silently is the failure this
+/// whole branch exists to remove.
+fn fallback_new_messages(team: &str, last_seen: Option<&str>) -> (Vec<Message>, Option<String>) {
+    const WINDOW: usize = 50;
+    let raw = match run_script(
+        "api.sh",
+        &["get", "teams", team, "messages", "--limit", "50"],
+    ) {
+        Ok(raw) => raw,
+        Err(_) => return (Vec::new(), last_seen.map(str::to_string)),
+    };
+    let all: Vec<Message> = parse_jsonl::<ApiMessage>(&raw)
+        .into_iter()
+        .map(|m| Message {
+            id: m.id,
+            team: m.team,
+            from: m.from,
+            to: m.to,
+            body: m.body,
+            created_at: m.created_at,
+        })
+        .collect();
+
+    let watermark = all.last().map(|m| m.id.clone()).or(last_seen.map(str::to_string));
+    let Some(last_seen) = last_seen else {
+        return (Vec::new(), watermark);
+    };
+    let fresh = match all.iter().position(|m| m.id == last_seen) {
+        Some(i) => all[i + 1..].to_vec(),
+        // Fell out of the window: everything here is newer than what was
+        // last seen, so all of it is fresh. Capped by WINDOW already.
+        None => all,
+    };
+    debug_assert!(fresh.len() <= WINDOW);
+    (fresh, watermark)
+}
+
+fn watchable_stores() -> (Vec<PathBuf>, Vec<String>) {
     let teams = match run_script("api.sh", &["get", "teams"]) {
         Ok(raw) => parse_jsonl::<ApiTeam>(&raw),
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
-    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut direct: Vec<PathBuf> = Vec::new();
+    let mut via_api: Vec<String> = Vec::new();
     for t in teams {
-        if let Some(p) = direct_store_path(&t.name) {
-            if !seen.contains(&p) {
-                seen.push(p);
+        match direct_store_path(&t.name) {
+            Some(p) => {
+                if !direct.contains(&p) {
+                    direct.push(p);
+                }
             }
+            None => via_api.push(t.name),
         }
     }
-    seen
+    (direct, via_api)
 }
 
 #[derive(Clone, Serialize)]
@@ -886,11 +938,28 @@ pub fn start_watcher(app: AppHandle) {
         // never showed it, until I restarted" is a bug report nobody can
         // diagnose.
         let mut ticks_until_rescan = 0u32;
+        // Teams the app cannot read directly, and how far each has been read.
+        // Polled on the rescan beat, not the fast one: this path costs a
+        // subprocess per team per poll.
+        let mut via_api: Vec<(String, Option<String>)> = Vec::new();
 
         loop {
             if ticks_until_rescan == 0 {
                 ticks_until_rescan = 12; // ~10s at the poll interval below
-                for path in watchable_stores() {
+                let (direct, fallback) = watchable_stores();
+                for team in fallback {
+                    if !via_api.iter().any(|(t, _)| t == &team) {
+                        via_api.push((team, None));
+                    }
+                }
+                for (team, seen) in via_api.iter_mut() {
+                    let (fresh, watermark) = fallback_new_messages(team, seen.as_deref());
+                    *seen = watermark;
+                    for m in fresh {
+                        let _ = app.emit("agmsg-message", m);
+                    }
+                }
+                for path in direct {
                     if open.iter().any(|(p, _, _)| p == &path) {
                         continue;
                     }
@@ -1342,6 +1411,47 @@ mod tests {
             None,
             "an unknown driver must not be opened as sqlite"
         );
+    }
+
+    /// The fallback has to actually deliver, not merely be described.
+    ///
+    /// Written after noticing the previous commit claimed the watcher "falls
+    /// back to going through api.sh" when it did no such thing: teams it
+    /// could not read directly were simply skipped, so with no `store`
+    /// endpoint deployed the app had no live updates at all. History still
+    /// worked, which is exactly what made it invisible.
+    #[test]
+    #[serial]
+    fn a_team_read_through_api_sh_still_delivers_new_messages() {
+        let _base = fake_base(&[(
+            "api.sh",
+            r#"
+if [ "$4" = "store" ]; then
+  echo '{"team":"alpha","driver":"jsonl","layout":"per-team","path":"/x/a.jsonl","exists":true}'
+  exit 0
+fi
+echo '{"type":"message_sent","id":"m1","team":"alpha","from":"a","to":"b","body":"first","at":"t1"}'
+echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body":"second","at":"t2"}'
+"#,
+        )]);
+
+        // First sight takes a watermark and emits nothing — the room loads
+        // its own history.
+        let (fresh, mark) = super::fallback_new_messages("alpha", None);
+        assert!(fresh.is_empty(), "history must not be replayed as live");
+        assert_eq!(mark.as_deref(), Some("m2"));
+
+        // A message the app has not seen is delivered.
+        let (fresh, mark) = super::fallback_new_messages("alpha", Some("m1"));
+        assert_eq!(
+            fresh.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+            vec!["second"],
+        );
+        assert_eq!(mark.as_deref(), Some("m2"));
+
+        // Nothing new means nothing emitted.
+        let (fresh, _) = super::fallback_new_messages("alpha", Some("m2"));
+        assert!(fresh.is_empty(), "already-seen rows must not be re-emitted");
     }
 
     /// A team nobody has written to yet has no store. That is an empty room,
