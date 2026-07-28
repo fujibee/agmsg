@@ -1,9 +1,17 @@
 # Handing an authentication result to a host's authorization decision
 
-**Status: draft, revision 5.** Design study for a seam the reference server does
-not have yet. It is deliberately narrow: it does not change who may connect, it
-changes how many times a request establishes *who is calling*, and how that
-answer reaches a decision the reference server does not make itself.
+**Status: review passed; adoption undecided.** Revision 5. Design study for a
+seam the reference server does not have yet. It is deliberately narrow: it does
+not change who may connect, it changes how many times a request establishes
+*who is calling*, and how that answer reaches a decision the reference server
+does not make itself.
+
+**Nothing here is a settled interface.** The review rounds below found and
+closed defects, which is a statement about quality and not about adoption: an
+OSS interface is a promise to users, and that decision belongs to the project
+owner rather than to a review thread. Read every normative-sounding sentence
+here as "what this design proposes, if adopted". Implementation has not started
+and must not start on the strength of the review alone.
 
 Revision 1 was returned with five blockers. **B1**: it asserted the state a host
 authorizes against "lives beside the credential" and could therefore be read in
@@ -248,7 +256,8 @@ operation does not compile because no overload exists without it. Obtaining the
 scoped identity and invoking the hook happens inside the registrar, so a handler
 cannot reach `scopedCredential` or `scopedTeamId` on its own.
 
-**The registrar is the design, not one of two options.** Revision 4 offered a
+**The registrar is what this design proposes, not one of two options.**
+Revision 4 offered a
 lint rule as an inline fallback, which puts the weaker choice in reach of
 whoever is implementing at the time — and this document has already watched an
 enforcement claim survive three revisions by being easy to defer. Substituting a
