@@ -686,14 +686,18 @@ SH
 }
 
 @test "mutator: rechecks a legacy directory created while waiting for its mutex" {
-  local lock="$(actas_lock_path T alice)" record
+  local lock="$(actas_lock_path T alice)" held_key record
   local helper="$SKILL_DIR/scripts/internal/actas-lock-mutate.sh"
   local shim_dir="$BATS_TEST_TMPDIR/sleep-shim" ready="$BATS_TEST_TMPDIR/sleep-ready"
   local real_sleep helper_pid helper_status=0
   real_sleep="$(command -v sleep)"
   actas_lock_claim T alice sid-old
   record="$(actas_lock_record T alice)"
-  actas_reclaim_mutex_acquire "$lock" "$$"
+  # The fixed helper canonicalizes the run directory with pwd -P before using
+  # the pathname as its SQLite mutex key.  Match that physical spelling here:
+  # macOS mktemp commonly returns /var/... while pwd -P returns /private/var/....
+  held_key="$(cd -P "${lock%/*}" && pwd -P)/${lock##*/}"
+  actas_reclaim_mutex_acquire "$held_key" "$$"
 
   mkdir "$shim_dir"
   cat > "$shim_dir/sleep" <<'SH'
