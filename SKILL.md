@@ -143,13 +143,12 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 
 # Tear down a spawned member — the inverse of spawn.
 # Default (graceful): sends a `ctrl:despawn` control message to <name>; its
-# exclusive watcher attempts to drop the logical role. For a tmux placement it
-# deliberately does not invoke tmux, so close the target pane/window manually.
-# Once the role lock is observed free, the caller prints
-# `status=ok ... note=role-lock-free-close-manually`; `ok` does not acknowledge
-# registration cleanup or pane/window closure. Non-tmux placements retain plain
-# `status=ok` without that note. An exact-matching herdr placement is handled
-# through the existing guarded close path, which attempts to close that pane.
+# exclusive watcher attempts to drop the logical role. It deliberately does not
+# invoke tmux, herdr, or another placement provider, so close the target
+# pane/window manually. Once the role lock is observed free, the caller prints
+# `status=ok ... note=role-lock-free-close-manually` when a non-empty placement
+# record exists; `ok` does not acknowledge registration cleanup or pane/window
+# closure. A placement-less launch retains plain `status=ok` without that note.
 # On timeout it prints status=timeout and exits 3 (retry with --force). On the
 # graceful control path, only an exclusive watcher dedicated to <name> acts —
 # the despawning session is never torn down.

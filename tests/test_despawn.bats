@@ -8,9 +8,8 @@ load test_helper
 
 setup() {
   setup_test_env
-  # Never inherit real tmux/herdr placement state from the test runner. Tmux
-  # graceful close is manual, while a matching inherited HERDR_PANE_ID can use
-  # the existing guarded herdr close path and affect the host session.
+  # Never inherit real tmux/herdr placement state from the test runner so
+  # graceful-control tests remain independent of host placement context.
   # This belongs in setup, not on individual watch.sh launches: guarding each
   # launch site means every test added later has to remember, and one that
   # did not (the #439 read_at test, added after this file first grew herdr
@@ -48,16 +47,15 @@ STUB
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   # Make the member session look alive so the leader sees a live lock to wait on.
   setup_live_owner "$RUN" sess-m
-  # A tmux placement makes the caller-visible manual-close result observable.
+  # A recorded herdr placement makes the provider-neutral manual-close result
+  # observable without authorizing an automatic herdr command.
   # Graceful teardown must delete this now-stale record after the role drops.
   # No final newline exercises graceful record reporting without letting
   # `read`'s EOF status abort the set -e script.
-  printf '%%42\t%s\tclaude-code' "$PROJ" > "$RUN/spawn.team__alice"
+  printf 'herdr:wC:p42\t%s\tclaude-code' "$PROJ" > "$RUN/spawn.team__alice"
 
   # Keep the integration watcher detached from host placement state. Graceful
-  # tmux close is intentionally manual; a real inherited herdr id could still
-  # satisfy its separately guarded close path if the test supplied a matching
-  # placement record.
+  # control teardown must not depend on a provider environment.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
@@ -72,6 +70,7 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=ok"* ]]
   [[ "$output" == *"note=role-lock-free-close-manually"* ]]
+  [[ "$output" == *"close its recorded pane/window manually"* ]]
   [ ! -f "$RUN/spawn.team__alice" ]
 
   # Member dropped its role: lock released and registration gone.
@@ -155,8 +154,8 @@ _read_at_for_body() {
 @test "despawn: a broad (non-actas) watcher ignores ctrl:despawn and does not self-destruct" {
   # Regression for the self-kill bug: a leader's default watcher subscribes to
   # EVERY project role. If it acted on a ctrl:despawn addressed to one of them,
-  # it would run `tmux kill-pane -t $TMUX_PANE` against the leader's OWN pane and
-  # take down the leader session. A broad watcher must skip the control message.
+  # it would reset a role it does not own and take down the leader session. A
+  # broad watcher must skip the control message.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team boss claude-code "$PROJ" >/dev/null
@@ -198,14 +197,15 @@ _read_at_for_body() {
   [ ! -f "$RUN/spawn.team__alice" ]
 }
 
-@test "despawn: no-live tmux window reports manual close before deleting its record" {
+@test "despawn: no-live recorded placement reports manual close before deleting its record" {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
-  printf '@42\t%s\tcodex\n' "$PROJ" > "$RUN/spawn.team__alice"
+  printf 'herdr:wC:p42\t%s\tcodex\n' "$PROJ" > "$RUN/spawn.team__alice"
 
   run bash "$SCRIPTS/despawn.sh" team leader alice
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"note=no-live-lock-close-manually"* ]]
+  [[ "$output" == *"close its recorded pane/window manually"* ]]
   [[ "$output" != *"use --force"* ]]
   [ ! -f "$RUN/spawn.team__alice" ]
 }

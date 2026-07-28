@@ -14,8 +14,8 @@ setup() {
   # the walk can produce different instance IDs. Pin to bare-sid on MSYS2 so
   # both contexts agree deterministically.
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export AGMSG_AGENT_PID="" ;; esac
-  # Never inherit real tmux/herdr env from the test runner to prevent
-  # accidental host-pane close on ctrl:despawn.
+  # Never inherit real tmux/herdr env from the test runner: graceful
+  # ctrl:despawn must be independent of receiver placement state.
   unset TMUX_PANE HERDR_PANE_ID HERDR_ENV
   DESPAWN_WATCH_PID=""
   export PROJ="/tmp/agmsg-watch-proj"
@@ -615,10 +615,10 @@ _read_at_for_body() {
 
 # --- ctrl:despawn, external placement ---
 #
-# A tmux pane id in the environment is inherited receiver context, not proof
-# that agmsg owns that pane. Even a matching legacy placement record has no
+# Placement ids in the environment are inherited receiver context, not proof
+# that agmsg owns a pane. Even a matching legacy placement record has no
 # authenticated, generation-bound ownership proof, so graceful teardown must
-# drop the role without invoking tmux.
+# drop the role without invoking a placement provider.
 
 _stub_tmux_fail_on_call() {
   local stub_bin="$1" log="$2"
@@ -679,12 +679,9 @@ _assert_despawn_role_cleanup() {
 
 # --- ctrl:despawn, herdr placement ---
 #
-# The watcher may only close a herdr pane that agmsg itself placed. HERDR_* is
-# inherited by every descendant of a pane, so "a pane id is in the environment"
-# proves nothing about ownership — a watcher started by hand inside herdr, or
-# by a test suite, carries the HOST pane's id. Acting on that closes the host,
-# which is exactly what happened to a real session while this branch was being
-# reviewed. The gate is HERDR_ENV=1 plus a placement record naming this pane.
+# HERDR_* is inherited by every descendant of a pane, so a matching environment
+# value and a legacy placement record are not ownership proof. A graceful
+# control message must therefore never invoke herdr.
 
 # Stub `herdr` into a private bin dir; every call is appended to $2.
 _stub_herdr() {
@@ -720,23 +717,24 @@ _despawn_under_herdr() {
   _wait_for_despawn_watch_exit
 }
 
-@test "watch: ctrl:despawn closes the herdr pane agmsg placed for this role" {
+@test "watch: ctrl:despawn never invokes herdr even for a matching recorded pane" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local stub_bin="$TEST_SKILL_DIR/stub-bin"
   local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
   local errlog="$TEST_SKILL_DIR/herdr-stderr.log"
   _stub_herdr "$stub_bin" "$herdr_log"
 
-  # spawn recorded this pane as alice's placement, so the watcher owns it.
+  # A matching legacy record is still not generation-bound authority.
   _record_herdr_placement wC:p42
 
   _despawn_under_herdr "$stub_bin" "$errlog" HERDR_PANE_ID="wC:p42" HERDR_ENV=1
 
-  [ -f "$herdr_log" ]
-  grep -q "pane close wC:p42" "$herdr_log"
+  [ ! -s "$herdr_log" ]
+  grep -q "close this window manually" "$errlog"
+  _assert_despawn_role_cleanup
 }
 
-@test "watch: ctrl:despawn preserves exact herdr close when TMUX_PANE is inherited" {
+@test "watch: ctrl:despawn invokes neither herdr nor tmux when both are inherited" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   local stub_bin="$TEST_SKILL_DIR/stub-bin"
   local herdr_log="$TEST_SKILL_DIR/herdr-calls.log"
@@ -749,8 +747,9 @@ _despawn_under_herdr() {
   _despawn_under_herdr "$stub_bin" "$errlog" \
     HERDR_PANE_ID="wC:p42" HERDR_ENV=1 TMUX_PANE=%17
 
-  grep -q "pane close wC:p42" "$herdr_log"
+  [ ! -s "$herdr_log" ]
   [ ! -s "$tmux_log" ]
+  grep -q "close this window manually" "$errlog"
   _assert_despawn_role_cleanup
 }
 

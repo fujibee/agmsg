@@ -213,17 +213,15 @@ Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-bu
 
 ### Tear down a spawned agent (`despawn`)
 
-`despawn` releases a spawned member's logical role. In the normal tmux case,
-you then close its pane or window manually.
+`despawn` releases a spawned member's logical role. You then close its pane or
+window manually, regardless of placement provider.
 
 ```
-/agmsg despawn reviewer          # graceful: release its role; close a tmux pane/window manually
+/agmsg despawn reviewer          # graceful: release its role; close its pane/window manually
 /agmsg despawn alice --force     # force: local recovery using the recorded placement
 ```
 
-By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose exclusive watcher attempts to drop its logical role. For a tmux placement it deliberately does not invoke tmux, so close the target pane/window manually. It waits up to `--timeout <secs>` (default 30) for the role lock to become free, then prints `status=ok ... note=role-lock-free-close-manually`. `ok` confirms only that the lock was observed free; it does not acknowledge registration cleanup or tmux closure. Non-tmux placements retain plain `status=ok` without that note. End-to-end lifecycle acknowledgement is tracked by #514. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
-
-An exact-matching `herdr` placement is handled through the existing guarded close path, which attempts to close that pane.
+By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose exclusive watcher attempts to drop its logical role. It deliberately does not invoke tmux, herdr, or another placement provider, so close the target pane/window manually. It waits up to `--timeout <secs>` (default 30) for the role lock to become free, then prints `status=ok ... note=role-lock-free-close-manually` whenever a non-empty placement record exists. `ok` confirms only that the lock was observed free; it does not acknowledge registration cleanup or pane/window closure. A placement-less launch retains plain `status=ok` without that note. End-to-end lifecycle acknowledgement is tracked by #514. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
 
 `--force` is an explicit local recovery escape hatch. It skips the message and trusts the placement ID recorded at spawn time to close the recorded pane/window and drop its registration. That ID is neither authenticated nor generation-bound, so a stale or recycled placement can target the wrong pane/window and be unsafe; hardening is tracked by #514. Use it when the member's watcher cannot respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) cannot be `--force`d; despawn says so and leaves it for you to close.
 
