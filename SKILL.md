@@ -157,6 +157,27 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
+## Permission prompts (Claude Code)
+
+Every agmsg step above runs through the host's Bash tool, so on Claude Code each call is gated by the permission system until you allowlist the script directory. Add these to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.agents/skills/agmsg/scripts/*)",
+      "Bash(/Users/<you>/.agents/skills/agmsg/scripts/*)",
+      "Bash(bash ~/.agents/skills/agmsg/scripts/*)",
+      "Bash(bash /Users/<you>/.agents/skills/agmsg/scripts/*)"
+    ]
+  }
+}
+```
+
+Four entries rather than one because a rule matches the command string as written: the scripts are invoked both as `~/...` and as an absolute path, and with or without an explicit `bash` prefix. Replace `/Users/<you>` with your home directory, and the `agmsg` path segment with your command name if you installed under a different one.
+
+**Run one agmsg script per Bash call.** A prefix rule does not carry across shell operators — [Claude Code's permission docs](https://code.claude.com/docs/en/permissions) state that a rule like `Bash(safe-cmd *)` does not permit `safe-cmd && other-cmd`, that the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines, and that "a rule must match each subcommand independently". Batching two agmsg steps into one call (`delivery.sh status … ; inbox.sh …`) therefore prompts even with the entries above in place. Keep each script in its own call.
+
 ## Sandbox compatibility (Claude Code)
 
 When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/agmsg/`. Add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):

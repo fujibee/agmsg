@@ -97,6 +97,25 @@ Four possible outputs:
 
 Then continue with the user's subcommand. This catches the case where the user invokes `/__SKILL_NAME__` as the first prompt before the SessionStart-hook directive has been acted on.
 
+**Permission prompts.** Every command here runs through the Bash tool, so each call is gated by the permission system until the script directory is allowlisted. Without this the user is asked to confirm essentially every `__SKILL_NAME__` call. Add to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(/Users/<you>/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(bash ~/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(bash /Users/<you>/.agents/skills/__SKILL_NAME__/scripts/*)"
+    ]
+  }
+}
+```
+
+Four entries because a rule matches the command string as written, and these scripts are invoked both as `~/...` and as an absolute path, with or without an explicit `bash` prefix. Replace `/Users/<you>` with the user's home directory.
+
+**Run one script per Bash call.** A prefix rule does not carry across shell operators: per [Claude Code's permission docs](https://code.claude.com/docs/en/permissions), a rule like `Bash(safe-cmd *)` does not permit `safe-cmd && other-cmd`, the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines, and "a rule must match each subcommand independently". So batching two steps into one call (`delivery.sh status … ; inbox.sh …`) prompts even with the entries above in place. Keep each script in its own call.
+
 **Sandbox compatibility.** When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/__SKILL_NAME__/`. If monitor mode fails with write/permission errors there, add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
 
 ```json
