@@ -117,9 +117,22 @@ be more.
 ### Rollback resistance is part of this, not an extra
 
 `age-v1` already specifies epoch snapshots: a strictly increasing
-`epoch_revision`, the full key-epoch history, and `previous_snapshot_sha256`
-linking each to the one before. It is designed and unimplemented, and it belongs
-in this work.
+`epoch_revision`, a strictly increasing `writer_generation`, the authorized
+writer roster for that generation, the full key-epoch history, and
+`previous_snapshot_sha256` linking each to the one before. It is designed and
+unimplemented, and it belongs in this work.
+
+**The `key_rotated` event does not carry a snapshot, and a machine must not
+build one from it.** The event has an epoch, a key id, a fingerprint, and a
+time — not the authorized roster, the generation, or the chain digest that make
+a snapshot trustworthy. So the snapshot travels the way the key material does:
+handed over out of band and taken in through `import`, authority and chain
+verified on the way in. The event only says *activate*: when a `key_rotated`
+matches the epoch, key id, fingerprint, and boundary of a snapshot already
+provisioned, the machine switches to it; when no such snapshot has been
+imported, it does the same thing it does for any missing key — it stops. The
+fingerprint's job is to confirm that the snapshot in hand is the one the event
+names, not to stand in for it.
 
 The tempting argument for deferring it is that a server hiding `key_rotated`
 from one machine leaves that machine on the old key, writing what nobody else
