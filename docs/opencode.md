@@ -1,8 +1,8 @@
 # agmsg for OpenCode
 
-OpenCode is supported for **manual and turn/off delivery workflows**.
+OpenCode supports **manual, turn/off, and real-time `monitor` delivery**.
 
-`monitor` and `both` are not supported in this release (real-time push delivery requires a Monitor-tool equivalent that OpenCode does not have built in). `spawn opencode` is supported via `opencode --prompt`. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
+`monitor` mode routes incoming messages through the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin (a Monitor-tool equivalent for OpenCode), with a turn-mode fallback when the plugin is not installed. `spawn opencode` is supported via `opencode --prompt` (TUI mode). `both` is not supported. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
 
 ## Install
 
@@ -49,7 +49,7 @@ From OpenCode, run:
 $agmsg
 ```
 
-On first run it prompts for a team name and agent name, then joins you to the team. Choose delivery mode `turn` or `off` when prompted.
+On first run it prompts for a team name and agent name, then joins you to the team. Choose delivery mode `monitor`, `turn`, or `off` when prompted (`monitor` requires the `opencode-sentinel` plugin — see [Delivery modes](#delivery-modes) below).
 
 Or join directly from the shell:
 
@@ -88,23 +88,40 @@ $agmsg history
 
 | Mode      | Supported | Notes |
 |-----------|:---------:|-------|
+| `monitor` | ✓         | Real-time push via the [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin's `sentinel_monitor` tool — same shape as Claude Code's Monitor. Falls back to turn-mode self-checks when the tool is unavailable |
 | `turn`    | ✓         | Instruction rule runs check-inbox after each tool call |
 | `off`     | ✓         | Manual `$agmsg` only |
-| `monitor` | ✗         | Requires Monitor tool — not available in OpenCode |
-| `both`    | ✗         | Requires monitor |
+| `both`    | ✗         | Not applicable to opencode (the sentinel tool already provides the real-time path, with turn as its in-band fallback) |
 
 Switch mode:
 
 ```
+$agmsg mode monitor    # real-time push (requires opencode-sentinel plugin)
 $agmsg mode turn
 $agmsg mode off
 ```
 
-Requesting `monitor` or `both` returns an error:
+### Real-time push (`monitor` mode)
+
+`monitor` mode streams incoming agmsg messages into the OpenCode session as
+they arrive, using the [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel)
+plugin's `sentinel_monitor` tool — the same shape as Claude Code's Monitor
+tool. Install the plugin first:
 
 ```
-Error: 'monitor' mode is not supported for opencode (no Monitor-tool equivalent). Use 'turn' or 'off'.
+opencode plugin opencode-sentinel
 ```
+
+Then set the mode and follow the rule's instruction to launch a resident
+watcher via `sentinel_monitor`:
+
+```
+$agmsg mode monitor
+```
+
+If `sentinel_monitor` is unavailable (plugin not installed, or the OpenCode
+build does not expose the tool), the rule falls back to turn-mode self-checks
+— so `monitor` never silently drops messages, it just degrades to `turn`.
 
 ## Spawn
 
@@ -137,7 +154,7 @@ OpenCode + Ollama is well-suited for local, low-cost tasks such as:
 
 ## Known limitations
 
-- No real-time push delivery (`monitor` mode requires a Monitor-tool equivalent, not available in OpenCode itself)
+- `monitor` mode depends on the external `opencode-sentinel` plugin — without it, delivery degrades to `turn` rather than failing
 - No native OpenCode plugin integration
 
 These may be addressed in future releases.

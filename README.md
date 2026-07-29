@@ -246,7 +246,7 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
 | **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
-| **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
+| **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode users not running monitor; Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
@@ -320,7 +320,7 @@ The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agms
 $agmsg
 ```
 
-Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode supports `mode turn` and `mode off`, and `spawn opencode` is available via `opencode --prompt` (TUI mode, which stays resident after the boot prompt's turn). `monitor` and `both` are not supported.
+Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode supports `mode monitor` (via the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin, with a turn-mode fallback when the plugin is absent), `mode turn`, and `mode off`. `spawn opencode` is available via `opencode --prompt` (TUI mode, which stays resident after the boot prompt's turn). `both` is not supported.
 
 This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
 
