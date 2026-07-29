@@ -276,8 +276,8 @@ settings_file() {
 }
 
 @test "delivery set: a space-padded spelling of an EXISTING dir is used literally, never trimmed into the real one" {
-  # "  $TEST_PROJECT  " names a (nonexistent) sibling whose first and last
-  # bytes are spaces -- NOT the real project. Accepting spaces as literal path
+  # "  $TEST_PROJECT  " is a RELATIVE pathname whose first byte is a space --
+  # NOT the real (absolute) project path. Accepting spaces as literal path
   # bytes must not come with a silent fallback that trims the padding and
   # resolves to the directory the caller probably meant: the value is used
   # as-is, found not to exist, and rejected -- with the real project left
@@ -325,7 +325,10 @@ settings_file() {
   # of ./proj -- so the traversability probe would test a DIFFERENT directory
   # than the one `-d` just checked. The validator clears CDPATH for the probe;
   # this pins that an un-enterable ./proj is still rejected even when an
-  # enterable sibling of the same name sits on CDPATH.
+  # enterable directory of the same name sits on CDPATH.
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "running as root: permission bits do not restrict traversal"
+  fi
   local decoy_root="$TEST_PROJECT/cdpath-decoy"
   mkdir -p "$decoy_root/proj"            # enterable decoy on CDPATH
   mkdir -p "$TEST_PROJECT/here/proj"     # the real target, made un-enterable

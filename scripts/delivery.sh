@@ -423,9 +423,9 @@ EOF
 #   1. empty, or made up entirely of whitespace (spaces/tabs/CR/LF);
 #   2. carrying a CR or LF byte anywhere -- leading, trailing, or embedded
 #      (the #493 repro is exactly a trailing LF from adjacent-quote
-#      concatenation, but a leading or embedded one is equally unable to
-#      round-trip through a shell command line or a JSON hooks entry, so all
-#      three are refused the same way);
+#      concatenation; a leading or embedded one is just as likely to be the
+#      product of a broken command composition, so all three are refused the
+#      same way rather than treated as an intentional path byte);
 #   3. not already an existing directory; or
 #   4. an existing directory this process cannot actually enter.
 # A plain leading/trailing space or tab is a valid POSIX path byte -- some
