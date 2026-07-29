@@ -306,7 +306,7 @@ Copilotインストーラーは `~/.copilot/skills/agmsg/` に `SKILL.md` を配
 $agmsg
 ```
 
-`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは手動およびturn/off配信ワークフローに対応している。現時点では `mode turn` と `mode off` のみサポート — `monitor`、`both`、`spawn opencode` は非対応。
+`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは `mode turn` と `mode off` に対応し、`spawn opencode` は `opencode --prompt`（ブートプロンプトのターンが終わってもTUIが滞在するモード）経由で利用可能。`monitor` と `both` は非対応。
 
 これによりOpenCodeは、Ollamaのようなローカルプロバイダーを使う構成を含め、ローカルのコーディングエージェントとして役立つ。
 

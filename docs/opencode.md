@@ -2,7 +2,7 @@
 
 OpenCode is supported for **manual and turn/off delivery workflows**.
 
-`monitor`, `both`, and `spawn opencode` are not supported in this release. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
+`monitor` and `both` are not supported in this release (real-time push delivery requires a Monitor-tool equivalent that OpenCode does not have built in). `spawn opencode` is supported via `opencode --prompt`. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
 
 ## Install
 
@@ -108,7 +108,16 @@ Error: 'monitor' mode is not supported for opencode (no Monitor-tool equivalent)
 
 ## Spawn
 
-`spawn opencode` is not supported. Spawn is limited to `claude-code` and `codex`.
+`spawn opencode` is supported via the existing `prompt_arg=` mechanism. The
+manifest declares `cli=opencode` + `prompt_arg=--prompt`, so `spawn.sh` emits
+`opencode --model <id> --prompt "<actas text>"`.
+
+TUI mode (`opencode --prompt`, not `opencode run --interactive`) is required:
+`run --interactive` exits as soon as the boot prompt's turn completes, so the
+spawned worker would never stay resident to receive further agmsg messages.
+`--prompt` auto-sends the initial prompt and keeps the TUI open.
+
+See the main spawn documentation in [README.md](../README.md#spawn-a-new-agent-spawn).
 
 ## Typical team setup
 
@@ -128,8 +137,7 @@ OpenCode + Ollama is well-suited for local, low-cost tasks such as:
 
 ## Known limitations
 
-- No real-time push delivery (`monitor` mode requires Claude Code's Monitor tool)
-- No `spawn opencode` support
+- No real-time push delivery (`monitor` mode requires a Monitor-tool equivalent, not available in OpenCode itself)
 - No native OpenCode plugin integration
 
 These may be addressed in future releases.
