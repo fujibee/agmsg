@@ -9,10 +9,12 @@ set -euo pipefail
 #   delivery.sh stop
 #   delivery.sh restart [<project_path> <type>]
 #
-# `set`'s <project_path> must already exist as a directory, with no
-# surrounding whitespace/newlines -- it is never created implicitly, and a
-# malformed value is rejected rather than silently cleaned up. See
-# agmsg_validate_project_path below (#493).
+# `set`'s <project_path> must already exist as a directory (and be one this
+# process can enter), must not be empty/whitespace-only, and must not carry a
+# carriage return or newline byte anywhere in it -- it is never created
+# implicitly, and a malformed value is rejected rather than silently cleaned
+# up. Plain leading/trailing spaces or tabs are valid POSIX path characters
+# and are accepted as-is. See agmsg_validate_project_path below (#493).
 #
 # Modes:
 #   monitor  — SessionStart hook → Claude Code Monitor tool → watch.sh stream
@@ -416,17 +418,26 @@ EOF
 # value got concatenated verbatim into a hooks_file path and mkdir -p'd into a
 # bogus sibling directory nobody asked for.
 #
-# Policy: trim to DETECT (not silently absorb) surrounding whitespace/
-# newlines -- any difference between the raw argument and its trimmed form
-# means the argument was malformed, so it is rejected outright rather than
-# quietly "corrected" to what we guess was meant (a caller that built a bad
-# command deserves a loud error pointing at the exact value it passed, not a
-# value that happens to work this one time and hides the bug in whatever
-# generated it). The existence check + `cd && pwd` canonicalization below
-# mirrors spawn.sh's existing --project handling: an unvalidated project_path
-# must never cause a directory to be created implicitly, so anything that is
-# empty, carries an embedded newline, or does not already exist as a
-# directory is refused rather than created.
+# Policy: reject only the input shapes #493 is actually about, and otherwise
+# use the caller's value literally. That is:
+#   1. empty, or made up entirely of whitespace (spaces/tabs/CR/LF);
+#   2. carrying a CR or LF byte anywhere -- leading, trailing, or embedded
+#      (the #493 repro is exactly a trailing LF from adjacent-quote
+#      concatenation, but a leading or embedded one is equally unable to
+#      round-trip through a shell command line or a JSON hooks entry, so all
+#      three are refused the same way);
+#   3. not already an existing directory; or
+#   4. an existing directory this process cannot actually enter.
+# A plain leading/trailing space or tab is a valid POSIX path byte -- some
+# directories are legitimately named that way -- so it is accepted and used
+# as-is, not silently trimmed and not rejected. Rejecting only carries the
+# same "loud error naming the exact value, not a silent guess" spirit for the
+# shapes above: a caller that built a bad command should see why, not have it
+# quietly "corrected" into something that happens to work this one time.
+#
+# The existence check + traversability probe below mirrors spawn.sh's
+# existing --project handling: an unvalidated project_path must never cause a
+# directory to be created implicitly.
 #
 # Echoes the caller's own path spelling back on success (validated, not
 # rewritten); prints an error naming the offending value to stderr and returns
@@ -446,20 +457,20 @@ agmsg_validate_project_path() {
     esac
   done
 
+  # Emptiness is judged after trimming space/tab/CR/LF from both ends, so a
+  # value that is only whitespace (of any of those four bytes) is caught here
+  # regardless of which one(s) it's made of.
   if [ -z "$trimmed" ]; then
     echo "delivery.sh: project_path is empty or only whitespace: $(printf '%q' "$raw")" >&2
     return 1
   fi
-  if [ "$trimmed" != "$raw" ]; then
-    echo "delivery.sh: project_path has leading/trailing whitespace or a newline -- refusing to guess what was meant: $(printf '%q' "$raw")" >&2
-    echo "  pass a clean path (e.g. the output of \"\$(pwd)\")." >&2
-    return 1
-  fi
   case "$raw" in
     *$'\n'*|*$'\r'*)
-      # An embedded (not just leading/trailing) newline or CR -- the trim
-      # above only strips the ends, so this catches one hiding in the middle.
-      echo "delivery.sh: project_path contains an embedded newline or carriage return: $(printf '%q' "$raw")" >&2
+      # Judged against $raw (not $trimmed), so this catches a CR/LF anywhere
+      # in the value -- leading, trailing, or hiding in the middle -- while
+      # leaving plain leading/trailing spaces/tabs (already proven non-empty
+      # above) untouched.
+      echo "delivery.sh: project_path contains a carriage return or newline (leading, trailing, or embedded): $(printf '%q' "$raw")" >&2
       return 1
       ;;
   esac
@@ -477,8 +488,11 @@ agmsg_validate_project_path() {
   # `$(cd ... && pwd)` command substitution: printf returns 0 regardless, so
   # that shape lets a permission failure sail through as a successful
   # validation of an empty path -- a validator that fails open is worse than
-  # no validator.
-  if ! ( cd -- "$raw" ) >/dev/null 2>&1; then
+  # no validator. CDPATH is cleared inside the subshell: with it set, a
+  # RELATIVE project_path can `cd` into a same-named directory somewhere on
+  # CDPATH instead of the one `-d` just checked -- an un-enterable local
+  # directory would then validate against a different, enterable one.
+  if ! ( CDPATH='' cd -- "$raw" ) >/dev/null 2>&1; then
     echo "delivery.sh: project path exists but cannot be entered: $(printf '%q' "$raw")" >&2
     return 1
   fi

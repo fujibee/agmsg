@@ -210,7 +210,7 @@ settings_file() {
   local bogus="$TEST_PROJECT"$'\n'
   run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "leading/trailing whitespace or a newline" ]]
+  [[ "$output" =~ "carriage return or newline" ]]
   # No sibling "<real project>\n" directory (or anything else) was created.
   [ ! -e "$bogus" ]
   ! has_session_start "$(settings_file)"
@@ -252,10 +252,41 @@ settings_file() {
   [[ "$output" =~ "empty or only whitespace" ]]
 }
 
-@test "delivery set: rejects a project_path with leading/trailing spaces, even though the trimmed path exists" {
+@test "delivery set: accepts a project_path with leading/trailing spaces, using it literally (#493 scope follow-up)" {
+  # A plain leading/trailing space is a valid POSIX path byte -- #493 is
+  # about CR/LF, not about whitespace in general -- so a directory legitimately
+  # named with padding must be accepted and used as-is, not rejected.
+  local padded="$TEST_PROJECT/  padded name  "
+  mkdir -p -- "$padded"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$padded"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  [ -f "$padded/.claude/settings.local.json" ]
+  has_session_start "$padded/.claude/settings.local.json"
+}
+
+@test "delivery set: accepts a project_path with leading/trailing tabs, using it literally (#493 scope follow-up)" {
+  local padded="$TEST_PROJECT/"$'\t'"tabbed name"$'\t'
+  mkdir -p -- "$padded"
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$padded"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  [ -f "$padded/.claude/settings.local.json" ]
+  has_session_start "$padded/.claude/settings.local.json"
+}
+
+@test "delivery set: a space-padded spelling of an EXISTING dir is used literally, never trimmed into the real one" {
+  # "  $TEST_PROJECT  " names a (nonexistent) sibling whose first and last
+  # bytes are spaces -- NOT the real project. Accepting spaces as literal path
+  # bytes must not come with a silent fallback that trims the padding and
+  # resolves to the directory the caller probably meant: the value is used
+  # as-is, found not to exist, and rejected -- with the real project left
+  # untouched. (This pins the "accept literally" half of the #493 follow-up
+  # from the other side: the old trim-then-compare rejection also prevented
+  # this fallback, so its removal must not quietly introduce one.)
   run bash "$SCRIPTS/delivery.sh" set monitor claude-code "  $TEST_PROJECT  "
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "leading/trailing whitespace or a newline" ]]
+  [[ "$output" =~ "does not exist" ]]
   ! has_session_start "$(settings_file)"
 }
 
@@ -263,8 +294,50 @@ settings_file() {
   local bogus="$TEST_PROJECT"$'\n'"extra"
   run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "embedded newline" ]]
+  [[ "$output" =~ "carriage return or newline" ]]
   [ ! -e "$bogus" ]
+}
+
+@test "delivery set: rejects a project_path with a trailing carriage return (CRLF line endings)" {
+  # The CR half of the CR/LF rule: a command composed on (or pasted from) a
+  # CRLF-line-ending environment leaves a bare \r on the value once the shell
+  # strips the \n. Same class of defect as the #493 repro, same rejection.
+  local bogus="$TEST_PROJECT"$'\r'
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$bogus"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "carriage return or newline" ]]
+  [ ! -e "$bogus" ]
+}
+
+@test "delivery set: rejects a project_path with a leading newline or an embedded carriage return" {
+  # The remaining corners of the "CR or LF anywhere" rule: leading (not just
+  # trailing) LF, and CR hiding mid-value rather than at an end.
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code $'\n'"$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "carriage return or newline" ]]
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"$'\r'"extra"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "carriage return or newline" ]]
+}
+
+@test "delivery set: an un-enterable relative path cannot validate via a same-named CDPATH match" {
+  # With CDPATH set, a bare `cd proj` can land in <cdpath-entry>/proj instead
+  # of ./proj -- so the traversability probe would test a DIFFERENT directory
+  # than the one `-d` just checked. The validator clears CDPATH for the probe;
+  # this pins that an un-enterable ./proj is still rejected even when an
+  # enterable sibling of the same name sits on CDPATH.
+  local decoy_root="$TEST_PROJECT/cdpath-decoy"
+  mkdir -p "$decoy_root/proj"            # enterable decoy on CDPATH
+  mkdir -p "$TEST_PROJECT/here/proj"     # the real target, made un-enterable
+  chmod 000 "$TEST_PROJECT/here/proj"
+  cd "$TEST_PROJECT/here"
+  CDPATH="$decoy_root" run bash "$SCRIPTS/delivery.sh" set monitor claude-code "proj"
+  chmod 755 "$TEST_PROJECT/here/proj"
+  cd "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "cannot be entered" ]]
+  # Nothing was written into the enterable decoy.
+  [ ! -e "$decoy_root/proj/.claude" ]
 }
 
 @test "delivery set: a normal valid project_path (the documented \$(pwd) shape) still works end to end" {
