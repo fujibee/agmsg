@@ -18,6 +18,38 @@ identity of a local team can never depend on a service that is optional.
 
 That single constraint decides most of what follows.
 
+## Try it on one machine
+
+Everything below can be watched end to end with two installs on one host, no
+cloud, no auth. This is the exact path the design was verified on.
+
+```sh
+# 1. A reference server on localhost, backed by Postgres.
+cd server && npm ci
+DATABASE_URL=postgres://USER:PASS@127.0.0.1:5432/DB PORT=8787 npx tsx src/index.ts &
+
+# 2. A second install beside your real one — different command name, own store.
+bash install.sh --cmd agmsg2 --agent-type claude-code
+
+# 3. Connect a team you already have. A team from before local ids works:
+#    connect mints them, moves the team to its own store, uploads its history,
+#    and leaves a sync engine running.
+~/.agents/skills/agmsg2/scripts/remote.sh connect --endpoint http://127.0.0.1:8787 myteam
+
+# 4. From another install, pull it by name and keep syncing.
+otherinstall/scripts/remote.sh pull --endpoint http://127.0.0.1:8787 myteam
+
+# 5. Send from either side; it reaches the other.
+~/.agents/skills/agmsg2/scripts/send.sh myteam alice bob "hello from machine one"
+```
+
+Two things are worth confirming yourself, because they are the whole point: a
+team you did **not** connect is untouched in the shared store and still readable,
+and the connected team's rows are gone from that shared store — a program that
+read the database file directly no longer sees them, by design. Ask the server
+for a team's location with `api.sh get teams <team> store` rather than assuming
+the path.
+
 ## Three things happen, and only three
 
 **Register.** Send the team you have. The server records it and answers.
