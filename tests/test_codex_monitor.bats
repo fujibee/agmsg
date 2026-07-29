@@ -147,7 +147,11 @@ teardown() {
 case "${1:-}" in
   --version) echo "codex-cli 0.144.1"; exit 0 ;;
   app-server)
-    node - <<'JS'
+    # Run the listener as a CHILD and forward teardown's kill to it, so it dies
+    # with this wrapper instead of holding the bats capture fd until its timer
+    # fires — the same dies-with-parent model as the python fake above. The
+    # wrapper stays the recorded pid (its argv is what the cmdline check reads).
+    node - <<'JS' &
 const net = require('net');
 const s = net.createServer((c) => c.destroy());
 s.listen(0, '127.0.0.1', () => {
@@ -155,8 +159,11 @@ s.listen(0, '127.0.0.1', () => {
   console.log(e + '[36;1mcodex app-server (WebSockets)' + e + '[0m');
   console.log('  ' + e + '[2mlistening on:' + e + '[0m ' + e + '[32mws://127.0.0.1:' + s.address().port + e + '[0m');
 });
-setTimeout(() => process.exit(0), 60000); // bound the listener if teardown misses it
+setTimeout(() => process.exit(0), 60000); // backstop if the forwarded kill never arrives
 JS
+    child=$!
+    trap 'kill "$child" 2>/dev/null' TERM INT
+    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
     ;;
   *)
     printf 'plain-codex' >> "$CALL_LOG"
