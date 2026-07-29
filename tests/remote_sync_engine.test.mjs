@@ -908,17 +908,17 @@ exec sleep 300
     ]);
 
   for (const { promise, childPid } of started) {
-    // On the code, not merely that it rejected: a rejection from 'close' carries
-    // no errno at all, so requiring one is what keeps this from passing against
-    // the unfixed engine.
+    // On the marker the stdin handler sets, not on the errno. This asserted
+    // EPIPE first and so passed or failed by platform -- macOS answers ENOTCONN
+    // or EPIPE from the same event -- and enumerating the codes seen so far only
+    // moves the problem to whichever spelling appears next. The set of errnos is
+    // not closed; the set of places that set this marker is.
     //
-    // Two codes, because the same event has two spellings. A write whose reader
-    // is gone is EPIPE on Linux, but macOS builds stdio on socketpairs and
-    // answers ENOTCONN or EPIPE depending on how far the write got. Asserting
-    // EPIPE alone made this test pass or fail by platform and timing -- it did
-    // both on the same commit range -- which is not a property of the bug.
+    // It stays load-bearing for the same reason it is stable: only that handler
+    // sets it, so a rejection arriving from 'close' cannot satisfy this, and
+    // removing the handler fails the test.
     await assert.rejects(() => promise,
-      (error) => ["EPIPE", "ENOTCONN"].includes(error.code));
+      (error) => error.driverFailurePhase === "stdin-write");
     // No poll and no grace period. The call settles only after the driver has
     // exited, so by this line it is already gone.
     assert.ok(gone(childPid), "the failed driver was left running");

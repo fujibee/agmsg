@@ -864,7 +864,17 @@ function runDriver({ args, label, operation, parse, input }) {
       process.stderr.write(chunk);
     });
     child.on("error", fail);
-    child.stdin.on("error", fail);
+    child.stdin.on("error", (error) => {
+      // Where the failure came from, recorded at the boundary because the OS
+      // code cannot be asked for it: a write whose reader is gone is EPIPE on
+      // Linux, and on macOS -- socketpairs -- either ENOTCONN or EPIPE
+      // depending on how far the write got. That set is not closed, so nothing
+      // downstream can recognise this failure by errno without going stale on
+      // the next platform. The error is otherwise passed through untouched, so
+      // its code and message survive for diagnostics.
+      error.driverFailurePhase = "stdin-write";
+      fail(error);
+    });
     // Every failure ends here, at 'exit'. A driver that merely exits non-zero is
     // the ordinary case and it needs this as much as a stream error does: it too
     // can leave a grandchild holding the inherited pipes, and waiting for 'close'
