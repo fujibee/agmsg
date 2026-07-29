@@ -809,29 +809,41 @@ test("capability policy history must be canonical and match current policy", () 
   }), /canonical ascending|begin at sequence 1/u);
 });
 
-test("a driver that stops reading its input fails the promise, not the process",
-  async () => {
+test("a driver that stops reading its input fails the call and is not left running",
+  { timeout: 30_000 }, async () => {
   // The write loses its reader and takes EPIPE, which arrives on the stdin
   // stream rather than on the child -- and an unhandled stream 'error' is
   // thrown, not returned. So the failure escaped the promise and killed the
   // process, surfacing as an uncaughtException inside whichever unrelated test
-  // happened to be running.
+  // was running when it fired, which is how it read as a flake.
   //
-  // Two things make it deterministic rather than a race. The payload is far
-  // past any platform's pipe buffer (64 KiB on Linux, less on macOS), so the
-  // write cannot complete without someone reading. And the child closes its
-  // stdin and then outlives the write, so the EPIPE lands while the promise is
-  // still pending -- if the child simply exited, 'close' would settle the
-  // promise first and the stream error would arrive afterwards, unattributable.
+  // Rejecting is only half of it. A rejected call that leaves the driver running
+  // trades "the process dies" for "the process cannot exit", so the fixture is
+  // built to catch that too, in the harder shape:
   //
-  // The wait is two seconds against an EPIPE that follows the close by
-  // microseconds: a margin, not a race. It is also bounded, because a child
-  // still holding a handle keeps the whole test process from exiting.
+  //   - it records its pid, so termination is asserted rather than assumed;
+  //   - it leaves a background descendant holding the inherited stdio pipes,
+  //     which is what a real driver that starts a helper does. SIGKILL does not
+  //     reach that descendant, and 'close' waits for every pipe to end, so an
+  //     engine waiting on 'close' would hang here forever;
+  //   - it then replaces itself with a sleep far longer than this test may run,
+  //     so it cannot end on its own and nothing here can pass by waiting.
+  //
+  // With the call settling only once the driver is gone, a missing cleanup shows
+  // up as this test's timeout, not as a quiet pass.
+  //
+  // The payload is past any platform's pipe buffer (64 KiB on Linux, less on
+  // macOS), so the write cannot complete unread.
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
   const mock = join(root, "driver.sh");
+  const pidFile = join(root, "child.pid");
+  const helperFile = join(root, "helper.pid");
   await writeFile(mock, `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
 exec 0<&-
-sleep 2
+exec sleep 300
 `, { mode: 0o700 });
   const config = {
     local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
@@ -840,23 +852,50 @@ sleep 2
   const wide = "x".repeat(4096);
   const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
 
+  const gone = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return error.code === "ESRCH";
+    }
+  };
+  const recordedPid = async (file) => {
+    const pid = Number((await readFile(file, "utf8")).trim());
+    assert.ok(Number.isInteger(pid) && pid > 0, `fixture did not record a pid in ${file}`);
+    return pid;
+  };
+  const helpers = [];
+
   const previousDriver = process.env.AGMSG_SYNC_DRIVER;
   const previousRoster = process.env.AGMSG_SYNC_ROSTER_DRIVER;
   process.env.AGMSG_SYNC_DRIVER = mock;
   process.env.AGMSG_SYNC_ROSTER_DRIVER = mock;
   try {
-    // Both paths write the same way, so both are covered. The assertion is on
-    // the code: it is what shows the stream's own failure reached this promise,
-    // rather than some later error standing in for it.
-    await assert.rejects(() => driver("prepare", config, input, ["1"]),
-      (error) => error.code === "EPIPE");
-    await assert.rejects(() => rosterDriver("apply", config, input),
-      (error) => error.code === "EPIPE");
+    // Both paths write their input the same way, so both are covered.
+    for (const call of [() => driver("prepare", config, input, ["1"]),
+      () => rosterDriver("apply", config, input)]) {
+      // On the code, not merely that it rejected: a rejection from 'close' would
+      // otherwise stand in for the stream's own failure and this would pass
+      // unfixed.
+      await assert.rejects(call, (error) => error.code === "EPIPE");
+      // No poll and no grace period. The call settles only after the driver has
+      // exited, so by this line it is already gone -- reading the pid
+      // immediately is the assertion, not a race with it.
+      assert.ok(gone(await recordedPid(pidFile)), "the failed driver was left running");
+      helpers.push(await recordedPid(helperFile));
+    }
   } finally {
     if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
     else process.env.AGMSG_SYNC_DRIVER = previousDriver;
     if (previousRoster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER;
     else process.env.AGMSG_SYNC_ROSTER_DRIVER = previousRoster;
+    // The descendants are the fixture's business, not the engine's: the engine
+    // is responsible for the process it started, and deliberately does not go
+    // hunting through a process tree it does not own.
+    for (const pid of helpers) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
     if (!root.startsWith(join(tmpdir(), "agmsg-sync-driver-epipe-"))) {
       throw new Error("unsafe test root");
     }
