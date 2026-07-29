@@ -26,15 +26,50 @@ teardown() {
   teardown_test_env
 }
 
-# Run watch.sh in the background for <secs> seconds, capturing stdout to <out>.
-# Returns once the watcher has been stopped.
-run_watcher_for() {
-  local sid="$1" out="$2" secs="$3"
+# Run watch.sh in the background until <condition> holds, capturing stdout to
+# <out>, then stop it. Returns non-zero if the condition never arrived.
+#
+# These wait for the thing the caller is about to assert instead of sleeping a
+# fixed number of seconds. A fixed sleep encodes "the watcher is usually done by
+# now", which is a claim about the machine rather than about the watcher: on a
+# loaded runner it is false, and the test then fails on its own assertion with no
+# hint that timing was the cause. `watch: persists a watermark file for the
+# session` failed exactly that way on main (macos shard 3/4), and `watch: restart
+# delivers messages that arrived while the watcher was down` failed the same way
+# the day before. Same class of defect as #503, same fix.
+#
+# A wait that times out returns non-zero HERE, so the failure names the condition
+# that never happened rather than surfacing later as a missing grep.
+# The launch is written out in each helper rather than factored into a
+# `pid=$(_start_watcher ...)` helper on purpose. A command substitution is a
+# subshell, so the watcher's parent would exit the instant the substitution
+# returned, and watch.sh — which stops within one interval once its session is
+# gone (#67) — would tear itself down before the condition could ever arrive. A
+# function call is not a subshell, so launching here keeps the test process as
+# the watcher's parent, exactly as the fixed-sleep version did.
+_stop_watcher() {
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# Stop once <file> exists.
+run_watcher_until_file() {
+  local sid="$1" out="$2" file="$3" pid rc=0
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
-  local pid=$!
-  sleep "$secs"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  pid=$!
+  wait_for_file "$file" || rc=1
+  _stop_watcher "$pid"
+  return "$rc"
+}
+
+# Stop once <out> contains <needle>.
+run_watcher_until_contains() {
+  local sid="$1" out="$2" needle="$3" pid rc=0
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  pid=$!
+  wait_for_file_contains "$out" "$needle" || rc=1
+  _stop_watcher "$pid"
+  return "$rc"
 }
 
 # Compute the per-process instance id (#93) that watch.sh / session-end key on
@@ -85,7 +120,7 @@ _max_message_id() {
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
 
   # Restart the SAME session_id — should resume from the persisted watermark.
-  run_watcher_for "$sid" "$TEST_SKILL_DIR/out2.log" 2
+  run_watcher_until_contains "$sid" "$TEST_SKILL_DIR/out2.log" "M2-in-gap"
 
   # In-gap message is delivered on restart...
   grep -q "M2-in-gap" "$TEST_SKILL_DIR/out2.log"
@@ -117,7 +152,10 @@ _max_message_id() {
 
 @test "watch: persists a watermark file for the session" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
+  run_watcher_until_file "sess-wm" "$TEST_SKILL_DIR/wm.log" \
+    "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark"
+  # Still asserted after the watcher is stopped: the point is that the file
+  # PERSISTS past the session, not merely that it appeared while it ran.
   [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
 }
 
@@ -199,7 +237,8 @@ _max_message_id() {
 
   [ "$(cat "$wm")" = "$initial" ]
 
-  run_watcher_for "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" 2
+  run_watcher_until_contains "$sid" "$TEST_SKILL_DIR/closed-redelivery.log" \
+    "M-after-closed-stdout"
   grep -q "M-after-closed-stdout" "$TEST_SKILL_DIR/closed-redelivery.log"
 }
 
@@ -233,7 +272,14 @@ _max_message_id() {
 
 @test "watch: a broad (non-actas) watcher does not create a ready sentinel" {
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
-  run_watcher_for "sess-broad" "$TEST_SKILL_DIR/broad.log" 1.5
+  # An absence cannot be waited for, so wait for a POSITIVE signal from the same
+  # startup path instead: the watermark appears once the watcher has taken its
+  # mark, i.e. past the point where an actas watcher would have written its
+  # sentinel. Sleeping a fixed 1.5s here was weaker in a way that never showed up
+  # as a failure — too short a window makes the absence vacuous and the test
+  # passes for the wrong reason.
+  run_watcher_until_file "sess-broad" "$TEST_SKILL_DIR/broad.log" \
+    "$TEST_SKILL_DIR/run/watch.$(_iid sess-broad).watermark"
   [ ! -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
   [ ! -e "$TEST_SKILL_DIR/run/ready.team__bob" ]
 }
