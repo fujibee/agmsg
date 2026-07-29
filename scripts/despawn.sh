@@ -50,13 +50,36 @@ case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be a whole number of seconds
 
 SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 
-# Kill the recorded tmux target. ids are self-describing: %N pane, @N window.
+# Kill the recorded placement. ids are self-describing: %N/@N for tmux,
+# herdr:<id> for herdr, and pid:<N> for an OS-terminal boot process.
+kill_pid_tree() {
+  local pid="$1" child children
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  # pgrep -P is available on both macOS and Linux. Keep a ps fallback for
+  # minimal environments where procps is present without pgrep.
+  if command -v pgrep >/dev/null 2>&1; then
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+  else
+    children="$(ps -o pid= --ppid "$pid" 2>/dev/null || true)"
+  fi
+  # Stop descendants before their boot-shell parent. This works for terminal
+  # templates that do not make the boot script a process-group leader.
+  while IFS= read -r child; do
+    child="${child//[[:space:]]/}"
+    [ -n "$child" ] && kill_pid_tree "$child"
+  done <<< "$children"
+  kill "$pid" 2>/dev/null || true
+}
+
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
   local id _proj _type
   IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
   [ -n "$id" ] || return 1
   case "$id" in
+    pid:*)
+      kill_pid_tree "${id#pid:}" || true
+      ;;
     herdr:*)
       command -v herdr >/dev/null 2>&1 && herdr pane close "${id#herdr:}" 2>/dev/null || true
       ;;
@@ -91,6 +114,23 @@ fi
 state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
 case "$state" in
   free)
+    if [ -f "$SPAWN_REC" ]; then
+      IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC"
+      case "${_id:-}" in
+        pid:*)
+          # OS-terminal members (notably codex) may have no watcher/actas lock.
+          # The boot PID is still an owned placement, so graceful despawn can
+          # terminate it and consistently remove the pre-joined registration.
+          kill_recorded_placement >/dev/null
+          if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
+            "$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" >/dev/null 2>&1 || true
+          fi
+          rm -f "$SPAWN_REC" 2>/dev/null || true
+          echo "status=ok name=$NAME team=$TEAM note=os-terminal"
+          exit 0
+          ;;
+      esac
+    fi
     echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; a tmux member may already be gone). If a window remains, use --force." >&2
     rm -f "$SPAWN_REC" 2>/dev/null || true
     echo "status=ok name=$NAME team=$TEAM note=no-live-lock"
@@ -113,5 +153,19 @@ while true; do
   waited=$((waited + 1))
 done
 
+# A graceful OS-terminal watcher can release its role but cannot portably close
+# the containing terminal. Once the lock is gone, use the boot PID placement to
+# finish teardown and make registration cleanup idempotent from the leader side.
+if [ -f "$SPAWN_REC" ]; then
+  IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC"
+  case "${_id:-}" in
+    pid:*)
+      kill_recorded_placement >/dev/null
+      if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
+        "$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+fi
 rm -f "$SPAWN_REC" 2>/dev/null || true
 echo "status=ok name=$NAME team=$TEAM after=${waited}s"

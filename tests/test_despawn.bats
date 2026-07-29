@@ -65,6 +65,32 @@ _read_at_for_body() {
       "SELECT read_at FROM messages WHERE body='$1' ORDER BY id DESC LIMIT 1;" )
 }
 
+@test "despawn: graceful OS-terminal member is terminated after releasing its live lock" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  setup_live_owner "$RUN" sess-m
+  printf 'sess-m\n' > "$RUN/actas.team__alice.session"
+  printf 'pid:999999\t%s\tclaude-code\n' "$PROJ" > "$RUN/spawn.team__alice"
+
+  export KILL_LOG="$TEST_SKILL_DIR/kill.log"
+  kill() { printf '%s\n' "$*" >> "$KILL_LOG"; }
+  export -f kill
+  export LOCK_TO_RELEASE="$RUN/actas.team__alice.session"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin-graceful"
+  mkdir -p "$stub_bin"
+  cat > "$stub_bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+rm -f "$LOCK_TO_RELEASE"
+STUB
+  chmod +x "$stub_bin/sleep"
+
+  run env PATH="$stub_bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=ok"* ]]
+  grep -q -- '999999' "$KILL_LOG"
+  [ ! -f "$RUN/spawn.team__alice" ]
+}
+
 @test "despawn: graceful — ctrl:despawn control row is marked read (does not linger as unread)" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
@@ -101,6 +127,43 @@ _read_at_for_body() {
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
+}
+
+@test "despawn --force: kills recorded OS-terminal PID and drops registration" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf 'pid:999999\t%s\tclaude-code\n' "$PROJ" > "$RUN/spawn.team__alice"
+  export KILL_LOG="$TEST_SKILL_DIR/kill.log"
+  kill() { printf '%s\n' "$*" >> "$KILL_LOG"; }
+  export -f kill
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=forced"* ]]
+  grep -q -- '999999' "$KILL_LOG"
+  [ ! -f "$RUN/spawn.team__alice" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" != *alice* ]]
+}
+
+@test "despawn --force: terminates OS-terminal descendants before the boot PID" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf 'pid:999999\t%s\tclaude-code\n' "$PROJ" > "$RUN/spawn.team__alice"
+  export KILL_LOG="$TEST_SKILL_DIR/kill.log"
+  kill() { printf '%s\n' "$*" >> "$KILL_LOG"; }
+  export -f kill
+  local stub_bin="$TEST_SKILL_DIR/stub-bin-pgrep"
+  mkdir -p "$stub_bin"
+  cat > "$stub_bin/pgrep" <<'STUB'
+#!/usr/bin/env bash
+[ "${2:-}" = "999999" ] && printf '999998\n'
+STUB
+  chmod +x "$stub_bin/pgrep"
+
+  run env PATH="$stub_bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  mapfile -t calls < "$KILL_LOG"
+  [ "${calls[0]}" = "999998" ]
+  [ "${calls[1]}" = "999999" ]
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -146,6 +209,21 @@ _read_at_for_body() {
   [[ "$output" == *alice* ]]             # broad watcher did not drop alice's role
 
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+}
+
+@test "despawn: graceful OS-terminal member without a live lock is terminated and de-registered" {
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  printf 'pid:999999\t%s\tcodex\n' "$PROJ" > "$RUN/spawn.team__alice"
+  export KILL_LOG="$TEST_SKILL_DIR/kill.log"
+  kill() { printf '%s\n' "$*" >> "$KILL_LOG"; }
+  export -f kill
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=ok"* ]]
+  grep -q -- '999999' "$KILL_LOG"
+  run bash "$SCRIPTS/identities.sh" "$PROJ" codex
+  [[ "$output" != *alice* ]]
 }
 
 @test "despawn: graceful no-op when the member holds no live lock (e.g. codex)" {

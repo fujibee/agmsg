@@ -426,6 +426,16 @@ BOOT="$(mktemp "$BOOT_DIR/boot-XXXXXX")"
 case "$(uname -s)" in
   Darwin) mv "$BOOT" "$BOOT.command"; BOOT="$BOOT.command" ;;
 esac
+
+# Tmux/herdr have stable native placement identifiers that their launchers
+# record below. An OS terminal has no portable window handle, so let the boot
+# script record its own PID instead; despawn can then terminate that process
+# tree and still has the project/type metadata needed to drop registration.
+RECORD_BOOT_PID=1
+if [ -n "${TMUX:-}" ] \
+  || { [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; }; then
+  RECORD_BOOT_PID=0
+fi
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
@@ -433,6 +443,12 @@ esac
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  if [ "$RECORD_BOOT_PID" = "1" ]; then
+    _spawn_rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+    printf 'mkdir -p %q\n' "$(dirname "$_spawn_rec")"
+    printf 'printf %q "pid:$$" %q %q > %q\n' \
+      '%s\t%s\t%s\n' "$PROJECT" "$AGENT_TYPE" "$_spawn_rec"
+  fi
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   if [ -n "$SPAWN_UNSET_VARS" ]; then
     printf 'unset %s\n' "$SPAWN_UNSET_VARS"

@@ -139,6 +139,25 @@ teardown() {
 
 # --- happy path / launch command ---
 
+@test "spawn: OS-terminal boot records its PID for despawn" {
+  cat > "$STUB_BIN/run-boot.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'exit\n' | "$1"
+STUB
+  chmod +x "$STUB_BIN/run-boot.sh"
+  export AGMSG_TERMINAL="$STUB_BIN/run-boot.sh {cmd}"
+
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  local record="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  [ -f "$record" ]
+  run cat "$record"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^pid:[0-9]+$'\t'"$PROJ"$'\t'claude-code$ ]]
+}
+
 @test "spawn: pre-joins the name and launches the CLI with the actas prompt" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
