@@ -232,7 +232,7 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 | モード | 仕組み | レイテンシ | 向いている相手 |
 |---|---|---|---|
 | **`monitor`**（Claude Codeのデフォルト） | SessionStartフック → Monitorツール → ブロッキングSQLiteストリーム | 約5秒 | リアルタイムプッシュを望むClaude Codeユーザー |
-| **`turn`**（Codex / Copilot CLI / OpenCodeのデフォルト） | アシスタントのターン間でStopフックが `check-inbox.sh` を発火 | 次のやり取りまで | Codex / Copilot CLI / OpenCode（Monitorツールなし）、より静かなループを好むClaude Codeユーザー |
+| **`turn`**（Codex / Copilot CLI / OpenCodeのデフォルト） | アシスタントのターン間でStopフックが `check-inbox.sh` を発火 | 次のやり取りまで | monitorを実行していないCodex / Copilot CLI / OpenCodeユーザー、より静かなループを好むClaude Codeユーザー |
 | **`both`** | monitorを主に、turnをセッションごとの安全網として | 約5秒。ウォッチャー障害時はturn相当にフォールバック | 二重の保険をかけたい場合 |
 | **`off`** | 自動配信なし | 手動の `/agmsg` のみ | ミニマリスト |
 
@@ -306,7 +306,7 @@ Copilotインストーラーは `~/.copilot/skills/agmsg/` に `SKILL.md` を配
 $agmsg
 ```
 
-`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは `mode turn` と `mode off` に対応し、`spawn opencode` は `opencode --prompt`（ブートプロンプトのターンが終わってもTUIが滞在するモード）経由で利用可能。`monitor` と `both` は非対応。
+`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは `mode monitor`（外部プラグイン [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) 経由。プラグイン未導入時は turn にフォールバック）、`mode turn`、`mode off` に対応。`spawn opencode` は `opencode --prompt`（ブートプロンプトのターンが終わってもTUIが滞在するモード）経由で利用可能。`both` は非対応。
 
 これによりOpenCodeは、Ollamaのようなローカルプロバイダーを使う構成を含め、ローカルのコーディングエージェントとして役立つ。
 
