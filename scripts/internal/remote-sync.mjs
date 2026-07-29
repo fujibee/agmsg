@@ -806,12 +806,14 @@ export function validateMembers(config, value) {
 // its handles pin the loop -- and lets failures pile up children as cycles
 // retry.
 //
-// The failure path deliberately waits for 'exit' and not 'close', and drops our
-// own ends of the pipes as it goes. SIGKILL reaches the driver but not anything
-// the driver started, and 'close' waits for every stdio stream to end: one
-// backgrounded grandchild holding the inherited pipes would keep 'close' from
-// ever arriving, which is the same hang wearing a different hat. What this
-// process owns is what it can be sure of releasing, so that is what it releases.
+// Every failure settles at 'exit' and drops our own ends of the pipes as it
+// goes -- including the ordinary one, a driver that simply exits non-zero.
+// 'close' waits for every stdio stream to end, and a driver's own grandchild
+// inherits those pipes and can hold them open indefinitely; SIGKILL reaches the
+// driver but nothing it started. So no failure route may depend on 'close', and
+// only success does, because only success has to read all of stdout. What this
+// process owns is what it can be sure of releasing, so that is what it releases:
+// a grandchild is left to the operator, not chased through the process tree.
 function runDriver({ args, label, operation, parse, input }) {
   return new Promise((resolve, reject) => {
     const childEnvironment = { ...process.env };
@@ -863,17 +865,18 @@ function runDriver({ args, label, operation, parse, input }) {
     });
     child.on("error", fail);
     child.stdin.on("error", fail);
-    // Failures settle here, once the driver is actually gone. Successes wait for
-    // 'close' below, because parsing needs every byte of stdout first.
-    child.on("exit", () => {
-      if (failure) settle(failure, null);
+    // Every failure ends here, at 'exit'. A driver that merely exits non-zero is
+    // the ordinary case and it needs this as much as a stream error does: it too
+    // can leave a grandchild holding the inherited pipes, and waiting for 'close'
+    // would then wait forever for output nobody is going to end. Only success
+    // goes on to 'close', because only success has to parse all of stdout.
+    child.on("exit", (code, signal) => {
+      if (failure) { fail(failure); return; }
+      if (code === 0 && !signal) return;
+      fail(new Error(`${label} ${operation} failed (${signal ?? code}): ${stderr.trim()}`));
     });
-    child.on("close", (code) => {
+    child.on("close", () => {
       if (failure) { settle(failure, null); return; }
-      if (code !== 0) {
-        settle(new Error(`${label} ${operation} failed (${code}): ${stderr.trim()}`), null);
-        return;
-      }
       try {
         settle(null, parse(stdout));
       } catch (error) {

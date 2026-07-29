@@ -809,48 +809,25 @@ test("capability policy history must be canonical and match current policy", () 
   }), /canonical ascending|begin at sequence 1/u);
 });
 
-test("a driver that stops reading its input fails the call and is not left running",
-  { timeout: 30_000 }, async () => {
-  // The write loses its reader and takes EPIPE, which arrives on the stdin
-  // stream rather than on the child -- and an unhandled stream 'error' is
-  // thrown, not returned. So the failure escaped the promise and killed the
-  // process, surfacing as an uncaughtException inside whichever unrelated test
-  // was running when it fired, which is how it read as a flake.
-  //
-  // Rejecting is only half of it. A rejected call that leaves the driver running
-  // trades "the process dies" for "the process cannot exit", so the fixture is
-  // built to catch that too, in the harder shape:
-  //
-  //   - it records its pid, so termination is asserted rather than assumed;
-  //   - it leaves a background descendant holding the inherited stdio pipes,
-  //     which is what a real driver that starts a helper does. SIGKILL does not
-  //     reach that descendant, and 'close' waits for every pipe to end, so an
-  //     engine waiting on 'close' would hang here forever;
-  //   - it then replaces itself with a sleep far longer than this test may run,
-  //     so it cannot end on its own and nothing here can pass by waiting.
-  //
-  // With the call settling only once the driver is gone, a missing cleanup shows
-  // up as this test's timeout, not as a quiet pass.
-  //
-  // The payload is past any platform's pipe buffer (64 KiB on Linux, less on
-  // macOS), so the write cannot complete unread.
-  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
-  const mock = join(root, "driver.sh");
-  const pidFile = join(root, "child.pid");
-  const helperFile = join(root, "helper.pid");
-  await writeFile(mock, `#!/usr/bin/env bash
-echo $$ > ${JSON.stringify(pidFile)}
-sleep 300 &
-echo $! > ${JSON.stringify(helperFile)}
-exec 0<&-
-exec sleep 300
-`, { mode: 0o700 });
-  const config = {
-    local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
-    remote_team_id: "018f3f7e-0000-7000-8000-000000000002", protocol_version: 1,
-  };
-  const wide = "x".repeat(4096);
-  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+// Shared by the two driver-lifecycle tests below. Both need the same awkward
+// shape: start the call, get hold of the fixture's pids *before* asserting
+// anything, and make sure those pids are reaped no matter where the test stops.
+//
+// Registering cleanup first is not tidiness. The mutation that proves these
+// tests -- making the engine wait for 'close' -- makes the call hang, so the
+// test ends on its timeout with the assertions never reached. Anything recorded
+// after an assertion is therefore recorded exactly never, in the one run that
+// needs it most, and 300-second sleeps outlive the runner. (Observed, not
+// predicted: an earlier version of this file left six of them behind.)
+async function driverLifecycleFixture(t, { script, calls, root }) {
+  const reap = [];
+  // t.after rather than try/finally: it still runs when the test is aborted on
+  // its timeout, which is precisely the failing case that leaves processes.
+  t.after(() => {
+    for (const pid of reap) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  });
 
   const gone = (pid) => {
     try {
@@ -860,48 +837,142 @@ exec sleep 300
       return error.code === "ESRCH";
     }
   };
-  const recordedPid = async (file) => {
-    const pid = Number((await readFile(file, "utf8")).trim());
-    assert.ok(Number.isInteger(pid) && pid > 0, `fixture did not record a pid in ${file}`);
-    return pid;
+  const awaitPid = async (file) => {
+    // Bounded: the fixture writes both pids before it can block or exit, so a
+    // file that never appears is a broken fixture, not slowness to wait out.
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      try {
+        const pid = Number((await readFile(file, "utf8")).trim());
+        if (Number.isInteger(pid) && pid > 0) return pid;
+      } catch { /* not written yet */ }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`fixture never recorded a pid in ${file}`);
   };
-  const helpers = [];
 
+  const started = [];
+  for (const [index, call] of calls.entries()) {
+    // Each call gets its own pid files, so the second driver's pids cannot be
+    // read as the first's -- both fixtures write as soon as they start.
+    const pidFile = join(root, `child-${index}.pid`);
+    const helperFile = join(root, `helper-${index}.pid`);
+    await writeFile(join(root, `driver-${index}.sh`),
+      script(pidFile, helperFile), { mode: 0o700 });
+    const promise = call(join(root, `driver-${index}.sh`));
+    // Held so the rejection is not unhandled while the pids are collected.
+    promise.catch(() => {});
+    const childPid = await awaitPid(pidFile);
+    const helperPid = await awaitPid(helperFile);
+    reap.push(childPid, helperPid);
+    started.push({ promise, childPid });
+  }
+  return { started, gone };
+}
+
+test("a driver that stops reading its input fails the call and is not left running",
+  { timeout: 30_000 }, async (t) => {
+  // The write loses its reader and takes EPIPE, which arrives on the stdin
+  // stream rather than on the child -- and an unhandled stream 'error' is
+  // thrown, not returned. So the failure escaped the promise and killed the
+  // process, surfacing as an uncaughtException inside whichever unrelated test
+  // was running when it fired, which is how it read as a flake.
+  //
+  // Rejecting is only half of it: a rejected call that leaves the driver running
+  // trades "the process dies" for "the process cannot exit". So the fixture
+  // records its pid, and leaves a background descendant holding the inherited
+  // pipes -- what a real driver that starts a helper does, and the thing that
+  // keeps 'close' from ever arriving -- then replaces itself with a sleep longer
+  // than this test may run, so nothing here can pass by waiting.
+  //
+  // The payload is past any platform's pipe buffer (64 KiB on Linux, less on
+  // macOS), so the write cannot complete unread.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+exec 0<&-
+exec sleep 300
+`;
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+  const { started, gone } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+      () => rosterDriver("apply", config, input),
+    ]);
+
+  for (const { promise, childPid } of started) {
+    // On the code, not merely that it rejected: a rejection from 'close' would
+    // otherwise stand in for the stream's own failure and this would pass
+    // unfixed.
+    await assert.rejects(() => promise, (error) => error.code === "EPIPE");
+    // No poll and no grace period. The call settles only after the driver has
+    // exited, so by this line it is already gone.
+    assert.ok(gone(childPid), "the failed driver was left running");
+  }
+});
+
+test("a driver that fails after starting a helper fails the call, and says how",
+  { timeout: 30_000 }, async (t) => {
+  // The ordinary failure: the driver reads its input, so there is no stream
+  // error anywhere, and then exits non-zero. It has a background helper holding
+  // the inherited pipes, so 'close' never arrives -- an engine that settled
+  // non-zero exits there would hang on the most common failure it has, and the
+  // stream-error fix alone would not have touched this path.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-exit-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+echo "driver is giving up" >&2
+cat > /dev/null
+exit 7
+`;
+  const input = [{ type: "probe" }];
+  const { started, gone } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+      () => rosterDriver("apply", config, input),
+    ]);
+
+  for (const { promise, childPid } of started) {
+    // The exit code has to survive: it is the whole diagnostic. So does the
+    // stderr collected before the child went away.
+    await assert.rejects(() => promise, (error) =>
+      /failed \(7\)/u.test(error.message) && /giving up/u.test(error.message));
+    assert.ok(gone(childPid), "the failed driver was left running");
+  }
+});
+
+// Sets AGMSG_SYNC_DRIVER / AGMSG_SYNC_ROSTER_DRIVER per call, restores them
+// whatever happens, and hands back the started calls with their pids collected.
+async function withDriverEnvironment(t, root, script, buildCalls) {
+  const config = {
+    local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
+    remote_team_id: "018f3f7e-0000-7000-8000-000000000002", protocol_version: 1,
+  };
   const previousDriver = process.env.AGMSG_SYNC_DRIVER;
   const previousRoster = process.env.AGMSG_SYNC_ROSTER_DRIVER;
-  process.env.AGMSG_SYNC_DRIVER = mock;
-  process.env.AGMSG_SYNC_ROSTER_DRIVER = mock;
-  try {
-    // Both paths write their input the same way, so both are covered.
-    for (const call of [() => driver("prepare", config, input, ["1"]),
-      () => rosterDriver("apply", config, input)]) {
-      // On the code, not merely that it rejected: a rejection from 'close' would
-      // otherwise stand in for the stream's own failure and this would pass
-      // unfixed.
-      await assert.rejects(call, (error) => error.code === "EPIPE");
-      // No poll and no grace period. The call settles only after the driver has
-      // exited, so by this line it is already gone -- reading the pid
-      // immediately is the assertion, not a race with it.
-      assert.ok(gone(await recordedPid(pidFile)), "the failed driver was left running");
-      helpers.push(await recordedPid(helperFile));
-    }
-  } finally {
+  t.after(async () => {
     if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
     else process.env.AGMSG_SYNC_DRIVER = previousDriver;
     if (previousRoster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER;
     else process.env.AGMSG_SYNC_ROSTER_DRIVER = previousRoster;
-    // The descendants are the fixture's business, not the engine's: the engine
-    // is responsible for the process it started, and deliberately does not go
-    // hunting through a process tree it does not own.
-    for (const pid of helpers) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
-    }
-    if (!root.startsWith(join(tmpdir(), "agmsg-sync-driver-epipe-"))) {
-      throw new Error("unsafe test root");
-    }
-    await rm(root, { recursive: true });
-  }
-});
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const built = buildCalls(null, config);
+  // Each call reads the driver path from the environment when it runs, so the
+  // path is set immediately before that call and never shared between them.
+  const calls = built.map((call) => (mockPath) => {
+    process.env.AGMSG_SYNC_DRIVER = mockPath;
+    process.env.AGMSG_SYNC_ROSTER_DRIVER = mockPath;
+    return call();
+  });
+  return driverLifecycleFixture(t, { script, calls, root });
+}
 
 test("storage driver subprocess cannot observe HTTP or age identity secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-env-"));
