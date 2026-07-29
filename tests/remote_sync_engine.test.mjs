@@ -908,10 +908,17 @@ exec sleep 300
     ]);
 
   for (const { promise, childPid } of started) {
-    // On the code, not merely that it rejected: a rejection from 'close' would
-    // otherwise stand in for the stream's own failure and this would pass
-    // unfixed.
-    await assert.rejects(() => promise, (error) => error.code === "EPIPE");
+    // On the code, not merely that it rejected: a rejection from 'close' carries
+    // no errno at all, so requiring one is what keeps this from passing against
+    // the unfixed engine.
+    //
+    // Two codes, because the same event has two spellings. A write whose reader
+    // is gone is EPIPE on Linux, but macOS builds stdio on socketpairs and
+    // answers ENOTCONN or EPIPE depending on how far the write got. Asserting
+    // EPIPE alone made this test pass or fail by platform and timing -- it did
+    // both on the same commit range -- which is not a property of the bug.
+    await assert.rejects(() => promise,
+      (error) => ["EPIPE", "ENOTCONN"].includes(error.code));
     // No poll and no grace period. The call settles only after the driver has
     // exited, so by this line it is already gone.
     assert.ok(gone(childPid), "the failed driver was left running");
