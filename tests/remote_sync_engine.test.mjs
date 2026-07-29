@@ -861,9 +861,14 @@ async function driverLifecycleFixture(t, { script, calls, root }) {
     const promise = call(join(root, `driver-${index}.sh`));
     // Held so the rejection is not unhandled while the pids are collected.
     promise.catch(() => {});
+    // Each pid joins the reap list the moment it is known, rather than both
+    // after both are read: a fixture that manages to start a process but not to
+    // record the second file would otherwise leave the first one unreaped, and
+    // the reap list is the one thing here that must not depend on the fixture
+    // being correct.
     const childPid = await awaitPid(pidFile);
-    const helperPid = await awaitPid(helperFile);
-    reap.push(childPid, helperPid);
+    reap.push(childPid);
+    reap.push(await awaitPid(helperFile));
     started.push({ promise, childPid });
   }
   return { started, gone };
