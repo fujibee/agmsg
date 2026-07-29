@@ -272,16 +272,41 @@ _max_message_id() {
 
 @test "watch: a broad (non-actas) watcher does not create a ready sentinel" {
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
-  # An absence cannot be waited for, so wait for a POSITIVE signal from the same
-  # startup path instead: the watermark appears once the watcher has taken its
-  # mark, i.e. past the point where an actas watcher would have written its
-  # sentinel. Sleeping a fixed 1.5s here was weaker in a way that never showed up
-  # as a failure — too short a window makes the absence vacuous and the test
-  # passes for the wrong reason.
-  run_watcher_until_file "sess-broad" "$TEST_SKILL_DIR/broad.log" \
-    "$TEST_SKILL_DIR/run/watch.$(_iid sess-broad).watermark"
-  [ ! -e "$TEST_SKILL_DIR/run/ready.team__alice" ]
-  [ ! -e "$TEST_SKILL_DIR/run/ready.team__bob" ]
+  # An absence cannot be waited for, so wait for positive evidence that the
+  # watcher got PAST the point where a sentinel would have been written.
+  #
+  # The watermark is not that evidence: watch.sh persists it, then runs the
+  # DB-open healthcheck, and only then writes the ready sentinel — so observing
+  # the watermark and stopping would leave the ready block unreached, and the
+  # absence would hold for the wrong reason. Streamed delivery is the evidence,
+  # because it happens in the main loop, which is after the ready block.
+  #
+  # The marker is sent only once the watermark exists, so it carries a higher id
+  # than the mark the watcher took at startup and is therefore streamed rather
+  # than absorbed into it.
+  local out="$TEST_SKILL_DIR/broad.log"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-broad" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  wait_for_file "$TEST_SKILL_DIR/run/watch.$(_iid sess-broad).watermark"
+  bash "$SCRIPTS/send.sh" team bob alice "M-broad-marker" >/dev/null
+  wait_for_file_contains "$out" "M-broad-marker"
+
+  # Asserted while the watcher is STILL RUNNING, and that is the whole point.
+  # cleanup() removes on exit every sentinel this watcher owns, so an assertion
+  # made after the kill cannot tell "never created" from "created, then cleaned
+  # up" — it holds either way. Checking it here is what makes the absence mean
+  # something. Verified by injection: with watch.sh's `[ -n "$ACTIVE_NAME" ]`
+  # guard removed so a broad watcher writes the sentinels, this test fails,
+  # while the kill-then-assert form it replaces still passes.
+  local rc=0 _s
+  for _s in ready.team__alice ready.team__bob; do
+    if [ -e "$TEST_SKILL_DIR/run/$_s" ]; then
+      echo "broad watcher created $_s" >&2
+      rc=1
+    fi
+  done
+  _stop_watcher "$w"
+  return "$rc"
 }
 
 @test "watch: ready sentinel records the owner session_id" {
