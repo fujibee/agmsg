@@ -85,7 +85,16 @@ _max_message_id() {
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
 
   # Restart the SAME session_id — should resume from the persisted watermark.
-  run_watcher_for "$sid" "$TEST_SKILL_DIR/out2.log" 2
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$TEST_SKILL_DIR/out2.log" 2>/dev/null 3>&- &
+  local w2=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/out2.log" "M2-in-gap" || {
+    kill "$w2" 2>/dev/null || true
+    wait "$w2" 2>/dev/null || true
+    false
+  }
+  kill "$w2" 2>/dev/null || true
+  wait "$w2" 2>/dev/null || true
 
   # In-gap message is delivered on restart...
   grep -q "M2-in-gap" "$TEST_SKILL_DIR/out2.log"
@@ -93,10 +102,11 @@ _max_message_id() {
   ! grep -q "M1-before-stop" "$TEST_SKILL_DIR/out2.log"
 }
 
-@test "watch: a fresh session starts from now and does not replay history" {
+@test "watch: a fresh session does not replay history already displayed by inbox" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  # Pre-existing message before any watcher for this session ever runs.
+  # A displayed row is historical even though this session is fresh.
   bash "$SCRIPTS/send.sh" team bob alice "M0-history" >/dev/null
+  bash "$SCRIPTS/inbox.sh" team alice >/dev/null
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-fresh" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/fresh.log" 2>/dev/null 3>&- &
@@ -110,15 +120,65 @@ _max_message_id() {
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
-  # Live message after attach is delivered; pre-existing history is not replayed.
+  # Live message after attach is delivered; displayed history is not replayed.
   grep -q "M-live" "$TEST_SKILL_DIR/fresh.log"
   ! grep -q "M0-history" "$TEST_SKILL_DIR/fresh.log"
 }
 
+@test "watch: a fresh watcher receives a job sent after join but before attach" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" task-late executor-task-late claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" task-late planner-task-late  claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" task-late planner-task-late executor-task-late "M-join-attach-gap" >/dev/null
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-join-gap" "$PROJ" claude-code executor-task-late \
+    >"$TEST_SKILL_DIR/join-gap.log" 2>/dev/null 3>&- &
+  local watcher_pid=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/join-gap.log" "M-join-attach-gap" || {
+    kill "$watcher_pid" 2>/dev/null || true
+    false
+  }
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+
+  grep -q "M-join-attach-gap" "$TEST_SKILL_DIR/join-gap.log"
+}
+
+@test "join: repeating an existing registration does not skip its pending job" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" task-repeat executor-repeat claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" task-repeat planner-repeat  claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" task-repeat planner-repeat executor-repeat "M-before-repeat-join" >/dev/null
+  bash "$SCRIPTS/join.sh" task-repeat executor-repeat claude-code "$PROJ" >/dev/null
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-repeat-join" "$PROJ" claude-code executor-repeat \
+    >"$TEST_SKILL_DIR/repeat-join.log" 2>/dev/null 3>&- &
+  local watcher_pid=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/repeat-join.log" "M-before-repeat-join" || {
+    kill "$watcher_pid" 2>/dev/null || true
+    false
+  }
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+
+  grep -q "M-before-repeat-join" "$TEST_SKILL_DIR/repeat-join.log"
+}
+
 @test "watch: persists a watermark file for the session" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  run_watcher_for "sess-wm" "$TEST_SKILL_DIR/wm.log" 1.5
-  [ -f "$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark" ]
+  local watermark="$TEST_SKILL_DIR/run/watch.$(_iid sess-wm).watermark"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-wm" "$PROJ" claude-code \
+    >"$TEST_SKILL_DIR/wm.log" 2>/dev/null 3>&- &
+  local watcher_pid=$!
+  wait_for_file "$watermark" || {
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    false
+  }
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+
+  [ -f "$watermark" ]
 }
 
 @test "watch: exits within one interval when its session dies, without advancing the watermark past an undelivered row (#67)" {

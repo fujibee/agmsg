@@ -234,3 +234,24 @@ agmsg_role_session_lookup_by_sid() {
   done
   return 0
 }
+
+# Print every record matching a bare session id as
+# team<TAB>agent<TAB>type<TAB>project. Callers must treat more than one matching
+# current registration as ambiguous instead of silently choosing the first.
+agmsg_role_session_pairs_by_sid() {
+  local sid="$1" dir f v team agent type project
+  [ -n "$sid" ] || return 0
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ "$v" = "$sid" ] || continue
+    team="$(_agmsg_role_session_field "$f" team)"
+    agent="$(_agmsg_role_session_field "$f" agent)"
+    type="$(_agmsg_role_session_field "$f" type)"
+    project="$(_agmsg_role_session_field "$f" project)"
+    [ -n "$team" ] && [ -n "$agent" ] || continue
+    printf '%s\t%s\t%s\t%s\n' "$team" "$agent" "$type" "$project"
+  done
+}

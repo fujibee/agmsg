@@ -133,6 +133,38 @@ run_launcher() {
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
 }
 
+@test "launcher: starts a role bridge joined after the dispatcher and leaves its gap job unread" {
+  put_record team alice thread-alice "$PROJ" codex
+  sleep 6 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local launcher_pid=$!
+
+  local i
+  for i in {1..50}; do
+    grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
+
+  bash "$SCRIPTS/join.sh" task-late executor-task-late codex "$PROJ" >/dev/null
+  put_record task-late executor-task-late thread-late "$PROJ" codex
+  bash "$SCRIPTS/send.sh" task-late alice executor-task-late "late bridge job" --force >/dev/null
+
+  for i in {1..50}; do
+    grep -q -- $'--pair task-late\texecutor-task-late --thread thread-late' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- $'--pair task-late\texecutor-task-late --thread thread-late' "$CAPTURE"
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex \
+    --pair $'task-late\texecutor-task-late' --timeout 1 --interval 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=pending"* ]]
+
+  wait "$launcher_pid" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+}
+
 @test "launcher: only one dispatcher runs per project" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
