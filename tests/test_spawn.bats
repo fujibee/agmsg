@@ -461,7 +461,12 @@ seed_resumable() {
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
   [[ "$output" == *"opencode --model anthropic/claude-opus-4-8 --prompt"* ]]
-  [[ "$output" == *"actas"* ]]
+  # opencode's actas prompt uses the '$' skill prefix, not Claude Code's '/' (#283).
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
 }
 
 @test "spawn: prompt_arg lands after spawn-options, immediately before the prompt" {
