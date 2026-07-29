@@ -21,26 +21,29 @@ That single constraint decides most of what follows.
 ## Try it on one machine
 
 Everything below can be watched end to end with two installs on one host, no
-cloud, no auth. This is the exact path the design was verified on.
+cloud, no auth. This is the exact path the design was verified on. `<A>` and
+`<B>` are two command names you pick — anything but the one your real install
+already uses, so this never touches it.
 
 ```sh
 # 1. A reference server on localhost, backed by Postgres.
 cd server && npm ci
 DATABASE_URL=postgres://USER:PASS@127.0.0.1:5432/DB PORT=8787 npx tsx src/index.ts &
 
-# 2. A second install beside your real one — different command name, own store.
-bash install.sh --cmd agmsg2 --agent-type claude-code
+# 2. Two installs beside your real one — each its own command name and store.
+bash install.sh --cmd <A> --agent-type claude-code
+bash install.sh --cmd <B> --agent-type claude-code
 
-# 3. Connect a team you already have. A team from before local ids works:
-#    connect mints them, moves the team to its own store, uploads its history,
-#    and leaves a sync engine running.
-~/.agents/skills/agmsg2/scripts/remote.sh connect --endpoint http://127.0.0.1:8787 myteam
+# 3. On <A>, connect a team you already have. A team from before local ids
+#    works: connect mints them, moves the team to its own store, uploads its
+#    history, and leaves a sync engine running.
+~/.agents/skills/<A>/scripts/remote.sh connect --endpoint http://127.0.0.1:8787 myteam
 
-# 4. From another install, pull it by name and keep syncing.
-otherinstall/scripts/remote.sh pull --endpoint http://127.0.0.1:8787 myteam
+# 4. On <B>, pull it by name and keep syncing.
+~/.agents/skills/<B>/scripts/remote.sh pull --endpoint http://127.0.0.1:8787 myteam
 
 # 5. Send from either side; it reaches the other.
-~/.agents/skills/agmsg2/scripts/send.sh myteam alice bob "hello from machine one"
+~/.agents/skills/<A>/scripts/send.sh myteam alice bob "hello from machine one"
 ```
 
 Two things are worth confirming yourself, because they are the whole point: a
