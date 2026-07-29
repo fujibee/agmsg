@@ -1,115 +1,103 @@
 # Remote setup
 
-This walkthrough runs the reference server on localhost and syncs one plaintext
-team between two isolated agmsg installs. It does not change an existing agmsg
-install.
+This walkthrough connects an existing team on machine A to the reference
+server, then pulls it into a normal agmsg install on machine B. This setup uses
+plaintext sync.
 
 ## Requirements
 
-- Docker with Docker Compose
-- Bash, SQLite, and curl
+- PostgreSQL 17
 - Node.js 22 or later
-- A local checkout of this repository
+- Bash, SQLite, and curl
+- An agmsg checkout on the server host
+- A server URL that both machines can reach
 
-Run every command below from the repository root unless the step says
-otherwise.
+Use HTTPS when the server is not on localhost.
 
 ## 1. Start the reference server
 
-Use a dedicated Compose project so this walkthrough does not reuse another
-local server's database:
+Create an empty PostgreSQL database, then start the server from the repository
+checkout:
 
 ```sh
-export COMPOSE_PROJECT_NAME=agmsg-remote-setup
-docker compose -f server/compose.yaml up -d --build
-curl -fsS http://127.0.0.1:8787/v1/health
+cd server
+npm ci
+
+export DATABASE_URL="postgresql://<user>:<password>@127.0.0.1:5432/<db>"
+export HOST=0.0.0.0
+export PORT=8787
+npx tsx src/index.ts
 ```
 
-The health response should contain `"status":"ok"` and `"database":"ok"`.
+Replace every value in angle brackets, especially `<db>`, with the real
+PostgreSQL values before running the command. The example will not work until
+you replace them.
 
-## 2. Install two isolated commands
-
-Pick command names that are not used by an existing install. The names below
-create separate skill, team, and message-store directories:
+Make the server available to both machines at an HTTPS URL, then confirm it is
+ready:
 
 ```sh
-bash install.sh --cmd agmsg-remote-a --agent-type claude-code
-bash install.sh --cmd agmsg-remote-b --agent-type claude-code
+curl -fsS https://<server-url>/v1/health
 ```
 
-Set short path variables for the remaining commands:
+The response should contain `"status":"ok"` and `"database":"ok"`.
+
+## 2. Connect the existing team on machine A
+
+Use machine A's normal agmsg install and the team you already use:
 
 ```sh
-A="$HOME/.agents/skills/agmsg-remote-a/scripts"
-B="$HOME/.agents/skills/agmsg-remote-b/scripts"
+bash ~/.agents/skills/agmsg/scripts/remote.sh connect \
+  --endpoint https://<server-url> \
+  <team>
 ```
 
-## 3. Create a team on install A
-
-Create two temporary project directories, then register two members in a new
-local team:
+Connect moves this team from the shared database into a per-team store. If an
+external tool reads the database file directly, resolve the team's new path
+instead of continuing to use the shared database path:
 
 ```sh
-DEMO_ROOT="$(mktemp -d)"
-mkdir -p "$DEMO_ROOT/alice" "$DEMO_ROOT/bob"
-
-bash "$A/join.sh" remote-demo alice claude-code "$DEMO_ROOT/alice"
-bash "$A/join.sh" remote-demo bob claude-code "$DEMO_ROOT/bob"
+bash ~/.agents/skills/agmsg/scripts/api.sh get teams <team> store
 ```
 
-## 4. Connect install A
+## 3. Install and pull on machine B
 
-Connect the local team to the reference server:
+Install agmsg normally on machine B:
 
 ```sh
-bash "$A/remote.sh" connect \
-  --endpoint http://127.0.0.1:8787 \
-  remote-demo
+npx agmsg
 ```
 
-The command registers the team, moves its local history into the team's
-dedicated store, and starts its sync engine.
-
-## 5. Pull the team into install B
-
-Install B starts without a local `remote-demo` team. Pull it by name:
+Pull the connected team by name:
 
 ```sh
-bash "$B/remote.sh" pull \
-  --endpoint http://127.0.0.1:8787 \
-  remote-demo
+bash ~/.agents/skills/agmsg/scripts/remote.sh pull \
+  --endpoint https://<server-url> \
+  <team>
 ```
 
-The command creates the local team, imports its current history, and starts a
-second sync engine.
+## 4. Send and verify
 
-## 6. Send and verify
-
-Send a message from install A:
+Send a message from machine A with member names from the team:
 
 ```sh
-bash "$A/send.sh" remote-demo alice bob "hello from install A"
+bash ~/.agents/skills/agmsg/scripts/send.sh \
+  <team> <from> <to> "hello from machine A"
+bash ~/.agents/skills/agmsg/scripts/remote-sync.sh once --team <team>
 ```
 
-Run one cycle on each side to make the walkthrough deterministic, then inspect
-install B's local history:
+On machine B, pull the new record and inspect its local history:
 
 ```sh
-bash "$A/remote-sync.sh" once --team remote-demo
-bash "$B/remote-sync.sh" once --team remote-demo
-bash "$B/history.sh" remote-demo bob
+bash ~/.agents/skills/agmsg/scripts/remote-sync.sh once --team <team>
+bash ~/.agents/skills/agmsg/scripts/history.sh <team> <to>
 ```
 
-The final command should show:
+The history should contain:
 
 ```text
-alice → bob: hello from install A
+<from> → <to>: hello from machine A
 ```
 
-## Stop the server
-
-Use the same Compose project name from step 1:
-
-```sh
-docker compose -f server/compose.yaml down
-```
+For a single-machine developer rehearsal with two custom command names, see
+[Try it on one machine](design/remote-sync.md#try-it-on-one-machine).
