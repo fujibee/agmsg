@@ -44,7 +44,7 @@ At session start (or the first time you run /agmsg this session), launch a
 resident inbox watcher with the \`sentinel_monitor\` tool so incoming agmsg
 messages stream into this conversation as they arrive:
 
-- command: '$SKILL_DIR/scripts/watch.sh' "\$SENTINEL_SESSION_ID" '$project' $type
+- command: '$SKILL_DIR/scripts/watch.sh' "\${SENTINEL_SESSION_ID:--}" '$project' $type
 - description: agmsg inbox stream
 
 Do not launch it more than once per session — if a watcher is already

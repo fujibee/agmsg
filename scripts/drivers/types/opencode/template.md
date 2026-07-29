@@ -86,7 +86,7 @@ Four possible outputs:
 
 **Ensure monitor is running first (monitor mode only).** If the project's delivery mode is `monitor` (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status opencode "$(pwd)"`) and no `agmsg inbox stream` watcher is already streaming into this session, launch one now with the `sentinel_monitor` tool:
 
-- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode`
+- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${SENTINEL_SESSION_ID:--}" "$(pwd)" opencode`
 - description: `agmsg inbox stream`
 
 Pass the command to `sentinel_monitor` exactly as written. If `sentinel_monitor` is not available in this environment, fall back to a turn-based self-check instead: after each tool call, run `~/.agents/skills/__SKILL_NAME__/scripts/check-inbox.sh opencode "$(pwd)"` to check the agmsg inbox for unread messages.
@@ -122,12 +122,12 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" opencode` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> opencode "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
-4. **If delivery mode is `monitor`**, switch the watcher to the new role so receive is restricted to it:
+4. **If delivery mode is `monitor`**, switch the watcher to the new role so receive is restricted to it. (If the sentinel tools are unavailable — plugin not installed — skip this step; the rule's turn-mode self-check still covers your roles.)
    a. Run `sentinel_list` to find a running monitor described `agmsg inbox stream`; if one is running in this session, stop it with `sentinel_stop` on its id.
    b. Launch a fresh watcher with the `sentinel_monitor` tool:
-      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode <name>`
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${SENTINEL_SESSION_ID:--}" "$(pwd)" opencode <name>`
       - description: `agmsg inbox stream`
-   The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
+    The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step too.
 5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
 6. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
 
@@ -135,8 +135,8 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" opencode <name>` to remove that role's registration.
 3. If the session's active FROM was `<name>`, clear that state.
-4. **If delivery mode is `monitor`**: run `sentinel_list` to find a running monitor described `agmsg inbox stream`; if one is running in this session, stop it with `sentinel_stop` on its id, then relaunch it with the `sentinel_monitor` tool using the default (no 4th arg) subscription so receive covers the project's remaining roles:
-   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "$SENTINEL_SESSION_ID" "$(pwd)" opencode`
+4. **If delivery mode is `monitor`** and the sentinel tools are available: run `sentinel_list` to find a running monitor described `agmsg inbox stream`; if one is running in this session, stop it with `sentinel_stop` on its id, then relaunch it with the `sentinel_monitor` tool using the default (no 4th arg) subscription so receive covers the project's remaining roles. If the sentinel tools are unavailable (plugin not installed), skip this step.
+   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${SENTINEL_SESSION_ID:--}" "$(pwd)" opencode`
    - description: `agmsg inbox stream`
 5. Tell the user: "Dropped role `<name>` from this project."
 
