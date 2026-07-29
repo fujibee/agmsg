@@ -83,13 +83,12 @@ Send a message from machine A with member names from the team:
 ```sh
 bash ~/.agents/skills/agmsg/scripts/send.sh \
   <team> <from> <to> "hello from machine A"
-bash ~/.agents/skills/agmsg/scripts/remote-sync.sh once --team <team>
 ```
 
-On machine B, pull the new record and inspect its local history:
+Connect and pull already started the sync engines. Wait a few seconds, then
+inspect machine B's local history:
 
 ```sh
-bash ~/.agents/skills/agmsg/scripts/remote-sync.sh once --team <team>
 bash ~/.agents/skills/agmsg/scripts/history.sh <team> <to>
 ```
 
@@ -99,5 +98,24 @@ The history should contain:
 <from> → <to>: hello from machine A
 ```
 
-For a single-machine developer rehearsal with two custom command names, see
+## Use a separate install for testing
+
+To keep a test separate from an existing install, give it another command name:
+
+```sh
+bash install.sh --cmd agmsg-test
+```
+
+For the single-machine, two-install rehearsal, see
 [Try it on one machine](design/remote-sync.md#try-it-on-one-machine).
+
+## Back up before connecting
+
+If you want a rollback copy, do this before step 2:
+
+Here `<storage>` is the install root, normally `~/.agents/skills/agmsg`.
+
+1. Back up `<storage>/db/messages.db` and the entire `<storage>/teams/` directory.
+2. To restore, stop the agmsg watcher and remote sync engine first.
+3. Copy both backups back to their original paths.
+4. Delete `<storage>/db/teams/<team>/`, then restart your normal delivery mode.
