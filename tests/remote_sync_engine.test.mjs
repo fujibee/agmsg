@@ -24,6 +24,7 @@ import {
   request,
   resyncCycle,
   retainAgeCheckpoint,
+  rosterDriver,
   selectWriteProfile,
   stage2ReadStateSupported,
   stage1ResyncSupported,
@@ -806,6 +807,61 @@ test("capability policy history must be canonical and match current policy", () 
     ...base,
     policy_history: [base.policy_history[1], base.policy_history[0]],
   }), /canonical ascending|begin at sequence 1/u);
+});
+
+test("a driver that stops reading its input fails the promise, not the process",
+  async () => {
+  // The write loses its reader and takes EPIPE, which arrives on the stdin
+  // stream rather than on the child -- and an unhandled stream 'error' is
+  // thrown, not returned. So the failure escaped the promise and killed the
+  // process, surfacing as an uncaughtException inside whichever unrelated test
+  // happened to be running.
+  //
+  // Two things make it deterministic rather than a race. The payload is far
+  // past any platform's pipe buffer (64 KiB on Linux, less on macOS), so the
+  // write cannot complete without someone reading. And the child closes its
+  // stdin and then outlives the write, so the EPIPE lands while the promise is
+  // still pending -- if the child simply exited, 'close' would settle the
+  // promise first and the stream error would arrive afterwards, unattributable.
+  //
+  // The wait is two seconds against an EPIPE that follows the close by
+  // microseconds: a margin, not a race. It is also bounded, because a child
+  // still holding a handle keeps the whole test process from exiting.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
+  const mock = join(root, "driver.sh");
+  await writeFile(mock, `#!/usr/bin/env bash
+exec 0<&-
+sleep 2
+`, { mode: 0o700 });
+  const config = {
+    local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
+    remote_team_id: "018f3f7e-0000-7000-8000-000000000002", protocol_version: 1,
+  };
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+
+  const previousDriver = process.env.AGMSG_SYNC_DRIVER;
+  const previousRoster = process.env.AGMSG_SYNC_ROSTER_DRIVER;
+  process.env.AGMSG_SYNC_DRIVER = mock;
+  process.env.AGMSG_SYNC_ROSTER_DRIVER = mock;
+  try {
+    // Both paths write the same way, so both are covered. The assertion is on
+    // the code: it is what shows the stream's own failure reached this promise,
+    // rather than some later error standing in for it.
+    await assert.rejects(() => driver("prepare", config, input, ["1"]),
+      (error) => error.code === "EPIPE");
+    await assert.rejects(() => rosterDriver("apply", config, input),
+      (error) => error.code === "EPIPE");
+  } finally {
+    if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
+    else process.env.AGMSG_SYNC_DRIVER = previousDriver;
+    if (previousRoster === undefined) delete process.env.AGMSG_SYNC_ROSTER_DRIVER;
+    else process.env.AGMSG_SYNC_ROSTER_DRIVER = previousRoster;
+    if (!root.startsWith(join(tmpdir(), "agmsg-sync-driver-epipe-"))) {
+      throw new Error("unsafe test root");
+    }
+    await rm(root, { recursive: true });
+  }
 });
 
 test("storage driver subprocess cannot observe HTTP or age identity secrets", async () => {

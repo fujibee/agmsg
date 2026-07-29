@@ -818,6 +818,13 @@ export async function driver(operation, config, input, extra = []) {
       process.stderr.write(chunk);
     });
     child.on("error", reject);
+    // A driver that exits before reading its input leaves this write with no
+    // reader, and the resulting EPIPE arrives on the stdin stream -- not on the
+    // child, whose handler above covers spawn failures only. Unhandled, a
+    // stream 'error' is thrown rather than returned, so the failure escaped this
+    // promise entirely and took the process down. Routed to the same reject, it
+    // becomes what every other driver failure already is.
+    child.stdin.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(["resync-status", "resync"].includes(operation) ?
         parseStrictJsonl(stdout) : parseJsonl(stdout));
@@ -851,6 +858,9 @@ export async function rosterDriver(operation, config, input, extra = []) {
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; process.stderr.write(chunk); });
     child.on("error", reject);
+    // Same reason as the storage driver above: the write's failure surfaces on
+    // the stdin stream, where nothing was listening.
+    child.stdin.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolvePromise(parseJsonl(stdout));
       else reject(new Error(`roster sync ${operation} failed (${code}): ${stderr.trim()}`));
