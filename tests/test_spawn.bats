@@ -886,6 +886,8 @@ EOF
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"alice"* ]]
   # No task appended → no newline-join → boot prompt unchanged.
+  run grep 'actas' "$boot"
+  [ "$status" -eq 0 ]
   [[ "$output" != *'\n'* ]]
 }
 

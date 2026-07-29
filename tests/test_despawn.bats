@@ -161,7 +161,10 @@ STUB
 
   run env PATH="$stub_bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
-  mapfile -t calls < "$KILL_LOG"
+  local calls=() call
+  while IFS= read -r call; do
+    calls+=("$call")
+  done < "$KILL_LOG"
   [ "${calls[0]}" = "999998" ]
   [ "${calls[1]}" = "999999" ]
 }
