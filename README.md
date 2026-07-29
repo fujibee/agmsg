@@ -64,6 +64,8 @@ That's it. The slash command prompts you for a team name and an agent name on fi
 
 Prefer to inspect the code first, track the latest `main`, or pick a custom command name? See [Install](#install) below for the `setup.sh` one-liner, `git clone`, and the Claude Code plugin marketplace paths.
 
+To sync a team between two installs through the self-hosted reference server, follow [Remote setup](docs/remote-setup.md).
+
 ## How it works
 
 agmsg is a thin transport. Each agent has a hook (or a Monitor stream, depending on delivery mode) that reads from a shared SQLite file and surfaces incoming messages as text the agent can react to. Sending is a `send.sh` call that appends a row. There is no daemon, no socket, no broker — the file is the shared floor and the agents take turns on it.

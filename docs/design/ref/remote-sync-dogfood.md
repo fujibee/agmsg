@@ -1,5 +1,8 @@
 # Stage-1 remote sync dogfood
 
+> Reference only. Delete this document when `integration/remote` merges to
+> `main`.
+
 Stage 1 polls the draft reference server while every `send` still commits to the
 local SQLite store first. It is intentionally branch-only and is not installed
 by the released core yet.
@@ -150,7 +153,7 @@ identity path stays in the engine configuration and is used only while opening
 pulled envelopes. Joining an established rotated binding or rotating an active
 binding requires complete chain verification, quiesce, drain, a server
 authorization fence, and the fresh-boundary procedure in the
-[`age-v1` profile](spec/ref/age-v1-profile.md#multi-writer-cutover-protocol), which
+[`age-v1` profile](../../spec/ref/age-v1-profile.md#multi-writer-cutover-protocol), which
 is not yet automated by this client.
 
 For `age-v1`, lifecycle logs omit imported plaintext fields by default. Set
