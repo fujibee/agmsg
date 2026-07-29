@@ -848,3 +848,45 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$TEST_SKILL_DIR/teams/myteam/config.json" ]
 }
+
+@test "team: a pulled member with no local registration is listed and counted" {
+  # A machine that pulled a team holds members it has never registered locally:
+  # the roster is real, the registrations are empty, and that is the correct
+  # state rather than a broken one. The listing joined through the
+  # registrations array, so those members produced no row at all and the team
+  # read as empty.
+  mkdir -p "$TEST_SKILL_DIR/teams/pulled"
+  cat > "$TEST_SKILL_DIR/teams/pulled/config.json" <<'JSON'
+{
+  "name": "pulled",
+  "team_id": "018f3f7e-2222-7000-8000-000000000002",
+  "agents": {
+    "alice": { "member_id": "018f3f7e-2222-7000-8000-000000000010", "registrations": [] },
+    "bob":   { "member_id": "018f3f7e-2222-7000-8000-000000000011", "registrations": [] },
+    "carol": { "member_id": "018f3f7e-2222-7000-8000-000000000012",
+               "registrations": [ { "type": "claude-code", "project": "/tmp/p" } ] }
+  },
+  "created_at": "2026-07-29T00:00:00Z"
+}
+JSON
+  run bash "$SCRIPTS/team.sh" pulled
+  [ "$status" -eq 0 ]
+  # Every member appears, not just the one with a registration.
+  [[ "$output" == *"alice"* ]]
+  [[ "$output" == *"bob"* ]]
+  [[ "$output" == *"carol"* ]]
+  # And the count agrees with the roster rather than with the join.
+  [[ "$output" == *"3 member(s)"* ]]
+  # The absence is described, not left blank.
+  [[ "$output" == *"no local registration"* ]]
+}
+
+@test "team: a locally registered member still lists its type and project" {
+  # The fix must not change what a normal member looks like.
+  bash "$SCRIPTS/join.sh" localteam alice claude-code /tmp/project-x >/dev/null
+  run bash "$SCRIPTS/team.sh" localteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"alice (claude-code) — /tmp/project-x"* ]]
+  [[ "$output" == *"1 member(s)"* ]]
+  [[ "$output" != *"no local registration"* ]]
+}

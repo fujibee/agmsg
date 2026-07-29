@@ -34,7 +34,12 @@ COUNT=0
 # caveat).
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$CONFIG")
 while IFS='	' read -r name types project registrations; do
-  if [ "${registrations:-0}" -gt 1 ]; then
+  if [ "${registrations:-0}" -eq 0 ]; then
+    # A member this machine has never registered locally: pulled with the team,
+    # real, and correctly without registrations. Saying so beats printing an
+    # empty type and a "?" project, which reads as damage.
+    echo "  $name (remote — no local registration)"
+  elif [ "$registrations" -gt 1 ]; then
     echo "  $name ($types) — $project (+$((registrations - 1)) more)"
   else
     echo "  $name ($types) — $project"
@@ -62,7 +67,11 @@ done < <(sqlite3 -separator '	' :memory: \
        LIMIT 1
      ), '?'),
      json_array_length(registrations)
-   FROM agents, json_each(agents.registrations) AS r
+   -- LEFT JOIN, not a comma join: a member whose registrations array is empty
+   -- produces no rows from json_each, so an inner join dropped them from the
+   -- listing entirely and from the count with it. That is the normal state on
+   -- a machine that pulled the team rather than joining it.
+   FROM agents LEFT JOIN json_each(agents.registrations) AS r
    GROUP BY name, registrations;" | tr -d '\r')
 
 echo ""
