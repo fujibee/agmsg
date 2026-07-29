@@ -1269,6 +1269,7 @@ class CodexBridge {
       `${send} ${this.identity.team} ${this.identity.name} <to> --stdin <<'AGMSG_BODY'`,
       "<message>",
       "AGMSG_BODY",
+      "A body you compose MUST NOT be passed as a positional argument (deprecated, #378); pick a delimiter it cannot contain on a line by itself.",
     ];
     if (this.opts.inlineInbox) {
       return [

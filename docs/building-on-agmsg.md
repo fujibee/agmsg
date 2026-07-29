@@ -65,6 +65,11 @@ flows use:
 | Check delivery mode | `scripts/delivery.sh status [<type> <project>]` |
 | Set delivery mode | `scripts/delivery.sh set <mode> <type> <project>` |
 
+`send.sh` also still accepts the message as a positional argument, but that
+form is **deprecated** (#378): the caller's shell parses the body before
+agmsg sees it, and on Windows MSYS truncates a long one at 8186 bytes. A body
+your integration composes MUST NOT use it — pass it on stdin or from a file.
+
 These are the same scripts `/agmsg` (or your configured command) itself
 shells out to — there is no more-privileged internal path. Treat them as the
 only sanctioned way to mutate agmsg state; nothing outside `scripts/` should

@@ -162,6 +162,18 @@ teardown() {
   [ "$n" -eq 0 ]
 }
 
+# `--` itself was a valid positional body before the flags existed (only
+# argument 5 was inspected, so argument 4 was taken verbatim). It is now
+# consumed as the terminator, which is the fourth and least obvious of the
+# literal bodies this change breaks — `-- --` is its migration form.
+@test "send: -- keeps a body that is literally -- working (backwards compat)" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--" ]
+}
+
 @test "send: -- with no body after it is an error, not an empty message" {
   run bash "$SCRIPTS/send.sh" testteam alice bob --
   [ "$status" -ne 0 ]

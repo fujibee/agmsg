@@ -17,10 +17,17 @@ set -euo pipefail
 #
 # That makes --stdin/--body-file the canonical way to send; it does not
 # remove the hazard, because the positional form still exists and still
-# carries both. The positional form is DEPRECATED: it keeps working for now
-# so no existing caller breaks, but a body composed by an agent must not use
-# it. Retiring it is a later, breaking stage of #378 — this stage only moves
-# every first-party example onto the safe path.
+# carries both. The positional form is DEPRECATED: it keeps working for now,
+# but a body composed by an agent must not use it. Retiring it is a later,
+# breaking stage of #378 — this stage only moves every first-party example
+# onto the safe path.
+#
+# Four literal bodies DO break here, and `--` is their migration syntax:
+# `--`, `--stdin` and `--body-file` are now consumed as a terminator or a
+# mode selector, and `--force` is now rejected outright (it used to arrive as
+# the body, because only argument 5 was checked for the flag). Send any of
+# them as `send.sh <team> <from> <to> -- <body>` — including `-- --`. Every
+# other positional body is unaffected.
 
 USAGE="Usage: send.sh <team> <from> <to> --stdin [--force]
    or: send.sh <team> <from> <to> --body-file <path> [--force]
