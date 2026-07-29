@@ -352,7 +352,7 @@ AGMSG_BODY
 ~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --body-file ./message.txt
 ```
 
-The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--stdin`, `--body-file`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin`.
+The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--`, `--stdin`, `--body-file`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin` — and for a body of `--`, that is `-- --`.
 
 ## FAQ / Design notes
 

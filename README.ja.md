@@ -338,7 +338,7 @@ AGMSG_BODY
 ~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --body-file ./message.txt
 ```
 
-従来の位置引数形式 — `send.sh <team> <from> <to> "<message>"` — も引き続き動作するが、**非推奨**である(#378)。このメッセージは agmsg が受け取る前にシェルが解釈するため、本文中のバッククォートや `$(...)` がそこで評価されうる。さらに Windows では MSYS の argv 変換によって長い本文が 8186 バイトで無言のうちに切り詰められる。**エージェントが組み立てたメッセージでは使ってはならない**。本文がちょうど `--stdin`・`--body-file`・`--force` そのものである場合は、直前に `--` を置くこと: `send.sh <team> <from> <to> -- --stdin`
+従来の位置引数形式 — `send.sh <team> <from> <to> "<message>"` — も引き続き動作するが、**非推奨**である(#378)。このメッセージは agmsg が受け取る前にシェルが解釈するため、本文中のバッククォートや `$(...)` がそこで評価されうる。さらに Windows では MSYS の argv 変換によって長い本文が 8186 バイトで無言のうちに切り詰められる。**エージェントが組み立てたメッセージでは使ってはならない**。本文がちょうど `--`・`--stdin`・`--body-file`・`--force` そのものである場合は、直前に `--` を置くこと: `send.sh <team> <from> <to> -- --stdin`（本文が `--` なら `-- --`）
 
 ## FAQ / 設計メモ
 

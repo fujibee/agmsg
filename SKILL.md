@@ -76,8 +76,9 @@ AGMSG_BODY
 # flags above; new sends use --stdin or --body-file.
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>" [--force]
 
-# A body that IS one of the flag names still works — put `--` before it.
+# A body that IS `--` or one of the flag names still works — put `--` before it.
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> -- --stdin
+~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> -- --
 
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
