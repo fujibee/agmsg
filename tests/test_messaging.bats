@@ -112,8 +112,9 @@ teardown() {
 #
 # A positional body goes through the sender's shell (backticks / $(...) can
 # execute or vanish) and, on Windows, through MSYS's argv-conversion path
-# (silent truncation at 8186 bytes). --stdin/--body-file bypass both by
-# never touching argv.
+# (silent truncation at 8186 bytes). A body sent via --stdin/--body-file
+# meets neither, because it never touches argv. The positional form remains
+# available (deprecated) and still carries both hazards.
 
 @test "send: -- keeps a body that is literally --stdin working (backwards compat)" {
   # Before --stdin/--body-file existed, "--stdin" was just an ordinary body.
@@ -125,12 +126,40 @@ teardown() {
   [ "$stored" = "--stdin" ]
 }
 
-@test "send: -- keeps a body that is literally --force working, and --force after it still applies" {
+@test "send: -- keeps a body that is literally --force working" {
   run bash "$SCRIPTS/send.sh" testteam alice bob -- --force
   [ "$status" -eq 0 ]
   local stored
   stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
   [ "$stored" = "--force" ]
+}
+
+# The two tests below are a pair, and only mean something together: the
+# second is the control for the first. `-- --force --force` sends the body
+# "--force" to an UNREGISTERED team/recipient, which the roster check (#355)
+# refuses unless force mode is on — so the send succeeding is what proves the
+# trailing --force was still parsed as a flag after `--` consumed the body.
+# Without the control, that success could just as well mean the roster check
+# never ran for an unknown team, and the test would assert nothing.
+@test "send: a --force after a '--' body still turns force mode on" {
+  run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody -- --force --force
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to nobody" ]]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='nobody';")
+  [ "$stored" = "--force" ]
+}
+
+@test "send: control — the same '--' body without a trailing --force is still roster-checked" {
+  run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody -- --force
+  [ "$status" -ne 0 ]
+  # Assert WHICH failure this is. A bare status check would also pass on an
+  # argument-parsing error, and then the pair would only show that the extra
+  # argument turns failure into success — not that it turned force mode on.
+  [[ "$output" =~ "has no registered agents" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
 }
 
 @test "send: -- with no body after it is an error, not an empty message" {
@@ -263,6 +292,41 @@ teardown() {
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
+}
+
+# A bash string cannot hold a NUL byte, so `IFS= read -r -d ''` stops at the
+# first one. Storing the shortened value with a success exit would report a
+# whole body sent when it was not, so the input is refused instead. Note the
+# NUL must be written by printf's FORMAT string: passing it through an
+# argument (printf '%s' "$var") cannot work, because argv cannot carry NUL
+# either — a test written that way would silently exercise NUL-free input.
+@test "send: rejects --stdin input containing a NUL byte instead of truncating it" {
+  run bash -c "printf 'before\000after' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "NUL byte" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects a --body-file containing a NUL byte instead of truncating it" {
+  local f="$TEST_SKILL_DIR/nul.bin"
+  printf 'before\000after' > "$f"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "NUL byte" ]]
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+# A leading NUL leaves the read with an empty value AND a zero exit, so the
+# NUL check has to come before the "no data" check — otherwise this input
+# would be blamed on an empty stdin rather than on the byte that caused it.
+@test "send: reports a leading NUL as a NUL, not as empty input" {
+  run bash -c "printf '\000trailing' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "NUL byte" ]]
 }
 
 @test "send: rejects an unexpected extra argument after the message" {

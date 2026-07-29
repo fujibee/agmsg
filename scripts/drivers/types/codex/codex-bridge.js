@@ -1259,6 +1259,17 @@ class CodexBridge {
   buildPrompt() {
     const inbox = path.join(SCRIPTS_DIR, "inbox.sh");
     const send = path.join(SCRIPTS_DIR, "send.sh");
+    // #378: show the agent the stdin path, not the positional one. A reply it
+    // composes must not travel as an argument — the shell it builds the command
+    // in parses that first, and MSYS truncates a long argv entry at 8186 bytes.
+    // The positional form still works but is deprecated. The delimiter is
+    // deliberately not EOF: a body containing a bare EOF line would end the
+    // heredoc early and run the rest as shell commands.
+    const replyWith = [
+      `${send} ${this.identity.team} ${this.identity.name} <to> --stdin <<'AGMSG_BODY'`,
+      "<message>",
+      "AGMSG_BODY",
+    ];
     if (this.opts.inlineInbox) {
       return [
         `agmsg delivered the following unread messages for ${this.identity.team}/${this.identity.name}:`,
@@ -1266,14 +1277,14 @@ class CodexBridge {
         this.inlineInboxText.trim(),
         "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
-        `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+        ...replyWith,
       ].join("\n");
     }
     return [
       `agmsg has unread messages for ${this.identity.team}/${this.identity.name}.`,
       `Run: ${inbox} ${this.identity.team} ${this.identity.name}`,
       "Read the messages and continue the conversation. If a reply is needed, send it with:",
-      `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
+      ...replyWith,
     ].join("\n");
   }
 

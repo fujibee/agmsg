@@ -75,6 +75,10 @@ EOF
       # shifting project/type/name one slot left and leaving the watcher
       # subscribed to nothing. `-` survives the re-eval as a real argument and
       # watch.sh folds it into its empty-session-id resolution path.
+      #
+      # The send.sh example below uses the delimiter AGMSG_BODY, not EOF: it must
+      # not terminate THIS heredoc early, and a reader's body containing a bare
+      # EOF line must not terminate theirs either.
       cat <<EOF > "$rule_file"
 <!-- agmsg-delivery-mode: monitor -->
 # agmsg — keep a real-time inbox watcher running
@@ -113,8 +117,20 @@ it once:
    you started and relaunch via the \`monitor\` tool — otherwise no message will
    ever reach you.
 4. Each notification line is one message:
-   \`<ts> | <team> | <from> -> <to> | <body>\`. React as they arrive; reply with
-   \`$SKILL_DIR/scripts/send.sh <team> <your-agent-name> <to_agent> "<message>"\`.
+   \`<ts> | <team> | <from> -> <to> | <body>\`. React as they arrive; reply by
+   passing the body on stdin. A message you compose MUST NOT be passed as a
+   positional argument — your shell would parse it first, so backticks or
+   \$(...) in it can be evaluated, and on Windows a long body is silently
+   truncated at 8186 bytes (#378). The positional form still works but is
+   deprecated. Pick a delimiter your body cannot contain on a line by
+   itself — a body with a bare AGMSG_BODY line would end the heredoc early and
+   the rest would run as shell commands. If unsure, use --body-file.
+
+\`\`\`bash
+$SKILL_DIR/scripts/send.sh <team> <your-agent-name> <to_agent> --stdin <<'AGMSG_BODY'
+<message>
+AGMSG_BODY
+\`\`\`
 
 Launch it only once per session — if a watcher is already streaming, do not
 start a second one. Stopping is via the \`kill_command_or_subagent\` tool on the

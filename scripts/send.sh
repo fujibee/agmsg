@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: send.sh <team> <from> <to> <message> [--force]
-#    or: send.sh <team> <from> <to> --stdin [--force]
+# Usage: send.sh <team> <from> <to> --stdin [--force]
 #    or: send.sh <team> <from> <to> --body-file <path> [--force]
+#    or: send.sh <team> <from> <to> <message> [--force]   (deprecated)
 #
 # #378: a message body passed positionally goes through the SENDER's shell
 # before it ever reaches this script — an unescaped `$(...)` in a quoted
@@ -12,12 +12,19 @@ set -euo pipefail
 # argv-conversion path (build_argv -> globify), which truncates silently at
 # exactly 8186 bytes (fixed MAXPATHLEN 8192 buffer in glob.cc). --stdin and
 # --body-file read the body verbatim from a file descriptor instead of
-# argv, so neither hazard applies — no shell re-interpretation, no argv
-# size limit. The positional form is unchanged and remains the default.
+# argv, so a body sent that way meets neither hazard — no shell
+# re-interpretation, no argv size limit.
+#
+# That makes --stdin/--body-file the canonical way to send; it does not
+# remove the hazard, because the positional form still exists and still
+# carries both. The positional form is DEPRECATED: it keeps working for now
+# so no existing caller breaks, but a body composed by an agent must not use
+# it. Retiring it is a later, breaking stage of #378 — this stage only moves
+# every first-party example onto the safe path.
 
-USAGE="Usage: send.sh <team> <from> <to> <message> [--force]
-   or: send.sh <team> <from> <to> --stdin [--force]
-   or: send.sh <team> <from> <to> --body-file <path> [--force]"
+USAGE="Usage: send.sh <team> <from> <to> --stdin [--force]
+   or: send.sh <team> <from> <to> --body-file <path> [--force]
+   or: send.sh <team> <from> <to> <message> [--force]   (deprecated, see #378)"
 
 TEAM="${1:?$USAGE}"
 FROM="${2:?Missing from agent}"
@@ -112,16 +119,23 @@ fi
 # whitespace/newlines — deliberately: whatever bytes are on stdin or in the
 # file land in the message exactly as given, including any trailing
 # newline(s). If you don't want a trailing newline in the sent message,
-# don't put one in the input. `read` returns non-zero at EOF even though it
-# captured the data, so failure here is expected and ignored.
+# don't put one in the input.
 #
-# Caveat shared with every other bash variable in this script (not new
-# here): a NUL byte terminates both `read -d ''` and a bash string, so
-# anything after one is lost. That is a shell-wide limit, not something
-# --stdin/--body-file could relax — the old positional <message> path had
-# the exact same ceiling (argv strings can't hold NUL either).
+# The exit status is load-bearing, so it is checked rather than discarded:
+# `read` exits 0 only when it actually found its -d delimiter — which here
+# is NUL — and non-zero when it reached EOF without one. EOF is the normal,
+# complete read. A zero exit therefore means exactly one thing: the input
+# carries a NUL byte, and BODY already stops there, because a bash string
+# cannot hold one. Storing that shortened value and exiting 0 would tell the
+# caller the whole body was sent when it was not, so a NUL-bearing body is
+# refused instead. (A positional <message> cannot hit this: argv strings
+# cannot carry NUL either, so such a body never reaches this script intact
+# in the first place.)
 if [ "$MODE" = "stdin" ]; then
-  IFS= read -r -d '' BODY || true
+  if IFS= read -r -d '' BODY; then
+    echo "Error: --stdin input contains a NUL byte; a message body must be text, and everything from that byte on would be lost. Nothing was sent." >&2
+    exit 1
+  fi
   if [ -z "$BODY" ]; then
     echo "Error: --stdin was given but no data was read from standard input." >&2
     exit 1
@@ -135,7 +149,10 @@ elif [ "$MODE" = "file" ]; then
     echo "Error: --body-file '$BODY_FILE' is not readable." >&2
     exit 1
   fi
-  IFS= read -r -d '' BODY < "$BODY_FILE" || true
+  if IFS= read -r -d '' BODY < "$BODY_FILE"; then
+    echo "Error: --body-file '$BODY_FILE' contains a NUL byte; a message body must be text, and everything from that byte on would be lost. Nothing was sent." >&2
+    exit 1
+  fi
   if [ -z "$BODY" ]; then
     echo "Error: --body-file '$BODY_FILE' is empty." >&2
     exit 1
