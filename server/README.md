@@ -6,45 +6,31 @@ the root installer package and desktop app.
 
 The server stores every envelope blob opaquely and does not inspect sender,
 recipient, body, or client creation time. New teams allow both `cipher: "none"`
-and `cipher: "age-v1"` by default. Each connected device receives an independent,
-team-scoped bearer credential that can be listed and revoked by its stable,
-non-secret `credential_id`.
+and `cipher: "age-v1"` by default. Clients register local teams directly
+through `/v1/connect`; reaching the server is the permission, with no pairing
+token or per-device credential.
 
-## Four-step self-host quickstart
+## Self-host quickstart
 
-Use an endpoint that both machines can reach. Pairing tokens expire after 15
-minutes, are valid for one exchange, and create one device credential each.
+The included Compose stack provides PostgreSQL 17 and the reference server.
+Before exposing it outside a local development machine, change the database
+password in `compose.yaml` and terminate TLS in front of the service.
 
-1. Start the reference server and PostgreSQL:
+1. From this directory, start PostgreSQL and the server:
 
    ```sh
    docker compose up -d --build
    ```
 
-2. Create a team:
+2. Confirm that the server and database are ready:
 
    ```sh
-   docker compose exec -T server npm run --silent admin -- \
-     team create --name my-team
+   curl -fsS http://127.0.0.1:8787/v1/health
    ```
 
-3. Issue one pairing token for each machine. The command writes only the
-   paste-ready connect command to stdout; expiry information goes to stderr:
+   The response should contain `"status":"ok"` and `"database":"ok"`.
 
-   ```sh
-   docker compose exec -T server npm run --silent admin -- \
-     token issue --team my-team --endpoint https://sync.example.com
-   ```
-
-4. Paste the returned command on the target machine:
-
-   ```sh
-   agmsg remote connect --endpoint https://sync.example.com agmsg_pair_EXAMPLE
-   ```
-
-   Repeat steps 3 and 4 for the second machine. Each machine receives a distinct
-   credential for the same team; normal agmsg send/sync activity then crosses
-   the shared team stream without sharing a credential between machines.
+For client setup, follow [Remote setup](../docs/remote-setup.md).
 
 ## Run with Compose
 
