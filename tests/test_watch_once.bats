@@ -42,6 +42,17 @@ EOF
   printf '%s' "$dir"
 }
 
+# The shim IS the premise: without the delay, an unfixed watch-once finishes in
+# about TIMEOUT and satisfies the ceiling, so the test would go green against the
+# very bug it exists for. Requiring the marker turns "startup no longer routes
+# through awk" into a loud failure instead of a silent pass.
+_assert_startup_was_delayed() {
+  [ -e "$BATS_TEST_TMPDIR/awk-delayed" ] || {
+    echo "the awk shim never fired — startup no longer routes through awk, so this test proves nothing; re-pick the seam"
+    false
+  }
+}
+
 @test "watch-once: total lifetime stays within the timeout even when startup is slow (#558)" {
   local bin start end elapsed
   bin="$(_slow_startup_path 3)"
@@ -53,6 +64,7 @@ EOF
   elapsed=$(( end - start ))
 
   [ "$status" -eq 2 ]
+  _assert_startup_was_delayed
   # The contract is the ceiling, not a precise duration: with the deadline taken
   # after startup this runs ~3+4=7s, so a 6s bound separates the two without
   # being tight enough to flake on a loaded runner.
@@ -70,6 +82,7 @@ EOF
   PATH="$bin:$PATH" run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex \
     --name alice --team team --timeout 1 --interval 1
   [ "$status" -eq 0 ]
+  _assert_startup_was_delayed
   [[ "$output" =~ "status=pending" ]]
 }
 
