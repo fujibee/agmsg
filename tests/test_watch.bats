@@ -685,7 +685,12 @@ _wait_pidfile() {
   bash "$SCRIPTS/config.sh" set delivery.monitor.catchup true >/dev/null
   bash "$SCRIPTS/send.sh" team bob alice "M-cfg-queued" >/dev/null
 
-  AGMSG_WATCH_INTERVAL=1 \
+  # Clear the env var explicitly — bats inherits the caller's environment, so an
+  # exported AGMSG_WATCH_CATCHUP=1 would let this pass with the config lookup
+  # broken, and =0 would fail it with the lookup working. Either way the test
+  # would be reporting on the environment, not the config key it names
+  # (review finding, 2026-07-30).
+  AGMSG_WATCH_CATCHUP= AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
   wait_for_file_contains "$out" "M-cfg-queued" || { kill "$w" 2>/dev/null || true; false; }
@@ -811,10 +816,12 @@ _wait_pidfile() {
 @test "watch: catch-up drain is a clean no-op when every role is owned elsewhere (#229)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
   mkdir -p "$TEST_SKILL_DIR/run"
-  local r
-  for r in $(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | cut -f2); do
-    [ -n "$r" ] && touch "$TEST_SKILL_DIR/run/ready.team__$r"
-  done
+  # read loop, not `for r in $(...)`: the latter word-splits and glob-expands,
+  # which an identity name with a space or a bracket would break.
+  local _t _r
+  while IFS=$'\t' read -r _t _r; do
+    [ -n "$_r" ] && touch "$TEST_SKILL_DIR/run/ready.${_t}__${_r}"
+  done < <(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code)
 
   local sid="sess-catchup-all-owned"
   local out="$TEST_SKILL_DIR/catchup-all-owned.log"

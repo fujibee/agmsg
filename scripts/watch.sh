@@ -173,13 +173,19 @@ CATCHUP_CAP="${AGMSG_WATCH_CATCHUP_CAP:-50}"
 # Bound the digit count BEFORE the arithmetic. Relying on a `-le 0` check after
 # the fact is not enough: a long enough digit string wraps to an arbitrary
 # value, which lands positive as easily as negative and would sail through
-# (review finding, 2026-07-30). 9 digits cannot overflow a 64-bit shell int,
-# and no plausible cap needs more.
+# (review finding, 2026-07-30). 10 digits cannot overflow a 64-bit shell int.
 case "$CATCHUP_CAP" in
-  ''|*[!0-9]*|??????????*) CATCHUP_CAP=50 ;;
+  ''|*[!0-9]*|???????????*) CATCHUP_CAP=50 ;;
   *) CATCHUP_CAP=$((10#$CATCHUP_CAP)) ;;
 esac
+# Then an absolute ceiling, because the drained rows are materialized into ONE
+# shell variable: a cap in the millions would trade "floods the Monitor stream"
+# for "exhausts memory building the string", which is not the protection this
+# is here to give. 10k is far above any real backlog and still bounded
+# (review finding, 2026-07-30).
+CATCHUP_CAP_MAX=10000
 [ "$CATCHUP_CAP" -le 0 ] && CATCHUP_CAP=50
+[ "$CATCHUP_CAP" -gt "$CATCHUP_CAP_MAX" ] && CATCHUP_CAP="$CATCHUP_CAP_MAX"
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 
@@ -426,10 +432,12 @@ fi
 # id <= LAST bound also makes drain + live stream mutually exclusive: nothing
 # is delivered twice.
 #
-# Control messages (ctrl:*) are excluded: they are live teardown directives,
-# and replaying a stale ctrl:despawn at attach could tear down a freshly
-# spawned successor for the same role. They stay unread for the live loop
-# semantics they were designed for.
+# Control messages (ctrl:*) are excluded. The drain only prints, so it cannot
+# itself act on one — the risk is downstream: a stale ctrl:despawn surfaced
+# into the Monitor stream is a teardown directive presented to a reader that
+# has no way to tell it is weeks old. They stay unread for the live loop, which
+# is where ctrl rows are actually interpreted. The test pins non-emission,
+# which is the part this path controls.
 #
 # A broad (non-actas) watcher drains ONLY the roles it is the definitive
 # receiver for. mark_read applies the same rule per row on the live path: a
@@ -484,11 +492,6 @@ if [ -n "$WHERE_DRAIN" ]; then
       AND body NOT LIKE 'ctrl:%' AND ($WHERE_DRAIN);
   " 2>/dev/null || echo 0)"
   case "$UNREAD_TOTAL" in ''|*[!0-9]*) UNREAD_TOTAL=0 ;; esac
-  if [ "$UNREAD_TOTAL" -gt "$CATCHUP_CAP" ]; then
-    # Keep the NEWEST rows under the cap — recent context is what an
-    # attaching agent needs; the full backlog stays reachable via inbox.sh.
-    echo "agmsg watch: catch-up drained the newest $CATCHUP_CAP of $UNREAD_TOTAL unread messages ($((UNREAD_TOTAL - CATCHUP_CAP)) older not shown; use inbox.sh)"
-  fi
   if [ "$UNREAD_TOTAL" -gt 0 ]; then
     DRAIN_ROWS="$(agmsg_sqlite -separator $'\x1f' "$DB" "
       SELECT id, created_at, team, from_agent, to_agent,
@@ -500,6 +503,16 @@ if [ -n "$WHERE_DRAIN" ]; then
         ORDER BY id DESC LIMIT $CATCHUP_CAP
       ) ORDER BY id;
     " 2>/dev/null || true)"
+    # The notice is emitted only once rows are actually in hand. Counting and
+    # fetching are two queries, and the fetch's failure is swallowed — printing
+    # the notice off the count alone would announce a drain that then emitted
+    # nothing, which is the sort of claim this branch keeps having to correct
+    # (review finding, 2026-07-30).
+    if [ -n "$DRAIN_ROWS" ] && [ "$UNREAD_TOTAL" -gt "$CATCHUP_CAP" ]; then
+      # Keep the NEWEST rows under the cap — recent context is what an
+      # attaching agent needs; the full backlog stays reachable via inbox.sh.
+      echo "agmsg watch: catch-up drained the newest $CATCHUP_CAP of $UNREAD_TOTAL unread messages ($((UNREAD_TOTAL - CATCHUP_CAP)) older not shown; use inbox.sh)"
+    fi
     if [ -n "$DRAIN_ROWS" ]; then
       while IFS=$'\x1f' read -r _cid _cts _cteam _cfrom _cto _cbody; do
         [ -z "$_cid" ] && continue
