@@ -36,6 +36,8 @@ RUN_DIR="$SKILL_DIR/run"
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/compat.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/instance-id.sh"
 
 ready="$(SKILL_DIR="$SKILL_DIR" agmsg_ready_path "$TEAM" "$AGENT")"
 [ -f "$ready" ] || exit 1
@@ -57,7 +59,7 @@ case "$watcher_pid" in
 esac
 [ "$watcher_pid" -gt 1 ] 2>/dev/null || exit 1
 
-kill -0 "$watcher_pid" 2>/dev/null || exit 1
+_agmsg_pid_alive "$watcher_pid" || exit 1
 
 # Defend against pid recycling: the live pid must still look like our watch.sh
 # for THIS agent specifically — not just any watch.sh (a recycled pid could

@@ -261,7 +261,7 @@ agmsg_delivery_find_broad_watcher_pid() {
     case "$pid" in
       ''|*[!0-9]*) continue ;;
     esac
-    kill -0 "$pid" 2>/dev/null || continue
+    _agmsg_pid_alive "$pid" || continue
     cmd=$(compat_get_cmdline "$pid" 2>/dev/null || true)
     if [ -n "$cmd" ]; then
       case "$cmd" in
