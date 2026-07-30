@@ -416,17 +416,49 @@ fi
 # spawned successor for the same role. They stay unread for the live loop
 # semantics they were designed for.
 #
-# The drain does NOT mark rows read: watch.sh streaming has never advanced
-# read_at (that is inbox.sh's job on display), and keeping that invariant
-# leaves this change orthogonal to any future live-delivery read-marking.
+# A broad (non-actas) watcher drains ONLY the roles it is the definitive
+# receiver for. mark_read applies the same rule per row on the live path: a
+# role with its own exclusive ready sentinel has its own watcher, and a broad
+# watcher must not act on its behalf. Without the equivalent check here, a
+# broad watcher's fresh attach would emit the backlog belonging to every such
+# role — the leader's default SessionStart watcher dumping what each actas'd
+# member's own watcher is responsible for. Evaluated at drain time rather than
+# reused from WHERE_PAIRS so it sees the sentinels as they stand now, and it
+# runs before this watcher writes its own sentinels below, so an exclusive
+# watcher never excludes itself (it is exempt from the rule anyway).
+#
+# The drain deliberately does NOT mark rows read, and that is now a choice
+# rather than an invariant: watch.sh's live loop DOES advance read_at via
+# mark_read, so the drain sits next to a live path that marks. The consequence
+# is deliberate and worth stating plainly — drained rows stay unread, so a
+# later inbox.sh re-surfaces exactly what was just shown. That is the
+# conservative direction: catch-up is an additive convenience at attach, and
+# having it silently consume the backlog would make the one command an
+# operator uses to audit unread mail lie about what is outstanding.
 # Done before the ready sentinel so "ready" implies the backlog notice went
 # out first, and after the DB healthcheck so we never drain from a store the
 # live loop cannot read.
+WHERE_DRAIN=""
 if [ "$CATCHUP" = 1 ] && [ "$FRESH_ATTACH" = 1 ] && [ -f "$DB" ]; then
+  while IFS=$'\t' read -r team agent; do
+    [ -z "$team" ] && continue
+    if [ -z "$ACTIVE_NAME" ] && [ -e "$(agmsg_ready_path "$team" "$agent")" ]; then
+      continue
+    fi
+    t_esc=$(sql_escape "$team")
+    a_esc=$(sql_escape "$agent")
+    WHERE_DRAIN="${WHERE_DRAIN:+$WHERE_DRAIN OR }(team='$t_esc' AND to_agent='$a_esc')"
+  done <<< "$PAIRS"
+fi
+# An empty clause means every subscribed role has its own exclusive watcher, so
+# this broad watcher has nothing it may drain. It must also short-circuit the
+# whole block: an empty $WHERE_DRAIN would interpolate as `AND ()` and make the
+# query a syntax error.
+if [ -n "$WHERE_DRAIN" ]; then
   UNREAD_TOTAL="$(agmsg_sqlite "$DB" "
     SELECT COUNT(*) FROM messages
     WHERE id <= $LAST AND read_at IS NULL
-      AND body NOT LIKE 'ctrl:%' AND ($WHERE_PAIRS);
+      AND body NOT LIKE 'ctrl:%' AND ($WHERE_DRAIN);
   " 2>/dev/null || echo 0)"
   case "$UNREAD_TOTAL" in ''|*[!0-9]*) UNREAD_TOTAL=0 ;; esac
   if [ "$UNREAD_TOTAL" -gt "$CATCHUP_CAP" ]; then
@@ -441,7 +473,7 @@ if [ "$CATCHUP" = 1 ] && [ "$FRESH_ATTACH" = 1 ] && [ -f "$DB" ]; then
       FROM (
         SELECT * FROM messages
         WHERE id <= $LAST AND read_at IS NULL
-          AND body NOT LIKE 'ctrl:%' AND ($WHERE_PAIRS)
+          AND body NOT LIKE 'ctrl:%' AND ($WHERE_DRAIN)
         ORDER BY id DESC LIMIT $CATCHUP_CAP
       ) ORDER BY id;
     " 2>/dev/null || true)"

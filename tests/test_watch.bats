@@ -539,9 +539,9 @@ _wait_pidfile() {
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file "$wm"
+  wait_for_file "$wm"
   bash "$SCRIPTS/send.sh" team bob alice "M-live-after" >/dev/null
-  _wait_for_file_contains "$out" "M-live-after" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" "M-live-after" || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -561,20 +561,35 @@ _wait_pidfile() {
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$TEST_SKILL_DIR/cu1.log" 2>/dev/null 3>&- &
   local w1=$!
-  _wait_for_file "$wm"
+  wait_for_file "$wm"
+  local wm_before
+  wm_before="$(cat "$wm" 2>/dev/null || true)"
   bash "$SCRIPTS/send.sh" team bob alice "M1-live" >/dev/null
-  _wait_for_file_contains "$TEST_SKILL_DIR/cu1.log" "M1-live" || { kill "$w1" 2>/dev/null || true; false; }
+  wait_for_file_contains "$TEST_SKILL_DIR/cu1.log" "M1-live" || { kill "$w1" 2>/dev/null || true; false; }
+  # The live loop prints the line BEFORE it persists the watermark, so killing
+  # on the log line alone can strand the watermark at its pre-M1 value. The
+  # reconnect would then re-deliver M1 legitimately, and the last assertion
+  # would be measuring this kill's timing rather than the no-re-drain contract
+  # it names. Sync on the watermark actually advancing instead.
+  local i wm_after=""
+  for i in $(seq 1 100); do
+    wm_after="$(cat "$wm" 2>/dev/null || true)"
+    [ -n "$wm_after" ] && [ "$wm_after" != "$wm_before" ] && break
+    sleep 0.1
+  done
+  [ "$wm_after" != "$wm_before" ]
   kill "$w1" 2>/dev/null || true
   wait "$w1" 2>/dev/null || true
   grep -q "M0-queued" "$TEST_SKILL_DIR/cu1.log"
 
-  # M0/M1 are still unread (the drain does not mark read); a reconnect with the
-  # persisted watermark must NOT re-drain them — only the in-gap row arrives.
+  # M0 is still unread — the drain does not mark read — while M1 went through
+  # the live loop, which does. Either way a reconnect resumes from the persisted
+  # watermark and must NOT re-emit them; only the in-gap row arrives.
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$TEST_SKILL_DIR/cu2.log" 2>/dev/null 3>&- &
   local w2=$!
-  _wait_for_file_contains "$TEST_SKILL_DIR/cu2.log" "M2-in-gap" || { kill "$w2" 2>/dev/null || true; false; }
+  wait_for_file_contains "$TEST_SKILL_DIR/cu2.log" "M2-in-gap" || { kill "$w2" 2>/dev/null || true; false; }
   kill "$w2" 2>/dev/null || true
   wait "$w2" 2>/dev/null || true
 
@@ -595,7 +610,7 @@ _wait_pidfile() {
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file_contains "$out" "M-still-unread" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" "M-still-unread" || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -615,7 +630,7 @@ _wait_pidfile() {
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_CATCHUP_CAP=3 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file_contains "$out" 'CAP-5$' || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" 'CAP-5$' || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -648,7 +663,7 @@ _wait_pidfile() {
   # The watcher survived attach (did not act on the stale despawn) and still
   # delivers live traffic.
   bash "$SCRIPTS/send.sh" team bob alice "M-live-ctrl-test" >/dev/null
-  _wait_for_file_contains "$out" "M-live-ctrl-test" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" "M-live-ctrl-test" || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
@@ -667,11 +682,112 @@ _wait_pidfile() {
   AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
   local w=$!
-  _wait_for_file_contains "$out" "M-cfg-queued" || { kill "$w" 2>/dev/null || true; false; }
+  wait_for_file_contains "$out" "M-cfg-queued" || { kill "$w" 2>/dev/null || true; false; }
   kill "$w" 2>/dev/null || true
   wait "$w" 2>/dev/null || true
 
   grep -q "M-cfg-queued" "$out"
+}
+
+# The live path's mark_read refuses to act for a role that owns an exclusive
+# ready sentinel; the drain has to refuse the same roles or a broad watcher's
+# fresh attach dumps backlog that belongs to each actas'd member's own watcher.
+# This is the case single-role manual testing never shows (review, 2026-07-29).
+@test "watch: catch-up drain skips roles with their own exclusive ready sentinel (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Sentinel presence IS the protocol (#108) — no live process needed, matching
+  # the mark_read guard's own test above.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  touch "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  local sid="sess-catchup-broad-guard"
+  local out="$TEST_SKILL_DIR/catchup-broad-guard.log"
+
+  # Both queued BEFORE any watcher attaches, so both are drain candidates.
+  bash "$SCRIPTS/send.sh" team bob alice "M-drain-alice-owned" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob bob "M-drain-bob-unowned" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  wait_for_file_contains "$out" "M-drain-bob-unowned" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  # bob has no exclusive owner, so this broad watcher is his definitive
+  # receiver and drains him...
+  grep -q "M-drain-bob-unowned" "$out"
+  # ...while alice's backlog belongs to alice's own watcher and must not appear.
+  ! grep -q "M-drain-alice-owned" "$out"
+}
+
+# The exclusion is specific to BROAD watchers. Without this companion, the test
+# above would also pass if the drain simply skipped every role with a sentinel,
+# including the actas watcher's own role — which would break catch-up for the
+# spawned agents that need it most (every actas watcher writes that sentinel).
+@test "watch: catch-up drain still covers an actas watcher's own role despite its sentinel (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  touch "$TEST_SKILL_DIR/run/ready.team__alice"
+
+  local sid="sess-catchup-actas-self"
+  local out="$TEST_SKILL_DIR/catchup-actas-self.log"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-drain-actas-self" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  wait_for_file_contains "$out" "M-drain-actas-self" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  grep -q "M-drain-actas-self" "$out"
+}
+
+# Every subscribed role owned elsewhere leaves an empty clause. What this pins
+# is the OBSERVABLE contract in that state: the watcher still arms, drains
+# nothing, prints no notice, and its live loop is unaffected.
+#
+# It deliberately does NOT claim to pin the `-n "$WHERE_DRAIN"` guard itself.
+# Dropping that guard interpolates `AND ()`, and the drain's
+# `2>/dev/null || echo 0` swallows the resulting SQL error into UNREAD_TOTAL=0
+# — which is the same no-drain, no-notice outcome this test asserts. Verified
+# by mutation: removing the guard leaves the whole suite green. The error is
+# unreachable from the watcher's own stderr too, so no assertion here can tell
+# the two apart; the guard is a correctness-by-construction stop, not a tested
+# branch. Saying so beats a comment that implies coverage this does not have.
+@test "watch: catch-up drain is a clean no-op when every role is owned elsewhere (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local r
+  for r in $(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | cut -f2); do
+    [ -n "$r" ] && touch "$TEST_SKILL_DIR/run/ready.team__$r"
+  done
+
+  local sid="sess-catchup-all-owned"
+  local out="$TEST_SKILL_DIR/catchup-all-owned.log"
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-all-owned-queued" >/dev/null
+
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  # The watcher must still arm normally — the empty clause is a skip, not a crash.
+  wait_for_file "$wm" || { kill "$w" 2>/dev/null || true; false; }
+
+  # And the live loop is unaffected: it uses WHERE_PAIRS, not the drain clause.
+  bash "$SCRIPTS/send.sh" team bob alice "M-all-owned-live" >/dev/null
+  wait_for_file_contains "$out" "M-all-owned-live" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  ! grep -q "M-all-owned-queued" "$out"
+  ! grep -q "catch-up drained" "$out"
 }
 
 @test "watch: empty session_id gets a generated fallback instead of a Usage error (#236)" {
