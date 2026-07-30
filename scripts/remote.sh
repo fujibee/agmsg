@@ -942,7 +942,7 @@ cmd_pull() {
   cmd_name="$(basename "$SKILL_DIR")"
   echo "Pulled '$pulled_name' into local team '$team' ($imported message(s)). Sync engine running."
   echo "This team is now local and ready for normal use."
-  echo "Open /$cmd_name in your agent, then join with a new agent name."
+  echo "Open your agent and invoke its installed '$cmd_name' command, then join with a new agent name."
 }
 
 # The remote-sync engine runs as a background daemon: one per connected team,

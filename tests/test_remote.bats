@@ -614,7 +614,7 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   local cmd_name
   cmd_name="$(basename "$TEST_SKILL_DIR")"
   [[ "$output" == *"This team is now local and ready for normal use."* ]]
-  [[ "$output" == *"Open /$cmd_name in your agent, then join with a new agent name."* ]]
+  [[ "$output" == *"Open your agent and invoke its installed '$cmd_name' command, then join with a new agent name."* ]]
   local cfg
   cfg="$TEST_SKILL_DIR/teams/cloned/config.json"
   [ -f "$cfg" ]

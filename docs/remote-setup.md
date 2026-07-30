@@ -64,7 +64,8 @@ that machine A's agent displayed. Do not create a same-named local team first;
 pull imports the team that already exists on the server.
 
 After pull succeeds, the team is local and works like any other local team.
-Open `/agmsg` in your agent and join it with a new agent name.
+Open your agent, invoke its installed `agmsg` command, and join the team with a
+new agent name.
 
 ## 4. Send and verify
 

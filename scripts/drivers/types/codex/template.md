@@ -202,7 +202,7 @@ If argument starts with "key show":
 4. Show the output to the user.
 
 If argument starts with "key import" followed by a team name:
-1. **Do not ask the user to paste the private identity into this chat, and do not run this command yourself** — same reasoning as `remote connect` above, and more important here: this is a permanent key, not a short-lived token. Tell the user to run this directly in their own terminal:
+1. **Do not ask the user to paste the private identity into this chat, and do not run this command yourself.** This identity is a permanent secret. Tell the user to run this directly in their own terminal:
    ```
    read -rsp 'Identity: ' IDENTITY; echo
    printf '%s' "$IDENTITY" | ~/.agents/skills/__SKILL_NAME__/scripts/key.sh import <team> --identity-stdin
