@@ -2,31 +2,15 @@
 set -euo pipefail
 
 # Usage:
-#   remote.sh connect --endpoint <url> [<token>] [--token-stdin] [<team>] [--force]
-#   remote.sh pull --endpoint <url> --team-id <uuid> <team>
+#   remote.sh connect --endpoint <url> <team>
+#   remote.sh pull --endpoint <url> [--team-id <uuid>] <team>
 #   remote.sh status [<team>] [--json]
 #   remote.sh disconnect <team>
-#   remote.sh doctor [<team>]
-#   remote.sh pending list [--json]
-#   remote.sh pending abort <pending_id>
 #
-# Team-scoped cloud/self-hosted sync connection. The OSS CLI never
-# assumes or defaults to any particular server — <endpoint> is always
-# required. Login/token acquisition is out of this repo's scope (remote-connect
-# §1a-§1c) — some provider tooling (or a self-hosted server's own admin
-# command) obtains the token; this script only ever receives one.
-#
-# `status --json` and `pending list/abort` (ADR 0007 addendum) are a
-# strict, secret-free ABI a cloud/self-hosted driver polls/acts on for crash
-# recovery: after a connect's exchange call, the driver may not know whether
-# its child `connect` invocation actually committed locally before dying.
-# `status --json` lets it correlate its own operation-status record against
-# the local binding by credential_id/server_instance_id/remote_team_id;
-# `pending list/abort` lets it enumerate and clean up an orphaned exchange
-# that never reached a local commit at all (so it isn't stuck holding a
-# server-issued credential neither side will ever use) — scoped to normal,
-# non-quarantined pending records only (see the comment above
-# `_remote_validate_pending_id`).
+# Team-scoped cloud/self-hosted sync connection. The OSS CLI never assumes or
+# defaults to a server, so <endpoint> is always required. `connect` registers a
+# local team directly; reaching the server is the permission. `pull` clones a
+# remote team into an empty local team. Both start the background sync engine.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

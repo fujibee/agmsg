@@ -169,107 +169,63 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
-### Remote sync & end-to-end encryption
+### Remote sync
 
-Connects a local team to a cloud/self-hosted sync endpoint and manages the
-team's `age-v1` encryption key. Additive to everything above — a team works
-purely locally without ever touching this. Login/token acquisition is out
-of this script's scope (some provider tooling, or a self-hosted server's
-own admin command, obtains the token); `connect` only ever receives one.
+Remote setup is no-auth. Do not ask for a token or create one.
 
-**Always use the `--*-stdin` forms below from an agent context.** The bare
-positional forms (`<token>`, `<identity>`) exist only as a warned legacy
-path for a human typing directly into their own terminal — from an agent,
-they leak the secret into this session's own transcript/tool-result
-history, which is exactly the kind of exposure `--token-stdin`/
-`--identity-stdin` exist to avoid. Pipe the secret in; never pass it as
-a literal argument in a command you construct.
+If argument starts with "remote connect":
+1. Parse the required `--endpoint <url>` and `<team>`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> <team>`
+3. Show the output to the user.
+4. End by showing this copy-paste command for the other machine, with the
+   actual endpoint and team substituted:
+   `bash ~/.agents/skills/agmsg/scripts/remote.sh pull --endpoint <actual-url> <actual-team>`
 
-```bash
-# Connect a team to a sync endpoint. <token> is a short-lived, single-use
-# exchange code (never the long-lived credential itself).
-#   --force    rebind an already-connected team to a new token (requires
-#              an explicit <team> — it cannot be inferred for this check)
-printf '%s' "$TOKEN" | ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
+If argument starts with "remote pull":
+1. Use this command whenever the user asks to bring in a team that already
+   exists on a server. Never use `join.sh` for that request.
+2. Parse the required `--endpoint <url>` and `<team>`, plus optional
+   `--team-id <uuid>`.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh pull --endpoint <url> [--team-id <uuid>] <team>`
+4. Show the output to the user.
 
-# If the team's capability response requires encryption and no local key
-# exists yet, connect pauses to generate or import one before finishing —
-# see the `key` commands below.
+If argument starts with "remote status":
+1. Parse an optional `<team>` and `--json`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh status [<team>] [--json]`
+3. Show the output to the user.
 
-# Show connection state. With no <team>, lists every locally-known
-# connected team (and whether each still needs a local encryption key).
-# --json emits a strict, secret-free machine-readable object instead of
-# the human text above (ADR 0007 addendum) — for a driver correlating its
-# own operation-status record against the local binding, not for a human
-# to read; prefer the plain form above in normal use.
-~/.agents/skills/agmsg/scripts/remote.sh status [<team>] [--json]
+If argument starts with "remote disconnect":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh disconnect <team>`
+3. Show the output to the user.
 
-# Disconnect a team: revokes the credential server-side (best-effort —
-# local state is always cleared even if the server is unreachable), then
-# clears the local sync driver override. Sends/reads keep working locally
-# afterward; this does not touch the team's encryption key.
-~/.agents/skills/agmsg/scripts/remote.sh disconnect <team>
+### End-to-end encryption
 
-# Read-only preflight check (currently: is `age` installed?). No token, no
-# state change — safe to run any time, and the thing to point a user at
-# when troubleshooting a missing dependency.
-~/.agents/skills/agmsg/scripts/remote.sh doctor [<team>]
+If argument starts with "key generate" followed by an optional team name:
+1. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh generate [<team>]`
+2. Show the full output to the user, including the mandatory key-backup notice.
 
-# List (and, if orphaned, clean up) a `connect` exchange that succeeded
-# server-side but never finished committing locally — e.g. the process died
-# between the exchange call and writing local state (ADR 0007 addendum).
-# pending_id is an opaque, content-derived key; abort always works on it
-# alone, even for a record whose content doesn't fully validate (a
-# separately quarantined record — see remote.sh's own comments — is not
-# enumerated or abortable here; that's a human/admin recovery path). Not a
-# normal-use command — this exists for a driver doing its own crash
-# recovery, not for a human to run routinely.
-~/.agents/skills/agmsg/scripts/remote.sh pending list [--json]
-~/.agents/skills/agmsg/scripts/remote.sh pending abort <pending_id>
+If argument starts with "key show":
+1. Parse an optional team name and `--reveal-secret`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh show [<team>] [--reveal-secret]`
+3. `--reveal-secret` requires a real interactive terminal and is refused in
+   agent mode. Tell the user to run it directly in their own terminal.
+4. Show the output to the user.
 
-# Generate the first age-v1 key for a team (single-writer onboarding only —
-# NOT the multi-writer cutover protocol, and NOT key rotation — see below).
-# Prints a mandatory backup notice: there is no server-side recovery, and
-# losing the device loses the key.
-~/.agents/skills/agmsg/scripts/key.sh generate [<team>]
+If argument starts with "key import" followed by a team name:
+1. Do not ask the user to paste the private identity into this chat, and do not
+   run the command yourself. Tell the user to run this in their own terminal:
+   ```
+   read -rsp 'Identity: ' IDENTITY; echo
+   printf '%s' "$IDENTITY" | ~/.agents/skills/agmsg/scripts/key.sh import <team> --identity-stdin
+   unset IDENTITY
+   ```
+2. Ask them to paste back only the command output, never the identity itself.
+3. Do not offer an environment-variable path. An identity file is a permanent
+   secret; always use the human-in-own-terminal flow above.
 
-# Show the team's public recipient + fingerprint. --reveal-secret prints
-# the private identity instead, after an interactive typed confirmation —
-# refused outright when there's no TTY (i.e. never usable from agent mode).
-~/.agents/skills/agmsg/scripts/key.sh show [<team>] [--reveal-secret]
-
-# Install a private age identity obtained out-of-band (e.g. via
-# `key.sh show <team> --reveal-secret` on another device that already has
-# it). Rejected if it doesn't match the team's already-authorized key.
-printf '%s' "$IDENTITY" | ~/.agents/skills/agmsg/scripts/key.sh import <team> --identity-stdin
-```
-
-**`key rotate` is NOT available in this release.** It refuses
-unconditionally and changes no state — a design review found its
-anti-rollback metadata insufficient (it can't detect a wholesale
-config.json rollback, and doesn't use the age-v1 profile's pinned
-canonical epoch-snapshot shape), so it's held back rather than shipping a
-protection that isn't actually there. Do not suggest it as a working
-command.
-
-Slash-command surface (SKILL.md / per-type templates), same mapping
-pattern as every command above:
-
-```
-/agmsg remote connect --endpoint <url>   (paste the token when prompted)
-/agmsg remote status
-/agmsg remote disconnect <team>
-/agmsg remote doctor
-/agmsg key generate [<team>]
-/agmsg key show [<team>] [--reveal-secret]
-/agmsg key import <team>   (paste the identity when prompted)
-```
-
-Additional dependencies beyond bash/sqlite3 (only needed if these commands
-are used): `curl` (the exchange/revoke calls), `python3` (parsing the
-exchange response), and `age`/`age-keygen` (E2EE — `remote.sh doctor`
-checks for these and `key.sh`'s own commands refuse to run without them).
-`team-list.sh` needs only `python3`.
+`key rotate` and device-pairing `key request`/`key approve` are not available
+yet. If the user asks for one, tell them so instead of attempting to run it.
 
 ## Sandbox compatibility (Claude Code)
 

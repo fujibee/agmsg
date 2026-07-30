@@ -141,29 +141,27 @@ If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" antigravity`
 2. Tell the user the result.
 
-If argument starts with "remote connect" (cloud/self-hosted sync connection):
-1. Parse `--endpoint <url>` and an optional `<team>`/`--force`.
-2. **Do not ask the user to paste the token into this chat, and do not run this command yourself.** The token must never enter this session's own transcript — constructing and running a command that embeds it (even piped to `--token-stdin`) would do exactly that, since the command text itself becomes part of this session's tool-call record. Instead, tell the user to run this directly in their own terminal:
-   ```
-   read -rsp 'Token: ' TOKEN; echo
-   printf '%s' "$TOKEN" | ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin [<team>] [--force]
-   unset TOKEN
-   ```
-3. If that pauses for an encryption-bootstrap choice (`[i/g/a]`) or an identity paste, those also happen entirely within the user's own terminal session — they choose and paste directly, without your involvement.
-4. Ask the user to paste back only the command's final output (never the token or an identity) once it finishes, and continue from there.
-5. **Advanced/automation path**: only if the user says the token is already in an environment variable set *before this session started* (env vars set afterward, in another terminal, do not propagate into an already-running agent process — this path needs a fresh restart with the variable already in place), you may reference that variable by NAME only — never ask them to reveal its value. Confirm the exact variable name with them explicitly first (never guess or invent one). **Before using it, validate that the confirmed name matches a portable shell identifier: `^[A-Za-z_][A-Za-z0-9_]*$` (letters/digits/underscore, not starting with a digit).** If it fails this check, refuse the advanced path and use the default human-in-own-terminal flow instead — an unvalidated name becomes part of the shell command you construct, so anything else risks injection or misexpansion. Once validated, substitute the confirmed name itself in place of the variable name shown below (e.g. a confirmed name of `PAIRING_TOKEN` becomes `"$PAIRING_TOKEN"` — never leave the literal placeholder text in the command you run): `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> --token-stdin <<< "$CONFIRMED_VAR_NAME" [<team>] [--force]`.
+If argument starts with "remote connect":
+1. Parse the required `--endpoint <url>` and `<team>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> <team>`
+3. Show the output to the user. No token or credential is required.
+4. End by showing this copy-paste command for the other machine, with the actual endpoint and team substituted: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh pull --endpoint <actual-url> <actual-team>`
 
-If argument is "remote status" (optionally followed by a team name):
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>]`
-2. Show the output to the user.
+If argument starts with "remote pull":
+1. Use this command whenever the user asks to bring in a team that already exists on a server. Never use `join.sh` for that request.
+2. Parse the required `--endpoint <url>` and `<team>`, plus optional `--team-id <uuid>`.
+3. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh pull --endpoint <url> [--team-id <uuid>] <team>`
+4. Show the output to the user.
 
-If argument starts with "remote disconnect" followed by a team name:
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh disconnect <team>`
-2. Show the output to the user.
+If argument starts with "remote status":
+1. Parse an optional `<team>` and `--json`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>] [--json]`
+3. Show the output to the user.
 
-If argument starts with "remote doctor":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/remote.sh doctor [<team>]`
-2. Show the output to the user.
+If argument starts with "remote disconnect":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh disconnect <team>`
+3. Show the output to the user.
 
 If argument starts with "key generate" followed by an optional team name:
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh generate [<team>]`
@@ -183,6 +181,6 @@ If argument starts with "key import" followed by a team name:
    unset IDENTITY
    ```
 2. Ask them to paste back only the command's output (never the identity itself) once it's done.
-3. **No advanced/automation env-var path is offered for key import** — not even a pre-existing, before-session variable. Unlike a short-lived pairing token, an identity file is a permanent secret; always use the human-in-own-terminal flow above.
+3. **No advanced/automation env-var path is offered for key import** — not even a pre-existing, before-session variable. An identity file is a permanent secret; always use the human-in-own-terminal flow above.
 
 `key rotate` and device-pairing `key request`/`key approve` are not available yet (they refuse unconditionally and change no state) — if the user asks for either, tell them so rather than attempting to run them.
