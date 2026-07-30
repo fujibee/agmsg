@@ -170,8 +170,15 @@ case "$CATCHUP" in 1|true|yes|on) CATCHUP=1 ;; *) CATCHUP=0 ;; esac
 # normalization strips leading zeros — bash arithmetic would otherwise parse
 # a value like "08" as bad octal and kill the watcher under set -u.
 CATCHUP_CAP="${AGMSG_WATCH_CATCHUP_CAP:-50}"
-case "$CATCHUP_CAP" in ''|*[!0-9]*) CATCHUP_CAP=50 ;; *) CATCHUP_CAP=$((10#$CATCHUP_CAP)) ;; esac
-# -le also catches a wrapped-negative from an absurdly long digit string.
+# Bound the digit count BEFORE the arithmetic. Relying on a `-le 0` check after
+# the fact is not enough: a long enough digit string wraps to an arbitrary
+# value, which lands positive as easily as negative and would sail through
+# (review finding, 2026-07-30). 9 digits cannot overflow a 64-bit shell int,
+# and no plausible cap needs more.
+case "$CATCHUP_CAP" in
+  ''|*[!0-9]*|??????????*) CATCHUP_CAP=50 ;;
+  *) CATCHUP_CAP=$((10#$CATCHUP_CAP)) ;;
+esac
 [ "$CATCHUP_CAP" -le 0 ] && CATCHUP_CAP=50
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
@@ -375,9 +382,17 @@ if [ -f "$WATERMARK_FILE" ]; then
   LAST="$(cat "$WATERMARK_FILE" 2>/dev/null || true)"
   case "$LAST" in ''|*[!0-9]*) LAST="" ;; esac
 fi
+# Keyed on the FILE's absence, not on LAST being empty. A watermark that exists
+# but does not parse (truncated by a kill mid-write, hand-edited) also empties
+# LAST and reseeds — but that is a damaged reconnect, not a first attach, and
+# treating it as fresh would replay the backlog to a session that already saw
+# it. "A reconnect never drains" then holds as written instead of only for an
+# intact watermark (review finding, 2026-07-30).
 FRESH_ATTACH=0
-if [ -z "$LAST" ]; then
+if [ ! -f "$WATERMARK_FILE" ]; then
   FRESH_ATTACH=1
+fi
+if [ -z "$LAST" ]; then
   LAST=0
   if [ -f "$DB" ]; then
     LAST="$(agmsg_sqlite "$DB" "SELECT COALESCE(MAX(id), 0) FROM messages WHERE $WHERE_PAIRS;" 2>/dev/null || echo 0)"
@@ -426,6 +441,14 @@ fi
 # reused from WHERE_PAIRS so it sees the sentinels as they stand now, and it
 # runs before this watcher writes its own sentinels below, so an exclusive
 # watcher never excludes itself (it is exempt from the rule anyway).
+#
+# The check and the drain are not atomic: an exclusive watcher that writes its
+# sentinel in that window still gets its backlog emitted here. Deliberately not
+# locked. mark_read carries the same race per row on the live path and is
+# documented as best-effort, the window is one clause build wide, and the
+# failure mode is a role seeing its backlog twice rather than losing it — the
+# drain marks nothing, so the other watcher's read state is untouched. A lock
+# spanning attach would cost more than the duplicate it prevents.
 #
 # The drain deliberately does NOT mark rows read, and that is now a choice
 # rather than an invariant: watch.sh's live loop DOES advance read_at via

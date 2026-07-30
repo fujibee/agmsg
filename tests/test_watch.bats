@@ -582,9 +582,15 @@ _wait_pidfile() {
   wait "$w1" 2>/dev/null || true
   grep -q "M0-queued" "$TEST_SKILL_DIR/cu1.log"
 
-  # M0 is still unread — the drain does not mark read — while M1 went through
-  # the live loop, which does. Either way a reconnect resumes from the persisted
-  # watermark and must NOT re-emit them; only the in-gap row arrives.
+  # Assert the read state directly rather than leaving it to prose: the
+  # watermark alone suppresses replay whether or not a row was marked, so the
+  # absence of M0 below would prove nothing about the drain's no-mark choice.
+  # M0 was drained (stays unread); M1 went through the live loop (marked).
+  [ -z "$(_read_at_for_body "M0-queued")" ]
+  [ -n "$(_read_at_for_body "M1-live")" ]
+
+  # A reconnect resumes from the persisted watermark and must NOT re-emit
+  # either of them; only the in-gap row arrives.
   bash "$SCRIPTS/send.sh" team bob alice "M2-in-gap" >/dev/null
   AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
     bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$TEST_SKILL_DIR/cu2.log" 2>/dev/null 3>&- &
@@ -687,6 +693,49 @@ _wait_pidfile() {
   wait "$w" 2>/dev/null || true
 
   grep -q "M-cfg-queued" "$out"
+}
+
+# A watermark that exists but does not parse is a damaged reconnect, not a
+# first attach. Keying the drain on the parsed value being empty (rather than
+# the file being absent) would replay the backlog to a session that already saw
+# it — the reconnect test above cannot catch that, since its watermark is
+# intact (review finding, 2026-07-30).
+@test "watch: a corrupt watermark reconnects without re-draining (#229)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-catchup-corrupt-wm"
+  local wm="$TEST_SKILL_DIR/run/watch.$(_iid "$sid").watermark"
+
+  bash "$SCRIPTS/send.sh" team bob alice "M-corrupt-queued" >/dev/null
+
+  # A watermark truncated mid-write: present, but not a number.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '' > "$wm"
+
+  local out="$TEST_SKILL_DIR/catchup-corrupt.log"
+  AGMSG_WATCH_CATCHUP=1 AGMSG_WATCH_INTERVAL=1 \
+    bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- &
+  local w=$!
+  # The file already exists, so its presence is not a sync point here — wait for
+  # the reseed to write a parsable value. Sending before that races the seed:
+  # the row would land at id <= LAST and the live loop (id > LAST) would skip it.
+  local i seeded=""
+  for i in $(seq 1 100); do
+    seeded="$(cat "$wm" 2>/dev/null || true)"
+    case "$seeded" in ''|*[!0-9]*) ;; *) break ;; esac
+    seeded=""
+    sleep 0.1
+  done
+  [ -n "$seeded" ] || { kill "$w" 2>/dev/null || true; false; }
+
+  # The watcher reseeds and serves live traffic normally...
+  bash "$SCRIPTS/send.sh" team bob alice "M-corrupt-live" >/dev/null
+  wait_for_file_contains "$out" "M-corrupt-live" \
+    || { kill "$w" 2>/dev/null || true; false; }
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  # ...but must not treat the damaged reconnect as a fresh attach and replay.
+  ! grep -q "M-corrupt-queued" "$out"
 }
 
 # The live path's mark_read refuses to act for a role that owns an exclusive
