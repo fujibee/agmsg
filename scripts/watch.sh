@@ -181,7 +181,9 @@ esac
 # Then an absolute ceiling, because the drained rows are materialized into ONE
 # shell variable: a cap in the millions would trade "floods the Monitor stream"
 # for "exhausts memory building the string", which is not the protection this
-# is here to give. 10k is far above any real backlog and still bounded
+# is here to give. 10k is a bound chosen to keep that string manageable, not a
+# claim about how large a backlog can get — a real one can exceed it, and what
+# does not fit stays reachable via inbox.sh like anything else over the cap
 # (review finding, 2026-07-30).
 CATCHUP_CAP_MAX=10000
 [ "$CATCHUP_CAP" -le 0 ] && CATCHUP_CAP=50
@@ -433,11 +435,13 @@ fi
 # is delivered twice.
 #
 # Control messages (ctrl:*) are excluded. The drain only prints, so it cannot
-# itself act on one — the risk is downstream: a stale ctrl:despawn surfaced
-# into the Monitor stream is a teardown directive presented to a reader that
-# has no way to tell it is weeks old. They stay unread for the live loop, which
-# is where ctrl rows are actually interpreted. The test pins non-emission,
-# which is the part this path controls.
+# itself act on one, and the line it would print carries created_at — a reader
+# is not left guessing the age. The reason is narrower than that: ctrl rows are
+# directives addressed to the live loop, which is the only place their
+# semantics are implemented, and a drain emits into the same stream without
+# that context. Keeping them out of the drain leaves them where they are
+# interpreted. The test pins non-emission, which is the part this path
+# controls.
 #
 # A broad (non-actas) watcher drains ONLY the roles it is the definitive
 # receiver for. mark_read applies the same rule per row on the live path: a
