@@ -176,7 +176,7 @@ Every agmsg step above runs through the host's Bash tool, so on Claude Code each
 
 Four entries rather than one because a rule matches the command string as written: the scripts are invoked both as `~/...` and as an absolute path, and with or without an explicit `bash` prefix. Replace `/Users/<you>` with your home directory, and the `agmsg` path segment with your command name if you installed under a different one.
 
-**Every subcommand needs its own match.** [Claude Code's permission docs](https://code.claude.com/docs/en/permissions) state that a rule must match each subcommand independently, and that the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines. Chaining two agmsg scripts is fine — both match the entries above. What reintroduces the prompt is mixing in a command those entries do not cover: `delivery.sh status … ; printenv AGMSG_SPAWNED` prompts because of the `printenv`, not because of the `;`. Either keep such a command in its own call, or allowlist it too.
+**Every subcommand needs its own match.** [Claude Code's permission docs](https://code.claude.com/docs/en/permissions) state that a rule must match each subcommand independently, and that the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines. Chaining two agmsg scripts is fine — both match the entries above. What reintroduces the prompt is mixing in a command those entries do not cover: `delivery.sh status … ; printenv AGMSG_SPAWNED` prompts because of the `printenv`, not because of the `;`. Splitting it into its own call does not remove that prompt — it only keeps it from gating the agmsg call. Allowlist the command as well if it needs to be prompt-free.
 
 ## Sandbox compatibility (Claude Code)
 
