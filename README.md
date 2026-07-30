@@ -186,6 +186,7 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 ```
 /agmsg spawn codex reviewer            # new codex agent, joins and becomes "reviewer"
 /agmsg spawn claude-code alice --window  # new claude-code agent in a fresh tmux window
+/agmsg spawn codex reviewer --effort xhigh  # exact effort for this worker
 /agmsg spawn codex reviewer --boot-prompt "review the diff on this branch"  # joins AND starts the task
 ```
 
@@ -193,9 +194,11 @@ Where `actas` switches *this* session to a different role, `spawn` brings up a *
 
 Pass `--boot-prompt <text>` to hand the new agent an initial task: the boot prompt becomes the actas slash command followed (newline-separated) by your text, so the agent claims its identity **and** acts on the task in the same first turn. This is the only way to give a one-shot goal to a **codex** peer, which has no Monitor and so never notices a message you `send` after it goes idle.
 
+Pass `--effort <level>` to select the reasoning effort for this spawn. The value is passed through unchecked, while each agent type's manifest supplies its CLI-specific argument shape. For example, Claude receives `--effort high`, while Codex receives `-c model_reasoning_effort=xhigh`. A type that does not declare the effort fields rejects the option instead of silently ignoring it.
+
 By default `spawn` **blocks until the new agent is actually listening** — its watcher attaches and touches a readiness sentinel — then prints `status=ready`, so you can send work the moment `spawn` returns without losing it to the agent's cold start. Use `--no-wait` for fire-and-forget, or `--ready-timeout <secs>` to bound the wait (default 90; on timeout it prints `status=timeout` and exits 3 so a caller can re-spawn). Codex skips the wait (it has no Monitor).
 
-Options: `--boot-prompt <text>` (initial task; see above), `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
+Options: `--boot-prompt <text>` (initial task; see above), `--project <path>` (default: current project), `--team <team>` (auto-resolved when the project has a single team), `--effort <level>`, and `--terminal <tmpl>` / `$AGMSG_TERMINAL` / config `spawn.terminal` to override the terminal command on the non-tmux path (a `{cmd}` placeholder is replaced with the path to the generated boot script). On macOS the default opens whichever terminal you're currently in (iTerm or Terminal, via `$TERM_PROGRAM`) using `open -a` — a plain app launch, so it does **not** trigger the Automation/AppleScript permission prompts that scripting the terminal directly would.
 
 To always pass a given agent type extra CLI flags on spawn (e.g. a default permission mode or sandbox policy), set them in a YAML **spawn options** file — one section per type, a flat `--flag: value` map underneath. Path: `$AGMSG_SPAWN_OPTIONS_FILE`, else `~/.agmsg/config/spawn_options.yaml`; a missing file or section is a no-op.
 

@@ -412,6 +412,52 @@ seed_resumable() {
   [[ "$output" != *"--model"* ]]
 }
 
+# --- --effort: per-type manifest mapping, pass-through level ---
+
+@test "spawn --effort: claude-code launch includes --effort + level" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --effort high --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"claude --effort high"* ]]
+  [[ "$output" == *"actas"* ]]
+}
+
+@test "spawn --effort: codex launch maps the level to model_reasoning_effort" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" --effort max --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"codex -c model_reasoning_effort=max"* ]]
+}
+
+@test "spawn --effort: model then effort preserve manifest-defined CLI order" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" \
+    --model gpt-test --effort xhigh --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" == *"codex -m gpt-test -c model_reasoning_effort=xhigh"* ]]
+}
+
+@test "spawn --effort: refused for a type with no effort_arg in its manifest" {
+  run bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" --effort high --no-wait
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "does not support --effort" ]]
+}
+
+@test "spawn: no --effort leaves effort flags absent" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run cat "$boot"
+  [[ "$output" != *"model_reasoning_effort="* ]]
+}
+
 # --- newly spawnable types (#277): cursor, gemini, antigravity, copilot, opencode ---
 
 @test "spawn: cursor launches cursor-agent with a bare positional prompt" {

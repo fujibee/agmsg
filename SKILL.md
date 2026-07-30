@@ -123,6 +123,8 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 # errors out.
 #   --project <path>     project to launch in (default: $PWD)
 #   --team <team>        team to join into (default: auto-resolved from project)
+#   --effort <level>     exact reasoning effort (passed through using the type
+#                        manifest; Claude --effort, Codex model_reasoning_effort)
 #   --window             new tmux window instead of splitting the current one
 #   --split h|v          tmux split direction (default h)
 #   --terminal <tmpl>    terminal command template ({cmd} = path to the boot

@@ -25,6 +25,8 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
 | `model_arg` | — | the `--model`/`-m`-style flag `spawn --model <id>` passes through to the CLI; a type with no `model_arg` refuses `--model` |
+| `effort_arg` | — | for direct-CLI types, the flag `spawn --effort <level>` uses (e.g. Claude's `--effort`, Codex's `-c`); a type with no `effort_arg` refuses `--effort` |
+| `effort_value_prefix` | — | optional text prepended to the effort level before it is passed as the `effort_arg` value (e.g. Codex's `model_reasoning_effort=`); empty for a plain value such as Claude's `high` |
 | `prompt_arg` | — | for a CLI that does not accept the actas prompt as a bare positional argument, the named flag whose value IS the prompt (e.g. antigravity's `--prompt-interactive`, copilot's `--interactive`) — `spawn.sh` inserts it immediately before the (already-quoted) prompt. Unset = bare positional, the default |
 | `hooks_file` | yes | project-relative delivery hooks file (e.g. `.codex/hooks.json`) |
 | `monitor` | — | `yes` if the type exposes a native Monitor tool; `spawn` skips the readiness wait when `no` |
@@ -83,6 +85,10 @@ as an external plugin (under `<install_dir>/plugins/types/<name>/` or a dir on
 with `agmsg plugin trust types/<name>` — see
 [ADR 0002](adr/0002-driver-discovery-and-plugin-opt-in.md).
 
+The core `--effort` mapping is for direct-CLI types. A node launcher owns its
+effort configuration, so `spawn.sh` refuses core `--effort` for it even if its
+manifest declares an `effort_arg`.
+
 ## Adding a type
 
 1. Create `scripts/drivers/types/<name>/type.conf` with at least `name`,
@@ -109,6 +115,9 @@ name=codex
 template=template.md
 cli=codex
 spawnable=yes
+model_arg=-m
+effort_arg=-c
+effort_value_prefix=model_reasoning_effort=
 detect=CODEX_SANDBOX CODEX_THREAD_ID
 detect_proc=codex codex-*
 hooks_file=.codex/hooks.json
