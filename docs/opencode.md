@@ -88,7 +88,7 @@ $agmsg history
 
 | Mode      | Supported | Notes |
 |-----------|:---------:|-------|
-| `monitor` | ✓         | Real-time push via the [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin's `sentinel_monitor` tool — same shape as Claude Code's Monitor. Falls back to turn-mode self-checks when the tool is unavailable |
+| `monitor` | ✓         | Real-time push via the [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin's `sentinel_monitor` tool — same shape as Claude Code's Monitor. The rule instructs a fallback to turn-mode self-checks when the tool is unavailable |
 | `turn`    | ✓         | Instruction rule runs check-inbox after each tool call |
 | `off`     | ✓         | Manual `$agmsg` only |
 | `both`    | ✗         | Not applicable to opencode (the sentinel tool already provides the real-time path, with turn as its in-band fallback) |
@@ -120,8 +120,15 @@ $agmsg mode monitor
 ```
 
 If `sentinel_monitor` is unavailable (plugin not installed, or the OpenCode
-build does not expose the tool), the rule falls back to turn-mode self-checks
-— so `monitor` never silently drops messages, it just degrades to `turn`.
+build does not expose the tool), the rule tells the agent to fall back to
+turn-mode self-checks instead, so `monitor` degrades to `turn` rather than
+failing outright.
+
+Worth knowing what that guarantees and what it does not. agmsg writes the rule;
+it does not detect whether the tool exists, so the fallback is an instruction
+the agent follows rather than a code path agmsg enforces. An agent that ignores
+it delivers nothing in `monitor` mode, and nothing reports that. If you need
+delivery that does not depend on the agent honouring the rule, set `turn`.
 
 ## Spawn
 
@@ -154,7 +161,7 @@ OpenCode + Ollama is well-suited for local, low-cost tasks such as:
 
 ## Known limitations
 
-- `monitor` mode depends on the external `opencode-sentinel` plugin — without it, delivery degrades to `turn` rather than failing
+- `monitor` mode depends on the external `opencode-sentinel` plugin — without it the rule instructs a fallback to `turn`, which is followed by the agent rather than enforced by agmsg
 - No native OpenCode plugin integration
 
 These may be addressed in future releases.
