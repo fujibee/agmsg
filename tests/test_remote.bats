@@ -209,11 +209,24 @@ restart_mock_server() {
   run bash "$SCRIPTS/remote.sh" disconnect testteam
   [ "$status" -eq 0 ]
   [[ "$output" == *"Disconnected 'testteam'. Local sync state cleared"* ]]
-  # The binding is marked disconnected locally (no server round-trip is needed
-  # to disconnect in the register model). We do NOT assert on the "Revoking
-  # credential..." line: it is old-path output that runs with no credential
-  # present and is removed with the credential/E2EE cleanup.
+  [[ "$output" != *"Revoking credential"* ]]
+  [[ "$output" != *"revoke it from the console"* ]]
+  # The binding is marked disconnected locally. No server round-trip is needed
+  # because the current connect model does not create a server credential.
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$SCRIPTS/../teams/testteam/config.json') AS TEXT), '\$.remote_binding.disconnected_at');")" != "" ]
+}
+
+@test "disconnect: a pulled no-auth team does not report a failed credential revoke" {
+  local pull_team_id="018f3f7e-2222-7000-8000-000000000002"
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" \
+    --team-id "$pull_team_id" cloned
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/remote.sh" disconnect cloned
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Disconnected 'cloned'. Local sync state cleared"* ]]
+  [[ "$output" != *"Revoking credential"* ]]
+  [[ "$output" != *"revoke it from the console"* ]]
 }
 
 @test "disconnect: fails for a team that isn't connected" {

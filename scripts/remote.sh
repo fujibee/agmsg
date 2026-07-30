@@ -1304,7 +1304,11 @@ cmd_disconnect() {
   # Server-side revoke first, local cleanup always — local deletion alone
   # does not stop the credential from continuing to authenticate
   # server-side (remote-connect lifecycle).
-  local revoke_ok=0
+  local revoke_required=0 revoke_ok=0
+  if [ -f "$cred_file" ] ||
+      { [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; }; then
+    revoke_required=1
+  fi
   if [ -f "$cred_file" ] && [ -n "$endpoint" ] && [ "$endpoint" != "null" ] && [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; then
     credential="$(python3 -c "import json,sys; print(json.load(open('$cred_file')).get('credential',''))" 2>/dev/null)"
     if [ -n "$credential" ] && [ -n "$server_instance_id" ] && [ "$server_instance_id" != "null" ] \
@@ -1335,11 +1339,13 @@ cmd_disconnect() {
     exit 1
   fi
 
-  if [ "$revoke_ok" -eq 1 ]; then
-    echo "Revoking credential with server... ok."
-  else
-    echo "Revoking credential with server... failed."
-    echo "Local state cleared, but the server could not be reached to revoke this credential — if this device may be compromised, revoke it from the console/admin side directly." >&2
+  if [ "$revoke_required" -eq 1 ]; then
+    if [ "$revoke_ok" -eq 1 ]; then
+      echo "Revoking credential with server... ok."
+    else
+      echo "Revoking credential with server... failed."
+      echo "Local state cleared, but the server could not be reached to revoke this credential — if this device may be compromised, revoke it from the console/admin side directly." >&2
+    fi
   fi
   echo "Disconnected '$team'. Local sync state cleared; sends/reads continue locally."
 }
