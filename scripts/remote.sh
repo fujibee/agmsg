@@ -787,6 +787,7 @@ _remote_write_pulled_team() {
       SELECT json_object('name','$(_agmsg_sqlesc "$team")',
                          'team_id','$(_agmsg_sqlesc "$team_id")',
                          'agents', json_object(),
+                         'drivers', json_object('layout', 'per-team'),
                          'created_at','$(date -u +%Y-%m-%dT%H:%M:%SZ)');")
     agmsg_write_atomic "$cfg" "$initial"
   fi
