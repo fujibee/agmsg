@@ -100,11 +100,14 @@ The history should contain:
 
 ## Use a separate install for testing
 
-To keep a test separate from an existing install, give it another command name:
+To keep a test separate from an existing install, clone the repository and run
+this from the checkout root:
 
 ```sh
 bash install.sh --cmd agmsg-test
 ```
+
+That install's commands are under `~/.agents/skills/agmsg-test/scripts/`.
 
 For the single-machine, two-install rehearsal, see
 [Try it on one machine](design/remote-sync.md#try-it-on-one-machine).
@@ -116,6 +119,7 @@ If you want a rollback copy, do this before step 2:
 Here `<storage>` is the install root, normally `~/.agents/skills/agmsg`.
 
 1. Back up `<storage>/db/messages.db` and the entire `<storage>/teams/` directory.
-2. To restore, stop the agmsg watcher and remote sync engine first.
+2. To restore, run `bash <storage>/scripts/delivery.sh stop`, then
+   `bash <storage>/scripts/remote.sh disconnect <team>`.
 3. Copy both backups back to their original paths.
 4. Delete `<storage>/db/teams/<team>/`, then restart your normal delivery mode.
