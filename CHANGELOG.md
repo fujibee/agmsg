@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.12] - 2026-07-31
+
+### Added
+- Monitor delivery via opencode-sentinel plugin
+
+### Fixed
+- Quote the project path into the generated monitor commands
+- Harden monitor rule + docs per Copilot review
+- Add cmd_prefix=$ so spawned actas uses $agmsg, not /agmsg
+- Keep opencode worker resident via TUI --prompt instead of run --interactive
+- Bound watch-once by its lifetime, not by its polling (#558) (#560)
+- Parse the app-server port through ANSI color sequences (#512)
+- Compare status metadata project as canonical normalized paths (#511)
+- Validate project_path in set instead of mkdir-ing whatever it is given (#508)
+- A process you cannot signal is not a process that is gone (#505)
+
+### Documentation
+- Add agmsg-bubblelog and agmsg-tui to the showcase and README (#571)
+- Describe the monitor fallback as instructed, not enforced
+- Document monitor mode via opencode-sentinel plugin
+- Mark spawn as supported via --prompt
+- Document safe Git Bash quoting from PowerShell
+- Document the permission allowlist agmsg needs on Claude Code (#551)
+
 ## [1.1.11] - 2026-07-27
 
 ### Added
@@ -336,6 +360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.12]: https://github.com/fujibee/agmsg/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/fujibee/agmsg/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/fujibee/agmsg/compare/app-v0.3.0...v1.1.10
 [1.1.9]: https://github.com/fujibee/agmsg/compare/app-v0.2.0...v1.1.9
