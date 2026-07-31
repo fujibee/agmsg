@@ -324,7 +324,12 @@ cmd_handoff() {
   done
   : "${team:?Usage: key.sh handoff <team> [--out <file>]}"
   agmsg_validate_team_name "$team" || exit 1
-  [ -n "$out" ] || out="./$team-age-handoff.json"
+  if [ -z "$out" ]; then
+    local handoff_dir="$CRED_ROOT/$team/handoff"
+    mkdir -p "$handoff_dir"
+    chmod 700 "$handoff_dir" 2>/dev/null || true
+    out="$handoff_dir/$team-age-handoff.json"
+  fi
   _key_require_age || exit 1
   bash "$SCRIPT_DIR/remote-sync.sh" export-age-handoff --team "$team" --out "$out"
   echo "Handoff bundle written to: $out"

@@ -204,6 +204,23 @@ EOF
   [[ "$output" == *"Handoff bundle written to: $bundle"* ]]
 }
 
+@test "key handoff without --out never writes the secret bundle under cwd" {
+  skip_if_no_age
+  stub_age_handoff
+  local project="$TEST_SKILL_DIR/project-checkout"
+  mkdir -p "$project"
+  cd "$project"
+  run bash "$SCRIPTS/key.sh" handoff testteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$project/testteam-age-handoff.json" ]
+  local private_bundle="$TEST_SKILL_DIR/run/remote-credentials/testteam/handoff/testteam-age-handoff.json"
+  [ -f "$private_bundle" ]
+  [[ "$output" == *"Handoff bundle written to: $private_bundle"* ]]
+  local perms
+  perms=$(stat -f "%Lp" "$(dirname "$private_bundle")" 2>/dev/null || stat -c "%a" "$(dirname "$private_bundle")")
+  [ "$perms" = "700" ]
+}
+
 # --- import --------------------------------------------------------------
 
 @test "key import --identity-stdin: establishes the first epoch for a team with no key yet" {
