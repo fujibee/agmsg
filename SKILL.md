@@ -169,6 +169,24 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
+### Rename
+
+If argument starts with "rename" but not "rename-team":
+1. Accept only an explicit user request. Parse either `<team> <old_name> <new_name>`,
+   or `<old_name> <new_name>` only when this agent belongs to exactly one team.
+2. Never invent either name. Before execution, repeat the resolved team, old name,
+   and new name and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/rename.sh <team> <old_name> <new_name>`
+4. Show the result. For a connected team, the `member_renamed` journal event
+   propagates the rename to other machines.
+
+If argument starts with "rename-team":
+1. Accept only an explicit user request. Parse `<old_team> <new_team>`.
+2. Never invent either team name. Before execution, repeat the old and new team
+   names and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/rename-team.sh <old_team> <new_team>`
+4. Show the result.
+
 ### Remote sync
 
 Remote setup is no-auth. Do not ask for a token or create one.
