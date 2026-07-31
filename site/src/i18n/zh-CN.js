@@ -84,6 +84,10 @@ export default {
         "将智能体间的消息日志回放成舞台上的角色对话——每个智能体化身轮流发言的角色。",
       "agmsg-viewer":
         "在浏览器中以 LINE 风格的聊天界面查看 agmsg 消息历史。",
+      "agmsg-bubblelog":
+        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+      "agmsg-tui":
+        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
     },
   },
   desktop: {

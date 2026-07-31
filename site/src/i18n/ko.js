@@ -84,6 +84,10 @@ export default {
         "에이전트 간 메시지 로그를 무대 위 캐릭터들의 대화로 재현합니다 — 각 에이전트가 캐릭터가 되어 차례로 말합니다.",
       "agmsg-viewer":
         "브라우저에서 LINE 스타일 채팅 화면으로 agmsg 메시지 기록을 확인합니다.",
+      "agmsg-bubblelog":
+        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+      "agmsg-tui":
+        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
     },
   },
   desktop: {

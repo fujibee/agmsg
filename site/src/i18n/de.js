@@ -86,6 +86,10 @@ export default {
         "Spielt Agent-zu-Agent-Nachrichtenprotokolle als Figuren auf einer Bühne ab — jeder Agent wird zu einer Figur, die abwechselnd spricht.",
       "agmsg-viewer":
         "Zeigt den agmsg-Nachrichtenverlauf in einer Chat-Oberfläche im LINE-Stil im Browser an.",
+      "agmsg-bubblelog":
+        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+      "agmsg-tui":
+        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
     },
   },
   desktop: {

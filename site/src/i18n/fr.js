@@ -86,6 +86,10 @@ export default {
         "Rejoue les journaux de messages entre agents comme des personnages qui parlent sur une scène — chaque agent devient un personnage qui prend la parole à son tour.",
       "agmsg-viewer":
         "Consulte l'historique des messages agmsg dans une interface de chat façon LINE, dans le navigateur.",
+      "agmsg-bubblelog":
+        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+      "agmsg-tui":
+        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
     },
   },
   desktop: {

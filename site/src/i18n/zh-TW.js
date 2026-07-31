@@ -86,6 +86,10 @@ export default {
         "將代理間的訊息日誌重現為舞台上角色的對話——每個代理化身為輪流發言的角色。",
       "agmsg-viewer":
         "在瀏覽器中以 LINE 風格的聊天介面檢視 agmsg 訊息紀錄。",
+      "agmsg-bubblelog":
+        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+      "agmsg-tui":
+        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
     },
   },
   desktop: {

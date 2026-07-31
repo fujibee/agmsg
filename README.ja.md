@@ -532,8 +532,8 @@ agmsgのプラグイン可能な単位は軸（axis）ごとにグループ化�
 ## コミュニティ
 
 - **Product Hunt**: Product of the Day 5位、[2026-06-09ローンチ](https://www.producthunt.com/products/agmsg) — 219アップボート、39コメント
-- **派生プロジェクト**: `agmsg-shogi`、`agmsg-go`、`agmsg-mcp`（コミュニティ製）
-- **外部コントリビューター**: [@MiuraKatsu](https://github.com/MiuraKatsu)（Geminiサポート + whoami自動検出）、[@roundrop](https://github.com/roundrop)（Copilot CLIサポート）、[@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP)（ネイティブWindows / Git Bash）、[@kenshin-yamada](https://github.com/kenshin-yamada)（ウォッチャーのスコープ修正）、[@utenadev](https://github.com/utenadev)（OpenCode貢献）、[@lucianlamp](https://github.com/lucianlamp)（ネイティブWindows PowerShellヘルパー）、[@tatsuya6502](https://github.com/tatsuya6502)（サンドボックス化されたBashツールのサポート）
+- **コミュニティプロジェクト**（[showcase](https://agmsg.cc) にも掲載）: [`agkanban`](https://github.com/lucianlamp/agkanban) — agmsg と組み合わせて使うマルチエージェント向けかんばんボード / [`agmsg-office`](https://github.com/shinshin86/agmsg-office) — メッセージログを、舞台上でキャラクターが話す形で再生 / [`agmsg-viewer`](https://github.com/utenadev/agmsg-viewer) — メッセージ履歴をブラウザのチャット画面で閲覧 / [`agmsg-bubblelog`](https://github.com/dreiachse-cyber/agmsg-bubblelog) — チームのログをメッセンジャー風のスレッドとしてローカルで再生 / [`agmsg-tui`](https://github.com/rrrrnmtsu/agmsg-tui) — Rust/ratatui のターミナルクライアント。SSH・mosh・tmux と相性がよい
+- **外部コントリビューター**: [@MiuraKatsu](https://github.com/MiuraKatsu)（Geminiサポート + whoami自動検出）、[@roundrop](https://github.com/roundrop)（Copilot CLIサポート）、[@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP)（ネイティブWindows / Git Bash）、[@kenshin-yamada](https://github.com/kenshin-yamada)（ウォッチャーのスコープ修正）、[@utenadev](https://github.com/utenadev)（OpenCode貢献）、[@lucianlamp](https://github.com/lucianlamp)（ネイティブWindows PowerShellヘルパー）、[@tatsuya6502](https://github.com/tatsuya6502)（サンドボックス化されたBashツールのサポート）、[@Masashi-Ono0611](https://github.com/Masashi-Ono0611)（project_path検証、ウォッチドッグとウォッチャーの修正）、[@chemica-tan](https://github.com/chemica-tan)（Windows codexブリッジ: プロジェクト比較とポート解析）、[@otsune](https://github.com/otsune)（PowerShellからのGit Bashクォート）、[@tsukimiya](https://github.com/tsukimiya)（OpenCode: 常駐spawnとmonitor配送）
 
 ## プロジェクトサイト（agmsg.cc）
 
