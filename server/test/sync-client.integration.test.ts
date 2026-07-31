@@ -127,8 +127,8 @@ storage_init "$2" >/dev/null`;
     await rm(root, { recursive: true });
   });
 
-  // Where a team's rows live depends on its layout driver. These teams are on
-  // the default `shared` layout — nothing here connects through a path that
+  // Where a team's rows live depends on its partition driver. These teams are on
+  // the default `shared` partition — nothing here connects through a path that
   // moves them — so this is the one store, the same file the client writes.
   // A team that had moved would answer differently, which is why this asks
   // rather than spelling the path out at each call site.
@@ -160,7 +160,7 @@ storage_init "$2" >/dev/null`;
   }
 
   async function localSend(store: string, from: string, to: string, body: string, team = localTeam) {
-    // storage_init takes the team even on the shared layout: which store to
+    // storage_init takes the team even on the shared partition: which store to
     // initialize is a question about a team, and calling it without one reaches
     // the resolver with an empty selector and fails under set -u.
     const script = `. "$1/scripts/lib/storage.sh"

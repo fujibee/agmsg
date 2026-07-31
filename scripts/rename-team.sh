@@ -33,11 +33,11 @@ agmsg_validate_team_name "$NEW_TEAM" || exit 1
 TEAMS_DIR="$SCRIPT_DIR/../teams"
 OLD_DIR="$TEAMS_DIR/$OLD_TEAM"
 NEW_DIR="$TEAMS_DIR/$NEW_TEAM"
-# Only a team on the per-team layout owns a directory to move. On the shared
-# layout its rows sit in a file with every other team's, so renaming rewrites
+# Only a team on the per-team partition owns a directory to move. On the shared
+# partition its rows sit in a file with every other team's, so renaming rewrites
 # the `team` column and moves nothing — which is what this script always did.
 MOVES_STORE=false
-if [ "$(agmsg_driver_for_team layout "$OLD_TEAM" shared)" = per-team ]; then
+if [ "$(agmsg_driver_for_team partition "$OLD_TEAM" shared)" = per-team ]; then
   MOVES_STORE=true
   # The store lives under the storage root, which AGMSG_STORAGE_PATH can move
   # independently of the config tree above — so it is resolved, never derived
@@ -105,7 +105,7 @@ fi
 
 # Move the store with it, when the team has one of its own. A team that never
 # sent anything has no store yet, which is not an error — the next send creates
-# one under the new name. On the shared layout there is nothing to move and DB
+# one under the new name. On the shared partition there is nothing to move and DB
 # already names the file both names resolve to.
 if [ "$MOVES_STORE" = true ] && [ -d "$OLD_STORE_DIR" ]; then
   mkdir -p "$(dirname "$NEW_STORE_DIR")"

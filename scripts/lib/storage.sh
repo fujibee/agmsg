@@ -73,11 +73,11 @@ agmsg_storage_dir() {
 #
 # Echo the full path to a team's message store, in a form sqlite3 can open.
 #
-# WHICH store depends on the team's layout driver, and teams choose separately:
+# WHICH store depends on the team's partition driver, and teams choose separately:
 # `shared` (the default) puts every team in one file, `per-team` gives the team
 # its own. A team only leaves the default when connecting requires it, because
 # external programs read the shared store directly and lose sight of any team
-# that moves out. See scripts/drivers/layout/.
+# that moves out. See scripts/drivers/partition/.
 #
 # The argument is required rather than optional on purpose. An optional one
 # leaves two ways to reach the store, and a caller that forgot the selector
@@ -93,15 +93,15 @@ agmsg_db_path() {
     return 1
   fi
   agmsg_validate_team_name "$team" || return 1
-  _agmsg_layout_load "$team" || return 1
-  _agmsg_db_file "$(layout_store_relpath "$team")"
+  _agmsg_partition_load "$team" || return 1
+  _agmsg_db_file "$(partition_store_relpath "$team")"
 }
 
-# Source the layout driver this team uses, memoized so repeated resolution in
+# Source the partition driver this team uses, memoized so repeated resolution in
 # one process costs nothing. Re-sources when a caller moves between teams on
-# different layouts — watch.sh loops over a subscription that can contain both.
-_AGMSG_LAYOUT_LOADED=""
-_agmsg_layout_load() {
+# different partitions — watch.sh loops over a subscription that can contain both.
+_AGMSG_PARTITION_LOADED=""
+_agmsg_partition_load() {
   # The registry may not be sourced yet — agmsg_db_path is reachable without
   # going through agmsg_storage_load. Same guarded pull-in that uses.
   if ! command -v agmsg_driver_for_team >/dev/null 2>&1; then
@@ -111,15 +111,15 @@ _agmsg_layout_load() {
     [ -n "$_lib" ] && . "$_lib/driver-registry.sh"
   fi
   local name
-  name="$(agmsg_driver_for_team layout "$1" shared)"
-  [ "$name" = "$_AGMSG_LAYOUT_LOADED" ] && return 0
+  name="$(agmsg_driver_for_team partition "$1" shared)"
+  [ "$name" = "$_AGMSG_PARTITION_LOADED" ] && return 0
   local base kind file found=""
   while IFS="$(printf '\t')" read -r kind base; do
     [ -n "$base" ] || continue
-    file="$base/layout/$name.sh"
+    file="$base/partition/$name.sh"
     [ -f "$file" ] || continue
     # Externals stay gated by the same opt-in every other axis uses.
-    if [ "$kind" = external ] && ! agmsg_driver_is_trusted layout "$name" "$file"; then
+    if [ "$kind" = external ] && ! agmsg_driver_is_trusted partition "$name" "$file"; then
       continue
     fi
     found="$file"
@@ -127,15 +127,15 @@ _agmsg_layout_load() {
 $(agmsg_driver_bases)
 EOF
   if [ -z "$found" ]; then
-    # Loud rather than falling back to shared: a team recorded a layout, and
+    # Loud rather than falling back to shared: a team recorded a partition, and
     # quietly reading a different store than the one it names is the exact
     # failure this axis exists to make impossible.
-    echo "Error: no layout driver '$name' for team '$1'" >&2
+    echo "Error: no partition driver '$name' for team '$1'" >&2
     return 1
   fi
   # shellcheck disable=SC1090
   . "$found" || return 1
-  _AGMSG_LAYOUT_LOADED="$name"
+  _AGMSG_PARTITION_LOADED="$name"
 }
 
 # The store that is NOT team-scoped, and the only resolver allowed to take no

@@ -97,9 +97,9 @@ shared_rows() {
 }
 
 @test "migrate: a moved team can still be renamed, and its store follows" {
-  # Renaming a shared-layout team rewrites a column; renaming a moved one has to
+  # Renaming a shared-partition team rewrites a column; renaming a moved one has to
   # move a directory as well. Only the second path exists after a migration, so
-  # it is covered here rather than beside the shared-layout rename tests.
+  # it is covered here rather than beside the shared-partition rename tests.
   bash "$SCRIPTS/send.sh" alpha ann bob "carried across" >/dev/null
   migrate alpha
   [ -e "$TEST_SKILL_DIR/db/teams/alpha/messages.db" ]

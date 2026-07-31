@@ -80,17 +80,17 @@ get_teams() {
 # database; a consumer that opens it with a SQLite client gets nonsense. Check
 # it before reading, and treat an unfamiliar value as "do not read this".
 get_store() {
-  local team="$1" path driver layout exists
+  local team="$1" path driver partition exists
   path="$(agmsg_db_path "$team")" || return 1
   driver="$(agmsg_storage_driver)"
-  layout="$(agmsg_driver_for_team layout "$team" shared)"
+  partition="$(agmsg_driver_for_team partition "$team" shared)"
   # json(...) so the field is a JSON boolean; a bare 1/0 reads as a number and a
   # consumer testing `=== true` would silently take the wrong branch.
   if [ -e "$path" ]; then exists="json('true')"; else exists="json('false')"; fi
   agmsg_sqlite_mem "SELECT json_object(
     'team', '$(agmsg_sqlesc "$team")',
     'driver', '$(agmsg_sqlesc "$driver")',
-    'layout', '$(agmsg_sqlesc "$layout")',
+    'partition', '$(agmsg_sqlesc "$partition")',
     'path', '$(agmsg_sqlesc "$path")',
     'exists', $exists
   );"

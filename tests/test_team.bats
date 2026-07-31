@@ -438,9 +438,9 @@ EOF
   _sqlite_sync_schema oldteam
   local generation db renamed_db store_dir
   generation=$(_sqlite_sync_generation oldteam)
-  # This team is on the default shared layout, so both names resolve to the same
+  # This team is on the default shared partition, so both names resolve to the same
   # file and the rename rewrites columns rather than moving anything. A team that
-  # owns its store is covered separately, in the layout tests.
+  # owns its store is covered separately, in the partition tests.
   db=$(agmsg_db_path oldteam)
   renamed_db="$db"
   store_dir=$(agmsg_storage_dir)

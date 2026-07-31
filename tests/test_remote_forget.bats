@@ -13,7 +13,7 @@ setup() {
   escaped="$(sed "s/'/''/g" "$cfg")"
   updated="$(sqlite_mem "
     SELECT json_set('$escaped',
-      '\$.drivers.layout', 'per-team',
+      '\$.drivers.partition', 'per-team',
       '\$.remote_binding', json_object(
         'endpoint', 'https://remote.example',
         'server_instance_id', '$SERVER_ID',

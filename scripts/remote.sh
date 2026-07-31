@@ -818,7 +818,7 @@ _remote_write_pulled_team() {
       SELECT json_object('name','$(_agmsg_sqlesc "$team")',
                          'team_id','$(_agmsg_sqlesc "$team_id")',
                          'agents', json_object(),
-                         'drivers', json_object('layout', 'per-team'),
+                         'drivers', json_object('partition', 'per-team'),
                          'created_at','$(date -u +%Y-%m-%dT%H:%M:%SZ)');")
     agmsg_write_atomic "$cfg" "$initial"
   fi
@@ -1894,7 +1894,7 @@ cmd_forget() {
   fi
 
   # A successful remote connection owns this exact directory. Never resolve
-  # through agmsg_db_path here: a malformed or interrupted layout selection
+  # through agmsg_db_path here: a malformed or interrupted partition selection
   # must not turn a team-scoped delete into deletion of the shared store.
   local store_dir store_path event_count=0 tables
   store_dir="$(agmsg_storage_dir)/teams/$team"

@@ -737,9 +737,9 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   [ -f "$cfg" ]
   # Not minted here: the id is the one the server answered with.
   [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.team_id');")" = "$PULL_TEAM_ID" ]
-  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.drivers.layout');")" = "per-team" ]
+  [ "$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.drivers.partition');")" = "per-team" ]
   [ -f "$TEST_SKILL_DIR/db/teams/cloned/messages.db" ]
-  # Pull arrives into an empty local team, so it can select the isolated layout
+  # Pull arrives into an empty local team, so it can select the isolated partition
   # before bootstrap. Imported remote rows must never leak into the shared
   # store that local-only teams and external readers still use.
   if sqlite3 "$TEST_SKILL_DIR/db/messages.db" \

@@ -8,7 +8,7 @@
 # store, which is what every external reader of the database depends on.
 #
 # It COPIES. The shared store keeps its rows, so a migration that goes wrong
-# costs nothing but disk — delete the per-team store, clear the layout field,
+# costs nothing but disk — delete the per-team store, clear the partition field,
 # and the team is back where it was. Reclaiming the copied rows is a separate,
 # later decision that wants confidence this one does not.
 
@@ -29,7 +29,7 @@ source "$SCRIPT_DIR/../lib/storage.sh"
 source "$SCRIPT_DIR/../lib/validate.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/registry-lock.sh"
-# The layout lookup lives here; storage.sh only pulls it in lazily.
+# The partition lookup lives here; storage.sh only pulls it in lazily.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/driver-registry.sh"
 
@@ -43,7 +43,7 @@ DEST="$(agmsg_storage_dir)/teams/$TEAM/messages.db"
 
 # Drop the team's rows from the shared store. Runs after the copy is verified,
 # and again on re-entry, which is what makes a crashed migration recoverable:
-# the layout is recorded before this, so an interrupted run leaves rows in both
+# the partition is recorded before this, so an interrupted run leaves rows in both
 # stores — readable, but stale in the one external programs watch.
 _drop_from_shared() {
   local lit; lit="$(agmsg_sqlesc "$TEAM")"
@@ -62,9 +62,9 @@ src_tables="$(agmsg_sqlite "$SHARED" \
   "SELECT name FROM sqlite_master WHERE type='table';" 2>/dev/null || true)"
 has_table() { printf '%s\n' "$src_tables" | grep -qx "$1"; }
 
-if [ "$(agmsg_driver_for_team layout "$TEAM" shared)" = per-team ]; then
+if [ "$(agmsg_driver_for_team partition "$TEAM" shared)" = per-team ]; then
   # Already moved. Finish the job if a previous run died between recording the
-  # layout and clearing the shared copy — otherwise external readers keep seeing
+  # partition and clearing the shared copy — otherwise external readers keep seeing
   # this team's history frozen at the moment it moved, which looks like nothing
   # is wrong.
   _drop_from_shared
@@ -149,7 +149,7 @@ done
 # resolves to the shared store, so everything above is a copy nothing reads.
 agmsg_lock_acquire "$CONNECTION_ROOT/teams/$TEAM" || exit 1
 updated="$(agmsg_sqlite_mem "SELECT json_set(CAST(readfile('$(agmsg_sql_readfile_path "$CONFIG")') AS TEXT),
-  '\$.drivers.layout', 'per-team');")"
+  '\$.drivers.partition', 'per-team');")"
 agmsg_write_atomic "$CONFIG" "$updated"
 agmsg_lock_release
 

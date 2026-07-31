@@ -90,7 +90,7 @@ agmsg_driver_untrust() {
 # Which driver a TEAM uses on <axis>, falling back to <default>.
 #
 # Teams choose independently: one team can sit on a per-team store while its
-# neighbour is still in the shared one. That is the point — the shared layout is
+# neighbour is still in the shared one. That is the point — the shared partition is
 # what every external reader of the database depends on, so a team only leaves
 # it when something (today: connecting to a remote) actually requires it.
 #

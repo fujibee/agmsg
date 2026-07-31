@@ -233,7 +233,7 @@ SH
   [ "$(wc -l < "$count" | tr -d ' ')" -eq 5 ]
 }
 
-# --- storage layout axis -----------------------------------------------------
+# --- storage partition axis -----------------------------------------------------
 #
 # Which store a team uses is a per-team driver choice. `shared` is the default
 # and is what programs outside agmsg read; `per-team` is what a team moves to
@@ -241,11 +241,11 @@ SH
 # team in one file, unchanged from before the axis existed) and the isolation a
 # moved team gets.
 
-# Put <team> on the per-team layout the way migrate-team-store.sh does, without
+# Put <team> on the per-team partition the way migrate-team-store.sh does, without
 # copying anything: these tests are about resolution, not migration.
 _use_per_team() {
   mkdir -p "$TEST_SKILL_DIR/teams/$1"
-  printf '{"name":"%s","drivers":{"layout":"per-team"}}\n' "$1" \
+  printf '{"name":"%s","drivers":{"partition":"per-team"}}\n' "$1" \
     > "$TEST_SKILL_DIR/teams/$1/config.json"
 }
 
@@ -253,14 +253,14 @@ _use_per_team() {
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/db" SKILL_DIR="$TEST_SKILL_DIR"
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/storage.sh"
-  # The layout external readers depend on. A team must not leave it by merely
+  # The partition external readers depend on. A team must not leave it by merely
   # existing — only by something that requires the move.
   [ "$(agmsg_db_path alpha)" = "$BATS_TEST_TMPDIR/db/messages.db" ]
   [ "$(agmsg_db_path bravo)" = "$BATS_TEST_TMPDIR/db/messages.db" ]
   [ "$(agmsg_db_path alpha)" = "$(_agmsg_runtime_db_path)" ]
 }
 
-@test "storage: a team on the per-team layout moves, and only that team" {
+@test "storage: a team on the per-team partition moves, and only that team" {
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/db" SKILL_DIR="$TEST_SKILL_DIR"
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/storage.sh"
@@ -272,12 +272,12 @@ _use_per_team() {
   [ "$(agmsg_db_path alpha)" = "$BATS_TEST_TMPDIR/db/teams/alpha/messages.db" ]
 }
 
-@test "storage: an unknown layout is an error, not a fallback" {
+@test "storage: an unknown partition is an error, not a fallback" {
   export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/db" SKILL_DIR="$TEST_SKILL_DIR"
   # shellcheck disable=SC1091
   source "$SCRIPTS/lib/storage.sh"
   mkdir -p "$TEST_SKILL_DIR/teams/gamma"
-  printf '{"name":"gamma","drivers":{"layout":"nope"}}\n' \
+  printf '{"name":"gamma","drivers":{"partition":"nope"}}\n' \
     > "$TEST_SKILL_DIR/teams/gamma/config.json"
   run agmsg_db_path gamma
   [ "$status" -ne 0 ]
