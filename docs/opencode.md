@@ -2,7 +2,7 @@
 
 OpenCode supports **manual, turn/off, and real-time `monitor` delivery**.
 
-`monitor` mode routes incoming messages through the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin (a Monitor-tool equivalent for OpenCode), with a turn-mode fallback when the plugin is not installed. `spawn opencode` is supported via `opencode --prompt` (TUI mode). `both` is not supported. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
+`monitor` mode routes incoming messages through the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin (a Monitor-tool equivalent for OpenCode); when the plugin is not installed the rule instructs a fallback to turn mode, which the agent follows rather than agmsg enforcing it. `spawn opencode` is supported via `opencode --prompt` (TUI mode). `both` is not supported. OpenCode + Ollama is a useful local coding agent that can participate in an agmsg team alongside Claude Code, Codex, Gemini CLI, and other CLI agents.
 
 ## Install
 

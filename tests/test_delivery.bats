@@ -1730,6 +1730,35 @@ JSON
   [[ "$output" == *"check-inbox.sh"* ]]
 }
 
+@test "opencode set monitor: a project path containing an apostrophe stays one shell word" {
+  # An apostrophe is a legal POSIX path character and delivery.sh accepts it, so
+  # a literal '$project' wrap in the rule would end the argument early and let
+  # anything after it become live shell syntax. Both generated commands — the
+  # sentinel_monitor watcher and the fallback check-inbox — have to survive it.
+  local weird="$TEST_PROJECT/it's a proj"
+  mkdir -p "$weird"
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$weird"
+  [ "$status" -eq 0 ]
+
+  local rule_file="$weird/.opencode/rules/agmsg.md"
+  [ -f "$rule_file" ]
+
+  # The path must not appear inside a single-quoted span that its own apostrophe
+  # terminates. Asserted by running the generated command lines through the
+  # shell's own parser: a broken quote fails to parse at all.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *watch.sh*|*check-inbox.sh*) ;;
+      *) continue ;;
+    esac
+    line="${line#- command: }"
+    line="${line#- Command: }"
+    run bash -n -c "$line"
+    [ "$status" -eq 0 ] || { echo "generated command does not parse: $line"; false; }
+  done < "$rule_file"
+}
+
 @test "opencode status: reports monitor when the monitor rule is present" {
   bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
