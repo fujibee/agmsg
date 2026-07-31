@@ -357,10 +357,10 @@ fn open_ro(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
 /// Every distinct store behind the teams this install knows about.
 ///
 /// Deduplicated by path, which is what makes one function serve both
-/// layouts: under a shared store every team resolves to the same file and
+/// partitions: under a shared store every team resolves to the same file and
 /// this yields one connection — today's behaviour exactly — while under
 /// per-team stores it yields one per team. The app does not branch on the
-/// layout because it does not need to know it.
+/// partition because it does not need to know it.
 ///
 /// Teams whose driver the app cannot read directly are absent here; their
 /// messages arrive through `api.sh` like everyone's history does.
@@ -1386,7 +1386,7 @@ mod tests {
     fn the_store_path_comes_from_agmsg_not_from_a_guess() {
         let _base = fake_base(&[(
             "api.sh",
-            r#"echo '{"team":"alpha","driver":"sqlite","layout":"per-team","path":"/somewhere/else/alpha.db","exists":true}'"#,
+            r#"echo '{"team":"alpha","driver":"sqlite","partition":"per-team","path":"/somewhere/else/alpha.db","exists":true}'"#,
         )]);
         assert_eq!(
             super::direct_store_path("alpha"),
@@ -1404,7 +1404,7 @@ mod tests {
     fn an_unreadable_driver_falls_back_rather_than_showing_an_empty_room() {
         let _base = fake_base(&[(
             "api.sh",
-            r#"echo '{"team":"alpha","driver":"jsonl","layout":"per-team","path":"/x/a.jsonl","exists":true}'"#,
+            r#"echo '{"team":"alpha","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'"#,
         )]);
         assert_eq!(
             super::direct_store_path("alpha"),
@@ -1427,7 +1427,7 @@ mod tests {
             "api.sh",
             r#"
 if [ "$4" = "store" ]; then
-  echo '{"team":"alpha","driver":"jsonl","layout":"per-team","path":"/x/a.jsonl","exists":true}'
+  echo '{"team":"alpha","driver":"jsonl","partition":"per-team","path":"/x/a.jsonl","exists":true}'
   exit 0
 fi
 echo '{"type":"message_sent","id":"m1","team":"alpha","from":"a","to":"b","body":"first","at":"t1"}'
@@ -1461,7 +1461,7 @@ echo '{"type":"message_sent","id":"m2","team":"alpha","from":"a","to":"b","body"
     fn a_team_with_no_store_yet_is_not_an_error() {
         let _base = fake_base(&[(
             "api.sh",
-            r#"echo '{"team":"alpha","driver":"sqlite","layout":"shared","path":"/x/db.sqlite","exists":false}'"#,
+            r#"echo '{"team":"alpha","driver":"sqlite","partition":"shared","path":"/x/db.sqlite","exists":false}'"#,
         )]);
         assert_eq!(super::direct_store_path("alpha"), None);
     }
