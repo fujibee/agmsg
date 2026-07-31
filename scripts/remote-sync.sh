@@ -15,4 +15,37 @@ export AGMSG_SYNC_DRIVER="$SCRIPT_DIR/internal/storage-sync-driver.sh"
 NODE_BIN="$(agmsg_resolve_node)"
 export AGMSG_SYNC_NODE_BIN="$NODE_BIN"
 export AGMSG_SYNC_CIPHER_HELPER="$SCRIPT_DIR/internal/sync-cipher.mjs"
+# The engine outlives the command that starts it, so whatever it inherits it
+# holds for as long as it runs. Under bats that included fd 144 -- a descriptor
+# internal to the harness -- and the shard then ran to the CI job's cap with
+# every test already reported ok, because bats was waiting for an EOF the engine
+# was keeping from arriving. Captured directly: the engine and three bats
+# processes all held the same pipe, 0xc9aea28a590ca110, at fd 144.
+#
+# Closing 3 and 4 by name at the spawn sites, which is what this repo did until
+# now, cannot reach a descriptor whose number the harness chooses. So the close
+# is by range, not by name, and it lives here -- the one place every engine
+# invocation passes through -- rather than at each caller.
+#
+# The engine speaks only over stdin, stdout and stderr; the spawn sites already
+# point those at a log. Nothing above stderr is anything it should keep.
+_close_inherited_fds() {
+  local fd
+  if [ -d /dev/fd ]; then
+    for fd in /dev/fd/*; do
+      fd="${fd##*/}"
+      case "$fd" in ''|*[!0-9]*) continue ;; esac
+      [ "$fd" -gt 2 ] || continue
+      eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+  else
+    # No /dev/fd to enumerate: sweep a range instead. Bounded rather than exact,
+    # which is why it is the fallback and not the method.
+    for fd in $(seq 3 255); do
+      eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+  fi
+}
+_close_inherited_fds
+
 exec "$NODE_BIN" "$SCRIPT_DIR/internal/remote-sync.mjs" "$@"
