@@ -4,6 +4,7 @@ set -euo pipefail
 # Usage:
 #   remote.sh connect --endpoint <url> [--e2ee] <team>
 #   remote.sh pull --endpoint <url> [--team-id <uuid>] <team>
+#   remote.sh unlock <team> --bundle <file> --confirm-digest <sha256>
 #   remote.sh unlock <team> --snapshot <file> (--identity <file>|--identity-stdin)
 #     [--confirm-digest <sha256>]
 #   remote.sh status [<team>] [--json]
@@ -764,6 +765,12 @@ _remote_json_field() {
   agmsg_sqlite_mem "SELECT COALESCE(json_extract('$escaped', '$path'), '');"
 }
 
+_remote_json_array_length() {
+  local doc="$1" path="$2" escaped
+  escaped=$(printf '%s' "$doc" | sed "s/'/''/g")
+  agmsg_sqlite_mem "SELECT COALESCE(json_array_length(json_extract('$escaped', '$path')), 0);"
+}
+
 # Writes the local team for a pull. Unlike _remote_ensure_team this does NOT
 # mint a team_id: the id came from the server and is recorded as it arrived.
 # Minting here would give one team two identities, which is the whole reason
@@ -957,7 +964,7 @@ cmd_pull() {
     echo "Pulled '$pulled_name' into local team '$team' ($imported message(s)). Sync engine running."
   fi
   if [ "$pulled_age_v1" -gt 0 ]; then
-    echo "This team is local but locked. Run remote.sh unlock with the snapshot and identity you were handed."
+    echo "This team is local but locked. Run remote.sh unlock --bundle with the secret handoff bundle you were given."
   else
     echo "This team is now local and ready for normal use."
     echo "Open your agent and invoke its installed '$cmd_name' command, then join with a new agent name."
@@ -965,11 +972,13 @@ cmd_pull() {
 }
 
 cmd_unlock() {
-  local team="" identity_file="" identity_stdin=0 confirm_digest="" snapshots=()
+  local team="" identity_file="" identity_stdin=0 confirm_digest="" bundle="" snapshots=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --snapshot) snapshots+=("${2:?--snapshot requires a value}"); shift 2 ;;
       --snapshot=*) snapshots+=("${1#--snapshot=}"); shift ;;
+      --bundle) bundle="${2:?--bundle requires a value}"; shift 2 ;;
+      --bundle=*) bundle="${1#--bundle=}"; shift ;;
       --identity) identity_file="${2:?--identity requires a value}"; shift 2 ;;
       --identity=*) identity_file="${1#--identity=}"; shift ;;
       --identity-stdin) identity_stdin=1; shift ;;
@@ -980,13 +989,24 @@ cmd_unlock() {
          team="$1"; shift ;;
     esac
   done
-  : "${team:?Usage: remote.sh unlock <team> --snapshot <file> (--identity <file>|--identity-stdin) [--confirm-digest <sha256>]}"
-  [ "${#snapshots[@]}" -gt 0 ] || { echo "agmsg: --snapshot is required" >&2; exit 1; }
+  : "${team:?Usage: remote.sh unlock <team> (--bundle <file> | --snapshot <file> (--identity <file>|--identity-stdin)) [--confirm-digest <sha256>]}"
   agmsg_validate_team_name "$team" || exit 1
-  if { [ -n "$identity_file" ] && [ "$identity_stdin" -eq 1 ]; } ||
-      { [ -z "$identity_file" ] && [ "$identity_stdin" -eq 0 ]; }; then
-    echo "agmsg: unlock requires exactly one of --identity <file> or --identity-stdin" >&2
-    exit 1
+  if [ -n "$bundle" ]; then
+    if [ "${#snapshots[@]}" -gt 0 ] || [ -n "$identity_file" ] || [ "$identity_stdin" -eq 1 ]; then
+      echo "agmsg: --bundle cannot be combined with --snapshot or --identity" >&2
+      exit 1
+    fi
+    [ -n "$confirm_digest" ] || {
+      echo "agmsg: --bundle requires --confirm-digest <sha256> verified over a separate live channel" >&2
+      exit 1
+    }
+  else
+    [ "${#snapshots[@]}" -gt 0 ] || { echo "agmsg: --snapshot or --bundle is required" >&2; exit 1; }
+    if { [ -n "$identity_file" ] && [ "$identity_stdin" -eq 1 ]; } ||
+        { [ -z "$identity_file" ] && [ "$identity_stdin" -eq 0 ]; }; then
+      echo "agmsg: unlock requires exactly one of --identity <file> or --identity-stdin" >&2
+      exit 1
+    fi
   fi
 
   local cfg binding_cipher metadata digest epoch_revision key_id recipient
@@ -997,7 +1017,29 @@ cmd_unlock() {
     echo "agmsg: team '$team' is not an encrypted pulled team awaiting unlock" >&2
     exit 1
   }
-  local snapshot_args=() snapshot
+  local snapshot_args=() identity_args=() snapshot handoff_tmp="" handoff_metadata=""
+  if [ -n "$bundle" ]; then
+    handoff_tmp="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-handoff.XXXXXX")"
+    chmod 700 "$handoff_tmp"
+    trap 'rm -r "${handoff_tmp:-}" 2>/dev/null || true' EXIT INT TERM HUP
+    handoff_metadata="$(bash "$SCRIPT_DIR/remote-sync.sh" verify-age-handoff \
+      --team "$team" --bundle "$bundle" --out-dir "$handoff_tmp")" || exit 1
+    local snapshot_count identity_count index mapped_key mapped_path
+    snapshot_count="$(_remote_json_array_length "$handoff_metadata" '$.snapshot_paths')"
+    identity_count="$(_remote_json_array_length "$handoff_metadata" '$.identities')"
+    index=0
+    while [ "$index" -lt "$snapshot_count" ]; do
+      snapshots+=("$(_remote_json_field "$handoff_metadata" "\$.snapshot_paths[$index]")")
+      index=$((index + 1))
+    done
+    index=0
+    while [ "$index" -lt "$identity_count" ]; do
+      mapped_key="$(_remote_json_field "$handoff_metadata" "\$.identities[$index].key_id")"
+      mapped_path="$(_remote_json_field "$handoff_metadata" "\$.identities[$index].path")"
+      identity_args+=("$mapped_key=$mapped_path")
+      index=$((index + 1))
+    done
+  fi
   for snapshot in "${snapshots[@]}"; do snapshot_args+=(--age-snapshot "$snapshot"); done
   metadata="$(bash "$SCRIPT_DIR/remote-sync.sh" verify-age-snapshot \
     --team "$team" "${snapshot_args[@]}")" || exit 1
@@ -1009,6 +1051,15 @@ cmd_unlock() {
   recipient="$(_remote_json_field "$metadata" '$.recipient')"
   echo "Snapshot SHA-256: $digest"
   echo "Snapshot key_id: $key_id"
+
+  if [ -n "$bundle" ]; then
+    local bundle_digest
+    bundle_digest="$(_remote_json_field "$handoff_metadata" '$.snapshot_sha256')"
+    [ "$bundle_digest" = "$digest" ] || {
+      echo "agmsg: handoff bundle verification disagrees with the snapshot chain" >&2
+      exit 1
+    }
+  fi
 
   if [ -z "$confirm_digest" ]; then
     if [ "$identity_stdin" -eq 1 ] && { [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; }; then
@@ -1023,33 +1074,43 @@ cmd_unlock() {
     exit 1
   fi
 
-  local identity_tmp derived_recipient identity_dest
-  identity_tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-unlock-identity.XXXXXX")"
-  chmod 600 "$identity_tmp"
-  trap 'rm -f "${identity_tmp:-}"' EXIT INT TERM HUP
-  if [ "$identity_stdin" -eq 1 ]; then
-    cat > "$identity_tmp"
+  local identity_tmp="" derived_recipient identity_dest mapping mapping_key mapping_path
+  if [ -n "$bundle" ]; then
+    local configured_identity_args=()
+    for mapping in "${identity_args[@]}"; do
+      mapping_key="${mapping%%=*}"
+      mapping_path="${mapping#*=}"
+      grep '^AGE-SECRET-KEY-' "$mapping_path" |
+        bash "$SCRIPT_DIR/key.sh" import "$team" --key-id "$mapping_key" \
+          --identity-stdin || exit 1
+      identity_dest="$CONNECTION_ROOT/run/remote-credentials/$team/keys/$mapping_key.key"
+      configured_identity_args+=(--age-identity "$mapping_key=$identity_dest")
+    done
   else
-    cat "$identity_file" > "$identity_tmp"
+    identity_tmp="$(mktemp "${TMPDIR:-/tmp}/agmsg-unlock-identity.XXXXXX")"
+    chmod 600 "$identity_tmp"
+    trap 'rm -f "${identity_tmp:-}"; [ -z "${handoff_tmp:-}" ] || rm -r "$handoff_tmp" 2>/dev/null || true' EXIT INT TERM HUP
+    if [ "$identity_stdin" -eq 1 ]; then
+      cat > "$identity_tmp"
+    else
+      cat "$identity_file" > "$identity_tmp"
+    fi
+    derived_recipient="$(age-keygen -y "$identity_tmp" 2>/dev/null)" || {
+      echo "agmsg: handed identity is not a valid age identity" >&2
+      exit 1
+    }
+    if [ "$derived_recipient" != "$recipient" ]; then
+      echo "agmsg: handed identity does not match the authority-confirmed snapshot" >&2
+      exit 1
+    fi
+    grep '^AGE-SECRET-KEY-' "$identity_tmp" |
+      bash "$SCRIPT_DIR/key.sh" import "$team" --key-id "$key_id" \
+        --identity-stdin || exit 1
+    identity_dest="$CONNECTION_ROOT/run/remote-credentials/$team/keys/$key_id.key"
+    configured_identity_args=(--age-identity "$key_id=$identity_dest")
+    rm -f "$identity_tmp"
+    identity_tmp=""
   fi
-  derived_recipient="$(age-keygen -y "$identity_tmp" 2>/dev/null)" || {
-    echo "agmsg: handed identity is not a valid age identity" >&2
-    exit 1
-  }
-  if [ "$derived_recipient" != "$recipient" ]; then
-    echo "agmsg: handed identity does not match the authority-confirmed snapshot" >&2
-    exit 1
-  fi
-  # age-keygen writes a native identity file with comments followed by the
-  # secret line. key.sh import intentionally accepts the raw secret on stdin,
-  # so pass only that line after age-keygen -y has validated the whole file and
-  # matched its recipient to the authority snapshot above.
-  grep '^AGE-SECRET-KEY-' "$identity_tmp" |
-    bash "$SCRIPT_DIR/key.sh" import "$team" --key-id "$key_id" \
-      --identity-stdin || exit 1
-  identity_dest="$CONNECTION_ROOT/run/remote-credentials/$team/keys/$key_id.key"
-  rm -f "$identity_tmp"
-  trap - EXIT INT TERM HUP
 
   local endpoint remote_team_id configure_out reprocess_out reprocess_result imported blocking
   endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
@@ -1063,7 +1124,7 @@ cmd_unlock() {
     "${snapshot_args[@]}" \
     --age-checkpoint "$epoch_revision:$digest" \
     --age-confirmation operator-live \
-    --age-identity "$key_id=$identity_dest")" || exit 1
+    "${configured_identity_args[@]}")" || exit 1
   [ -n "$configure_out" ] && printf '%s\n' "$configure_out"
   reprocess_out="$(bash "$SCRIPT_DIR/remote-sync.sh" reprocess --team "$team")" || exit 1
   reprocess_result="$(printf '%s\n' "$reprocess_out" |
@@ -1110,6 +1171,8 @@ cmd_unlock() {
   fi
   echo "Unlocked '$team': imported $imported envelope(s); engine running (pid $pid)."
   echo "This team is now local and ready for normal use."
+  [ -z "$handoff_tmp" ] || rm -r "$handoff_tmp"
+  trap - EXIT INT TERM HUP
 }
 
 # The remote-sync engine runs as a background daemon: one per connected team,

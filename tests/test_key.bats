@@ -57,6 +57,27 @@ EOF
   chmod +x "$SCRIPTS/remote-sync.sh"
 }
 
+stub_age_handoff() {
+  cat > "$SCRIPTS/remote-sync.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = "export-age-handoff" ]
+shift
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ]
+printf '%s' '{"format_version":1,"identities":[],"snapshots":[],"type":"agmsg_age_v1_handoff"}' > "$out"
+chmod 600 "$out"
+echo "Snapshot SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >&2
+EOF
+  chmod +x "$SCRIPTS/remote-sync.sh"
+}
+
 # --- generate --------------------------------------------------------------
 
 @test "key generate: creates a first epoch and prints the backup notice" {
@@ -169,6 +190,18 @@ EOF
   [ "$(sqlite_mem "SELECT json_valid(CAST(readfile('$(rf "$first")') AS TEXT));")" = "1" ]
   key_id="$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$config")') AS TEXT), '\$.remote_key.current.key_id');")"
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$first")') AS TEXT), '\$.authorized_writers[0]');")" = "$key_id" ]
+}
+
+@test "key handoff writes a secret bundle and prints its digest and warning" {
+  skip_if_no_age
+  stub_age_handoff
+  local bundle="$TEST_SKILL_DIR/handoff.json"
+  run bash "$SCRIPTS/key.sh" handoff testteam --out "$bundle"
+  [ "$status" -eq 0 ]
+  [ -f "$bundle" ]
+  [[ "$output" == *"Snapshot SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"* ]]
+  [[ "$output" == *"KEEP SECRET — this file IS the key"* ]]
+  [[ "$output" == *"Handoff bundle written to: $bundle"* ]]
 }
 
 # --- import --------------------------------------------------------------

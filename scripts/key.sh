@@ -5,6 +5,7 @@ set -euo pipefail
 #   key.sh generate [<team>]
 #   key.sh show [<team>] [--key-id <key-id>] [--reveal-secret]
 #   key.sh show [<team>] --snapshot [--out <file>]
+#   key.sh handoff <team> [--out <file>]
 #   key.sh import <team> [<identity>] [--identity-stdin]
 #   key.sh rotate [<team>]
 #
@@ -308,6 +309,26 @@ cmd_show() {
     exit 1
   fi
   grep '^AGE-SECRET-KEY-' "$identity_file"
+}
+
+cmd_handoff() {
+  local team="" out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out) out="${2:?--out requires a value}"; shift 2 ;;
+      --out=*) out="${1#--out=}"; shift ;;
+      --*) echo "agmsg: unknown handoff option: $1" >&2; exit 1 ;;
+      *) [ -z "$team" ] || { echo "agmsg: handoff accepts one team" >&2; exit 1; }
+         team="$1"; shift ;;
+    esac
+  done
+  : "${team:?Usage: key.sh handoff <team> [--out <file>]}"
+  agmsg_validate_team_name "$team" || exit 1
+  [ -n "$out" ] || out="./$team-age-handoff.json"
+  _key_require_age || exit 1
+  bash "$SCRIPT_DIR/remote-sync.sh" export-age-handoff --team "$team" --out "$out"
+  echo "Handoff bundle written to: $out"
+  echo "KEEP SECRET — this file IS the key. Transfer it only through a trusted channel."
 }
 
 cmd_import() {
@@ -630,9 +651,10 @@ EOF
 case "${1:-}" in
   generate) shift; cmd_generate "$@" ;;
   show) shift; cmd_show "$@" ;;
+  handoff) shift; cmd_handoff "$@" ;;
   import) shift; cmd_import "$@" ;;
   rotate) shift; cmd_rotate "$@" ;;
   *)
-    echo "Usage: key.sh <generate|show|import|rotate> ..." >&2
+    echo "Usage: key.sh <generate|show|handoff|import|rotate> ..." >&2
     exit 1 ;;
 esac

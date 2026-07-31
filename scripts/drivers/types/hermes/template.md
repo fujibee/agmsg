@@ -142,10 +142,11 @@ If argument starts with "remote pull":
 4. Show the output to the user.
 
 If argument starts with "remote unlock":
-1. Parse `<team>`, one or more `--snapshot <file>` arguments in ascending revision order, exactly one of `--identity <file>` or `--identity-stdin`, and optional `--confirm-digest <sha256>`.
-2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh unlock <team> --snapshot <file> [--snapshot <file> ...] (--identity <file>|--identity-stdin) [--confirm-digest <sha256>]`
-3. The snapshot digest must be compared over a separate live channel. Never infer or auto-confirm it. Raw identity material is a permanent secret; when `--identity-stdin` is needed, tell the user to run the command in their own terminal rather than asking them to paste the identity into agent chat.
+1. Parse `<team>`, `--bundle <file>`, and `--confirm-digest <sha256>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh unlock <team> --bundle <file> --confirm-digest <sha256>`
+3. The snapshot digest must be compared over a separate live channel. Never infer or auto-confirm it. The bundle is permanent secret key material; tell the user to transfer and handle it only through their own trusted channel, never by pasting it into agent chat.
 4. Show the complete result, including the imported-envelope count and engine PID.
+5. The advanced form with repeatable `--snapshot` plus `--identity` or `--identity-stdin` remains available when explicitly requested.
 
 If argument starts with "remote status":
 1. Parse an optional `<team>` and `--json`.
@@ -166,6 +167,11 @@ If argument starts with "key show":
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh show [<team>] [--reveal-secret]`
 3. `--reveal-secret` requires a real interactive terminal and is refused in agent mode — if the user wants to reveal a secret, tell them to run it themselves directly in their own terminal rather than through you.
 4. Show the output to the user.
+
+If argument starts with "key handoff" followed by a team name:
+1. Parse optional `--out <file>` and run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/key.sh handoff <team> [--out <file>]`
+2. The output bundle contains every epoch identity and is itself permanent secret key material. Never read it into agent chat or display its contents.
+3. Show the bundle path, latest snapshot digest, and full secrecy warning.
 
 If argument starts with "key import" followed by a team name:
 1. **Do not ask the user to paste the private identity into this chat, and do not run this command yourself.** This identity is a permanent secret. Tell the user to run this directly in their own terminal:

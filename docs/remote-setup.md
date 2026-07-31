@@ -97,23 +97,28 @@ bash ~/.agents/skills/agmsg/scripts/remote.sh connect \
 ```
 
 If the team has no key yet, connect creates one and prints the mandatory backup
-notice. It also shows how to export the compact public epoch snapshot. Transfer
-that snapshot and the private key to machine B through a separate trusted
-channel. Machine B still imports the key explicitly and live-confirms the
-displayed snapshot digest; the message server never distributes key material.
-After `pull` reports that the team is locked, machine B runs one command with
-the handed files and the digest verified over that separate live channel:
+notice. On machine A, export one secret handoff bundle containing the confirmed
+snapshot chain and every epoch identity:
+
+```sh
+bash ~/.agents/skills/agmsg/scripts/key.sh handoff <team> --out <bundle-file>
+```
+
+Transfer that bundle to machine B through a separate trusted channel. The
+message server never distributes key material. Compare the displayed snapshot
+digest over a separate live channel. After `pull` reports that the team is
+locked, machine B runs:
 
 ```sh
 bash ~/.agents/skills/agmsg/scripts/remote.sh unlock <team> \
-  --snapshot <snapshot-file> [--snapshot <next-snapshot-file> ...] \
-  --identity <identity-file> \
+  --bundle <bundle-file> \
   --confirm-digest <verified-sha256>
 ```
 
 `unlock` imports the identity, records the trust anchor, reprocesses quarantined
 envelopes, and starts the encrypted sync engine. It is safe to repeat with the
-same confirmed files.
+same confirmed bundle. The bundle contains private keys: keep it secret and
+delete the transferred copy when it is no longer needed.
 
 ## Reference
 

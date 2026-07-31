@@ -33,6 +33,8 @@ function usage() {
     [--age-identity KEY_ID=FILE ...]
   remote-sync.sh export-age-snapshot --team NAME [--out FILE]
   remote-sync.sh verify-age-snapshot --team NAME --age-snapshot FILE
+  remote-sync.sh export-age-handoff --team NAME --out FILE
+  remote-sync.sh verify-age-handoff --team NAME --bundle FILE --out-dir DIRECTORY
   remote-sync.sh once --team NAME [--limit N]
   remote-sync.sh run --team NAME [--limit N] [--interval SECONDS]
   remote-sync.sh reprocess --team NAME [--limit N]
@@ -532,6 +534,118 @@ export async function exportAgeSnapshot(args) {
     process.stdout.write(`${canonical}\n`);
   }
   process.stderr.write(`Snapshot SHA-256: ${ageSnapshotDigest(snapshot)}\n`);
+}
+
+export async function exportAgeHandoff(args) {
+  const team = requireName(args.team, "team");
+  if (!args.out) throw new Error("export-age-handoff requires --out");
+  const config = await readStoredSyncConfig(team);
+  if (config.cipher_profile !== "age-v1") throw new Error("team is not configured for age-v1");
+  validateAgeConfiguration(config);
+  await validateRetainedAgeCheckpoint(config);
+  validateConfiguredAgeIdentities(config);
+  const snapshots = ageSnapshotChain(config.age_v1);
+  const latest = snapshots.at(-1);
+  const identities = [];
+  const seen = new Set();
+  for (const epoch of latest.history) {
+    if (seen.has(epoch.key_id)) continue;
+    seen.add(epoch.key_id);
+    const path = config.age_v1.identity_files[epoch.key_id];
+    if (!path) throw new Error(`local identity is missing for ${epoch.key_id}`);
+    const identity = (await readFile(path, "utf8")).trim();
+    identities.push({ key_id: epoch.key_id, identity });
+  }
+  const bundle = {
+    format_version: 1,
+    type: "agmsg_age_v1_handoff",
+    snapshots,
+    identities,
+  };
+  const canonical = canonicalJson(bundle);
+  const outputPath = resolve(args.out);
+  const directory = dirname(outputPath);
+  await mkdir(directory, { recursive: true });
+  const temporary = join(directory, `.${basename(outputPath)}.${process.pid}.tmp`);
+  await writeFile(temporary, canonical, { mode: 0o600, flag: "wx" });
+  await rename(temporary, outputPath);
+  process.stderr.write(`Snapshot SHA-256: ${ageSnapshotDigest(latest)}\n`);
+}
+
+export async function verifyAgeHandoff(args) {
+  const team = requireName(args.team, "team");
+  if (!args.bundle || !args["out-dir"]) {
+    throw new Error("verify-age-handoff requires --bundle and --out-dir");
+  }
+  const text = await readFile(resolve(args.bundle), "utf8");
+  const bundle = parseStrictJson(text);
+  if (text.trim() !== canonicalJson(bundle)) {
+    throw new Error("age handoff bundle must be RFC 8785 JCS without duplicate or noncanonical fields");
+  }
+  if (!bundle || bundle.format_version !== 1 || bundle.type !== "agmsg_age_v1_handoff" ||
+      !Array.isArray(bundle.snapshots) || bundle.snapshots.length < 1 ||
+      !Array.isArray(bundle.identities) ||
+      Object.keys(bundle).sort().join(",") !== "format_version,identities,snapshots,type") {
+    throw new Error("age handoff bundle is invalid");
+  }
+  const outputDirectory = resolve(args["out-dir"]);
+  await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+  const snapshotPaths = [];
+  for (let index = 0; index < bundle.snapshots.length; index += 1) {
+    const path = join(outputDirectory, `snapshot-${String(index).padStart(4, "0")}.json`);
+    await writeFile(path, canonicalJson(bundle.snapshots[index]), { mode: 0o600, flag: "wx" });
+    snapshotPaths.push(path);
+  }
+  const identityMappings = [];
+  const seen = new Set();
+  for (const entry of bundle.identities) {
+    if (!entry || Object.keys(entry).sort().join(",") !== "identity,key_id" ||
+        typeof entry.key_id !== "string" || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(entry.key_id) ||
+        typeof entry.identity !== "string" || seen.has(entry.key_id)) {
+      throw new Error("age handoff identity is invalid");
+    }
+    seen.add(entry.key_id);
+    const path = join(outputDirectory, `identity-${entry.key_id}.key`);
+    await writeFile(path, `${entry.identity.trim()}\n`, { mode: 0o600, flag: "wx" });
+    identityMappings.push({ key_id: entry.key_id, path });
+  }
+  const binding = await readConnectedBinding(team);
+  const latest = bundle.snapshots.at(-1);
+  const digest = ageSnapshotDigest(latest);
+  const config = {
+    format_version: 1,
+    local_team: team,
+    server_url: binding.endpoint,
+    server_instance_id: binding.server_instance_id,
+    remote_team_id: binding.remote_team_id,
+    protocol_version: binding.protocol_version,
+    cipher_profile: "age-v1",
+    local_security_history: [{ local_security_revision: "0", effective_from_seq: "1",
+      minimum_security_mode: "e2ee-required" }],
+    age_v1: {
+      epoch_snapshots: bundle.snapshots,
+      checkpoint: { epoch_revision: latest.epoch_revision, snapshot_sha256: digest,
+        writer_generation: latest.writer_generation, confirmed_at: new Date().toISOString() },
+      identity_files: Object.fromEntries(identityMappings.map(({ key_id, path }) => [key_id, path])),
+      age_version: "verification-only",
+    },
+  };
+  validateAgeConfiguration(config);
+  const expectedKeyIds = [...new Set(latest.history.map((epoch) => epoch.key_id))];
+  if (expectedKeyIds.length !== identityMappings.length ||
+      expectedKeyIds.some((keyId) => !seen.has(keyId))) {
+    throw new Error("age handoff bundle does not contain every epoch identity exactly once");
+  }
+  validateConfiguredAgeIdentities(config);
+  const result = {
+    type: "age_handoff_verified",
+    snapshot_sha256: digest,
+    epoch_revision: latest.epoch_revision,
+    snapshot_paths: snapshotPaths,
+    identities: identityMappings,
+  };
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  return result;
 }
 
 export async function verifyAgeSnapshot(args) {
@@ -2442,13 +2556,16 @@ async function publicSnapshot(serverUrl, teamId) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = options(rest);
-  if (!["configure", "export-age-snapshot", "verify-age-snapshot", "once", "run", "reprocess", "resync",
+  if (!["configure", "export-age-snapshot", "verify-age-snapshot", "export-age-handoff",
+        "verify-age-handoff", "once", "run", "reprocess", "resync",
         "unblock-read", "pull-bootstrap", "resolve-team"].includes(command)) {
     throw new Error(usage());
   }
   if (command === "configure") { await configure(args); return; }
   if (command === "export-age-snapshot") { await exportAgeSnapshot(args); return; }
   if (command === "verify-age-snapshot") { await verifyAgeSnapshot(args); return; }
+  if (command === "export-age-handoff") { await exportAgeHandoff(args); return; }
+  if (command === "verify-age-handoff") { await verifyAgeHandoff(args); return; }
   // Before any local team exists, so neither can go through loadConfig.
   if (command === "resolve-team") { await resolveTeam(args); return; }
   if (command === "pull-bootstrap") { await pullBootstrap(args); return; }

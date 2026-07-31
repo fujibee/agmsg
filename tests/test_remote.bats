@@ -833,7 +833,7 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$PULL_TEAM_ID" encrypted
   [ "$status" -eq 0 ]
   [[ "$output" == *"This team is encrypted"* ]]
-  [[ "$output" == *"Run remote.sh unlock with the snapshot and identity you were handed."* ]]
+  [[ "$output" == *"Run remote.sh unlock --bundle with the secret handoff bundle you were given."* ]]
 
   local cfg before after
   cfg="$TEST_SKILL_DIR/teams/encrypted/config.json"
@@ -853,11 +853,13 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   skip_if_no_age
 
   bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam >/dev/null
-  local source_cfg snapshot key_id recipient identity team_id envelope digest
+  local source_cfg snapshot bundle key_id recipient identity team_id envelope digest
   source_cfg="$TEST_SKILL_DIR/teams/testteam/config.json"
   snapshot="$TEST_SKILL_DIR/handed-snapshot.json"
+  bundle="$TEST_SKILL_DIR/handed-bundle.json"
   envelope="$TEST_SKILL_DIR/handed-envelope.json"
   bash "$SCRIPTS/key.sh" show testteam --snapshot --out "$snapshot" 2>/dev/null
+  bash "$SCRIPTS/key.sh" handoff testteam --out "$bundle" >/dev/null 2>&1
   key_id="$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$source_cfg")') AS TEXT), '\$.remote_key.current.key_id');")"
   recipient="$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$source_cfg")') AS TEXT), '\$.remote_key.current.recipient');")"
   team_id="$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$source_cfg")') AS TEXT), '\$.team_id');")"
@@ -919,7 +921,7 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   [ ! -d "$PEER_SKILL_DIR/run/remote-trust" ]
 
   run bash "$peer_scripts/remote.sh" unlock encrypted \
-    --snapshot "$snapshot" --identity "$identity" --confirm-digest "$digest"
+    --bundle "$bundle" --confirm-digest "$digest"
   [ "$status" -eq 0 ]
   [[ "$output" == *"imported 1 envelope(s); engine running (pid "* ]]
   local pidfile first_pid second_pid
@@ -928,7 +930,7 @@ PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
   first_pid="$(cat "$pidfile")"
   [ -d "$PEER_SKILL_DIR/run/remote-trust" ]
   run bash "$peer_scripts/remote.sh" unlock encrypted \
-    --snapshot "$snapshot" --identity "$identity" --confirm-digest "$digest"
+    --bundle "$bundle" --confirm-digest "$digest"
   [ "$status" -eq 0 ]
   [[ "$output" == *"imported 0 envelope(s); engine running (pid "* ]]
   second_pid="$(cat "$pidfile")"

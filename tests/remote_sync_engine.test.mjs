@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink,
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   configure,
   cycle,
   driver,
+  exportAgeHandoff,
   exportAgeSnapshot,
   isRetryable,
   initialAgeSnapshot,
@@ -43,6 +44,7 @@ import {
   validateResyncResult,
   validateResyncStatus,
   verifyAgeSnapshot,
+  verifyAgeHandoff,
 } from "../scripts/internal/remote-sync.mjs";
 
 const config = {
@@ -109,7 +111,8 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
       epoch_snapshots: [initial],
       checkpoint: { epoch_revision: "0", writer_generation: "0",
         snapshot_sha256: ageSnapshotDigest(initial), confirmed_at: "2026-07-29T00:00:00Z" },
-      identity_files: {},
+      identity_files: { [oldKeyId]: join(root, "run", "remote-credentials", "demo",
+        "keys", `${oldKeyId}.key`) },
       age_version: "v1.3.1",
     },
   };
@@ -121,7 +124,14 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
     const keyDir = join(root, "run", "remote-credentials", "demo", "keys");
     await mkdir(teamDir, { recursive: true });
     await mkdir(keyDir, { recursive: true });
-    await writeFile(join(teamDir, "config.json"), `${JSON.stringify(teamConfig)}\n`);
+    await writeFile(join(teamDir, "config.json"), `${JSON.stringify({ ...teamConfig,
+      remote_binding: { endpoint: "https://sync.example.test",
+        server_instance_id: config.server_instance_id,
+        remote_team_id: config.remote_team_id, protocol_version: 1,
+        capabilities: { write_allowed_ciphers: ["none", "age-v1"] },
+        cipher_profile: "age-v1", connected_at: "2026-07-29T00:00:00Z",
+        disconnected_at: null },
+    })}\n`);
     await writeFile(join(teamDir, "roster.jsonl"), [
       JSON.stringify({ type: "key_rotated", ...rotation,
         at: "2026-07-30T00:00:00.000000Z", server_seq: undefined }),
@@ -131,6 +141,7 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
         server_instance_id: config.server_instance_id,
         remote_team_id: config.remote_team_id }), "",
     ].join("\n"));
+    await writeFile(join(keyDir, `${oldKeyId}.key`), `${identity}\n`, { mode: 0o600 });
     await writeFile(join(keyDir, `${newKeyId}.key`), `${identity}\n`, { mode: 0o600 });
     const snapshot = nextLocalAgeSnapshot(rotationConfig, teamConfig, rotation);
     assert.equal(snapshot.epoch_revision, "1");
@@ -154,6 +165,17 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
     const exported = JSON.parse(await readFile(exportedPath, "utf8"));
     assert.equal(exported.epoch_revision, "1");
     assert.equal(exported.history.length, 2);
+    const handoffPath = join(root, "age-handoff.json");
+    await exportAgeHandoff({ team: "demo", out: handoffPath });
+    const handoff = JSON.parse(await readFile(handoffPath, "utf8"));
+    assert.equal(handoff.snapshots.length, 2);
+    assert.deepEqual(handoff.identities.map((entry) => entry.key_id), [oldKeyId, newKeyId]);
+    assert.equal((await stat(handoffPath)).mode & 0o077, 0);
+    const extracted = await verifyAgeHandoff({ team: "demo", bundle: handoffPath,
+      "out-dir": join(root, "handoff-extracted") });
+    assert.equal(extracted.snapshot_sha256, ageSnapshotDigest(snapshot));
+    assert.equal(extracted.snapshot_paths.length, 2);
+    assert.equal(extracted.identities.length, 2);
     const confirmedStored = structuredClone(stored);
     const rolledBack = structuredClone(confirmedStored);
     rolledBack.age_v1.epoch_snapshots = [initial];
