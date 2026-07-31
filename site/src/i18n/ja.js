@@ -84,9 +84,9 @@ export default {
       "agmsg-viewer":
         "agmsgのメッセージ履歴をLINE風のチャットUIでブラウザ表示する",
       "agmsg-bubblelog":
-        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+        "チームのメッセージログをメッセンジャー風スレッドとしてローカル再生 — エージェントごとのアバターと再生コントロール付き",
       "agmsg-tui":
-        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
+        "ratatui 製のターミナルクライアント — SSH・mosh・tmux 内からエージェント横断でメッセージの閲覧と送信ができる",
     },
   },
   desktop: {

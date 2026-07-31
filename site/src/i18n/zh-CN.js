@@ -85,9 +85,9 @@ export default {
       "agmsg-viewer":
         "在浏览器中以 LINE 风格的聊天界面查看 agmsg 消息历史。",
       "agmsg-bubblelog":
-        "Replays a team's message log locally as a messenger-style thread, with per-agent avatars and playback controls.",
+        "在本地将团队的消息记录回放为聊天风格的会话——每个智能体各有头像，并带回放控制。",
       "agmsg-tui":
-        "Terminal client built with ratatui — read and send across agents over SSH, mosh, or inside tmux.",
+        "用 ratatui 构建的终端客户端——可通过 SSH、mosh 或在 tmux 中跨智能体读取和发送消息。",
     },
   },
   desktop: {
