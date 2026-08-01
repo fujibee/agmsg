@@ -68,6 +68,20 @@ if [ -n "${CODEX_THREAD_ID:-}" ]; then
   thread="$CODEX_THREAD_ID"
 fi
 
+# Past this point every remaining path is an INFERENCE, and an inference may not
+# change a seat that already exists -- not the loaded-set subtraction below, and
+# not the rollout scan either. The subtraction fails by removing this role's own
+# thread and adopting what is left; the rollout scan fails by picking whatever
+# happens to be unique in the cwd. Both replace a correct seat with a stranger's
+# thread, so the rule belongs to the whole inference, not to one branch of it.
+#
+# CODEX_THREAD_ID is exempt because it is not an inference: it is either exported
+# by the session itself or passed by the bridge with the thread the app-server
+# confirmed, which is exactly how a seeded seat gets corrected after arming.
+if [ -z "$thread" ] && [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
+  exit 0
+fi
+
 # Ask the app-server which threads it has loaded, and subtract the ones a role
 # already sits in (#579). The rollout files below cannot answer "which thread is
 # THIS session" on a project that has been worked in before: every past session
@@ -91,15 +105,6 @@ fi
 # gets seated.
 probe_ran=0
 if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
-  # An inference may only claim a role that has no seat. The subtraction removes
-  # every recorded thread INCLUDING this role's own, so a seated role running
-  # this again would find its own thread gone from the set and adopt whatever
-  # else was left -- overwriting a correct seat with a stranger's thread. Only
-  # CODEX_THREAD_ID, which is not an inference, may re-seat a seated role (that
-  # is how the bridge rewrites the seat after arming).
-  if [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
-    exit 0
-  fi
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/node.sh"
   node_bin="$(agmsg_resolve_node 2>/dev/null || true)"

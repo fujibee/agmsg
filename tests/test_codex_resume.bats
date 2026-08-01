@@ -334,3 +334,16 @@ fake_node_failing() {
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
   [ "$(recorded_uuid team alice)" = "confirmed-thread" ]
 }
+
+@test "codex record: the rollout scan does not re-seat a seated role either" {
+  # The guard belongs to the whole inference, not to the app-server branch. With
+  # no app-server the rollout scan is the inference, and a unique rollout must not
+  # replace a seat that is already there.
+  local proj; proj="$(mktemp -d)"
+  make_rollout "rollout-unique-uuid" "$proj"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-A "$proj" codex
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ "$(recorded_uuid team alice)" = "thread-A" ]
+}
