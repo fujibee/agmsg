@@ -26,7 +26,10 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
-# _agmsg_pid_alive: every lifetime and lock-owner check below goes through it.
+# The liveness helpers. Every lifetime and lock-owner check below goes through
+# one of them, chosen by where the pid was minted: _agmsg_pid_alive_local for
+# the ones this shell or codex-monitor.sh produced, _agmsg_pid_alive for the
+# bridge's own pid, which the bridge records itself (#567).
 # Sourced explicitly rather than relied on transitively through role-session.sh,
 # which only pulls it in when actas-lock.sh has not already been loaded.
 # shellcheck source=../../../lib/instance-id.sh
