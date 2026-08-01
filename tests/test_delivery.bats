@@ -2088,14 +2088,17 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): identity with no bridge reports not running" {
+@test "delivery status (codex): identity with no bridge and no seat says so, not \"not running\"" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex bridge: team/alice not running"* ]]
+  # No seat is the reason here, and it is a different problem from a process
+  # that died -- the old wording named the wrong one (#579).
+  [[ "$output" == *"Codex bridge: team/alice has no session recorded"* ]]
+  [[ "$output" != *"Codex bridge: team/alice not running"* ]]
   [[ "$output" != *"watch processes:"* ]]
 }
 
@@ -2212,7 +2215,7 @@ EOF
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
-  [[ "$output" == *"Codex bridge: team/bob not running"* ]]
+  [[ "$output" == *"Codex bridge: team/bob has no session recorded"* ]]
   [[ "$output" != *"watch processes:"* ]]
 
   kill "$bpid" 2>/dev/null || true
@@ -2481,4 +2484,19 @@ JSON
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   run bash "$SCRIPTS/delivery.sh" status grok-build "$TEST_PROJECT"
   [[ "$output" =~ "mode: turn" ]]
+}
+
+@test "delivery status (codex): a recorded seat makes \"not running\" mean the process (#579)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  # shellcheck disable=SC1090
+  SKILL_DIR="$TEST_SKILL_DIR" source "$SCRIPTS/lib/role-session.sh"
+  SKILL_DIR="$TEST_SKILL_DIR" agmsg_role_session_record team alice seat-uuid-1 "$TEST_PROJECT" codex
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # With a seat on record, the bridge really is just absent -- and the seat is
+  # printed so the reader can tell the two states apart at a glance.
+  [[ "$output" == *"Codex bridge: team/alice not running (seat recorded: seat-uuid-1)"* ]]
+  [[ "$output" != *"has no session recorded"* ]]
 }

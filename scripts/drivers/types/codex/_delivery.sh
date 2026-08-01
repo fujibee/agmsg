@@ -87,6 +87,52 @@ agmsg_codex_shim_path_note() {
   fi
 }
 
+# Why a role has no bridge. A seat (role-session record) is what every layer of
+# the monitor path requires, so its absence -- not a dead process -- is the usual
+# reason nothing is running. When the seat is missing, the loaded-thread count is
+# what decides whether the next session can seed one, so report that too (#579).
+agmsg_codex_report_missing_bridge() {
+  local team="$1" name="$2" project="$3" seat loaded_count port_file port node_bin
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/role-session.sh"
+  seat="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+  if [ -n "$seat" ]; then
+    echo "Codex bridge: $team/$name not running (seat recorded: $seat)"
+    return 0
+  fi
+
+  loaded_count=""
+  port_file="$RUN_DIR/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
+  port="$(cat "$port_file" 2>/dev/null || true)"
+  node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
+  if [ -n "$port" ] && [ -n "$node_bin" ] && { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; }; then
+    loaded_count="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
+      --app-server "ws://127.0.0.1:$port" --print-loaded-threads 2>/dev/null | grep -c . || true)"
+  fi
+
+  case "${loaded_count:-}" in
+    "")
+      echo "Codex bridge: $team/$name has no session recorded, and no app-server to ask"
+      echo "  Start Codex through monitor mode in this project; the seat is recorded then."
+      ;;
+    0)
+      echo "Codex bridge: $team/$name has no session recorded (no Codex thread is loaded yet)"
+      echo "  Start Codex through monitor mode in this project; the seat is recorded then."
+      ;;
+    1)
+      echo "Codex bridge: $team/$name has no session recorded, though one thread is loaded"
+      echo "  That combination is unexpected -- the seat is normally written for it."
+      ;;
+    *)
+      echo "Codex bridge: $team/$name has no session recorded ($loaded_count threads loaded, none identifiable as its session)"
+      echo "  Recreate this project's app-server so the next session can be identified:"
+      echo "    $SCRIPT_DIR/delivery.sh set off codex $project"
+      echo "    $SCRIPT_DIR/delivery.sh set monitor codex $project"
+      echo "  This also stops any other Codex bridge for this project."
+      ;;
+  esac
+}
+
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0 any_alive=0
@@ -109,7 +155,11 @@ agmsg_delivery_runtime_status() {
     metafile="$base.meta"
 
     if [ ! -f "$pidfile" ]; then
-      echo "Codex bridge: $team/$name not running"
+      # "not running" reads as "the bridge process died". The far more common
+      # cause is that this role has no seat, which no layer of the monitor path
+      # says out loud: the SessionStart hook exits 0, the launcher re-execs, and
+      # the only visible symptom is this line. Say which one it is.
+      agmsg_codex_report_missing_bridge "$team" "$name" "$project"
       continue
     fi
 
