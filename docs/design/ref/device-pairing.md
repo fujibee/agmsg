@@ -1,5 +1,11 @@
 # Device pairing (`key request` / `key approve`)
 
+> **SUPERSEDED.** The onboarding this describes was replaced by
+> [`docs/design/remote-sync.md`](../remote-sync.md), which states the replacement
+> from its own side. Kept as design history: the reasoning here is why the
+> current shape is what it is, and the findings it records were closed rather
+> than dropped. Do not build to it.
+
 **Status: draft, revision 7.** Replaces the NOT READY subsection of
 `remote-connect-onboarding.md` §8, which recorded five findings from an
 adversarial review. A2 (one-directional authentication) was closed by the

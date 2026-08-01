@@ -1,5 +1,11 @@
 # Handing an authentication result to a host's authorization decision
 
+> **SUPERSEDED.** The onboarding this describes was replaced by
+> [`docs/design/remote-sync.md`](../remote-sync.md), which states the replacement
+> from its own side. Kept as design history: the reasoning here is why the
+> current shape is what it is, and the findings it records were closed rather
+> than dropped. Do not build to it.
+
 **Status: review passed; adoption undecided.** Revision 5. Design study for a
 seam the reference server does not have yet. It is deliberately narrow: it does
 not change who may connect, it changes how many times a request establishes

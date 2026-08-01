@@ -1,5 +1,11 @@
 # Local-first onboarding and convergent roster design
 
+> **SUPERSEDED.** The onboarding this describes was replaced by
+> [`docs/design/remote-sync.md`](../remote-sync.md), which states the replacement
+> from its own side. Kept as design history: the reasoning here is why the
+> current shape is what it is, and the findings it records were closed rather
+> than dropped. Do not build to it.
+
 **Status:** design gate
 **Last updated:** 2026-07-25
 **Owner:** @fujibee
