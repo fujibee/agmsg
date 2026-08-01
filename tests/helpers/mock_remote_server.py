@@ -416,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                 "current_seq": "0",
                 "next_sequence_boundary": "1",
                 "accepted_envelope_versions": [1],
-                "write_allowed_ciphers": ["none", "age-v1"],
+                "write_allowed_ciphers": CONNECT_CIPHERS,
                 "policy_revision": "0",
                 "effective_from_seq": "1",
                 "max_blob_bytes": "1048576",
