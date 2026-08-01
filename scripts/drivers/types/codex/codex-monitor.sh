@@ -175,15 +175,14 @@ if [ -z "$PORT" ]; then
     # `app-server --listen ws://`): no point burning the full timeout before we
     # fail open.
     #
-    # `kill -0`, deliberately, and not the shared _agmsg_pid_alive: this pid is
-    # our OWN background child, taken from $! in this shell, so it is numbered in
-    # the MSYS pid space. Under MSYSTEM the shared helper answers from `tasklist`,
-    # which knows Windows pids only -- it cannot see this one, reports it dead on
-    # the first iteration, and every Windows launch falls back to plain codex with
-    # no bridge (#567). The helper is right for a pid that came from outside this
-    # shell; it is wrong for a pid this shell just minted. Do not re-unify this
-    # call site without settling which pid space the value belongs to.
-    kill -0 "$server_bg" 2>/dev/null || break
+    # _local, deliberately: this pid came from $! in this shell, so it is numbered
+    # in the MSYS pid space, and `tasklist` -- which is what the plain helper asks
+    # under MSYSTEM -- has no record of it. It answered "dead" on the first pass
+    # here, seconds before the banner, and every Windows launch since 1.1.12 fell
+    # back to plain codex with no bridge (#567). Not a bare `kill -0` either: the
+    # EPERM reading still has to hold, or a sandbox that cannot signal our own
+    # child fails us open the same way (#505).
+    _agmsg_pid_alive_local "$server_bg" || break
     sleep 0.1
   done
   if [ -z "$PORT" ]; then

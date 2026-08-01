@@ -224,71 +224,70 @@ while True:
   kill "$foreign_pid" 2>/dev/null || true
 }
 
-# --- MSYS pid space (#567) ---
+
+# --- which pid space (#567) ---
+#
+# Both tests below model Git Bash: MSYSTEM set, and a `tasklist` that answers as
+# the real one does for a pid it has no record of -- nothing. The app-server pid
+# is minted by $! in codex-monitor.sh, so it lives in the MSYS pid space and
+# tasklist never reports it; a probe that asks tasklist calls a running server
+# dead. Setting MSYSTEM does not otherwise disturb a POSIX run: compat.sh picks
+# its platform from `uname -s`, and the only other reader is a pid-range bound.
+
+# Answers nothing, like tasklist asked about a pid it does not know.
+_stub_tasklist() {
+  local dir="$1"
+  mkdir -p "$dir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/tasklist"
+  chmod +x "$dir/tasklist"
+}
 
 @test "codex-monitor: waits for the port when tasklist cannot see the app-server (#567)" {
-  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative here"
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
   run node -e 'const net = require("net"); if (!net) process.exit(1);'
   if [ "$status" -ne 0 ]; then
     skip "node net module is not available in this sandbox"
   fi
 
-  # The app-server is this shell's own background child, so its pid is numbered
-  # in the MSYS pid space. `tasklist` reports Windows pids and cannot see it. A
-  # liveness probe that asks tasklist therefore calls a running app-server dead
-  # on the first iteration and the launch falls back to plain codex (#567).
-  #
-  # MSYSTEM steers the shared helper down its tasklist branch; the stub is what
-  # tasklist would say about a pid it has no record of, which is nothing. Setting
-  # MSYSTEM does not otherwise disturb a macOS run -- compat.sh picks its
-  # platform from `uname -s`, not from this variable.
   local stubdir="$TEST_PROJECT/stub-bin"
-  mkdir -p "$stubdir"
-  cat > "$stubdir/tasklist" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$stubdir/tasklist"
+  _stub_tasklist "$stubdir"
 
-  # The banner is delayed on purpose. The wait loop reads the log BEFORE it
-  # probes liveness, so an app-server that announces itself immediately breaks
-  # out on the first pass and never reaches the probe -- against which this test
-  # would pass no matter what the probe answered.
-  local slow_codex="$TEST_PROJECT/slow-codex"
-  cat > "$slow_codex" <<'EOF'
+  # Reaching the liveness probe is fixed by ORDER, not by a delay. Each pass of
+  # the wait loop reads the log with sed and only probes when that came back
+  # empty, so a server that has already announced itself breaks out on the first
+  # pass and the probe never runs -- against which this test would pass whatever
+  # the probe answered. An earlier revision leaned on a 600ms banner delay for
+  # that, which is a race: deschedule the parent past it and the seam is gone.
+  #
+  # The shim forces the first port-extracting sed to come back empty, so the
+  # first pass always reaches the probe, and hands every later call to the real
+  # sed so the second pass finds the banner. It matches on the argument rather
+  # than on being the first sed of the run: other sed calls in this script would
+  # otherwise consume the one intercept and the seam would miss silently.
+  export SED_SHIM_MARKER="$TEST_PROJECT/sed-shim-fired"
+  local real_sed; real_sed="$(command -v sed)"
+  cat > "$stubdir/sed" <<EOF
 #!/usr/bin/env bash
-case "${1:-}" in
-  --version) echo "codex-cli 0.144.1"; exit 0 ;;
-  app-server)
-    node - <<'JS' &
-const net = require('net');
-const s = net.createServer((c) => c.destroy());
-setTimeout(() => {
-  s.listen(0, '127.0.0.1', () => {
-    console.log('codex app-server (WebSockets)');
-    console.log('  listening on: ws://127.0.0.1:' + s.address().port);
-  });
-}, 600);
-setTimeout(() => process.exit(0), 60000);
-JS
-    child=$!
-    trap 'kill "$child" 2>/dev/null' TERM INT
-    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
-    ;;
-  *)
-    printf 'plain-codex' >> "$CALL_LOG"
-    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
-    printf '\n' >> "$CALL_LOG"
+case "\$*" in
+  *"listening on"*)
+    if [ ! -e "\$SED_SHIM_MARKER" ]; then
+      : > "\$SED_SHIM_MARKER"
+      exit 0
+    fi
     ;;
 esac
+exec "$real_sed" "\$@"
 EOF
-  chmod +x "$slow_codex"
+  chmod +x "$stubdir/sed"
 
-  run env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" AGMSG_REAL_CODEX="$slow_codex" \
+  run env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
   [ "$status" -eq 0 ]
-  # The bridged handoff, not the fail-open: the wait outlasted a probe that
-  # could not see the process.
+  # The seam was actually taken. Without this the assertions below could hold
+  # for the wrong reason -- a run that never entered the loop body at all.
+  [ -e "$SED_SHIM_MARKER" ]
+  # Bridged, not the fail-open: the wait outlasted a probe that could not see
+  # the process.
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   [[ "$output" != *"did not report a listening port"* ]]
 }

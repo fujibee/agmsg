@@ -89,15 +89,20 @@ _agmsg_pid_valid() {
   return 0
 }
 
-_agmsg_pid_alive() {
+# Liveness for a pid THIS codebase minted: $! or $$ in one of these shells, or
+# read back from a pidfile one of them wrote. A pidfile does not launder the pid
+# space -- the number in it is still whatever the shell that wrote it was given.
+#
+# Under Git Bash such a pid is numbered in the MSYS space, which `tasklist` does
+# not report, so the Windows branch in _agmsg_pid_alive must not run for one:
+# asking tasklist about an MSYS pid answers "dead" for a process that is running,
+# which is how every Windows codex launch lost its bridge (#567).
+#
+# The EPERM reading and the ps cross-check are the same as _agmsg_pid_alive's --
+# a pid we minted is still a pid a sandbox may refuse to let us signal (#505).
+_agmsg_pid_alive_local() {
   local pid="$1" err stat
   _agmsg_pid_valid "$pid" || return 1
-  case "${MSYSTEM:-}" in
-    MINGW*|MSYS*|CLANGARM*)
-      MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
-      return $?
-      ;;
-  esac
   # Fast path, and the common answer: the builtin, no fork. Callers poll this in
   # loops whose whole point is to be fork-free (#466), so the alive case must
   # not cost a subshell.
@@ -116,6 +121,25 @@ _agmsg_pid_alive() {
   [ -n "$stat" ] || return 1
   case "$stat" in Z*) return 1 ;; esac   # exited, just not reaped yet
   return 0
+}
+
+# Liveness for a pid that came from OUTSIDE these shells -- reached by walking
+# ancestors until the walk leaves the MSYS subsystem, so under Git Bash the
+# number is a Windows pid and kill(1) there cannot see it at all (#134).
+#
+# Which of the two applies is decided by where the pid was minted, not by whether
+# it arrived through a pidfile. For anything $! or $$ produced, and anything read
+# back from a pidfile one of these shells wrote, use _agmsg_pid_alive_local.
+_agmsg_pid_alive() {
+  local pid="$1"
+  _agmsg_pid_valid "$pid" || return 1
+  case "${MSYSTEM:-}" in
+    MINGW*|MSYS*|CLANGARM*)
+      MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
+      return $?
+      ;;
+  esac
+  _agmsg_pid_alive_local "$pid"
 }
 
 # Compose from an explicit pid. Bare sid when pid is empty/non-numeric.
