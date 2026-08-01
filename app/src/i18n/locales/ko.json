@@ -138,14 +138,24 @@
       "title": "{{name}}을(를) 닫으시겠습니까?",
       "body": "{{name}}이(가) 중지됩니다. 되돌릴 수 없습니다.",
       "confirmLabel": "패널 닫기"
+    },
+    "projectDir": {
+      "titleTeam": "프로젝트 디렉터리 — {{team}}",
+      "titleAgent": "프로젝트 디렉터리 — {{name}}",
+      "note": "변경 사항은 에이전트가 다음에 시작될 때부터 적용됩니다. 이미 실행 중인 패널은 현재 디렉터리를 그대로 유지합니다.",
+      "save": "저장"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "프로젝트 디렉터리 변경…"
+    },
     "member": {
       "spawnTo": "실행 위치 ▸",
       "spawnNewTab": "새 탭",
       "existingTabsDivider": "— 기존 탭 —",
       "rename": "이름 변경…",
+      "setProject": "프로젝트 디렉터리 변경…",
       "leave": "나가기"
     },
     "pane": {

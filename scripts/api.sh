@@ -87,6 +87,13 @@ get_members() {
         SELECT json_extract(r.value, '\$.project')
         FROM json_each(json_extract(a.value, '\$.registrations')) AS r
         LIMIT 1
+      ),
+      'registrations', (
+        SELECT json_group_array(json_object(
+          'type', json_extract(r.value, '\$.type'),
+          'project', json_extract(r.value, '\$.project')
+        ))
+        FROM json_each(json_extract(a.value, '\$.registrations')) AS r
       )
     )
     FROM cfg, json_each(json_extract(cfg.json, '\$.agents')) AS a

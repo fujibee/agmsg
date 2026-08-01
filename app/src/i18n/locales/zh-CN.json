@@ -138,14 +138,24 @@
       "title": "关闭 {{name}}？",
       "body": "这将停止 {{name}}。此操作无法撤销。",
       "confirmLabel": "关闭面板"
+    },
+    "projectDir": {
+      "titleTeam": "项目目录 — {{team}}",
+      "titleAgent": "项目目录 — {{name}}",
+      "note": "更改将在该智能体下次启动时生效。已在运行的面板会保留当前目录。",
+      "save": "保存"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "更改项目目录…"
+    },
     "member": {
       "spawnTo": "启动到 ▸",
       "spawnNewTab": "新标签页",
       "existingTabsDivider": "— 现有标签页 —",
       "rename": "重命名…",
+      "setProject": "更改项目目录…",
       "leave": "离开"
     },
     "pane": {

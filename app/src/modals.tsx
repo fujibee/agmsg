@@ -316,6 +316,67 @@ export function AgentModal(props: {
   );
 }
 
+export function ProjectDirModal(props: {
+  title: string;
+  current: string;
+  onSave: (project: string) => Promise<void>;
+  onClose: () => void;
+  browseDir: BrowseDir;
+}) {
+  const { t } = useTranslation();
+  // Plain controlled input, not useDefaultProject — this field is editing an
+  // EXISTING registration's project, so it must never re-derive a default
+  // from a name the way the add-member modals do.
+  const [project, setProject] = useState(props.current);
+  const [err, setErr] = useState("");
+  const trimmed = project.trim();
+  const ready = trimmed !== "" && trimmed !== props.current;
+  const submit = async () => {
+    if (!ready) return;
+    try {
+      await props.onSave(trimmed);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  return (
+    <Modal title={props.title} onClose={props.onClose}>
+      <p className="modal-note">{t("modal.projectDir.note")}</p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <label>
+          {t("common.projectDirLabel")}
+          <span className="path-row">
+            <input autoFocus value={project} onChange={(e) => setProject(e.target.value)} />
+            <button
+              type="button"
+              onClick={async () => {
+                const d = await props.browseDir(project);
+                if (d) setProject(d);
+              }}
+            >
+              {t("common.browse")}
+            </button>
+          </span>
+        </label>
+        {err && <div className="modal-err">{err}</div>}
+        <div className="modal-actions">
+          <button type="button" onClick={props.onClose}>
+            {t("common.cancel")}
+          </button>
+          <button type="submit" className="primary" disabled={!ready}>
+            {t("modal.projectDir.save")}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 export function RenameModal(props: {
   current: string;
   onRename: (current: string, next: string) => Promise<void>;

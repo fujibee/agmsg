@@ -62,6 +62,7 @@ flows use:
 | Join a team / register an agent | `scripts/join.sh <team> <name> <type> <project>` |
 | Rename an agent | `scripts/rename.sh <team> <old> <new>` |
 | Remove an agent from a team | `scripts/leave.sh <team> <name>` |
+| Change a registered agent's project dir | `scripts/set-project.sh <team> <name> <new_project> [--type <type>]` |
 | Check delivery mode | `scripts/delivery.sh status [<type> <project>]` |
 | Set delivery mode | `scripts/delivery.sh set <mode> <type> <project>` |
 

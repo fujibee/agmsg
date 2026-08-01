@@ -138,14 +138,24 @@
       "title": "Fechar {{name}}?",
       "body": "Isso vai parar {{name}}. Isso não pode ser desfeito.",
       "confirmLabel": "Fechar painel"
+    },
+    "projectDir": {
+      "titleTeam": "Diretório do projeto — {{team}}",
+      "titleAgent": "Diretório do projeto — {{name}}",
+      "note": "Terá efeito na próxima vez que o agente for iniciado. Painéis já em execução mantêm o diretório atual.",
+      "save": "Salvar"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "Alterar diretório do projeto…"
+    },
     "member": {
       "spawnTo": "Iniciar em ▸",
       "spawnNewTab": "Nova aba",
       "existingTabsDivider": "— abas existentes —",
       "rename": "Renomear…",
+      "setProject": "Alterar diretório do projeto…",
       "leave": "Sair"
     },
     "pane": {

@@ -137,6 +137,202 @@ EOF
   [ ! -e "$TEST_SKILL_DIR/teams/myteam/.config.lock" ]
 }
 
+# --- set-project.sh ---
+
+# Prints <agent>'s registered project paths in <team>, one per line, in
+# registration order. Looks the agent up by `key = '<agent>'` in json_each
+# over $.agents (same shape set-project.sh's own EXISTING query uses) rather
+# than concatenating the name into a '$.agents.<name>' JSON path, so a quote
+# in the agent name can't misroute this helper either.
+projects_of() {
+  local team="$1" agent="$2" cfg agent_sql
+  cfg="$TEST_SKILL_DIR/teams/$team/config.json"
+  agent_sql="$(printf '%s' "$agent" | sed "s/'/''/g")"
+  sqlite_mem "
+    WITH cfg AS (SELECT CAST(readfile('$(rf "$cfg")') AS TEXT) AS json),
+    agent AS (
+      SELECT value AS a
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT json_extract(r.value, '\$.project')
+    FROM agent, json_each(json_extract(agent.a, '\$.registrations')) AS r
+    ORDER BY r.key;
+  "
+}
+
+# Same lookup, filtered to a single registration type — for assertions that a
+# --type-scoped set-project left a specific type's project alone (or moved
+# it), independent of the agent's other registrations.
+project_of_type() {
+  local team="$1" agent="$2" type="$3" cfg agent_sql type_sql
+  cfg="$TEST_SKILL_DIR/teams/$team/config.json"
+  agent_sql="$(printf '%s' "$agent" | sed "s/'/''/g")"
+  type_sql="$(printf '%s' "$type" | sed "s/'/''/g")"
+  sqlite_mem "
+    WITH cfg AS (SELECT CAST(readfile('$(rf "$cfg")') AS TEXT) AS json),
+    agent AS (
+      SELECT value AS a
+      FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
+      WHERE key = '$agent_sql'
+    )
+    SELECT json_extract(r.value, '\$.project')
+    FROM agent, json_each(json_extract(agent.a, '\$.registrations')) AS r
+    WHERE json_extract(r.value, '\$.type') = '$type_sql';
+  "
+}
+
+@test "set-project: repoints an existing registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-old
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-new
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Set project for alice in myteam: /tmp/proj-new" ]]
+  local projs; projs="$(projects_of myteam alice)"
+  [[ "$projs" =~ "/tmp/proj-new" ]]
+  [[ ! "$projs" =~ "/tmp/proj-old" ]]
+}
+
+@test "set-project: --type omitted moves every registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b
+  [ "$status" -eq 0 ]
+  local projs; projs="$(projects_of myteam alice)"
+  [ "$(echo "$projs" | wc -l | tr -d ' ')" -eq 2 ]
+  [[ ! "$projs" =~ "/tmp/proj-a" ]]
+  [ "$(echo "$projs" | grep -c "/tmp/proj-b")" -eq 2 ]
+}
+
+@test "set-project: --type moves only that type's registrations, others untouched" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b --type codex
+  [ "$status" -eq 0 ]
+  [ "$(project_of_type myteam alice codex)" = "/tmp/proj-b" ]
+  [ "$(project_of_type myteam alice claude-code)" = "/tmp/proj-a" ]
+}
+
+@test "set-project: --type agmsg-app moves only the app-user registration when a name is shared with another type (Codex review scenario)" {
+  bash "$SCRIPTS/join.sh" myteam shared agmsg-app /tmp/proj-app
+  bash "$SCRIPTS/join.sh" myteam shared claude-code /tmp/proj-agent
+  run bash "$SCRIPTS/set-project.sh" myteam shared /tmp/proj-app-new --type agmsg-app
+  [ "$status" -eq 0 ]
+  [ "$(project_of_type myteam shared agmsg-app)" = "/tmp/proj-app-new" ]
+  [ "$(project_of_type myteam shared claude-code)" = "/tmp/proj-agent" ]
+}
+
+@test "set-project: collapses a registration that lands on an existing identical one" {
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-b
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-a --type codex
+  [ "$status" -eq 0 ]
+  local projs; projs="$(projects_of myteam alice)"
+  [ "$(echo "$projs" | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$projs" = "/tmp/proj-a" ]
+}
+
+@test "set-project: leaves other members untouched" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam bob claude-code /tmp/proj-b
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-new
+  [ "$status" -eq 0 ]
+  [ "$(projects_of myteam bob)" = "/tmp/proj-b" ]
+}
+
+@test "set-project: fails on unknown team" {
+  run bash "$SCRIPTS/set-project.sh" ghostteam alice /tmp/proj
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Team not found" ]]
+}
+
+@test "set-project: fails when agent is not in team" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam ghost /tmp/proj-b
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not in team" ]]
+}
+
+@test "set-project: fails when --type matches no registration, config unchanged" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  local cfg="$TEST_SKILL_DIR/teams/myteam/config.json" before
+  before="$(cat "$cfg")"
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b --type codex
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "No 'codex' registration" ]]
+  [ "$(cat "$cfg")" = "$before" ]
+}
+
+@test "set-project: rejects unknown --type" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b --type bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Unknown agent type" ]]
+}
+
+@test "set-project: an agent name containing a single quote doesn't break the underlying SQL statement (#87-class)" {
+  local agent="al'ice"
+  bash "$SCRIPTS/join.sh" myteam "$agent" claude-code /tmp/proj-old
+  run bash "$SCRIPTS/set-project.sh" myteam "$agent" /tmp/proj-new
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "syntax error" ]]
+  [[ ! "$output" =~ ".parameter" ]]
+  [ "$(projects_of myteam "$agent")" = "/tmp/proj-new" ]
+}
+
+@test "set-project: a project path containing a single quote survives the round trip" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-old
+  local project="$TEST_SKILL_DIR/pro'j"
+  run bash "$SCRIPTS/set-project.sh" myteam alice "$project"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "$project" ]]
+  [ "$(projects_of myteam alice)" = "$project" ]
+}
+
+@test "set-project: rejects an agent name containing path-hazard characters" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam "al.ice" /tmp/proj-b
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "must not contain" ]]
+}
+
+@test "set-project: releases its lock on success (no .config.lock left behind)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b
+  [ ! -e "$TEST_SKILL_DIR/teams/myteam/.config.lock" ]
+}
+
+@test "set-project: releases its lock when the agent isn't in the team" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam ghost /tmp/proj-b
+  [ "$status" -ne 0 ]
+  [ ! -e "$TEST_SKILL_DIR/teams/myteam/.config.lock" ]
+}
+
+@test "set-project: releases its lock when --type matches no registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  run bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-b --type codex
+  [ "$status" -ne 0 ]
+  [ ! -e "$TEST_SKILL_DIR/teams/myteam/.config.lock" ]
+}
+
+@test "set-project: whoami.sh resolves the agent at the new project and no longer at the old one" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-old
+  bash "$SCRIPTS/set-project.sh" myteam alice /tmp/proj-new
+  clear_autodetect_env
+  mock_no_agent_ps
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-new claude-code
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "agent=alice" ]]
+  # Not an exact match at the old path any more. alice is still a registered
+  # claude-code agent (just elsewhere now), so this legitimately falls into
+  # whoami's "suggest=true agents=alice ..." shape rather than
+  # "not_joined=true" -- the contract this asserts is just that /tmp/proj-old
+  # no longer resolves as an exact "agent=alice" identity.
+  run bash "$SCRIPTS/whoami.sh" /tmp/proj-old claude-code
+  [ "$status" -eq 0 ]
+  [[ ! "$output" =~ "agent=alice" ]]
+}
+
 # --- leave.sh ---
 
 @test "leave: removes agent from team" {

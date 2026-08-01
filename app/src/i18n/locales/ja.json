@@ -138,14 +138,24 @@
       "title": "{{name}} を閉じますか?",
       "body": "{{name}} が停止します。元に戻せません。",
       "confirmLabel": "ペインを閉じる"
+    },
+    "projectDir": {
+      "titleTeam": "プロジェクトディレクトリ — {{team}}",
+      "titleAgent": "プロジェクトディレクトリ — {{name}}",
+      "note": "変更は次回起動時から有効です。実行中のペインは現在のディレクトリのまま動き続けます。",
+      "save": "保存"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "プロジェクトディレクトリを変更…"
+    },
     "member": {
       "spawnTo": "起動先 ▸",
       "spawnNewTab": "新しいタブ",
       "existingTabsDivider": "— 既存のタブ —",
       "rename": "名前を変更…",
+      "setProject": "プロジェクトディレクトリを変更…",
       "leave": "削除"
     },
     "pane": {

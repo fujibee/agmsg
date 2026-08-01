@@ -138,14 +138,24 @@
       "title": "Fermer {{name}} ?",
       "body": "Cela arrêtera {{name}}. Cette action est irréversible.",
       "confirmLabel": "Fermer le panneau"
+    },
+    "projectDir": {
+      "titleTeam": "Répertoire du projet — {{team}}",
+      "titleAgent": "Répertoire du projet — {{name}}",
+      "note": "Prend effet au prochain démarrage de l'agent. Les panneaux déjà en cours d'exécution conservent leur répertoire actuel.",
+      "save": "Enregistrer"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "Changer le répertoire du projet…"
+    },
     "member": {
       "spawnTo": "Démarrer vers ▸",
       "spawnNewTab": "Nouvel onglet",
       "existingTabsDivider": "— onglets existants —",
       "rename": "Renommer…",
+      "setProject": "Changer le répertoire du projet…",
       "leave": "Quitter"
     },
     "pane": {
