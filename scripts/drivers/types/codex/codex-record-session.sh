@@ -49,6 +49,10 @@ export SKILL_DIR
 . "$SKILL_DIR/scripts/lib/storage.sh"
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/role-session.sh"
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/hash.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_app-server.sh"
 
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
 # <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
@@ -104,7 +108,12 @@ fi
 # be identified, and letting a weaker source overrule it is how a wrong thread
 # gets seated.
 probe_ran=0
-if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+# The URL, not the environment variable. Under codex 0.146 `--remote` this script
+# runs inside the app-server process, which is a context codex-monitor.sh cannot
+# export into, so gating on the variable meant this probe never ran on the very
+# path #579 was about. The port file carries the same string (see _app-server.sh).
+app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+if [ -z "$thread" ] && [ -n "$app_server" ]; then
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/node.sh"
   node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
@@ -114,7 +123,7 @@ if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
     if [ -n "$loaded_file" ] && [ -n "$seated_file" ]; then
       # Exit status, not output: an empty list is a valid answer ("nothing is
       # loaded"), while a failure to reach the app-server is not an answer at all.
-      if "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$AGMSG_CODEX_BRIDGE_APP_SERVER" \
+      if "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$app_server" \
            --print-loaded-threads >"$loaded_file.raw" 2>/dev/null; then
         probe_ran=1
       fi

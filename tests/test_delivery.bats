@@ -2607,3 +2607,33 @@ JSON
   [ "$(wc -c < "$calls" | tr -d ' ')" = "1" ]
   [[ "$output" == *"2 threads loaded"* ]]
 }
+
+@test "delivery status (codex): a thread already seated elsewhere is not called unexpected" {
+  # A loaded thread seats ONE role. When the only loaded thread belongs to alice,
+  # bob having no seat is the correct state — the old wording called it
+  # unexpected because it counted loaded threads rather than unclaimed ones.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/hash.sh"
+  # The record has to land in the tree delivery.sh will read, so the helper needs
+  # the test's skill dir rather than the one it would derive for itself.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice thr-alice "$TEST_PROJECT" codex
+  [ -n "$(agmsg_role_session_uuid team alice)" ]
+  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+
+  local fake="$TEST_SKILL_DIR/fake-node-loaded"
+  { printf '#!/usr/bin/env bash\n'; printf 'printf %%s\\\\n thr-alice\n'; } > "$fake"
+  chmod +x "$fake"
+
+  AGMSG_NODE="$fake" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/bob has no session recorded (the one loaded thread is already seated by another role)"* ]]
+  [[ "$output" != *"That combination is unexpected"* ]]
+}
