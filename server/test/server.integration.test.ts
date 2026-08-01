@@ -797,4 +797,36 @@ describeDatabase("remote storage HTTP API v1", () => {
     }
   });
 
+  it("rejects duplicate JSON keys and rolls back a sequence-crossing batch", async () => {
+    const duplicateKeys = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: { ...headers, "content-type": "application/json" },
+      payload: '{"messages":[],"messages":[]}',
+    });
+    expect(duplicateKeys.statusCode).toBe(400);
+
+    await pool.query(
+      "UPDATE teams SET current_seq = 9223372036854775806 WHERE team_id = $1",
+      [teamId],
+    );
+    const exhausted = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers,
+      payload: {
+        messages: [
+          message("750e8400-e29b-41d4-a716-446655440003", "a"),
+          message("750e8400-e29b-41d4-a716-446655440004", "b"),
+        ],
+      },
+    });
+    expect(exhausted.statusCode).toBe(507);
+    expect(exhausted.json().error.code).toBe("sequence-exhausted");
+    const rows = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM messages WHERE id = ANY($1::uuid[])",
+      [["750e8400-e29b-41d4-a716-446655440003", "750e8400-e29b-41d4-a716-446655440004"]],
+    );
+    expect(rows.rows[0]?.count).toBe("0");
+  });
 });
