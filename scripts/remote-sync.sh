@@ -30,27 +30,43 @@ export AGMSG_SYNC_CIPHER_HELPER="$SCRIPT_DIR/internal/sync-cipher.mjs"
 # The engine speaks only over stdin, stdout and stderr; the spawn sites already
 # point those at a log. Nothing above stderr is anything it should keep.
 #
-# The closes are attached to the exec rather than performed before it. One of the
-# descriptors above stderr belongs to the shell itself -- bash keeps the script it
-# is reading open, at 255 -- and closing it from a statement would leave the shell
-# to carry on reading a script through a descriptor it no longer holds. Bash does
-# defend against that (observed: it moves the script to another number), but as a
-# redirection on the exec the question does not arise: nothing of this script runs
-# between the close and the execve.
-_fd_closes=""
-if [ -d /dev/fd ]; then
-  for _fd in /dev/fd/*; do
-    _fd="${_fd##*/}"
-    case "$_fd" in ''|*[!0-9]*) continue ;; esac
-    [ "$_fd" -gt 2 ] || continue
-    _fd_closes="$_fd_closes ${_fd}>&-"
-  done
-else
-  # Nothing to enumerate, so name a range instead. Closing a descriptor that was
-  # never open is not an error, which is what makes the blind form safe.
-  for _fd in $(seq 3 255); do
-    _fd_closes="$_fd_closes ${_fd}>&-"
-  done
-fi
+# Each close is its own statement. Collecting them into redirections on the exec
+# reads better and is wrong: bash 3.2 -- which is /bin/bash on macOS, and what
+# runs this on the macOS runner -- relocates descriptors into the range at and
+# above 10 while it processes an exec's redirections, and the child then inherits
+# those relocated copies. Measured, same script, same enumeration
+# (`10>&- 143>&- 255>&- 3>&-`) both times:
+#
+#   bash 5.3.15   engine sees  0 1 2
+#   bash 3.2.57   engine sees  0 1 2 10 11      <- 143 came back as 11
+#
+# A CI shard hung on exactly that: the engine held bats's pipe at fd 13 while
+# bats held it at 143, and bats sat waiting for an EOF that could not arrive.
+#
+# The hazard that argued for the exec form does not bite. One descriptor above
+# stderr belongs to the shell -- bash keeps the script it is reading open, at 255
+# -- and closing it from a statement might have left the shell reading through a
+# descriptor it had given up. Bash defends itself: given `exec 255>&-` it moves
+# the script to another number (observed as 11), and a script padded to 291 KB,
+# far past any read buffer, still ran to its last line under both 3.2.57 and
+# 5.3.15. Do not "simplify" this back onto the exec line.
+_close_inherited_fds() {
+  local fd
+  if [ -d /dev/fd ]; then
+    for fd in /dev/fd/*; do
+      fd="${fd##*/}"
+      case "$fd" in ''|*[!0-9]*) continue ;; esac
+      [ "$fd" -gt 2 ] || continue
+      eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+  else
+    # Nothing to enumerate, so sweep a range instead. Closing a descriptor that
+    # was never open is not an error, which is what makes the blind form safe.
+    for fd in $(seq 3 255); do
+      eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+  fi
+}
+_close_inherited_fds
 
-eval "exec$_fd_closes \"\$NODE_BIN\" \"\$SCRIPT_DIR/internal/remote-sync.mjs\" \"\$@\""
+exec "$NODE_BIN" "$SCRIPT_DIR/internal/remote-sync.mjs" "$@"

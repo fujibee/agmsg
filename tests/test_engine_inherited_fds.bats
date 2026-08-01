@@ -40,22 +40,66 @@ teardown() {
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
 }
 
+# Reports its OWN descriptors above stderr. A stand-in that shells out to `ls`
+# would add that child's directory descriptor to the count; this one adds
+# nothing the baseline below does not also see.
+_write_self_reporter() {
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' ': > "$FD_REPORT"'
+    printf '%s\n' 'for f in /dev/fd/*; do'
+    printf '%s\n' '  n="${f##*/}"'
+    printf '%s\n' '  case "$n" in ""|*[!0-9]*) continue ;; esac'
+    printf '%s\n' '  [ "$n" -gt 2 ] && printf "%s " "$n" >> "$FD_REPORT"'
+    printf '%s\n' 'done'
+  } > "$1"
+  chmod +x "$1"
+}
+
 @test "the engine does not inherit descriptors the harness opened" {
-  # 144 is the number seen in the captured hang; 77 is arbitrary, so passing
-  # cannot come from something particular about 144. A closed descriptor is not
-  # reissued at its old number -- reuse takes the lowest free one -- so absence
-  # here is meaningful.
-  bash "$SCRIPTS/remote-sync.sh" probe 144>/dev/null 77>/dev/null \
-    </dev/null >/dev/null 2>/dev/null || true
+  # Run under EVERY bash on this machine, because they disagree. bash 3.2 --
+  # /bin/bash on macOS, and what runs this on the macOS runner -- relocates
+  # descriptors into the range at and above 10 while processing an exec's
+  # redirections, so a close 5.x honours can come back to the child at a new
+  # number. A single-shell version of this test stayed green through exactly
+  # that regression while a CI shard hung.
+  #
+  # Compared against a BASELINE rather than against named numbers: what 3.2
+  # leaves behind is renumbered, so asserting "144 and 77 are absent" cannot
+  # see it. The baseline is the stand-in's own descriptors, measured with
+  # nothing inherited to lose; anything beyond that came through the close.
+  local reporter="$WORK/self-report"
+  _write_self_reporter "$reporter"
+  export AGMSG_NODE="$reporter"
 
-  # That the stand-in ran at all: with an empty report every "absent" assertion
-  # below would hold for the wrong reason.
-  [ -s "$FD_REPORT" ]
+  local sh found=0
+  for sh in /bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash "$(command -v bash)"; do
+    [ -x "$sh" ] || continue
+    found=$((found + 1))
 
-  run grep -qx 144 "$FD_REPORT"
-  [ "$status" -ne 0 ]
-  run grep -qx 77 "$FD_REPORT"
-  [ "$status" -ne 0 ]
+    : > "$FD_REPORT"
+    "$sh" "$SCRIPTS/remote-sync.sh" probe </dev/null >/dev/null 2>/dev/null || true
+    local baseline; baseline="$(cat "$FD_REPORT")"
+
+    # Pipes, not files: the relocation only shows up on pipes, which is what a
+    # harness holds. 143 is the shape seen in the captured hang; 10 is low and
+    # arbitrary, so a pass cannot come from something particular about 143.
+    : > "$FD_REPORT"
+    (
+      exec 143> >(sleep 20)
+      exec 10> >(sleep 20)
+      "$sh" "$SCRIPTS/remote-sync.sh" probe </dev/null >/dev/null 2>/dev/null || true
+    )
+    local measured; measured="$(cat "$FD_REPORT")"
+
+    [ -n "$baseline$measured" ] || { echo "$sh: the stand-in never ran"; false; }
+    [ "$baseline" = "$measured" ] || {
+      echo "$sh ($("$sh" --version 2>/dev/null | head -1))"
+      echo "  baseline [$baseline]  measured [$measured]"
+      false
+    }
+  done
+  [ "$found" -gt 0 ]
 }
 
 @test "the three standard streams still reach the engine" {
