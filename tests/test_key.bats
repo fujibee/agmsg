@@ -104,7 +104,7 @@ EOF
   key_id=$(python3 -c "import json; print(json.load(open('$SCRIPTS/../teams/testteam/config.json'))['remote_key']['current']['key_id'])")
   identity_file="$SCRIPTS/../run/remote-credentials/testteam/keys/$key_id.key"
   [ -f "$identity_file" ]
-  perms=$(stat -f "%Lp" "$identity_file" 2>/dev/null || stat -c "%a" "$identity_file")
+  perms=$(file_mode "$identity_file")
   [ "$perms" = "600" ]
   run grep -c "AGE-SECRET-KEY" "$SCRIPTS/../teams/testteam/config.json"
   [ "$output" -eq 0 ]
@@ -217,7 +217,7 @@ EOF
   [ -f "$private_bundle" ]
   [[ "$output" == *"Handoff bundle written to: $private_bundle"* ]]
   local perms
-  perms=$(stat -f "%Lp" "$(dirname "$private_bundle")" 2>/dev/null || stat -c "%a" "$(dirname "$private_bundle")")
+  perms=$(file_mode "$(dirname "$private_bundle")")
   [ "$perms" = "700" ]
 }
 
@@ -281,7 +281,7 @@ EOF
   run bash -c "printf '%s' '$secret' | bash '$SCRIPTS/key.sh' import testteam --identity-stdin"
   [ "$status" -eq 0 ]
   [ -f "$identity_file" ]
-  perms=$(stat -f "%Lp" "$identity_file" 2>/dev/null || stat -c "%a" "$identity_file")
+  perms=$(file_mode "$identity_file")
   [ "$perms" = "600" ]
   run bash -c "age-keygen -y < '$identity_file'"
   [ "$status" -eq 0 ]

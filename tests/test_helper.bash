@@ -58,6 +58,25 @@ skip_on_windows() {
 # This is the test-side mirror of scripts/lib/storage.sh's agmsg_sqlite_mem.
 sqlite_mem() { sqlite3 :memory: "$@" | tr -d '\r'; }
 
+# Permission bits of <path> as octal, e.g. 700.
+#
+# NOT `stat -f "%Lp" "$p" 2>/dev/null || stat -c "%a" "$p"`. That idiom leans on
+# the BSD form FAILING under GNU. It does fail — but only after writing
+# filesystem information to STDOUT, because GNU reads `-f` as `--file-system`
+# and the format string as a second file operand. `2>/dev/null` hides the error
+# it then prints, not the output already written, so the capture becomes that
+# block with the real mode appended and no comparison can match. Green on macOS,
+# red on any GNU host, and the reason is invisible at the call site.
+#
+# Branch on the platform instead, the way scripts/lib/compat.sh already does for
+# mtime. One implementation so a fourth call site cannot reintroduce it.
+file_mode() {
+  case "$(uname -s)" in
+    Darwin*) stat -f "%Lp" "$1" ;;
+    *)       stat -c "%a" "$1" ;;
+  esac
+}
+
 # Resolve a file path for use inside a sqlite3 readfile('...') call in a test.
 # On native Windows, sqlite3 only reads a Windows path (C:\Users\...), not a Git
 # Bash POSIX path (/c/Users/... or /tmp/...): an unconverted path reads back as
