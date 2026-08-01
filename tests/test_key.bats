@@ -38,21 +38,25 @@ open(p, 'w').write(json.dumps(d) + '\\n')
 "
 }
 
+# $1 = the epoch revision the authority has confirmed (default 0, i.e. nothing
+# rotated yet has been sequenced). key.sh derives "is this rotation effective"
+# from the exported chain, so this is how a test says confirmed or not.
 stub_current_age_snapshot() {
-  cat > "$SCRIPTS/remote-sync.sh" <<'EOF'
+  local revision="${1:-0}"
+  cat > "$SCRIPTS/remote-sync.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$1" = "export-age-snapshot" ]
+[ "\$1" = "export-age-snapshot" ]
 shift
 out=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --out) out="$2"; shift 2 ;;
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --out) out="\$2"; shift 2 ;;
     *) shift ;;
   esac
 done
-[ -n "$out" ]
-printf '%s' '{"epoch_revision":"0"}' > "$out"
+[ -n "\$out" ]
+printf '%s' '{"epoch_revision":"${revision}"}' > "\$out"
 EOF
   chmod +x "$SCRIPTS/remote-sync.sh"
 }
@@ -332,6 +336,43 @@ EOF
 
 # --- rotate ---------------------------------------------------------------
 
+@test "key rotate: current moves only when the chain confirms the rotation" {
+  skip_if_no_age
+  # The other half of the staged contract. A rotation is announced locally and
+  # becomes effective when the authority sequences its journal record. The
+  # exported snapshot chain is the only thing that knows, so key.sh derives it
+  # from there and copies it into current on its next run -- nothing writes back
+  # into this ledger at confirmation time.
+  bash "$SCRIPTS/key.sh" generate testteam
+  local cfg_json="$SCRIPTS/../teams/testteam/config.json"
+  local first; first="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")"
+
+  stub_current_age_snapshot 0
+  bash "$SCRIPTS/key.sh" rotate testteam >/dev/null
+  local staged; staged="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-1]['key_id'])")"
+  [ "$staged" != "$first" ]
+  # Unconfirmed: current still names the epoch actually in force.
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$first" ]
+
+  # A staged rotation is visible to the reader that needs it -- rotating again
+  # before the authority has spoken is refused -- without ever being treated as
+  # effective.
+  run bash "$SCRIPTS/key.sh" rotate testteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unacknowledged key rotation"* ]]
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$first" ]
+
+  # The chain now reports the rotation as sequenced. The next key.sh run catches
+  # up, and only then does current name the replacement.
+  stub_current_age_snapshot 1
+  local identity secret
+  identity="$SCRIPTS/../run/remote-credentials/testteam/keys/$staged.key"
+  secret=$(grep '^AGE-SECRET-KEY-' "$identity")
+  run bash -c "printf '%s' '$secret' | bash '$SCRIPTS/key.sh' import testteam --key-id '$staged' --identity-stdin"
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$staged" ]
+}
+
 @test "key rotate: creates a replacement identity and journals only its fingerprint" {
   skip_if_no_age
   bash "$SCRIPTS/key.sh" generate testteam
@@ -347,8 +388,13 @@ EOF
   [[ "$key_id" == epoch-* ]]
   [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]]
   [ -f "$SCRIPTS/../run/remote-credentials/testteam/keys/$key_id.key" ]
-  [ "$(python3 -c "import json; d=json.load(open('$SCRIPTS/../teams/testteam/config.json')); print(d['remote_key']['current']['key_id'])")" = "$key_id" ]
-  [ "$(python3 -c "import json; d=json.load(open('$SCRIPTS/../teams/testteam/config.json')); print(len(d['remote_key']['epochs']))")" -eq 2 ]
+  # Staged, not effective: the chain has not sequenced this rotation, so current
+  # still names the epoch that is actually in force. The replacement is the
+  # trailing entry in epochs.
+  cfg_json="$SCRIPTS/../teams/testteam/config.json"
+  [ "$(python3 -c "import json; d=json.load(open('$cfg_json')); print(d['remote_key']['current']['key_id'])")" != "$key_id" ]
+  [ "$(python3 -c "import json; d=json.load(open('$cfg_json')); print(d['remote_key']['epochs'][-1]['key_id'])")" = "$key_id" ]
+  [ "$(python3 -c "import json; d=json.load(open('$cfg_json')); print(len(d['remote_key']['epochs']))")" -eq 2 ]
   ! grep -q 'AGE-SECRET-KEY\\|age1' "$journal"
   run bash "$SCRIPTS/key.sh" show testteam --key-id "$key_id"
   [ "$status" -eq 0 ]
