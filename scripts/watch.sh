@@ -164,7 +164,7 @@ mkdir -p "$RUN_DIR" 2>/dev/null || true
 # so a live-but-unsignalable sibling watcher isn't misread as dead and left running.
 if [ -f "$PIDFILE" ]; then
   prev_pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && _agmsg_pid_alive "$prev_pid"; then
+  if [ -n "$prev_pid" ] && [ "$prev_pid" != "$$" ] && _agmsg_pid_alive_local "$prev_pid"; then
     prev_cmd=$(compat_get_cmdline "$prev_pid" 2>/dev/null || true)
     if [ -n "$prev_cmd" ]; then
       case "$prev_cmd" in

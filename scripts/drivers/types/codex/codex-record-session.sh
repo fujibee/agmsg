@@ -66,7 +66,89 @@ esac
 thread=""
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   thread="$CODEX_THREAD_ID"
-else
+fi
+
+# Past this point every remaining path is an INFERENCE, and an inference may not
+# change a seat that already exists -- not the loaded-set subtraction below, and
+# not the rollout scan either. The subtraction fails by removing this role's own
+# thread and adopting what is left; the rollout scan fails by picking whatever
+# happens to be unique in the cwd. Both replace a correct seat with a stranger's
+# thread, so the rule belongs to the whole inference, not to one branch of it.
+#
+# CODEX_THREAD_ID is exempt because it is not an inference: it is either exported
+# by the session itself or passed by the bridge with the thread the app-server
+# confirmed, which is exactly how a seeded seat gets corrected after arming.
+if [ -z "$thread" ] && [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
+  exit 0
+fi
+
+# Ask the app-server which threads it has loaded, and subtract the ones a role
+# already sits in (#579). The rollout files below cannot answer "which thread is
+# THIS session" on a project that has been worked in before: every past session
+# in this cwd matches, the count is never one, and the seat is never written --
+# so on such a project the bridge can never arm, in this session or any later
+# one.
+#
+# The subtraction is what makes the remainder unique. A thread stays loaded in
+# the app-server after its window is gone, so `loaded` is every thread this
+# server has opened, not the live ones; but each of those already has a seat, so
+# taking the recorded ids away leaves the session that has not been seated yet.
+#
+# Exactly one leftover => ours. Zero or several => record nothing, exactly as
+# before: this stays biased toward a fresh boot, because a resume mis-fire
+# (waking someone else's conversation) is worse than no resume at all.
+#
+# probe_ran distinguishes "the app-server answered and the answer was ambiguous"
+# from "there was no app-server to ask". Only the second may fall through to the
+# rollout scan: an ambiguous answer is a firm statement that this session cannot
+# be identified, and letting a weaker source overrule it is how a wrong thread
+# gets seated.
+probe_ran=0
+if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/node.sh"
+  node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
+  if [ -n "$node_bin" ] && { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; }; then
+    loaded_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexloaded.XXXXXX" 2>/dev/null || true)"
+    seated_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexseated.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$loaded_file" ] && [ -n "$seated_file" ]; then
+      # Exit status, not output: an empty list is a valid answer ("nothing is
+      # loaded"), while a failure to reach the app-server is not an answer at all.
+      if "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$AGMSG_CODEX_BRIDGE_APP_SERVER" \
+           --print-loaded-threads >"$loaded_file.raw" 2>/dev/null; then
+        probe_ran=1
+      fi
+      grep . "$loaded_file.raw" 2>/dev/null | sort -u > "$loaded_file" || true
+      rm -f "$loaded_file.raw"
+      # Every recorded codex seat, not just this project's. Over-subtracting can
+      # only drop a thread that some role already owns, which is never the one we
+      # want to claim; under-subtracting would leave a stale thread in the set and
+      # make the count ambiguous.
+      agmsg_role_session_recorded_uuids codex 2>/dev/null | grep . | sort -u > "$seated_file" || true
+      if [ "$probe_ran" = "1" ]; then
+        cand_count="$(comm -23 "$loaded_file" "$seated_file" | grep -c . || true)"
+        if [ "${cand_count:-0}" -eq 1 ]; then
+          thread="$(comm -23 "$loaded_file" "$seated_file" | grep . | head -1)"
+        fi
+      fi
+    fi
+    rm -f "$loaded_file" "$seated_file"
+  fi
+fi
+
+# An answered-but-ambiguous probe ends here: the app-server has already said this
+# session cannot be told apart, and no weaker signal may overturn that.
+if [ "$probe_ran" = "1" ]; then
+  [ -n "$thread" ] || exit 0
+fi
+
+if [ -z "$thread" ]; then
+  # No app-server to ask, or it could not be reached -- a codex session outside
+  # monitor mode, a missing Node, a server that is not answering. The rollout scan
+  # is the only signal left, so it stays as the fallback: it still resolves the
+  # single-rollout case it always did, and on a project with history it records
+  # nothing, which is what happens today.
+  #
   # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
   # dir check below fails -> fresh), not an unbound-variable abort (co1 nit).
   sessions_dir="${HOME:-}/.codex/sessions"

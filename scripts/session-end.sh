@@ -55,8 +55,9 @@ INSTANCE_ID="$(agmsg_instance_id "$SESSION_ID" "$TYPE")"
 PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$PIDFILE" ]; then
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  # EPERM-aware liveness (_agmsg_pid_alive): don't skip cleaning a live watcher.
-  if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
+  # _agmsg_pid_alive_local: EPERM-aware, so a live watcher still gets cleaned --
+  # and no tasklist, which cannot see the $$ watch.sh recorded (#567).
+  if [ -n "$pid" ] && _agmsg_pid_alive_local "$pid"; then
     # Defensive: only kill if the pid's command line still looks like our
     # watch.sh. Pids can be recycled — a stale pidfile could point at an
     # unrelated process that took the same pid.

@@ -86,6 +86,10 @@ export default {
         "Reproduz logs de mensagens entre agentes como personagens conversando em um palco — cada agente vira um personagem que fala na sua vez.",
       "agmsg-viewer":
         "Veja o histórico de mensagens do agmsg em uma interface de chat estilo LINE no navegador.",
+      "agmsg-bubblelog":
+        "Reproduz localmente o log de mensagens de um time como uma conversa no estilo messenger — com avatares por agente e controles de reprodução.",
+      "agmsg-tui":
+        "Cliente de terminal construído com ratatui — leia e envie mensagens entre agentes via SSH, mosh ou dentro do tmux.",
     },
   },
   desktop: {

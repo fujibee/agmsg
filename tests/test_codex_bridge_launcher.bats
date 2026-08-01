@@ -349,3 +349,53 @@ wait_for_child_count() {
   kill "$parent" 2>/dev/null || true
   wait "$parent" 2>/dev/null || true
 }
+
+# --- which pid space (#567) ---
+
+@test "launcher: starts the bridge when tasklist cannot see the parent (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  # Every pid the launcher waits on -- PARENT_PID, LIFETIME_PID, the dispatcher
+  # lock owner -- is minted by $! or $$ in one of these shells, so under Git Bash
+  # it is numbered in the MSYS space and `tasklist` has no record of it. A probe
+  # that asks tasklist calls the live parent dead: the startup loop is never
+  # entered, the supervision loop never runs, and no bridge is ever launched.
+  # Measured on our own Windows runner -- $$, $! and a pid read back from a
+  # pidfile all report tasklist_hits=0 while kill -0 answers yes.
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+
+  put_record team alice thread-msys "$PROJ" codex
+
+  sleep 6 3>&- & local p=$!
+  MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  wait "$p" 2>/dev/null || true
+  local i
+  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+
+  # A bridge was launched at all -- this is what the whole class costs on Windows.
+  [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
+  grep -q -- '--thread thread-msys' "$CAPTURE"
+}
+
+@test "launcher: windows-native starts the bridge (#567)" {
+  skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
+  # The counterpart to codex-monitor's windows-native test, and the half #582
+  # does NOT fix: reaching the bridged handoff is not the same as delivering a
+  # message. PARENT_PID is codex-monitor.sh's own $$, so on Git Bash the loops
+  # at :291 and :381 are asking tasklist about an MSYS pid -- false on the first
+  # evaluation, which means neither loop turns over and no bridge is ever
+  # started. Real tasklist, no stub.
+  put_record team alice thread-win "$PROJ" codex
+
+  sleep 6 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  wait "$p" 2>/dev/null || true
+  local i
+  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+
+  [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
+  grep -q -- '--thread thread-win' "$CAPTURE"
+}

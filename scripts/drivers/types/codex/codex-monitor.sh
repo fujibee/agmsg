@@ -124,8 +124,14 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   # Reuse only when OUR recorded app-server is still alive AND its port answers,
   # so a foreign process that grabbed the same port after ours died is not
   # mistaken for the bridge app-server.
+  #
+  # _local for the same reason as the wait loop below: this file records $! (see
+  # the `> "$SERVER_PID"` further down), and reading it back through a pidfile
+  # does not move the number into the Windows pid space. Asking tasklist about it
+  # never matches, so a live app-server reads as dead and every launch starts
+  # another one beside it.
   if [ -n "$existing_port" ] && [ -n "$existing_pid" ] \
-    && _agmsg_pid_alive "$existing_pid" && port_alive "$existing_port"; then
+    && _agmsg_pid_alive_local "$existing_pid" && port_alive "$existing_port"; then
     # Confirm the recorded pid is actually OUR codex app-server before trusting OR
     # killing it: a recycled pid could belong to an unrelated process while the
     # recorded port happens to answer via something else. Only reuse/kill when the
@@ -174,7 +180,15 @@ if [ -z "$PORT" ]; then
     # Stop waiting the moment the app-server exits (e.g. a codex release dropped
     # `app-server --listen ws://`): no point burning the full timeout before we
     # fail open.
-    _agmsg_pid_alive "$server_bg" || break
+    #
+    # _local, deliberately: this pid came from $! in this shell, so it is numbered
+    # in the MSYS pid space, and `tasklist` -- which is what the plain helper asks
+    # under MSYSTEM -- has no record of it. It answered "dead" on the first pass
+    # here, seconds before the banner, and every Windows launch since 1.1.12 fell
+    # back to plain codex with no bridge (#567). Not a bare `kill -0` either: the
+    # EPERM reading still has to hold, or a sandbox that cannot signal our own
+    # child fails us open the same way (#505).
+    _agmsg_pid_alive_local "$server_bg" || break
     sleep 0.1
   done
   if [ -z "$PORT" ]; then

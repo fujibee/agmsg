@@ -13,6 +13,12 @@ If you already know your AGENT and TEAMS from a previous `$__SKILL_NAME__` call 
 
 Otherwise, run: `~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" codex`
 
+**Windows PowerShell:** The Shell requirement above still applies, but a bare `bash` in PowerShell often resolves to the WSL shim. Invoke **Git Bash** explicitly and keep the entire `-lc` payload inside one PowerShell single-quoted string:
+
+`& 'C:\Program Files\Git\bin\bash.exe' -lc '~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" codex'`
+
+Do not use POSIX `'"'"'` quote splicing in PowerShell; it can leave the `-lc` payload unterminated. Windows PowerShell 5.1 strips the embedded double quotes when passing the payload, so `"$(pwd)"` arrives unquoted — fine unless the current directory contains spaces; prefer PowerShell 7.3+ if it does. If Git Bash is installed elsewhere, replace the executable path above with its actual path.
+
 Four possible outputs:
 
 **A) Single identity:**

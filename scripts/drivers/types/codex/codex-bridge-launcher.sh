@@ -26,7 +26,10 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
-# _agmsg_pid_alive: every lifetime and lock-owner check below goes through it.
+# The liveness helpers. Every lifetime and lock-owner check below goes through
+# one of them, chosen by where the pid was minted: _agmsg_pid_alive_local for
+# the ones this shell or codex-monitor.sh produced, _agmsg_pid_alive for the
+# bridge's own pid, which the bridge records itself (#567).
 # Sourced explicitly rather than relied on transitively through role-session.sh,
 # which only pulls it in when actas-lock.sh has not already been loaded.
 # shellcheck source=../../../lib/instance-id.sh
@@ -61,7 +64,7 @@ mkdir -p "$RUN_DIR"
 # to start first. Tests/older launchers without the sidecar retain parent-PID
 # fallback behavior.
 LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive "$LIFETIME_PID"; then
+if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
@@ -94,7 +97,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && _agmsg_pid_alive "$owner"; then
+    if [ -n "$owner" ] && _agmsg_pid_alive_local "$owner"; then
       return 1
     fi
     if [ -n "${AGMSG_TEST_DISPATCHER_STALE_BARRIER:-}" ]; then
@@ -117,7 +120,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && _agmsg_pid_alive "$owner"; then
+    if [ -n "$owner" ] && _agmsg_pid_alive_local "$owner"; then
       return 1
     fi
     sleep 0.05
@@ -242,7 +245,7 @@ if [ -z "$ROLE_PAIR" ]; then
   acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
-    && _agmsg_pid_alive "$LIFETIME_PID"; do
+    && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
@@ -288,7 +291,7 @@ acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 # its registration disappears, so a re-registered role gets a fresh child.
 ids=""
 startup_attempts=0
-while _agmsg_pid_alive "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
+while _agmsg_pid_alive_local "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
   ids="$(resolve_identity || true)"
   [ -n "$ids" ] && break
   startup_attempts=$((startup_attempts + 1))
@@ -338,7 +341,7 @@ ids="$safe_ids"
 # A role record may be written by actas later in this same first turn. An empty
 # safe set is therefore transient, not terminal: retry while the parent lives.
 if [ -z "$ids" ]; then
-  _agmsg_pid_alive "$PARENT_PID" || exit 0
+  _agmsg_pid_alive_local "$PARENT_PID" || exit 0
   sleep 0.3
   exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
 fi
@@ -378,7 +381,7 @@ else
 fi
 
 deregistered_ticks=0
-while _agmsg_pid_alive "$PARENT_PID"; do
+while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.

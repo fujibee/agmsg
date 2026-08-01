@@ -62,9 +62,11 @@ const agents = fs.readdirSync(typesDir)
 // --- Showcase gallery: real public GitHub repos built on agmsg. Star counts are
 // approximate (build-time snapshot); a future build can fetch them via the API. ---
 const showcase = [
-  { owner: "lucianlamp", repo: "agkanban", desc: t.showcase.desc.agkanban, lang: "Shell", langColor: "#89e051", stars: "9", img: "/showcase/agkanban.png" },
-  { owner: "shinshin86", repo: "agmsg-office", desc: t.showcase.desc["agmsg-office"], lang: "TypeScript", langColor: "#3178c6", stars: "5", img: "/showcase/agmsg-office.png" },
-  { owner: "utenadev", repo: "agmsg-viewer", desc: t.showcase.desc["agmsg-viewer"], lang: "Go", langColor: "#00add8", stars: "1", img: "/showcase/agmsg-viewer.png" },
+  { owner: "lucianlamp", repo: "agkanban", desc: t.showcase.desc.agkanban, lang: "Shell", langColor: "#89e051", stars: "12", img: "/showcase/agkanban.png" },
+  { owner: "shinshin86", repo: "agmsg-office", desc: t.showcase.desc["agmsg-office"], lang: "TypeScript", langColor: "#3178c6", stars: "15", img: "/showcase/agmsg-office.png" },
+  { owner: "utenadev", repo: "agmsg-viewer", desc: t.showcase.desc["agmsg-viewer"], lang: "Go", langColor: "#00add8", stars: "3", img: "/showcase/agmsg-viewer.png" },
+  { owner: "dreiachse-cyber", repo: "agmsg-bubblelog", desc: t.showcase.desc["agmsg-bubblelog"], lang: "JavaScript", langColor: "#f1e05a", stars: "2", img: "/showcase/agmsg-bubblelog.png" },
+  { owner: "rrrrnmtsu", repo: "agmsg-tui", desc: t.showcase.desc["agmsg-tui"], lang: "Rust", langColor: "#dea584", stars: "0", img: "/showcase/agmsg-tui.png" },
 ];
 
 // GitHub mark (simple-icons), inlined so the proto needs no icon dependency.
@@ -361,9 +363,15 @@ const localeCodes = Object.keys(languages);
       <div class="mt-10 grid grid-cols-1 gap-4 md:grid-cols-3">
         {showcase.map((s) => (
           <a href={`https://github.com/${s.owner}/${s.repo}`} class="card group flex flex-col overflow-hidden rounded-2xl border border-border bg-surface">
-            <div class="aspect-[16/9] overflow-hidden border-b border-border bg-bg">
-              <img src={s.img} alt={s.repo} loading="lazy" class="h-full w-full object-cover opacity-90 transition group-hover:opacity-100" />
-            </div>
+            {s.img ? (
+              <div class="aspect-[16/9] overflow-hidden border-b border-border bg-bg">
+                <img src={s.img} alt={s.repo} loading="lazy" class="h-full w-full object-cover opacity-90 transition group-hover:opacity-100" />
+              </div>
+            ) : (
+              <div class="flex aspect-[16/9] items-center justify-center border-b border-border bg-bg">
+                <span class="font-mono text-sm text-muted">{s.repo}</span>
+              </div>
+            )}
             <div class="flex flex-1 flex-col p-6">
               <div class="flex items-center gap-2.5">
                 <svg viewBox="0 0 24 24" class="h-5 w-5 fill-muted transition group-hover:fill-accent" aria-hidden="true"><path d={githubPath}></path></svg>

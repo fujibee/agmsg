@@ -87,9 +87,75 @@ agmsg_codex_shim_path_note() {
   fi
 }
 
+# Loaded-thread count for this project, resolved AT MOST ONCE per status run and
+# left in _AGMSG_CODEX_LOADED_COUNT (empty = could not ask). Two reasons not to do
+# this per identity: `status` should not take N network round-trips to print, and
+# a stale port file whose port is held by something that accepts but never speaks
+# WebSocket would stall on each one. The timeouts are deliberately far below the
+# bridge's own defaults -- this is a status line, not a delivery path, and a slow
+# answer here is worth less than a prompt one.
+agmsg_codex_probe_loaded_count() {
+  local project="$1" port_file port node_bin
+  [ -n "${_AGMSG_CODEX_LOADED_PROBED:-}" ] && return 0
+  _AGMSG_CODEX_LOADED_PROBED=1
+  _AGMSG_CODEX_LOADED_COUNT=""
+  port_file="$RUN_DIR/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
+  port="$(cat "$port_file" 2>/dev/null || true)"
+  [ -n "$port" ] || return 0
+  node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
+  [ -n "$node_bin" ] || return 0
+  { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; } || return 0
+  _AGMSG_CODEX_LOADED_COUNT="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
+    --app-server "ws://127.0.0.1:$port" --print-loaded-threads \
+    --connect-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" \
+    --request-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" 2>/dev/null | grep -c . || true)"
+  return 0
+}
+
+# Why a role has no bridge. A seat (role-session record) is what every layer of
+# the monitor path requires, so its absence -- not a dead process -- is the usual
+# reason nothing is running. When the seat is missing, the loaded-thread count is
+# what decides whether the next session can seed one, so report that too (#579).
+agmsg_codex_report_missing_bridge() {
+  local team="$1" name="$2" project="$3" seat
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/role-session.sh"
+  seat="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+  if [ -n "$seat" ]; then
+    echo "Codex bridge: $team/$name not running (seat recorded: $seat)"
+    return 0
+  fi
+
+  agmsg_codex_probe_loaded_count "$project"
+
+  case "${_AGMSG_CODEX_LOADED_COUNT:-}" in
+    "")
+      echo "Codex bridge: $team/$name has no session recorded, and no app-server to ask"
+      echo "  Start Codex through monitor mode in this project; the seat is recorded then."
+      ;;
+    0)
+      echo "Codex bridge: $team/$name has no session recorded (no Codex thread is loaded yet)"
+      echo "  Start Codex through monitor mode in this project; the seat is recorded then."
+      ;;
+    1)
+      echo "Codex bridge: $team/$name has no session recorded, though one thread is loaded"
+      echo "  That combination is unexpected -- the seat is normally written for it."
+      ;;
+    *)
+      echo "Codex bridge: $team/$name has no session recorded ($_AGMSG_CODEX_LOADED_COUNT threads loaded, none identifiable as its session)"
+      echo "  Recreate this project's app-server so the next session can be identified:"
+      echo "    $SCRIPT_DIR/delivery.sh set off codex $project"
+      echo "    $SCRIPT_DIR/delivery.sh set monitor codex $project"
+      echo "  This also stops any other Codex bridge for this project."
+      ;;
+  esac
+}
+
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0 any_alive=0
+  _AGMSG_CODEX_LOADED_PROBED=""
+  _AGMSG_CODEX_LOADED_COUNT=""
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
 
   if [ -z "$pairs" ]; then
@@ -109,7 +175,11 @@ agmsg_delivery_runtime_status() {
     metafile="$base.meta"
 
     if [ ! -f "$pidfile" ]; then
-      echo "Codex bridge: $team/$name not running"
+      # "not running" reads as "the bridge process died". The far more common
+      # cause is that this role has no seat, which no layer of the monitor path
+      # says out loud: the SessionStart hook exits 0, the launcher re-execs, and
+      # the only visible symptom is this line. Say which one it is.
+      agmsg_codex_report_missing_bridge "$team" "$name" "$project"
       continue
     fi
 

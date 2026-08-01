@@ -15,6 +15,24 @@ set -euo pipefail
 # `inbox.sh` remains the only read cursor; watch-once simply waits until the
 # inbox cursor says there is something to handle.
 
+# Taken before any startup work, because the deadline below has to bound this
+# process's LIFETIME, not just its polling. The bridge force-kills the child at
+# (timeout + interval + 10) seconds measured from spawn (codex-bridge.js,
+# process/spawn timeoutMs), so a deadline computed after startup makes the real
+# wall time startup + TIMEOUT. Where startup is slower than interval + 10 — MSYS
+# fork emulation measured at 55-300ms per spawn puts a Windows host at ~29s — the
+# bridge kills the child before it can reach its own deadline, so it exits 124
+# instead of the clean 2 on every single re-arm, the bridge counts three failures
+# and self-destructs, and the launcher restarts it forever. Reported with
+# measurements by 東リ屋 (#558). Startup on Linux is ~0.2s, which is why this has
+# never surfaced here.
+#
+# Making the deadline lifetime-based means a slow startup eats into the polling
+# window rather than overrunning the ceiling. It cannot skip the inbox check
+# entirely: the loop queries before it tests the deadline, so even a deadline
+# that is already past yields one full check first.
+_AGMSG_WO_START="$(date +%s)"
+
 PROJECT_PATH="${1:?Usage: watch-once.sh <project_path> <agent_type> [--name <agent>] [--team <team>] [--timeout <sec>] [--interval <sec>]}"
 AGENT_TYPE="${2:?Missing agent_type}"
 shift 2
@@ -79,7 +97,7 @@ if [ -z "$PAIRS" ]; then
 fi
 
 WHERE_PAIRS="$(agmsg_subscription_where "$PAIRS")"
-deadline=$(( $(date +%s) + TIMEOUT ))
+deadline=$(( _AGMSG_WO_START + TIMEOUT ))
 
 while true; do
   if [ -f "$DB" ]; then

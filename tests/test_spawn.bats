@@ -454,16 +454,19 @@ seed_resumable() {
   [[ "$output" == *"actas"* ]]
 }
 
-@test "spawn: opencode launches its 'run --interactive' fixed subcommand prefix" {
+@test "spawn: opencode launches opencode with --prompt (not a bare positional)" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" opencode alice --project "$PROJ" --model anthropic/claude-opus-4-8 --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
-  [[ "$output" == *"opencode run --interactive --model anthropic/claude-opus-4-8"* ]]
-  [[ "$output" == *"actas"* ]]
-  # no bare 'opencode' invocation without the fixed prefix
-  [[ "$output" != *$'\n''opencode --model'* ]]
+  [[ "$output" == *"opencode --model anthropic/claude-opus-4-8 --prompt"* ]]
+  # opencode's actas prompt uses the '$' skill prefix, not Claude Code's '/' (#283).
+  local cmd; cmd="$(basename "$TEST_SKILL_DIR")"
+  run grep -F "\$$cmd"'\ actas' "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "/$cmd"'\ actas' "$boot"
+  [ "$status" -ne 0 ]
 }
 
 @test "spawn: prompt_arg lands after spawn-options, immediately before the prompt" {

@@ -231,8 +231,8 @@ despawnは指定されたメンバーにのみ作用する — `despawn` を実�
 
 | モード | 仕組み | レイテンシ | 向いている相手 |
 |---|---|---|---|
-| **`monitor`**（Claude Codeのデフォルト） | SessionStartフック → Monitorツール → ブロッキングSQLiteストリーム | 約5秒 | リアルタイムプッシュを望むClaude Codeユーザー |
-| **`turn`**（Codex / Copilot CLI / OpenCodeのデフォルト） | アシスタントのターン間でStopフックが `check-inbox.sh` を発火 | 次のやり取りまで | Codex / Copilot CLI / OpenCode（Monitorツールなし）、より静かなループを好むClaude Codeユーザー |
+| **`monitor`**（Claude Codeのデフォルト。OpenCodeではopencode-sentinel pluginで利用可能） | SessionStartフック → Monitorツール → ブロッキングSQLiteストリーム | 約5秒 | リアルタイムプッシュを望むClaude Codeユーザー |
+| **`turn`**（Codex / Copilot CLI / OpenCode（plugin未導入）のデフォルト） | アシスタントのターン間でStopフックが `check-inbox.sh` を発火 | 次のやり取りまで | monitorを実行していないCodex / Copilot CLI / OpenCodeユーザー、より静かなループを好むClaude Codeユーザー |
 | **`both`** | monitorを主に、turnをセッションごとの安全網として | 約5秒。ウォッチャー障害時はturn相当にフォールバック | 二重の保険をかけたい場合 |
 | **`off`** | 自動配信なし | 手動の `/agmsg` のみ | ミニマリスト |
 
@@ -306,7 +306,7 @@ Copilotインストーラーは `~/.copilot/skills/agmsg/` に `SKILL.md` を配
 $agmsg
 ```
 
-`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは手動およびturn/off配信ワークフローに対応している。現時点では `mode turn` と `mode off` のみサポート — `monitor`、`both`、`spawn opencode` は非対応。
+`./install.sh` でインストールする（`~/.config/opencode/` が存在する場合、OpenCode向けスキルがデフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type opencode` はCodexがインストールされていないOpenCode専用環境でのみ使う。OpenCodeは `mode monitor`（外部プラグイン [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) 経由。プラグイン未導入時は turn へのフォールバックをruleが指示するが、それに従うのはagentであってagmsgが強制するものではない）、`mode turn`、`mode off` に対応。`spawn opencode` は `opencode --prompt`（ブートプロンプトのターンが終わってもTUIが滞在するモード）経由で利用可能。`both` は非対応。
 
 これによりOpenCodeは、Ollamaのようなローカルプロバイダーを使う構成を含め、ローカルのコーディングエージェントとして役立つ。
 
@@ -532,8 +532,8 @@ agmsgのプラグイン可能な単位は軸（axis）ごとにグループ化�
 ## コミュニティ
 
 - **Product Hunt**: Product of the Day 5位、[2026-06-09ローンチ](https://www.producthunt.com/products/agmsg) — 219アップボート、39コメント
-- **派生プロジェクト**: `agmsg-shogi`、`agmsg-go`、`agmsg-mcp`（コミュニティ製）
-- **外部コントリビューター**: [@MiuraKatsu](https://github.com/MiuraKatsu)（Geminiサポート + whoami自動検出）、[@roundrop](https://github.com/roundrop)（Copilot CLIサポート）、[@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP)（ネイティブWindows / Git Bash）、[@kenshin-yamada](https://github.com/kenshin-yamada)（ウォッチャーのスコープ修正）、[@utenadev](https://github.com/utenadev)（OpenCode貢献）、[@lucianlamp](https://github.com/lucianlamp)（ネイティブWindows PowerShellヘルパー）、[@tatsuya6502](https://github.com/tatsuya6502)（サンドボックス化されたBashツールのサポート）
+- **コミュニティプロジェクト**（[showcase](https://agmsg.cc) にも掲載）: [`agkanban`](https://github.com/lucianlamp/agkanban) — agmsg と組み合わせて使うマルチエージェント向けかんばんボード / [`agmsg-office`](https://github.com/shinshin86/agmsg-office) — メッセージログを、舞台上でキャラクターが話す形で再生 / [`agmsg-viewer`](https://github.com/utenadev/agmsg-viewer) — メッセージ履歴をブラウザのチャット画面で閲覧 / [`agmsg-bubblelog`](https://github.com/dreiachse-cyber/agmsg-bubblelog) — チームのログをメッセンジャー風のスレッドとしてローカルで再生 / [`agmsg-tui`](https://github.com/rrrrnmtsu/agmsg-tui) — Rust/ratatui のターミナルクライアント。SSH・mosh・tmux と相性がよい
+- **外部コントリビューター**: [@MiuraKatsu](https://github.com/MiuraKatsu)（Geminiサポート + whoami自動検出）、[@roundrop](https://github.com/roundrop)（Copilot CLIサポート）、[@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP)（ネイティブWindows / Git Bash）、[@kenshin-yamada](https://github.com/kenshin-yamada)（ウォッチャーのスコープ修正）、[@utenadev](https://github.com/utenadev)（OpenCode貢献）、[@lucianlamp](https://github.com/lucianlamp)（ネイティブWindows PowerShellヘルパー）、[@tatsuya6502](https://github.com/tatsuya6502)（サンドボックス化されたBashツールのサポート）、[@Masashi-Ono0611](https://github.com/Masashi-Ono0611)（project_path検証、ウォッチドッグとウォッチャーの修正）、[@chemica-tan](https://github.com/chemica-tan)（Windows codexブリッジ: プロジェクト比較とポート解析）、[@otsune](https://github.com/otsune)（PowerShellからのGit Bashクォート）、[@tsukimiya](https://github.com/tsukimiya)（OpenCode: 常駐spawnとmonitor配送）
 
 ## プロジェクトサイト（agmsg.cc）
 

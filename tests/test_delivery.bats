@@ -943,6 +943,36 @@ JSON
   unset CLAUDE_CODE_SESSION_ID
 }
 
+@test "emit monitor directive: skips when tasklist cannot see the live watcher (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  # watch.sh records its own $$, so the pid in watch.<sid>.pid is numbered in the
+  # MSYS pid space. `tasklist` reports Windows pids and has no record of it --
+  # measured on our own Windows runner, where $$, $! and a pid read back from a
+  # pidfile all come back with zero tasklist hits while kill -0 answers yes. A
+  # probe that asks tasklist therefore calls the running watcher dead, and this
+  # dedup emits a second directive beside the one already streaming.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+
+  sleep 30 3>&- &
+  local live_pid=$!
+  CLAUDE_CODE_SESSION_ID="msys-live-sid"
+  export CLAUDE_CODE_SESSION_ID
+  echo "$live_pid" > "$TEST_SKILL_DIR/run/watch.$CLAUDE_CODE_SESSION_ID.pid"
+
+  run env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "already streaming" ]]
+  ! [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+
+  kill "$live_pid" 2>/dev/null || true
+  unset CLAUDE_CODE_SESSION_ID
+}
+
 @test "emit monitor directive: emits when no live watcher exists for this session" {
   CLAUDE_CODE_SESSION_ID="fresh-sid-no-watcher"
   export CLAUDE_CODE_SESSION_ID
@@ -1700,13 +1730,6 @@ JSON
   [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode rejects monitor mode" {
-  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
-}
-
 @test "opencode rejects both mode" {
   run bash "$SCRIPTS/delivery.sh" set both opencode "$TEST_PROJECT"
   [ "$status" -ne 0 ]
@@ -1714,15 +1737,74 @@ JSON
   [ ! -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode rejects monitor: does NOT delete an existing turn rule" {
+@test "opencode rejects both: does NOT delete an existing turn rule" {
   bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
   [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
-  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" set both opencode "$TEST_PROJECT"
   [ "$status" -ne 0 ]
   [ -f "$TEST_PROJECT/.opencode/rules/agmsg.md" ]
 }
 
-@test "opencode supports turn and off modes: status derives mode from rule file existence" {
+@test "opencode set monitor: passes the delivery_modes gate and writes a sentinel_monitor rule" {
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  local rule_file="$TEST_PROJECT/.opencode/rules/agmsg.md"
+  [ -f "$rule_file" ]
+  run cat "$rule_file"
+  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
+  [[ "$output" == *"sentinel_monitor"* ]]
+  [[ "$output" == *"watch.sh"* ]]
+  [[ "$output" == *"SENTINEL_SESSION_ID"* ]]
+  # Fallback instructions for when sentinel_monitor is unavailable.
+  [[ "$output" == *"check-inbox.sh"* ]]
+}
+
+@test "opencode set monitor: a project path containing an apostrophe stays one shell word" {
+  # An apostrophe is a legal POSIX path character and delivery.sh accepts it, so
+  # a literal '$project' wrap in the rule would end the argument early and let
+  # anything after it become live shell syntax. Both generated commands — the
+  # sentinel_monitor watcher and the fallback check-inbox — have to survive it.
+  local weird="$TEST_PROJECT/it's a proj"
+  mkdir -p "$weird"
+  run bash "$SCRIPTS/delivery.sh" set monitor opencode "$weird"
+  [ "$status" -eq 0 ]
+
+  local rule_file="$weird/.opencode/rules/agmsg.md"
+  [ -f "$rule_file" ]
+
+  # The path must not appear inside a single-quoted span that its own apostrophe
+  # terminates. Asserted by running the generated command lines through the
+  # shell's own parser: a broken quote fails to parse at all.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *watch.sh*|*check-inbox.sh*) ;;
+      *) continue ;;
+    esac
+    line="${line#- command: }"
+    line="${line#- Command: }"
+    run bash -n -c "$line"
+    [ "$status" -eq 0 ] || { echo "generated command does not parse: $line"; false; }
+  done < "$rule_file"
+}
+
+@test "opencode status: reports monitor when the monitor rule is present" {
+  bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "opencode set turn then monitor: rewrites the rule from turn to monitor" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+  bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "opencode supports turn/monitor/off modes: status derives mode from rule file content" {
   run bash "$SCRIPTS/delivery.sh" status opencode "$TEST_PROJECT"
   [[ "$output" =~ "mode: off" ]]
 
@@ -2036,14 +2118,17 @@ EOF
   [[ "$output" != *"watch processes:"* ]]
 }
 
-@test "delivery status (codex): identity with no bridge reports not running" {
+@test "delivery status (codex): identity with no bridge and no seat says so, not \"not running\"" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"mode: monitor"* ]]
-  [[ "$output" == *"Codex bridge: team/alice not running"* ]]
+  # No seat is the reason here, and it is a different problem from a process
+  # that died -- the old wording named the wrong one (#579).
+  [[ "$output" == *"Codex bridge: team/alice has no session recorded"* ]]
+  [[ "$output" != *"Codex bridge: team/alice not running"* ]]
   [[ "$output" != *"watch processes:"* ]]
 }
 
@@ -2160,7 +2245,7 @@ EOF
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex bridge: team/alice alive (pid $bpid)"* ]]
-  [[ "$output" == *"Codex bridge: team/bob not running"* ]]
+  [[ "$output" == *"Codex bridge: team/bob has no session recorded"* ]]
   [[ "$output" != *"watch processes:"* ]]
 
   kill "$bpid" 2>/dev/null || true
@@ -2714,4 +2799,96 @@ EOF
 
   kill "$wpid" 2>/dev/null || true
   trap - EXIT
+}
+
+@test "delivery status (codex): a recorded seat makes \"not running\" mean the process (#579)" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  # shellcheck disable=SC1090
+  SKILL_DIR="$TEST_SKILL_DIR" source "$SCRIPTS/lib/role-session.sh"
+  SKILL_DIR="$TEST_SKILL_DIR" agmsg_role_session_record team alice seat-uuid-1 "$TEST_PROJECT" codex
+
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # With a seat on record, the bridge really is just absent -- and the seat is
+  # printed so the reader can tell the two states apart at a glance.
+  [[ "$output" == *"Codex bridge: team/alice not running (seat recorded: seat-uuid-1)"* ]]
+  [[ "$output" != *"has no session recorded"* ]]
+}
+
+@test "delivery status (codex): a port that accepts but never answers does not stall status (#579)" {
+  # A stale port file whose port is now held by something that completes the TCP
+  # connect and then says nothing is the worst case for a diagnostic probe: the
+  # bridge's own defaults would wait 10s to connect plus 30s for a reply, per
+  # identity. status has to stay a status line.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob   codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  # Silent listener: accepts, then holds the socket open without ever replying.
+  local portfile="$TEST_SKILL_DIR/silent.port"
+  node -e '
+    const net = require("net");
+    const srv = net.createServer(() => {});
+    srv.listen(0, "127.0.0.1", () => {
+      require("fs").writeFileSync(process.argv[1], String(srv.address().port));
+    });
+  ' "$portfile" >/dev/null 2>&1 3>&- &
+  local listener=$!
+  local waited=0
+  while [ ! -s "$portfile" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -s "$portfile" ]
+
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/hash.sh"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  cp "$portfile" "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+
+  local start finish elapsed
+  start=$(date +%s)
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  finish=$(date +%s)
+  elapsed=$((finish - start))
+
+  kill "$listener" 2>/dev/null || true
+  wait "$listener" 2>/dev/null || true
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mode: monitor"* ]]
+  # Tight enough to fail on the bridge's own 10s connect default: this probe must
+  # carry a status-sized timeout of its own, not inherit a delivery-sized one.
+  [ "$elapsed" -lt 8 ]
+}
+
+@test "delivery status (codex): the loaded-thread probe runs once, not once per identity (#579)" {
+  # Bounding the timeout is not enough on its own -- N identities with no seat
+  # would still pay it N times. Counted rather than timed, so it cannot pass by
+  # being fast.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob   codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team carol codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  local calls="$TEST_SKILL_DIR/probe-calls"
+  local fake="$TEST_SKILL_DIR/counting-node"
+  {
+    printf '#!/usr/bin/env bash
+'
+    printf 'printf x >> %q
+' "$calls"
+    printf 'printf "thr-a\nthr-b\n"
+'
+  } > "$fake"
+  chmod +x "$fake"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/hash.sh"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+
+  AGMSG_NODE="$fake" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  # Three seatless identities, one probe.
+  [ "$(wc -c < "$calls" | tr -d ' ')" = "1" ]
+  [[ "$output" == *"2 threads loaded"* ]]
 }

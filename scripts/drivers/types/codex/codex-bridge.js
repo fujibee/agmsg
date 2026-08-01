@@ -56,6 +56,10 @@ Options:
                           of total duration — only true silence trips it.
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
   --resolve-only          Print resolved team/name and exit.
+  --print-loaded-threads  Print the app-server's loaded thread ids (one per
+                          line) and exit. Needs --app-server. Used by
+                          codex-record-session.sh to seat a role without
+                          guessing from rollout files (#579).
   --help                  Show this help.
 
 Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
@@ -104,6 +108,8 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === "--resolve-only") {
       opts.resolveOnly = true;
+    } else if (arg === "--print-loaded-threads") {
+      opts.printLoadedThreads = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
     } else if (arg === "--workspace-root") {
@@ -148,6 +154,14 @@ function parseArgs(argv) {
   }
 
   if (opts.help) return opts;
+  // The loaded-thread probe neither watches an inbox nor resolves an identity,
+  // so every option below is meaningless to it. --project in particular is the
+  // one thing its caller cannot supply usefully: a project is how you find a
+  // ROLE, and the probe exists precisely because no role is seated yet.
+  if (opts.printLoadedThreads) {
+    if (!opts.appServer) die("--print-loaded-threads requires --app-server");
+    return opts;
+  }
   if (!opts.project) die("--project is required");
   if (opts.workspaceRoots.some((root) => !root)) die("--workspace-root requires a path");
   opts.workspaceRoots = [...new Set([opts.project, ...opts.workspaceRoots])];
@@ -875,6 +889,32 @@ class CodexBridge {
     await this.initialize();
     await this.ensureThread();
     await this.armWatch();
+    // After armWatch, not before: the seat is a claim that this role is being
+    // delivered to, and until the watch is armed that is not yet true.
+    this.recordSeat();
+  }
+
+  // Write the seat from the thread the bridge actually armed on (#579). Seating
+  // before this point can only ever be inference -- the app-server is the one
+  // that knows which thread this session got, and it does not know it until the
+  // resume above succeeded. So whatever seeded the seat earlier, the value it
+  // guessed is replaced here by one the app-server confirmed.
+  //
+  // Best-effort by design: a failure to record costs the NEXT session a resume,
+  // not this one, which is already armed and delivering. Never let it take the
+  // bridge down.
+  recordSeat() {
+    if (!this.threadId || this.threadId === "loaded") return;
+    for (const pair of this.identities) {
+      try {
+        spawnSync(BASH_BIN, [
+          path.join(SCRIPT_DIR, "codex-record-session.sh"),
+          pair.team, pair.name, toPosixPath(this.opts.project),
+        ], { cwd: SKILL_DIR, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: this.threadId } });
+      } catch (error) {
+        console.error(`codex-bridge: could not record seat for ${pair.team}/${pair.name}: ${error.message}`);
+      }
+    }
   }
 
   clientHandler(method, handler) {
@@ -1457,6 +1497,31 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     usage();
+    return;
+  }
+
+  // Read-only probe: no identities, no pidfile, no thread resumed. Runs before
+  // resolveIdentities because seating a role is exactly what has not happened
+  // yet when this is called -- requiring an identity here would be circular.
+  if (opts.printLoadedThreads) {
+    const client = createAppServerClient(opts);
+    try {
+      // start() arms the connection; ready() is what resolves once the WebSocket
+      // handshake has completed. Awaiting start() alone sends the first request
+      // into a socket that is not connected yet.
+      client.start();
+      await client.ready?.();
+      await client.request("initialize", {
+        clientInfo: { name: "agmsg-codex-bridge", title: "agmsg Codex bridge", version: readVersion() },
+        capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: [] },
+      });
+      client.notify("initialized");
+      const response = await client.request("thread/loaded/list", {});
+      const ids = response && Array.isArray(response.data) ? response.data : [];
+      if (ids.length > 0) console.log(ids.join("\n"));
+    } finally {
+      client.stop();
+    }
     return;
   }
 

@@ -51,6 +51,16 @@ skip_on_windows() {
   esac
 }
 
+# The inverse, for the handful of tests whose whole point is native Windows: the
+# real tasklist, the real MSYS pid space, no stub in between. Everywhere else
+# they would prove nothing, so they skip rather than pass vacuously.
+skip_unless_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) skip "${1:-only meaningful under Git Bash}" ;;
+  esac
+}
+
 # In-memory sqlite for test ASSERTIONS, stripping CR. sqlite3.exe writes stdout
 # in text mode on Windows (\n -> \r\n); $(...) keeps the trailing \r, so a probe
 # like [ "$(sqlite3 :memory: 'SELECT json_valid(...)')" = "1" ] compares "1\r"

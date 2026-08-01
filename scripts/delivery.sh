@@ -350,7 +350,7 @@ agmsg_delivery_runtime_status_default() {
       [ -f "$f" ] || continue
       local pid
       pid=$(cat "$f" 2>/dev/null || echo "")
-      if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
+      if [ -n "$pid" ] && _agmsg_pid_alive_local "$pid"; then
         alive=$((alive + 1))
       else
         dead=$((dead + 1))
@@ -408,9 +408,9 @@ emit_monitor_directive() {
   if [ -f "$pidfile" ]; then
     local existing
     existing=$(cat "$pidfile" 2>/dev/null || true)
-    # EPERM-aware liveness (_agmsg_pid_alive): a sandbox-unsignalable watcher is
+    # _agmsg_pid_alive_local: EPERM-aware, so a sandbox-unsignalable watcher is
     # still alive, so we must not re-emit and spawn a duplicate.
-    if [ -n "$existing" ] && _agmsg_pid_alive "$existing"; then
+    if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
       cat <<EOF
 
 A watch.sh is already streaming into this session (pid $existing). No
@@ -485,7 +485,7 @@ EOF
     server_pidfile="$RUN_DIR/codex-app-server.$project_hash.pid"
     if [ -f "$server_pidfile" ]; then
       server_pid="$(cat "$server_pidfile" 2>/dev/null || true)"
-      if [ -n "$server_pid" ] && _agmsg_pid_alive "$server_pid"; then
+      if [ -n "$server_pid" ] && _agmsg_pid_alive_local "$server_pid"; then
         server_cmd="$(compat_get_cmdline "$server_pid" 2>/dev/null || true)"
         case "$server_cmd" in
           *codex*app-server*) kill "$server_pid" 2>/dev/null || true ;;
@@ -711,7 +711,7 @@ kill_all_watchers() {
       [ -f "$f" ] || continue
       local pid cmd
       pid=$(cat "$f" 2>/dev/null || echo "")
-      if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
+      if [ -n "$pid" ] && _agmsg_pid_alive_local "$pid"; then
         # Defensive: only kill if the pid's command line still looks like
         # our watch.sh. Defends against pid recycling — a stale pidfile
         # could point at an unrelated process that reused the pid.
