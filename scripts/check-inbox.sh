@@ -75,8 +75,10 @@ if [ -n "$SESSION_ID" ]; then
   PIDFILE="$SKILL_DIR/run/watch.$SESSION_ID.pid"
   if [ -f "$PIDFILE" ]; then
     WATCH_PID=$(cat "$PIDFILE" 2>/dev/null || true)
-    # EPERM-aware liveness (_agmsg_pid_alive): a sandbox-unsignalable watcher is still alive.
-    if [ -n "$WATCH_PID" ] && _agmsg_pid_alive "$WATCH_PID"; then
+    # _agmsg_pid_alive_local: EPERM-aware, so a sandbox-unsignalable watcher is
+    # still alive -- and it does not ask tasklist, which cannot see a pid watch.sh
+    # minted from its own $$ (#567).
+    if [ -n "$WATCH_PID" ] && _agmsg_pid_alive_local "$WATCH_PID"; then
       exit 0
     fi
   fi

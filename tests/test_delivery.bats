@@ -943,6 +943,36 @@ JSON
   unset CLAUDE_CODE_SESSION_ID
 }
 
+@test "emit monitor directive: skips when tasklist cannot see the live watcher (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  # watch.sh records its own $$, so the pid in watch.<sid>.pid is numbered in the
+  # MSYS pid space. `tasklist` reports Windows pids and has no record of it --
+  # measured on our own Windows runner, where $$, $! and a pid read back from a
+  # pidfile all come back with zero tasklist hits while kill -0 answers yes. A
+  # probe that asks tasklist therefore calls the running watcher dead, and this
+  # dedup emits a second directive beside the one already streaming.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+
+  sleep 30 3>&- &
+  local live_pid=$!
+  CLAUDE_CODE_SESSION_ID="msys-live-sid"
+  export CLAUDE_CODE_SESSION_ID
+  echo "$live_pid" > "$TEST_SKILL_DIR/run/watch.$CLAUDE_CODE_SESSION_ID.pid"
+
+  run env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "already streaming" ]]
+  ! [[ "$output" =~ "AGMSG-DIRECTIVE" ]]
+
+  kill "$live_pid" 2>/dev/null || true
+  unset CLAUDE_CODE_SESSION_ID
+}
+
 @test "emit monitor directive: emits when no live watcher exists for this session" {
   CLAUDE_CODE_SESSION_ID="fresh-sid-no-watcher"
   export CLAUDE_CODE_SESSION_ID

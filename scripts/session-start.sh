@@ -164,7 +164,7 @@ for f in "$RUN_DIR"/cc-instance.*; do
     orphan_pidfile="$RUN_DIR/watch.$dead_sid.pid"
     if [ -f "$orphan_pidfile" ]; then
       orphan_pid=$(cat "$orphan_pidfile" 2>/dev/null || true)
-      if [ -n "$orphan_pid" ] && _agmsg_pid_alive "$orphan_pid"; then
+      if [ -n "$orphan_pid" ] && _agmsg_pid_alive_local "$orphan_pid"; then
         # Defensive: only kill if the pid's command line actually matches
         # our watch.sh. Defends against pid recycling — a stale pidfile
         # could point at an unrelated process that took the same pid.
@@ -240,7 +240,7 @@ if [ -n "$CC_PID" ]; then
       prev_pidfile="$RUN_DIR/watch.$prev.pid"
       if [ -f "$prev_pidfile" ]; then
         prev_pid=$(cat "$prev_pidfile" 2>/dev/null || true)
-        if [ -n "$prev_pid" ] && _agmsg_pid_alive "$prev_pid"; then
+        if [ -n "$prev_pid" ] && _agmsg_pid_alive_local "$prev_pid"; then
           kill "$prev_pid" 2>/dev/null || true
         fi
       fi
@@ -258,7 +258,7 @@ fi
 WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
-  if [ -n "$existing" ] && _agmsg_pid_alive "$existing"; then
+  if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
     cat <<EOF
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
