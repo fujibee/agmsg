@@ -157,45 +157,73 @@ _key_stage_epoch_locked() {
   agmsg_write_atomic "$cfg" "$updated"
 }
 
-# _key_confirmed_epoch_revision <team>
-# The revision the authority has actually sequenced, read from the exported
-# snapshot chain -- the one place that knows. Empty (and non-zero) when there is
-# no chain to read, which is the caller's cue to leave current where it is
-# rather than guess.
-_key_confirmed_epoch_revision() {
-  local team="$1" snapshot revision
+# _key_confirmed_epoch <team>
+# The epoch the authority actually sequenced, as revision<TAB>key_id<TAB>recipient,
+# read from the tail of the exported snapshot chain -- the one place that knows.
+# Non-zero (and silent) when there is no chain to read, which is the caller's cue
+# to leave current where it is rather than guess.
+#
+# The revision alone does not identify it. Two machines can announce a rotation
+# at the same revision; the authority sequences one of them and the chain's tail
+# names THAT one, key and recipient included. Promoting on the revision would let
+# a machine whose local ledger holds the loser install the loser as effective --
+# the exact thing this file is here to prevent, in the case where it matters most.
+_key_confirmed_epoch() {
+  local team="$1" snapshot row
   snapshot="$(mktemp "${TMPDIR:-/tmp}/agmsg-confirmed-epoch.XXXXXX")" || return 1
   if ! bash "$SCRIPT_DIR/remote-sync.sh" export-age-snapshot \
       --team "$team" --out "$snapshot" >/dev/null 2>&1; then
     rm -f "$snapshot"
     return 1
   fi
-  revision="$(agmsg_sqlite_mem \
-    "SELECT json_extract(readfile('$(_agmsg_sqlesc "$snapshot")'), '\$.epoch_revision');")"
+  row="$(agmsg_sqlite_mem "
+    WITH doc(j) AS (SELECT readfile('$(_agmsg_sqlesc "$snapshot")')),
+         tail(e) AS (
+           SELECT value FROM doc, json_each(json_extract(doc.j, '\$.history'))
+            ORDER BY CAST(key AS INTEGER) DESC LIMIT 1)
+    SELECT json_extract(e, '\$.epoch_revision') || char(9) ||
+           json_extract(e, '\$.key_id')         || char(9) ||
+           json_extract(e, '\$.recipients[0]')
+      FROM tail;")"
   rm -f "$snapshot"
-  case "$revision" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s' "$revision"
+  case "$row" in ''|*'|'*) return 1 ;; esac
+  # A tail missing any of the three is not something to promote against.
+  case "$row" in *$'\t'*$'\t'*) ;; *) return 1 ;; esac
+  printf '%s' "$row"
 }
 
 # _key_promote_confirmed_locked <team> <config_json_path>
-# Move remote_key.current forward to the newest epoch the chain has confirmed.
-# Lazy on purpose: the chain is the single source of truth, so nothing has to
-# write back into this ledger at confirmation time -- readers just find current
-# already correct the next time key.sh runs. Same locking contract as above.
+# Move remote_key.current forward to the epoch the chain has confirmed, and only
+# when the local ledger holds that exact epoch -- revision, key_id and recipient
+# all matching. A machine that staged a competing rotation has no entry to
+# promote and keeps the epoch it has, which is the correct answer: it needs the
+# winner's identity imported before anything of its own becomes effective.
+#
+# Lazy on purpose: the chain is the single source of truth, so nothing writes
+# back into this ledger at confirmation time -- readers find current already
+# correct on the next key.sh run. Same locking contract as above.
 _key_promote_confirmed_locked() {
-  local team="$1" cfg="$2" confirmed cur_revision escaped updated
-  confirmed="$(_key_confirmed_epoch_revision "$team")" || return 0
+  local team="$1" cfg="$2" row confirmed_rev confirmed_key confirmed_rcpt \
+    cur_revision escaped updated
+  row="$(_key_confirmed_epoch "$team")" || return 0
+  confirmed_rev="${row%%	*}"
+  confirmed_key="${row#*	}"; confirmed_key="${confirmed_key%%	*}"
+  confirmed_rcpt="${row##*	}"
+  case "$confirmed_rev" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$confirmed_key" ] && [ -n "$confirmed_rcpt" ] || return 0
   cur_revision="$(_key_read_config_field "$cfg" '$.remote_key.current.epoch_revision')"
   case "$cur_revision" in ''|null|*[!0-9]*) return 0 ;; esac
-  [ "$confirmed" -gt "$cur_revision" ] 2>/dev/null || return 0
+  [ "$confirmed_rev" -gt "$cur_revision" ] 2>/dev/null || return 0
   escaped=$(sed "s/'/''/g" "$cfg")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped', '\$.remote_key.current',
        (SELECT value FROM json_each(json_extract('$escaped', '\$.remote_key.epochs'))
-         WHERE json_extract(value, '\$.epoch_revision') = $confirmed
+         WHERE json_extract(value, '\$.epoch_revision') = $confirmed_rev
+           AND json_extract(value, '\$.key_id')        = '$(_agmsg_sqlesc "$confirmed_key")'
+           AND json_extract(value, '\$.recipient')     = '$(_agmsg_sqlesc "$confirmed_rcpt")'
          LIMIT 1));")
-  # No staged entry for that revision: leave the ledger alone rather than write
-  # a null over a live current.
+  # No local entry for the confirmed winner: leave the ledger alone rather than
+  # write a null over a live current.
   case "$updated" in ''|*'"current":null'*) return 0 ;; esac
   agmsg_write_atomic "$cfg" "$updated"
 }

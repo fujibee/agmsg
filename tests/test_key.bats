@@ -39,10 +39,15 @@ open(p, 'w').write(json.dumps(d) + '\\n')
 }
 
 # $1 = the epoch revision the authority has confirmed (default 0, i.e. nothing
-# rotated yet has been sequenced). key.sh derives "is this rotation effective"
-# from the exported chain, so this is how a test says confirmed or not.
+# rotated yet has been sequenced). $2/$3 = the key_id and recipient it sequenced.
+# The chain's tail names the WINNER, not just the revision: competing rotations
+# share a revision and the authority picks one, so a test that wants a rotation
+# confirmed has to say which one.
 stub_current_age_snapshot() {
-  local revision="${1:-0}"
+  local revision="${1:-0}" key_id="${2:-}" recipient="${3:-}" history=""
+  if [ -n "$key_id" ]; then
+    history=",\"history\":[{\"epoch_revision\":\"${revision}\",\"key_id\":\"${key_id}\",\"recipients\":[\"${recipient}\"]}]"
+  fi
   cat > "$SCRIPTS/remote-sync.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -56,7 +61,7 @@ while [ \$# -gt 0 ]; do
   esac
 done
 [ -n "\$out" ]
-printf '%s' '{"epoch_revision":"${revision}"}' > "\$out"
+printf '%s' '{"epoch_revision":"${revision}"${history}}' > "\$out"
 EOF
   chmod +x "$SCRIPTS/remote-sync.sh"
 }
@@ -364,13 +369,80 @@ EOF
 
   # The chain now reports the rotation as sequenced. The next key.sh run catches
   # up, and only then does current name the replacement.
-  stub_current_age_snapshot 1
+  local staged_rcpt
+  staged_rcpt="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-1]['recipient'])")"
+  stub_current_age_snapshot 1 "$staged" "$staged_rcpt"
   local identity secret
   identity="$SCRIPTS/../run/remote-credentials/testteam/keys/$staged.key"
   secret=$(grep '^AGE-SECRET-KEY-' "$identity")
   run bash -c "printf '%s' '$secret' | bash '$SCRIPTS/key.sh' import testteam --key-id '$staged' --identity-stdin"
   [ "$status" -eq 0 ]
   [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$staged" ]
+}
+
+# Two machines can announce a rotation at the same revision. The authority
+# sequences one, and the chain's tail names that one -- key and recipient
+# included. Promoting on the revision alone would let a machine holding the
+# other candidate install it as effective, which is the failure this whole
+# change exists to prevent, in the case where it costs the most.
+_add_competing_epoch() {   # $1 = config path, $2 = key_id, $3 = revision
+  python3 - "$1" "$2" "$3" <<'EOS'
+import json, sys
+path, key_id, revision = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cfg = json.load(open(path))
+epochs = cfg["remote_key"]["epochs"]
+rival = dict(epochs[-1])
+rival["key_id"] = key_id
+rival["epoch_revision"] = revision
+rival["recipient"] = "age1" + "r" * 58
+epochs.insert(len(epochs) - 1, rival)      # the rival lands FIRST
+json.dump(cfg, open(path, "w"), indent=2)
+EOS
+}
+
+@test "key rotate: a competing epoch at the same revision is not promoted in the winner's place" {
+  skip_if_no_age
+  bash "$SCRIPTS/key.sh" generate testteam
+  local cfg_json="$SCRIPTS/../teams/testteam/config.json"
+  stub_current_age_snapshot 0
+  bash "$SCRIPTS/key.sh" rotate testteam >/dev/null
+  local winner winner_rcpt
+  winner="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-1]['key_id'])")"
+  winner_rcpt="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-1]['recipient'])")"
+  _add_competing_epoch "$cfg_json" "epoch-rival-0001" 1
+  # The rival is ahead of the winner in the ledger, so a revision-only match
+  # would pick it.
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-2]['key_id'])")" = "epoch-rival-0001" ]
+
+  stub_current_age_snapshot 1 "$winner" "$winner_rcpt"
+  bash "$SCRIPTS/key.sh" show testteam >/dev/null 2>&1 || true
+  local identity secret
+  identity="$SCRIPTS/../run/remote-credentials/testteam/keys/$winner.key"
+  secret=$(grep '^AGE-SECRET-KEY-' "$identity")
+  run bash -c "printf '%s' '$secret' | bash '$SCRIPTS/key.sh' import testteam --key-id '$winner' --identity-stdin"
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$winner" ]
+}
+
+@test "key rotate: current stays put when the ledger has no entry for the confirmed winner" {
+  skip_if_no_age
+  bash "$SCRIPTS/key.sh" generate testteam
+  local cfg_json="$SCRIPTS/../teams/testteam/config.json"
+  local first; first="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")"
+  stub_current_age_snapshot 0
+  bash "$SCRIPTS/key.sh" rotate testteam >/dev/null
+
+  # This machine announced a rotation the authority did NOT sequence. It has no
+  # copy of the winner, so there is nothing here that may become effective --
+  # the winner's identity has to be imported first.
+  stub_current_age_snapshot 1 "epoch-someone-elses-0001" "age1$(printf 'w%.0s' $(seq 58))"
+  bash "$SCRIPTS/key.sh" show testteam >/dev/null 2>&1 || true
+  local staged; staged="$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['epochs'][-1]['key_id'])")"
+  local identity secret
+  identity="$SCRIPTS/../run/remote-credentials/testteam/keys/$staged.key"
+  secret=$(grep '^AGE-SECRET-KEY-' "$identity")
+  run bash -c "printf '%s' '$secret' | bash '$SCRIPTS/key.sh' import testteam --key-id '$staged' --identity-stdin"
+  [ "$(python3 -c "import json; print(json.load(open('$cfg_json'))['remote_key']['current']['key_id'])")" = "$first" ]
 }
 
 @test "key rotate: creates a replacement identity and journals only its fingerprint" {
