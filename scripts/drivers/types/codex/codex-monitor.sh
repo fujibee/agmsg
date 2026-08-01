@@ -124,8 +124,14 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   # Reuse only when OUR recorded app-server is still alive AND its port answers,
   # so a foreign process that grabbed the same port after ours died is not
   # mistaken for the bridge app-server.
+  #
+  # _local for the same reason as the wait loop below: this file records $! (see
+  # the `> "$SERVER_PID"` further down), and reading it back through a pidfile
+  # does not move the number into the Windows pid space. Asking tasklist about it
+  # never matches, so a live app-server reads as dead and every launch starts
+  # another one beside it.
   if [ -n "$existing_port" ] && [ -n "$existing_pid" ] \
-    && _agmsg_pid_alive "$existing_pid" && port_alive "$existing_port"; then
+    && _agmsg_pid_alive_local "$existing_pid" && port_alive "$existing_port"; then
     # Confirm the recorded pid is actually OUR codex app-server before trusting OR
     # killing it: a recycled pid could belong to an unrelated process while the
     # recorded port happens to answer via something else. Only reuse/kill when the

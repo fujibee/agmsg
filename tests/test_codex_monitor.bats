@@ -291,3 +291,34 @@ EOF
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   [[ "$output" != *"did not report a listening port"* ]]
 }
+
+@test "codex-monitor: reuses a live app-server when tasklist cannot see it (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local stubdir="$TEST_PROJECT/stub-bin"
+  _stub_tasklist "$stubdir"
+
+  # First launch records port + pid; the recorded pid is this file's own $!.
+  run env FAKE_CODEX_VERSION=0.142.2 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  local resolved hash base first_pid first_port
+  resolved="$(cd "$TEST_PROJECT" && pwd)"
+  hash="$(printf '%s' "$resolved" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  base="$TEST_SKILL_DIR/run/codex-app-server.$hash"
+  first_pid="$(cat "$base.pid")"
+  first_port="$(cat "$base.port")"
+  [ -n "$first_pid" ] && [ -n "$first_port" ]
+
+  # Second launch, now under Git Bash's pid rules. Reading the pid back out of a
+  # pidfile does not move it into the Windows pid space, so a probe that asks
+  # tasklist calls the live server dead and starts another one beside it.
+  run env FAKE_CODEX_VERSION=0.142.2 MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  # Same server: same pid on record, same port in the handoff.
+  [ "$(cat "$base.pid")" = "$first_pid" ]
+  grep -q "plain-codex <--remote> <ws://127\.0\.0\.1:$first_port>" "$CALL_LOG"
+}
