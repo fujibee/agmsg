@@ -1,5 +1,11 @@
 # Remote connect onboarding design
 
+> **SUPERSEDED.** The onboarding this describes was replaced by
+> [`docs/design/remote-sync.md`](../remote-sync.md), which states the replacement
+> from its own side. Kept as design history: the reasoning here is why the
+> current shape is what it is, and the findings it records were closed rather
+> than dropped. Do not build to it.
+
 **Status:** implemented dogfood design — §1/§1a-§1c/§8's four key commands (generate/show/
 import) and §0-§7's connect/status/disconnect/doctor are approved and
 implemented (this PR). `key rotate` remains NOT READY — see §8 — and is
