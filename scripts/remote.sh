@@ -1326,19 +1326,26 @@ cmd_disconnect() {
   # binding_revision is the generation: every binding carries one and every write
   # bumps it. The guard used to compare credential_id, which stopped meaning
   # anything the moment connect stopped issuing credentials.
+  # The stop is inside the same hold, and that is the point. connect writes its
+  # binding under this lock and starts the engine after releasing it, so a
+  # reconnect that landed between the snapshot and an unlocked stop would have
+  # ITS engine killed by a disconnect that then refuses to write -- the config
+  # protected by the check, the engine killed outside it. Holding through the
+  # stop means the replacement cannot exist yet when the engine is stopped.
   local connected_at binding_revision
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
   connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
   binding_revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
-  agmsg_lock_release
   if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
+    agmsg_lock_release
     echo "agmsg: team '$team' is not connected" >&2
     exit 1
   fi
 
-  # Stop the background sync engine: leaving it polling a team we are tearing the
-  # binding off of would just error every cycle.
+  # Leaving the engine polling a team we are tearing the binding off of would
+  # just error every cycle.
   _remote_sync_engine_stop "$team"
+  agmsg_lock_release
 
   # `|| status=$?`, not a bare call followed by `$?`: under `set -e` a function
   # returning non-zero as a statement aborts the script before the next line
