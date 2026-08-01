@@ -385,6 +385,59 @@ PY
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$cfg') AS TEXT), '\$.remote_binding.disconnected_at');")" = "" ]
 }
 
+@test "disconnect: no replacement can land while the engine it chose is being stopped" {
+  # The half the generation check cannot cover. connect writes its binding under
+  # the team lock and starts the engine after releasing it, so a reconnect
+  # landing between disconnect's snapshot and an unlocked stop would have ITS
+  # engine killed by a call that then refuses to write. The stop therefore
+  # happens inside the same hold as the snapshot.
+  #
+  # Observed by exclusion rather than by racing: while disconnect is inside the
+  # stop, a separate process asks for the same lock with a short retry budget
+  # and must be refused. Nothing here depends on who wins a lock -- being shut
+  # out IS the invariant.
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  local pidfile="$SCRIPTS/../run/remote-sync.testteam.pid"
+  local termed="$TEST_SKILL_DIR/engine-termed"
+  local release="$TEST_SKILL_DIR/engine-release"
+
+  local real_pid; real_pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [ -n "$real_pid" ] && kill "$real_pid" 2>/dev/null
+  # argv has to end the way _remote_sync_engine_status expects, or the stop
+  # declines to reap it and the seam is never reached.
+  TERMED="$termed" RELEASE="$release" bash -c '
+    trap "touch \"$TERMED\"" TERM
+    while [ ! -f "$RELEASE" ]; do sleep 0.02; done
+  ' "$SCRIPTS/internal/remote-sync.mjs" run --team testteam &
+  local engine=$!
+  echo "$engine" > "$pidfile"
+
+  bash "$SCRIPTS/remote.sh" disconnect testteam > "$TEST_SKILL_DIR/dc.out" 2>&1 &
+  local dc=$!
+
+  local i
+  for i in $(seq 1 300); do [ -f "$termed" ] && break; sleep 0.02; done
+  [ -f "$termed" ] || { echo "disconnect never reached the engine stop"; false; }
+
+  # A would-be replacement writer, while the stop is in progress.
+  run env AGMSG_LOCK_TRIES=5 SCRIPTS="$SCRIPTS" bash -c '
+    . "$SCRIPTS/lib/registry-lock.sh"
+    agmsg_lock_acquire "$SCRIPTS/../teams/testteam"
+  '
+  [ "$status" -ne 0 ] || {
+    echo "the lock was available during the engine stop: a reconnect could have landed"
+    false
+  }
+  [[ "$output" == *"timed out acquiring registry lock"* ]]
+
+  touch "$release"
+  local dc_status=0
+  wait "$dc" || dc_status=$?
+  wait "$engine" 2>/dev/null || true
+  # Nothing was contending, so the disconnect itself completes normally.
+  [ "$dc_status" -eq 0 ] || { echo "disconnect failed: $(cat "$TEST_SKILL_DIR/dc.out")"; false; }
+}
+
 @test "disconnect: fails for a team that isn't connected" {
   run bash "$SCRIPTS/remote.sh" disconnect testteam
   [ "$status" -ne 0 ]
