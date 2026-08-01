@@ -83,7 +83,23 @@ fi
 # Exactly one leftover => ours. Zero or several => record nothing, exactly as
 # before: this stays biased toward a fresh boot, because a resume mis-fire
 # (waking someone else's conversation) is worse than no resume at all.
+#
+# probe_ran distinguishes "the app-server answered and the answer was ambiguous"
+# from "there was no app-server to ask". Only the second may fall through to the
+# rollout scan: an ambiguous answer is a firm statement that this session cannot
+# be identified, and letting a weaker source overrule it is how a wrong thread
+# gets seated.
+probe_ran=0
 if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+  # An inference may only claim a role that has no seat. The subtraction removes
+  # every recorded thread INCLUDING this role's own, so a seated role running
+  # this again would find its own thread gone from the set and adopt whatever
+  # else was left -- overwriting a correct seat with a stranger's thread. Only
+  # CODEX_THREAD_ID, which is not an inference, may re-seat a seated role (that
+  # is how the bridge rewrites the seat after arming).
+  if [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
+    exit 0
+  fi
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/node.sh"
   node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
@@ -91,25 +107,40 @@ if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
     loaded_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexloaded.XXXXXX" 2>/dev/null || true)"
     seated_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexseated.XXXXXX" 2>/dev/null || true)"
     if [ -n "$loaded_file" ] && [ -n "$seated_file" ]; then
-      "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$AGMSG_CODEX_BRIDGE_APP_SERVER" \
-        --print-loaded-threads 2>/dev/null | grep . | sort -u > "$loaded_file" || true
+      # Exit status, not output: an empty list is a valid answer ("nothing is
+      # loaded"), while a failure to reach the app-server is not an answer at all.
+      if "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$AGMSG_CODEX_BRIDGE_APP_SERVER" \
+           --print-loaded-threads >"$loaded_file.raw" 2>/dev/null; then
+        probe_ran=1
+      fi
+      grep . "$loaded_file.raw" 2>/dev/null | sort -u > "$loaded_file" || true
+      rm -f "$loaded_file.raw"
       # Every recorded codex seat, not just this project's. Over-subtracting can
       # only drop a thread that some role already owns, which is never the one we
       # want to claim; under-subtracting would leave a stale thread in the set and
       # make the count ambiguous.
       agmsg_role_session_recorded_uuids codex 2>/dev/null | grep . | sort -u > "$seated_file" || true
-      cand_count="$(comm -23 "$loaded_file" "$seated_file" | grep -c . || true)"
-      if [ "${cand_count:-0}" -eq 1 ]; then
-        thread="$(comm -23 "$loaded_file" "$seated_file" | grep . | head -1)"
+      if [ "$probe_ran" = "1" ]; then
+        cand_count="$(comm -23 "$loaded_file" "$seated_file" | grep -c . || true)"
+        if [ "${cand_count:-0}" -eq 1 ]; then
+          thread="$(comm -23 "$loaded_file" "$seated_file" | grep . | head -1)"
+        fi
       fi
     fi
     rm -f "$loaded_file" "$seated_file"
   fi
 fi
 
+# An answered-but-ambiguous probe ends here: the app-server has already said this
+# session cannot be told apart, and no weaker signal may overturn that.
+if [ "$probe_ran" = "1" ]; then
+  [ -n "$thread" ] || exit 0
+fi
+
 if [ -z "$thread" ]; then
-  # No app-server to ask (a codex session outside monitor mode). The rollout scan
-  # is the only signal left, so it stays as the fallback -- it still resolves the
+  # No app-server to ask, or it could not be reached -- a codex session outside
+  # monitor mode, a missing Node, a server that is not answering. The rollout scan
+  # is the only signal left, so it stays as the fallback: it still resolves the
   # single-rollout case it always did, and on a project with history it records
   # nothing, which is what happens today.
   #

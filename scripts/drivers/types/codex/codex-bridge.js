@@ -888,8 +888,10 @@ class CodexBridge {
     await this.client.ready?.();
     await this.initialize();
     await this.ensureThread();
-    this.recordSeat();
     await this.armWatch();
+    // After armWatch, not before: the seat is a claim that this role is being
+    // delivered to, and until the watch is armed that is not yet true.
+    this.recordSeat();
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating

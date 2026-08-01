@@ -262,3 +262,75 @@ record_with_loaded() {   # <ids-file> <team> <agent> <project>
   record_with_loaded "$ids" team alice "$proj"
   [ -z "$(recorded_uuid team alice)" ]
 }
+
+# A stand-in for node that FAILS, i.e. the app-server could not be reached at all.
+# Distinct from a probe that answers with an empty or ambiguous list: only this
+# case may fall through to the rollout scan.
+fake_node_failing() {
+  local out="$TEST_SKILL_DIR/fake-node-fail"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$out"
+  chmod +x "$out"
+  printf '%s' "$out"
+}
+
+@test "codex record: an ambiguous probe is NOT overruled by a unique rollout" {
+  # The rollout scan is the weaker source. Once the app-server has said it cannot
+  # tell this session apart, a rollout that happens to be unique must not seat a
+  # thread on top of that answer.
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-one\nthr-two\n' > "$ids"
+  make_rollout "rollout-unique-uuid" "$proj"
+  record_with_loaded "$ids" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: an empty probe is NOT overruled by a unique rollout" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  : > "$ids"
+  make_rollout "rollout-unique-uuid" "$proj"
+  record_with_loaded "$ids" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: an unreachable app-server DOES fall back to the rollout scan" {
+  local proj; proj="$(mktemp -d)"
+  make_rollout "rollout-unique-uuid" "$proj"
+  ( unset CODEX_THREAD_ID
+    AGMSG_NODE="$(fake_node_failing)" \
+    AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ "$(recorded_uuid team alice)" = "rollout-unique-uuid" ]
+}
+
+@test "codex record: a role that already has a seat is never re-seated by inference" {
+  # The subtraction removes this role's own thread along with everyone else's, so
+  # a seated role running the inference again would find its own gone and adopt
+  # whatever was left -- replacing a correct seat with a stranger's thread.
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thread-A\nthread-B\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-A "$proj" codex
+  record_with_loaded "$ids" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "thread-A" ]
+}
+
+@test "codex record: an unseated role still gets the remainder while a seated one keeps its own" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thread-A\nthread-B\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice thread-A "$proj" codex
+  record_with_loaded "$ids" team bob "$proj"
+  [ "$(recorded_uuid team bob)" = "thread-B" ]
+  [ "$(recorded_uuid team alice)" = "thread-A" ]
+}
+
+@test "codex record: CODEX_THREAD_ID still re-seats a seated role (bridge write-back)" {
+  # The guard above is for INFERENCE only. The bridge rewrites the seat after
+  # arming with a thread the app-server confirmed, which must still land.
+  local proj; proj="$(mktemp -d)"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice guessed-thread "$proj" codex
+  CODEX_THREAD_ID="confirmed-thread" \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "confirmed-thread" ]
+}
