@@ -566,6 +566,32 @@ require_eperm_pid() {
   ! MSYSTEM=MINGW64 PATH="$stub:$PATH" _agmsg_pid_alive $$
 }
 
+@test "pid_alive_local: an oversized pid is dead on Windows too" {
+  skip_on_windows "POSIX kill path; the ceiling is what is under test"
+  # The validator widens to the DWORD range when MSYSTEM is set, because a
+  # Windows pid is a DWORD and tasklist is only asked to match a number. But
+  # _local hands the value to kill(1) even there, and past INT32_MAX kill
+  # rejects the argument rather than reporting ESRCH -- which reads as alive.
+  # Inheriting the wide ceiling would make an oversized pidfile value alive
+  # forever: lock never reclaimed, bridge never restarted (#505).
+  local err
+  err="$(export LC_ALL=C; kill -0 2147483648 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "kill treats out-of-range pids as ESRCH here" ;;
+  esac
+  local bad
+  for bad in 2147483648 4294967295; do
+    run env MSYSTEM=MINGW64 bash -c \
+      ". '$SCRIPTS/lib/instance-id.sh'; _agmsg_pid_alive_local $bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive_local $bad reported alive"; false; }
+  done
+  # The platform ceiling itself is untouched: the same value is still a legal
+  # thing to ask tasklist about.
+  run env MSYSTEM=MINGW64 bash -c \
+    ". '$SCRIPTS/lib/instance-id.sh'; _agmsg_pid_valid 4294967295"
+  [ "$status" -eq 0 ]
+}
+
 @test "pid_alive_local: EPERM still reads as alive (sandbox)" {
   skip_on_windows "POSIX kill path"
   # The reason the fix is not a bare `kill -0`: a pid we minted is still a pid a

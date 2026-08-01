@@ -63,9 +63,18 @@ _AGMSG_INSTANCE_ID_SH=1
 # Split out from _agmsg_pid_alive so a caller that kills a recorded pid WITHOUT
 # asking about liveness first can still refuse the values that do not name one
 # process.
+# A ceiling may be passed as $2 to override the platform's. Which one is right is
+# a property of what the value will be USED for, not of the host -- see the call
+# in _agmsg_pid_alive_local, which hands the value to kill(1) even on Windows.
 _agmsg_pid_valid() {
-  local pid="${1:-}" max=2147483647
+  local pid="${1:-}" max="${2:-}"
   case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  if [ -n "$max" ]; then
+    [ "${#pid}" -le 10 ] || return 1
+    if [ "${#pid}" -eq 10 ] && [ "$pid" \> "$max" ]; then return 1; fi
+    return 0
+  fi
+  max=2147483647
   # The upper bound is the platform's, not one number. A Windows process id is a
   # DWORD, and the liveness path there queries the native process table via
   # tasklist rather than kill(1)'s signed pid_t — applying the POSIX bound to it
@@ -102,7 +111,13 @@ _agmsg_pid_valid() {
 # a pid we minted is still a pid a sandbox may refuse to let us signal (#505).
 _agmsg_pid_alive_local() {
   local pid="$1" err stat
-  _agmsg_pid_valid "$pid" || return 1
+  # The POSIX ceiling, explicitly, whatever the host. _agmsg_pid_valid widens to
+  # the DWORD range when MSYSTEM is set, which is right for a number tasklist
+  # will be asked about and wrong for one kill(1) will parse: past INT32_MAX kill
+  # rejects the ARGUMENT rather than reporting ESRCH, and everything below that
+  # is not ESRCH reads as alive. Inheriting the wide ceiling here would put an
+  # oversized pidfile value back to alive forever -- the shape #505 closed.
+  _agmsg_pid_valid "$pid" 2147483647 || return 1
   # Fast path, and the common answer: the builtin, no fork. Callers poll this in
   # loops whose whole point is to be fork-free (#466), so the alive case must
   # not cost a subshell.
