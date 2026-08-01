@@ -315,7 +315,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Was 10, sized for the vectors and one filtered test. This job now runs
+    # every age-gated test -- about a hundred, across two files -- on top of a
+    # go install, so the old cap would have turned a slow runner into a
+    # cancellation rather than a result.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -355,12 +359,25 @@ jobs:
           AGMSG_AGE_BIN="$age_bin" bats --print-output-on-failure tests/test_jsonl_remote_sync.bats
           AGE_BIN="$age_bin" node docs/spec/vectors/verify-age-v1-vectors.mjs
 
-      - name: Run encrypted onboarding CLI roundtrip
+      # Every test that gates itself on age, discovered from the tree rather than
+      # listed here. A list is how #567 happened on the Windows side: a file the
+      # list did not name ran in no job at all, and CI went on reporting green
+      # while never executing it. The same hole was open here -- 31 tests gate on
+      # age, the shards skip them for want of the binary, and this job named one
+      # of them, so 30 were executed nowhere. Two of those were already red.
+      - name: Run every age-gated test
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           command -v age >/dev/null
           command -v age-keygen >/dev/null
-          bats --print-output-on-failure --filter 'remote unlock:' tests/test_remote.bats
+          files="$(grep -rl 'skip_if_no_age' tests/*.bats | sort | tr '\n' ' ')"
+          echo "age-gated files: $files"
+          # A discovery that finds nothing must fail loudly. Silently running no
+          # tests is indistinguishable from running them all successfully, which
+          # is the failure this step exists to end.
+          [ -n "$files" ] || { echo "::error::no age-gated test files found; the discovery is broken"; exit 1; }
+          # shellcheck disable=SC2086
+          bats --print-output-on-failure $files
 
   # Continuously verify that the storage contract is backend-portable: run the
   # SAME driver-agnostic contract suite against the jsonl driver (the sqlite run
