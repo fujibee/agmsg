@@ -29,23 +29,28 @@ export AGMSG_SYNC_CIPHER_HELPER="$SCRIPT_DIR/internal/sync-cipher.mjs"
 #
 # The engine speaks only over stdin, stdout and stderr; the spawn sites already
 # point those at a log. Nothing above stderr is anything it should keep.
-_close_inherited_fds() {
-  local fd
-  if [ -d /dev/fd ]; then
-    for fd in /dev/fd/*; do
-      fd="${fd##*/}"
-      case "$fd" in ''|*[!0-9]*) continue ;; esac
-      [ "$fd" -gt 2 ] || continue
-      eval "exec ${fd}>&-" 2>/dev/null || true
-    done
-  else
-    # No /dev/fd to enumerate: sweep a range instead. Bounded rather than exact,
-    # which is why it is the fallback and not the method.
-    for fd in $(seq 3 255); do
-      eval "exec ${fd}>&-" 2>/dev/null || true
-    done
-  fi
-}
-_close_inherited_fds
+#
+# The closes are attached to the exec rather than performed before it. One of the
+# descriptors above stderr belongs to the shell itself -- bash keeps the script it
+# is reading open, at 255 -- and closing it from a statement would leave the shell
+# to carry on reading a script through a descriptor it no longer holds. Bash does
+# defend against that (observed: it moves the script to another number), but as a
+# redirection on the exec the question does not arise: nothing of this script runs
+# between the close and the execve.
+_fd_closes=""
+if [ -d /dev/fd ]; then
+  for _fd in /dev/fd/*; do
+    _fd="${_fd##*/}"
+    case "$_fd" in ''|*[!0-9]*) continue ;; esac
+    [ "$_fd" -gt 2 ] || continue
+    _fd_closes="$_fd_closes ${_fd}>&-"
+  done
+else
+  # Nothing to enumerate, so name a range instead. Closing a descriptor that was
+  # never open is not an error, which is what makes the blind form safe.
+  for _fd in $(seq 3 255); do
+    _fd_closes="$_fd_closes ${_fd}>&-"
+  done
+fi
 
-exec "$NODE_BIN" "$SCRIPT_DIR/internal/remote-sync.mjs" "$@"
+eval "exec$_fd_closes \"\$NODE_BIN\" \"\$SCRIPT_DIR/internal/remote-sync.mjs\" \"\$@\""
