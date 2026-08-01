@@ -223,3 +223,72 @@ while True:
 
   kill "$foreign_pid" 2>/dev/null || true
 }
+
+# --- MSYS pid space (#567) ---
+
+@test "codex-monitor: waits for the port when tasklist cannot see the app-server (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative here"
+  run node -e 'const net = require("net"); if (!net) process.exit(1);'
+  if [ "$status" -ne 0 ]; then
+    skip "node net module is not available in this sandbox"
+  fi
+
+  # The app-server is this shell's own background child, so its pid is numbered
+  # in the MSYS pid space. `tasklist` reports Windows pids and cannot see it. A
+  # liveness probe that asks tasklist therefore calls a running app-server dead
+  # on the first iteration and the launch falls back to plain codex (#567).
+  #
+  # MSYSTEM steers the shared helper down its tasklist branch; the stub is what
+  # tasklist would say about a pid it has no record of, which is nothing. Setting
+  # MSYSTEM does not otherwise disturb a macOS run -- compat.sh picks its
+  # platform from `uname -s`, not from this variable.
+  local stubdir="$TEST_PROJECT/stub-bin"
+  mkdir -p "$stubdir"
+  cat > "$stubdir/tasklist" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stubdir/tasklist"
+
+  # The banner is delayed on purpose. The wait loop reads the log BEFORE it
+  # probes liveness, so an app-server that announces itself immediately breaks
+  # out on the first pass and never reaches the probe -- against which this test
+  # would pass no matter what the probe answered.
+  local slow_codex="$TEST_PROJECT/slow-codex"
+  cat > "$slow_codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.144.1"; exit 0 ;;
+  app-server)
+    node - <<'JS' &
+const net = require('net');
+const s = net.createServer((c) => c.destroy());
+setTimeout(() => {
+  s.listen(0, '127.0.0.1', () => {
+    console.log('codex app-server (WebSockets)');
+    console.log('  listening on: ws://127.0.0.1:' + s.address().port);
+  });
+}, 600);
+setTimeout(() => process.exit(0), 60000);
+JS
+    child=$!
+    trap 'kill "$child" 2>/dev/null' TERM INT
+    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
+    ;;
+  *)
+    printf 'plain-codex' >> "$CALL_LOG"
+    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
+    printf '\n' >> "$CALL_LOG"
+    ;;
+esac
+EOF
+  chmod +x "$slow_codex"
+
+  run env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" AGMSG_REAL_CODEX="$slow_codex" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  # The bridged handoff, not the fail-open: the wait outlasted a probe that
+  # could not see the process.
+  grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  [[ "$output" != *"did not report a listening port"* ]]
+}
