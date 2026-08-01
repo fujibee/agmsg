@@ -1,0 +1,15 @@
+COMMAND   PID   USER   FD     TYPE             DEVICE SIZE/OFF                NODE NAME
+bash    12130 runner    1     PIPE 0x23bb28474d4ff06f    16384                     ->0xb32e37cc3b293162
+bash    12130 runner    2     PIPE 0x44cd01b038503719    16384                     ->0xdf5648eb97210808
+bash    12130 runner  143     PIPE 0x4081ea6d31363d36    65536                     ->0x96fc842a4fb80b16
+bash    12144 runner    0     PIPE  0xd61b70ffc6fdfa5    16384                     ->0xd1a083d094b7148
+bash    12144 runner    2     PIPE 0x44cd01b038503719    16384                     ->0xdf5648eb97210808
+bash    12144 runner  143     PIPE 0x4081ea6d31363d36    65536                     ->0x96fc842a4fb80b16
+bash    12145 runner    1     PIPE 0x23bb28474d4ff06f    16384                     ->0xb32e37cc3b293162
+bash    12145 runner  143     PIPE 0x4081ea6d31363d36    65536                     ->0x96fc842a4fb80b16
+node    42776 runner    0r     CHR                3,2      0t0                 334 /dev/null
+node    42776 runner    1w     REG               1,17     2325             2902151 /tmp/remote-sync.myteam.log
+node    42776 runner    4     PIPE 0x9ed3b7445c820504    16384                     ->0xb6be1127e19a2a27
+node    42776 runner    5     PIPE 0xb6be1127e19a2a27    16384                     ->0x9ed3b7445c820504
+node    42776 runner   10     PIPE  0xd1a083d094b7148    16384                     ->0xd61b70ffc6fdfa5
+node    42776 runner   13     PIPE 0x4081ea6d31363d36    65536                     ->0x96fc842a4fb80b16

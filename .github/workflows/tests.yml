@@ -179,12 +179,19 @@ jobs:
             {
               echo "===== sample $i  $(date -u +%H:%M:%S)"
               ps -ef 2>/dev/null | grep -vE '\[' | tail -n +2
-              echo "----- surviving node/python and what they hold:"
-              for pid in $(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /node|python/ {print $1}'); do
-                echo "--- pid $pid: $(ps -o command= -p "$pid" 2>/dev/null | cut -c1-160)"
-                lsof -p "$pid" 2>/dev/null \
-                  | awk 'NR == 1 || $4 ~ /^[0-9]+[rwu]?$/ { n++; if (n <= 14) print }'
-              done
+              # One lsof over every candidate at once. Per-pid calls put the two
+              # ends of a pipe in separate blocks minutes apart in the log, and
+              # a reader has to spot that two numbers match; in the 08-01 hang
+              # nobody did, and a 14-line cap had cut the decisive line anyway.
+              pids="$(ps -eo pid=,comm= 2>/dev/null \
+                | awk '$2 ~ /node|python|bats|bash/ {printf "%s%s", sep, $1; sep=","}')"
+              if [ -n "$pids" ]; then
+                lsof -p "$pids" 2>/dev/null > "$RUNNER_TEMP/sample-lsof.txt"
+                echo "----- pipes held by more than one process:"
+                awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/sample-lsof.txt"
+                echo "----- every descriptor they hold (no cap):"
+                cat "$RUNNER_TEMP/sample-lsof.txt"
+              fi
               echo "----- bats temp dirs left behind:"
               ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
                 | awk 'tolower($0) ~ /bats/ { n++; if (n <= 20) print }'
@@ -222,15 +229,21 @@ jobs:
           set +o pipefail 2>/dev/null || true
           echo "##### live snapshot at $(date -u +%H:%M:%S 2>/dev/null)"
           ps -ef 2>/dev/null | awk 'NR > 1 && NR <= 61'
-          echo "##### anything still holding a pipe or fifo:"
-          pids="$(ps -eo pid=,comm= 2>/dev/null | awk '$2 ~ /node|python|bats|bash|sleep/ {print $1}')"
-          for pid in $pids; do
-            held="$(lsof -p "$pid" 2>/dev/null | awk '$5 == "PIPE" || $5 == "FIFO"' | awk 'NR <= 4')"
-            if [ -n "$held" ]; then
-              echo "--- pid $pid $(ps -o command= -p "$pid" 2>/dev/null | cut -c1-120)"
-              echo "$held"
-            fi
-          done
+          # One snapshot over every candidate, so both ends of a pipe are in the
+          # same dump and can be matched by machine rather than by eye.
+          pids="$(ps -eo pid=,comm= 2>/dev/null \
+            | awk '$2 ~ /node|python|bats|bash|sleep/ {printf "%s%s", sep, $1; sep=","}')"
+          if [ -n "$pids" ]; then
+            lsof -p "$pids" 2>/dev/null > "$RUNNER_TEMP/forensic-lsof.txt"
+          else
+            : > "$RUNNER_TEMP/forensic-lsof.txt"
+          fi
+          echo "##### pipes held by more than one process:"
+          echo "##### (a shard that reported every test ok and is still open is usually one of these:"
+          echo "#####  a process that outlived its caller, holding the pipe bats is waiting to see close)"
+          awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/forensic-lsof.txt"
+          echo "##### every descriptor those processes hold (no per-pid cap):"
+          cat "$RUNNER_TEMP/forensic-lsof.txt"
           echo "##### bats temp remnants:"
           ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
             | awk 'tolower($0) ~ /bats/ { n++; if (n <= 20) print }'
