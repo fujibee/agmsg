@@ -8,7 +8,6 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && cp -R migrations dist/migrations",
-    "admin": "node dist/src/admin.js",
     "dev": "tsx watch src/index.ts",
     "migrate": "tsx src/migrate.ts",
     "provision": "tsx src/provision.ts",

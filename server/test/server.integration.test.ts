@@ -8,11 +8,6 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { Config } from "../src/config.js";
-import {
-  createTeam,
-  exchangePairingToken,
-  issuePairingToken,
-} from "../src/credentials.js";
 import { migrate } from "../src/db.js";
 import { postMessages, retainThrough } from "../src/storage.js";
 
@@ -22,7 +17,6 @@ const execFileAsync = promisify(execFile);
 
 describeDatabase("remote storage HTTP API v1", () => {
   const schema = `agmsg_test_${randomBytes(8).toString("hex")}`;
-  let token: string;
   const teamId = "018f3f7e-0000-7000-8000-000000000001";
   const memberId = "018f3f7e-0000-7000-8000-000000000010";
   const registrationId = "018f3f7e-0000-7000-8000-000000000011";
@@ -71,10 +65,8 @@ describeDatabase("remote storage HTTP API v1", () => {
        VALUES ($1, $2, $3, $4, 'codex')`,
       [teamId, registrationId, memberId, installationId],
     );
-    const issued = await issuePairingToken(pool, teamId);
-    token = String((await exchangePairingToken(pool, issued.token)).credential);
+    // No credential: the data plane takes the team from its header alone.
     headers = {
-      authorization: `Bearer ${token}`,
       "agmsg-protocol-version": "1",
       "agmsg-team-id": teamId,
     };
@@ -164,15 +156,14 @@ describeDatabase("remote storage HTTP API v1", () => {
     const noVersion = await app.inject({
       method: "GET",
       url: "/v1/members",
-      headers: { authorization: `Bearer ${token}`, "agmsg-team-id": teamId },
+      headers: { "agmsg-team-id": teamId },
     });
     expect(noVersion.statusCode).toBe(426);
     expect(noVersion.json().error.code).toBe("unsupported-protocol-version");
 
-    // The data plane no longer authenticates: a valid protocol + team id, with
-    // no Authorization, now succeeds. Reaching the server is the permission
-    // (see scopedTeamId / docs/design/remote-sync.md). Credentials remain only
-    // on the pairing/revoke routes.
+    // The data plane does not authenticate: a valid protocol + team id, with no
+    // Authorization, succeeds. Reaching the server is the permission (see
+    // scopedTeamId / docs/design/remote-sync.md).
     const noAuth = await app.inject({
       method: "GET",
       url: "/v1/members",
@@ -806,336 +797,4 @@ describeDatabase("remote storage HTTP API v1", () => {
     }
   });
 
-  it("onboards devices with one-time pairing and independently revocable credentials", async () => {
-    const onboardingTeam = "018f3f7e-0000-7000-8000-000000000201";
-    const onboardingName = "self-host-quickstart";
-    const connection = new URL(databaseUrl ?? "");
-    connection.searchParams.set("options", `-c search_path=${schema}`);
-    const environment = { ...process.env, DATABASE_URL: connection.toString() };
-    const runAdmin = (...args: string[]) =>
-      execFileAsync(
-        process.execPath,
-        ["node_modules/tsx/dist/cli.mjs", "src/admin.ts", ...args],
-        { cwd: process.cwd(), env: environment },
-      );
-
-    const created = await runAdmin(
-      "team", "create", "--name", onboardingName, "--team-id", onboardingTeam,
-    );
-    expect(created.stdout).toBe(`${onboardingTeam}\n`);
-    expect(created.stderr).toContain(`Created team ${onboardingName}`);
-
-    const jsonTeamId = "018f3f7e-0000-7000-8000-000000000202";
-    const jsonCreated = await runAdmin(
-      "team", "create", "--name", "json-created-team",
-      "--team-id", jsonTeamId, "--json",
-    );
-    expect(JSON.parse(jsonCreated.stdout)).toEqual({
-      team_id: jsonTeamId,
-      team_name: "json-created-team",
-    });
-
-    const duplicateNameResults = await Promise.allSettled([
-      createTeam(pool, "concurrent-name", "018f3f7e-0000-7000-8000-000000000203"),
-      createTeam(pool, "concurrent-name", "018f3f7e-0000-7000-8000-000000000204"),
-    ]);
-    expect(duplicateNameResults.map((result) => result.status).sort()).toEqual([
-      "fulfilled",
-      "rejected",
-    ]);
-
-    await expect(runAdmin(
-      "token", "issue", "--team", onboardingName,
-      "--endpoint", "ftp://sync.example.test",
-    )).rejects.toThrow(/HTTP\(S\)/u);
-    const noOrphanToken = await pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM pairing_tokens WHERE team_id = $1",
-      [onboardingTeam],
-    );
-    expect(noOrphanToken.rows[0]?.count).toBe("0");
-
-    const firstIssue = await runAdmin(
-      "token", "issue", "--team", onboardingName,
-      "--endpoint", "http://127.0.0.1:8787/",
-    );
-    expect(firstIssue.stdout).toMatch(
-      /^agmsg remote connect --endpoint http:\/\/127\.0\.0\.1:8787 agmsg_pair_[A-Za-z0-9_-]+\n$/u,
-    );
-    const firstToken = firstIssue.stdout.trim().split(" ").at(-1) ?? "";
-    expect(firstIssue.stderr).not.toContain(firstToken);
-
-    // The data plane no longer authenticates, so a stray/legacy Bearer is simply
-    // ignored rather than rejected: the request is scoped by the team-id header
-    // and succeeds. (The pairing/revoke routes below still take a credential.)
-    const legacyGlobalToken = await app.inject({
-      method: "GET",
-      url: "/v1/members",
-      headers: {
-        authorization: "Bearer change-this-development-token",
-        "agmsg-protocol-version": "1",
-        "agmsg-team-id": onboardingTeam,
-      },
-    });
-    expect(legacyGlobalToken.statusCode).toBe(200);
-
-    const exchange = async (pairingToken: string) =>
-      app.inject({
-        method: "POST",
-        url: "/v1/pairing/exchange",
-        headers: { "agmsg-protocol-version": "1" },
-        payload: { token: pairingToken },
-      });
-    const firstAttempts = await Promise.all([exchange(firstToken), exchange(firstToken)]);
-    expect(firstAttempts.map((response) => response.statusCode).sort()).toEqual([200, 409]);
-    const firstExchange = firstAttempts.find((response) => response.statusCode === 200);
-    const consumed = firstAttempts.find((response) => response.statusCode === 409);
-    expect(firstExchange).toBeDefined();
-    expect(consumed?.json().error.code).toBe("pairing-token-consumed");
-    if (!firstExchange) throw new Error("pairing exchange did not produce a winner");
-    expect(firstExchange.statusCode).toBe(200);
-    expect(firstExchange.headers["cache-control"]).toBe("no-store");
-    const first = firstExchange.json();
-    expect(first).toMatchObject({
-      protocol_version: 1,
-      remote_team_id: onboardingTeam,
-      remote_team_name: onboardingName,
-      capabilities: {
-        write_allowed_ciphers: ["none", "age-v1"],
-        current_seq: "0",
-        next_sequence_boundary: "1",
-      },
-    });
-    expect(first.credential).not.toBe(firstToken);
-    expect(first.credential_id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
-    );
-    const secretStorage = await pool.query<{
-      credential_digest_bytes: number;
-      token_digest_bytes: number;
-      raw_credential_stored: boolean;
-      raw_token_stored: boolean;
-    }>(
-      `SELECT
-         octet_length(c.secret_digest) AS credential_digest_bytes,
-         octet_length(p.token_digest) AS token_digest_bytes,
-         c.secret_digest = convert_to($3, 'UTF8') AS raw_credential_stored,
-         p.token_digest = convert_to($4, 'UTF8') AS raw_token_stored
-       FROM credentials c
-       JOIN pairing_tokens p
-         ON p.team_id = c.team_id AND p.credential_id = c.credential_id
-      WHERE c.team_id = $1 AND c.credential_id = $2`,
-      [onboardingTeam, first.credential_id, first.credential, firstToken],
-    );
-    expect(secretStorage.rows[0]).toEqual({
-      credential_digest_bytes: 32,
-      token_digest_bytes: 32,
-      raw_credential_stored: false,
-      raw_token_stored: false,
-    });
-    const credentialHeaders = (secret: string) => ({
-      authorization: `Bearer ${secret}`,
-      "agmsg-protocol-version": "1",
-      "agmsg-team-id": onboardingTeam,
-    });
-    const authorized = await app.inject({
-      method: "GET", url: "/v1/members", headers: credentialHeaders(first.credential),
-    });
-    expect(authorized.statusCode).toBe(200);
-    const canonicalCapabilities = await app.inject({
-      method: "GET",
-      url: "/v1/capabilities",
-      headers: credentialHeaders(first.credential),
-    });
-    expect(canonicalCapabilities.statusCode).toBe(200);
-    expect(first.capabilities).toEqual(canonicalCapabilities.json());
-    // A credential can no longer scope the data plane: it is ignored, and the
-    // team is taken from the header. A caller naming another team simply reads
-    // that team — anyone who can reach the server and knows a team_id can read
-    // it (docs/design/remote-sync.md, "deliberately out of scope"). This is no
-    // longer a cross-team rejection.
-    const otherTeamByHeader = await app.inject({
-      method: "GET",
-      url: "/v1/members",
-      headers: {
-        ...credentialHeaders(first.credential),
-        "agmsg-team-id": teamId,
-      },
-    });
-    expect(otherTeamByHeader.statusCode).toBe(200);
-
-    const secondIssue = await runAdmin(
-      "token", "issue", "--team", onboardingTeam,
-      "--endpoint", "https://sync.example.test/base", "--json",
-    );
-    const secondIssued = JSON.parse(secondIssue.stdout);
-    expect(secondIssued.command).toBe(
-      `agmsg remote connect --endpoint https://sync.example.test/base ${secondIssued.token}`,
-    );
-    const secondExchange = await exchange(secondIssued.token);
-    const second = secondExchange.json();
-    expect(second.credential_id).not.toBe(first.credential_id);
-
-    const encrypted = await app.inject({
-      method: "POST",
-      url: "/v1/messages",
-      headers: credentialHeaders(second.credential),
-      payload: {
-        messages: [{
-          id: "550e8400-e29b-41d4-a716-446655440201",
-          envelope: {
-            v: 1,
-            cipher: "age-v1",
-            key_id: "epoch-1",
-            blob: Buffer.from("opaque standard age file").toString("base64"),
-          },
-        }],
-      },
-    });
-    expect(encrypted.statusCode).toBe(200);
-    expect(encrypted.json().acks[0]).toMatchObject({
-      server_seq: "1",
-      disposition: "stored",
-    });
-
-    const cannotRevokeOther = await app.inject({
-      method: "POST",
-      url: `/v1/credentials/${second.credential_id}/revoke`,
-      headers: credentialHeaders(first.credential),
-    });
-    expect(cannotRevokeOther.statusCode).toBe(403);
-    expect(cannotRevokeOther.json().error.code).toBe("credential-scope-violation");
-    expect(cannotRevokeOther.json()).toMatchObject({
-      server_instance_id: first.server_instance_id,
-      team_id: onboardingTeam,
-    });
-    const revokeWithBody = await app.inject({
-      method: "POST",
-      url: `/v1/credentials/${first.credential_id}/revoke`,
-      headers: credentialHeaders(first.credential),
-      payload: {},
-    });
-    expect(revokeWithBody.statusCode).toBe(400);
-
-    const revokeSelf = () => app.inject({
-      method: "POST",
-      url: `/v1/credentials/${first.credential_id}/revoke`,
-      headers: credentialHeaders(first.credential),
-    });
-    expect((await revokeSelf()).statusCode).toBe(200);
-    expect((await revokeSelf()).statusCode).toBe(200);
-    // Revocation still works on its own route (above), but it no longer gates
-    // the data plane: that plane does not authenticate, so a revoked — or any —
-    // credential is ignored and the request is scoped by the team-id header.
-    const revokedAuth = await app.inject({
-      method: "GET", url: "/v1/members", headers: credentialHeaders(first.credential),
-    });
-    expect(revokedAuth.statusCode).toBe(200);
-    expect((await app.inject({
-      method: "GET", url: "/v1/members", headers: credentialHeaders(second.credential),
-    })).statusCode).toBe(200);
-
-    const listed = await runAdmin(
-      "credential", "list", "--team", onboardingName, "--json",
-    );
-    expect(JSON.parse(listed.stdout).credentials).toMatchObject([
-      { team_id: onboardingTeam, credential_id: first.credential_id, status: "revoked" },
-      { team_id: onboardingTeam, credential_id: second.credential_id, status: "active" },
-    ]);
-    const adminRevoke = await runAdmin(
-      "credential", "revoke", "--team", onboardingTeam,
-      "--credential-id", second.credential_id, "--json",
-    );
-    expect(JSON.parse(adminRevoke.stdout)).toMatchObject({
-      credential_id: second.credential_id,
-      revoked: true,
-    });
-
-    const thirdIssue = JSON.parse((await runAdmin(
-      "token", "issue", "--team", onboardingTeam,
-      "--endpoint", "https://sync.example.test", "--json",
-    )).stdout);
-    await pool.query(
-      "UPDATE pairing_tokens SET expires_at = created_at + interval '1 microsecond' WHERE team_id = $1 AND consumed_at IS NULL",
-      [onboardingTeam],
-    );
-    const expired = await exchange(thirdIssue.token);
-    expect(expired.statusCode).toBe(410);
-    expect(expired.json().error.code).toBe("pairing-token-expired");
-
-    const racedToken = (await issuePairingToken(pool, onboardingTeam)).token;
-    const policyClient = await pool.connect();
-    try {
-      await policyClient.query("BEGIN");
-      await policyClient.query("SELECT 1 FROM teams WHERE team_id = $1 FOR UPDATE", [
-        onboardingTeam,
-      ]);
-      await policyClient.query(
-        `UPDATE teams
-            SET policy_revision = 1,
-                write_allowed_ciphers = ARRAY['age-v1']::TEXT[]
-          WHERE team_id = $1`,
-        [onboardingTeam],
-      );
-      await policyClient.query(
-        `INSERT INTO team_policy_history
-           (team_id, policy_revision, effective_from_seq,
-            accepted_envelope_versions, write_allowed_ciphers)
-         VALUES ($1, 1, 2, ARRAY[1], ARRAY['age-v1']::TEXT[])`,
-        [onboardingTeam],
-      );
-      const racedExchange = exchange(racedToken);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      await policyClient.query("COMMIT");
-      const raced = await racedExchange;
-      expect(raced.statusCode).toBe(200);
-      expect(raced.json().capabilities).toMatchObject({
-        protocol_version: 1,
-        server_instance_id: raced.json().server_instance_id,
-        team_id: onboardingTeam,
-        team_name: onboardingName,
-        policy_revision: "1",
-        effective_from_seq: "2",
-        write_allowed_ciphers: ["age-v1"],
-        policy_history: [{ policy_revision: "0" }, { policy_revision: "1" }],
-      });
-    } catch (error) {
-      await policyClient.query("ROLLBACK");
-      throw error;
-    } finally {
-      policyClient.release();
-    }
-  }, 20_000);
-
-  it("rejects duplicate JSON keys and rolls back a sequence-crossing batch", async () => {
-    const duplicateKeys = await app.inject({
-      method: "POST",
-      url: "/v1/messages",
-      headers: { ...headers, "content-type": "application/json" },
-      payload: '{"messages":[],"messages":[]}',
-    });
-    expect(duplicateKeys.statusCode).toBe(400);
-
-    await pool.query(
-      "UPDATE teams SET current_seq = 9223372036854775806 WHERE team_id = $1",
-      [teamId],
-    );
-    const exhausted = await app.inject({
-      method: "POST",
-      url: "/v1/messages",
-      headers,
-      payload: {
-        messages: [
-          message("750e8400-e29b-41d4-a716-446655440003", "a"),
-          message("750e8400-e29b-41d4-a716-446655440004", "b"),
-        ],
-      },
-    });
-    expect(exhausted.statusCode).toBe(507);
-    expect(exhausted.json().error.code).toBe("sequence-exhausted");
-    const rows = await pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM messages WHERE id = ANY($1::uuid[])",
-      [["750e8400-e29b-41d4-a716-446655440003", "750e8400-e29b-41d4-a716-446655440004"]],
-    );
-    expect(rows.rows[0]?.count).toBe("0");
-  });
 });

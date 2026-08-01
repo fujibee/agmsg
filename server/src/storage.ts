@@ -761,7 +761,7 @@ export async function connectTeam(
 ): Promise<Record<string, unknown>> {
   return inTransaction(pool, async (client) => {
     const serverId = await serverInstanceId(client);
-    // The team and its opening policy row — the two writes createTeam makes.
+    // The team and its opening policy row.
     // team_policy_history is required: capabilitySnapshot (and so
     // GET /v1/capabilities) reads it, and a team without it is out of bounds.
     //
