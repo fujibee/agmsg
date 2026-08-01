@@ -651,19 +651,6 @@ jobs:
         if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
         run: npm run build
 
-      - name: Compiled admin onboarding smoke test
-        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agmsg_test
-        run: |
-          team_json=$(npm run --silent admin -- team create --name ci-onboarding --json)
-          printf '%s\n' "$team_json" | grep -Eq '^\{"team_id":"[0-9a-f-]+","team_name":"ci-onboarding"\}$'
-          connect_command=$(npm run --silent admin -- \
-            token issue --team ci-onboarding --endpoint https://sync.example.test)
-          test "$(printf '%s\n' "$connect_command" | wc -l)" -eq 1
-          printf '%s\n' "$connect_command" | grep -Eq \
-            '^agmsg remote connect --endpoint https://sync\.example\.test agmsg_pair_[A-Za-z0-9_-]+$'
-
       - name: Compiled start smoke test
         if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
         env:
@@ -713,32 +700,35 @@ jobs:
             docker logs "$CONTAINER_NAME"
             exit 1
           fi
-          docker exec "$CONTAINER_NAME" npm run --silent admin -- \
-            team create --name ci-docker-onboarding \
-            --team-id 018f3f7e-0000-7000-8000-000000000901 >/dev/null
-          connect_command=$(docker exec "$CONTAINER_NAME" npm run --silent admin -- \
-            token issue --team ci-docker-onboarding --endpoint http://127.0.0.1:8788)
-          pairing_token=${connect_command##* }
-          docker exec --env PAIRING_TOKEN="$pairing_token" "$CONTAINER_NAME" \
-            node --input-type=module -e '
+          # A container really registering a team and serving a read, through the
+          # current protocol: the client mints the team_id and posts it to
+          # /v1/connect, and the data plane takes the team from its header. No
+          # token is exchanged and no credential is presented, because none
+          # exists to present.
+          docker exec "$CONTAINER_NAME" node --input-type=module -e '
             const endpoint = "http://127.0.0.1:8788";
             const team = "018f3f7e-0000-7000-8000-000000000901";
             const common = {"Agmsg-Protocol-Version": "1"};
-            const exchange = await fetch(`${endpoint}/v1/pairing/exchange`, {
+            const connected = await fetch(`${endpoint}/v1/connect`, {
               method: "POST",
               headers: {...common, "Content-Type": "application/json"},
-              body: JSON.stringify({token: process.env.PAIRING_TOKEN}),
+              body: JSON.stringify({
+                team_id: team,
+                team_name: "ci-docker-onboarding",
+                members: [],
+              }),
             });
-            if (exchange.status !== 200) process.exit(1);
-            const connected = await exchange.json();
+            if (connected.status !== 200) {
+              console.error("connect:", connected.status, await connected.text());
+              process.exit(1);
+            }
             const members = await fetch(`${endpoint}/v1/members`, {
-              headers: {
-                ...common,
-                "Agmsg-Team-ID": team,
-                Authorization: `Bearer ${connected.credential}`,
-              },
+              headers: {...common, "Agmsg-Team-ID": team},
             });
-            if (members.status !== 200) process.exit(1);
+            if (members.status !== 200) {
+              console.error("members:", members.status, await members.text());
+              process.exit(1);
+            }
           '
 
   # Windows leg for the app: the command layer's bash resolution and path

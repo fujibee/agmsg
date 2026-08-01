@@ -11,7 +11,7 @@ setup() {
   MOCK_PYTHON3="$(command -v python3)"
   bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a
 
-  # Start the mock pairing-exchange/revoke server on an OS-assigned port.
+  # Start the mock remote server on an OS-assigned port.
   MOCK_PULL_MIXED="${MOCK_PULL_MIXED:-}" \
   MOCK_PULL_AGE="${MOCK_PULL_AGE:-}" \
   MOCK_PULL_AGE_ENVELOPE_FILE="${MOCK_PULL_AGE_ENVELOPE_FILE:-}" \
