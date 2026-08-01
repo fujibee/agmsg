@@ -66,7 +66,53 @@ esac
 thread=""
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   thread="$CODEX_THREAD_ID"
-else
+fi
+
+# Ask the app-server which threads it has loaded, and subtract the ones a role
+# already sits in (#579). The rollout files below cannot answer "which thread is
+# THIS session" on a project that has been worked in before: every past session
+# in this cwd matches, the count is never one, and the seat is never written --
+# so on such a project the bridge can never arm, in this session or any later
+# one.
+#
+# The subtraction is what makes the remainder unique. A thread stays loaded in
+# the app-server after its window is gone, so `loaded` is every thread this
+# server has opened, not the live ones; but each of those already has a seat, so
+# taking the recorded ids away leaves the session that has not been seated yet.
+#
+# Exactly one leftover => ours. Zero or several => record nothing, exactly as
+# before: this stays biased toward a fresh boot, because a resume mis-fire
+# (waking someone else's conversation) is worse than no resume at all.
+if [ -z "$thread" ] && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/node.sh"
+  node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
+  if [ -n "$node_bin" ] && { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; }; then
+    loaded_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexloaded.XXXXXX" 2>/dev/null || true)"
+    seated_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-codexseated.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$loaded_file" ] && [ -n "$seated_file" ]; then
+      "$node_bin" "$SCRIPT_DIR/codex-bridge.js" --app-server "$AGMSG_CODEX_BRIDGE_APP_SERVER" \
+        --print-loaded-threads 2>/dev/null | grep . | sort -u > "$loaded_file" || true
+      # Every recorded codex seat, not just this project's. Over-subtracting can
+      # only drop a thread that some role already owns, which is never the one we
+      # want to claim; under-subtracting would leave a stale thread in the set and
+      # make the count ambiguous.
+      agmsg_role_session_recorded_uuids codex 2>/dev/null | grep . | sort -u > "$seated_file" || true
+      cand_count="$(comm -23 "$loaded_file" "$seated_file" | grep -c . || true)"
+      if [ "${cand_count:-0}" -eq 1 ]; then
+        thread="$(comm -23 "$loaded_file" "$seated_file" | grep . | head -1)"
+      fi
+    fi
+    rm -f "$loaded_file" "$seated_file"
+  fi
+fi
+
+if [ -z "$thread" ]; then
+  # No app-server to ask (a codex session outside monitor mode). The rollout scan
+  # is the only signal left, so it stays as the fallback -- it still resolves the
+  # single-rollout case it always did, and on a project with history it records
+  # nothing, which is what happens today.
+  #
   # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
   # dir check below fails -> fresh), not an unbound-variable abort (co1 nit).
   sessions_dir="${HOME:-}/.codex/sessions"

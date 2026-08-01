@@ -216,6 +216,25 @@ agmsg_role_session_lookup_by_name() {
   return 0
 }
 
+# Print the session id of every record of <type>, one per line (unordered, may
+# repeat across teams). Empty if none. Used by codex seat resolution (#579) to
+# subtract already-claimed threads from the app-server's loaded set: what is left
+# is the session that has not been seated yet.
+agmsg_role_session_recorded_uuids() {
+  local type="$1" dir f t v
+  [ -n "$type" ] || return 0
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    t="$(_agmsg_role_session_field "$f" type)"
+    [ "$t" = "$type" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ -n "$v" ] && printf '%s\n' "$v"
+  done
+  return 0
+}
+
 # Scan run/role-session.* for the record whose session= field equals <sid> and
 # print its full body (all key=value lines). Empty if none. Used by role-aware
 # SessionStart (PR-E) to map a resumed session id back to its (team, agent).

@@ -183,3 +183,82 @@ recorded_project() {
   [ "$(recorded_uuid team alice)" = "sym-thread" ]
   [ "$(recorded_project team alice)" = "$want" ]
 }
+
+# --- codex-record-session.sh: seat from the app-server's loaded set (#579) ---
+#
+# The rollout scan cannot answer "which thread is THIS session" on a project that
+# has been worked in before -- every past session in that cwd matches, so the
+# count is never one and the seat is never written. These cover the replacement:
+# ask the app-server what it has loaded, subtract the threads a role already sits
+# in, and take the remainder only when it is unique.
+
+# A stand-in for node that ignores the bridge path and its flags and prints the
+# ids the test staged. agmsg_resolve_node honours AGMSG_NODE, so this is the seam
+# the production call already goes through -- no test-only branch in the script.
+fake_node_printing() {
+  local out="$TEST_SKILL_DIR/fake-node"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'cat %q\n' "$1"
+  } > "$out"
+  chmod +x "$out"
+  printf '%s' "$out"
+}
+
+record_with_loaded() {   # <ids-file> <team> <agent> <project>
+  ( unset CODEX_THREAD_ID
+    AGMSG_NODE="$(fake_node_printing "$1")" \
+    AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1" \
+      bash "$TYPES/codex/codex-record-session.sh" "$2" "$3" "$4" )
+}
+
+@test "codex record: seats the loaded thread that no role has claimed yet" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-seated\nthr-unclaimed\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team bob thr-seated "$proj" codex
+  record_with_loaded "$ids" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
+}
+
+@test "codex record: a long history in the cwd no longer blocks the seat" {
+  # The exact shape of #579: many past sessions in this project. Under the rollout
+  # scan this is the ambiguous case that records nothing forever; the loaded set
+  # is unaffected by how much history the project has.
+  local proj ids i; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  for i in 1 2 3 4 5; do
+    make_rollout "hist-uuid-$i" "$proj" "2026/07/05" "2026-07-05T1$i-00-00"
+  done
+  printf 'thr-live\n' > "$ids"
+  record_with_loaded "$ids" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "thr-live" ]
+}
+
+@test "codex record: two unclaimed loaded threads record nothing (stays fail-closed)" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-one\nthr-two\n' > "$ids"
+  record_with_loaded "$ids" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: every loaded thread already claimed records nothing" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-a\nthr-b\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team bob thr-a "$proj" codex
+  agmsg_role_session_record team carol thr-b "$proj" codex
+  record_with_loaded "$ids" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: a claimed thread of another TYPE is not subtracted" {
+  # claude-code records session ids in the same directory. Subtracting those
+  # would silently shrink the codex candidate set and could make an ambiguous
+  # pair look unique -- the one way this subtraction could seat a wrong thread.
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-x\nthr-y\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team bob thr-x "$proj" claude-code
+  record_with_loaded "$ids" team alice "$proj"
+  [ -z "$(recorded_uuid team alice)" ]
+}
