@@ -321,6 +321,57 @@ skip_if_no_age() {
   [[ "$output" != *"revoke it from the console"* ]]
 }
 
+@test "disconnect: refuses when the binding was replaced between the read and the lock" {
+  # The generation guard, on a binding that has no credential -- which is every
+  # binding now. cmd_disconnect reads binding_revision before taking the team
+  # lock; a concurrent reconnect in that window installs a NEWER binding, and
+  # marking that one disconnected would tear down a connection this call never
+  # touched.
+  #
+  # The barrier is the real lock, not a sleep: the lock is a directory, so
+  # holding it here blocks disconnect exactly where the window is, and the
+  # replacement lands while it waits.
+  bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  local cfg="$SCRIPTS/../teams/testteam/config.json"
+  local lock="$SCRIPTS/../teams/testteam/.config.lock"
+
+  mkdir "$lock"
+  bash "$SCRIPTS/remote.sh" disconnect testteam > "$TEST_SKILL_DIR/dc.out" 2>&1 &
+  local dc=$!
+  # Wait until it is actually parked on the lock rather than guessing.
+  local i
+  for i in $(seq 1 200); do
+    grep -q 'agmsg' "$TEST_SKILL_DIR/dc.out" 2>/dev/null && break
+    kill -0 "$dc" 2>/dev/null || break
+    sleep 0.05
+    [ "$i" -ge 6 ] && break
+  done
+
+  # A concurrent reconnect: same team, newer generation.
+  python3 - "$cfg" <<'PY'
+import json, sys
+cfg = sys.argv[1]
+with open(cfg, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["remote_binding"]["binding_revision"] = \
+    int(document["remote_binding"].get("binding_revision") or 0) + 1
+with open(cfg, "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+    handle.write("\n")
+PY
+
+  rmdir "$lock"
+  local dc_status=0
+  wait "$dc" || dc_status=$?
+  local out; out="$(cat "$TEST_SKILL_DIR/dc.out")"
+  echo "disconnect exited $dc_status; output:"; echo "$out"
+
+  [ "$dc_status" -ne 0 ] || { echo "disconnect succeeded against a replaced binding: $out"; false; }
+  [[ "$out" == *"binding changed to something else during disconnect"* ]]
+  # ...and the newer binding is still active: nothing marked it disconnected.
+  [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$cfg') AS TEXT), '\$.remote_binding.disconnected_at');")" = "" ]
+}
+
 @test "disconnect: fails for a team that isn't connected" {
   run bash "$SCRIPTS/remote.sh" disconnect testteam
   [ "$status" -ne 0 ]

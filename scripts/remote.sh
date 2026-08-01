@@ -253,35 +253,32 @@ _remote_http_post_json() {
   printf '%s' "$http_code"
 }
 
-# _remote_local_disconnect <team> <cfg> [expected_credential_id]
-# The local-state half of disconnect (credential file removal + marking
-# the binding disconnected) — factored out so the --force rebind path can
-# apply it immediately after a successful revoke, before ever attempting
-# the new exchange (D2): otherwise a crash between "old credential
-# revoked" and "new connection fully committed" leaves local state
-# claiming to still be connected to a credential that the server has
-# already invalidated, with no way to tell from local state alone.
+# _remote_local_disconnect <team> <cfg> [expected_binding_revision]
+# Marks the binding disconnected. That is now the whole of it: there is no
+# credential to delete and nothing to revoke, so this writes disconnected_at
+# and bumps the revision, under the team lock.
 #
-# When <expected_credential_id> is given, the credential_id check AND the
-# cred-file removal AND the disconnected_at write all happen under ONE
-# lock acquisition, and only if the binding's CURRENT credential_id still
-# equals it (E1): the earlier version removed the cred file before ever
-# taking the lock and unmarked "whatever binding is currently there"
-# unconditionally, with no check that it was still the same one this
-# caller revoked — a second concurrent operation's legitimately newer
-# binding (for a different credential this call never touched or
-# revoked) could get silently clobbered and its own credential file
-# deleted, orphaning it exactly like the bug this was meant to fix.
-# Returns 0 on success, 1 on lock failure, 2 if <expected_credential_id>
-# no longer matches (caller must treat this as "someone else already
-# changed this team's binding — abort, don't proceed").
+# When <expected_binding_revision> is given, the comparison and the write happen
+# under ONE lock acquisition, and the write only lands if the binding is still
+# the generation the caller decided to disconnect. Without that, a concurrent
+# reconnect between the caller's read and this lock would have its own, newer
+# binding marked disconnected by a call that never touched it.
+#
+# The guard used to compare credential_id. That stopped meaning anything when
+# connect stopped issuing credentials -- the expected value was always empty, so
+# the comparison never ran -- while still reading like a live check.
+# binding_revision is what every binding has and every write bumps.
+#
+# Returns 0 on success, 1 on lock failure, 2 if the revision no longer matches
+# (the caller must treat that as "someone else changed this team's binding —
+# abort, don't proceed").
 _remote_local_disconnect() {
-  local team="$1" cfg="$2" expected_credential_id="${3:-}" \
-    escaped updated disconnected_at current_credential_id
+  local team="$1" cfg="$2" expected_binding_revision="${3:-}" \
+    escaped updated disconnected_at current_binding_revision
   agmsg_lock_acquire "$TEAMS_DIR/$team" || return 1
-  if [ -n "$expected_credential_id" ]; then
-    current_credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
-    if [ "$current_credential_id" != "$expected_credential_id" ]; then
+  if [ -n "$expected_binding_revision" ] && [ "$expected_binding_revision" != "null" ]; then
+    current_binding_revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
+    if [ "$current_binding_revision" != "$expected_binding_revision" ]; then
       agmsg_lock_release
       return 2
     fi
@@ -1329,24 +1326,23 @@ cmd_disconnect() {
   # tearing the binding off of would just error every cycle.
   _remote_sync_engine_stop "$team"
 
-  local endpoint server_instance_id remote_team_id credential_id
-  endpoint="$(_remote_read_config_field "$cfg" '$.remote_binding.endpoint')"
-  server_instance_id="$(_remote_read_config_field "$cfg" '$.remote_binding.server_instance_id')"
-  remote_team_id="$(_remote_read_config_field "$cfg" '$.remote_binding.remote_team_id')"
-  credential_id="$(_remote_read_config_field "$cfg" '$.remote_binding.credential_id')"
+  # The generation to unbind, read before the lock. Every binding carries a
+  # binding_revision and every write bumps it, so this identifies the binding
+  # we decided to disconnect even though nothing here is a credential any more.
+  # Keying the check on credential_id (as it was) silently stopped working the
+  # moment connect stopped issuing one: the expected value was always empty, so
+  # the comparison never ran and a concurrent reconnect's newer binding could be
+  # marked disconnected by a call that never touched it.
+  local binding_revision
+  binding_revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
 
-  # Pass the credential_id we just (attempted to) revoke as the expected
-  # value (E1) — if the binding changed to something else in the window
-  # since we read it above (a concurrent reconnect), disconnecting THAT
-  # would silently tear down a connection this call never touched. Only
-  # pass it when it's a real value — "null"/empty means this binding
-  # never had one, so there's nothing meaningful to CAS against.
-  local expected_credential_id_for_disconnect=""
-  if [ -n "$credential_id" ] && [ "$credential_id" != "null" ]; then
-    expected_credential_id_for_disconnect="$credential_id"
-  fi
-  _remote_local_disconnect "$team" "$cfg" "$expected_credential_id_for_disconnect"
-  local local_disconnect_status=$?
+  # `|| status=$?`, not a bare call followed by `$?`: under `set -e` a function
+  # returning non-zero as a statement aborts the script before the next line
+  # runs, so the branches below would never be reached and the caller would see
+  # a bare exit 2 with nothing said. That was unreachable while the guard was
+  # keyed on credential_id and always inert; making the guard work exposed it.
+  local local_disconnect_status=0
+  _remote_local_disconnect "$team" "$cfg" "$binding_revision" || local_disconnect_status=$?
   if [ "$local_disconnect_status" -eq 2 ]; then
     echo "agmsg: team '$team's binding changed to something else during disconnect — aborting rather than risk clobbering a concurrent connection. Retry if you still want to disconnect the CURRENT binding." >&2
     exit 1
