@@ -321,6 +321,21 @@ jobs:
           - leg: install helpers
             filter: "[Ww]indows"
             target: tests/test_install.bats
+          # The Windows runtime path, which nothing here covered until #567: a
+          # change to how liveness is decided on Windows shipped through a CI
+          # that never decided liveness on Windows. Everything else about that
+          # class is proved against a `tasklist` stub on a POSIX host, which
+          # shows what the code does when a probe says "not found" -- not that
+          # Git Bash says it, and not that a launch survives it.
+          #
+          # These two run with the real tasklist and the real MSYS pid space,
+          # and they assert the EFFECT rather than the premise: the TUI reaches
+          # its bridged --remote handoff, and a bridge is actually started.
+          # Reaching the handoff is not delivering a message -- they are
+          # separate failure points and each has its own test.
+          - leg: windows runtime (#567)
+            filter: "windows-native"
+            target: tests/test_codex_monitor.bats tests/test_codex_bridge_launcher.bats
     defaults:
       run:
         # bats is bash; on Windows runners `shell: bash` is Git Bash, the same

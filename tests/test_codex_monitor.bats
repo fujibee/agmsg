@@ -322,3 +322,54 @@ EOF
   [ "$(cat "$base.pid")" = "$first_pid" ]
   grep -q "plain-codex <--remote> <ws://127\.0\.0\.1:$first_port>" "$CALL_LOG"
 }
+
+# --- native Windows: the effect, not the premise (#567) ---
+
+@test "codex-monitor: windows-native reaches the bridged handoff (#567)" {
+  skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
+  # Everything else about #567 is proved against a tasklist STUB on a POSIX host,
+  # which shows what the code does when a probe answers "not found" -- not that
+  # Git Bash answers that way, and not that a launch survives it. This runs on
+  # windows-latest with the real tasklist, the real MSYSTEM, and no stub: the
+  # app-server pid is genuinely in the MSYS space, tasklist genuinely has no
+  # record of it, and the assertion is that the launch still reaches the bridge.
+  #
+  # Mutate codex-monitor.sh's wait loop back to _agmsg_pid_alive and this fails
+  # where it counts -- on Windows, with nothing simulated.
+  run node -e 'const net = require("net"); if (!net) process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node net module is not available"
+
+  local win_codex="$TEST_PROJECT/win-codex"
+  cat > "$win_codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.144.1"; exit 0 ;;
+  app-server)
+    node - <<'JS' &
+const net = require('net');
+const s = net.createServer((c) => c.destroy());
+s.listen(0, '127.0.0.1', () => {
+  console.log('codex app-server (WebSockets)');
+  console.log('  listening on: ws://127.0.0.1:' + s.address().port);
+});
+setTimeout(() => process.exit(0), 60000);
+JS
+    child=$!
+    trap 'kill "$child" 2>/dev/null' TERM INT
+    wait "$child" 2>/dev/null || wait "$child" 2>/dev/null
+    ;;
+  *)
+    printf 'plain-codex' >> "$CALL_LOG"
+    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
+    printf '\n' >> "$CALL_LOG"
+    ;;
+esac
+EOF
+  chmod +x "$win_codex"
+
+  run env AGMSG_REAL_CODEX="$win_codex" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  [[ "$output" != *"did not report a listening port"* ]]
+}

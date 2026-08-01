@@ -45,6 +45,16 @@ teardown_test_env() {
 # the Git Bash compat (#179) and sqlite CRLF (#180) fixes; quarantining them
 # lets the experimental leg report green instead of perpetually red. Each call
 # site names the tracking issue so the skip is removed when the bug is fixed.
+# The inverse, for the handful of tests whose whole point is native Windows: the
+# real tasklist, the real MSYS pid space, no stub in between. Everywhere else
+# they would prove nothing, so they skip rather than pass vacuously.
+skip_unless_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) skip "${1:-only meaningful under Git Bash}" ;;
+  esac
+}
+
 skip_on_windows() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) skip "${1:-not yet supported on native Windows}" ;;

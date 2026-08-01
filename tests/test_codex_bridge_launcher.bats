@@ -379,3 +379,23 @@ wait_for_child_count() {
   [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
   grep -q -- '--thread thread-msys' "$CAPTURE"
 }
+
+@test "launcher: windows-native starts the bridge (#567)" {
+  skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
+  # The counterpart to codex-monitor's windows-native test, and the half #582
+  # does NOT fix: reaching the bridged handoff is not the same as delivering a
+  # message. PARENT_PID is codex-monitor.sh's own $$, so on Git Bash the loops
+  # at :291 and :381 are asking tasklist about an MSYS pid -- false on the first
+  # evaluation, which means neither loop turns over and no bridge is ever
+  # started. Real tasklist, no stub.
+  put_record team alice thread-win "$PROJ" codex
+
+  sleep 6 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  wait "$p" 2>/dev/null || true
+  local i
+  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+
+  [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
+  grep -q -- '--thread thread-win' "$CAPTURE"
+}
