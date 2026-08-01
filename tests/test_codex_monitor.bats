@@ -59,10 +59,18 @@ EOF
 }
 
 teardown() {
-  # Kill any app-server listeners these tests spawned.
+  # Kill any app-server listeners these tests spawned, and WAIT for them.
+  # Signalling and moving on is enough on POSIX, where an open file does not
+  # stop its directory being unlinked. Windows holds the directory while any
+  # process inside it is alive, so the rm below fails with "Directory not
+  # empty" and the test reports a failure whose assertions all passed.
+  local pf pid
   for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
     [ -f "$pf" ] || continue
-    kill "$(cat "$pf" 2>/dev/null)" 2>/dev/null || true
+    pid="$(cat "$pf" 2>/dev/null)"
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait_for_pid_exit "$pid" || true
   done
   rm -rf "$TEST_PROJECT"
   teardown_test_env
