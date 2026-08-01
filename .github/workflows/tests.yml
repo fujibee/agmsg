@@ -186,11 +186,11 @@ jobs:
               pids="$(ps -eo pid=,comm= 2>/dev/null \
                 | awk '$2 ~ /node|python|bats|bash/ {printf "%s%s", sep, $1; sep=","}')"
               if [ -n "$pids" ]; then
-                lsof -p "$pids" 2>/dev/null > "$RUNNER_TEMP/sample-lsof.txt"
+                lsof -F pcftDin -p "$pids" 2>/dev/null > "$RUNNER_TEMP/sample-lsof.txt"
                 echo "----- pipes held by more than one process:"
                 awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/sample-lsof.txt"
                 echo "----- every descriptor they hold (no cap):"
-                cat "$RUNNER_TEMP/sample-lsof.txt"
+                lsof -p "$pids" 2>/dev/null
               fi
               echo "----- bats temp dirs left behind:"
               ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
@@ -234,7 +234,7 @@ jobs:
           pids="$(ps -eo pid=,comm= 2>/dev/null \
             | awk '$2 ~ /node|python|bats|bash|sleep/ {printf "%s%s", sep, $1; sep=","}')"
           if [ -n "$pids" ]; then
-            lsof -p "$pids" 2>/dev/null > "$RUNNER_TEMP/forensic-lsof.txt"
+            lsof -F pcftDin -p "$pids" 2>/dev/null > "$RUNNER_TEMP/forensic-lsof.txt"
           else
             : > "$RUNNER_TEMP/forensic-lsof.txt"
           fi
@@ -243,7 +243,7 @@ jobs:
           echo "#####  a process that outlived its caller, holding the pipe bats is waiting to see close)"
           awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/forensic-lsof.txt"
           echo "##### every descriptor those processes hold (no per-pid cap):"
-          cat "$RUNNER_TEMP/forensic-lsof.txt"
+          lsof -p "$pids" 2>/dev/null
           echo "##### bats temp remnants:"
           ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
             | awk 'tolower($0) ~ /bats/ { n++; if (n <= 20) print }'
