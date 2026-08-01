@@ -1315,26 +1315,30 @@ cmd_disconnect() {
   agmsg_validate_team_name "$team" || exit 1
   local cfg
   cfg="$(_remote_team_config "$team")"
-  local connected_at
+  # "Is it connected" and "which generation" have to come from ONE snapshot, and
+  # the snapshot has to be the moment the decision is made. Read under the team
+  # lock so a concurrent reconnect cannot land between the two fields, and read
+  # both BEFORE stopping the engine: taking the generation afterwards would mean
+  # a reconnect during the stop got its own, newer binding adopted as the thing
+  # this call had decided to disconnect, and the check would then agree with
+  # itself and disconnect the wrong one.
+  #
+  # binding_revision is the generation: every binding carries one and every write
+  # bumps it. The guard used to compare credential_id, which stopped meaning
+  # anything the moment connect stopped issuing credentials.
+  local connected_at binding_revision
+  agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
   connected_at="$(_remote_read_config_field "$cfg" '$.remote_binding.connected_at')"
+  binding_revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
+  agmsg_lock_release
   if [ -z "$connected_at" ] || [ "$connected_at" = "null" ]; then
     echo "agmsg: team '$team' is not connected" >&2
     exit 1
   fi
 
-  # Stop the background sync engine first: leaving it polling a team we are
-  # tearing the binding off of would just error every cycle.
+  # Stop the background sync engine: leaving it polling a team we are tearing the
+  # binding off of would just error every cycle.
   _remote_sync_engine_stop "$team"
-
-  # The generation to unbind, read before the lock. Every binding carries a
-  # binding_revision and every write bumps it, so this identifies the binding
-  # we decided to disconnect even though nothing here is a credential any more.
-  # Keying the check on credential_id (as it was) silently stopped working the
-  # moment connect stopped issuing one: the expected value was always empty, so
-  # the comparison never ran and a concurrent reconnect's newer binding could be
-  # marked disconnected by a call that never touched it.
-  local binding_revision
-  binding_revision="$(_remote_read_config_field "$cfg" '$.remote_binding.binding_revision')"
 
   # `|| status=$?`, not a bare call followed by `$?`: under `set -e` a function
   # returning non-zero as a statement aborts the script before the next line

@@ -321,54 +321,67 @@ skip_if_no_age() {
   [[ "$output" != *"revoke it from the console"* ]]
 }
 
-@test "disconnect: refuses when the binding was replaced between the read and the lock" {
-  # The generation guard, on a binding that has no credential -- which is every
-  # binding now. cmd_disconnect reads binding_revision before taking the team
-  # lock; a concurrent reconnect in that window installs a NEWER binding, and
-  # marking that one disconnected would tear down a connection this call never
-  # touched.
+@test "disconnect: refuses when the binding was replaced after it chose one" {
+  # The generation guard, on a binding with no credential -- which is every
+  # binding now. disconnect decides what to unbind from one snapshot, then stops
+  # the engine, then writes. A reconnect landing in that gap installs a NEWER
+  # binding, and marking THAT disconnected would tear down a connection this
+  # call never touched.
   #
-  # The barrier is the real lock, not a sleep: the lock is a directory, so
-  # holding it here blocks disconnect exactly where the window is, and the
-  # replacement lands while it waits.
+  # Ordered by a synchronisation primitive, not by a delay. The stand-in engine
+  # traps TERM and reports it: receiving TERM proves disconnect has already
+  # taken its snapshot and is inside the engine stop, which is exactly the gap.
+  # The replacement lands there, and only then is the engine let go.
   bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   local cfg="$SCRIPTS/../teams/testteam/config.json"
-  local lock="$SCRIPTS/../teams/testteam/.config.lock"
+  local pidfile="$SCRIPTS/../run/remote-sync.testteam.pid"
+  local termed="$TEST_SKILL_DIR/engine-termed"
+  local release="$TEST_SKILL_DIR/engine-release"
 
-  mkdir "$lock"
+  # Replace the real engine with one that stops when we say so. Its argv has to
+  # end the way the status check expects, or the stop declines to reap it.
+  local real_pid; real_pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [ -n "$real_pid" ] && kill "$real_pid" 2>/dev/null
+  TERMED="$termed" RELEASE="$release" bash -c '
+    trap "touch \"$TERMED\"" TERM
+    while [ ! -f "$RELEASE" ]; do sleep 0.02; done
+  ' "$SCRIPTS/internal/remote-sync.mjs" run --team testteam &
+  local fake=$!
+  echo "$fake" > "$pidfile"
+
   bash "$SCRIPTS/remote.sh" disconnect testteam > "$TEST_SKILL_DIR/dc.out" 2>&1 &
   local dc=$!
-  # Wait until it is actually parked on the lock rather than guessing.
+
+  # Wait for the seam itself, not for a duration.
   local i
-  for i in $(seq 1 200); do
-    grep -q 'agmsg' "$TEST_SKILL_DIR/dc.out" 2>/dev/null && break
-    kill -0 "$dc" 2>/dev/null || break
-    sleep 0.05
-    [ "$i" -ge 6 ] && break
+  for i in $(seq 1 300); do
+    [ -f "$termed" ] && break
+    sleep 0.02
   done
+  [ -f "$termed" ] || { echo "disconnect never reached the engine stop"; false; }
 
   # A concurrent reconnect: same team, newer generation.
   python3 - "$cfg" <<'PY'
 import json, sys
-cfg = sys.argv[1]
-with open(cfg, encoding="utf-8") as handle:
+with open(sys.argv[1], encoding="utf-8") as handle:
     document = json.load(handle)
-document["remote_binding"]["binding_revision"] = \
-    int(document["remote_binding"].get("binding_revision") or 0) + 1
-with open(cfg, "w", encoding="utf-8") as handle:
+binding = document["remote_binding"]
+binding["binding_revision"] = int(binding.get("binding_revision") or 0) + 1
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(document, handle)
     handle.write("\n")
 PY
 
-  rmdir "$lock"
+  touch "$release"
   local dc_status=0
   wait "$dc" || dc_status=$?
+  wait "$fake" 2>/dev/null || true
   local out; out="$(cat "$TEST_SKILL_DIR/dc.out")"
-  echo "disconnect exited $dc_status; output:"; echo "$out"
+  echo "disconnect exited $dc_status; output: $out"
 
-  [ "$dc_status" -ne 0 ] || { echo "disconnect succeeded against a replaced binding: $out"; false; }
+  [ "$dc_status" -ne 0 ] || { echo "disconnect succeeded against a replaced binding"; false; }
   [[ "$out" == *"binding changed to something else during disconnect"* ]]
-  # ...and the newer binding is still active: nothing marked it disconnected.
+  # ...and the newer binding is still active.
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$cfg') AS TEXT), '\$.remote_binding.disconnected_at');")" = "" ]
 }
 
