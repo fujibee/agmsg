@@ -363,7 +363,7 @@ stop_codex_bridge() {
       pidfile="$RUN_DIR/codex-bridge.$team.$name.pid"
       [ -f "$pidfile" ] || continue
       bpid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$bpid" ] && _agmsg_pid_alive_local "$bpid"; then
+      if [ -n "$bpid" ] && _agmsg_pid_alive "$bpid"; then
         kill "$bpid" 2>/dev/null && killed=$((killed + 1))
       fi
       # .appserver records which app-server URL the bridge was bound to (the

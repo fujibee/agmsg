@@ -459,7 +459,7 @@ EOF
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
-    if [ -n "$bridge_pid" ] && _agmsg_pid_alive_local "$bridge_pid"; then
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
       # Reuse only when the live bridge is bound to the CURRENT app-server. A
       # codex upgrade makes codex-monitor.sh kill the stale app-server and start a
       # fresh one on a new port (#237); a bridge still bound to the old URL stays
