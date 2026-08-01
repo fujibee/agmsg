@@ -401,3 +401,29 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
       bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
   [ -z "$(recorded_uuid team alice)" ]
 }
+
+@test "codex record: a digits-only value outside the port range is not turned into a URL" {
+  # Digits alone do not make a port. A prefix of a real port is also all digits,
+  # which is why the writer publishes atomically — this bounds what anything
+  # else could leave behind.
+  local proj ids hash bad
+  proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-unclaimed\n' > "$ids"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  for bad in 0 65536 999999 00042; do
+    printf '%s' "$bad" > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+    ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+      AGMSG_NODE="$(fake_node_printing "$ids")" \
+        bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+    [ -z "$(recorded_uuid team alice)" ] || { echo "seated from port '$bad'"; false; }
+  done
+  # …and the boundary values that ARE ports still work.
+  printf '65535' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
+}

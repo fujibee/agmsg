@@ -122,10 +122,14 @@ agmsg_codex_probe_loaded_count() {
 # codex-record-session.sh makes when it decides whether it can identify a
 # session; the diagnostic needs it to tell "nobody seated this" apart from
 # "someone else already did". Operates on the list the probe already fetched.
+# Prints the count, or nothing when it could not be worked out. Empty is not
+# zero: zero says "someone else holds it", and a caller that reads a failure as
+# zero would state that as fact. The same distinction probe_ran keeps on the
+# seating side.
 _agmsg_codex_unseated_count() {
   local seated
-  [ -n "${_AGMSG_CODEX_LOADED_LIST:-}" ] || { printf '0'; return 0; }
-  seated="$(mktemp "${TMPDIR:-/tmp}/agmsg-dxseated.XXXXXX" 2>/dev/null)" || { printf '0'; return 0; }
+  [ -n "${_AGMSG_CODEX_LOADED_LIST:-}" ] || return 0
+  seated="$(mktemp "${TMPDIR:-/tmp}/agmsg-dxseated.XXXXXX" 2>/dev/null)" || return 0
   agmsg_role_session_recorded_uuids codex 2>/dev/null | grep . | sort -u > "$seated" || true
   printf '%s\n' "$_AGMSG_CODEX_LOADED_LIST" | sort -u | comm -23 - "$seated" | grep -c . || true
   rm -f "$seated"
@@ -161,6 +165,8 @@ agmsg_codex_report_missing_bridge() {
       # already seated elsewhere, this role having no seat is the correct state,
       # not a surprise -- the count says how many threads are loaded, not how many
       # are still unclaimed, and only the second would make a missing seat odd.
+      # Only an established zero earns the calmer message; an unknown falls
+      # through to the wording that asks a human to look.
       if [ "$(_agmsg_codex_unseated_count)" = "0" ]; then
         echo "Codex bridge: $team/$name has no session recorded (the one loaded thread is already seated by another role)"
         echo "  Nothing to do: a thread seats one role. Start Codex for this role to give it its own."

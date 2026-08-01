@@ -39,9 +39,18 @@ _agmsg_codex_app_server_url() {
   command -v agmsg_sha1 >/dev/null 2>&1 || return 0
   port_file="$SKILL_DIR/run/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
   port="$(cat "$port_file" 2>/dev/null || true)"
-  # Digits only. A truncated or half-written file must not become part of a URL.
+  # Digits, and a port a TCP stack could have handed out. Digits alone are not
+  # enough on their own — a prefix of a real port (5 of 52962) is all digits and
+  # is itself a valid port, so this check cannot detect a partial read. The
+  # writer publishes atomically for that reason; this bounds the damage of
+  # anything else that could leave a stray value here.
+  #
+  # Length before magnitude: `[ -ge ]` on an unbounded digit string is a
+  # comparison on a value that may not fit.
   case "$port" in
-    ''|*[!0-9]*) return 0 ;;
+    ''|*[!0-9]*|0*) return 0 ;;
   esac
+  [ "${#port}" -le 5 ] || return 0
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 0
   printf 'ws://127.0.0.1:%s' "$port"
 }
