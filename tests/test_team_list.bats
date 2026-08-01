@@ -51,7 +51,7 @@ json_field() {
 @test "team list --json: an actively connected team has binding_state=active and a real remote_team_id" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/project-a
 
-  MOCK_REVOKE_FAIL="${MOCK_REVOKE_FAIL:-}" "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+  "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
   local mock_pid=$!
   wait_for_file_contains "$TEST_SKILL_DIR/server.port" '^[0-9][0-9]*$'

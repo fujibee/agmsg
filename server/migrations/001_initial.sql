@@ -121,34 +121,6 @@ CREATE TABLE IF NOT EXISTS registration_identity_history (
 -- Pairing codes are short-lived bootstrap capabilities. Long-lived bearer
 -- secrets are stored only as domain-separated digests and are independently
 -- revocable per connected device.
-CREATE TABLE IF NOT EXISTS credentials (
-  team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE RESTRICT,
-  credential_id UUID NOT NULL,
-  secret_digest BYTEA NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  last_active_at TIMESTAMPTZ,
-  revoked_at TIMESTAMPTZ,
-  PRIMARY KEY (team_id, credential_id)
-);
-
-CREATE INDEX IF NOT EXISTS credentials_team_created_idx
-  ON credentials(team_id, created_at, credential_id);
-
-CREATE TABLE IF NOT EXISTS pairing_tokens (
-  token_digest BYTEA PRIMARY KEY,
-  team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE RESTRICT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  expires_at TIMESTAMPTZ NOT NULL,
-  consumed_at TIMESTAMPTZ,
-  credential_id UUID,
-  CHECK (expires_at > created_at),
-  CHECK ((consumed_at IS NULL) = (credential_id IS NULL)),
-  FOREIGN KEY (team_id, credential_id)
-    REFERENCES credentials(team_id, credential_id) ON DELETE RESTRICT
-);
-
-CREATE INDEX IF NOT EXISTS pairing_tokens_team_expiry_idx
-  ON pairing_tokens(team_id, expires_at);
 
 -- Column additions that read another table live here, after every table above
 -- exists. This file runs top to bottom against a database that may be empty, so
@@ -178,3 +150,13 @@ UPDATE teams t
 
 ALTER TABLE teams ALTER COLUMN registered_at SET DEFAULT clock_timestamp();
 ALTER TABLE teams ALTER COLUMN registered_at SET NOT NULL;
+
+-- The pre-connect pairing path is gone: /v1/connect mints nothing and the data
+-- plane takes its team from a header, so nothing issues a token or a credential
+-- any more. Dropped here, in the tail section, because this file runs top to
+-- bottom on every start -- the tables above are no longer created, and these
+-- statements clear them from a database that has been up before.
+--
+-- pairing_tokens first: it carries the foreign key onto credentials.
+DROP TABLE IF EXISTS pairing_tokens;
+DROP TABLE IF EXISTS credentials;
