@@ -69,16 +69,30 @@ emit() {
 }
 
 if [ -n "$OUT" ]; then
-  # Stream to a temp file in the SAME directory, then rename on success. A driver
-  # failure mid-export therefore never truncates or corrupts an existing out
-  # file (the old file survives), and the full history is never held in memory.
-  # Empty export still yields an empty file (a valid, zero-record export).
-  tmp="${OUT}.tmp.$$"
+  # Stream to a same-directory temp, then rename on success. Two properties, both
+  # load-bearing (mirrors scripts/key.sh's _key_write_identity_atomic):
+  #  - Atomic: a driver failure mid-export never truncates or corrupts an
+  #    existing out file (the old file survives), and the full history is never
+  #    held in memory.
+  #  - Safe: the temp is created by mktemp (O_EXCL + an UNPREDICTABLE name), so a
+  #    process sharing the out directory cannot pre-plant a symlink at a guessable
+  #    temp path and redirect our plaintext onto an arbitrary file. A predictable
+  #    "$OUT.tmp.$$" opened with plain `>` would make the atomicity fix itself a
+  #    write primitive against any file the caller can write.
+  out_dir="$(cd "$(dirname "$OUT")" && pwd)"
+  tmp="$(mktemp "$out_dir/.export-XXXXXX")" || {
+    printf 'export.sh: cannot create a temp file in %s\n' "$out_dir" >&2; exit 1
+  }
+  chmod 600 "$tmp"
+  # A signal between mktemp and the rename would otherwise leave a 0600-but-never-
+  # renamed plaintext temp behind; clean it on any exit path, then drop the trap
+  # once the rename has happened (an empty export still yields an empty file).
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
   if emit > "$tmp"; then
     mv -f "$tmp" "$OUT"
+    trap - EXIT HUP INT TERM
   else
     rc=$?
-    rm -f "$tmp"
     exit "$rc"
   fi
 else

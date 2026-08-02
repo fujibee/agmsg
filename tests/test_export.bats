@@ -136,7 +136,35 @@ STUB
   [ "$status" -ne 0 ]
   # The old file survives untouched — not truncated, not the partial output.
   [ "$(cat "$out")" = "PRE-EXISTING" ]
-  # No leftover temp file next to the target.
-  run bash -c 'ls "$1".tmp.* 2>/dev/null' _ "$out"
+  # The EXIT trap removed the mktemp temp — no plaintext residue in the out dir.
+  run bash -c 'ls "$1"/.export-* 2>/dev/null' _ "$TEST_SKILL_DIR"
   [ -z "$output" ]
+}
+
+@test "export: a symlink at the --out path is replaced, its target untouched" {
+  # rename() over a symlink replaces the LINK, so a victim file the --out path
+  # points at is never overwritten with plaintext. Guards against regressing the
+  # atomic rename to a symlink-following copy (cp / cat > "$OUT").
+  bash "$SCRIPTS/send.sh" testteam alice bob "real"
+  local victim="$TEST_SKILL_DIR/victim.txt"
+  printf 'DO-NOT-OVERWRITE\n' > "$victim"
+  local out="$TEST_SKILL_DIR/link.jsonl"
+  ln -s "$victim" "$out"
+  run bash "$SCRIPTS/export.sh" --team testteam --out "$out"
+  [ "$status" -eq 0 ]
+  # Victim content is unchanged...
+  [ "$(cat "$victim")" = "DO-NOT-OVERWRITE" ]
+  # ...and --out is now a regular file (not a symlink) holding the export.
+  [ -f "$out" ] && [ ! -L "$out" ]
+  grep -q '"type":"message_sent"' "$out"
+  grep -q "real" "$out"
+}
+
+@test "export: --out uses an unpredictable mktemp temp, not a guessable name" {
+  # Anti-regression for the symlink finding: the temp must be created via mktemp
+  # (O_EXCL + random name), never a predictable "$OUT.tmp.$$" opened with plain >,
+  # and its cleanup trap must cover signal exits as well as EXIT.
+  grep -q 'mktemp "\$out_dir/\.export-XXXXXX"' "$SCRIPTS/export.sh"
+  ! grep -qE '\.tmp\.\$\$|\$OUT\.tmp' "$SCRIPTS/export.sh"
+  grep -q "trap 'rm -f \"\$tmp\"' EXIT HUP INT TERM" "$SCRIPTS/export.sh"
 }
