@@ -25,6 +25,7 @@ commands:
   inbox
   send <to> <message>
   history [agent] [limit]
+  export [--agent <agent>] [--limit N] [--out <file>]
   team [team]
   config [show|set ...]
   mode [turn|off]
@@ -186,6 +187,21 @@ case "$COMMAND" in
       args+=("$@")
     fi
     run_script history.sh "${args[@]}"
+    ;;
+
+  export)
+    # Resolve only the team export.sh requires; forward the rest of argv so the
+    # flag contract (--agent/--limit/--out) is identical to invoking export.sh
+    # directly. --agent stays opt-in — export is team-wide by default, so this
+    # does NOT inject the acting agent (that would make `agmsg export` filter
+    # differently from `export.sh --team <team>`). An explicit --team in argv
+    # wins over the resolved one (export.sh takes the last --team).
+    resolve_identity 1 0
+    args=(--team "$(first_team "$RESOLVED_TEAM")")
+    if [ "$#" -gt 0 ]; then
+      args+=("$@")
+    fi
+    run_script export.sh "${args[@]}"
     ;;
 
   team)

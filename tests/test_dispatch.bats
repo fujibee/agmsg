@@ -54,6 +54,30 @@ teardown() {
   [[ "$output" =~ "$message" ]]
 }
 
+@test "dispatch: export routes to export.sh and emits JSONL" {
+  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" --team demo --agent alice -- send bob "exported"
+  [ "$status" -eq 0 ]
+
+  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" --team demo -- export
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ \"type\":\"message_sent\" ]]
+  [[ "$output" =~ "exported" ]]
+}
+
+@test "dispatch: export forwards --limit and --out to export.sh" {
+  bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" --team demo --agent alice -- send bob "e1"
+  bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" --team demo --agent alice -- send bob "e2"
+  local out="$BATS_TEST_TMPDIR/dispatch-export.jsonl"
+  run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" --team demo -- export --limit 1 --out "$out"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -f "$out" ]
+  local count
+  count="$(grep -c '"type":"message_sent"' "$out")"
+  [ "$count" -eq 1 ]
+  grep -q "e2" "$out"
+}
+
 @test "dispatch: codex mode off and turn delegate to delivery" {
   run bash "$SCRIPTS/windows/dispatch.sh" --type codex --project "$PROJECT_ALICE" -- mode off
   [ "$status" -eq 0 ]

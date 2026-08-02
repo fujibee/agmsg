@@ -98,3 +98,45 @@ teardown() {
   run bash "$SCRIPTS/export.sh" --team testteam --bogus
   [ "$status" -eq 2 ]
 }
+
+@test "export: streams many lines to --out in chronological order" {
+  # More than the 1-2 messages the other tests seed, so the multi-record stream
+  # path (no in-memory materialization) is actually exercised end to end.
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    bash "$SCRIPTS/send.sh" testteam alice bob "line-$i"
+  done
+  local out="$TEST_SKILL_DIR/many.jsonl"
+  run bash "$SCRIPTS/export.sh" --team testteam --out "$out"
+  [ "$status" -eq 0 ]
+  [ -f "$out" ]
+  local count
+  count="$(grep -c '"type":"message_sent"' "$out")"
+  [ "$count" -eq 8 ]
+  head -1 "$out" | grep -q "line-1"
+  tail -1 "$out" | grep -q "line-8"
+}
+
+@test "export: a driver failure leaves an existing --out file intact" {
+  # Isolate export.sh with a stub storage lib so storage_history can be forced to
+  # fail deterministically on ANY backend. The contract under test: a mid-export
+  # driver failure must not truncate or replace a pre-existing out file, and must
+  # leave no temp turd behind (temp-in-same-dir + rename-on-success atomicity).
+  local dir="$TEST_SKILL_DIR/fakeexport"
+  mkdir -p "$dir/lib"
+  cp "$SCRIPTS/export.sh" "$dir/export.sh"
+  cat > "$dir/lib/storage.sh" <<'STUB'
+agmsg_storage_load() { :; }
+storage_store_exists() { return 0; }
+storage_history() { printf 'partial line\n'; return 3; }
+STUB
+  local out="$TEST_SKILL_DIR/keep.jsonl"
+  printf 'PRE-EXISTING\n' > "$out"
+  run bash "$dir/export.sh" --team testteam --out "$out"
+  [ "$status" -ne 0 ]
+  # The old file survives untouched — not truncated, not the partial output.
+  [ "$(cat "$out")" = "PRE-EXISTING" ]
+  # No leftover temp file next to the target.
+  run bash -c 'ls "$1".tmp.* 2>/dev/null' _ "$out"
+  [ -z "$output" ]
+}
