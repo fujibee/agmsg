@@ -41,11 +41,19 @@ setup_test_env() {
   # inherited the caller's directory. Run the suite from inside a
   # .claude/worktrees/<name> checkout and that fallback matched, session-start
   # exited 0 before doing any work, and ~a dozen tests failed that pass from
-  # anywhere else. mktemp's directory is neutral for that match and for any
+  # anywhere else. An empty temp dir is neutral for that match and for any
   # future cwd-sensitive script. Each bats test runs in its own subshell, so
   # this is scoped to the test like the HOME export above.
-  mkdir -p "$TEST_SKILL_DIR/cwd"
-  cd "$TEST_SKILL_DIR/cwd" || return 1
+  #
+  # Deliberately OUTSIDE $TEST_SKILL_DIR, and shared across tests rather than
+  # per-test: under Git Bash a directory that is some process's cwd cannot be
+  # removed, so parking the cwd inside the tree teardown_test_env deletes makes
+  # `rm -rf` fail with "Device or resource busy" (it succeeds silently on
+  # Linux/macOS). BATS_RUN_TMPDIR is bats-managed and cleaned once the whole
+  # run — every test subshell included — has finished.
+  AGMSG_TEST_CWD="${BATS_RUN_TMPDIR:-${TMPDIR:-/tmp}}/agmsg-neutral-cwd"
+  mkdir -p "$AGMSG_TEST_CWD"
+  cd "$AGMSG_TEST_CWD" || return 1
 }
 
 teardown_test_env() {
