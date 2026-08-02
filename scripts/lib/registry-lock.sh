@@ -79,6 +79,17 @@ EOF
 agmsg_write_atomic() {
   local dest="$1" content="$2" tmp
   tmp="$dest.tmp.$$"
-  printf '%s\n' "$content" > "$tmp"
-  mv "$tmp" "$dest"
+  # This function is commonly called as `if ! agmsg_write_atomic ...`; Bash
+  # disables errexit for that conditional context, so every fallible command
+  # must be checked explicitly.  Otherwise a partial printf failure could be
+  # followed by mv and publish a truncated registry as a successful update.
+  if ! printf '%s\n' "$content" > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$tmp" "$dest"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
 }

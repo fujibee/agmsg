@@ -144,14 +144,18 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 # Tear down a spawned member — the inverse of spawn.
 # Default (graceful): sends a `ctrl:despawn` control message to <name>; the
 # member's watcher drops its own role (releasing the actas lock + registration)
-# and closes its own tmux pane, ending the agent. Blocks until the lock releases
-# (--timeout, default 30s) then prints `status=ok`; on timeout prints
-# status=timeout and exits 3 (retry with --force). Only an exclusive watcher
-# dedicated to <name> acts on it — the despawning session is never torn down.
+# and closes its own tmux pane, ending the agent. It reports `status=ok` only
+# after the target actas lock is free and, when a readiness sentinel existed at
+# teardown start, that sentinel is absent. This is conservative lifecycle
+# evidence, not a placement-generation proof. On timeout (`--timeout`, default
+# 30s), retry graceful after watcher/registry recovery; use --force only when
+# no other same-name registration remains. Only an exclusive watcher dedicated
+# to <name> acts on it — the despawning session is never torn down.
 # --force: skip the message and tear the member down from the placement recorded
 # at spawn time (kill its tmux pane/window, drop its registration) — for a dead
-# watcher or a codex member (no Monitor). A hand-started member with no placement
-# record can't be --forced.
+# watcher or a codex member (no watcher/Monitor, so it normally needs --force,
+# subject to the same-name-registration guard). A hand-started member with no
+# placement record can't be --forced.
 #   --force              tear down from the recorded placement, no message
 #   --timeout N          seconds to wait for graceful teardown (default 30)
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]

@@ -17,8 +17,12 @@
 
 set -u
 
-MODE="${1:?Usage: actas-lock-mutate.sh <stale|exact> <lock-path> [expected-record]}"
-LOCK_PATH="${2:?Missing lock path}"
+# Validate the full call shape before dereferencing positional parameters.
+# `${n:?}` exits 1 for missing arguments, but callers rely on this fixed helper
+# returning 2 for every invalid invocation (including zero or one argument).
+[ "$#" -ge 2 ] || exit 2
+MODE="$1"
+LOCK_PATH="$2"
 EXPECTED="${3:-}"
 
 SCRIPT_DIR="$(cd -P "$(dirname "$0")/.." && pwd -P)" || exit 2

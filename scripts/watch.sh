@@ -324,14 +324,27 @@ fi
 # joined by OR. Single quotes inside team/agent names are doubled for SQL.
 sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
-WHERE_PAIRS=""
-while IFS=$'\t' read -r team agent; do
-  [ -z "$team" ] && continue
-  t_esc=$(sql_escape "$team")
-  a_esc=$(sql_escape "$agent")
-  pair="(team='$t_esc' AND to_agent='$a_esc')"
-  WHERE_PAIRS="${WHERE_PAIRS:+$WHERE_PAIRS OR }$pair"
-done <<< "$PAIRS"
+rebuild_where_pairs() {
+  local source_pairs="$1" pair_team pair_agent t_esc a_esc pair
+  WHERE_PAIRS=""
+  while IFS=$'\t' read -r pair_team pair_agent; do
+    [ -z "$pair_team" ] && continue
+    t_esc=$(sql_escape "$pair_team") || return 1
+    a_esc=$(sql_escape "$pair_agent") || return 1
+    pair="(team='$t_esc' AND to_agent='$a_esc')"
+    WHERE_PAIRS="${WHERE_PAIRS:+$WHERE_PAIRS OR }$pair"
+  done <<< "$source_pairs"
+  return 0
+}
+if ! rebuild_where_pairs "$PAIRS"; then
+  echo "agmsg watch: could not build initial subscription; refusing to start" >&2
+  exit 1
+fi
+
+# Freeze the successfully retained/claimed launch set. ctrl:despawn must not
+# expand itself to identities joined after this watcher started (#556); committed
+# non-target pairs are removed from this remaining snapshot as they are reset.
+TEARDOWN_PAIRS="$PAIRS"
 
 # Determine the starting watermark.
 #
@@ -433,6 +446,159 @@ if [ -n "$ACTIVE_NAME" ]; then
   done <<< "$PAIRS"
 fi
 
+# Return the remaining newline-separated pair set after removing one exact
+# (team, agent) record. Pair names are validated by the registry, so tabs and
+# newlines are not valid components here.
+remove_pair_from_list() {
+  local source_pairs="$1" remove_team="$2" remove_agent="$3"
+  local pair_team pair_agent updated=""
+  while IFS=$'\t' read -r pair_team pair_agent; do
+    [ -z "$pair_team" ] && continue
+    if [ "$pair_team" = "$remove_team" ] && [ "$pair_agent" = "$remove_agent" ]; then
+      continue
+    fi
+    updated="${updated:+$updated$'\n'}${pair_team}"$'\t'"${pair_agent}"
+  done <<< "$source_pairs"
+  printf '%s' "$updated"
+}
+
+# A reset that commits one non-target pair must immediately remove only that
+# watcher's own readiness sentinel. A successor may already own the path, so
+# never remove a sentinel whose stamped owner is different.
+remove_ready_from_bookkeeping() {
+  local ready_path="$1" ready_owner="" post_owner="" item updated=""
+  if [ -e "$ready_path" ] || [ -L "$ready_path" ]; then
+    if [ ! -f "$ready_path" ] || ! IFS= read -r ready_owner < "$ready_path"; then
+      printf "agmsg watch: could not verify readiness sentinel '%s'; retaining cleanup ownership\n" \
+        "$ready_path" >&2
+      return 1
+    fi
+    if [ "$ready_owner" = "$SESSION_ID" ]; then
+      if ! rm -f "$ready_path" 2>/dev/null; then
+        printf "agmsg watch: could not remove owned readiness sentinel '%s'; retaining cleanup ownership\n" \
+          "$ready_path" >&2
+        return 1
+      fi
+      if [ -e "$ready_path" ] || [ -L "$ready_path" ]; then
+        if [ ! -f "$ready_path" ] || ! IFS= read -r post_owner < "$ready_path" \
+          || [ "$post_owner" = "$SESSION_ID" ]; then
+          printf "agmsg watch: owned readiness sentinel '%s' remains after removal; retaining cleanup ownership\n" \
+            "$ready_path" >&2
+          return 1
+        fi
+      fi
+    fi
+  fi
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    [ "$item" = "$ready_path" ] && continue
+    updated="${updated:+$updated$'\n'}$item"
+  done <<< "$READY_FILES"
+  READY_FILES="$updated"
+}
+
+# Keep the live SQL subscription and cleanup bookkeeping consistent with a
+# committed scoped reset. PAIRS/WHERE_PAIRS must narrow before any later row in
+# the fetched SQLite batch can be delivered. TEARDOWN_PAIRS deliberately stays
+# unchanged until owned-ready cleanup succeeds: a retry can then prove the now
+# absent registration/released lock again and retry that cleanup. It is never
+# rebuilt from identities after startup (#556).
+remove_live_pair() {
+  local pair_team="$1" pair_agent="$2" ready_path new_pairs new_teardown
+  if ! new_pairs="$(remove_pair_from_list "$PAIRS" "$pair_team" "$pair_agent")"; then
+    printf "agmsg watch: could not reconcile committed reset for '%s/%s'; stopping safely\n" \
+      "$pair_team" "$pair_agent" >&2
+    exit 1
+  fi
+  PAIRS="$new_pairs"
+  if ! rebuild_where_pairs "$PAIRS"; then
+    printf "agmsg watch: could not rebuild subscription after committed reset for '%s/%s'; stopping safely\n" \
+      "$pair_team" "$pair_agent" >&2
+    exit 1
+  fi
+  ready_path="$(agmsg_ready_path "$pair_team" "$pair_agent")"
+  if ! remove_ready_from_bookkeeping "$ready_path"; then
+    printf "agmsg watch: could not reconcile readiness after committed reset for '%s/%s'; retaining watcher for ctrl:despawn retry\n" \
+      "$pair_team" "$pair_agent" >&2
+    return 1
+  fi
+  if ! new_teardown="$(remove_pair_from_list "$TEARDOWN_PAIRS" "$pair_team" "$pair_agent")"; then
+    printf "agmsg watch: could not finalize teardown bookkeeping for '%s/%s'; stopping safely\n" \
+      "$pair_team" "$pair_agent" >&2
+    exit 1
+  fi
+  TEARDOWN_PAIRS="$new_teardown"
+  return 0
+}
+
+# reset.sh's machine protocol is deliberately strict for watcher teardown:
+# this watcher always passes its own SESSION_ID, so only a checked exact
+# release may permit it to stop receiving for the pair. A post-release empty
+# team-finalization warning is still a logical commit and is safe to accept.
+scoped_machine_outcome_ok() {
+  local record="$1" encoded_team="$2"
+  case "$record" in
+    "status=ok team=$encoded_team registration=removed release=proven"|\
+    "status=ok team=$encoded_team registration=removed release=proven finalize=failed"|\
+    "status=ok team=$encoded_team registration=absent release=proven")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+reset_scoped_pair() {
+  local pair_team="$1" pair_agent="$2" reset_output reset_status machine_team
+  if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$pair_agent" "$SESSION_ID" --team "$pair_team" --machine 2>&1)"; then
+    printf "agmsg watch: despawn reset failed for '%s/%s'; retaining watcher for retry: %s\n" \
+      "$pair_team" "$pair_agent" "$reset_output" >&2
+    return 1
+  fi
+  reset_status="${reset_output##*$'\n'}"
+  machine_team="$(_actas_lock_encode "$pair_team")"
+  if ! scoped_machine_outcome_ok "$reset_status" "$machine_team"; then
+    printf "agmsg watch: despawn reset returned an invalid target outcome for '%s/%s'; retaining watcher for retry: %s\n" \
+      "$pair_team" "$pair_agent" "$reset_output" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Teardown an active-name watcher's frozen launch set in a deterministic order:
+# every same-name non-target pair first, then the requested target pair. If a
+# non-target or target reset fails, the target's remaining registration/lock and
+# readiness sentinel stay in place for a later ctrl:despawn retry. The caller
+# uses TEARDOWN_BATCH_CHANGED to discard its stale SQLite result set before any
+# later rows from a now-released pair can be delivered or marked read.
+reset_remaining_despawn_pairs() {
+  local target_team="$1" target_agent="$2" pair_team pair_agent snapshot
+  local target_found=0
+  TEARDOWN_BATCH_CHANGED=0
+  snapshot="$TEARDOWN_PAIRS"
+  while IFS=$'\t' read -r pair_team pair_agent; do
+    [ -z "$pair_team" ] && continue
+    [ "$pair_agent" = "$target_agent" ] || continue
+    if [ "$pair_team" = "$target_team" ]; then
+      target_found=1
+      continue
+    fi
+    if ! reset_scoped_pair "$pair_team" "$pair_agent"; then
+      return 1
+    fi
+    TEARDOWN_BATCH_CHANGED=1
+    if ! remove_live_pair "$pair_team" "$pair_agent"; then
+      return 1
+    fi
+  done <<< "$snapshot"
+
+  if [ "$target_found" -ne 1 ]; then
+    printf "agmsg watch: despawn target '%s/%s' is not in this watcher's launch set; retaining watcher for retry\n" \
+      "$target_team" "$target_agent" >&2
+    return 1
+  fi
+  reset_scoped_pair "$target_team" "$target_agent"
+}
+
 while true; do
   # Liveness guard (#67): exit promptly once the originating agent session is
   # gone. A plain pipe gives no portable way to notice a *downstream* consumer
@@ -456,6 +622,7 @@ while true; do
     " 2>/dev/null || true)"
 
     if [ -n "$ROWS" ]; then
+      RESTART_ROWS=0
       while IFS=$'\x1f' read -r id ts team from to body; do
         [ -z "$id" ] && continue
         # Control message: a leader's `despawn` sends `ctrl:despawn` to this
@@ -483,16 +650,19 @@ while true; do
           placed_id=""
           spawn_rec="$(agmsg_spawn_path "$team" "$to")"
           [ -f "$spawn_rec" ] && IFS=$'\t' read -r placed_id _ _ < "$spawn_rec"
-          # reset.sh owns the registration+checked-lock transaction.  If it
-          # cannot prove release (for example the reclaim SQLite DB or a
-          # legacy marker is unavailable), do not close this watcher or report
-          # a successful graceful despawn.  Leaving it attached preserves the
-          # role and lets a later ctrl:despawn retry after recovery.  The
-          # successful path's existing placement cleanup is intentionally
-          # unchanged here; provider-operation policy belongs to #518.
-          if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" 2>&1)"; then
-            printf "agmsg watch: despawn reset failed for '%s/%s'; retaining watcher for retry: %s\n" \
-              "$team" "$to" "$reset_output" >&2
+          # A watcher that claimed the same active name across multiple teams
+          # owns one frozen startup set, not a dynamically rediscovered set.
+          # Reset every non-target pair first, then this target. That lets a
+          # successful earlier pair disappear from the live subscription while
+          # a later failure leaves the target watcher viable for retry.
+          if ! reset_remaining_despawn_pairs "$team" "$to"; then
+            # ROWS is a snapshot from before any committed non-target reset.
+            # Do not print or mark its later rows for a pair that was just
+            # removed; restart the outer query with rebuilt WHERE_PAIRS.
+            if [ "${TEARDOWN_BATCH_CHANGED:-0}" -eq 1 ]; then
+              RESTART_ROWS=1
+              break
+            fi
             continue
           fi
           if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
@@ -529,6 +699,7 @@ while true; do
         LAST="$id"
         persist_watermark
       done <<< "$ROWS"
+      [ "$RESTART_ROWS" -eq 1 ] && continue
     fi
   fi
 

@@ -177,8 +177,8 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62).
-3. If the session's active FROM was `<name>`, clear that state. Then:
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62). **If reset.sh exits nonzero, abort immediately:** show its output and do NOT clear the active FROM, TaskStop, relaunch, or otherwise touch the running Monitor; do not report the role as dropped. Recovery must retry the same reset only after its reported registry/lock infrastructure failure is fixed.
+3. Only after reset.sh succeeds, if the session's active FROM was `<name>`, clear that state. Then:
    a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
    b. **If a matching task is found**: TaskStop it.
    c. **If no matching task is found**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
@@ -201,7 +201,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` is the inverse of `spawn` — it tears down a member you previously spawned.
 2. Determine which team `<name>` belongs to (as with `send`), then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
-   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. The member's watcher drops its own role (releasing the actas lock + registration) and closes its own tmux pane, which ends the agent CLI. Blocks until the lock releases, up to `--timeout` (default 30s), then prints `status=ok`. On timeout it prints `status=timeout` and exits 3 — the member's watcher didn't respond (dead watcher, or a codex member with no Monitor); retry with `--force`.
+   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. The member's watcher drops its own role (releasing the actas lock + registration) and closes its own tmux pane, which ends the agent CLI. It reports `status=ok` only after the target lock is free and, when a readiness sentinel existed at teardown start, that sentinel is absent. This is a conservative lifecycle check, not a placement-generation proof. It waits up to `--timeout` (default 30s); on timeout it prints `status=timeout` and exits 3 — the member's watcher didn't respond (dead watcher, or a codex member with no Monitor); retry graceful after watcher/registry recovery, and use `--force` only when no other same-name registration remains.
    - `--force`: skips the message and tears the member down from the placement recorded at spawn time — kills its tmux pane/window and drops its registration. Use when the member's watcher can't respond.
 3. Show the script's output. Do NOT TaskStop or relaunch this session's own Monitor — despawn affects the spawned member, not this session's subscription.
 

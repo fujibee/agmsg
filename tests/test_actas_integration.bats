@@ -240,6 +240,61 @@ run_session_start() {
   [ -f "$SKILL_DIR/teams/T/config.json" ]
 }
 
+@test "reset: scoped machine retry releases an orphan lock after its team config is absent" {
+  local lock="$(actas_lock_path T alice)"
+  printf 'sid-me\n' > "$lock"
+
+  run bash "$SKILL_DIR/scripts/reset.sh" /tmp/p1 claude-code alice sid-me --team T --machine
+
+  [ "$status" -eq 0 ]
+  [ "${lines[${#lines[@]}-1]}" = "status=ok team=T registration=absent release=proven" ]
+  [ ! -e "$lock" ]
+}
+
+@test "reset: scoped machine mode touches only the exact target team" {
+  local target_lock="$(actas_lock_path T alice)"
+  local secondary_lock="$(actas_lock_path T2 alice)"
+  fake_register T alice
+  fake_register T2 alice
+  actas_lock_claim T alice sid-me
+  actas_lock_claim T2 alice sid-me
+
+  run bash "$SKILL_DIR/scripts/reset.sh" /tmp/p1 claude-code alice sid-me --team T --machine
+
+  [ "$status" -eq 0 ]
+  [ "${lines[${#lines[@]}-1]}" = "status=ok team=T registration=removed release=proven" ]
+  [ ! -e "$target_lock" ]
+  [ ! -e "$SKILL_DIR/teams/T/config.json" ]
+  [ -e "$secondary_lock" ]
+  [ -e "$SKILL_DIR/teams/T2/config.json" ]
+}
+
+@test "reset: scoped machine reports a committed release when empty-team finalization fails" {
+  local lock="$(actas_lock_path T alice)"
+  local config="$SKILL_DIR/teams/T/config.json"
+  local stub_bin="$BATS_TEST_TMPDIR/finalize-rm-bin"
+  fake_register T alice
+  actas_lock_claim T alice sid-me
+  mkdir -p "$stub_bin"
+  cat > "$stub_bin/rm" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = "$AGMSG_TEST_FAIL_FINALIZE_PATH" ] && exit 1
+done
+exec /bin/rm "$@"
+STUB
+  chmod +x "$stub_bin/rm"
+
+  run env PATH="$stub_bin:$PATH" AGMSG_TEST_FAIL_FINALIZE_PATH="$config" \
+    bash "$SKILL_DIR/scripts/reset.sh" /tmp/p1 claude-code alice sid-me --team T --machine
+
+  [ "$status" -eq 0 ]
+  [ "${lines[${#lines[@]}-1]}" = "status=ok team=T registration=removed release=proven finalize=failed" ]
+  [ ! -e "$lock" ]
+  [ -e "$config" ]
+  grep -Fq '"agents":{}' "$config"
+}
+
 @test "reset: legacy reclaim marker retains the last registration and lock for recovery" {
   local lock="$(actas_lock_path T alice)"
   fake_register T alice

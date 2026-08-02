@@ -142,7 +142,7 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` is the inverse of `spawn` — it tears down a member you previously spawned.
 2. Determine which team `<name>` belongs to (as with `send`), then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
-   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. A claude-code member's watcher drops its own role and closes its own tmux pane, ending the agent. Blocks until the lock releases, up to `--timeout` (default 30s), then prints `status=ok`. On timeout it prints `status=timeout` and exits 3 — retry with `--force`. A codex member has no watcher to respond, so use `--force` for it.
+   - Default (graceful): sends a `ctrl:despawn` control message to `<name>`. A claude-code member's watcher drops its own role and closes its own tmux pane, ending the agent. It reports `status=ok` only after the target actas lock is free and, when a readiness sentinel existed at teardown start, that sentinel is absent. This is conservative lifecycle evidence, not a placement-generation proof. It waits up to `--timeout` (default 30s); on timeout it prints `status=timeout` and exits 3 — retry graceful after watcher/registry recovery, and use `--force` only when no other same-name registration remains. A codex member has no watcher to respond, so it normally needs `--force`, subject to that same-name-registration guard.
    - `--force`: skips the message and tears the member down from the placement recorded at spawn time — kills its tmux pane/window and drops its registration.
 3. Show the script's output.
 

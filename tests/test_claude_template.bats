@@ -40,3 +40,24 @@ setup() {
   grep -Fq 'Before rolling back code, quiesce every new-protocol helper and process' "$TEMPLATE"
   grep -Fq 'Marker detection is diagnostic and fail-closed, not proof that the system is quiescent.' "$TEMPLATE"
 }
+
+@test "Claude template aborts a failed drop before changing active state or Monitor" {
+  grep -Fq 'If reset.sh exits nonzero, abort immediately:' "$TEMPLATE"
+  grep -Fq 'do NOT clear the active FROM, TaskStop, relaunch, or otherwise touch the running Monitor' "$TEMPLATE"
+  grep -Fq 'do not report the role as dropped' "$TEMPLATE"
+}
+
+@test "shipped despawn guidance preserves #522 completion and recovery gates" {
+  local skill="$ROOT/SKILL.md"
+  local codex_template="$ROOT/scripts/drivers/types/codex/template.md"
+  local guide
+
+  for guide in "$skill" "$TEMPLATE" "$codex_template"; do
+    grep -Fq 'readiness sentinel' "$guide"
+    grep -Fq 'retry graceful after watcher/registry recovery' "$guide"
+    grep -Fq 'no other same-name registration remains' "$guide"
+  done
+  grep -Fq 'target actas lock is free' "$skill"
+  grep -Fq 'target lock is free' "$TEMPLATE"
+  grep -Fq 'target actas lock is free' "$codex_template"
+}

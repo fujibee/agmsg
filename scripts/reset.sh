@@ -10,23 +10,57 @@ set -euo pipefail
 # returns the role to the pool so peer sessions can pick it up immediately
 # without waiting for stale-lock GC.
 
-PROJECT_PATH="${1:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]}"
-AGENT_TYPE="${2:?Usage: reset.sh <project_path> <type> [agent_id] [session_id]}"
-TARGET_AGENT="${3:-}"
-SESSION_ID="${4:-}"
-EXACT_OWNER=0
-case "${5:-}" in
-  '') ;;
-  --exact-owner) EXACT_OWNER=1 ;;
-  *)
-    echo "Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner]" >&2
-    exit 1
-    ;;
-esac
-[ "$#" -le 5 ] || {
-  echo "Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner]" >&2
+usage() {
+  echo "Usage: reset.sh <project_path> <type> [agent_id] [session_id] [--exact-owner] [--team <team> --machine]" >&2
   exit 1
 }
+
+[ "$#" -ge 2 ] || usage
+PROJECT_PATH="$1"
+AGENT_TYPE="$2"
+shift 2
+TARGET_AGENT=""
+SESSION_ID=""
+EXACT_OWNER=0
+TEAM_SCOPE=""
+MACHINE=0
+
+# Keep the public optional positional shape, then reserve the scoped flags for
+# despawn/watch. Agent names cannot begin with '-' (validate.sh), so this is
+# unambiguous while still permitting an explicit empty session-id before flags.
+if [ "$#" -gt 0 ]; then
+  case "$1" in --*) ;; *) TARGET_AGENT="$1"; shift ;; esac
+fi
+if [ "$#" -gt 0 ]; then
+  case "$1" in --*) ;; *) SESSION_ID="$1"; shift ;; esac
+fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --exact-owner)
+      EXACT_OWNER=1
+      shift
+      ;;
+    --team)
+      [ "$#" -ge 2 ] || usage
+      TEAM_SCOPE="$2"
+      shift 2
+      ;;
+    --machine)
+      MACHINE=1
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+
+# This is an internal single-team protocol for watcher/force teardown. Keep
+# user-facing reset's established all-team partial-progress semantics intact.
+if [ -n "$TEAM_SCOPE" ] && [ "$MACHINE" -ne 1 ]; then
+  usage
+fi
+if [ "$MACHINE" -eq 1 ] && [ -z "$TEAM_SCOPE" ]; then
+  usage
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -84,10 +118,19 @@ if [ -z "$TARGET_AGENT" ]; then
 fi
 
 agmsg_validate_agent_name "$TARGET_AGENT" || exit 1
+if [ -n "$TEAM_SCOPE" ]; then
+  agmsg_validate_team_name "$TEAM_SCOPE" || exit 1
+  TEAM_SCOPE_ENCODED="$(_actas_lock_encode "$TEAM_SCOPE")"
+else
+  TEAM_SCOPE_ENCODED=""
+fi
 TARGET_AGENT_SQL=$(_agmsg_sqlesc "$TARGET_AGENT")
 AGENT_TYPE_SQL=$(_agmsg_sqlesc "$AGENT_TYPE")
 
-if [ ! -d "$TEAMS_DIR" ]; then
+# Preserve the public command's historical no-registry response. Scoped
+# machine callers deliberately bypass this early return so an orphan target
+# lock still receives its checked-release fallback below.
+if [ ! -d "$TEAMS_DIR" ] && [ -z "$TEAM_SCOPE" ]; then
   echo "No team registrations found."
   exit 0
 fi
@@ -98,11 +141,18 @@ LOCK_FAILED=0
 RELEASE_FAILED=0
 FINALIZE_FAILED=0
 RETAINED_LOCKS=""
+SCOPED_CONFIG_SEEN=0
+SCOPED_RELEASE_PROVEN=0
+SCOPED_COMMITTED_FINALIZE_WARNING=0
 
 for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   [ -f "$TEAM_CONFIG" ] || continue
   TEAM_DIR="$(dirname "$TEAM_CONFIG")"
   TEAM_NAME="$(basename "$TEAM_DIR")"
+  if [ -n "$TEAM_SCOPE" ] && [ "$TEAM_NAME" != "$TEAM_SCOPE" ]; then
+    continue
+  fi
+  SCOPED_CONFIG_SEEN=1
 
   # Serialize this team's read-modify-write so a concurrent join/leave/rename on
   # the same team can't be clobbered (#141). Per team, released before moving on.
@@ -132,6 +182,18 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   AGENT_JSON=$(agmsg_sqlite_mem \
     "SELECT json_extract('$CONFIG_ESCAPED', '\$.agents.' || '$TARGET_AGENT_SQL');")
   if [ -z "$AGENT_JSON" ] || [ "$AGENT_JSON" = "null" ]; then
+    # A scoped teardown may find a surviving config with no target
+    # registration. Keep its registry lock while proving release, so a
+    # concurrent join cannot insert the pair between our absence observation
+    # and the target lock operation.
+    if [ -n "$TEAM_SCOPE" ] && [ "$RELEASE_REQUESTED" -eq 1 ]; then
+      if actas_lock_release_checked "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID"; then
+        SCOPED_RELEASE_PROVEN=1
+      else
+        RETAINED_LOCKS="$(_actas_lock_encode "$TEAM_NAME")/$(_actas_lock_encode "$TARGET_AGENT")"
+        RELEASE_FAILED=1
+      fi
+    fi
     agmsg_lock_release
     continue
   fi
@@ -160,10 +222,17 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
       AND json_extract(value, '\$.project') IN ($PROJECT_SQL_IN);
   ")
   if [ "$MATCH_COUNT" -eq 0 ]; then
+    if [ -n "$TEAM_SCOPE" ] && [ "$RELEASE_REQUESTED" -eq 1 ]; then
+      if actas_lock_release_checked "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID"; then
+        SCOPED_RELEASE_PROVEN=1
+      else
+        RETAINED_LOCKS="$(_actas_lock_encode "$TEAM_NAME")/$(_actas_lock_encode "$TARGET_AGENT")"
+        RELEASE_FAILED=1
+      fi
+    fi
     agmsg_lock_release
     continue
   fi
-
   FILTERED=$(agmsg_sqlite_mem "
     SELECT json_object(
       'registrations',
@@ -233,6 +302,19 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     if ! rm -f "$TEAM_CONFIG"; then
       echo "Warning: could not finalize empty team $TEAM_NAME" >&2
       FINALIZE_FAILED=1
+      # The prospective config was already published and checked release
+      # already succeeded. For the internal scoped protocol this is a logical
+      # commit with only empty-directory finalization left behind; callers must
+      # stop advertising/subscribing to the released pair rather than retain a
+      # watcher after its lock is proven gone. Keep public reset's historical
+      # non-zero partial-result semantics below.
+      if [ "$MACHINE" -eq 1 ] && [ "$RELEASE_REQUESTED" -eq 1 ]; then
+        SCOPED_COMMITTED_FINALIZE_WARNING=1
+        REMOVED=$((REMOVED + MATCH_COUNT))
+        TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
+        agmsg_lock_release
+        continue
+      fi
       agmsg_lock_release
       continue
     fi
@@ -244,10 +326,61 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
 
   REMOVED=$((REMOVED + MATCH_COUNT))
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
-  echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
+  if [ "$MACHINE" -eq 0 ]; then
+    echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
+  fi
 done
 
-if [ "$LOCK_FAILED" -ne 0 ] || [ "$RELEASE_FAILED" -ne 0 ] || [ "$FINALIZE_FAILED" -ne 0 ]; then
+# A scoped caller may retry after its team config was finalized. It still needs
+# an exact, checked release for the target pair: reporting `not-registered` and
+# exiting would let a watcher close while leaving an orphan lock. If a team dir
+# exists without config.json, serialize/recheck it too: a concurrent join may
+# be about to publish that registration. Only a wholly absent team dir can use
+# the direct fallback without a registry lock.
+if [ -n "$TEAM_SCOPE" ] \
+  && [ "$SCOPED_CONFIG_SEEN" -eq 0 ] \
+  && [ "$RELEASE_REQUESTED" -eq 1 ] \
+  && [ "$LOCK_FAILED" -eq 0 ] \
+  && [ "$RELEASE_FAILED" -eq 0 ] \
+  && [ "$FINALIZE_FAILED" -eq 0 ]; then
+  SCOPED_TEAM_DIR="$TEAMS_DIR/$TEAM_SCOPE"
+  if [ -d "$SCOPED_TEAM_DIR" ]; then
+    if ! agmsg_lock_acquire "$SCOPED_TEAM_DIR"; then
+      echo "Warning: could not lock $TEAM_SCOPE for scoped release" >&2
+      LOCK_FAILED=1
+    elif [ -f "$SCOPED_TEAM_DIR/config.json" ]; then
+      # The config appeared after the glob above. Do not race its publisher
+      # with an out-of-transaction release; retry once that writer completes.
+      echo "Warning: $TEAM_SCOPE registration changed during scoped release" >&2
+      LOCK_FAILED=1
+      agmsg_lock_release
+    elif ! actas_lock_release_checked "$TEAM_SCOPE" "$TARGET_AGENT" "$SESSION_ID"; then
+      RETAINED_LOCKS="$(_actas_lock_encode "$TEAM_SCOPE")/$(_actas_lock_encode "$TARGET_AGENT")"
+      RELEASE_FAILED=1
+      agmsg_lock_release
+    else
+      SCOPED_RELEASE_PROVEN=1
+      agmsg_lock_release
+    fi
+  else
+    if ! actas_lock_release_checked "$TEAM_SCOPE" "$TARGET_AGENT" "$SESSION_ID"; then
+      RETAINED_LOCKS="$(_actas_lock_encode "$TEAM_SCOPE")/$(_actas_lock_encode "$TARGET_AGENT")"
+      RELEASE_FAILED=1
+    else
+      SCOPED_RELEASE_PROVEN=1
+    fi
+  fi
+fi
+
+if [ "$LOCK_FAILED" -ne 0 ] || [ "$RELEASE_FAILED" -ne 0 ] \
+  || { [ "$FINALIZE_FAILED" -ne 0 ] \
+       && ! { [ "$MACHINE" -eq 1 ] && [ "$SCOPED_COMMITTED_FINALIZE_WARNING" -eq 1 ]; }; }; then
+  if [ "$MACHINE" -eq 1 ]; then
+    printf 'status=error team=%s' "$TEAM_SCOPE_ENCODED"
+    [ -z "$RETAINED_LOCKS" ] || printf ' retained=%s' "$RETAINED_LOCKS"
+    printf '\n'
+    exit 1
+  fi
   # A team we could not lock or whose checked lock release failed was left
   # unprocessed.  Surface partial progress, but never call it complete.  Exact
   # percent-encoded labels make the retained retry target unambiguous.
@@ -261,6 +394,29 @@ if [ "$LOCK_FAILED" -ne 0 ] || [ "$RELEASE_FAILED" -ne 0 ] || [ "$FINALIZE_FAILE
     echo "Reset incomplete: retained=$RETAINED_LOCKS" >&2
   fi
   exit 1
+fi
+
+if [ "$MACHINE" -eq 1 ]; then
+  if [ "$REMOVED" -gt 0 ]; then
+    if [ "$RELEASE_REQUESTED" -eq 1 ]; then
+      printf 'status=ok team=%s registration=removed release=proven' "$TEAM_SCOPE_ENCODED"
+    else
+      printf 'status=ok team=%s registration=removed release=not-requested' "$TEAM_SCOPE_ENCODED"
+    fi
+    [ "$SCOPED_COMMITTED_FINALIZE_WARNING" -eq 0 ] || printf ' finalize=failed'
+    printf '\n'
+  elif [ "$RELEASE_REQUESTED" -eq 1 ] && [ "$SCOPED_RELEASE_PROVEN" -eq 1 ]; then
+    printf 'status=ok team=%s registration=absent release=proven\n' "$TEAM_SCOPE_ENCODED"
+  elif [ "$RELEASE_REQUESTED" -eq 1 ]; then
+    # Defensive invariant: every no-registration scoped release either proved
+    # release above or recorded an error. Do not ever turn an unexpected path
+    # into a watcher-closing success.
+    printf 'status=error team=%s\n' "$TEAM_SCOPE_ENCODED"
+    exit 1
+  else
+    printf 'status=not-registered team=%s\n' "$TEAM_SCOPE_ENCODED"
+  fi
+  exit 0
 fi
 
 if [ "$REMOVED" -eq 0 ]; then

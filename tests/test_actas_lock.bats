@@ -9,9 +9,72 @@ setup() {
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   export RUN_DIR="$SKILL_DIR/run"
   mkdir -p "$RUN_DIR"
+  ACTAS_TEST_CHILD_PIDS=""
 }
 
-teardown() { teardown_test_env; }
+track_test_child() {
+  ACTAS_TEST_CHILD_PIDS="${ACTAS_TEST_CHILD_PIDS:+$ACTAS_TEST_CHILD_PIDS }$1"
+}
+
+untrack_test_child() {
+  local target="$1" pid kept=""
+  for pid in ${ACTAS_TEST_CHILD_PIDS:-}; do
+    [ "$pid" = "$target" ] && continue
+    kept="${kept:+$kept }$pid"
+  done
+  ACTAS_TEST_CHILD_PIDS="$kept"
+}
+
+wait_test_child() {
+  local pid="$1" wait_status
+  if wait "$pid"; then
+    wait_status=0
+  else
+    wait_status=$?
+  fi
+  untrack_test_child "$pid"
+  return "$wait_status"
+}
+
+wait_test_child_exit_with_deadline() {
+  local pid="$1" i
+  for i in $(seq 1 20); do
+    # Let Bash reap any completed background child before trusting its PID.
+    jobs >/dev/null 2>&1 || true
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+teardown() {
+  local pid
+  # Barrier tests deliberately pause helpers. If an assertion fails before the
+  # release sentinel is written, stop only still-tracked children rather than
+  # leaving a blocked test process behind for the next Bats case. Both phases
+  # are bounded: a child that ignores TERM is escalated to KILL, and teardown
+  # never waits forever for an uncooperative helper.
+  for pid in ${ACTAS_TEST_CHILD_PIDS:-}; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in ${ACTAS_TEST_CHILD_PIDS:-}; do
+    if wait_test_child_exit_with_deadline "$pid"; then
+      untrack_test_child "$pid"
+    fi
+  done
+  for pid in ${ACTAS_TEST_CHILD_PIDS:-}; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  for pid in ${ACTAS_TEST_CHILD_PIDS:-}; do
+    if wait_test_child_exit_with_deadline "$pid"; then
+      untrack_test_child "$pid"
+    fi
+  done
+  teardown_test_env
+}
 
 # Pretend a CC instance with the given pid is alive and owns the given sid.
 fake_cc_instance() {
@@ -61,6 +124,47 @@ reaped_pid() {
   p=$(actas_lock_path "チーム" alice)
   # "チ" = E3 83 81, so the encoded prefix must contain that triple.
   [[ "$p" == *"%E3%83%81%E3%83%BC%E3%83%A0"* ]]
+}
+
+# --- registry publish / fixed-helper argument contracts ---
+
+@test "registry atomic write: a partial printf failure leaves destination unchanged" {
+  local dest="$BATS_TEST_TMPDIR/config.json"
+  printf '%s\n' '{"old":true}' > "$dest"
+
+  run bash -c '
+    source "$1"
+    printf() { command printf "%s" "partial"; return 1; }
+    agmsg_write_atomic "$2" "{\"new\":true}"
+  ' _ "$SKILL_DIR/scripts/lib/registry-lock.sh" "$dest"
+
+  [ "$status" -eq 1 ]
+  [ "$(cat "$dest")" = '{"old":true}' ]
+  [ ! -e "$dest.tmp."* ]
+}
+
+@test "registry atomic write: a failed move leaves destination unchanged and cleans temp" {
+  local dest="$BATS_TEST_TMPDIR/config.json"
+  printf '%s\n' '{"old":true}' > "$dest"
+
+  run bash -c '
+    source "$1"
+    mv() { return 1; }
+    agmsg_write_atomic "$2" "{\"new\":true}"
+  ' _ "$SKILL_DIR/scripts/lib/registry-lock.sh" "$dest"
+
+  [ "$status" -eq 1 ]
+  [ "$(cat "$dest")" = '{"old":true}' ]
+  [ ! -e "$dest.tmp."* ]
+}
+
+@test "mutator: missing zero or one argument calls return contract status 2" {
+  local helper="$SKILL_DIR/scripts/internal/actas-lock-mutate.sh"
+
+  run bash "$helper"
+  [ "$status" -eq 2 ]
+  run bash "$helper" stale
+  [ "$status" -eq 2 ]
 }
 
 # --- claim / state ---
@@ -230,7 +334,7 @@ SH
   (
     _actas_lock_delete_stale() {
       : > "$ready"
-      while [ ! -f "$go" ]; do sleep 0.01; done
+      wait_for_file "$go" || exit 75
       bash "$SKILL_DIR/scripts/internal/actas-lock-mutate.sh" stale "$1"
     }
     if actas_lock_claim T alice sid-loser > "$loser_out"; then
@@ -240,6 +344,7 @@ SH
     fi
   ) 3>&- &
   local loser_pid=$!
+  track_test_child "$loser_pid"
   wait_for_file "$ready"
 
   (
@@ -250,9 +355,10 @@ SH
     fi
   ) 3>&- &
   local winner_pid=$!
-  wait "$winner_pid"
+  track_test_child "$winner_pid"
+  wait_test_child "$winner_pid"
   : > "$go"
-  wait "$loser_pid"
+  wait_test_child "$loser_pid"
 
   [ "$(cat "$winner_status")" = 0 ]
   [ "$(cat "$winner_out")" = "" ]
@@ -398,18 +504,19 @@ SH
   (
     _actas_lock_delete_exact() {
       : > "$ready"
-      while [ ! -f "$go" ]; do sleep 0.01; done
+      wait_for_file "$go" || exit 75
       bash "$SKILL_DIR/scripts/internal/actas-lock-mutate.sh" exact "$1" "$2"
     }
     actas_lock_release T alice sid-old
   ) 3>&- &
   local release_pid=$!
+  track_test_child "$release_pid"
   wait_for_file "$ready"
 
   command rm "$lock"
   actas_lock_claim T alice sid-new
   : > "$go"
-  wait "$release_pid"
+  wait_test_child "$release_pid"
 
   [ "$(actas_lock_owner T alice)" = sid-new ]
 }
@@ -437,20 +544,21 @@ SH
     _actas_lock_delete_exact() {
       if [ "$1" = "$target" ] && [ ! -f "$ready" ]; then
         : > "$ready"
-        while [ ! -f "$go" ]; do sleep 0.01; done
+        wait_for_file "$go" || exit 75
       fi
       bash "$SKILL_DIR/scripts/internal/actas-lock-mutate.sh" exact "$1" "$2"
     }
     actas_lock_release_all sid-going
   ) 3>&- &
   local release_pid=$!
+  track_test_child "$release_pid"
   wait_for_file "$ready"
 
   command rm "$target"
   actas_lock_claim T1 alice sid-new
   successor="$(actas_lock_record T1 alice)"
   : > "$go"
-  wait "$release_pid"
+  wait_test_child "$release_pid"
 
   [ "$(actas_lock_record T1 alice)" = "$successor" ]
   [ ! -f "$other" ]
@@ -505,19 +613,20 @@ SH
   (
     _actas_lock_delete_stale() {
       : > "$ready"
-      while [ ! -f "$go" ]; do sleep 0.01; done
+      wait_for_file "$go" || exit 75
       bash "$SKILL_DIR/scripts/internal/actas-lock-mutate.sh" stale "$1"
     }
     actas_lock_gc_stale > "$count_file"
   ) 3>&- &
   local gc_pid=$!
+  track_test_child "$gc_pid"
   wait_for_file "$ready"
 
   command rm "$lock"
   setup_live_owner "$RUN_DIR" sid-live
   actas_lock_claim T alice sid-live
   : > "$go"
-  wait "$gc_pid"
+  wait_test_child "$gc_pid"
 
   [ "$(cat "$count_file")" = 0 ]
   [ "$(actas_lock_owner T alice)" = sid-live ]
@@ -536,12 +645,13 @@ SH
   (
     _actas_reclaim_holder_alive() {
       : > "$ready"
-      while [ ! -f "$go" ]; do sleep 0.01; done
+      wait_for_file "$go" || exit 75
       return 1
     }
     actas_reclaim_mutex_gc > "$count_file"
   ) 3>&- &
   local first_gc=$!
+  track_test_child "$first_gc"
   wait_for_file "$ready"
 
   [ "$(actas_reclaim_mutex_gc)" = 1 ]
@@ -550,7 +660,7 @@ SH
     VALUES('reused-key', $$, 'dddddddddddddddddddddddddddddddd');
   " >/dev/null
   : > "$go"
-  wait "$first_gc"
+  wait_test_child "$first_gc"
 
   [ "$(cat "$count_file")" = 0 ]
   run _actas_reclaim_sqlite \
@@ -571,7 +681,12 @@ SH
   cat > "$shim_dir/rm" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$AGMSG_TEST_RM_READY"
-while [ ! -f "$AGMSG_TEST_RM_GO" ]; do sleep 0.01; done
+i=0
+while [ ! -f "$AGMSG_TEST_RM_GO" ]; do
+  i=$((i + 1))
+  [ "$i" -lt "${AGMSG_TEST_RM_WAIT_TICKS:-1000}" ] || exit 75
+  sleep 0.01
+done
 exec "$AGMSG_TEST_REAL_RM" "$@"
 SH
   chmod +x "$shim_dir/rm"
@@ -582,6 +697,7 @@ SH
     AGMSG_TEST_REAL_RM="$real_rm" \
     bash "$helper" exact "$lock" "$record" 3>&- &
   local helper_pid=$!
+  track_test_child "$helper_pid"
   wait_for_file "$ready"
   [ "$(cat "$ready")" = "$helper_pid" ]
 
@@ -593,7 +709,7 @@ SH
   # Kill only the process that began as Bash and is now the rm shim. Because
   # the destructive branch used exec, there is no child left to unlink later.
   kill -KILL "$helper_pid"
-  wait "$helper_pid" 2>/dev/null || true
+  wait_test_child "$helper_pid" 2>/dev/null || true
   [ -f "$lock" ]
 
   run bash "$helper" exact "$lock" "$record"
@@ -712,11 +828,12 @@ SH
     AGMSG_TEST_REAL_SLEEP="$real_sleep" \
     bash "$helper" exact "$lock" "$record" 3>&- &
   helper_pid=$!
+  track_test_child "$helper_pid"
   wait_for_file "$ready"
 
   mkdir "${lock}.reclaim.d"
   actas_reclaim_mutex_release
-  wait "$helper_pid" || helper_status=$?
+  wait_test_child "$helper_pid" || helper_status=$?
 
   [ "$helper_status" -eq 4 ]
   [ -f "$lock" ]

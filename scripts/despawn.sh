@@ -49,12 +49,115 @@ done
 case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be a whole number of seconds" ;; esac
 
 SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
+READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
+
+# A placement record is valid for the narrowly-scoped registration guards only
+# when it contains the project/type that spawn recorded. Malformed and legacy
+# records retain force despawn's existing fallback behavior.
+SPAWN_METADATA_VALID=0
+SPAWN_PLACEMENT_ID=""
+SPAWN_PROJECT=""
+SPAWN_TYPE=""
+read_spawn_metadata() {
+  SPAWN_METADATA_VALID=0
+  SPAWN_PLACEMENT_ID=""
+  SPAWN_PROJECT=""
+  SPAWN_TYPE=""
+  [ -f "$SPAWN_REC" ] || return 1
+  if ! IFS=$'\t' read -r SPAWN_PLACEMENT_ID SPAWN_PROJECT SPAWN_TYPE < "$SPAWN_REC"; then
+    # read returns EOF for an otherwise valid final line without a trailing
+    # newline. spawn writes one, but tolerate a hand-recovered record too.
+    [ -n "$SPAWN_PLACEMENT_ID" ] && [ -n "$SPAWN_PROJECT" ] && [ -n "$SPAWN_TYPE" ] || return 1
+  fi
+  [ -n "$SPAWN_PLACEMENT_ID" ] && [ -n "$SPAWN_PROJECT" ] && [ -n "$SPAWN_TYPE" ] || return 1
+  SPAWN_METADATA_VALID=1
+  return 0
+}
+
+# List only same-name registrations outside the spawn record's exact team.
+# identities.sh is read-only; a lookup error is deliberately distinguishable
+# from an empty result so a destructive teardown cannot guess at its scope.
+SAME_NAME_OTHER_PAIRS=""
+same_name_other_pairs() {
+  local pairs pair_team pair_agent encoded_team encoded_agent
+  SAME_NAME_OTHER_PAIRS=""
+  if ! pairs="$("$SCRIPT_DIR/identities.sh" "$SPAWN_PROJECT" "$SPAWN_TYPE" 2>/dev/null)"; then
+    return 1
+  fi
+  while IFS=$'\t' read -r pair_team pair_agent; do
+    [ -z "$pair_team" ] && continue
+    [ "$pair_agent" = "$NAME" ] || continue
+    [ "$pair_team" = "$TEAM" ] && continue
+    if ! encoded_team="$(_actas_lock_encode "$pair_team")" \
+      || ! encoded_agent="$(_actas_lock_encode "$pair_agent")"; then
+      return 1
+    fi
+    SAME_NAME_OTHER_PAIRS="${SAME_NAME_OTHER_PAIRS:+$SAME_NAME_OTHER_PAIRS,}${encoded_team}/${encoded_agent}"
+  done <<< "$pairs"
+  return 0
+}
+
+other_registration_preflight() {
+  [ "$SPAWN_METADATA_VALID" -eq 1 ] || return 0
+  if ! same_name_other_pairs; then
+    echo "status=error name=$NAME team=$TEAM reason=registration-read"
+    echo "despawn: could not read same-name registrations before teardown; retry after registry access recovers" >&2
+    return 1
+  fi
+  if [ -n "$SAME_NAME_OTHER_PAIRS" ]; then
+    echo "status=error name=$NAME team=$TEAM reason=multiple-registrations remaining=$SAME_NAME_OTHER_PAIRS action=use-graceful-or-recover-registrations"
+    echo "despawn: '$NAME' is also registered in $SAME_NAME_OTHER_PAIRS; use graceful teardown while its watcher is live, or recover registrations before force removal" >&2
+    return 1
+  fi
+  return 0
+}
+
+# A readiness sentinel is best-effort: do not make a member that never created
+# one impossible to despawn. If it did exist before graceful control flow (or
+# appears during an early-free check), however, it must disappear before that
+# placement's spawn record is discarded. A replacement sentinel is not proof
+# that the recorded placement is gone, so it deliberately remains incomplete.
+READY_CAPTURED=0
+READY_OWNER=""
+capture_target_ready() {
+  READY_CAPTURED=0
+  READY_OWNER=""
+  if [ ! -e "$READY_PATH" ] && [ ! -L "$READY_PATH" ]; then
+    return 0
+  fi
+  [ -f "$READY_PATH" ] || return 1
+  if ! READY_OWNER="$(head -n 1 "$READY_PATH" 2>/dev/null)"; then
+    return 1
+  fi
+  [ -n "$READY_OWNER" ] || return 1
+  READY_CAPTURED=1
+  return 0
+}
+
+ready_gate_satisfied() {
+  [ "$READY_CAPTURED" -eq 1 ] || return 0
+  if [ ! -e "$READY_PATH" ] && [ ! -L "$READY_PATH" ]; then
+    return 0
+  fi
+  # Even a readable different owner is not a completion proof: the placement
+  # record has no generation token, so deleting it could erase a successor's
+  # recovery handle. Wait for absence instead of treating replacement as done.
+  return 1
+}
+
+ready_read_error() {
+  echo "status=error name=$NAME team=$TEAM reason=ready-read"
+  echo "despawn: could not read the existing readiness sentinel for '$TEAM/$NAME'; retaining placement for recovery" >&2
+  exit 1
+}
 
 # Kill the recorded tmux target. ids are self-describing: %N pane, @N window.
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
-  local id _proj _type
-  IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
+  local id="" _proj="" _type=""
+  if ! IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"; then
+    [ -n "$id" ] || return 1
+  fi
   [ -n "$id" ] || return 1
   case "$id" in
     herdr:*)
@@ -134,12 +237,52 @@ force_release_exact_owner() {
   force_verify_lock_absent_or_replaced "$lock_path" "$owner" "$label"
 }
 
+# reset.sh emits a machine-readable final record. A force run with an initial
+# target lock supplied its exact owner and therefore requires a checked release;
+# a retry that began with no target lock deliberately made no release request,
+# and may only accept the two exact no-release outcomes before its existing
+# lock-absent postcheck. Never treat a no-release record as release=proven.
+force_machine_outcome_ok() {
+  local record="$1" encoded_team="$2" lock_was_present="$3"
+  if [ "$lock_was_present" -eq 1 ]; then
+    case "$record" in
+      "status=ok team=$encoded_team registration=removed release=proven"|\
+      "status=ok team=$encoded_team registration=removed release=proven finalize=failed"|\
+      "status=ok team=$encoded_team registration=absent release=proven")
+        return 0
+        ;;
+    esac
+  else
+    case "$record" in
+      "status=ok team=$encoded_team registration=removed release=not-requested"|\
+      "status=not-registered team=$encoded_team")
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
 if [ "$FORCE" = "1" ]; then
   [ -f "$SPAWN_REC" ] || die "no placement record for '$TEAM/$NAME' — nothing to force (was it launched via 'spawn'? graceful despawn does not need this)"
-  IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC"
+
+  # Before killing a provider placement or changing its target registration,
+  # refuse an ambiguous valid spawn record that reveals the same name belongs
+  # to another team too. This is a read-only guard; malformed/legacy records
+  # retain the narrow fallback below.
+  if read_spawn_metadata; then
+    if ! other_registration_preflight; then
+      exit 1
+    fi
+  fi
+  _id=""
+  _proj=""
+  _type=""
+  IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC" || true
   kill_recorded_placement >/dev/null
   lock_path="$(actas_lock_path "$TEAM" "$NAME")"
   lock_label="$(_actas_lock_encode "$TEAM")/$(_actas_lock_encode "$NAME")"
+  machine_team="$(_actas_lock_encode "$TEAM")"
   lock_was_present=0
   lock_owner=""
   if _actas_lock_read_path_checked "$lock_path"; then
@@ -152,32 +295,29 @@ if [ "$FORCE" = "1" ]; then
     fi
   fi
 
-  # The normal spawn-record path funnels the exact current lock owner through
-  # reset.sh's registry-lock transaction.  It must not be normalized: a legacy
-  # bare owner can differ from an instance id derived by this leader process.
-  # This keeps config mutation, checked release, and restoration on failure in
-  # one order, without reopening a release-before-registration peer-claim gap.
+  # The normal spawn-record path uses reset.sh's internal exact-team protocol.
+  # It must not apply the target lock's raw owner to any other team: that used
+  # to let a retry after the target lock vanished run a sessionless global reset
+  # and remove a secondary registration while leaving its lock behind. The
+  # present-lock path proves an exact release; the absent-lock retry accepts a
+  # narrow no-release machine result and still proves target lock absence.
   if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
     if [ "$lock_was_present" -eq 1 ]; then
-      if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" "$lock_owner" --exact-owner 2>&1)"; then
+      if ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" "$lock_owner" --exact-owner --team "$TEAM" --machine 2>&1)"; then
         force_reset_error "$lock_label" "$lock_path" "$lock_owner" "$reset_output"
       fi
-    elif ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" 2>&1)"; then
+    elif ! reset_output="$("$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" "" --team "$TEAM" --machine 2>&1)"; then
       force_reset_error "$lock_label" "$lock_path" "" "$reset_output"
     fi
 
-    # If this target was no longer registered, reset has no pair on which to
-    # invoke checked release.  Only then use the direct exact-owner fallback;
-    # successful target resets rely on their single checked release and merely
-    # prove absence/replacement afterwards.
-    if [[ "$reset_output" == *" for $NAME from $TEAM"* ]]; then
-      if [ "$lock_was_present" -eq 1 ]; then
-        force_verify_lock_absent_or_replaced "$lock_path" "$lock_owner" "$lock_label"
-      else
-        force_verify_lock_absent "$lock_path" "$lock_label"
-      fi
-    elif [ "$lock_was_present" -eq 1 ]; then
-      force_release_exact_owner "$lock_path" "$lock_owner" "$lock_label"
+    # reset.sh's final line is the scoped machine record. Diagnostics can
+    # precede it on stderr, so consume only an approved exact record — never
+    # human prose whose wording or another team name could alter teardown.
+    reset_status="${reset_output##*$'\n'}"
+    force_machine_outcome_ok "$reset_status" "$machine_team" "$lock_was_present" \
+      || force_reset_error "$lock_label" "$lock_path" "$lock_owner" "$reset_output"
+    if [ "$lock_was_present" -eq 1 ]; then
+      force_verify_lock_absent_or_replaced "$lock_path" "$lock_owner" "$lock_label"
     else
       force_verify_lock_absent "$lock_path" "$lock_label"
     fi
@@ -195,25 +335,56 @@ if [ "$FORCE" = "1" ]; then
 fi
 
 # --- Graceful ---
+if read_spawn_metadata; then
+  :
+fi
+if ! capture_target_ready; then
+  ready_read_error
+fi
+SEND_FORCE=0
 state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
 case "$state" in
   free)
-    echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; a tmux member may already be gone). If a window remains, use --force." >&2
-    rm -f "$SPAWN_REC" 2>/dev/null || true
-    echo "status=ok name=$NAME team=$TEAM note=no-live-lock"
-    exit 0
+    # A sentinel that appeared after the initial snapshot but before this
+    # early-free branch is still evidence of an old live watcher. Capture and
+    # gate it rather than deleting the sole placement record optimistically.
+    if [ "$READY_CAPTURED" -eq 0 ] && { [ -e "$READY_PATH" ] || [ -L "$READY_PATH" ]; }; then
+      capture_target_ready || ready_read_error
+    fi
+    if [ "$READY_CAPTURED" -eq 1 ]; then
+      # Do not early-success while the old owner still advertises readiness.
+      # The target registration may already be absent after a target commit
+      # stalled before watcher cleanup, so intentionally bypass roster checks
+      # only for this recovery control row and wait for the ready gate below.
+      SEND_FORCE=1
+    else
+      # A free target lock normally means the old no-op path is safe. A valid
+      # spawn record that names another same-name team is the exception:
+      # deleting this record would erase its only recovery handle.
+      other_registration_preflight || exit 1
+      echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; a tmux member may already be gone). If a window remains, use --force." >&2
+      rm -f "$SPAWN_REC" 2>/dev/null || true
+      echo "status=ok name=$NAME team=$TEAM note=no-live-lock"
+      exit 0
+    fi
     ;;
 esac
 
-"$SCRIPT_DIR/send.sh" "$TEAM" "$FROM" "$NAME" "ctrl:despawn" >/dev/null
+if [ "$SEND_FORCE" -eq 1 ]; then
+  "$SCRIPT_DIR/send.sh" "$TEAM" "$FROM" "$NAME" "ctrl:despawn" --force >/dev/null
+else
+  "$SCRIPT_DIR/send.sh" "$TEAM" "$FROM" "$NAME" "ctrl:despawn" >/dev/null
+fi
 
 waited=0
 while true; do
   state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
-  [ "$state" = "free" ] && break
+  if [ "$state" = "free" ] && ready_gate_satisfied; then
+    break
+  fi
   if [ "$waited" -ge "$TIMEOUT" ]; then
     echo "status=timeout name=$NAME team=$TEAM after=${TIMEOUT}s"
-    echo "despawn: '$NAME' did not tear down within ${TIMEOUT}s — its watcher may be dead. Retry with --force." >&2
+    echo "despawn: '$NAME' did not tear down within ${TIMEOUT}s — its watcher may be dead. Retry graceful after watcher/registry recovery; use --force only when no other same-name registration remains." >&2
     exit 3
   fi
   sleep 1
