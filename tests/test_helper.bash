@@ -32,6 +32,20 @@ setup_test_env() {
   # export is scoped to the test and needs no restore. See #41.
   export HOME="$TEST_SKILL_DIR/home"
   mkdir -p "$HOME"
+
+  # Neutralise the working directory the same way HOME is neutralised: a test
+  # must not behave differently because of where the suite happened to be
+  # invoked from. session-start.sh's worktree-sub-session skip (#367) reads
+  # "cwd" from the hook JSON and falls back to $PWD when the field is absent —
+  # so every test that feeds it JSON without a "cwd" (or no stdin at all)
+  # inherited the caller's directory. Run the suite from inside a
+  # .claude/worktrees/<name> checkout and that fallback matched, session-start
+  # exited 0 before doing any work, and ~a dozen tests failed that pass from
+  # anywhere else. mktemp's directory is neutral for that match and for any
+  # future cwd-sensitive script. Each bats test runs in its own subshell, so
+  # this is scoped to the test like the HOME export above.
+  mkdir -p "$TEST_SKILL_DIR/cwd"
+  cd "$TEST_SKILL_DIR/cwd" || return 1
 }
 
 teardown_test_env() {
