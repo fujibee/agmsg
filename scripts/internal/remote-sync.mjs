@@ -1202,13 +1202,8 @@ export function validateMembers(config, value) {
 // only success does, because only success has to read all of stdout. What this
 // process owns is what it can be sure of releasing, so that is what it releases:
 // a grandchild is left to the operator, not chased through the process tree.
-function runDriver({ args, label, operation, parse, input, environment = {} }) {
+function runDriver({ args, label, operation, parse, input, rosterFile }) {
   return new Promise((resolve, reject) => {
-    // Inherit, then strip, then add. The order matters both ways: stripping
-    // after the merge would silently drop anything a caller deliberately passed
-    // whose name happens to collide, and merging before the strip would let an
-    // inherited secret survive under a name the caller also uses. What a caller
-    // supplies here is a derived value it means to hand over — never a secret.
     const childEnvironment = { ...process.env };
     delete childEnvironment.AGMSG_SYNC_TOKEN;
     delete childEnvironment.AGMSG_SYNC_CONNECTION_DIR;
@@ -1218,7 +1213,13 @@ function runDriver({ args, label, operation, parse, input, environment = {} }) {
         delete childEnvironment[key];
       }
     }
-    Object.assign(childEnvironment, environment);
+    // One named value may be set after the strip, and only this one: the roster
+    // file the caller resolved. A general "extra environment" parameter would
+    // make this boundary re-openable — any caller could put TOKEN, TRUST_DIR or
+    // an age identity back, and the rule that they never cross would live in a
+    // comment rather than in the function. Naming the single variable keeps the
+    // guarantee where it can be checked.
+    if (rosterFile) childEnvironment.AGMSG_SYNC_LOCAL_ROSTER_FILE = rosterFile;
     const child = spawn("bash", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnvironment });
     let stdout = ""; let stderr = ""; let settled = false; let failure = null;
 
@@ -1314,11 +1315,11 @@ export async function driver(operation, config, input, extra = []) {
 // When neither a connection root nor a skill directory is set there is nothing
 // to derive, so nothing is passed and the driver's own fallback applies —
 // failing here instead would break callers that never had a root to begin with.
-function rosterFileEnvironment(team) {
+function rosterFileFor(team) {
   const supplied = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
-  if (supplied) return { AGMSG_SYNC_LOCAL_ROSTER_FILE: supplied };
-  if (!(process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR)) return {};
-  return { AGMSG_SYNC_LOCAL_ROSTER_FILE: teamConfigPath(team) };
+  if (supplied) return supplied;
+  if (!(process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR)) return undefined;
+  return teamConfigPath(team);
 }
 
 export async function rosterDriver(operation, config, input, extra = []) {
@@ -1348,7 +1349,7 @@ export async function rosterDriver(operation, config, input, extra = []) {
     // even started — turning a resolvable situation into a hard error for every
     // caller that has no connection root, which is what happened the first time
     // this was written unconditionally.
-    environment: rosterFileEnvironment(config.local_team),
+    rosterFile: rosterFileFor(config.local_team),
   });
 }
 

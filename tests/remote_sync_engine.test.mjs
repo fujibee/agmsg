@@ -2759,3 +2759,77 @@ printf '{"type":"seen","roster":"%s","connection_dir":"%s","trust_dir":"%s"}\\n'
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("only the roster file may be set after the strip — nothing else can be re-added", async () => {
+  // The strip is the boundary, and it has to be one. An earlier version took a
+  // general "extra environment" object applied after the deletes, which let any
+  // caller put TOKEN, TRUST_DIR or an age identity back; the rule that they
+  // never cross lived in a comment instead of in the function. runDriver now
+  // accepts one named path and nothing else, so this asserts the shape of the
+  // parameter rather than the good behaviour of today's only caller.
+  const source = await readFile(new URL("../scripts/internal/remote-sync.mjs", import.meta.url), "utf8");
+  const signature = /function runDriver\(\{([^}]*)\}\)/u.exec(source);
+  assert.ok(signature, "runDriver's destructured parameters could not be read");
+  const parameters = signature[1].split(",").map((name) => name.trim().split(/[:=]/u)[0].trim());
+  // No general environment/env/extraEnv escape hatch — the reviewable property.
+  for (const forbidden of ["environment", "env", "extraEnv", "envOverrides"]) {
+    assert.ok(!parameters.includes(forbidden),
+      `runDriver takes "${forbidden}", which re-opens the secret boundary`);
+  }
+  assert.ok(parameters.includes("rosterFile"), "the one permitted value is missing");
+  // And exactly one assignment into the child environment after the deletes.
+  const afterStrip = source.slice(source.indexOf("function runDriver"), source.indexOf("const child = spawn"));
+  const assignments = afterStrip.match(/childEnvironment\.[A-Z_]+\s*=/gu) ?? [];
+  assert.deepEqual(assignments, ["childEnvironment.AGMSG_SYNC_LOCAL_ROSTER_FILE ="]);
+});
+
+test("a secret handed in as the roster file cannot reach the driver as a secret", async () => {
+  // The complement of the shape check: drive the real path and confirm the only
+  // thing that lands is the roster variable.
+  //
+  // Note what this test can and cannot do. With a general environment parameter
+  // it would still pass, because the only caller passes just the roster path —
+  // which is exactly why the shape check above exists as well. Behaviour proves
+  // today's callers behave; the parameter list proves a future one cannot.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-allowlist-"));
+  const script = join(root, "driver.sh");
+  await writeFile(script, `#!/usr/bin/env bash
+printf '{"type":"seen","token":"%s","trust":"%s","conn":"%s","identity":"%s","roster":"%s"}\\n' \\
+  "\${AGMSG_SYNC_TOKEN:-}" "\${AGMSG_SYNC_TRUST_DIR:-}" "\${AGMSG_SYNC_CONNECTION_DIR:-}" \\
+  "\${AGMSG_AGE_IDENTITY:-}" "\${AGMSG_SYNC_LOCAL_ROSTER_FILE:-}"
+`, { mode: 0o700 });
+  const previous = {
+    driver: process.env.AGMSG_SYNC_ROSTER_DRIVER,
+    token: process.env.AGMSG_SYNC_TOKEN,
+    trust: process.env.AGMSG_SYNC_TRUST_DIR,
+    connection: process.env.AGMSG_SYNC_CONNECTION_DIR,
+    identity: process.env.AGMSG_AGE_IDENTITY,
+    roster: process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE,
+  };
+  process.env.AGMSG_SYNC_ROSTER_DRIVER = script;
+  process.env.AGMSG_SYNC_TOKEN = "must-not-cross";
+  process.env.AGMSG_SYNC_TRUST_DIR = "/durable/trust";
+  process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+  process.env.AGMSG_AGE_IDENTITY = "AGE-SECRET-KEY-1FIXTURE";
+  delete process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
+  try {
+    const [seen] = await rosterDriver("prepare", config, []);
+    assert.equal(seen.token, "");
+    assert.equal(seen.trust, "");
+    assert.equal(seen.conn, "");
+    assert.equal(seen.identity, "");
+    assert.equal(seen.roster, join(root, "teams", config.local_team, "config.json"));
+  } finally {
+    for (const [key, value] of [
+      ["AGMSG_SYNC_ROSTER_DRIVER", previous.driver],
+      ["AGMSG_SYNC_TOKEN", previous.token],
+      ["AGMSG_SYNC_TRUST_DIR", previous.trust],
+      ["AGMSG_SYNC_CONNECTION_DIR", previous.connection],
+      ["AGMSG_AGE_IDENTITY", previous.identity],
+      ["AGMSG_SYNC_LOCAL_ROSTER_FILE", previous.roster],
+    ]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
