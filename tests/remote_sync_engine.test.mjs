@@ -2704,3 +2704,58 @@ test("an error code is read from the protocol shape, and from the edge's for now
   assert.equal(errorCode({}), "unknown-error");
   assert.equal(errorCode(undefined), "unknown-error");
 });
+
+test("the roster driver is handed a resolved file path, from the connection root", async () => {
+  // Only `remote.sh pull` ever set AGMSG_SYNC_LOCAL_ROSTER_FILE, so every other
+  // caller left the driver to guess — and its guess was the skill directory. A
+  // second machine keeps its teams under its own connection directory, so an
+  // existing roster looked missing.
+  //
+  // The engine derives the path now and passes the file, at the one place both
+  // drivers go through. This drives a stand-in driver that reports what it was
+  // given, so what is measured is the value that crosses the process boundary,
+  // not a re-derivation of the same expression.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-roster-env-"));
+  const connection = join(root, "connection");
+  const skill = join(root, "skill");
+  await mkdir(join(connection, "teams", "demo"), { recursive: true });
+  await mkdir(skill, { recursive: true });
+  const script = join(root, "driver.sh");
+  await writeFile(script, `#!/usr/bin/env bash
+printf '{"type":"seen","roster":"%s","connection_dir":"%s","trust_dir":"%s"}\\n' \\
+  "\${AGMSG_SYNC_LOCAL_ROSTER_FILE:-}" "\${AGMSG_SYNC_CONNECTION_DIR:-}" "\${AGMSG_SYNC_TRUST_DIR:-}"
+`, { mode: 0o700 });
+
+  const previous = {
+    driver: process.env.AGMSG_SYNC_ROSTER_DRIVER,
+    connection: process.env.AGMSG_SYNC_CONNECTION_DIR,
+    skill: process.env.SKILL_DIR,
+    roster: process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE,
+    trust: process.env.AGMSG_SYNC_TRUST_DIR,
+  };
+  process.env.AGMSG_SYNC_ROSTER_DRIVER = script;
+  process.env.AGMSG_SYNC_CONNECTION_DIR = connection;
+  process.env.SKILL_DIR = skill;
+  delete process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
+  process.env.AGMSG_SYNC_TRUST_DIR = "/durable/trust";
+  try {
+    const [seen] = await rosterDriver("prepare", config, []);
+    assert.equal(seen.roster, join(connection, "teams", "demo", "config.json"));
+    assert.notEqual(seen.roster, join(skill, "teams", "demo", "config.json"));
+    // The directories stay stripped: the driver is given the one file it needs
+    // and is not put back in the business of deriving locations.
+    assert.equal(seen.connection_dir, "");
+    assert.equal(seen.trust_dir, "");
+  } finally {
+    for (const [key, value] of [
+      ["AGMSG_SYNC_ROSTER_DRIVER", previous.driver],
+      ["AGMSG_SYNC_CONNECTION_DIR", previous.connection],
+      ["SKILL_DIR", previous.skill],
+      ["AGMSG_SYNC_LOCAL_ROSTER_FILE", previous.roster],
+      ["AGMSG_SYNC_TRUST_DIR", previous.trust],
+    ]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

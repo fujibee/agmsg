@@ -350,9 +350,13 @@ export async function loadConfig(team) {
 }
 
 async function localAgentRoster(team) {
+  // One derivation for this path, shared with teamConfigPath: the connection
+  // root when there is one, the skill directory only as the single-machine
+  // default. This read used SKILL_DIR alone, so on a second machine — which
+  // always has its own connection directory — it looked in a directory nothing
+  // had written and reported the roster missing.
   const supplied = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
-  const skillRoot = process.env.SKILL_DIR;
-  const path = supplied || (skillRoot ? join(skillRoot, "teams", team, "config.json") : "");
+  const path = supplied || teamConfigPath(team);
   if (!path) throw new Error("local team roster path is unavailable");
   const value = JSON.parse(await readFile(path, "utf8"));
   if (!value?.agents || typeof value.agents !== "object" || Array.isArray(value.agents)) {
@@ -1198,8 +1202,13 @@ export function validateMembers(config, value) {
 // only success does, because only success has to read all of stdout. What this
 // process owns is what it can be sure of releasing, so that is what it releases:
 // a grandchild is left to the operator, not chased through the process tree.
-function runDriver({ args, label, operation, parse, input }) {
+function runDriver({ args, label, operation, parse, input, environment = {} }) {
   return new Promise((resolve, reject) => {
+    // Inherit, then strip, then add. The order matters both ways: stripping
+    // after the merge would silently drop anything a caller deliberately passed
+    // whose name happens to collide, and merging before the strip would let an
+    // inherited secret survive under a name the caller also uses. What a caller
+    // supplies here is a derived value it means to hand over — never a secret.
     const childEnvironment = { ...process.env };
     delete childEnvironment.AGMSG_SYNC_TOKEN;
     delete childEnvironment.AGMSG_SYNC_CONNECTION_DIR;
@@ -1209,6 +1218,7 @@ function runDriver({ args, label, operation, parse, input }) {
         delete childEnvironment[key];
       }
     }
+    Object.assign(childEnvironment, environment);
     const child = spawn("bash", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnvironment });
     let stdout = ""; let stderr = ""; let settled = false; let failure = null;
 
@@ -1297,6 +1307,20 @@ export async function driver(operation, config, input, extra = []) {
   });
 }
 
+// The roster file to hand the driver, when this process can work it out.
+//
+// Passing an explicit path is what keeps the driver out of the location
+// business: it receives one file rather than a directory to build a path from.
+// When neither a connection root nor a skill directory is set there is nothing
+// to derive, so nothing is passed and the driver's own fallback applies —
+// failing here instead would break callers that never had a root to begin with.
+function rosterFileEnvironment(team) {
+  const supplied = process.env.AGMSG_SYNC_LOCAL_ROSTER_FILE;
+  if (supplied) return { AGMSG_SYNC_LOCAL_ROSTER_FILE: supplied };
+  if (!(process.env.AGMSG_SYNC_CONNECTION_DIR ?? process.env.SKILL_DIR)) return {};
+  return { AGMSG_SYNC_LOCAL_ROSTER_FILE: teamConfigPath(team) };
+}
+
 export async function rosterDriver(operation, config, input, extra = []) {
   const script = process.env.AGMSG_SYNC_ROSTER_DRIVER ??
     join(dirname(fileURLToPath(import.meta.url)), "roster-sync-driver.sh");
@@ -1307,6 +1331,24 @@ export async function rosterDriver(operation, config, input, extra = []) {
     operation,
     parse: parseJsonl,
     input,
+    // The roster file, resolved here and handed over as one path — not the
+    // directory it sits in. A directory would put the driver back in the
+    // business of deriving locations, which is what AGMSG_SYNC_CONNECTION_DIR
+    // was doing before it was stripped, and the driver has no business knowing
+    // that layout.
+    //
+    // Set at this single point rather than by each subcommand that shells out.
+    // `remote.sh pull` already passed this variable, and it was the ONLY caller
+    // that did: every other path fell back to the driver's own guess, which
+    // pointed at the skill directory and missed a second machine's teams
+    // entirely. A per-subcommand fix would have left the next subcommand to
+    // remember; there is nothing to remember now.
+    // Derived only when a root exists to derive it from. teamConfigPath throws
+    // otherwise, and throwing here would fail the call before the driver was
+    // even started — turning a resolvable situation into a hard error for every
+    // caller that has no connection root, which is what happened the first time
+    // this was written unconditionally.
+    environment: rosterFileEnvironment(config.local_team),
   });
 }
 

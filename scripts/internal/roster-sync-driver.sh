@@ -11,6 +11,12 @@ source "$SKILL_DIR/scripts/lib/roster-journal.sh"
 operation="${1:?Missing operation}"; team="${2:?Missing team}"
 server="${3:?Missing server id}"; remote="${4:?Missing remote team id}"
 protocol="${5:?Missing protocol version}"; shift 5
+# The caller supplies the roster path; it derives it from the connection root and
+# hands over one file. The fallback below is for running this driver DIRECTLY —
+# by hand, or from a test — on a single-machine install where the skill directory
+# is the connection root. It is not a location this driver should be working out
+# on behalf of the engine: a second machine keeps its teams somewhere else
+# entirely, and guessing here is what made an existing roster look missing.
 config="${AGMSG_SYNC_LOCAL_ROSTER_FILE:-$SKILL_DIR/teams/$team/config.json}"
 team_dir="$(cd "$(dirname "$config")" && pwd)"
 
