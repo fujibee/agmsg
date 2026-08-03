@@ -92,6 +92,13 @@ shared_rows() {
   run migrate alpha
   [ "$status" -ne 0 ]
   [[ "$output" =~ "refusing to merge" ]]
+  # And it says what to do — the verification failure below already did, and a
+  # reader who hits this one first should not have to guess.
+  [[ "$output" =~ "remove" ]]
+  # With the caveat that makes the advice safe. Following it after a team is
+  # recorded as moved would destroy the live store, which is the loss this
+  # change exists to prevent.
+  [[ "$output" =~ "NOT yet" ]]
   # The team did not move, so its rows are still where readers expect them.
   [ "$(shared_rows alpha)" -eq 1 ]
 }
@@ -138,4 +145,97 @@ shared_rows() {
   called="$(grep -n 'migrate-team-store' "$BATS_TEST_DIRNAME/../install.sh" \
     | grep -v '^[0-9]*: *#' || true)"
   [ -z "$called" ] || { echo "$called"; false; }
+}
+
+# The loss pm's advisory describes: a run interrupted after the config flipped
+# leaves rows in BOTH stores, and re-running with the destination gone deletes
+# the shared copy on the strength of the flag alone.
+#
+# Written as "the rows survive". Remove the guard and the shared store is
+# emptied, so this fails by losing data rather than by a changed message.
+@test "migrate: a destination that vanished does not take the shared rows with it" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  migrate alpha
+
+  # Re-enter the window the advisory describes: the config says per-team, and
+  # the shared store still holds rows for this team.
+  sqlite3 "$SHARED" "INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    VALUES('message_sent','stray-1','alpha','ann','bob','still in shared',
+           strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+  [ "$(shared_rows alpha)" -eq 1 ]
+
+  rm -f "$(store_of alpha)"
+  run migrate alpha
+
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "does not exist" ]]
+  [[ "$output" =~ "NOT been touched" ]]
+  # The point of the test: the rows are still there.
+  [ "$(shared_rows alpha)" -eq 1 ]
+}
+
+@test "migrate: a destination missing some of the shared rows is refused" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  migrate alpha
+
+  # A row the destination never received — an interrupted copy, or one the
+  # destination lost. Same count is not the test; this row is simply absent
+  # there.
+  sqlite3 "$SHARED" "INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    VALUES('message_sent','never-copied','alpha','ann','bob','missing there',
+           strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+
+  run migrate alpha
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing rows" ]]
+  [ "$(shared_rows alpha)" -eq 1 ]
+}
+
+# A destination that exists but cannot be read. Being unable to check is not
+# the same as having checked: if an unreadable store counted as complete, the
+# guard would pass in exactly the situation where it knows least.
+@test "migrate: a destination that cannot be read is refused, not assumed complete" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  migrate alpha
+
+  sqlite3 "$SHARED" "INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
+    VALUES('message_sent','stray-1','alpha','ann','bob','still in shared',
+           strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+
+  # Present, non-empty, and not a database.
+  local dest; dest="$(store_of alpha)"
+  printf 'this is not a sqlite file' > "$dest"
+
+  run migrate alpha
+  [ "$status" -ne 0 ]
+  [ "$(shared_rows alpha)" -eq 1 ]
+}
+
+# The normal re-entry this guard must NOT break. After the config flips, new
+# messages land in the destination, so it legitimately holds MORE than the
+# shared store. A guard written as "the counts match" would refuse exactly the
+# case it exists to complete.
+@test "migrate: re-entry completes when the destination has more than the shared store" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "before the move" >/dev/null
+  migrate alpha
+
+  # Arrivals after the move: they go to the destination, as they do in life.
+  bash "$SCRIPTS/send.sh" alpha ann bob "after the move" >/dev/null
+  bash "$SCRIPTS/send.sh" alpha ann bob "also after" >/dev/null
+
+  # And a leftover in the shared store, which is what re-entry is for. Copied
+  # into the destination as an interrupted run would have done.
+  local dest; dest="$(store_of alpha)"
+  sqlite3 "$SHARED" "INSERT INTO events(seq,type,id,team,from_agent,to_agent,body,at)
+    VALUES(9001,'message_sent','leftover','alpha','ann','bob','left behind',
+           strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+  sqlite3 "$dest" "INSERT INTO events(seq,type,id,team,from_agent,to_agent,body,at)
+    VALUES(9001,'message_sent','leftover','alpha','ann','bob','left behind',
+           strftime('%Y-%m-%dT%H:%M:%SZ','now'));"
+
+  run migrate alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "already has its own store" ]]
+  # The leftover is gone from shared, because the destination has it.
+  [ "$(shared_rows alpha)" -eq 0 ]
 }
