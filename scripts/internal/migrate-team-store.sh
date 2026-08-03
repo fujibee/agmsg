@@ -62,26 +62,45 @@ src_tables="$(agmsg_sqlite "$SHARED" \
   "SELECT name FROM sqlite_master WHERE type='table';" 2>/dev/null || true)"
 has_table() { printf '%s\n' "$src_tables" | grep -qx "$1"; }
 
-# Every row of this team that the shared store holds, keyed by what identifies
-# it. seq and id are copied verbatim, so they match across the two stores;
-# read_cursors have no id and are identified by (team, agent).
+# Every row of this team that the shared store holds, compared by VALUE.
 #
-# Compared as a SET, not a count. Equal counts can be different rows — a
-# half-finished copy that then received new arrivals reaches the same total
-# while the original history is still missing.
+# Not a count: equal totals can be different rows. Not a key either: the same
+# seq or id can name different content once a destination has been recreated.
+# What has to be proven before deleting anything is that each shared row exists
+# in the destination as the same row.
 _missing_from_dest() {
   local lit; lit="$(agmsg_sqlesc "$TEAM")"
   local dest_lit; dest_lit="$(agmsg_sql_readfile_path "$DEST")"
   local t sql out
   for t in events messages read_cursors; do
     printf '%s\n' "$src_tables" | grep -qx "$t" || continue
+    # Every column the copy carries, not just the key.
+    #
+    # A key alone proves too little here. After the destination is removed the
+    # config still says per-team, so the next write creates a NEW database at
+    # that path, AUTOINCREMENT restarts, and its first event takes seq 1 — the
+    # same seq a different shared event already has. Measured: two stores, both
+    # holding seq 1, entirely different bodies, and a key-only comparison
+    # reports nothing missing.
+    #
+    # The copy uses INSERT OR IGNORE, so a key collision leaves the existing row
+    # untouched rather than replacing it. Whatever is under that key in the
+    # destination may be someone else's row, and deleting the shared original on
+    # the strength of a matching number would lose it.
     case "$t" in
-      events)   sql="SELECT seq FROM $t WHERE team='$lit'
-                     EXCEPT SELECT seq FROM dst.$t WHERE team='$lit';" ;;
-      messages) sql="SELECT id FROM $t WHERE team='$lit'
-                     EXCEPT SELECT id FROM dst.$t WHERE team='$lit';" ;;
-      *)        sql="SELECT agent FROM $t WHERE team='$lit'
-                     EXCEPT SELECT agent FROM dst.$t WHERE team='$lit';" ;;
+      events)   sql="SELECT seq,type,id,team,from_agent,to_agent,body,msg_id,agent,at
+                       FROM $t WHERE team='$lit'
+                     EXCEPT
+                     SELECT seq,type,id,team,from_agent,to_agent,body,msg_id,agent,at
+                       FROM dst.$t WHERE team='$lit';" ;;
+      messages) sql="SELECT id,team,from_agent,to_agent,body,created_at,read_at
+                       FROM $t WHERE team='$lit'
+                     EXCEPT
+                     SELECT id,team,from_agent,to_agent,body,created_at,read_at
+                       FROM dst.$t WHERE team='$lit';" ;;
+      *)        sql="SELECT team,agent,local_position FROM $t WHERE team='$lit'
+                     EXCEPT
+                     SELECT team,agent,local_position FROM dst.$t WHERE team='$lit';" ;;
     esac
     # A destination that cannot be read, or lacks the table, makes the query
     # fail — which is reported as "not proven complete", never as "nothing is
