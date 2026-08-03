@@ -98,9 +98,21 @@ _missing_from_dest() {
                      EXCEPT
                      SELECT id,team,from_agent,to_agent,body,created_at,read_at
                        FROM dst.$t WHERE team='$lit';" ;;
-      *)        sql="SELECT team,agent,local_position FROM $t WHERE team='$lit'
-                     EXCEPT
-                     SELECT team,agent,local_position FROM dst.$t WHERE team='$lit';" ;;
+      # A cursor is a POSITION, and positions only move forward: the writer
+      # updates them with MAX(local_position, ...). So the destination's cursor
+      # being AHEAD of the shared one is the normal state after the config
+      # flips — reads go to the destination from then on, while the shared copy
+      # stays frozen at the moment of the move.
+      #
+      # Requiring the rows to be identical would refuse re-entry as soon as
+      # anyone reads once, which in a recovery window that stays open for a
+      # while is close to always. What has to be refused is a cursor that has
+      # gone BACKWARDS, or one that is absent: either would resume that agent
+      # earlier than they had already read.
+      *)        sql="SELECT s.agent FROM $t s
+                       LEFT JOIN dst.$t d ON d.team = s.team AND d.agent = s.agent
+                      WHERE s.team='$lit'
+                        AND (d.agent IS NULL OR d.local_position < s.local_position);" ;;
     esac
     # A destination that cannot be read, or lacks the table, makes the query
     # fail — which is reported as "not proven complete", never as "nothing is

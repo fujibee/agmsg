@@ -291,6 +291,53 @@ shared_rows() {
   [ "$(sqlite3 "$SHARED"       "SELECT local_position FROM read_cursors WHERE team='alpha' AND agent='ann';")" -eq 999 ]
 }
 
+# A cursor that moved on after the move. Reads go to the destination once the
+# config flips, so its cursor legitimately runs AHEAD of the shared copy, which
+# stays frozen at the moment of the move. An identity comparison refuses this —
+# and it happens as soon as anyone reads once, which in a recovery window that
+# stays open is close to always.
+@test "migrate: a cursor that advanced in the destination does not block re-entry" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  migrate alpha
+  local dest; dest="$(store_of alpha)"
+
+  sqlite3 "$dest"   "INSERT OR REPLACE INTO read_cursors(team,agent,local_position)
+    VALUES('alpha','ann',1005);"
+  sqlite3 "$SHARED" "INSERT OR REPLACE INTO read_cursors(team,agent,local_position)
+    VALUES('alpha','ann',999);"
+
+  run migrate alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "already has its own store" ]]
+  # The stale shared cursor is cleared; the destination keeps the further one.
+  [ "$(sqlite3 "$SHARED" \
+      "SELECT COUNT(*) FROM read_cursors WHERE team='alpha';")" -eq 0 ]
+  [ "$(sqlite3 "$dest" \
+      "SELECT local_position FROM read_cursors WHERE team='alpha' AND agent='ann';")" -eq 1005 ]
+}
+
+# A cursor the destination never received. Deleting the shared copy would lose
+# where that agent had read to entirely — they would resume from the start and
+# re-read everything, or from zero and appear to have read nothing. Absent is
+# not "far enough along"; it is no information at all.
+@test "migrate: a cursor absent from the destination is refused" {
+  bash "$SCRIPTS/send.sh" alpha ann bob "one" >/dev/null
+  migrate alpha
+  local dest; dest="$(store_of alpha)"
+
+  # Only in the shared store. Nothing else is short, so a refusal is about this.
+  sqlite3 "$dest"   "DELETE FROM read_cursors WHERE team='alpha' AND agent='ann';"
+  sqlite3 "$SHARED" "INSERT OR REPLACE INTO read_cursors(team,agent,local_position)
+    VALUES('alpha','ann',42);"
+  [ "$(shared_rows alpha)" -eq 0 ]
+
+  run migrate alpha
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing rows" ]]
+  [ "$(sqlite3 "$SHARED" \
+      "SELECT local_position FROM read_cursors WHERE team='alpha' AND agent='ann';")" -eq 42 ]
+}
+
 # The normal re-entry this guard must NOT break. After the config flips, new
 # messages land in the destination, so it legitimately holds MORE than the
 # shared store. A guard written as "the counts match" would refuse exactly the
