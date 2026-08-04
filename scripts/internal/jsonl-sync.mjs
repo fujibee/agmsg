@@ -491,21 +491,25 @@ function apply(path, target, inputText) {
     fail("pull cursor cannot move backwards");
   }
   const replay = input.messages.length > 0 && input.cursor === state.transportCursor;
+  // A storage driver must not assume its page is contiguous, and must not
+  // assume the cursor equals its own last row. Roster mutations consume the
+  // same team_seq space as messages, but the engine routes them to the roster
+  // driver and never hands them here, so from this side the sequence has holes
+  // and the page may end on a row we never saw. Contiguity is checked where the
+  // whole page is still visible — remote-sync.mjs `pull page sequence is not
+  // contiguous`. Assert only what survives the split: ordering (validatePull)
+  // and a cursor that covers every row we were given. For the same reason a
+  // page can be empty here and still advance: two machines that connect and
+  // sync before anyone speaks exchange roster rows only, and this driver is
+  // handed the cursor alone. Only "cannot move backwards" survives.
   if (!replay) {
-    let expected = BigInt(state.transportCursor) + 1n;
-    for (const message of input.messages) {
-      if (BigInt(message.server_seq) !== expected) fail("pull page is not contiguous");
-      expected += 1n;
-    }
-    if (input.messages.length > 0 && input.cursor !== input.messages.at(-1).server_seq) {
+    const last = input.messages.at(-1);
+    if (last && BigInt(input.cursor) < BigInt(last.server_seq)) {
       fail("pull cursor does not cover the page");
     }
   } else if (input.messages.some((message) =>
     BigInt(message.server_seq) > BigInt(state.transportCursor))) {
     fail("pull replay exceeds the durable cursor");
-  }
-  if (input.messages.length === 0 && input.cursor !== state.transportCursor) {
-    fail("empty pull page cannot advance the cursor");
   }
   const committed = [];
   for (const source of input.messages) {

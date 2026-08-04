@@ -420,6 +420,36 @@ EOF
   [ "$(storage_history demo | jq -s '[.[]|select(.body=="must-not-import")]|length')" -eq 0 ]
 }
 
+@test "jsonl pull accepts the holes roster mutations leave in the sequence" {
+  # Roster rows consume team_seq but the engine routes them to the roster
+  # driver, so this driver legitimately sees a page that starts above its
+  # cursor, ends on a row it was never handed, or carries no rows at all.
+  # Contiguity belongs to the engine, which still sees the whole page.
+  local roster_only gapped result
+  roster_only='{"type":"sync_pull_cursor","next_after":"2"}'
+  result=$(printf '%s\n' "$roster_only" |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].transport_cursor')" = 2 ]
+  gapped=$(jq -nc '{type:"sync_pull_message",server_seq:"4",
+    id:"550e8400-e29b-41d4-a716-446655440020",
+    server_received_at:"2026-07-22T11:02:00.000000Z",
+    envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+    policy_revision:"0",local_security_revision:"0",
+    projection:{body:"after-a-roster-gap",created_at:"2026-07-22T11:02:00.000000Z",
+                from_agent:"carol",to_agent:"bob"}}')
+  result=$(printf '%s\n%s\n' "$gapped" \
+    '{"type":"sync_pull_cursor","next_after":"6"}' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].transport_cursor')" = 6 ]
+  [ "$(storage_history demo | jq -s '[.[]|select(.body=="after-a-roster-gap")]|length')" -eq 1 ]
+  printf '%s\n' '{"type":"sync_pull_cursor","next_after":"5"}' \
+    > "$BATS_TEST_TMPDIR/backwards.jsonl"
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 \
+    < "$BATS_TEST_TMPDIR/backwards.jsonl"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pull cursor cannot move backwards"* ]]
+}
+
 @test "jsonl pull echo before POST acknowledgement durably reconciles the reservation" {
   storage_send demo alice bob early-echo >/dev/null
   local prepared candidate echo page after

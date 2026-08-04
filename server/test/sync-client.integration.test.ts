@@ -236,26 +236,38 @@ storage_list_unread "$2" "$3"`;
       blob: Buffer.from("opaque future ciphertext").toString("base64"),
     };
     await pool.query("BEGIN");
+    // The next free sequence, read rather than assumed. How many rows the syncs
+    // above pushed is not this test's subject — it moves whenever the client's
+    // batching or the set of axes it syncs changes, and a literal here turns any
+    // such change into a unique-constraint violation with nothing to do with
+    // ciphers. Both the team's current_seq and the row land on this position, so
+    // the pulled page stays contiguous; a gap fails the engine's continuity
+    // check instead of exercising the unreadable envelope.
+    const { rows: [head] } = await pool.query<{ next: string }>(
+      "SELECT (current_seq + 1)::text AS next FROM teams WHERE team_id=$1 FOR UPDATE",
+      [teamId],
+    );
+    const futureSeq = head!.next;
     await pool.query(
-      `UPDATE teams SET current_seq=3,policy_revision=1,
+      `UPDATE teams SET current_seq=$2::bigint,policy_revision=1,
          accepted_envelope_versions=ARRAY[1],
          write_allowed_ciphers=ARRAY['future-aead']::TEXT[]
        WHERE team_id=$1`,
-      [teamId],
+      [teamId, futureSeq],
     );
     await pool.query(
       `INSERT INTO team_policy_history
          (team_id,policy_revision,effective_from_seq,
           accepted_envelope_versions,write_allowed_ciphers)
-       VALUES($1,1,3,ARRAY[1],ARRAY['future-aead']::TEXT[])`,
-      [teamId],
+       VALUES($1,1,$2::bigint,ARRAY[1],ARRAY['future-aead']::TEXT[])`,
+      [teamId, futureSeq],
     );
     await pool.query(
       `INSERT INTO messages
          (team_id,id,team_seq,envelope_v,cipher,key_id,blob,envelope_digest)
-       VALUES($1,'550e8400-e29b-41d4-a716-446655440099',3,1,
+       VALUES($1,'550e8400-e29b-41d4-a716-446655440099',$4::bigint,1,
               'future-aead','epoch-1',$2,$3)`,
-      [teamId, futureEnvelope.blob, envelopeDigest(futureEnvelope)],
+      [teamId, futureEnvelope.blob, envelopeDigest(futureEnvelope), futureSeq],
     );
     await pool.query("COMMIT");
 
@@ -265,27 +277,37 @@ storage_list_unread "$2" "$3"`;
     expect(policyTransition.stdout).toContain('"status":"unsupported_cipher"');
     const quarantined = await execFileAsync("sqlite3", [teamStore(storeA),
       "SELECT status || ':' || server_seq FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440099';"]);
-    expect(quarantined.stdout.trim()).toBe("unsupported_cipher:3");
+    expect(quarantined.stdout.trim()).toBe(`unsupported_cipher:${futureSeq}`);
     expect((await history(storeA)).map((message) => message.body)).toEqual([
       "fixture from machine A", "fixture reply from machine B",
     ]);
 
-    await retainThrough(pool, teamId, 3n);
+    // storeB has not seen this message — the sync above was storeA's — so
+    // retaining through it lands past storeB's cursor, which is what makes the
+    // next pull a 410. The old literal 3 was this same position by coincidence;
+    // the relationship is what matters, since retaining through something storeB
+    // already holds would ask it to recover from nothing and no 410 would come.
+    // The assertion below pins that relationship rather than trusting it.
+    const cursorB = await execFileAsync("sqlite3", [teamStore(storeB),
+      "SELECT transport_cursor FROM sync_bindings;"]);
+    expect(BigInt(cursorB.stdout.trim())).toBeLessThan(BigInt(futureSeq));
+    const retainFloor = BigInt(futureSeq);
+    await retainThrough(pool, teamId, retainFloor);
     await expect(sync(storeB, "once", "--team", localTeam)).rejects.toMatchObject({
       stderr: expect.stringContaining("HTTP 410 resync-required"),
     });
     const beforeResync = await history(storeB);
     const recovered = await sync(storeB, "resync", "--team", localTeam,
-      "--accept-floor", "3");
+      "--accept-floor", retainFloor.toString());
     expect(recovered.stdout).toContain('"event":"resync.complete"');
     expect(recovered.stdout).toContain('"disposition":"accepted"');
     expect(await history(storeB)).toEqual(beforeResync);
     const resyncState = await execFileAsync("sqlite3", [teamStore(storeB),
       `SELECT transport_cursor || ':' ||
          (SELECT count(*) FROM sync_resync_audits) FROM sync_bindings;`]);
-    expect(resyncState.stdout.trim()).toBe("3:1");
+    expect(resyncState.stdout.trim()).toBe(`${retainFloor}:1`);
     const retried = await sync(storeB, "resync", "--team", localTeam,
-      "--accept-floor", "3");
+      "--accept-floor", retainFloor.toString());
     expect(retried.stdout).toContain('"disposition":"already-accepted"');
 
     const disconnected = await execFileAsync("bash", [join(repositoryRoot, "scripts/remote.sh"),
