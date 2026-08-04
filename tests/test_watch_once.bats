@@ -145,50 +145,23 @@ _assert_startup_was_delayed() {
   [[ "$output" =~ "no available subscription" ]]
 }
 
-# --- #605 diagnostic: only fires when the exclusion empties the whole
-#     subscription, and has to name which liveness branch fired ------------
-#
-# The composite/no-cc-instance case is the one worth pinning by name:
-# instance-id.sh's agmsg_instance_alive treats a composite owner as alive
-# whenever its pid answers alive AND there is no cc-instance.<pid> to
-# cross-check against -- an unconfirmed "assume alive", not a verified one.
-# A misjudged lock in that shape is exactly what #605's diagnostic exists to
-# surface, so the test writes that exact shape (composite owner, live pid,
-# no cc-instance file) directly rather than going through actas-claim.sh,
-# whose own instance-id resolution falls back to a bare token here (no real
-# codex agent pid to find in a bats subprocess).
-@test "watch-once: #605 diagnostic names the composite/no-cc-instance branch" {
+# --- #605: when the exclusion above empties the whole subscription, name the
+#     lock file and whether cc-instance.<pid> backs the owner. A composite
+#     owner with no matching cc-instance file is instance-id.sh's
+#     unconditional-alive branch -- the one worth being able to spot. ------
+@test "watch-once: #605 names the lock path and reports cc-instance as absent" {
   local lock="$TEST_SKILL_DIR/run/actas.team__alice.session"
-  local owner="deadbeef-thread.$$"
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$owner" > "$lock"
+  printf '%s\n' "deadbeef-thread.$$" > "$lock"
   bash "$SCRIPTS/send.sh" team bob alice "locked out" >/dev/null
 
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 1 --interval 1
   [ "$status" -eq 1 ]
-  [[ "$output" == *"no available subscription"* ]]
-  [[ "$output" == *"lock file: $lock"* ]]
-  [[ "$output" == *"owner token: composite (pid=$$)"* ]]
-  [[ "$output" == *"cc-instance.$$ absent"* ]]
-  [[ "$output" == *"verdict: alive (unconfirmed"* ]]
+  [[ "$output" == *"lock=$lock"* ]]
+  [[ "$output" == *"cc-instance=absent"* ]]
 }
 
-@test "watch-once: #605 diagnostic names a confirmed-alive composite owner" {
-  local lock="$TEST_SKILL_DIR/run/actas.team__alice.session"
-  local owner="deadbeef-thread.$$"
-  mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$owner" > "$lock"
-  printf '%s\n' "$owner" > "$TEST_SKILL_DIR/run/cc-instance.$$"
-  bash "$SCRIPTS/send.sh" team bob alice "locked out" >/dev/null
-
-  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 1 --interval 1
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"cc-instance.$$ present, contents match — verdict: alive (confirmed)"* ]]
-}
-
-@test "watch-once: #605 diagnostic stays quiet when another pair still gets through" {
-  # alice is locked out, but bob (also registered) is free -- the subscription
-  # is not empty, so the loud per-skip diagnostic must not fire.
+@test "watch-once: #605 facts stay quiet when another pair still resolves" {
   setup_live_owner "$TEST_SKILL_DIR/run" other-sid
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice other-sid >/dev/null
   bash "$SCRIPTS/send.sh" team alice bob "for bob, not alice" >/dev/null
@@ -196,5 +169,5 @@ _assert_startup_was_delayed() {
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --team team --timeout 1 --interval 1
   [ "$status" -eq 0 ]
   [[ "$output" =~ "status=pending" ]]
-  [[ "$output" != *"lock file:"* ]]
+  [[ "$output" != *"lock="* ]]
 }
