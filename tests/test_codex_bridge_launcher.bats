@@ -3,8 +3,21 @@
 # Unit tests for codex-bridge-launcher.sh thread resolution (#350).
 # The launcher must bind the bridge to the role's RECORDED codex thread instead
 # of the app-server's ambiguous "loaded" thread (which a co-resident codex thread
-# in the same cwd could otherwise capture). A mock bridge (AGMSG_CODEX_BRIDGE_CMD)
-# records the --thread the launcher passes.
+# in the same cwd could otherwise capture). A mock bridge records the --thread
+# the launcher passes.
+#
+# The mock replaces codex-bridge.js itself (the file the launcher's DEFAULT
+# bridge_run resolves to) rather than being swapped in via AGMSG_CODEX_BRIDGE_CMD
+# (#595). AGMSG_CODEX_BRIDGE_CMD is a real, documented user-facing override (a
+# custom bridge wrapper), and codex-bridge-launcher.sh takes a materially
+# different code path for it (a synchronous wait on the launched process) than
+# for its default codex-bridge.js path -- exercising that override path here
+# tested a branch these tests have no interest in and does not run for anyone
+# using agmsg without a custom wrapper, and its wait, sized for a real bridge
+# process's lifetime, raced these tests' shorter deregistration-response
+# assertions. Only tests/ files change here: setup_test_env already copies the
+# whole scripts/ tree into an isolated $TEST_SKILL_DIR per test, so overwriting
+# codex-bridge.js below mutates only that disposable copy.
 
 load test_helper
 
@@ -16,15 +29,19 @@ setup() {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
   export CAPTURE="$TEST_SKILL_DIR/thread-capture.txt"
-  export MOCK="$TEST_SKILL_DIR/mock-bridge.sh"
-  cat > "$MOCK" <<EOF
+  # Overwrite the (already-isolated, per-test) copy of codex-bridge.js with a
+  # mock that records its argv. AGMSG_NODE is the documented override for the
+  # Node binary codex-bridge-launcher.sh resolves this file through; pointing
+  # it at bash makes bash the interpreter for this file regardless of its .js
+  # name, so the launcher's default (no-custom-wrapper) path runs unmodified.
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
 [ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
-  chmod +x "$MOCK"
-  export AGMSG_CODEX_BRIDGE_CMD="$MOCK"
+  chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
 }
 
