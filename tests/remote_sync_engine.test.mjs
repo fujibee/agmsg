@@ -2837,6 +2837,50 @@ test("a half that fails after its sibling succeeded still records the sibling's 
   assert.equal(committed.length, 2);
 });
 
+test("an event sink that fails costs neither the prefix nor the transport error", async () => {
+  // The recovery must not depend on the reporting. An event log that cannot be
+  // written is a reason to say so, never a reason to skip the durable write the
+  // acks exist for, or to surface itself as the cycle's error in place of the
+  // transport failure that caused it.
+  const candidates = Array.from({ length: 8 }, (_unused, index) =>
+    bulkyCandidate(index, 256 * 1024));
+  const committed = [];
+  const reconciled = [];
+  let posts = 0;
+  const ack = ackAllFrom({ value: 0 });
+  const harness = pushHarness(candidates, (messages) => {
+    posts += 1;
+    if (posts === 2) {
+      const error = new Error("HTTP 409 conflict");
+      error.status = 409;
+      throw error;
+    }
+    committed.push(...messages.map((message) => message.id));
+    return ack(messages);
+  });
+  await assert.rejects(cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+    ...harness,
+    // Every event reachable once the push has failed throws — the two this
+    // change added, and the two that report the reconcile. None of them may sit
+    // between the acks and the durable write.
+    eventCall: async (name) => {
+      if (["push.partial", "push.partial-unrecorded", "push.ack", "push.reconciled"]
+        .includes(name)) {
+        throw new Error("event log is unwritable");
+      }
+    },
+    driverCall: async (operation, driverConfig, input) => {
+      if (operation === "reconcile") {
+        reconciled.push(...input.map((record) => record.id));
+        return [{ type: "sync_reconcile_result", count: input.length }];
+      }
+      return harness.driverCall(operation, driverConfig, input);
+    },
+  }), (error) => error.status === 409 && /409 conflict/u.test(error.message));
+  assert.ok(committed.length > 0, "the first POST stored nothing, so nothing was at risk");
+  assert.deepEqual(reconciled, committed);
+});
+
 test("push stops at one message rather than splitting forever, and names it", async () => {
   // A single message the server refuses is a permanent dead end: no batching
   // this client can do will get it across, and every later cycle retries it.

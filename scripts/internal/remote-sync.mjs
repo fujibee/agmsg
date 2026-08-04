@@ -2171,6 +2171,20 @@ async function postGroup(config, group, requestCall, eventCall) {
 // this whole path exists to avoid. So the error carries them: every layer that
 // concatenates acks concatenates them onto the failure too, and the top of the
 // push sees one prefix no matter how deep the split recursed.
+// Emit a diagnostic on a path that is already failing. Every other eventCall in
+// this file is awaited bare, and should be: on the success path an unwritable
+// event log is a real fault and failing the cycle is right. Here it is not —
+// the cycle has already failed, an error is already on its way up, and letting
+// the sink throw would replace that error with one about logging. Nothing is
+// swallowed silently: the caller still throws what actually went wrong.
+async function note(eventCall, name, payload) {
+  try {
+    await eventCall(name, payload);
+  } catch {
+    // Deliberately ignored; see above.
+  }
+}
+
 async function carryAcks(earned, attempt) {
   try {
     return await attempt();
@@ -2274,13 +2288,16 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       // what makes the mapping's positional id check an assertion that this
       // really is an unbroken prefix — a gap shows up as an id mismatch.
       const ackRecords = validateAckMapping(candidates.slice(0, acks.length), acks);
-      await eventCall("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
       const messageAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "messages");
       const rosterAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "roster");
+      // The durable write comes before either event. An event sink that throws
+      // between them would otherwise skip the reconcile the acks exist for —
+      // reporting must not be able to cost the recording.
       const [reconciled, rosterReconciled] = await Promise.all([
         messageAcks.length > 0 ? driverCall("reconcile", config, messageAcks) : [],
         rosterAcks.length > 0 ? rosterDriverCall("reconcile", config, rosterAcks) : [],
       ]);
+      await eventCall("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
       await eventCall("push.reconciled", {
         result: reconciled[0] ?? null,
         roster_result: rosterReconciled[0] ?? null,
@@ -2292,17 +2309,26 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     } catch (error) {
       const earned = Array.isArray(error?.acks) ? error.acks : [];
       if (earned.length > 0) {
-        await eventCall("push.partial", { acked: earned.length, of: candidates.length });
+        // Recovery first, reporting after, and the reporting cannot break
+        // either: an event sink that throws on this path would otherwise skip
+        // the very recording this branch exists for, and surface itself as the
+        // cycle's error in place of the transport failure that caused it.
+        let recorded;
         try {
           await reconcileAcks(earned);
+          recorded = null;
         } catch (reconcileFailure) {
-          // Recording the prefix failed too. Report it — the client now has
-          // neither the rows nor a note of them — but do not let it replace the
-          // transport error that started this, or the cause disappears.
-          await eventCall("push.partial-unrecorded", { reason: reconcileFailure.message });
+          recorded = reconcileFailure;
+          // Neither the rows nor a note of them. Report it, but keep it under
+          // the transport error rather than in front of it — that error is the
+          // reason any of this happened.
           if (error && typeof error === "object" && error.cause === undefined) {
             error.cause = reconcileFailure;
           }
+        }
+        await note(eventCall, "push.partial", { acked: earned.length, of: candidates.length });
+        if (recorded) {
+          await note(eventCall, "push.partial-unrecorded", { reason: recorded.message });
         }
       }
       throw error;
