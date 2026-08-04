@@ -51,7 +51,34 @@ EOF
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
 }
 
-teardown() { teardown_test_env; }
+# PIDs of live per-role child launchers for this test's project (same match as
+# count_child_launchers below: LAUNCHER + PROJ + "alice" in the cmdline, one
+# line per pid). Unlike count_child_launchers, this does not dedupe transient
+# command-substitution subshells by parent pid -- for killing that distinction
+# does not matter, signaling and waiting on a subshell that has already
+# exited on its own is a harmless no-op.
+_launcher_child_pids() {
+  ps -Ao pid=,args= 2>/dev/null \
+    | grep -F "$LAUNCHER" | grep -F "$PROJ" | grep alice \
+    | awk '{print $1}'
+}
+
+# A test's own kill/wait sequence reaches the dispatcher and the short-lived
+# parent it was handed, but a per-role child (nohup'd, independent of both) and
+# the bridge process it launched are not direct children of anything a test
+# holds a pid for, so they are not swept by "kill $dispatcher; kill $parent"
+# alone -- the child only self-exits once it next notices its parent is gone.
+# Reap here, and WAIT for the reap rather than just signaling and moving on, so
+# teardown_test_env's rm -rf never races a process still touching this test's
+# $TEST_SKILL_DIR (#595/#615).
+teardown() {
+  local pid
+  for pid in $(_launcher_child_pids); do
+    kill "$pid" 2>/dev/null || true
+    wait_for_pid_exit "$pid" || true
+  done
+  teardown_test_env
+}
 
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
