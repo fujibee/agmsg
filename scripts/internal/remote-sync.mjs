@@ -2282,7 +2282,11 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     // succeeded. Reconciling first means a retry resends only what is actually
     // missing — and the acks arrive as `duplicate` for anything it does resend,
     // which the mapping already accepts.
-    const reconcileAcks = async (acks) => {
+    // Recording and reporting are separate calls on purpose. Folded together,
+    // the caller cannot tell "the prefix was never written" from "the prefix
+    // was written and the log was not" — and the failing path acts on exactly
+    // that distinction.
+    const recordAcks = async (acks) => {
       // Only a front prefix can be reconciled: the acks are in send order, so
       // acks[i] belongs to candidates[i]. Slicing to the acks' own length is
       // what makes the mapping's positional id check an assertion that this
@@ -2290,15 +2294,17 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       const ackRecords = validateAckMapping(candidates.slice(0, acks.length), acks);
       const messageAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "messages");
       const rosterAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "roster");
-      // The durable write comes before either event. An event sink that throws
-      // between them would otherwise skip the reconcile the acks exist for —
-      // reporting must not be able to cost the recording.
       const [reconciled, rosterReconciled] = await Promise.all([
         messageAcks.length > 0 ? driverCall("reconcile", config, messageAcks) : [],
         rosterAcks.length > 0 ? rosterDriverCall("reconcile", config, rosterAcks) : [],
       ]);
-      await eventCall("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
-      await eventCall("push.reconciled", {
+      return { ackRecords, reconciled, rosterReconciled };
+    };
+    // `emit` is the bare eventCall on the success path and note() on the failing
+    // one. Nothing here runs before the write above.
+    const reportAcks = async (emit, { ackRecords, reconciled, rosterReconciled }) => {
+      await emit("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
+      await emit("push.reconciled", {
         result: reconciled[0] ?? null,
         roster_result: rosterReconciled[0] ?? null,
       });
@@ -2309,31 +2315,38 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
     } catch (error) {
       const earned = Array.isArray(error?.acks) ? error.acks : [];
       if (earned.length > 0) {
-        // Recovery first, reporting after, and the reporting cannot break
-        // either: an event sink that throws on this path would otherwise skip
-        // the very recording this branch exists for, and surface itself as the
-        // cycle's error in place of the transport failure that caused it.
-        let recorded;
+        // The try covers the durable write and nothing else. Widen it by one
+        // event and a log failure starts arriving here as a write failure —
+        // `push.partial-unrecorded` for a prefix that is on disk, and the next
+        // reader resends what must not be resent. The boundary is the write,
+        // not the function.
+        let written = null;
+        let writeFailure = null;
         try {
-          await reconcileAcks(earned);
-          recorded = null;
-        } catch (reconcileFailure) {
-          recorded = reconcileFailure;
+          written = await recordAcks(earned);
+        } catch (failure) {
+          writeFailure = failure;
           // Neither the rows nor a note of them. Report it, but keep it under
           // the transport error rather than in front of it — that error is the
           // reason any of this happened.
           if (error && typeof error === "object" && error.cause === undefined) {
-            error.cause = reconcileFailure;
+            error.cause = failure;
           }
         }
-        await note(eventCall, "push.partial", { acked: earned.length, of: candidates.length });
-        if (recorded) {
-          await note(eventCall, "push.partial-unrecorded", { reason: recorded.message });
+        // Everything below is reporting, on a path that has already failed, so
+        // none of it may throw: an unwritable log must not replace the
+        // transport error on its way up.
+        const emit = (name, payload) => note(eventCall, name, payload);
+        await emit("push.partial", { acked: earned.length, of: candidates.length });
+        if (written) {
+          await reportAcks(emit, written);
+        } else {
+          await emit("push.partial-unrecorded", { reason: writeFailure.message });
         }
       }
       throw error;
     }
-    await reconcileAcks(posted.acks);
+    await reportAcks(eventCall, await recordAcks(posted.acks));
   }
   // A full push page (and eligible) means at least a full page was available,
   // so the loop treats it as "more remains" and stays in catch-up. An exactly-

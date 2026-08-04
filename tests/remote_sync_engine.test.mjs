@@ -2858,7 +2858,8 @@ test("an event sink that fails costs neither the prefix nor the transport error"
     committed.push(...messages.map((message) => message.id));
     return ack(messages);
   });
-  await assert.rejects(cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+  const attempted = [];
+  const failed = await cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
     ...harness,
     // Every event reachable once the push has failed throws — the two this
     // change added, and the two that report the reconcile. None of them may sit
@@ -2866,6 +2867,7 @@ test("an event sink that fails costs neither the prefix nor the transport error"
     eventCall: async (name) => {
       if (["push.partial", "push.partial-unrecorded", "push.ack", "push.reconciled"]
         .includes(name)) {
+        attempted.push(name);
         throw new Error("event log is unwritable");
       }
     },
@@ -2876,9 +2878,20 @@ test("an event sink that fails costs neither the prefix nor the transport error"
       }
       return harness.driverCall(operation, driverConfig, input);
     },
-  }), (error) => error.status === 409 && /409 conflict/u.test(error.message));
+  }).then(() => null, (error) => error);
+  assert.ok(failed, "the cycle resolved, so the transport failure was swallowed");
+  assert.equal(failed.status, 409);
+  assert.match(failed.message, /409 conflict/u);
   assert.ok(committed.length > 0, "the first POST stored nothing, so nothing was at risk");
   assert.deepEqual(reconciled, committed);
+  // The write succeeded and only the log failed. Saying "unrecorded" here would
+  // send the next reader to resend a prefix that is already durable, so the
+  // classification is the assertion — a log failure is not a write failure.
+  assert.ok(!attempted.includes("push.partial-unrecorded"),
+    "a durable prefix was reported as unrecorded");
+  assert.equal(failed.cause, undefined, "an event failure took the cause slot");
+  // Reporting was still attempted, in order, after the write.
+  assert.deepEqual(attempted, ["push.partial", "push.ack", "push.reconciled"]);
 });
 
 test("push stops at one message rather than splitting forever, and names it", async () => {
