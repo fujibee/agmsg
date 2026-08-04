@@ -2156,10 +2156,29 @@ async function postGroup(config, group, requestCall, eventCall) {
     const middle = Math.ceil(group.length / 2);
     await eventCall("push.split", { count: group.length, halves: [middle, group.length - middle] });
     const first = await postGroup(config, group.slice(0, middle), requestCall, eventCall);
-    const second = await postGroup(config, group.slice(middle), requestCall, eventCall);
+    const second = await carryAcks(first.acks, () =>
+      postGroup(config, group.slice(middle), requestCall, eventCall));
     // Concatenated in send order, so the combined acks line up with the
     // candidates the caller passed in — validateAckMapping compares positionally.
     return { ...second, acks: [...first.acks, ...second.acks] };
+  }
+}
+
+// One POST is atomic; several are not. When a later POST dies — 4xx, 5xx, a
+// dropped socket — the rows the earlier ones stored are already committed on
+// the server, and the acks proving it are in hand. Throwing them away leaves
+// the client with no record of messages the server holds, which is the state
+// this whole path exists to avoid. So the error carries them: every layer that
+// concatenates acks concatenates them onto the failure too, and the top of the
+// push sees one prefix no matter how deep the split recursed.
+async function carryAcks(earned, attempt) {
+  try {
+    return await attempt();
+  } catch (error) {
+    if (earned.length > 0 && error && typeof error === "object") {
+      error.acks = [...earned, ...(error.acks ?? [])];
+    }
+    throw error;
   }
 }
 
@@ -2172,7 +2191,7 @@ async function postCandidates(config, candidates, requestCall, eventCall) {
   let last;
   const acks = [];
   for (const group of groups) {
-    last = await postGroup(config, group, requestCall, eventCall);
+    last = await carryAcks(acks, () => postGroup(config, group, requestCall, eventCall));
     acks.push(...last.acks);
   }
   // The last response carries the freshest server state (current_seq, floor);
@@ -2244,19 +2263,51 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
   if (!writeProfile.eligible) {
     await eventCall("push.blocked", { reason: writeProfile.reason });
   } else if (candidates.length > 0) {
-    const posted = await postCandidates(config, candidates, requestCall, eventCall);
-    const ackRecords = validateAckMapping(candidates, posted.acks);
-    await eventCall("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
-    const messageAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "messages");
-    const rosterAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "roster");
-    const [reconciled, rosterReconciled] = await Promise.all([
-      messageAcks.length > 0 ? driverCall("reconcile", config, messageAcks) : [],
-      rosterAcks.length > 0 ? rosterDriverCall("reconcile", config, rosterAcks) : [],
-    ]);
-    await eventCall("push.reconciled", {
-      result: reconciled[0] ?? null,
-      roster_result: rosterReconciled[0] ?? null,
-    });
+    // Record whatever the server acknowledged, then let the failure through.
+    // Both have to reach the caller: the cycle failed, and some of it durably
+    // succeeded. Reconciling first means a retry resends only what is actually
+    // missing — and the acks arrive as `duplicate` for anything it does resend,
+    // which the mapping already accepts.
+    const reconcileAcks = async (acks) => {
+      // Only a front prefix can be reconciled: the acks are in send order, so
+      // acks[i] belongs to candidates[i]. Slicing to the acks' own length is
+      // what makes the mapping's positional id check an assertion that this
+      // really is an unbroken prefix — a gap shows up as an id mismatch.
+      const ackRecords = validateAckMapping(candidates.slice(0, acks.length), acks);
+      await eventCall("push.ack", { acks: ackRecords.map(({ id, server_seq, disposition }) => ({ id, server_seq, disposition })) });
+      const messageAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "messages");
+      const rosterAcks = ackRecords.filter((_, index) => candidates[index].sync_axis === "roster");
+      const [reconciled, rosterReconciled] = await Promise.all([
+        messageAcks.length > 0 ? driverCall("reconcile", config, messageAcks) : [],
+        rosterAcks.length > 0 ? rosterDriverCall("reconcile", config, rosterAcks) : [],
+      ]);
+      await eventCall("push.reconciled", {
+        result: reconciled[0] ?? null,
+        roster_result: rosterReconciled[0] ?? null,
+      });
+    };
+    let posted;
+    try {
+      posted = await postCandidates(config, candidates, requestCall, eventCall);
+    } catch (error) {
+      const earned = Array.isArray(error?.acks) ? error.acks : [];
+      if (earned.length > 0) {
+        await eventCall("push.partial", { acked: earned.length, of: candidates.length });
+        try {
+          await reconcileAcks(earned);
+        } catch (reconcileFailure) {
+          // Recording the prefix failed too. Report it — the client now has
+          // neither the rows nor a note of them — but do not let it replace the
+          // transport error that started this, or the cause disappears.
+          await eventCall("push.partial-unrecorded", { reason: reconcileFailure.message });
+          if (error && typeof error === "object" && error.cause === undefined) {
+            error.cause = reconcileFailure;
+          }
+        }
+      }
+      throw error;
+    }
+    await reconcileAcks(posted.acks);
   }
   // A full push page (and eligible) means at least a full page was available,
   // so the loop treats it as "more remains" and stays in catch-up. An exactly-
