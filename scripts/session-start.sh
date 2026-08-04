@@ -47,6 +47,20 @@ source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/role-session.sh"  # role->session reverse lookup (#339)
 
+# Legacy reclaim markers are global run-state and must be diagnosed even when
+# this particular project has no identity (the early return below) or a driver
+# exits before the generic cleanup pass. They are deliberately never removed.
+legacy_reclaim_found=0
+for legacy_reclaim_dir in "$RUN_DIR"/actas.*.session.reclaim.d; do
+  [ -d "$legacy_reclaim_dir" ] || continue
+  legacy_reclaim_found=1
+  printf 'agmsg session-start: legacy actas reclaim marker detected: %s\n' \
+    "$legacy_reclaim_dir" >&2
+done
+if [ "$legacy_reclaim_found" -eq 1 ]; then
+  echo 'agmsg session-start: stop and restart every old agmsg mutator; after they have stopped, validate and remove only the affected empty .reclaim.d directories shown above, then retry. Never delete reclaim markers based on age.' >&2
+fi
+
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
 [ -n "$PAIRS" ] || exit 0
@@ -191,8 +205,18 @@ for f in "$RUN_DIR"/watch.*.pid; do
     rm -f "$f"
     continue
   fi
-  _agmsg_pid_alive "$pid" || rm -f "$f"
+  # watch.sh recorded its shell-minted $!, so under Git Bash it remains in the
+  # MSYS pid namespace even after a later SessionStart reads this pidfile.
+  _agmsg_pid_alive_local "$pid" || rm -f "$f"
 done
+
+# Reclaim mutex rows are pid+generation fenced in a dedicated SQLite database.
+# Collection never uses age: a paused live mutator keeps its row indefinitely,
+# while a dead holder is removed only if the complete observed tuple is still
+# current. Legacy `.reclaim.d` directories are deliberately untouched. Old
+# clients enter those directories while empty, so no age can make their removal
+# safe; upgrading the protocol requires all actas mutators to restart.
+actas_reclaim_mutex_gc >/dev/null 2>&1 || true
 
 # Garbage-collect actas exclusivity locks whose owner session_id no longer
 # maps to a live cc-instance. Must run after the dead cc-instance cleanup

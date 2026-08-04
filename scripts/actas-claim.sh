@@ -15,13 +15,18 @@ set -euo pipefail
 #
 # Output (stdout, key=value lines):
 #   status=ok team=<team> [team=<team2> ...]              everything claimed
-#   status=held team=<team> owner=<owner_sid>             refused — another live session owns it
+#   status=held team=<team> owner=<owner_sid> [rollback=incomplete locked=<pairs>]
+#                                                            refused — another live session owns it
 #   status=not_registered                                  name is not joined to any team in this project/type
+#   status=error team=<team> reason=<reason> [rollback=incomplete locked=<pairs>]
+# On held or error, `locked` is the exact comma-separated set of percent-encoded
+# team/agent pairs that the checked best-effort rollback could not prove released.
 #
 # Exit code:
 #   0 — status=ok
 #   1 — status=held (callers should NOT proceed with the actas flow)
 #   2 — status=not_registered (callers should run join.sh first)
+#   3 — status=error (claim/reclaim infrastructure failed; do not proceed)
 
 PROJECT="${1:?Usage: actas-claim.sh <project> <type> <name> <session_id>}"
 TYPE="${2:?Missing type}"
@@ -29,6 +34,7 @@ NAME="${3:?Missing name}"
 SESSION_ID="${4:?Missing session_id}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC2034  # consumed by sourced actas/role-session libraries
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
@@ -62,24 +68,63 @@ if [ -z "$TEAMS" ]; then
 fi
 
 # Attempt claim for each matching team. First failure aborts and reports the
-# offending team — callers should resolve that before retrying. Releases
-# already-claimed pairs in this same attempt so partial state doesn't leak.
-claimed=""
+# offending team — callers should resolve that before retrying. Rollback is
+# checked but necessarily best-effort: if the same infrastructure is down, the
+# exact retained pairs are reported rather than deleted unsafely. Only locks
+# that were free before this attempt are included; a pre-existing lock already
+# owned by this session is not disturbed.
+newly_claimed=""
+
 while IFS= read -r team; do
   [ -z "$team" ] && continue
-  result=$(actas_lock_claim "$team" "$NAME" "$SESSION_ID" 2>/dev/null || true)
+  pre_state="$(actas_lock_state "$team" "$NAME" "$SESSION_ID")"
+  claim_status=0
+  if result=$(actas_lock_claim "$team" "$NAME" "$SESSION_ID" 2>/dev/null); then
+    claim_status=0
+  else
+    claim_status=$?
+  fi
+
+  if [ "$claim_status" -eq 0 ] && [ -z "$result" ]; then
+    [ "$pre_state" = "free" ] \
+      && newly_claimed="${newly_claimed:+$newly_claimed$'\n'}${team}"$'\t'"${NAME}"
+    continue
+  fi
+
+  rollback="$newly_claimed"
+  # A write may have linked the record before a later temp-cleanup failure.
+  # Releasing a free-before-attempt pair is safe: release compares our exact
+  # owner, so it cannot remove a peer that won the race.
+  [ "$pre_state" = "free" ] \
+    && rollback="${rollback:+$rollback$'\n'}${team}"$'\t'"${NAME}"
+  rollback_incomplete=0
+  if rollback_locked="$(actas_lock_rollback_pairs "$rollback" "$SESSION_ID")"; then
+    rollback_incomplete=0
+  else
+    rollback_incomplete=1
+  fi
+
+  if [ "$claim_status" -eq 1 ]; then
+    case "$result" in
+      held:*)
+        printf 'status=held team=%s owner=%s' "$team" "${result#held:}"
+        [ "$rollback_incomplete" -eq 1 ] \
+          && printf ' rollback=incomplete locked=%s' "$rollback_locked"
+        printf '\n'
+        exit 1
+        ;;
+    esac
+  fi
+
   case "$result" in
-    held:*)
-      # Roll back any partial claims so the user can retry cleanly.
-      while IFS= read -r c_team; do
-        [ -z "$c_team" ] && continue
-        actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
-      done <<< "$claimed"
-      printf 'status=held team=%s owner=%s\n' "$team" "${result#held:}"
-      exit 1
-      ;;
+    error:*) reason="${result#error:}" ;;
+    *) reason="claim-protocol" ;;
   esac
-  claimed="${claimed:+$claimed$'\n'}$team"
+  printf 'status=error team=%s reason=%s' "$team" "$reason"
+  [ "$rollback_incomplete" -eq 1 ] \
+    && printf ' rollback=incomplete locked=%s' "$rollback_locked"
+  printf '\n'
+  exit 3
 done <<< "$TEAMS"
 
 # All teams claimed. Record (team, agent) -> bare session id for each, so this

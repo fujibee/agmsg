@@ -220,7 +220,7 @@ Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-bu
 /agmsg despawn alice --force     # force: tear it down from here when its watcher can't respond
 ```
 
-By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose watcher drops its own role (releasing the actas lock and registration) and closes its own tmux pane — ending the agent. It blocks until the role is released, up to `--timeout <secs>` (default 30), then prints `status=ok`. If the member's watcher never responds it prints `status=timeout` and exits 3 — retry with `--force`.
+By default `despawn <name>` is **graceful**: it sends a `ctrl:despawn` control message to `<name>`, whose watcher drops its own role (releasing the actas lock and registration) and closes its own tmux pane — ending the agent. It blocks until the target lock is free and, if that watcher had already published a readiness sentinel, the sentinel is gone; then it prints `status=ok`. The readiness check is conservative lifecycle evidence, not a placement-generation proof. It waits up to `--timeout <secs>` (default 30); on timeout it prints `status=timeout` and exits 3 — retry graceful after watcher/registry recovery; use `--force` only when no other same-name registration remains.
 
 `--force` skips the message and tears the member down from the placement recorded at spawn time: it kills the member's tmux pane/window and drops its registration. Use it when the member's watcher can't respond — a dead watcher, or a **codex** member (no Monitor, so graceful has nothing to act on). A member started by hand (no spawn placement record) can't be `--force`d; despawn says so and leaves it for you to close.
 
