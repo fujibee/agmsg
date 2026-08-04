@@ -51,30 +51,52 @@ EOF
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
 }
 
-# PIDs of live per-role child launchers for this test's project (same match as
-# count_child_launchers below: LAUNCHER + PROJ + "alice" in the cmdline, one
-# line per pid). Unlike count_child_launchers, this does not dedupe transient
+# PIDs of live per-role child launchers for this test's project: any process
+# whose argv contains both LAUNCHER and PROJ, one line per pid. Not scoped to a
+# single role name -- teardown must reap every role's child a test spawned
+# (e.g. "the identity cache still sees a role added mid-loop" joins a second
+# role, "bob", mid-test), unlike count_child_launchers below, which measures
+# one specific role on purpose. This also does not dedupe transient
 # command-substitution subshells by parent pid -- for killing that distinction
 # does not matter, signaling and waiting on a subshell that has already
 # exited on its own is a harmless no-op.
 _launcher_child_pids() {
-  ps -Ao pid=,args= 2>/dev/null \
-    | grep -F "$LAUNCHER" | grep -F "$PROJ" | grep alice \
-    | awk '{print $1}'
+  ps -Ao pid=,args= 2>/dev/null | grep -F "$LAUNCHER" | grep -F "$PROJ" | awk '{print $1}'
+}
+
+# PIDs of bridge processes this test's launchers started. The bridge itself
+# runs as "bash codex-bridge.js ..." -- its argv never contains LAUNCHER, so
+# _launcher_child_pids cannot see it, and a child launcher's EXIT trap only
+# releases its runtime lock; it does not kill a bridge it already nohup'd. Read
+# from pidfiles instead, which live under this test's own $RUN_DIR ($TEST_
+# SKILL_DIR is unique per test), so this cannot reach another test's process.
+_launcher_bridge_pids() {
+  local f
+  for f in "$RUN_DIR"/codex-bridge.*.pid; do
+    [ -f "$f" ] || continue
+    cat "$f" 2>/dev/null
+  done
 }
 
 # A test's own kill/wait sequence reaches the dispatcher and the short-lived
 # parent it was handed, but a per-role child (nohup'd, independent of both) and
 # the bridge process it launched are not direct children of anything a test
 # holds a pid for, so they are not swept by "kill $dispatcher; kill $parent"
-# alone -- the child only self-exits once it next notices its parent is gone.
-# Reap here, and WAIT for the reap rather than just signaling and moving on, so
-# teardown_test_env's rm -rf never races a process still touching this test's
+# alone -- the child only self-exits once it next notices its parent is gone,
+# and never kills its own bridge except when it does so as part of noticing
+# deregistration. Snapshot the pid set once, signal all of it, then wait for
+# all of it, rather than interleaving kill/wait per pid against a ps/pidfile
+# view that can keep changing underneath. Reaping here, and WAITING for the
+# reap rather than just signaling and moving on, is what keeps
+# teardown_test_env's rm -rf from racing a process still touching this test's
 # $TEST_SKILL_DIR (#595/#615).
 teardown() {
-  local pid
-  for pid in $(_launcher_child_pids); do
+  local pid pids
+  pids="$(_launcher_child_pids; _launcher_bridge_pids)"
+  for pid in $pids; do
     kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
     wait_for_pid_exit "$pid" || true
   done
   teardown_test_env
