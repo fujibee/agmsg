@@ -29,6 +29,12 @@ setup() {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
   export CAPTURE="$TEST_SKILL_DIR/thread-capture.txt"
+  # A leaked AGMSG_CODEX_BRIDGE_CMD from the ambient environment (not this
+  # file, which no longer sets it) would silently put the launcher back on the
+  # override code path this suite is no longer testing -- unset it explicitly
+  # rather than relying on it merely being absent here (#595).
+  unset AGMSG_CODEX_BRIDGE_CMD
+  [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]
   # Overwrite the (already-isolated, per-test) copy of codex-bridge.js with a
   # mock that records its argv. AGMSG_NODE is the documented override for the
   # Node binary codex-bridge-launcher.sh resolves this file through; pointing
