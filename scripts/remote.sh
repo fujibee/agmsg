@@ -108,6 +108,33 @@ _remote_validate_endpoint() {
   python3 "$SCRIPT_DIR/internal/validate-endpoint.py" "$1"
 }
 
+# An endpoint, safe to print. Keeps the scheme, host and port; DROPS everything
+# else, and the list of what it drops is the point of this function:
+#
+#   path      — a hosted endpoint is `https://host/t/<token>`, and that token IS
+#               the capability. Anyone who reads it off a terminal, a screen
+#               share or a pasted log can connect as this team.
+#   userinfo  — `scheme://user:pass@host` puts a credential before the host, so
+#               a "host and port only" rule that forgets it prints the password.
+#   query, fragment — no current endpoint carries either, and that is exactly
+#               why they would be missed when one does.
+#
+# The caller keeps the team name in the message. That is what makes host-only
+# enough to identify the destination: a team has one endpoint, so `team 'X' to
+# host:port` names it exactly without naming the secret.
+_remote_endpoint_display() {
+  local url="$1" scheme rest
+  case "$url" in
+    *://*) scheme="${url%%://*}://"; rest="${url#*://}" ;;
+    *) scheme=""; rest="$url" ;;
+  esac
+  # Cut the path/query/fragment FIRST. Doing userinfo first would let an `@`
+  # inside a path decide where the host ends.
+  rest="${rest%%/*}"; rest="${rest%%\?*}"; rest="${rest%%#*}"
+  rest="${rest##*@}"
+  printf '%s%s' "$scheme" "$rest"
+}
+
 # Read an interactive value without coupling it to the token transport.
 # `connect --token-stdin` intentionally consumes fd 0 through EOF before the
 # E2EE bootstrap starts. In a real terminal the choice/identity must therefore
@@ -1074,14 +1101,14 @@ cmd_connect() {
         json('[]'))
     );" > "$body_file"
 
-  echo "Connecting team '$team' to $endpoint ..." >&2
+  echo "Connecting team '$team' to $(_remote_endpoint_display "$endpoint") ..." >&2
   http_code="$(_remote_http_post_json "$endpoint/v1/connect" "$body_file" "$resp_file" "$header_file")"
   if [ "$http_code" = "409" ]; then
     echo "agmsg: team '$team' (team_id $team_id) is already registered on this remote. A team_id registers once — this is a uniqueness conflict (like a non-fast-forward push), not a transient error to retry." >&2
     exit 1
   fi
   if [ "$http_code" != "200" ]; then
-    echo "agmsg: connect failed — $endpoint/v1/connect returned HTTP $http_code" >&2
+    echo "agmsg: connect failed — $(_remote_endpoint_display "$endpoint")/v1/connect returned HTTP $http_code" >&2
     exit 1
   fi
 

@@ -140,6 +140,42 @@ skip_if_no_age() {
   [ "$status" -eq 0 ]
 }
 
+@test "connect: the capability path never reaches the terminal" {
+  # A hosted endpoint is `https://host/t/<token>` and that token IS the
+  # capability -- read it off a terminal, a screen share or a pasted log and you
+  # can connect as this team. `connect` printed the whole URL twice, on every
+  # run, for every user.
+  #
+  # The assertion is that the secret is ABSENT, so it has to also assert that
+  # the line was printed at all: "no token in the output" is trivially true of
+  # no output, and would keep passing if the message were deleted or renamed.
+  local secret="agsy_do_not_print_this_token"
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/$secret" testteam
+  [[ "$output" == *"Connecting team 'testteam' to"* ]]
+  [[ "$output" == *"127.0.0.1:$MOCK_PORT"* ]]
+  [[ "$output" != *"$secret"* ]]
+  [[ "$output" != *"/t/"* ]]
+}
+
+@test "the endpoint shown on the terminal keeps only scheme, host and port" {
+  # Unit-level, because `connect` cannot reach the interesting inputs: the
+  # validator refuses userinfo outright (see the loopback-bypass test below),
+  # so that branch of the redactor is defence in depth and has to be exercised
+  # here or not at all. Query and fragment are the same -- no endpoint carries
+  # one today, which is exactly why one would slip through when it does.
+  # shellcheck disable=SC1090
+  eval "$(sed -n '/^_remote_endpoint_display()/,/^}/p' "$SCRIPTS/remote.sh")"
+  [ "$(_remote_endpoint_display "http://127.0.0.1:8797/t/SECRET")" = "http://127.0.0.1:8797" ]
+  [ "$(_remote_endpoint_display "https://u:pa55@example.com/t/SECRET")" = "https://example.com" ]
+  [ "$(_remote_endpoint_display "https://example.com?token=SECRET")" = "https://example.com" ]
+  [ "$(_remote_endpoint_display "https://example.com#SECRET")" = "https://example.com" ]
+  # An `@` inside the path must not be read as the end of the userinfo.
+  [ "$(_remote_endpoint_display "https://a@b@evil.example/t/SECRET")" = "https://evil.example" ]
+  [ "$(_remote_endpoint_display "http://[::1]:8080/t/SECRET")" = "http://[::1]:8080" ]
+  # Port survives -- it is how two local servers are told apart.
+  [ "$(_remote_endpoint_display "https://host.example.com:443")" = "https://host.example.com:443" ]
+}
+
 @test "connect: requires the response protocol header" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" missing-protocol-header-token myteam
   [ "$status" -ne 0 ]
