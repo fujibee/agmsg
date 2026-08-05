@@ -61,12 +61,15 @@ function main() {
   }
 
   if (injected.declaredNone) {
+    // Declared, not defaulted — an unset list is exit 2, so reaching here means
+    // someone wrote `none`. The banner still states the limit, because the
+    // limit is real whether or not it was chosen on purpose.
     process.stderr.write(
       "\n==============================================================\n" +
-      "  check-private-names: RUNNING WITH NO NAME LIST\n" +
-      "  Only the seat-shape pattern ran. Names that have no shape --\n" +
-      "  a person's handle, a project nickname -- were NOT checked.\n" +
-      "  A pass here does NOT mean the tree is clean.\n" +
+      "  check-private-names: SHAPE ONLY (no name list, by declaration)\n" +
+      "  Seat-shaped names were checked. Names with no shape -- a\n" +
+      "  person's handle, a project nickname -- were NOT.\n" +
+      "  A pass here means \"no seat-shaped name\", NOT \"clean\".\n" +
       "==============================================================\n\n",
     );
   }

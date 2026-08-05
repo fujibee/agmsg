@@ -106,6 +106,12 @@ export function injectedPattern(names) {
 }
 
 /** Read injected names from the environment: a literal list, or a file of them. */
+const stripComments = (lines) =>
+  // A list a person maintains needs somewhere to say why a name is on it.
+  // Without this, `# a person's handle` becomes a "name" and the checker starts
+  // matching the prose of its own configuration.
+  lines.map((line) => line.replace(/(^|\s)#.*$/u, "$1"));
+
 export function readInjectedNames(environment, readFile) {
   const literal = environment.AGMSG_PRIVATE_NAMES;
   const file = environment.AGMSG_PRIVATE_NAMES_FILE;
@@ -119,7 +125,12 @@ export function readInjectedNames(environment, readFile) {
   // said so, and the runner prints that it happened. Unset stays a failure.
   if (literal === "none") return { names: [], declaredNone: true };
   if (literal) return { names: literal.split(/[\n,]/u), declaredNone: false };
-  if (file) return { names: readFile(file).split(/\n/u), declaredNone: false };
+  if (file) {
+    const names = stripComments(readFile(file).split(/\n/u));
+    // A file that is all comments supplied no names. Say absent, so the caller
+    // fails rather than running a vacuous check that reports clean.
+    return { names: names.some((name) => name.trim()) ? names : null, declaredNone: false };
+  }
   return { names: null, declaredNone: false };
 }
 

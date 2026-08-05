@@ -772,19 +772,25 @@ jobs:
   # Internal team names must not reach what we publish. This runs on EVERY diff,
   # with no docs-only skip: the docs tree is exactly where prose names people,
   # and a check that skips the files most likely to carry the problem is
-  # decoration. It is cheap — one node process over `git ls-files`.
+  # decoration. It costs one node process over `git ls-files`.
   #
-  # The name list is a secret because putting it in this repository would
-  # publish the names the check exists to keep unpublished. Consequences:
+  # SHAPE ONLY, AND THAT IS A DECISION, NOT AN ACCIDENT.
   #
-  #   - On our own branches the secret is present and BOTH halves run.
-  #   - On a fork's pull request GitHub withholds secrets, so the shape half
-  #     runs alone and the step says so in a banner. That is the one place a
-  #     partial run is accepted, and it is loud rather than silent: an unshaped
-  #     name added by a fork is caught when the merge lands on a branch of this
-  #     repository, where the secret exists.
-  #   - Unset with no explicit `none` is exit 2, never a pass — a check that
-  #     quietly does nothing reports green, and green reads as "clean".
+  # Seat names have a shape (<base>-cc<n> / <base>-co<n>), so a pattern catches
+  # the whole class -- including seats nobody has created yet -- while putting
+  # no name into this repository. That half runs here.
+  #
+  # Names with no shape (a person's handle, a project nickname) are NOT checked
+  # by CI. Checking them needs the list of them, and the only way to give CI
+  # that list is to hand it to GitHub as a secret -- publishing, to a third
+  # party, the names the rule exists to keep unpublished. So that half runs
+  # before push, from a private checkout that holds the list, and never here.
+  #
+  # A green here therefore means "no seat-shaped name", not "no internal name".
+  # The script prints that in a banner rather than letting the distinction live
+  # only in this comment. `none` is passed explicitly for the same reason: an
+  # UNSET list is exit 2, so a run that checks half of what it claims can only
+  # happen because someone wrote it down, never because a variable was missing.
   private-names:
     name: internal names
     runs-on: ubuntu-latest
@@ -796,25 +802,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Check what we publish for internal names
-        env:
-          NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
-          # A fork PR gets no secrets — that is GitHub's doing, not a
-          # misconfiguration, and it is the only case where a partial run is
-          # accepted. Anywhere else an empty secret means nobody created it,
-          # which must fail rather than quietly check half of what it claims.
-          IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
-        run: |
-          if [ -n "$NAMES" ]; then
-            AGMSG_PRIVATE_NAMES="$NAMES" node scripts/check-private-names.mjs
-          elif [ "$IS_FORK" = "true" ]; then
-            echo "::warning::Fork pull request — secrets are withheld, so only the shape half ran."
-            AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs
-          else
-            echo "::error::AGMSG_PRIVATE_NAMES is not configured for this repository."
-            echo "This job cannot make the claim it exists to make. Create the secret"
-            echo "(Settings > Secrets and variables > Actions), or, if the check is"
-            echo "meant to run shape-only for now, say so explicitly in this workflow"
-            echo "rather than leaving an unset secret to decide it."
-            exit 2
-          fi
+      # `none` is written out here on purpose: it is the difference between
+      # "we check the shapes" and "nobody configured anything".
+      - name: Check the shapes we publish (unshaped names are checked before push)
+        run: AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs

@@ -103,6 +103,27 @@ test("an all-blank list is absent too, so whitespace cannot disarm the check", (
   assert.equal(injectedPattern([" ", "", "\t"]), null);
 });
 
+test("a list file may explain itself without its prose becoming names", () => {
+  // The list is maintained by hand, so it needs somewhere to say why a name is
+  // on it. Untreated, `# a person's handle` is read as a name and the checker
+  // starts matching the prose of its own configuration.
+  const file = "# why this list exists\nnori   # a handle\n\natlas\n";
+  assert.deepEqual(
+    readInjectedNames({ AGMSG_PRIVATE_NAMES_FILE: "f" }, () => file).names
+      .map((name) => name.trim()).filter(Boolean),
+    ["nori", "atlas"],
+  );
+});
+
+test("a list file that is only comments is absent, not empty", () => {
+  // Otherwise the check runs with no names, finds nothing, and reports clean --
+  // the vacuous green the whole design is built to refuse.
+  assert.deepEqual(
+    readInjectedNames({ AGMSG_PRIVATE_NAMES_FILE: "f" }, () => "# nothing here\n\n"),
+    { names: null, declaredNone: false },
+  );
+});
+
 test("a finding carries the line it is on, so the report reads without the file", () => {
   const found = scan("one\ntwo atlas-cc1 three", "scripts/x.sh", shapeOnly());
   assert.deepEqual(found, [{
