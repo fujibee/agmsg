@@ -157,6 +157,26 @@ skip_if_no_age() {
   [[ "$output" != *"/t/"* ]]
 }
 
+@test "connect: the capability path is absent from the FAILURE message too" {
+  # The failure line matters more than the progress line, and it was the one no
+  # test reached. Successful output scrolls past; failing output gets pasted --
+  # into a bug report, a chat, a screenshot -- and then it is stored, forwarded
+  # and searchable with the capability in it.
+  #
+  # A closed loopback port is what drives it: the endpoint passes validation,
+  # the POST cannot connect, and the HTTP branch prints. Reaching that line at
+  # all is asserted, because "the token is not in the output" is also true of
+  # output that never mentioned the endpoint.
+  local secret="agsy_do_not_print_this_token"
+  local closed_port=1
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://127.0.0.1:$closed_port/t/$secret" testteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"connect failed"* ]]
+  [[ "$output" == *"127.0.0.1:$closed_port"* ]]
+  [[ "$output" != *"$secret"* ]]
+  [[ "$output" != *"/t/"* ]]
+}
+
 @test "the endpoint shown on the terminal keeps only scheme, host and port" {
   # Unit-level, because `connect` cannot reach the interesting inputs: the
   # validator refuses userinfo outright (see the loopback-bypass test below),
