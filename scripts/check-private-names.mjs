@@ -18,19 +18,19 @@ import { readFileSync } from "node:fs";
 import { SEAT_SHAPE, format, injectedPattern, readInjectedNames, scan }
   from "./internal/private-names.mjs";
 
-// One entry, and it is load-bearing that there is only one.
+// Deliberately empty, and it stays that way.
 //
-// A test for a shape matcher has to contain the shape, so this file cannot be
-// scanned like any other. That is the whole justification — and it holds only
-// because the fixtures in it are FICTIONAL. Measured: with this exclusion
-// lifted, the test file yields 16 shape findings and zero real names, while the
-// checker and its library yield zero of either. An exclusion that covered a
-// real name would be hiding the thing it was written to find.
+// A test for a shape matcher has to exercise the shape -- but it does not have
+// to CONTAIN one. tests/private_names.test.mjs assembles every fixture at run
+// time (`[base, "-", role].join("")`), so its source holds no seat-shaped
+// literal and no listed name, and it is scanned like every other file.
 //
-// The first draft of this list had three entries and hid 29 real names,
-// including examples quoted in the library's own comments. Keep it at one, and
-// keep the fixtures fictional. Nothing can add itself here.
-const SELF = new Set(["tests/private_names.test.mjs"]);
+// The earlier version excluded three files and hid 29 real names, including
+// examples quoted in this checker's own comments. Review then made the sharper
+// point: "the fixtures are fictional today" describes the current contents, it
+// does not bind the next edit. An exclusion is a place a real name can be added
+// later and never reported. There is no such place now.
+const SELF = new Set();
 
 function trackedFiles() {
   return execFileSync("git", ["ls-files", "-z"], { maxBuffer: 1 << 28 })
@@ -101,10 +101,15 @@ function main() {
   if (findings.length > 0) {
     process.stdout.write(`${format(findings, { reveal }).join("\n")}\n`);
     const files = new Set(findings.map((f) => f.source)).size;
+    // Lines as well as findings. The two detectors overlap on purpose -- a seat
+    // built on a listed name is reported by both -- so a raw count reads as
+    // more work than it is. The line count is the number of edits.
+    const lines = new Set(findings.map((f) => `${f.source}:${f.line}`)).size;
     process.stderr.write(
-      `\ncheck-private-names: ${findings.length} internal name(s) in ${files} file(s), ` +
-      `out of ${scanned} scanned.\nRewrite the sentence so it states the reason ` +
-      `rather than who gave it; there is deliberately no way to silence a finding.\n`,
+      `\ncheck-private-names: ${findings.length} finding(s) on ${lines} line(s) ` +
+      `in ${files} file(s), out of ${scanned} scanned.\nRewrite the sentence so it ` +
+      `states the reason rather than who gave it; there is deliberately no way to ` +
+      `silence a finding.\n`,
     );
     return 1;
   }

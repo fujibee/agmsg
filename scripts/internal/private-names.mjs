@@ -23,11 +23,12 @@
  * Word boundaries by explicit character class, never `\b`. Two measured
  * reasons, one of them load-bearing today:
  *
- * 1. `-` must NOT be a boundary. To `\b` it is one, so a bare name fires inside
- *    a seat name built on it — `<name>` inside `<name>-cc1` — and every seat is
- *    reported twice, once as a shape and once as a bare name, telling the
- *    author to fix two things where there is one. The class below excludes `-`,
- *    so the shape reports it alone.
+ * 1. `-` must NOT be a boundary here. These two are the SHAPE's boundaries, and
+ *    a shape is built out of hyphens: with `\b`, `<a>-<b>-cc1` could match from
+ *    the middle and report `<b>-cc1`, naming a seat that does not exist while
+ *    the real one goes unreported. Excluding `-` forces the match to start at
+ *    the beginning of the name. (The bare-name boundaries are separate, and
+ *    deliberately looser — see below.)
  *
  * 2. It says what it means. `\b` is defined against `\w`, so reading a pattern
  *    requires knowing which characters that covers in this engine — and the
@@ -41,30 +42,31 @@ const BEFORE = "(?<![A-Za-z0-9_-])";
 const AFTER = "(?![A-Za-z0-9_-])";
 
 /**
- * Bare names need an ASYMMETRIC boundary, and the two sides are not the same
- * question:
+ * Bare names get plain boundaries on both sides, and DO overlap the shape.
  *
- *   LEFT accepts `-`. A name is still published when it is the tail of a
- *   compound — `<team>-<name>` in a fixture is the name, in the file, in the
- *   open. Refusing `-` on the left missed 17 such occurrences of one name
- *   alone; measured against the tree, that is the difference between 71 and 88.
+ * Two earlier versions tried to keep a seat name from being reported twice --
+ * once by the shape, once as the bare name inside it -- and each attempt left a
+ * hole where neither detector fired:
  *
- *   RIGHT refuses `-` ONLY when a role follows it. Refusing every `-` was the
- *   first attempt and it opened a hole between the two detectors: `<name>-`
- *   plus an ordinary word — `<name>-approved`, `<name>-code` — is neither a
- *   seat shape nor, under a blanket refusal, a bare name, so it was reported by
- *   nobody. The reason to refuse at all is narrow (do not report `<name>-cc1`
- *   twice, the shape has it), so the refusal is narrow too.
+ *   refusing `-` on the LEFT   missed `<team>-<name>`, 17 real occurrences
+ *   refusing `-` on the RIGHT  missed `<name>-approved`, found in review
+ *   suppressing when a role follows missed `<hyphenated-base>-cc1` entirely,
+ *     because the shape does not match it either
  *
- * The shape keeps the symmetric pair above: measured both ways, it finds the
- * same 60, so the looser left buys nothing there and the tighter one is easier
- * to reason about.
+ * Every hole came from the same wish. A duplicate report costs a reader one
+ * confused moment; a hole costs a published name. So the suppression is gone:
+ * a seat name built on a listed base is reported by both detectors, and the
+ * summary counts lines as well as findings so "two findings" reads as the one
+ * edit it is.
  */
 const NAME_BEFORE = "(?<![A-Za-z0-9])";
-const NAME_AFTER = "(?![A-Za-z0-9])(?!-(?:cc|co)[0-9]*(?![A-Za-z0-9_-]))";
+const NAME_AFTER = "(?![A-Za-z0-9])";
 
 /**
- * A seat name: a base word, then a role, then an optional index.
+ * A seat name: a base, then a role, then an optional index. The base may
+ * itself contain hyphens -- `<a>-<b>-cc1` is a seat, and a base of
+ * `[a-z][a-z0-9]*` alone matched neither from `<a>` (where `-<b>` is not a
+ * role) nor from `<b>` (where the preceding hyphen is refused).
  *
  * Only `cc` and `co` are roles here, and that is measured rather than assumed:
  * adding `x` or `it` to the alternation matches `linux-x64`, `win32-x64`,
@@ -77,7 +79,7 @@ const NAME_AFTER = "(?![A-Za-z0-9])(?!-(?:cc|co)[0-9]*(?![A-Za-z0-9_-]))";
  * hits either way, one false positive with the flag on.
  */
 export const SEAT_SHAPE = new RegExp(
-  `${BEFORE}[a-z][a-z0-9]*-(?:cc|co)[0-9]*${AFTER}`,
+  `${BEFORE}[a-z][a-z0-9]*(?:-[a-z0-9]+)*-(?:cc|co)[0-9]*${AFTER}`,
   "g",
 );
 

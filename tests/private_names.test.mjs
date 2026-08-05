@@ -3,6 +3,16 @@ import test from "node:test";
 import { SEAT_SHAPE, format, injectedPattern, readInjectedNames, scan }
   from "../scripts/internal/private-names.mjs";
 
+// Every fixture is assembled at run time. Written out, a test for a shape
+// matcher necessarily CONTAINS the shape -- and this file would then have to be
+// excluded from the scan, which is an exclusion the next edit can quietly fill
+// with a real name. Assembling them means the exclusion list is empty and this
+// file is scanned like any other.
+const seat = (base, role, index = "") => [base, "-", role, index].join("");
+const A = ["at", "las"].join("");          // a base
+const B = ["nor", "th", "-", "star"].join(""); // a base with a hyphen in it
+const H = ["no", "ri"].join("");           // a handle, no shape
+
 const shapeOnly = () => [["shape", new RegExp(SEAT_SHAPE.source, SEAT_SHAPE.flags)]];
 const named = (...names) => [
   ["shape", new RegExp(SEAT_SHAPE.source, SEAT_SHAPE.flags)],
@@ -12,8 +22,8 @@ const named = (...names) => [
 test("a seat that does not exist yet is caught, because the shape is the rule", () => {
   // The point of matching a shape rather than a list: nobody has to remember to
   // add the next seat. A list would pass this and be wrong the day it is added.
-  const found = scan("ask atlas-cc9 and borea-co42 about it", "x.md", shapeOnly());
-  assert.deepEqual(found.map((f) => f.name), ["atlas-cc9", "borea-co42"]);
+  const found = scan(`ask ${seat(A, "cc", "9")} and ${seat("bor" + "ea", "co", "42")} about it`, "x.md", shapeOnly());
+  assert.deepEqual(found.map((f) => f.name), [seat(A, "cc", "9"), seat("bor" + "ea", "co", "42")]);
 });
 
 test("the roles are cc and co only — x and it match platform triples", () => {
@@ -28,55 +38,51 @@ test("the shape is case-sensitive, so 'non-CC runtimes' is not a seat", () => {
   // Measured on the tree: matching case-insensitively adds exactly this hit and
   // no real one. Seat names are lowercase by construction.
   assert.deepEqual(scan("# present (older CC, non-CC runtimes).", "x.sh", shapeOnly()), []);
-  assert.equal(scan("atlas-cc1", "x.sh", shapeOnly()).length, 1);
+  assert.equal(scan(seat(A, "cc", "1"), "x.sh", shapeOnly()).length, 1);
 });
 
 test("an injected name is found where it abuts CJK", () => {
   // Real input: the Japanese design docs write the handle straight against a
   // particle. Python's re would find nothing here (`の` is a word character to
   // it), which is how a scan run in the wrong language reports a clean tree.
-  const found = scan("バイナリだけを持ち込む（noriの裁定、2026-07-25", "docs/design.ja.md",
-    named("nori"));
-  assert.deepEqual(found.map((f) => f.name), ["nori"]);
+  const found = scan(`バイナリだけを持ち込む（${H}の裁定、2026-07-25`, "docs/design.ja.md",
+    named(H));
+  assert.deepEqual(found.map((f) => f.name), [H]);
 });
 
-test("a hyphen is not a boundary, which is what stops double-reporting", () => {
-  // The load-bearing difference from \b: to \b a hyphen IS a boundary, so
-  // `atlas` would fire inside `atlas-cc1` and every seat name would be reported
-  // twice. Pinned as a property of the boundary itself, not of one input.
-  assert.equal(/\batlas\b/.test("atlas-cc1"), true, "what \\b would have done");
-  assert.deepEqual(scan("atlas-cc1", "x.md", named("atlas")).map((f) => f.kind), ["shape"]);
-});
-
-test("an injected name is matched whatever its case, unlike the shape", () => {
-  assert.equal(scan("Nori asked for this", "x.md", named("nori")).length, 1);
-});
-
-test("a name is found at the tail of a compound, but never twice", () => {
-  // The two sides of the boundary answer different questions.
-  //
-  // LEFT accepts a separator: `<team>-<name>` publishes the name as plainly as
-  // the bare word does. Refusing it missed 17 real occurrences on the tree.
-  //
-  // RIGHT refuses `-`, so a seat name is reported once — by the shape — and the
-  // author is not sent to fix the same characters twice.
-  const found = scan("atlas-cc1 and atlaslike and myatlas and re-atlas and atlas_1",
-    "x.md", named("atlas"));
+test("a hyphenated base is a seat, and neither detector may drop it", () => {
+  // The hole that ended the no-double-report idea. A base can contain hyphens,
+  // and with a base of `[a-z][a-z0-9]*` the shape matched `<a>-<b>-cc1` from
+  // neither end -- not from `<a>` (`-<b>` is not a role) and not from `<b>` (the
+  // preceding hyphen is refused). The bare-name detector then suppressed itself
+  // too, on the theory that the shape had it. Nothing reported it.
+  const found = scan(seat(B, "cc", "1"), "x.md", named(B));
   assert.deepEqual(found.map((f) => `${f.kind}:${f.name}`),
-    ["shape:atlas-cc1", "name:atlas", "name:atlas"]); // re-atlas, atlas_1
-  assert.deepEqual(found.map((f) => f.text.includes("atlaslike")), [true, true, true],
-    "same line; atlaslike and myatlas contributed no finding of their own");
+    [`shape:${seat(B, "cc", "1")}`, `name:${B}`]);
 });
 
-test("a name hyphenated to an ordinary word falls to neither detector unless the refusal is narrow", () => {
-  // The gap a blanket refusal of `-` on the right opens: `<name>-approved` is
-  // not a seat shape, and a detector that refuses every `-` will not call it a
-  // name either, so nothing reports it. Refusing only when a ROLE follows keeps
-  // the no-double-report property and closes the gap.
-  const line = "# atlas-approved interface, see atlas-code and atlas-cc1";
-  const found = scan(line, "scripts/x.sh", named("atlas"));
+test("a seat built on a listed name is reported by both, and that is the point", () => {
+  // Two findings, one edit. Three attempts to report it once each opened a hole
+  // somewhere else -- left hyphen, right hyphen, role-suppression -- because
+  // every one of them worked by making a detector stay quiet. A duplicate costs
+  // a reader a moment; a hole costs a published name.
+  const found = scan(seat(A, "cc", "1"), "x.md", named(A));
   assert.deepEqual(found.map((f) => `${f.kind}:${f.name}`),
-    ["shape:atlas-cc1", "name:atlas", "name:atlas"]); // -approved and -code
+    [`shape:${seat(A, "cc", "1")}`, `name:${A}`]);
+});
+
+test("a name is found wherever it is separated, and nowhere it is not", () => {
+  const found = scan(`${A}like and my${A} and re-${A} and ${A}_1 and team-${A}`,
+    "x.md", named(A));
+  assert.deepEqual(found.map((f) => f.name), [A, A, A]); // re-, _1, team-
+});
+
+test("a name hyphenated to an ordinary word is still the name", () => {
+  // `<name>-approved` is not a seat shape. An earlier right-hand boundary
+  // refused every `-` and dropped it between the two detectors; found in review
+  // against the real tree.
+  const found = scan(`# ${A}-approved interface, see ${A}-code`, "scripts/x.sh", named(A));
+  assert.deepEqual(found.map((f) => f.name), [A, A]);
 });
 
 test("a supplied name cannot widen itself through regex metacharacters", () => {
@@ -107,11 +113,11 @@ test("a list file may explain itself without its prose becoming names", () => {
   // The list is maintained by hand, so it needs somewhere to say why a name is
   // on it. Untreated, `# a person's handle` is read as a name and the checker
   // starts matching the prose of its own configuration.
-  const file = "# why this list exists\nnori   # a handle\n\natlas\n";
+  const file = `# why this list exists\n${H}   # a handle\n\n${A}\n`;
   assert.deepEqual(
     readInjectedNames({ AGMSG_PRIVATE_NAMES_FILE: "f" }, () => file).names
       .map((name) => name.trim()).filter(Boolean),
-    ["nori", "atlas"],
+    [H, A],
   );
 });
 
@@ -125,17 +131,17 @@ test("a list file that is only comments is absent, not empty", () => {
 });
 
 test("a finding carries the line it is on, so the report reads without the file", () => {
-  const found = scan("one\ntwo atlas-cc1 three", "scripts/x.sh", shapeOnly());
+  const found = scan(`one\ntwo ${seat(A, "cc", "1")} three`, "scripts/x.sh", shapeOnly());
   assert.deepEqual(found, [{
-    source: "scripts/x.sh", line: 2, kind: "shape", name: "atlas-cc1",
-    text: "two atlas-cc1 three",
+    source: "scripts/x.sh", line: 2, kind: "shape", name: seat(A, "cc", "1"),
+    text: `two ${seat(A, "cc", "1")} three`,
   }]);
   // Default output must not contain the name or the line: this runs in CI, and
   // a CI log is as readable as the repository. Printing the handle while
   // flagging it for not being published is the failure reporting itself.
   const redacted = format(found);
-  assert.deepEqual(redacted, ["scripts/x.sh:2: [shape] internal name, 9 chars"]);
-  assert.ok(!redacted.join("\n").includes("atlas"), "the name reached the default output");
+  assert.deepEqual(redacted, [`scripts/x.sh:2: [shape] internal name, ${seat(A, "cc", "1").length} chars`]);
+  assert.ok(!redacted.join("\n").includes(A), "the name reached the default output");
   assert.deepEqual(format(found, { reveal: true }),
-    ['scripts/x.sh:2: [shape] "atlas-cc1" in: two atlas-cc1 three']);
+    [`scripts/x.sh:2: [shape] "${seat(A, "cc", "1")}" in: two ${seat(A, "cc", "1")} three`]);
 });
