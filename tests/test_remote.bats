@@ -9,6 +9,8 @@ setup() {
   # server for each later test — and a case that fails early never gets to
   # put it back.
   MOCK_TEAM_CIPHER_PROFILE=age-v1
+  MOCK_CONNECT_STATUS=""
+  export MOCK_CONNECT_STATUS
   export PEER_SKILL_DIR=""
   # Some cases deliberately remove python3 from PATH to verify the control-plane
   # gate. Resolve the fixture interpreter in each test process before that
@@ -24,6 +26,7 @@ setup() {
   MOCK_HEALTH_TEAM_ID="${MOCK_HEALTH_TEAM_ID:-}" \
   MOCK_CONNECT_NO_AGE="${MOCK_CONNECT_NO_AGE:-}" \
   MOCK_CONNECT_TEAM_NAME="${MOCK_CONNECT_TEAM_NAME:-}" \
+  MOCK_CONNECT_STATUS="${MOCK_CONNECT_STATUS:-}" \
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
@@ -89,6 +92,7 @@ restart_mock_server() {
   MOCK_HEALTH_TEAM_ID="${MOCK_HEALTH_TEAM_ID:-}" \
   MOCK_CONNECT_NO_AGE="${MOCK_CONNECT_NO_AGE:-}" \
   MOCK_CONNECT_TEAM_NAME="${MOCK_CONNECT_TEAM_NAME:-}" \
+  MOCK_CONNECT_STATUS="${MOCK_CONNECT_STATUS:-}" \
   MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
     "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
       </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
@@ -158,21 +162,27 @@ skip_if_no_age() {
 }
 
 @test "connect: the capability path is absent from the FAILURE message too" {
-  # The failure line matters more than the progress line, and it was the one no
-  # test reached. Successful output scrolls past; failing output gets pasted --
-  # into a bug report, a chat, a screenshot -- and then it is stored, forwarded
-  # and searchable with the capability in it.
+  # The failure line matters more than the progress line: successful output
+  # scrolls past, failing output gets pasted -- into a bug report, a chat, a
+  # screenshot -- and is then stored, forwarded and searchable.
   #
-  # A closed loopback port is what drives it: the endpoint passes validation,
-  # the POST cannot connect, and the HTTP branch prints. Reaching that line at
-  # all is asserted, because "the token is not in the output" is also true of
-  # output that never mentioned the endpoint.
+  # The status is forced by the fixture rather than by pointing at a port
+  # nobody is listening on. A free port is not state this test owns: anything
+  # on the runner may be bound to it, and then the POST succeeds and the branch
+  # under test never runs. The mock is started by this suite, so its answer is
+  # ours to decide.
+  #
+  # Reaching the line is asserted too. "The token is not in the output" is also
+  # true of output that never mentioned the endpoint at all.
+  MOCK_CONNECT_STATUS=503
+  export MOCK_CONNECT_STATUS
+  restart_mock_server
   local secret="agsy_do_not_print_this_token"
-  local closed_port=1
-  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://127.0.0.1:$closed_port/t/$secret" testteam
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/$secret" testteam
   [ "$status" -ne 0 ]
   [[ "$output" == *"connect failed"* ]]
-  [[ "$output" == *"127.0.0.1:$closed_port"* ]]
+  [[ "$output" == *"returned HTTP 503"* ]]
+  [[ "$output" == *"127.0.0.1:$MOCK_PORT"* ]]
   [[ "$output" != *"$secret"* ]]
   [[ "$output" != *"/t/"* ]]
 }

@@ -23,6 +23,13 @@ CONNECT_CIPHERS = (["none"] if os.environ.get("MOCK_CONNECT_NO_AGE") == "1"
 # for", which is the real server's behaviour and what every other case wants.
 CONNECT_TEAM_NAME = os.environ.get("MOCK_CONNECT_TEAM_NAME", "")
 
+# Force /v1/connect to answer with a given HTTP status. Only a test that needs
+# the client's non-200 branch sets this; everything else leaves it unset and
+# gets the normal handler. Owning the status here is what makes such a test
+# hermetic -- the alternative, pointing the client at a port nobody is listening
+# on, depends on a port being free, which no test owns.
+CONNECT_STATUS = os.environ.get("MOCK_CONNECT_STATUS", "")
+
 # What the server DECLARES this team uses, as distinct from CONNECT_CIPHERS
 # above, which is what it would accept. Empty means "no machine has declared
 # it" and is sent as JSON null — the state a team connected by an older client
@@ -364,6 +371,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
+
+        # Before routing, on purpose. A capability endpoint is
+        # `https://host/t/<token>`, so every request path arrives with that
+        # prefix and would miss a check placed inside a `self.path == "/v1/..."`
+        # branch. Only a test that needs the client's non-200 branch sets this.
+        if CONNECT_STATUS and self.path.endswith("/v1/connect"):
+            self._send_json(int(CONNECT_STATUS), {"error": {"code": "forced-by-fixture"}})
+            return
 
         if self.path == "/v1/messages":
             try:
