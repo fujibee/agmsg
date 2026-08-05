@@ -171,7 +171,7 @@ export function hasUnsafeDropPath(paths: string[]): boolean {
 // null if any of them fails the control-character check above (the whole
 // drop is rejected, not just the unsafe path — see its doc). Deliberately
 // NOT shell-quoted: the target of a drop is almost always an agent CLI's
-// own prompt line (koit's framing — "same as cc/codex"), not a literal
+// own prompt line (the framing — "same as cc/codex"), not a literal
 // shell command, and quoting broke path recognition there in live testing
 // — Claude Code's own file-path heuristic doesn't match a quote-wrapped
 // string, it just reads as plain text (Codex tolerated quotes fine, but
@@ -184,7 +184,7 @@ export function joinDroppedPaths(paths: string[]): string | null {
 // Which pane, if any, a dropped file should land in when it didn't land on
 // any specific pane cell (dropped on the sidebar, tab bar, Team Room, ...)
 // — the active tab's actually-focused pane if it has one, else its first
-// pane, per koit's spec ("特定できない場合はactiveへ" — koit's follow-up
+// pane, per the spec ("特定できない場合はactiveへ" — a follow-up
 // live-testing feedback: prefer the focused pane specifically, not just
 // whichever leaf happens to be first in the tree). A pane found directly
 // under the cursor is always already in the active window (inactive
@@ -446,7 +446,7 @@ export default function App() {
   // Same idea, over the app-user chat pane's own header: { x, y }.
   const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
 
-  // Closes every context/dropdown menu (koit: opening a second one while a
+  // Closes every context/dropdown menu (opening a second one while a
   // first is still open used to stack both — right-clicking a different
   // target, or clicking a different trigger button, never went through the
   // background click-away handler that normally closes these, since it's
@@ -514,7 +514,7 @@ export default function App() {
   const [externalDropPaneId, setExternalDropPaneId] = useState<string | null>(null);
   // Most recently focused pane, across the whole app (TerminalPane's
   // onFocusPane) — the external-file-drop fallback target when a drop
-  // misses every pane cell (koit: prefer the active tab's actual focused
+  // misses every pane cell (prefer the active tab's actual focused
   // pane over just its first one). A plain ref, not state — nothing renders
   // off this, it's only read inside the drag-drop effect below, so tracking
   // it as state would just be a re-render on every pane focus change for no
@@ -602,7 +602,7 @@ export default function App() {
 
   // Cell size in CSS px. The ref is for snapping a divider drag to whole
   // terminal rows/cols — read once at drag-start, doesn't need a re-render
-  // on every fit. The state twin drives the gap BETWEEN panes below (koit:
+  // on every fit. The state twin drives the gap BETWEEN panes below (it
   // should be a full terminal cell per axis, herdr-style, not an arbitrary
   // fixed px value) — that one has to be real React state since it feeds
   // rendered CSS. Every pane uses the same fixed font today, so any one of
@@ -1078,7 +1078,7 @@ export default function App() {
       // A free-shell pane has no "still running, look at the error" state
       // worth preserving the way an agent's crash banner does
       // (TerminalPane's own pty-exit listener writes that inline) — its own
-      // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
+      // exit/Ctrl-D is a deliberate "done here", so the pane (and its
       // tab, if it was the last one) just goes away instead of sitting on a
       // dead prompt. Agent panes are untouched — this only fires for panes
       // flagged `shell`.
@@ -1092,7 +1092,7 @@ export default function App() {
   // Dragging a file from Finder/Explorer onto the app used to hand off to
   // the webview's own default drop navigation — for an image, that meant
   // the whole window replaced its content with the image and the app was
-  // stuck (koit bug report). Tauri's dragDropEnabled (tauri.conf.json,
+  // stuck (reported in use). Tauri's dragDropEnabled (tauri.conf.json,
   // flipped on for this feature) intercepts the OS-level drop entirely and
   // routes it through this native event instead, which is also what makes
   // the fix and the feature the same change: with nothing left to hand off
@@ -1123,7 +1123,7 @@ export default function App() {
         // device pixels, which DOES need the devicePixelRatio divide. Using
         // .toLogical() unconditionally halved every coordinate on a 2x
         // Retina Mac, which was consistently landing in/near the top-left
-        // pane regardless of actual drop position (koit bug report).
+        // pane regardless of actual drop position (reported in use).
         const { x, y } = isWindows
           ? event.payload.position.toLogical(window.devicePixelRatio)
           : event.payload.position;
@@ -1205,7 +1205,7 @@ export default function App() {
   // #431); getLoginShell has already surfaced startupError in that case, so
   // callers just bail out with no pane. cwd defaults to the current team's
   // project dir (teamProject) rather than wherever the shell would
-  // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
+  // otherwise start — re-cd'ing from $HOME every time is tedious —
   // falling back to $HOME only when no project dir is configured. Shared by
   // openShellTab (new tab) and openShellInWindow (split into an existing
   // tab) below; both only ever act on the current team's tabs (windowMenu
@@ -1260,7 +1260,7 @@ export default function App() {
 
   // True when `windowId`'s tab currently has a free-shell pane in it — the
   // signal spawnMember's sidebar-click site uses to decide "spawn this agent
-  // beside the shell in the same tab" (koit's design B) instead of the
+  // beside the shell in the same tab" (design B) instead of the
   // default "open a new tab".
   const windowHasShellPane = useCallback((windowId: string) => {
     const w = windowsRef.current.find((w) => w.id === windowId);
@@ -1668,7 +1668,8 @@ export default function App() {
       const startW = sidebarWidth;
       // 180, not 140 — narrower than that wraps the brand-row's + New
       // button and the sidebar-title row's All/None filter links onto a
-      // second line (koit). Full collapse (the rail toggle) is the way to
+      // second line, which reads as broken rather than compact. Full collapse
+      // (the rail toggle) is the way to
       // go narrower than a usable full sidebar now anyway.
       const onMove = (ev: MouseEvent) =>
         setSidebarWidth(Math.max(180, Math.min(520, startW + ev.clientX - startX)));
@@ -1760,7 +1761,7 @@ export default function App() {
     // own doc).
     const MIN_PANE_PX = 120;
     const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
-    // koit: prefers the divider snapping to whole terminal cells over a
+    // prefers the divider snapping to whole terminal cells over a
     // free pixel drag (herdr-inspired, though herdr itself had nothing
     // reusable here — this is agmsg's own design). Every pane shares the
     // same fixed font, so one representative cell size (captured by any
@@ -1871,7 +1872,7 @@ export default function App() {
           style={{ width: sidebarCollapsed ? undefined : sidebarWidth }}
         >
           {/* Collapse toggle — level with the traffic lights, expanded state
-              only (koit: it looked fine there, "closing is perfect"). At
+              only (it looked fine there, "closing is perfect"). At
               44px wide the collapsed sidebar sits entirely under the
               traffic-light cluster, so ANY button in this same slim strip
               would overlap them there — collapsed state expands via the
@@ -1888,13 +1889,13 @@ export default function App() {
             </div>
           )}
           {sidebarCollapsed ? (
-            // Icon-only rail (koit design): the agmsg mark (click to
+            // Icon-only rail (by design): the agmsg mark (click to
             // expand) → + (new team/agent, same menu as full view) → team
             // icon (click opens a team-switch popup, replacing the
             // <select>) → spacer → the app-user avatar + a settings button
             // at the bottom. No running-dot / member list — spawning/
             // messaging isn't offered from here at all. Icons are lucide
-            // (koit: prefer a real icon set over ad-hoc unicode
+            // (prefer a real icon set over ad-hoc unicode
             // glyphs/hand-drawn SVGs).
             <div className="sidebar-collapsed-rail">
               <button
@@ -2300,7 +2301,7 @@ export default function App() {
                     // The gap between two adjacent panes is each side's own
                     // padding added together, so half a cell per side makes
                     // a full terminal cell of gap at the shared seam
-                    // (koit/herdr: the gap should read as "one cell", not
+                    // (the gap should read as "one cell", not
                     // an arbitrary fixed px value — falls back to the old
                     // fixed padding before any pane has fit and reported
                     // its real cell size).

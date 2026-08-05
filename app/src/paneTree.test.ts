@@ -76,7 +76,7 @@ describe("computeRects", () => {
     expect(rects.get("p4")).toEqual({ left: 50, top: 50, width: 50, height: 50 });
   });
 
-  // Invariant (aggie review, recommendation 4): rects tile the unit rect
+  // Invariant (an earlier review, recommendation 4): rects tile the unit rect
   // exactly for a range of generated trees, not just the hand-picked cases
   // above — no gaps, no overlaps, areas sum to the whole.
   it("invariant: leaf rects always tile the full rect with no gaps or overlaps", () => {
@@ -278,7 +278,7 @@ describe("insertBeside", () => {
     expect(insertBeside(tree, "p1", "left", "p1")).toBe(tree);
   });
 
-  // co1 + aggie review: without this guard, splicing newPaneId out FIRST
+  // an earlier review: without this guard, splicing newPaneId out FIRST
   // and only then failing to find a nonexistent targetPaneId would return
   // "the tree minus newPaneId" — silently dropping the dragged pane
   // entirely rather than leaving it in place. Reachable via a real UI race
@@ -442,7 +442,7 @@ describe("clampRatio / minRatioForPx", () => {
   });
 });
 
-describe("invariants (aggie review, recommendation 4)", () => {
+describe("invariants (an earlier review, recommendation 4)", () => {
   it("round-trip: leaves(spliceOutLeaf(insertAsNewLeaf(t, id), id)) === leaves(t)", () => {
     const trees: SplitNode[] = [
       leaf("solo"),

@@ -275,7 +275,7 @@ function zipPairs(a: SplitNode, b: SplitNode, pairAxis: SplitAxis, pairRatio: nu
  * single-divider, whole-grid-drag fallback applies there, same as any
  * asymmetric or manually-adjusted tree today. Deliberately scoped to
  * exactly this one shape — a further generalization to partially-aligned
- * nested arrangements is out of scope (confirmed with koit).
+ * nested arrangements is out of scope (settled deliberately).
  */
 export function transposeGrid(node: SplitNode): SplitNode {
   if (node.kind === "leaf") return node;
@@ -443,7 +443,7 @@ function tileRowSizes(n: number): number[] {
 /**
  * Discards whatever tree currently exists and rebuilds a fresh canonical
  * tree for `preset` from `paneIds` — a one-shot RESET, not a persisted mode
- * (confirmed with koit: picking Vertical/Horizontal/Tile from the menu just
+ * (settled deliberately: picking Vertical/Horizontal/Tile from the menu just
  * re-arranges the tab back to that pattern; it doesn't lock out further
  * manual divider drags or split-drops afterward).
  */

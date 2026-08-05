@@ -185,7 +185,7 @@ fn resolve_login_shell() -> String {
 /// only treats stdin-is-a-tty as sufficient for *interactive*, not *login*.
 /// `home` is the frontend's cwd fallback when the current team has no
 /// project dir configured — the frontend's own default-project value always
-/// wins when set (koit: cd'ing from $HOME every time is tedious), this is
+/// wins when set (cd'ing from $HOME every time is tedious), this is
 /// only reached when that's empty. A login shell doesn't cd to $HOME on its
 /// own; that's a real terminal app's spawn-time cwd, not shell behavior.
 #[derive(Serialize)]
@@ -250,7 +250,7 @@ fn make_menu(app: &AppHandle, lang: &str) -> tauri::Result<(Menu<Wry>, CheckMenu
     // This runs again on every language switch (set_menu_language rebuilds
     // the whole menu — Tauri has no per-item relabel API), which used to
     // hardcode both checkboxes back to checked regardless of their actual
-    // current state (koit bug report: the checkmark went stale after
+    // current state (reported in use: the checkmark went stale after
     // hiding Team Room, even though the real show/hide behavior was
     // correct). try_state — not state, which panics — since the very
     // FIRST call happens from the initial .menu(...) builder hook, before

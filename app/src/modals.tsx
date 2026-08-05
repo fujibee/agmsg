@@ -400,7 +400,7 @@ export const MIN_TERMINAL_FONT_SIZE = 8;
 export const MAX_TERMINAL_FONT_SIZE = 24;
 
 // type="number" doesn't reliably block non-numeric characters in every
-// webview engine (koit's real-hardware report: WKWebView on macOS let them
+// webview engine (a real-hardware report: WKWebView on macOS let them
 // through into the field). Strips anything that isn't a digit, a leading
 // "-", or the first "." — applied to the DRAFT text itself before it's
 // shown, not just before committing, so a rejected character never

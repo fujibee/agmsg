@@ -76,20 +76,20 @@ describe("shellPaneFrom", () => {
   });
 
   it("builds a shell pane from resolved login shell info", () => {
-    const info: LoginShellInfo = { cmd: "/bin/zsh", args: ["-il"], home: "/Users/koit" };
-    expect(shellPaneFrom(info, "shell-1", "Shell", "/Users/koit/project")).toEqual({
+    const info: LoginShellInfo = { cmd: "/bin/zsh", args: ["-il"], home: "/Users/dev" };
+    expect(shellPaneFrom(info, "shell-1", "Shell", "/Users/dev/project")).toEqual({
       id: "shell-1",
       label: "Shell",
       cmd: "/bin/zsh",
       args: ["-il"],
-      cwd: "/Users/koit/project",
+      cwd: "/Users/dev/project",
       native: false,
       shell: true,
     });
   });
 
   it("passes cwd through as-is, including undefined", () => {
-    const info: LoginShellInfo = { cmd: "/bin/bash", args: ["-il"], home: "/home/koit" };
+    const info: LoginShellInfo = { cmd: "/bin/bash", args: ["-il"], home: "/home/dev" };
     expect(shellPaneFrom(info, "shell-2", "Shell", undefined)?.cwd).toBeUndefined();
   });
 });
@@ -140,23 +140,23 @@ describe("shellSplitStillValid", () => {
 
 describe("hasUnsafeDropPath", () => {
   it("is false for ordinary paths", () => {
-    expect(hasUnsafeDropPath(["/Users/koit/file.txt", "/a/b c.png"])).toBe(false);
+    expect(hasUnsafeDropPath(["/Users/dev/file.txt", "/a/b c.png"])).toBe(false);
   });
 
   it("catches a newline — could submit the target prompt on drop alone", () => {
-    expect(hasUnsafeDropPath(["/Users/koit/evil\nrm -rf ~.txt"])).toBe(true);
+    expect(hasUnsafeDropPath(["/Users/dev/evil\nrm -rf ~.txt"])).toBe(true);
   });
 
   it("catches a carriage return", () => {
-    expect(hasUnsafeDropPath(["/Users/koit/evil\rfile.txt"])).toBe(true);
+    expect(hasUnsafeDropPath(["/Users/dev/evil\rfile.txt"])).toBe(true);
   });
 
   it("catches an ESC byte — terminal control sequence, not text", () => {
-    expect(hasUnsafeDropPath(["/Users/koit/evil\x1bfile.txt"])).toBe(true);
+    expect(hasUnsafeDropPath(["/Users/dev/evil\x1bfile.txt"])).toBe(true);
   });
 
   it("catches DEL (\\u007f), just outside the C0 range", () => {
-    expect(hasUnsafeDropPath(["/Users/koit/evil\x7ffile.txt"])).toBe(true);
+    expect(hasUnsafeDropPath(["/Users/dev/evil\x7ffile.txt"])).toBe(true);
   });
 
   it("is false for an empty list", () => {
@@ -168,12 +168,12 @@ describe("joinDroppedPaths", () => {
   it("joins multiple paths with a single space, unquoted", () => {
     // Deliberately bare, not shell-quoted — see joinDroppedPaths' own doc:
     // quoting broke Claude Code's own file-path recognition in live
-    // testing (koit), even though it's fine for Codex.
+    // testing, even though it's fine for Codex.
     expect(joinDroppedPaths(["/a/b.txt", "/c/d.txt"])).toBe("/a/b.txt /c/d.txt");
   });
 
   it("passes a path with a space through unquoted", () => {
-    expect(joinDroppedPaths(["/Users/koit/my file.txt"])).toBe("/Users/koit/my file.txt");
+    expect(joinDroppedPaths(["/Users/dev/my file.txt"])).toBe("/Users/dev/my file.txt");
   });
 
   it("returns an empty string for no paths", () => {
@@ -186,7 +186,7 @@ describe("joinDroppedPaths", () => {
     // line the instant the file is dropped. Rejecting outright (not
     // stripping the bad byte) avoids silently writing a DIFFERENT path than
     // what was actually dropped.
-    expect(joinDroppedPaths(["/Users/koit/evil\nfile.txt", "/Users/koit/fine.txt"])).toBeNull();
+    expect(joinDroppedPaths(["/Users/dev/evil\nfile.txt", "/Users/dev/fine.txt"])).toBeNull();
   });
 });
 
@@ -204,8 +204,8 @@ describe("resolveFileDropTarget", () => {
   });
 
   it("falls back to the active tab's focused pane when nothing was hit", () => {
-    // e.g. dropped on the sidebar or tab bar, not any pane cell — koit's
-    // follow-up feedback: prefer the pane the user was actually using, not
+    // e.g. dropped on the sidebar or tab bar, not any pane cell. Follow-up
+    // feedback: prefer the pane the user was actually using, not
     // just whichever leaf happens to be first in the tree.
     expect(resolveFileDropTarget(null, windows, "w-1", "p-2")).toBe("p-2");
   });
