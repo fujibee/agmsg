@@ -768,3 +768,43 @@ jobs:
       - name: Rust tests
         if: needs.changes.outputs.app_changed != 'false'
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Internal team names must not reach what we publish. This runs on EVERY diff,
+  # with no docs-only skip: the docs tree is exactly where prose names people,
+  # and a check that skips the files most likely to carry the problem is
+  # decoration. It is cheap — one node process over `git ls-files`.
+  #
+  # The name list is a secret because putting it in this repository would
+  # publish the names the check exists to keep unpublished. Consequences:
+  #
+  #   - On our own branches the secret is present and BOTH halves run.
+  #   - On a fork's pull request GitHub withholds secrets, so the shape half
+  #     runs alone and the step says so in a banner. That is the one place a
+  #     partial run is accepted, and it is loud rather than silent: an unshaped
+  #     name added by a fork is caught when the merge lands on a branch of this
+  #     repository, where the secret exists.
+  #   - Unset with no explicit `none` is exit 2, never a pass — a check that
+  #     quietly does nothing reports green, and green reads as "clean".
+  private-names:
+    name: internal names
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check what we publish for internal names
+        env:
+          # Empty on a fork PR. The step turns that into an explicit, announced
+          # `none` rather than letting an unset variable decide silently.
+          NAMES: ${{ secrets.AGMSG_PRIVATE_NAMES }}
+        run: |
+          if [ -z "$NAMES" ]; then
+            echo "::warning::No name list available (fork PR?) — running the shape half only."
+            AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs
+          else
+            AGMSG_PRIVATE_NAMES="$NAMES" node scripts/check-private-names.mjs
+          fi
