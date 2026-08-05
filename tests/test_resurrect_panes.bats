@@ -52,15 +52,15 @@ make_transcript() {
 }
 
 @test "plan: seats a role pane matched by its saved title" {
-  put_record agmsg aggie "sess-1" /proj
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  put_record agmsg alice "sess-1" /proj
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
 
   run agmsg_resurrect_plan "$FIXTURE"
   [ "$status" -eq 0 ]
   # <target>\t<command>: target is session:window.pane
   [[ "$output" == "agmsg:0.0"* ]]
   [[ "$output" == *"claude"* ]]
-  [[ "$output" == *"-n agmsg-aggie"* ]]
+  [[ "$output" == *"-n agmsg-alice"* ]]
   [[ "$output" == *"actas"* ]]
 }
 
@@ -69,11 +69,11 @@ make_transcript() {
   # still-running session in another process). Reseating would resume a uuid that
   # is already open -> the CLI rejects the double-launch and the pane dies to a
   # shell. The lock -- not "pane is a shell" -- is the source of truth here.
-  put_record agmsg aggie "sess-1" /proj
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  put_record agmsg alice "sess-1" /proj
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
   # A live actas-lock owner: cc-instance for this test's pid holds the owner sid.
   echo "live-owner" > "$RUN_DIR/cc-instance.$$"
-  echo "live-owner" > "$(actas_lock_path agmsg aggie)"
+  echo "live-owner" > "$(actas_lock_path agmsg alice)"
 
   run agmsg_resurrect_plan "$FIXTURE"
   [ "$status" -eq 0 ]
@@ -83,13 +83,13 @@ make_transcript() {
 @test "plan: still reseats when the lock is stale (owner sid dead) (#339)" {
   # A dead owner (no live cc-instance references the sid) is a stale lock ->
   # actas_lock_state reports free -> the role really needs reseating.
-  put_record agmsg aggie "sess-1" /proj
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
-  echo "dead-owner" > "$(actas_lock_path agmsg aggie)"   # no cc-instance -> not alive
+  put_record agmsg alice "sess-1" /proj
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
+  echo "dead-owner" > "$(actas_lock_path agmsg alice)"   # no cc-instance -> not alive
 
   run agmsg_resurrect_plan "$FIXTURE"
   [[ "$output" == "agmsg:0.0"* ]]
-  [[ "$output" == *"-n agmsg-aggie"* ]]
+  [[ "$output" == *"-n agmsg-alice"* ]]
 }
 
 @test "plan: matches by the -n role marker in the saved argv when the title is generic" {
@@ -102,25 +102,25 @@ make_transcript() {
 }
 
 @test "plan: adds --resume <uuid> when the recorded transcript still exists" {
-  put_record agmsg aggie "sess-1" /proj
+  put_record agmsg alice "sess-1" /proj
   make_transcript "sess-1" /proj
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
 
   run agmsg_resurrect_plan "$FIXTURE"
   [[ "$output" == *"--resume sess-1"* ]]
 }
 
 @test "plan: falls back to fresh (no --resume) when the transcript is gone" {
-  put_record agmsg aggie "sess-1" /proj   # record but no transcript
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  put_record agmsg alice "sess-1" /proj   # record but no transcript
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
 
   run agmsg_resurrect_plan "$FIXTURE"
   [[ "$output" != *"--resume"* ]]
-  [[ "$output" == *"-n agmsg-aggie"* ]]   # still seated, just fresh
+  [[ "$output" == *"-n agmsg-alice"* ]]   # still seated, just fresh
 }
 
 @test "plan: ignores panes that are not a role seat" {
-  put_record agmsg aggie "sess-1" /proj
+  put_record agmsg alice "sess-1" /proj
   pane_line agmsg 0 0 "vim" /proj vim "vim README.md"
 
   run agmsg_resurrect_plan "$FIXTURE"
@@ -128,7 +128,7 @@ make_transcript() {
 }
 
 @test "plan: a title that matches no record is not seated" {
-  put_record agmsg aggie "sess-1" /proj
+  put_record agmsg alice "sess-1" /proj
   pane_line agmsg 0 0 "* agmsg-ghost" /proj bash "bash"
 
   run agmsg_resurrect_plan "$FIXTURE"
@@ -136,22 +136,22 @@ make_transcript() {
 }
 
 @test "plan: empty when there are no role-session records" {
-  pane_line agmsg 0 0 "* agmsg-aggie" /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  pane_line agmsg 0 0 "* agmsg-alice" /proj bash "claude -n agmsg-alice /agmsg actas alice"
   run agmsg_resurrect_plan "$FIXTURE"
   [ -z "$output" ]
 }
 
 @test "plan: empty when the save file is missing" {
-  put_record agmsg aggie "sess-1" /proj
+  put_record agmsg alice "sess-1" /proj
   run agmsg_resurrect_plan "$TEST_SKILL_DIR/does-not-exist.txt"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
 @test "plan: multiple role panes each get their own seat line" {
-  put_record agmsg aggie  "sess-1" /proj
+  put_record agmsg alice  "sess-1" /proj
   put_record agmsg worker "sess-2" /proj
-  pane_line agmsg 0 0 "* agmsg-aggie"  /proj bash "claude -n agmsg-aggie /agmsg actas aggie"
+  pane_line agmsg 0 0 "* agmsg-alice"  /proj bash "claude -n agmsg-alice /agmsg actas alice"
   pane_line agmsg 0 1 "* agmsg-worker" /proj bash "claude -n agmsg-worker /agmsg actas worker"
 
   run agmsg_resurrect_plan "$FIXTURE"
