@@ -49,17 +49,19 @@ const AFTER = "(?![A-Za-z0-9_-])";
  *   open. Refusing `-` on the left missed 17 such occurrences of one name
  *   alone; measured against the tree, that is the difference between 71 and 88.
  *
- *   RIGHT refuses `-`, which is what keeps a seat name from being reported
- *   twice: `<name>-cc1` is a shape finding, and the bare-name detector must
- *   stay out of it. `_` is allowed here — `<name>_1` is the name too, and no
- *   shape uses `_`.
+ *   RIGHT refuses `-` ONLY when a role follows it. Refusing every `-` was the
+ *   first attempt and it opened a hole between the two detectors: `<name>-`
+ *   plus an ordinary word — `<name>-approved`, `<name>-code` — is neither a
+ *   seat shape nor, under a blanket refusal, a bare name, so it was reported by
+ *   nobody. The reason to refuse at all is narrow (do not report `<name>-cc1`
+ *   twice, the shape has it), so the refusal is narrow too.
  *
  * The shape keeps the symmetric pair above: measured both ways, it finds the
  * same 60, so the looser left buys nothing there and the tighter one is easier
  * to reason about.
  */
 const NAME_BEFORE = "(?<![A-Za-z0-9])";
-const NAME_AFTER = "(?![A-Za-z0-9-])";
+const NAME_AFTER = "(?![A-Za-z0-9])(?!-(?:cc|co)[0-9]*(?![A-Za-z0-9_-]))";
 
 /**
  * A seat name: a base word, then a role, then an optional index.

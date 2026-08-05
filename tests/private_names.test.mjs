@@ -68,6 +68,17 @@ test("a name is found at the tail of a compound, but never twice", () => {
     "same line; atlaslike and myatlas contributed no finding of their own");
 });
 
+test("a name hyphenated to an ordinary word falls to neither detector unless the refusal is narrow", () => {
+  // The gap a blanket refusal of `-` on the right opens: `<name>-approved` is
+  // not a seat shape, and a detector that refuses every `-` will not call it a
+  // name either, so nothing reports it. Refusing only when a ROLE follows keeps
+  // the no-double-report property and closes the gap.
+  const line = "# atlas-approved interface, see atlas-code and atlas-cc1";
+  const found = scan(line, "scripts/x.sh", named("atlas"));
+  assert.deepEqual(found.map((f) => `${f.kind}:${f.name}`),
+    ["shape:atlas-cc1", "name:atlas", "name:atlas"]); // -approved and -code
+});
+
 test("a supplied name cannot widen itself through regex metacharacters", () => {
   const found = scan("kXit and k.it", "x.md", named("k.it"));
   assert.deepEqual(found.map((f) => f.name), ["k.it"]);
