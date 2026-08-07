@@ -56,8 +56,8 @@ teardown() {
   printf '%s\n' "$owner" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
   printf '%s\n' "$owner" > "$TEST_SKILL_DIR/run/cc-instance.$$"
   # No watch.<owner>.pid: the lock is legitimately live, but nothing is
-  # watching for it -- the shape #605's report and koit's Alice/Bob example
-  # both were.
+  # watching for it -- exclusivity claimed, nothing receiving. #605's report
+  # was exactly this shape.
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
   [ "$status" -ne 0 ]
