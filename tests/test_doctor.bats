@@ -35,6 +35,27 @@ teardown() {
   rm -rf "$other_proj"
 }
 
+@test "doctor: a genuinely empty installation (no filters, zero registrations anywhere) is a clean 0/0/0, not a usage error" {
+  # setup() always creates one registration; leave it so this test starts
+  # from a truly empty installation (leave.sh also removes the now-empty
+  # team). An explicit --project/--type/--team matching nothing is still a
+  # usage error (exit 2, unchanged) -- only the no-filter default-scope case
+  # changes, since a whole-install scan that finds nothing is a VALID result,
+  # not a mistake the way a typo'd explicit filter would be.
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "0 team(s), 0 registration(s), 0 warning(s)"* ]]
+  [[ "$output" == *"no warnings."* ]]
+}
+
+@test "doctor: an explicit --project matching nothing is still a usage error (exit 2), unlike the no-filter empty case" {
+  run bash "$SCRIPTS/doctor.sh" --project "$(mktemp -d)"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no registrations match this scope"* ]]
+}
+
 @test "doctor: a positional argument (the dropped <project> <type> form) is a usage error, not silently accepted" {
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
   [ "$status" -eq 2 ]
@@ -77,6 +98,22 @@ teardown() {
   run bash "$SCRIPTS/doctor.sh" --team not-a-real-team
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown team"* ]]
+}
+
+@test "doctor: --team is rejected as a path-traversal attempt even when it resolves to a real config-shaped file outside teams/" {
+  # --team becomes a path segment (teams/$FILTER_TEAM/config.json). Without
+  # running it through the existing agmsg_validate_team_name first, a value
+  # containing ".." could resolve OUTSIDE teams/ entirely -- and if a
+  # config-shaped file happens to exist there, the plain existence check
+  # this file used before would have accepted it. Proves the rejection is
+  # the validator firing, not an incidental "file doesn't exist": the
+  # traversal target is made to exist first.
+  mkdir -p "$TEST_SKILL_DIR/evil"
+  printf '{"name": "evil", "agents": {}}' > "$TEST_SKILL_DIR/evil/config.json"
+
+  run bash "$SCRIPTS/doctor.sh" --team "../evil"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"path traversal"* ]]
 }
 
 # --- BLOCKING fix: a type with no real delivery (delivery_modes is nothing
@@ -131,6 +168,28 @@ teardown() {
   [ "$line_count" -eq 1 ]
 
   rm -rf "$other_proj"
+}
+
+@test "doctor: a stale watch pidfile is still detected when every registration is codex or a no-delivery type" {
+  # codex overrides runtime status with its own per-role bridge lines instead
+  # of the default "watch processes: ..." line; a no-delivery type skips
+  # calling delivery.sh at all. An earlier version captured the global line
+  # opportunistically from whichever pair's own delivery.sh call happened to
+  # emit it -- on an installation whose registrations are ALL one of these
+  # two shapes, that line (and the stale-pidfile warning derived from it)
+  # never appeared AT ALL, not just once instead of per-group. Regression for
+  # the fix: capture it independently, once, regardless of what's in scope.
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  ( exit 0 ) & local deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  printf '%s\n' "$deadpid" > "$TEST_SKILL_DIR/run/watch.faketoken.pid"
+
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"watch processes: 0 alive, 1 stale pidfiles"* ]]
+  [[ "$output" == *"watcher pidfile present but process not running, installation-wide"* ]]
 }
 
 @test "doctor: exits 0 and reports no warnings when nothing is registered as locked" {
@@ -344,6 +403,26 @@ teardown() {
   [[ "$output" == "1 team(s),"* ]]
   [[ "$output" == *"team/alice"* ]]
   [[ "$output" != *"other/bob"* ]]
+}
+
+@test "doctor: --team still works when the LAST identities.sh row for a pair belongs to a DIFFERENT team" {
+  # identities.sh orders rows by team name; "other" sorts before "team", so
+  # filtering --team other means the last row _team_filter_lines reads for
+  # this pair is "team"'s -- a non-match. Its filtering loop's own exit
+  # status is that non-match's (short-circuited "&&") failure, which, with
+  # no caller guarding the assignment, aborted the whole script under set -e
+  # -- silently, with zero output. Found by running --team against the real
+  # installation, where alphabetical luck went the other way from the test
+  # above. This is the mirror-image fixture: same two registrations, the
+  # OTHER of the two teams filtered for.
+  bash "$SCRIPTS/join.sh" other bob claude-code "$PROJ" >/dev/null
+
+  run bash "$SCRIPTS/doctor.sh" --team other
+  [ "$status" -eq 0 ]
+  # Confirms both "didn't crash" (the actual bug: silent exit 1, zero output)
+  # and "actually filtered" (1 registration -- bob's -- not the 2 that exist
+  # for this pair total).
+  [[ "$output" == "1 team(s), 1 registration(s), 0 warning(s)"* ]]
 }
 
 @test "doctor: the default whole-install scope does not double-count a (project, type) registered under two different teams" {

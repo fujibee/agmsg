@@ -86,6 +86,8 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/validate.sh"
 
 # --project / --type / --team all validated here, before any scope work:
 # an unknown --type or --team is a usage error (exit 2), not left to fail
@@ -98,9 +100,23 @@ if [ -n "$FILTER_TYPE" ] && ! agmsg_is_known_type "$FILTER_TYPE"; then
   echo "doctor: unknown agent type: '$FILTER_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
   exit 2
 fi
-if [ -n "$FILTER_TEAM" ] && [ ! -f "$SKILL_DIR/teams/$FILTER_TEAM/config.json" ]; then
-  echo "doctor: unknown team: '$FILTER_TEAM'" >&2
-  exit 2
+if [ -n "$FILTER_TEAM" ]; then
+  # --team becomes a path segment below (teams/$FILTER_TEAM/config.json,
+  # both here and inside agmsg_registered_projects) whether or not it turns
+  # out to name a real team -- validate.sh's header names every entry point
+  # that does this ("join.sh, leave.sh, team.sh, rename.sh, rename-team.sh")
+  # for exactly this reason: an unvalidated value containing "..", "/", or
+  # similar can resolve to a config-shaped file outside teams/ entirely. This
+  # is doctor.sh's first --team-shaped entry point, so it needs the same
+  # validator every other one already runs through -- not a new check, just
+  # this file failing to call the existing one. Runs BEFORE the existence
+  # check below: a value validate.sh rejects should never even reach a
+  # filesystem lookup.
+  agmsg_validate_team_name "$FILTER_TEAM" || exit 2
+  if [ ! -f "$SKILL_DIR/teams/$FILTER_TEAM/config.json" ]; then
+    echo "doctor: unknown team: '$FILTER_TEAM'" >&2
+    exit 2
+  fi
 fi
 
 # Keep only the "<team>\t<agent>" lines belonging to FILTER_TEAM. A no-op
@@ -115,6 +131,20 @@ _team_filter_lines() {
     [ -z "$t" ] && continue
     [ "$t" = "$team" ] && printf '%s\t%s\n' "$t" "$a"
   done <<< "$input"
+  # A while loop's own exit status is whatever its LAST executed command
+  # left behind -- here, "[ "$t" = "$team" ] && printf ...", whose short-
+  # circuiting means a NON-matching final input line leaves exit 1, even
+  # though filtering out a non-match is completely normal. Every caller of
+  # this function assigns its output via a bare command substitution (no
+  # `|| true`), so under set -e that leaked 1 aborted the whole script --
+  # silently, with no output at all, whenever --team's target sorted before
+  # some other team on the LAST row of a pair's registrations (identities.sh
+  # orders by team name, so this depended on which teams happened to share a
+  # project/type and how their names compared). Found by running --team
+  # against the real installation, where this ordering wasn't in this
+  # branch's favor. return 0 makes "ran to completion, matched or not" the
+  # function's actual contract, matching what every caller already assumes.
+  return 0
 }
 
 # --- scope: build the (project, type) pairs to scan --------------------
@@ -165,7 +195,18 @@ while IFS= read -r _type; do
 done <<< "$(if [ -n "$FILTER_TYPE" ]; then printf '%s\n' "$FILTER_TYPE"; else agmsg_known_types | sort -u; fi)"
 unset _type _proj _resolved _hit
 
-if [ -z "$SCOPE" ]; then
+# An empty SCOPE means two different things depending on whether a filter
+# narrowed it: an EXPLICIT --project/--type/--team that matched nothing is
+# almost certainly a mistake (a typo'd project path, a team that doesn't
+# exist) -- exit 2, as before. But no filters at all, on an installation
+# that genuinely has zero registrations anywhere, is a VALID whole-install
+# scan whose answer happens to be empty -- that is not a usage error, and
+# treating it as one meant "diagnose an empty installation" itself failed
+# doctor's own exit-code contract. Falls through to the normal report path
+# below, which -- with SCOPE empty -- naturally produces a clean "0 team(s),
+# 0 registration(s), 0 warning(s)" / "no warnings." / exit 0 with no special
+# casing needed there.
+if [ -z "$SCOPE" ] && { [ -n "$FILTER_PROJECT" ] || [ -n "$FILTER_TYPE" ] || [ -n "$FILTER_TEAM" ]; }; then
   echo "doctor: no registrations match this scope" >&2
   exit 2
 fi
@@ -309,12 +350,21 @@ _redact_text() {
 REPORT_BLOCKS=""
 TOTAL_PAIR_COUNT=0
 # The "watch processes: N alive, M stale pidfiles" line the default runtime
-# status emits scans the WHOLE run/ directory, not this (project, type)'s own
-# state -- an installation-wide fact, not a per-pair one. Captured once
-# (first pair that emits it) rather than once per pair; see where it is
-# stripped out of delivery_output below and printed once, globally, after
-# the summary line.
-GLOBAL_WATCH_LINE=""
+# status emits scans the WHOLE run/ directory, not any one (project, type)'s
+# own state -- an installation-wide fact, not a per-pair one. Captured ONCE
+# here, independent of the scope being scanned, via `delivery.sh status` with
+# no <type>/<project> -- do_status's own comment documents this as its
+# no-args path: it skips the project-scoped mode line and just reports the
+# global watcher state. This independence matters: an earlier version
+# captured it opportunistically from whichever pair's own delivery.sh call
+# happened to emit it first, which meant it silently never appeared at all
+# on an installation whose registrations are ALL a no-delivery type (skips
+# the call) and/or codex (overrides runtime status with its own per-role
+# bridge lines instead of this one) -- an install like that would lose
+# run/watch.*.pid stale-watcher detection entirely, not just deduplicate it.
+# Caught in review; the fix is scanning run/ once, unconditionally, not
+# deduplicating a per-pair emission that may never happen.
+GLOBAL_WATCH_LINE="$(bash "$SCRIPT_DIR/delivery.sh" status 2>&1 | grep '^watch processes: ' | head -1 || true)"
 _doctor_scan_pair() {
   local project="$1" type="$2"
 
@@ -370,17 +420,15 @@ _doctor_scan_pair() {
     mode_line="$(printf '%s\n' "$delivery_output" | head -1)"
     mode="${mode_line#mode: }"
 
-    local watch_line
-    watch_line="$(printf '%s\n' "$delivery_output" | grep '^watch processes: ' | head -1 || true)"
-    if [ -n "$watch_line" ]; then
-      [ -n "$GLOBAL_WATCH_LINE" ] || GLOBAL_WATCH_LINE="$watch_line"
-      # delivery.sh always emits "mode: ..." before this line (do_status
-      # runs agmsg_delivery_status, which prints it unconditionally, before
-      # agmsg_delivery_runtime_status), so this grep -v never filters every
-      # line away in practice -- guarded with || true anyway rather than
-      # leaning on that ordering under set -e.
-      delivery_output="$(printf '%s\n' "$delivery_output" | grep -v '^watch processes: ' || true)"
-    fi
+    # This pair's own delivery.sh call may ALSO emit the same global line
+    # (default runtime status, when this type doesn't override it) -- always
+    # captured independently above now, so here it's only ever stripped out
+    # of this pair's own text, never (re-)captured from it. delivery.sh
+    # always emits "mode: ..." before this line when given a type/project
+    # (do_status runs agmsg_delivery_status first, unconditionally), so this
+    # grep -v never filters every line away in practice -- guarded with
+    # || true anyway rather than leaning on that ordering under set -e.
+    delivery_output="$(printf '%s\n' "$delivery_output" | grep -v '^watch processes: ' || true)"
   fi
 
   # Tracks whether this pair turned out to have anything worth a full block:
@@ -481,8 +529,9 @@ _doctor_scan_pair() {
   # codex's per-role lines always carry a parenthetical reason (e.g. "stale
   # pidfile (pid 123 not running)") -- a genuine per-(project, type) fact,
   # unlike the installation-wide "N stale pidfiles" default-runtime-status
-  # line (extracted above into GLOBAL_WATCH_LINE and checked once, globally,
-  # after the whole scope has been scanned -- see below the scan loop).
+  # line (captured independently into GLOBAL_WATCH_LINE above and checked
+  # once, globally, after the whole scope has been scanned -- see below the
+  # scan loop).
   if printf '%s\n' "$delivery_output" | grep -q "stale pidfile ("; then
     _redact_project "$project"
     _warn "[$_REDACT_OUT] watcher/bridge pidfile present but process not running (see delivery status above)"

@@ -5,7 +5,7 @@
 # (teams/<name>/config.json). A name containing "/", "\", or equal to "." / ".."
 # can escape teams/ and create/read/move/delete files outside the agmsg state
 # tree (#140). Validate at every entry point that turns a team name into a path:
-# join.sh, leave.sh, team.sh, rename.sh, rename-team.sh.
+# join.sh, leave.sh, team.sh, rename.sh, rename-team.sh, doctor.sh (--team).
 #
 # Team names are intentionally allowed to be arbitrary UTF-8 (e.g. Japanese team
 # names like "testチーム" exist in the wild), so this is a deny-list of
