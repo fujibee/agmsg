@@ -246,10 +246,10 @@ When delivery goes quiet or a role refuses to be claimed, `doctor` puts the stat
 ```
 /agmsg doctor                  # the whole installation — every team, project, type
 /agmsg doctor --team myteam    # narrow to one team
-/agmsg doctor --redacted       # same report with paths and names masked — paste it into an issue
+/agmsg doctor --redacted       # masked report for sharing — see below for what is hidden
 ```
 
-Bare `doctor` is the normal form: like `claude doctor` or `brew doctor`, it takes no scope and reports on everything. `--project <path>`, `--type <type>`, and `--team <team>` narrow the report and combine freely — reach for them when you already suspect a corner, not because doctor requires them. `--redacted` replaces project paths and team/agent names with consistent pseudonyms (`<project1>`, `team1/agent2`), so the report can go into a bug report without leaking your machine's layout.
+Bare `doctor` is the normal form: like `claude doctor` or `brew doctor`, it takes no scope and reports on everything. `--project <path>`, `--type <type>`, and `--team <team>` narrow the report and combine freely — reach for them when you already suspect a corner, not because doctor requires them. `--redacted` masks the report for sharing — be precise about what it hides and what it keeps: your home directory prefix is collapsed to `~` (the username disappears, but the path *below* `$HOME` stays visible), project paths **outside** `$HOME` are replaced with consistent pseudonyms (`<project1>`), and team/agent names become `team1`/`agent2`. A project under `$HOME` still shows its directory names, so skim the output for anything you consider sensitive before pasting it into a public issue.
 
 Doctor is **read-only**: a stale lock or dead watcher pidfile is reported, never cleaned up, so the evidence stays in place. The exit code makes it scriptable — `0` clean, `1` one or more warnings, `2` usage or resolution error (an unknown `--type`/`--team`, or an explicit filter that matches nothing). From a shell or CI, invoke it as `~/.agents/skills/<cmd>/scripts/doctor.sh`.
 
