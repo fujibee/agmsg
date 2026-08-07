@@ -63,3 +63,19 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Delivery mode set to 'turn'" ]]
 }
+
+@test "dispatch: doctor needs no identity and covers the whole installation by default" {
+  # No --team/--agent (unlike every other command above) -- doctor.sh needs
+  # no identity, only its own flags, and the default scope is everything.
+  run bash "$SCRIPTS/windows/dispatch.sh" -- doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "$PROJECT_ALICE" ]]
+  [[ "$output" =~ "$PROJECT_BOB" ]]
+}
+
+@test "dispatch: doctor flags pass straight through, not through this dispatcher's own --project/--type globals" {
+  run bash "$SCRIPTS/windows/dispatch.sh" -- doctor --project "$PROJECT_ALICE"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "$PROJECT_ALICE" ]]
+  [[ "$output" != *"$PROJECT_BOB"* ]]
+}

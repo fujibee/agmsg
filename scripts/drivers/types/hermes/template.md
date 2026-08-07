@@ -42,6 +42,7 @@ Four possible outputs:
   > - ask `send <agent> <message>` — send a message
   > - ask `team` — list team members
   > - ask `history` — message history
+  > - ask `doctor` — check registration/lock/delivery health across the installation
 
   5. Hermes has no agmsg automatic delivery hook. Set manual delivery explicitly:
      `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off hermes "$(pwd)"`
@@ -120,6 +121,15 @@ If argument is "hook on" (legacy alias):
 If argument is "hook off" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off hermes "$(pwd)"`
 2. Tell the user: "Delivery mode set to 'off'."
+
+If argument is "doctor" (no further args):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/doctor.sh`
+2. Show the output to the user. Exit code: 0 = clean, 1 = one or more warnings (the output still shows everything -- show it in full), 2 = usage/resolution error.
+
+If argument starts with "doctor" followed by flags (e.g. "doctor --project /path/to/project"):
+1. Pass the flags straight through: `~/.agents/skills/__SKILL_NAME__/scripts/doctor.sh <flags>`
+2. Supported flags, all optional and combinable: `--project <path>`, `--type <type>`, `--team <team>`, `--redacted` (masks paths and names, safe to paste into a report). Only use these when the user explicitly asks to narrow the scope -- bare `doctor` (no flags) already covers the whole installation and is the normal way to run it.
+3. Show the output to the user.
 
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" hermes`

@@ -155,6 +155,14 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 #   --force              tear down from the recorded placement, no message
 #   --timeout N          seconds to wait for graceful teardown (default 30)
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
+
+# Read-only health check: registrations, actas lock status, and delivery mode
+# per (project, type). Default (no flags) covers the WHOLE installation —
+# every team, project, and type — not just the current one; narrow with
+# --project/--type/--team (combinable) only when asked to. Exit codes: 0
+# clean, 1 one or more warnings, 2 usage/resolution error. --redacted masks
+# paths and names, safe to paste into a report.
+~/.agents/skills/agmsg/scripts/doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]
 ```
 
 ## Permission prompts (Claude Code)
