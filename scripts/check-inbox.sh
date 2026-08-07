@@ -98,25 +98,43 @@ SESSION_ID=$(printf '%s' "$INPUT" \
 # Deferral was an optimisation, not a correctness requirement. The read state
 # is the correctness requirement, and it was already there.
 
-# Identify agent and teams
-WHOAMI=$("$SCRIPT_DIR/whoami.sh" "$PROJECT" "$TYPE")
-# suggest=true means this identity is registered only under a DIFFERENT
-# project, so it is not joined here -> deliver nothing (mirror not_joined).
-# Without this the else-branch extracts "agents=" as the agent name.
-if echo "$WHOAMI" | grep -Eq "not_joined=true|suggest=true"; then
-  exit 0
-fi
+# Resolve the invocation path to the registered project root (session marker /
+# nearest ancestor / sibling worktree) before the identity lookup — the
+# whoami.sh path did this resolution, and identities.sh itself is an exact
+# registry lookup by design (its other callers rely on that).
+PROJECT="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
 
-# Handle multiple identities: use first agent name
-if echo "$WHOAMI" | grep -q "multiple=true"; then
-  AGENT=$(echo "$WHOAMI" | sed -n 's/.*agents=\([^,]*\).*/\1/p')
-else
-  # Anchor on a leading "agent=" so "agents=" (multiple/suggest) cannot match.
-  AGENT=$(echo "$WHOAMI" | sed -n 's/^agent=\([^ ]*\).*/\1/p')
-fi
-TEAMS=$(echo "$WHOAMI" | sed -n 's/.*teams=\([^ ]*\).*/\1/p')
+# Consume exact (team, agent) TSV rows instead of independently flattened
+# agent/team lists. For multiple agents, preserve the existing first-agent
+# policy, but subscribe only to that agent's actual team rows.
+IDENTITIES=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE")
+[ -n "$IDENTITIES" ] || exit 0
 
-if [ -z "$AGENT" ] || [ -z "$TEAMS" ]; then
+AGENT=""
+TEAM_LIST=()
+IDENTITIES_VALID=1
+while IFS=$'\t' read -r identity_team identity_agent identity_extra; do
+  if [ -z "$identity_team" ] || [ -z "$identity_agent" ] || [ -n "$identity_extra" ]; then
+    IDENTITIES_VALID=0
+    break
+  fi
+
+  [ -n "$AGENT" ] || AGENT="$identity_agent"
+  [ "$identity_agent" = "$AGENT" ] || continue
+
+  team_seen=0
+  # ${arr[@]+...} guards the empty-array expansion: under `set -u` bash 3.2
+  # (macOS default) treats "${TEAM_LIST[@]}" on an empty array as unbound.
+  for selected_team in ${TEAM_LIST[@]+"${TEAM_LIST[@]}"}; do
+    if [ "$selected_team" = "$identity_team" ]; then
+      team_seen=1
+      break
+    fi
+  done
+  [ "$team_seen" -eq 1 ] || TEAM_LIST+=("$identity_team")
+done <<< "$IDENTITIES"
+
+if [ "$IDENTITIES_VALID" -ne 1 ] || [ -z "$AGENT" ] || [ "${#TEAM_LIST[@]}" -eq 0 ]; then
   exit 0
 fi
 
@@ -173,7 +191,6 @@ agmsg_storage_load
 OUTPUT=""
 LOOP_RC=0
 LOOP_FAILED_TEAM=""
-IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
   storage_store_exists "$team" || continue
 
@@ -214,7 +231,7 @@ for team in "${TEAM_LIST[@]}"; do
     # session, that session owns that role's inbox — don't deliver here.
     # Mirrors watch.sh's per-pair filtering (#62).
     #
-    # AGENT comes from whoami.sh: the first registered agent for
+    # AGENT comes from identities.sh: the first registered agent for
     # (project, type), NOT the session's in-memory actas role — the Codex
     # caveat documented in README.
     state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")

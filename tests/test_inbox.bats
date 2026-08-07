@@ -24,6 +24,14 @@ unread_count() {
   ' _ "$1" | grep -c .
 }
 
+pair_unread_count() {
+  bash -c '
+    source "'"$SCRIPTS"'/lib/storage.sh"
+    agmsg_storage_load
+    storage_list_unread "$1" "$2"
+  ' _ "$1" "$2" | grep -c .
+}
+
 # Wait until the script under test has displayed and is paused before its
 # mark UPDATE (barrier .reached appears), with a bounded wait.
 await_barrier_reached() {
@@ -216,6 +224,42 @@ delivered_to_operator() {
   [ "$status" -eq 0 ]
   # 1: the failure is what came out, because nothing ran after it.
   [[ "$output" == *"plain=1"* ]]
+}
+
+@test "check-inbox: multiple identities poll only the first agent's exact team rows" {
+  local project="/tmp/exact-pair-project"
+  bash "$SCRIPTS/join.sh" alpha alice claude-code "$project"
+  bash "$SCRIPTS/join.sh" beta bob claude-code "$project"
+
+  bash "$SCRIPTS/send.sh" alpha system alice "alpha-alice-exact" --force >/dev/null
+  bash "$SCRIPTS/send.sh" alpha system bob   "alpha-bob-cross" --force >/dev/null
+  bash "$SCRIPTS/send.sh" beta  system alice "beta-alice-cross" --force >/dev/null
+  bash "$SCRIPTS/send.sh" beta  system bob   "beta-bob-exact" --force >/dev/null
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$project'"
+  [ "$status" -eq 0 ]
+  grep -q -F -- 'alpha-alice-exact' <<<"$output"
+  refute grep -q -F -- 'alpha-bob-cross' <<<"$output"
+  refute grep -q -F -- 'beta-alice-cross' <<<"$output"
+  refute grep -q -F -- 'beta-bob-exact' <<<"$output"
+
+  [ "$(pair_unread_count alpha alice)" -eq 0 ]
+  [ "$(pair_unread_count alpha bob)" -eq 1 ]
+  [ "$(pair_unread_count beta alice)" -eq 1 ]
+  [ "$(pair_unread_count beta bob)" -eq 1 ]
+}
+
+@test "check-inbox: a subdirectory invocation resolves to the registered project root" {
+  # Registration lives at the root; the Stop hook bakes in whatever path the
+  # session was started from, so a nested invocation must still find it.
+  bash "$SCRIPTS/join.sh" gamma carol claude-code /tmp/exact-pair-root
+
+  bash "$SCRIPTS/send.sh" gamma system carol "root-resolved" --force >/dev/null
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code /tmp/exact-pair-root/nested/subdir"
+  [ "$status" -eq 0 ]
+  grep -q -F -- 'root-resolved' <<<"$output"
+  [ "$(pair_unread_count gamma carol)" -eq 0 ]
 }
 
 @test "check-inbox: a message arriving between display and mark is NOT marked read unseen" {
