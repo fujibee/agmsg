@@ -32,6 +32,8 @@ fi
 
 After this runs once, `~/.agents/skills/agmsg/` is populated and you can skip Step 0 on future invocations.
 
+**If the argument/intent is `doctor` (with or without further flags): do NOT run whoami.sh, do NOT enter the join flow (Steps 1-2a). Go straight to the `doctor.sh` line under Step 2b and stop there.** `doctor` reports the health of the whole installation and exists specifically for when registration or delivery is broken — it must work even before you have an identity, so it never goes through Steps 1-2a.
+
 ### Step 1: Check identity
 
 ```bash
