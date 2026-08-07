@@ -137,6 +137,14 @@ _agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
 AGENT_SQL="$(_agmsg_sqlesc "$AGENT")"
 
 OUTPUT=""
+# Messages are marked read per team INSIDE this loop, but emitted only AFTER
+# it. Under errexit, a failure while processing a later team (either command
+# substitution below) would abort between those two points: earlier teams'
+# messages end up read_at-stamped yet never delivered, and never re-offered
+# (#637). So loop failures stop the loop instead of the script — whatever was
+# already accumulated still reaches an emit point, teams after the failing one
+# stay untouched (unread), and the failure status is re-raised on exit.
+CLAIM_RC=0
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
   team_sql="$(_agmsg_sqlesc "$team")"
@@ -151,7 +159,7 @@ for team in "${TEAM_LIST[@]}"; do
   # role. That asymmetry is the Codex caveat documented in README — if a
   # Codex session actas'd into <name>, check-inbox is still polling
   # whatever whoami chose first, not <name>.
-  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
+  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}") || { CLAIM_RC=$?; break; }
   case "$state" in
     other:*) continue ;;
   esac
@@ -160,7 +168,7 @@ for team in "${TEAM_LIST[@]}"; do
     SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
     ORDER BY created_at ASC;
-  ")
+  ") || { CLAIM_RC=$?; break; }
   if [ -n "$RESULT" ]; then
     COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
     OUTPUT+="$COUNT new message(s) in $team:"$'\n'
@@ -192,10 +200,12 @@ for team in "${TEAM_LIST[@]}"; do
   fi
 done
 
-# No new messages
+# No new messages. Both emit points re-raise a loop failure captured above:
+# exiting 0 here would convert "a team's query failed" into "nothing to
+# deliver", which is the silent half of #637.
 if [ -z "$OUTPUT" ]; then
   emit_status_json "agmsg: no new messages"
-  exit 0
+  exit "$CLAIM_RC"
 fi
 
 # New messages found
@@ -208,5 +218,5 @@ if [ -n "$OUTPUT" ]; then
   "reason": "$ESCAPED"
 }
 ENDJSON
-  exit 0
+  exit "$CLAIM_RC"
 fi
