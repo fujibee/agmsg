@@ -14,6 +14,45 @@ teardown() {
   rm -rf "$PROJ"
 }
 
+# --- usage-error contract (exit 2), separate from the "found a problem"
+#     contract (exit 1) above -- these used to collapse into bash's own
+#     ${1:?...} exit 1 on a missing argument, which is indistinguishable
+#     from a warning to anything scripting against the exit code. ----------
+
+@test "doctor: no arguments is a usage error (exit 2), not bash's own exit 1" {
+  run bash "$SCRIPTS/doctor.sh"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Usage: doctor.sh"* ]]
+}
+
+@test "doctor: a missing type argument is a usage error (exit 2)" {
+  run bash "$SCRIPTS/doctor.sh" "$PROJ"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Usage: doctor.sh"* ]]
+}
+
+@test "doctor: bare --help exits 0 and prints usage, even with no other arguments" {
+  # ${1:?...} alone would consume "--help" as PROJECT, then die on the
+  # missing TYPE with status 1 and never reach a help branch.
+  run bash "$SCRIPTS/doctor.sh" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage: doctor.sh"* ]]
+}
+
+@test "doctor: an unknown option is a usage error (exit 2)" {
+  run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code --nonsense
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown option"* ]]
+}
+
+@test "doctor: an unknown agent type is a usage error (exit 2), not a silent clean report" {
+  run bash "$SCRIPTS/doctor.sh" "$PROJ" not-a-real-type
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown agent type"* ]]
+  # Must not fall through to delivery.sh/identities.sh and report clean.
+  [[ "$output" != *"no warnings."* ]]
+}
+
 @test "doctor: exits 0 and reports no warnings when nothing is registered as locked" {
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
   [ "$status" -eq 0 ]
@@ -27,7 +66,7 @@ teardown() {
   printf '%s\n' "deadtoken.999999" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"stale lock: team/alice"* ]]
   [[ "$output" == *"cc-instance=absent"* ]]
 }
@@ -60,7 +99,7 @@ teardown() {
   # was exactly this shape.
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"lock=owner(alive)=$owner cc-instance=present watcher=none"* ]]
   [[ "$output" == *"actas lock held but no watcher: team/alice"* ]]
 }
@@ -70,7 +109,7 @@ teardown() {
   printf '%s\n' "deadtoken.999999" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"stale lock: team/alice"* ]]
   [[ "$output" != *"actas lock held but no watcher"* ]]
 }
@@ -92,7 +131,7 @@ teardown() {
   printf '%s\n' "deadtoken.999999" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
 
   run bash "$SCRIPTS/doctor.sh" "$home_proj" claude-code --redacted
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"project: ~/redact-me"* ]]
   [[ "$output" != *"team/alice"* ]]
   [[ "$output" == *"team1/agent1"* ]]
@@ -100,19 +139,45 @@ teardown() {
   [[ "$output" != *"deadtoken.999999"* ]]
 }
 
+@test "doctor: --redacted also masks a project path outside \$HOME (a shared worktree, /Volumes, etc.), including in the embedded block" {
+  # $PROJ (from setup(), a plain mktemp -d) is already outside the sandboxed
+  # $HOME test_helper.bash sets up -- no extra fixture needed to get a
+  # non-HOME path here, which is exactly the case that leaked before: only
+  # the $HOME-relative path was masked, so a project anywhere else (a shared
+  # worktree, /Volumes/..., /Users/Shared/...) passed through raw, in both
+  # doctor's own "project:" line and the embedded delivery.sh block (whose
+  # "settings hooks file:" line names the project directly).
+  case "$PROJ" in
+    "$HOME"*) skip "fixture \$PROJ landed under \$HOME this run; this test needs it outside" ;;
+  esac
+
+  run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code --redacted
+  [[ "$output" == *"project: <project>"* ]]
+  [[ "$output" != *"$PROJ"* ]]
+}
+
 @test "doctor: owner is shown in full by default, and --redacted splits a composite token on its last dot (not a fixed tail length)" {
   mkdir -p "$TEST_SKILL_DIR/run"
-  # A short pid, deliberately not 6 digits: a fixed-tail-length shortener
-  # would cut into the sid (e.g. "...02.42"); splitting on the last "."
-  # always lands exactly on the pid, whatever its length.
-  local owner="459d8198-3fcf-4c9e-a4ff-5f8fbd18c802.42"
+  # A pid genuinely dead by construction (spawn, wait, then use its now-freed
+  # pid) rather than a hardcoded small number: a fixed guess like "42" can
+  # collide with a real process on a container CI runner, where low pids are
+  # far more likely to be in active use than on a real developer machine --
+  # the same class of flake #595's marker-gc investigation found in a
+  # hardcoded pid 4242. Whatever pid the OS actually hands back also isn't
+  # guaranteed to be 6 digits, which is what this test needs: a fixed-tail
+  # shortener would cut into the sid (e.g. "...02.42") on a short one, while
+  # splitting on the last "." always lands exactly on the pid regardless of
+  # its length.
+  ( exit 0 ) & local deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  local owner="459d8198-3fcf-4c9e-a4ff-5f8fbd18c802.$deadpid"
 
   printf '%s\n' "$owner" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
   [[ "$output" == *"lock=owner(STALE)=$owner"* ]]
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code --redacted
-  [[ "$output" == *"lock=owner(STALE)=...42 "* ]]
+  [[ "$output" == *"lock=owner(STALE)=...$deadpid "* ]]
   [[ "$output" != *"$owner"* ]]
 }
 
@@ -121,7 +186,7 @@ teardown() {
   bash "$SCRIPTS/delivery.sh" set turn claude-code "$PROJ" >/dev/null
 
   run bash "$SCRIPTS/doctor.sh" "$PROJ" claude-code
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" == *"registrations for this (project, type) under turn-mode delivery"* ]]
 }
 

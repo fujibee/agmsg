@@ -22,18 +22,34 @@ set -euo pipefail
 #   1  one or more warnings (see WARNINGS section)
 #   2  usage or resolution error
 
-PROJECT="${1:?Usage: doctor.sh <project_path> <agent_type> [--redacted]}"
-TYPE="${2:?Missing agent_type}"
+_usage() {
+  echo "Usage: doctor.sh <project_path> <agent_type> [--redacted]" >&2
+}
+
+# Scanned for --help before the positional args are required below: with
+# ${1:?...} doing that job instead, `doctor.sh --help` alone reads --help as
+# PROJECT, then dies on the missing TYPE with "Missing agent_type" (bash's own
+# nounset message, exit 1) and never reaches a help branch at all.
+for _arg in "${@:-}"; do
+  case "$_arg" in
+    -h|--help) _usage; exit 0 ;;
+  esac
+done
+unset _arg
+
+if [ "$#" -lt 2 ]; then
+  _usage
+  exit 2
+fi
+
+PROJECT="$1"
+TYPE="$2"
 shift 2
 
 REDACTED=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --redacted) REDACTED=1; shift ;;
-    -h|--help)
-      echo "Usage: doctor.sh <project_path> <agent_type> [--redacted]"
-      exit 0
-      ;;
     *) echo "doctor: unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -45,6 +61,17 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/type-registry.sh"
+
+# Rejected here, not left to delivery.sh/identities.sh to fail into: those
+# don't error loudly on an unknown type, they just return empty/quiet, which
+# is exactly the "warning text on screen, exit 0 underneath" shape that made
+# this a blocking finding in review.
+if ! agmsg_is_known_type "$TYPE"; then
+  echo "doctor: unknown agent type: '$TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
+  exit 2
+fi
 
 PROJECT="$(agmsg_resolve_project "$PROJECT" "$TYPE")"
 
@@ -116,11 +143,16 @@ _redact_owner() {
     printf '...%s' "${1: -6}"
   fi
 }
+# A path outside $HOME (a shared worktree, /Volumes/..., /Users/Shared/...)
+# has no HOME-relative form to fall back to, and showing it raw would be the
+# exact leak --redacted exists to prevent -- so that case gets a bare
+# placeholder instead of the path. The HOME case keeps the more readable
+# "~/..." form.
 _redact_project() {
   [ "$REDACTED" = 1 ] || { printf '%s' "$1"; return 0; }
   case "$1" in
     "$HOME"*) printf '~%s' "${1#"$HOME"}" ;;
-    *)        printf '%s' "$1" ;;
+    *)        printf '<project>' ;;
   esac
 }
 # Literal (not glob, not regex) substring replace. A quoted portion of a
@@ -157,6 +189,12 @@ _redact_text() {
   local text="$1" i n
   [ "$REDACTED" = 1 ] || { printf '%s' "$text"; return 0; }
   text="$(_replace_literal "$text" "$HOME" "~")"
+  # A project outside $HOME survives the substitution above untouched (no
+  # $HOME prefix to catch), and delivery.sh's own output names it directly
+  # (its settings-hooks-file path is under it) -- so the exact resolved path
+  # is masked here too, the same placeholder _redact_project uses for the
+  # non-HOME case, not just doctor's own "project:" line.
+  text="$(_replace_literal "$text" "$PROJECT" "<project>")"
   n=${#_R_TEAM_K[@]}
   for ((i = 0; i < n; i++)); do
     text="$(_replace_literal "$text" "${_R_TEAM_K[$i]}" "${_R_TEAM_V[$i]}")"
@@ -187,7 +225,8 @@ _redact_text() {
 # -- a duplicated implementation would drift instead of going quiet, which is
 # worse. Flagged here so whoever next changes delivery.sh's status wording
 # knows to check.
-DELIVERY_OUTPUT="$(bash "$SCRIPT_DIR/delivery.sh" status "$TYPE" "$PROJECT" 2>&1 || true)"
+DELIVERY_STATUS=0
+DELIVERY_OUTPUT="$(bash "$SCRIPT_DIR/delivery.sh" status "$TYPE" "$PROJECT" 2>&1)" || DELIVERY_STATUS=$?
 MODE_LINE="$(printf '%s\n' "$DELIVERY_OUTPUT" | head -1)"
 MODE="${MODE_LINE#mode: }"
 
@@ -276,6 +315,15 @@ STALE_COUNT="$(printf '%s\n' "$DELIVERY_OUTPUT" | sed -n 's/.*, \([0-9]*\) stale
 case "$STALE_COUNT" in ''|*[!0-9]*) STALE_COUNT=0 ;; esac
 if [ "$STALE_COUNT" -gt 0 ]; then
   _warn "watcher/bridge pidfile present but process not running (see delivery status above)"
+fi
+
+# TYPE is already validated above, so this is not the "unknown type" case --
+# some other failure inside delivery.sh status itself. Surfaced as a warning
+# rather than swallowed: showing error text on screen while still reporting
+# "no warnings." / exit 0 underneath would be a doctor that lies about its
+# own read.
+if [ "$DELIVERY_STATUS" -ne 0 ]; then
+  _warn "delivery.sh status exited $DELIVERY_STATUS (see delivery status above)"
 fi
 
 # --- now print, in screen order -------------------------------------------
