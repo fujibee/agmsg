@@ -99,8 +99,13 @@ EOF
   [[ "$output" == *"no server-side recovery"* ]]
   # The facts ride along with it, and are asserted here too so the split
   # between fact and guidance cannot quietly move.
+  [[ "$output" == *"no copy of it survives anywhere"* ]]
   [[ "$output" == *"becomes permanently unreadable"* ]]
   [[ "$output" == *"revoke its ability to read history"* ]]
+  # Where nothing keeps a copy, losing the device IS losing the key. That
+  # implication belongs to this path only, so it is stated in the guidance
+  # rather than left for the reader to derive.
+  [[ "$output" == *"losing this device loses"* ]]
 }
 
 @test "key generate: a caller that owns the guidance gets the facts without ours" {
@@ -120,6 +125,7 @@ EOF
   # own defect: these are true however agmsg was invoked.
   [[ "$output" == *"Generated a new key for team 'testteam'"* ]]
   [[ "$output" == *"Recipient fingerprint:"* ]]
+  [[ "$output" == *"no copy of it survives anywhere"* ]]
   [[ "$output" == *"becomes permanently unreadable"* ]]
   [[ "$output" == *"revoke its ability to read history"* ]]
 
@@ -128,6 +134,13 @@ EOF
   [[ "$output" != *"no server-side recovery"* ]]
   [[ "$output" != *"--reveal-secret"* ]]
   [[ "$output" != *"password manager"* ]]
+
+  # And does not assert that losing the DEVICE loses the history. That is
+  # true only where nothing keeps a copy; a caller may hold a sealed copy of
+  # this same key and be able to recover it. Asserting it on their behalf is
+  # the same premise this change exists to stop asserting.
+  [[ "$output" != *"losing this device loses"* ]]
+  [[ "$output" != *"If this device is lost"* ]]
 }
 
 @test "key generate: an unrecognised guidance setting still prints the guidance" {

@@ -318,12 +318,18 @@ cmd_generate() {
   echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
   echo
   # What the key IS, always: true whoever ran this, so it is never held back.
-  # Losing it costs the same either way -- a vault elsewhere holds a sealed
-  # copy of this key, not a second key, so a lost key with no backup of any
-  # kind is still a lost history.
-  echo "If this device is lost, every message encrypted under this key"
-  echo "becomes permanently unreadable. Removing a device later does not"
-  echo "revoke its ability to read history encrypted before removal."
+  #
+  # Stated as KEY loss, not DEVICE loss. Those are the same event only where
+  # nothing keeps a copy, which is this install's situation and not everyone's
+  # -- a caller may hold a sealed copy of this same key and be able to recover
+  # it after the device is gone. "Lose the device and it is unreadable" would
+  # be the very premise this change exists to stop asserting on their behalf.
+  # The condition below holds either way, because a surviving copy is exactly
+  # what makes it not hold.
+  echo "If this key is lost and no copy of it survives anywhere, every"
+  echo "message encrypted under it becomes permanently unreadable. Removing"
+  echo "a device later does not revoke its ability to read history encrypted"
+  echo "before removal."
 
   # What to DO about it: only ours to say when nobody else owns that job.
   # Both claims below are specific to a plain install -- a larger tool may
@@ -333,7 +339,8 @@ cmd_generate() {
   if agmsg_operator_guidance_is_ours; then
     echo
     echo "Back this up now. agmsg does not store a copy of this key anywhere,"
-    echo "and there is no server-side recovery. Run"
+    echo "and there is no server-side recovery — so losing this device loses"
+    echo "the key, and with it the history. Run"
     echo "'key.sh show $team --reveal-secret' to view and save it somewhere"
     echo "safe — a password manager entry, not a plaintext file. Do NOT copy"
     echo "it into a dotfiles repo, a git repo of any kind, or any other"
