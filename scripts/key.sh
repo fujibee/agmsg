@@ -27,6 +27,8 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/registry-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck source=lib/operator-guidance.sh
+source "$SCRIPT_DIR/lib/operator-guidance.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/roster-journal.sh"
 
@@ -315,15 +317,29 @@ cmd_generate() {
   echo "Generated a new key for team '$team'."
   echo "Recipient fingerprint: $(_key_fingerprint "$recipient")"
   echo
-  echo "Back this up now. agmsg does not store a copy of this key anywhere —"
-  echo "if this device is lost, every message encrypted under this key"
-  echo "becomes permanently unreadable. There is no server-side recovery."
-  echo "Run 'key.sh show $team --reveal-secret' to view and save it somewhere"
-  echo "safe — a password manager entry, not a plaintext file. Do NOT copy"
-  echo "it into a dotfiles repo, a git repo of any kind, or any other"
-  echo "synced/backed-up-by-a-tool location you wouldn't also trust with a"
-  echo "production credential. Removing a device later does not revoke its"
-  echo "ability to read history encrypted before removal."
+  # What the key IS, always: true whoever ran this, so it is never held back.
+  # Losing it costs the same either way -- a vault elsewhere holds a sealed
+  # copy of this key, not a second key, so a lost key with no backup of any
+  # kind is still a lost history.
+  echo "If this device is lost, every message encrypted under this key"
+  echo "becomes permanently unreadable. Removing a device later does not"
+  echo "revoke its ability to read history encrypted before removal."
+
+  # What to DO about it: only ours to say when nobody else owns that job.
+  # Both claims below are specific to a plain install -- a larger tool may
+  # keep a sealed copy on a server and have its own way to set that up, and
+  # its operator has never heard of key.sh. Saying this there is not merely
+  # noise; it is false, and it points away from the route they have.
+  if agmsg_operator_guidance_is_ours; then
+    echo
+    echo "Back this up now. agmsg does not store a copy of this key anywhere,"
+    echo "and there is no server-side recovery. Run"
+    echo "'key.sh show $team --reveal-secret' to view and save it somewhere"
+    echo "safe — a password manager entry, not a plaintext file. Do NOT copy"
+    echo "it into a dotfiles repo, a git repo of any kind, or any other"
+    echo "synced/backed-up-by-a-tool location you wouldn't also trust with a"
+    echo "production credential."
+  fi
 }
 
 cmd_show() {

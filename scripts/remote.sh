@@ -40,6 +40,8 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/registry-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck source=lib/operator-guidance.sh
+source "$SCRIPT_DIR/lib/operator-guidance.sh"
 # shellcheck source=lib/shquote.sh
 source "$SCRIPT_DIR/lib/shquote.sh"
 # shellcheck disable=SC1091
@@ -1431,7 +1433,12 @@ cmd_connect() {
     server_side=" (on the server: '$remote_team_name')"
   fi
   echo "Connected: team '$team'$server_side ($connection_security). Sync engine running."
-  if [ "$e2ee" -eq 1 ]; then
+  # Carrying the snapshot and key by hand is the plain install's answer to
+  # getting a second machine in. A larger tool may have a ceremony for exactly
+  # that, and this line would talk its operator out of it -- into doing by hand
+  # the thing the ceremony exists to make unnecessary. So it is said only when
+  # nobody else owns the next step.
+  if [ "$e2ee" -eq 1 ] && agmsg_operator_guidance_is_ours; then
     echo "Export the public epoch snapshot with: key.sh show $team --snapshot --out <file>"
     echo "Transfer that snapshot and the key out of band; the other machine must import and live-confirm them before syncing."
   fi

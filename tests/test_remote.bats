@@ -466,6 +466,32 @@ _capability_endpoint() {
   [ "$(_remote_endpoint_display "https://host.example.com:443")" = "https://host.example.com:443" ]
 }
 
+@test "connect: the out-of-band handoff line is printed by default" {
+  skip_if_no_age
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Export the public epoch snapshot"* ]]
+  [[ "$output" == *"out of band"* ]]
+}
+
+@test "connect: a caller that owns the guidance does not get the out-of-band line" {
+  skip_if_no_age
+  # Carrying the key by hand is this install's answer to adding a machine. A
+  # tool with a ceremony for that would have its operator talked out of it --
+  # into doing by hand exactly what the ceremony exists to prevent.
+  #
+  # Paired with the test above deliberately: absence alone would pass for a
+  # connect that printed nothing, and presence alone would pass for a
+  # suppression that never fires.
+  AGMSG_OPERATOR_GUIDANCE=caller run bash "$SCRIPTS/remote.sh" connect \
+    --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -eq 0 ]
+  # The result is still reported -- only the next step is withheld.
+  [[ "$output" == *"Connected: team 'testteam'"* ]]
+  [[ "$output" != *"Export the public epoch snapshot"* ]]
+  [[ "$output" != *"out of band"* ]]
+}
+
 @test "connect: requires the response protocol header" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" missing-protocol-header-token myteam
   [ "$status" -ne 0 ]
