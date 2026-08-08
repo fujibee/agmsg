@@ -30,6 +30,27 @@ _agmsg_roster_sqlesc() {
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
+# A PATH bound for readfile(), not a value. The two need different treatment and
+# only one of them is escaping.
+#
+# sqlite3 on Windows is a native binary: it cannot open the `/tmp/...` form Git
+# Bash hands around, so readfile() returns NULL, the projection collapses to
+# empty, and the caller reads that as "no roster" -- join.sh exited 1 right
+# after "Created team:" with nothing on stderr (#669). Every other readfile call
+# site in the repo already converts (agmsg_sql_readfile_path); this file escaped
+# and stopped.
+#
+# Kept local rather than sourcing storage.sh: this library is loaded by six
+# scripts, some of which do not want the storage facade, and the conversion is
+# four lines. It must stay identical to agmsg_sql_readfile_path's.
+_agmsg_roster_readfile_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
+  fi
+  printf '%s' "$path" | sed "s/'/''/g"
+}
+
 _agmsg_roster_record() {
   local type="$1" member_id="$2" name="$3" at="$4"
   sqlite3 :memory: "SELECT json_object(
@@ -103,7 +124,7 @@ agmsg_roster_name_owner() {
   local team_dir="$1" name="$2" journal journal_sql name_sql
   journal="$(agmsg_roster_journal_path "$team_dir")"
   [ -f "$journal" ] || return 0
-  journal_sql="$(_agmsg_roster_sqlesc "$journal")"
+  journal_sql="$(_agmsg_roster_readfile_path "$journal")"
   name_sql="$(_agmsg_roster_sqlesc "$name")"
   sqlite3 :memory: "
     WITH source(doc) AS (
@@ -137,7 +158,7 @@ agmsg_roster_ensure() {
   journal="$(agmsg_roster_journal_path "$team_dir")"
   [ -f "$journal" ] && return 0
   [ -f "$config" ] || return 0
-  config_sql="$(_agmsg_roster_sqlesc "$config")"
+  config_sql="$(_agmsg_roster_readfile_path "$config")"
   team_id="$(sqlite3 :memory: \
     "SELECT COALESCE(json_extract(CAST(readfile('$config_sql') AS TEXT), '\$.team_id'),'');" \
     2>/dev/null | tr -d '\r')"
@@ -171,8 +192,8 @@ agmsg_roster_project_config() {
   journal="$(agmsg_roster_journal_path "$team_dir")"
   [ -f "$journal" ] || return 0
   [ -f "$config" ] || return 1
-  journal_sql="$(_agmsg_roster_sqlesc "$journal")"
-  config_sql="$(_agmsg_roster_sqlesc "$config")"
+  journal_sql="$(_agmsg_roster_readfile_path "$journal")"
+  config_sql="$(_agmsg_roster_readfile_path "$config")"
   updated="$(sqlite3 :memory: "
     WITH
     source(doc) AS (
@@ -301,6 +322,28 @@ agmsg_roster_project_config() {
                     '\$.agents',json(agents.value),
                     '\$.retired_members',json(retired.value))
       FROM agents,retired;" 2>/dev/null | tr -d '\r')" || return 1
-  [ -n "$updated" ] || return 1
+  # An empty result has two causes and they are not the same failure: the
+  # projection genuinely produced nothing, or readfile() could not open one of
+  # its arguments and returned NULL, which collapses the whole expression. The
+  # second is what happened on Windows -- and because both arrive here as "",
+  # the caller reported neither. join.sh printed "Created team:" and exited 1
+  # with nothing on stderr (#669).
+  #
+  # `readfile(x) IS NULL` separates them, and the message names the path that
+  # could not be read, in the form sqlite was actually given.
+  if [ -z "$updated" ]; then
+    local unreadable
+    unreadable="$(sqlite3 :memory: "
+      SELECT CASE WHEN readfile('$journal_sql') IS NULL THEN '$journal_sql' ELSE '' END
+      UNION ALL
+      SELECT CASE WHEN readfile('$config_sql') IS NULL THEN '$config_sql' ELSE '' END;" \
+      2>/dev/null | tr -d '\r' | grep -v '^$' || true)"
+    if [ -n "$unreadable" ]; then
+      printf 'agmsg: roster projection could not read:\n%s\n' "$unreadable" >&2
+    else
+      printf 'agmsg: roster projection produced no config for %s\n' "$config" >&2
+    fi
+    return 1
+  fi
   agmsg_write_atomic "$config" "$updated"
 }

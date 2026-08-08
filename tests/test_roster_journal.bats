@@ -199,3 +199,29 @@ EOF
   [ ! -d "$team_dir/.config.lock" ]
   [ "$(config_field "$config" '$.agents.alice.member_id')" = "$member_id" ]
 }
+
+# The failure this covers is not "the projection was empty" -- it is that an
+# empty projection had two causes and reported neither. readfile() returns NULL
+# for a path it cannot open, that NULL collapses the whole expression, and the
+# caller saw the same "" a genuinely empty roster produces. join.sh printed
+# "Created team:" and exited 1 with nothing on stderr (#669).
+#
+# An unreadable file is the portable way to make readfile() return NULL. On
+# Windows the same NULL arrived from a path sqlite3.exe could not open, which is
+# what the conversion in _agmsg_roster_readfile_path fixes; this pins the half
+# that can be observed anywhere.
+@test "roster projection names the file it could not read instead of failing silently" {
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local config="$TEST_SKILL_DIR/teams/demo/config.json"
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  [ -f "$config" ]
+
+  chmod 000 "$config"
+  run bash -c '. "$1/lib/roster-journal.sh"; agmsg_roster_project_config "$2" "$3"' _ \
+    "$SCRIPTS" "$team_dir" "$config"
+  chmod 644 "$config"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not read"* ]]
+  [[ "$output" == *"config.json"* ]]
+}
