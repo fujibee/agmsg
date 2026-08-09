@@ -40,7 +40,7 @@ field() {
   run bash "$SCRIPTS/delegate.sh" "$PROJ" codex claude-code "review this change" \
     --session-id codex-thread-a --no-wait --no-delivery
   [ "$status" -eq 0 ]
-  [[ "$output" == status=spawned* ]]
+  [[ "$output" == *"status=spawned"* ]]
   [[ "$output" == *"conversation=conv-"* ]]
   [[ "$output" == *" to=claude-"* ]]
 
@@ -80,7 +80,7 @@ field() {
     --session-id thread-a --conversation "$conv" --no-wait \
     --no-delivery
   [ "$status" -eq 0 ]
-  [[ "$output" == status=sent* ]]
+  [[ "$output" == *"status=sent"* ]]
   [ ! -s "$CAPTURE" ]
 
   source_agent="$(field "$first" from)"
@@ -139,7 +139,7 @@ field() {
   run bash "$SCRIPTS/delegate.sh" "$PROJ" codex claude-code "recover" \
     --session-id thread-a --conversation "$conv" --no-wait --no-delivery
   [ "$status" -eq 0 ]
-  [[ "$output" == status=spawned* ]]
+  [[ "$output" == *"status=spawned"* ]]
   [ ! -d "$TEST_SKILL_DIR/run/delegations/$conv.lock" ]
 }
 
