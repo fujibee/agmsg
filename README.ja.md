@@ -117,7 +117,7 @@ cd agmsg
 - Claude Code / Copilot CLI: `/<cmd>`
 - Codex / Gemini CLI / Antigravity: `$<cmd>`
 
-`--cmd` と `--agent-type` は直接スクリプト経路でのみ利用可能。`npm` とプラグインの経路は常に `agmsg` としてインストールされ、ホストのエージェントタイプを自動検出する。
+`npx agmsg install --cmd <名前> --agent-type <種類>` のように、npm経路でもインストーラーのオプションを渡せる。プラグイン経路の初回ブートストラップは `agmsg` という名前を使う。
 
 インストール後、**エージェントを再起動**して（Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode）新しいスキルを反映させる。
 
@@ -161,6 +161,34 @@ $agmsg              # Codex, Gemini CLI, Antigravity
 - *「チームに誰がいるか」*
 
 適切なサブコマンドはエージェントが選んで実行してくれる。以下のスクリプトリファレンスは自動化・スクリプト・CI向けであり、暗記する必要はない。
+
+### Claude/Codexへの自動委任
+
+ClaudeとCodexの間で質問・レビュー・タスクを委任する場合は、チーム名やエージェント名の入力は不要だ。`delegate.sh` がプロジェクト用チームとセッション固有の送信者を自動作成する。
+
+```bash
+# CodexからClaudeへ
+~/.agents/skills/agmsg/scripts/delegate.sh "$PWD" codex claude-code \
+  "この変更をレビューして" --session-id "${CODEX_THREAD_ID:-}"
+
+# ClaudeからCodexへ
+~/.agents/skills/agmsg/scripts/delegate.sh "$PWD" claude-code codex \
+  "テスト失敗を調査して" --session-id "${CLAUDE_CODE_SESSION_ID:-}"
+```
+
+出力された `conversation=<id>` を次の呼び出しへ渡すと、同じ相手へ継続送信する。
+
+```bash
+~/.agents/skills/agmsg/scripts/delegate.sh "$PWD" codex claude-code \
+  "続けてDB負荷も確認して" --session-id "${CODEX_THREAD_ID:-}" \
+  --conversation conv-xxxxxxxxxxxxxxxx
+```
+
+同じプロジェクトから複数セッションが同時に呼び出しても、チームだけを共有し、送信者と会話相手はセッションごとに分離される。同じconversationの更新は直列化される。
+
+相手が終了していた場合は、記録済みrole sessionのresumeを試す。resumeできない場合も停止せず、直近のagmsg履歴を引き継ぎ文脈として新しいセッションを起動する。
+
+ターミナルやtmuxの都合でセッションを起動できない場合は、`claude --print` または `codex exec` の1回実行へ自動フォールバックする。回答はagmsg履歴へ保存されるため、次回の呼び出しでも同じconversationを継続できる。
 
 チーム名の変更、離脱、2つ目のプロジェクトから同じチームへの参加、プロジェクトの登録解除については [docs/teams.md](docs/teams.md) を参照。
 

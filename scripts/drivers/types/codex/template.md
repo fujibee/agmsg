@@ -7,6 +7,21 @@ Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER dir
 
 **Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/__SKILL_NAME__/scripts/send.sh myteam alice bob "hello"'`. Always single-quote the `bash -lc` payload; NEVER use a double-quoted wrapper with escaped inner quotes (e.g. `bash -lc "... \"$PWD\" ..."`) — PowerShell parses `\"` as a literal backslash that terminates the string, silently corrupting the command and dropping everything after it. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
 
+## Claudeへの自動委任
+
+Claudeへの質問・レビュー・タスクは、手動のチーム初期設定を行わず `delegate.sh` で送る。
+
+```bash
+if [ ! -x ~/.agents/skills/__SKILL_NAME__/scripts/delegate.sh ]; then
+  npx --yes agmsg install --cmd __SKILL_NAME__ --agent-type codex
+fi
+~/.agents/skills/__SKILL_NAME__/scripts/delegate.sh "$(pwd)" codex claude-code "<依頼本文>" --session-id "${CODEX_THREAD_ID:-}"
+```
+
+出力された `conversation=<id>` を保持する。「続けて」「追加で聞いて」は同じIDを `--conversation <id>` で渡す。返答は同じconversationと最新generationだけを採用する。
+
+相手が生存中ならメッセージを送り、不在なら前回のrole sessionをresumeする。resumeできない場合はagmsg履歴を渡して新しいClaudeセッションを起動する。spawnが失敗した場合は `claude --print` へ自動フォールバックし、その回答を採用する。
+
 ## Identity
 
 If you already know your AGENT and TEAMS from a previous `$__SKILL_NAME__` call in this session, skip to **Execute** below.
@@ -131,7 +146,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 4. Tell the user: "Dropped role `<name>` from this project."
 
 If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
-1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
+1. Parse `<type>` (must be `claude-code` or `codex`), `<name>`, and any options (`--boot-prompt`, `--project`, `--team`, `--window`, `--split h|v`, `--terminal`, `--no-wait`, `--ready-timeout <secs>`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
    - spawn.sh pre-joins `<name>`, then opens a tmux pane/window (when this session is inside tmux) or a new OS terminal, and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt.
    - By default it BLOCKS until a spawned claude-code agent's watcher attaches (`status=ready`); `status=timeout` + exit 3 if not ready within `--ready-timeout` (default 90s). `--no-wait` for fire-and-forget. Spawning a codex agent skips the wait (codex has no Monitor).

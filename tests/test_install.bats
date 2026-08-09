@@ -24,6 +24,8 @@ teardown() {
 @test "install: fresh install ships scripts/lib and the commands actually run" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   [ -f "$SK/scripts/lib/storage.sh" ]
+  [ -x "$SK/scripts/bootstrap.sh" ]
+  [ -x "$SK/scripts/delegate.sh" ]
 
   # End-to-end through the installed scripts — a missing sourced helper would
   # surface here, not just as a stat on a file.
@@ -308,16 +310,24 @@ PS1
   [ ! -d "$SK" ]  # canonical agmsg location absent
 
   # Run the same shell snippet our SKILL.md prescribes as Step 0.
-  HOME="$FAKE_HOME" bash -c '
-    if [ ! -d ~/.agents/skills/agmsg ]; then
-      installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
-      [ -n "$installer" ] && bash "$installer" --cmd agmsg
+  local fake_bin="$FAKE_HOME/fake-bin"
+  mkdir -p "$fake_bin"
+  printf "#!/usr/bin/env bash\nexit 1\n" > "$fake_bin/npx"
+  chmod +x "$fake_bin/npx"
+  PATH="$fake_bin:/bin:/usr/bin" HOME="$FAKE_HOME" bash -c '
+    if [ ! -x ~/.agents/skills/agmsg/scripts/delegate.sh ]; then
+      if ! command -v npx >/dev/null 2>&1 \
+          || ! npx --yes agmsg install --cmd agmsg --agent-type codex; then
+        installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
+        [ -n "$installer" ] && bash "$installer" --cmd agmsg --agent-type codex
+      fi
     fi
   '
 
   [ -d "$SK" ]
   [ -f "$SK/db/messages.db" ]
   [ -f "$SK/scripts/whoami.sh" ]
+  [ -x "$SK/scripts/delegate.sh" ]
   # The substituted SKILL.md the installer drops should not still carry the
   # __SKILL_NAME__ placeholder (Codex / Gemini / Antigravity all read it).
   ! grep -q "__SKILL_NAME__" "$SK/SKILL.md"

@@ -66,6 +66,8 @@ SESSION_ID=$(printf '%s' "$INPUT" \
   | sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   | head -1)
 [ -z "$SESSION_ID" ] && SESSION_ID="${GROK_SESSION_ID:-}"
+[ -z "$SESSION_ID" ] && SESSION_ID="${CODEX_THREAD_ID:-}"
+[ -z "$SESSION_ID" ] && SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -n "$SESSION_ID" ]; then
   # The monitor watcher keys its pidfile (and its actas owner, below) on the
   # per-process instance id (#93), not the bare session_id. Normalize to the
@@ -93,14 +95,29 @@ if echo "$WHOAMI" | grep -Eq "not_joined=true|suggest=true"; then
   exit 0
 fi
 
-# Handle multiple identities: use first agent name
-if echo "$WHOAMI" | grep -q "multiple=true"; then
+# When bootstrap-created identities coexist, prefer the pair explicitly owned
+# by this runtime instance. Falling back to the historical first-registration
+# behavior preserves compatibility for sessions that have no lock/session id.
+AGENT=""
+TEAMS=""
+if echo "$WHOAMI" | grep -q "multiple=true" && [ -n "$SESSION_ID" ]; then
+  while IFS=$'\t' read -r candidate_team candidate_agent; do
+    [ -n "$candidate_team" ] || continue
+    if [ "$(actas_lock_state "$candidate_team" "$candidate_agent" "$SESSION_ID")" = mine ]; then
+      AGENT="$candidate_agent"
+      TEAMS="$candidate_team"
+      break
+    fi
+  done < <("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE")
+fi
+
+if [ -z "$AGENT" ] && echo "$WHOAMI" | grep -q "multiple=true"; then
   AGENT=$(echo "$WHOAMI" | sed -n 's/.*agents=\([^,]*\).*/\1/p')
-else
+elif [ -z "$AGENT" ]; then
   # Anchor on a leading "agent=" so "agents=" (multiple/suggest) cannot match.
   AGENT=$(echo "$WHOAMI" | sed -n 's/^agent=\([^ ]*\).*/\1/p')
 fi
-TEAMS=$(echo "$WHOAMI" | sed -n 's/.*teams=\([^ ]*\).*/\1/p')
+[ -n "$TEAMS" ] || TEAMS=$(echo "$WHOAMI" | sed -n 's/.*teams=\([^ ]*\).*/\1/p')
 
 if [ -z "$AGENT" ] || [ -z "$TEAMS" ]; then
   exit 0

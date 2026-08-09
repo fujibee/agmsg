@@ -9,23 +9,41 @@ description: Cross-agent messaging via SQLite. Send messages between Claude Code
 
 **Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/agmsg/scripts/send.sh myteam alice bob "hello"'`. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
 
+## Claude/Codexへの自動委任
+
+Claudeへの質問・レビュー・タスクは、手動のチーム初期設定を行わず `delegate.sh` で送る。
+
+```bash
+if [ ! -x ~/.agents/skills/agmsg/scripts/delegate.sh ]; then
+  if ! npx --yes agmsg install --cmd agmsg --agent-type codex; then
+    installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
+    [ -n "$installer" ] && bash "$installer" --cmd agmsg --agent-type codex
+  fi
+fi
+~/.agents/skills/agmsg/scripts/delegate.sh "$(pwd)" codex claude-code "<依頼本文>" --session-id "${CODEX_THREAD_ID:-}"
+```
+
+出力された `conversation=<id>` を保持する。「続けて」「追加で聞いて」は同じIDを `--conversation <id>` で渡す。返答は同じconversationと最新generationだけを採用する。
+
+相手が生存中ならメッセージを送り、不在なら前回のrole sessionをresumeする。resumeできない場合はagmsg履歴を渡して新しいセッションを起動する。spawnが失敗した場合は1回実行の直接CLIへ自動フォールバックし、その回答を採用する。
+
 ## How to use
 
 ### Step 0: First-run bootstrap
 
-agmsg keeps its SQLite database, team registry, and runtime state under `~/.agents/skills/agmsg/`. The `./install.sh` install path creates that tree; the Claude Code plugin install path does not (the plugin marketplace flow only drops the skill content into `~/.claude/plugins/cache/`). Before any other command, bootstrap if needed:
+agmsg keeps its SQLite database, team registry, and runtime state under `~/.agents/skills/agmsg/`. The `./install.sh` install path creates that tree; the Claude Code plugin install path does not (the plugin marketplace flow only drops the skill content into `~/.claude/plugins/cache/`). Before any other command, bootstrap if needed. Prefer the npm bootstrapper so no repository checkout or plugin path discovery is required:
 
 ```bash
-if [ ! -d ~/.agents/skills/agmsg ]; then
-  # Locate the plugin install script (any version), run it once.
-  installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
-  if [ -n "$installer" ]; then
-    bash "$installer" --cmd agmsg
-  else
-    echo "agmsg not installed. Either:" >&2
-    echo "  - run ./install.sh in the agmsg repo, or" >&2
-    echo "  - install via /plugin marketplace add fujibee/agmsg && /plugin install agmsg@fujibee-agmsg" >&2
-    exit 1
+if [ ! -x ~/.agents/skills/agmsg/scripts/delegate.sh ]; then
+  if ! command -v npx >/dev/null 2>&1 \
+      || ! npx --yes agmsg install --cmd agmsg --agent-type codex; then
+    installer=$(ls ~/.claude/plugins/cache/fujibee-agmsg/agmsg/*/install.sh 2>/dev/null | head -1)
+    if [ -n "$installer" ]; then
+      bash "$installer" --cmd agmsg --agent-type codex
+    else
+      echo "agmsg requires npx (Node.js) or an installed agmsg plugin" >&2
+      exit 1
+    fi
   fi
 fi
 ```
