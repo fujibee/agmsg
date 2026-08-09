@@ -17,7 +17,7 @@ teardown() {
 @test "bootstrap: creates a deterministic team and session-scoped identity" {
   run bash "$SCRIPTS/bootstrap.sh" "$PROJ" codex --session-id thread-a --no-delivery
   [ "$status" -eq 0 ]
-  [[ "$output" == status=ready* ]]
+  [[ "$output" == *"status=ready"* ]]
   [[ "$output" == *" type=codex "* ]]
   [[ "$output" == *" created=1 "* ]]
 
@@ -35,7 +35,7 @@ teardown() {
 @test "bootstrap: an empty optional session id falls back instead of stopping" {
   run bash "$SCRIPTS/bootstrap.sh" "$PROJ" codex --session-id "" --no-delivery
   [ "$status" -eq 0 ]
-  [[ "$output" == status=ready* ]]
+  [[ "$output" == *"status=ready"* ]]
 }
 
 @test "bootstrap: parallel sessions share the project team but not the agent identity" {
