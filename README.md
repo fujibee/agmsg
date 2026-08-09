@@ -146,6 +146,9 @@ Git Bash PATH). There is no PowerShell reimplementation.
   Set-Alias bash 'C:\Program Files\Git\bin\bash.exe'
   ```
 
+For a complete Windows coordinator/peer recipe, see [Claude Code Desktop +
+Codex CLI/TUI](docs/windows-claude-codex-tui.md).
+
 ## First run
 
 Open your project in your agent (Claude Code, Codex, Gemini CLI, etc.) and run:

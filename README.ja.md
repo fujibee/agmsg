@@ -145,6 +145,9 @@ agmsgの実装は `scripts/` 配下のBashスクリプト群であるため、Wi
   Set-Alias bash 'C:\Program Files\Git\bin\bash.exe'
   ```
 
+WindowsでのClaude Code Desktop起点・Codex CLI/TUI接続の手順は、[Claude Code
+Desktop + Codex CLI/TUI ガイド](docs/windows-claude-codex-tui.md)を参照。
+
 ## 初回実行
 
 エージェント（Claude Code、Codexなど）でプロジェクトを開き、次を実行する:
