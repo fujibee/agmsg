@@ -103,6 +103,10 @@ _run_reaper_with_kill_failing() {
   # (which may or may not itself have a real claude/codex ancestor).
   export AGMSG_AGENT_PID=""
   export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+  # These tests reap seconds-old watchers on purpose; the grace period exists
+  # for real deployments, not for a test that already controls every other
+  # variable (#737 review).
+  export AGMSG_REAP_GRACE_SECONDS=0
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out.log" 2>/dev/null 3>&- 4>&- &
@@ -147,6 +151,10 @@ _run_reaper_with_kill_failing() {
   # "ancestor" — simulating a watcher whose own id happened to come back bare,
   # but whose owning session is in fact still alive and resolvable.
   export AGMSG_ANY_AGENT_ANCESTOR_PID="$$"
+  # Zero the grace period so this test exercises the ancestor check itself,
+  # not the age floor added in #737 review (which would otherwise protect a
+  # seconds-old watcher regardless of ancestor).
+  export AGMSG_REAP_GRACE_SECONDS=0
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out2.log" 2>/dev/null 3>&- 4>&- &
@@ -178,6 +186,10 @@ _run_reaper_with_kill_failing() {
   # without cleaning up.
   export AGMSG_AGENT_PID=""
   export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+  # These tests reap seconds-old watchers on purpose; the grace period exists
+  # for real deployments, not for a test that already controls every other
+  # variable (#737 review).
+  export AGMSG_REAP_GRACE_SECONDS=0
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$real_sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out3.log" 2>/dev/null 3>&- 4>&- &
@@ -212,6 +224,10 @@ _run_reaper_with_kill_failing() {
 
   export AGMSG_AGENT_PID=""
   export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+  # These tests reap seconds-old watchers on purpose; the grace period exists
+  # for real deployments, not for a test that already controls every other
+  # variable (#737 review).
+  export AGMSG_REAP_GRACE_SECONDS=0
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out4.log" 2>/dev/null 3>&- 4>&- &
@@ -233,6 +249,38 @@ _run_reaper_with_kill_failing() {
   # not fixed).
   kill -0 "$wpid" 2>/dev/null
   [ -f "$pf" ]
+
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+}
+
+@test "a bare-id watcher younger than the grace period is not reaped even with no ancestor (#737 review)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-bare-too-young"
+
+  # No AGMSG_REAP_GRACE_SECONDS override here: the default must protect a
+  # watcher that only just started, in exactly the shape that made
+  # session-start.sh's own "compact dedup" test fail in real CI (ubuntu-latest
+  # and macos-latest both showed the reaper killing that test's seconds-old
+  # watcher, because CI has no claude/codex process anywhere in the tree, so
+  # EVERY bare watcher looks ancestor-less from the instant it starts, not
+  # only genuinely orphaned ones).
+  export AGMSG_AGENT_PID=""
+  export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$TEST_SKILL_DIR/out5.log" 2>/dev/null 3>&- 4>&- &
+  local wpid=$!
+  local pf="$TEST_SKILL_DIR/run/watch.$sid.pid"
+  for i in $(seq 1 50); do
+    [ -f "$pf" ] && break
+    sleep 0.1
+  done
+  [ -f "$pf" ]
+
+  _run_reaper
+  sleep 1
+  kill -0 "$wpid" 2>/dev/null   # still alive: too young to be a reap candidate yet
 
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true

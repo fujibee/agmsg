@@ -454,9 +454,10 @@ EOF
 # wrong session, #737 review).
 agmsg_reap_orphan_bare_watchers() {
   local run="${SKILL_DIR:?agmsg_reap_orphan_bare_watchers requires SKILL_DIR}/run"
-  local self="${1:-$$}" f sid pid cmd
+  local self="${1:-$$}" f sid pid cmd mtime now
   [ -d "$run" ] || return 0
   command -v ps >/dev/null 2>&1 || return 0
+  now=$(date +%s)
   for f in "$run"/watch.*.pid; do
     [ -f "$f" ] || continue
     sid="${f#"$run"/watch.}"; sid="${sid%.pid}"
@@ -465,6 +466,23 @@ agmsg_reap_orphan_bare_watchers() {
     _agmsg_pid_valid "$pid" || continue
     [ "$pid" = "$self" ] && continue
     _agmsg_pid_alive "$pid" || continue
+    # Grace period: a bare watcher that just started has had no chance to
+    # prove it is orphaned. "No agent ancestor" is not rare here — it is what
+    # EVERY bare watcher looks like, from the instant it starts, in any
+    # environment where nothing in the process tree is ever a recognizable
+    # agent binary (headless CI, a container, this test suite's own bats
+    # runner). Without an age floor, this reaper would kill a bare watcher
+    # seconds into its life just as readily as one orphaned for a week — and
+    # did: session-start.sh's own "compact dedup" test starts a watcher and
+    # immediately re-fires session-start, and CI (no agent process anywhere)
+    # showed the reaper killing that live, seconds-old watcher on both
+    # ubuntu-latest and macos-latest (#737 review). Requiring the pidfile to
+    # be at least AGMSG_REAP_GRACE_SECONDS old is what keeps "no ancestor"
+    # meaning "had time to prove it and still couldn't" rather than "hasn't
+    # been alive long enough to matter either way". Override exists so tests
+    # can shrink the window instead of sleeping real wall-clock seconds.
+    mtime="$(compat_file_mtime "$f" 2>/dev/null || echo "$now")"
+    [ $(( now - mtime )) -ge "${AGMSG_REAP_GRACE_SECONDS:-120}" ] || continue
     agmsg_any_agent_ancestor_pid "$pid" >/dev/null 2>&1 && continue
     # Re-read cmdline right before signalling (not a value captured earlier in
     # the loop), narrowing the pid-reuse race to the smallest window this
