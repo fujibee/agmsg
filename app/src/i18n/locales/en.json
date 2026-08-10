@@ -148,14 +148,24 @@
       "title": "Close {{name}}?",
       "body": "This stops {{name}}. This can't be undone.",
       "confirmLabel": "Close pane"
+    },
+    "projectDir": {
+      "titleTeam": "Project directory — {{team}}",
+      "titleAgent": "Project directory — {{name}}",
+      "note": "Takes effect the next time the agent is spawned. Already-running panes keep their current directory.",
+      "save": "Save"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "Change project directory…"
+    },
     "member": {
       "spawnTo": "Spawn to ▸",
       "spawnNewTab": "New tab",
       "existingTabsDivider": "— existing tabs —",
       "rename": "Rename…",
+      "setProject": "Change project directory…",
       "leave": "Leave"
     },
     "pane": {

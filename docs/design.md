@@ -135,6 +135,7 @@ must track the same resolved project); direct shell invocations and
 | `history.sh` | Show message history (newest first, displayed oldest first) |
 | `join.sh` | Add agent to team (create team if needed) |
 | `leave.sh` | Remove agent from team (delete team if empty) |
+| `set-project.sh` | Repoint a registered agent's project dir (all registrations, or one `--type`) |
 | `team.sh` | List team members |
 | `whoami.sh` | Identify agent by project path and type |
 | `rename.sh` | Rename agent in config and message history |

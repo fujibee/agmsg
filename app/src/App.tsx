@@ -24,6 +24,7 @@ import {
   MAX_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   NewTeamModal,
+  ProjectDirModal,
   RenameModal,
   SettingsModal,
 } from "./modals";
@@ -53,7 +54,15 @@ import { PulseDot } from "./pulseSync";
 import { resolveActiveTab } from "./tabMemory";
 import "./App.css";
 
-export type Member = { name: string; types: string[]; project: string };
+export type Member = {
+  name: string;
+  types: string[];
+  project: string;
+  // Per-type registrations — empty on an older core whose api.sh predates
+  // this field. Distinct from `project` (the FIRST registration's project,
+  // which may belong to a different type than the one being edited).
+  registrations: { type: string; project: string }[];
+};
 type Message = {
   id: number;
   team: string;
@@ -224,6 +233,7 @@ type Modal =
   | { kind: "appuser"; auto: boolean }
   | { kind: "rename"; current: string }
   | { kind: "leave"; name: string }
+  | { kind: "projectDir"; team: string; name: string; current: string; agentType?: string }
   | { kind: "settings" }
   | { kind: "closeWindow"; windowId: string }
   | { kind: "closePane"; paneId: string }
@@ -351,6 +361,10 @@ export default function App() {
   const [newMenu, setNewMenu] = useState(false);
   const [cmdName, setCmdName] = useState("agmsg");
   const [spawnTypes, setSpawnTypes] = useState<AgentType[]>([]);
+  // Whether the installed core has set-project.sh (core 1.1.13+) — feature-
+  // gates the "Change project directory…" context-menu items below, same
+  // pattern as coreOutdated already gates the banner.
+  const [supportsSetProject, setSupportsSetProject] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [chatHeight, setChatHeight] = useState(160);
   // Terminal font size, adjustable from the Settings modal and persisted
@@ -425,6 +439,8 @@ export default function App() {
   const [memberMenu, setMemberMenu] = useState<{ member: Member; x: number; y: number } | null>(
     null,
   );
+  // Right-click context menu over a team row in the sidebar: { team, x, y }.
+  const [teamMenu, setTeamMenu] = useState<{ team: string; x: number; y: number } | null>(null);
   // Right-click context menu over a pane's header: { paneId, windowId, x, y }.
   const [paneMenu, setPaneMenu] = useState<{
     paneId: string;
@@ -451,6 +467,7 @@ export default function App() {
   const closeAllMenus = useCallback(() => {
     setNewMenu(false);
     setMemberMenu(null);
+    setTeamMenu(null);
     setPaneMenu(null);
     setWindowMenu(null);
     setRoomMenu(null);
@@ -620,7 +637,15 @@ export default function App() {
   const appUserMember = members.find((m) => m.types.includes(APP_USER_TYPE));
   const appUser = appUserMember?.name ?? "";
   // The team's project dir (the app-user's) — new agents default into the same place.
-  const teamProject = appUserMember?.project ?? "";
+  // Prefers the app-user's own registration (accurate when the same name also
+  // has other-type registrations); falls back to `project` for an older core
+  // whose api.sh doesn't return `registrations` yet. Display-only default, so
+  // that fallback is fine here — unlike the team-menu edit flow below, which
+  // must never guess.
+  const teamProject =
+    appUserMember?.registrations.find((r) => r.type === APP_USER_TYPE)?.project ??
+    appUserMember?.project ??
+    "";
   // Everyone else is a spawnable/messageable agent.
   const others = members.filter((m) => !m.types.includes(APP_USER_TYPE));
   // The app user's own send/receive thread.
@@ -773,6 +798,13 @@ export default function App() {
   // re-fetches this itself right before spawning — see there for why.
   useEffect(() => {
     invoke<AgentType[]>("agmsg_spawnable_types").then(setSpawnTypes).catch(() => {});
+  }, []);
+
+  // Feature-gate for the project-dir edit context-menu items — false (hidden)
+  // until proven otherwise, so an older core without set-project.sh never
+  // shows an action that would fail.
+  useEffect(() => {
+    invoke<boolean>("agmsg_supports_set_project").then(setSupportsSetProject).catch(() => {});
   }, []);
 
   // First load: teams. If there are none, the first-run flow opens New Team.
@@ -1636,6 +1668,20 @@ export default function App() {
     [team, loadMembers],
   );
 
+  // The modal carries its own team (a right-clicked team row need not be the
+  // active one), so that — not the outer `team` — is what's passed to the
+  // backend. Only the currently active team's roster is ever rendered, so
+  // reloading always targets `team` regardless of which team the modal edited
+  // (a no-op refresh when they differ, since that team's list didn't change).
+  const onSetProject = useCallback(
+    async (modalTeam: string, name: string, project: string, agentType?: string) => {
+      await invoke("agmsg_set_project", { team: modalTeam, name, project, agentType });
+      await loadMembers(team);
+      setModal(null);
+    },
+    [team, loadMembers],
+  );
+
   const onLeave = useCallback(
     async (name: string) => {
       const pane = panesRef.current.find((p) => p.label === name);
@@ -2021,6 +2067,18 @@ export default function App() {
                       className={teamName === team ? "team-status-row active" : "team-status-row"}
                       title={`${teamName}: ${status} (open panes)`}
                       onClick={() => setTeam(teamName)}
+                      onContextMenu={(e) => {
+                        // Older core with no set-project.sh: this menu has
+                        // exactly one item and it's always the project-dir
+                        // edit, so there's nothing to show at all — leave the
+                        // native context menu/no-op alone instead of opening
+                        // an empty (or permanently-disabled) agmsg menu.
+                        if (!supportsSetProject) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeAllMenus();
+                        setTeamMenu({ team: teamName, x: e.clientX, y: e.clientY });
+                      }}
                     >
                       <span className="team-status-slot">
                         <span className={`team-status-dot status-${status}`} />
@@ -2571,6 +2629,21 @@ export default function App() {
       {modal?.kind === "rename" && (
         <RenameModal current={modal.current} onRename={onRename} onClose={() => setModal(null)} />
       )}
+      {modal?.kind === "projectDir" && (
+        <ProjectDirModal
+          // Opened from a team row when agentType is the app-user type — the
+          // only case that flow ever sets it to (see the team ctx-menu above).
+          title={
+            modal.agentType === APP_USER_TYPE
+              ? t("modal.projectDir.titleTeam", { team: modal.team })
+              : t("modal.projectDir.titleAgent", { name: modal.name })
+          }
+          current={modal.current}
+          onSave={(project) => onSetProject(modal.team, modal.name, project, modal.agentType)}
+          onClose={() => setModal(null)}
+          browseDir={browseDir}
+        />
+      )}
       {modal?.kind === "leave" && (
         <ConfirmModal
           title={t("modal.leave.title", { name: modal.name })}
@@ -2673,6 +2746,24 @@ export default function App() {
               >
                 {t("ctxMenu.member.rename")}
               </button>
+              {supportsSetProject && (
+                <button
+                  onClick={() => {
+                    // No agentType: `others` never includes the app-user type
+                    // (see its filter above), so moving all of this member's
+                    // registrations is safe and intended here.
+                    setModal({
+                      kind: "projectDir",
+                      team,
+                      name: memberMenu.member.name,
+                      current: memberMenu.member.project,
+                    });
+                    setMemberMenu(null);
+                  }}
+                >
+                  {t("ctxMenu.member.setProject")}
+                </button>
+              )}
               <button
                 className="danger"
                 onClick={() => {
@@ -2681,6 +2772,45 @@ export default function App() {
                 }}
               >
                 {t("ctxMenu.member.leave")}
+              </button>
+            </div>
+          );
+        })()}
+
+      {teamMenu &&
+        supportsSetProject &&
+        (() => {
+          const menuTeam = teamMenu.team;
+          return (
+            <div
+              className="ctx-menu"
+              style={{ left: teamMenu.x, top: teamMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={async () => {
+                  setTeamMenu(null);
+                  const teamMembers = await invoke<Member[]>("agmsg_members", { team: menuTeam }).catch(
+                    () => [] as Member[],
+                  );
+                  const appUserOfTeam = teamMembers.find((m) => m.types.includes(APP_USER_TYPE));
+                  const reg = appUserOfTeam?.registrations.find((r) => r.type === APP_USER_TYPE);
+                  // Deliberately no fallback to `m.project` here: that's the
+                  // FIRST registration's project, not necessarily the
+                  // app-user's — an older core (no `registrations`) or a
+                  // team with no app-user must bail rather than risk moving
+                  // the wrong type's registration (see the plan's review note).
+                  if (!appUserOfTeam || !reg) return;
+                  setModal({
+                    kind: "projectDir",
+                    team: menuTeam,
+                    name: appUserOfTeam.name,
+                    current: reg.project,
+                    agentType: APP_USER_TYPE,
+                  });
+                }}
+              >
+                {t("ctxMenu.team.setProject")}
               </button>
             </div>
           );

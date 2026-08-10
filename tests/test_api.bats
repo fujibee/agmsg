@@ -69,6 +69,24 @@ json_valid_line() {
   [ "$(json_field "$alice_line" project)" = "/tmp/project-a" ]
 }
 
+@test "api: get teams <team> members includes a per-member registrations array" {
+  bash "$SCRIPTS/join.sh" testteam alice codex /tmp/project-a2
+  run bash "$SCRIPTS/api.sh" get teams testteam members
+  [ "$status" -eq 0 ]
+  local alice_line
+  alice_line="$(echo "$output" | grep '"alice"')"
+  [ "$(sqlite_mem "SELECT json_array_length('$(printf %s "$alice_line" | sed "s/'/''/g")', '\$.registrations');")" -eq 2 ]
+  local first_type first_project second_type second_project
+  first_type="$(json_field "$alice_line" 'registrations[0].type')"
+  first_project="$(json_field "$alice_line" 'registrations[0].project')"
+  second_type="$(json_field "$alice_line" 'registrations[1].type')"
+  second_project="$(json_field "$alice_line" 'registrations[1].project')"
+  [ "$first_type" = "claude-code" ]
+  [ "$first_project" = "/tmp/project-a" ]
+  [ "$second_type" = "codex" ]
+  [ "$second_project" = "/tmp/project-a2" ]
+}
+
 @test "api: get teams <team> members is empty for a nonexistent team" {
   run bash "$SCRIPTS/api.sh" get teams ghost-team members
   [ "$status" -eq 0 ]

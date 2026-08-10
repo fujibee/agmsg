@@ -644,6 +644,8 @@ pub fn run() {
             agmsg::agmsg_messages,
             agmsg::agmsg_send,
             agmsg::agmsg_join,
+            agmsg::agmsg_set_project,
+            agmsg::agmsg_supports_set_project,
             agmsg::agmsg_rename,
             agmsg::agmsg_leave,
             agmsg::agmsg_delivery_mode,

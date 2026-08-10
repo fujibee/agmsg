@@ -138,14 +138,24 @@
       "title": "關閉 {{name}}？",
       "body": "這將停止 {{name}}。此操作無法復原。",
       "confirmLabel": "關閉面板"
+    },
+    "projectDir": {
+      "titleTeam": "專案目錄 — {{team}}",
+      "titleAgent": "專案目錄 — {{name}}",
+      "note": "變更將於該代理下次啟動時生效。已在執行中的面板會維持目前的目錄。",
+      "save": "儲存"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "變更專案目錄…"
+    },
     "member": {
       "spawnTo": "啟動至 ▸",
       "spawnNewTab": "新分頁",
       "existingTabsDivider": "— 現有分頁 —",
       "rename": "重新命名…",
+      "setProject": "變更專案目錄…",
       "leave": "離開"
     },
     "pane": {

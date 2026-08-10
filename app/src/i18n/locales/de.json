@@ -138,14 +138,24 @@
       "title": "{{name}} schließen?",
       "body": "Dadurch wird {{name}} gestoppt. Dies kann nicht rückgängig gemacht werden.",
       "confirmLabel": "Panel schließen"
+    },
+    "projectDir": {
+      "titleTeam": "Projektverzeichnis — {{team}}",
+      "titleAgent": "Projektverzeichnis — {{name}}",
+      "note": "Wird erst beim nächsten Start des Agenten wirksam. Bereits laufende Bereiche behalten ihr aktuelles Verzeichnis.",
+      "save": "Speichern"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "Projektverzeichnis ändern…"
+    },
     "member": {
       "spawnTo": "Starten in ▸",
       "spawnNewTab": "Neuer Tab",
       "existingTabsDivider": "— vorhandene Tabs —",
       "rename": "Umbenennen…",
+      "setProject": "Projektverzeichnis ändern…",
       "leave": "Verlassen"
     },
     "pane": {

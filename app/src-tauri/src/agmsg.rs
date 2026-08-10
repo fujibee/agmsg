@@ -227,6 +227,21 @@ pub struct Member {
     pub types: Vec<String>,
     /// First registration's project dir (used as the cwd when spawning a pane).
     pub project: String,
+    /// Every (type, project) registration this member holds, in api.sh's
+    /// order — `types`/`project` above stay as the flattened summary the
+    /// frontend already relies on; this is the detail agmsg_set_project needs
+    /// to target a single registration instead of every type at once.
+    pub registrations: Vec<Registration>,
+}
+
+/// One (type, project) pair from a member's registration list — see
+/// `Member::registrations`. Field is `r#type` because the wire name from
+/// api.sh is the reserved word `type`; serializes back to the frontend as
+/// `type` too, matching `ApiMember`/agmsg's own JSON.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Registration {
+    pub r#type: String,
+    pub project: String,
 }
 
 /// A spawnable agent type, read from its type.conf manifest.
@@ -362,13 +377,18 @@ fn parse_jsonl<T: for<'de> Deserialize<'de>>(raw: &str) -> Vec<T> {
 /// Wire shape of `api.sh get teams <team> members` — see scripts/api.sh.
 /// `project` is nullable there (a member with zero registrations); `Member`
 /// itself keeps a plain `String` for the frontend, so this is mapped rather
-/// than deriving Deserialize directly on `Member`.
+/// than deriving Deserialize directly on `Member`. `registrations` defaults
+/// to empty so an older installed core's api.sh (predating core 1.1.13, which
+/// added the field) still deserializes — existing `types`/`project` behavior
+/// is unaffected either way.
 #[derive(Deserialize)]
 struct ApiMember {
     name: String,
     #[serde(default)]
     types: Vec<String>,
     project: Option<String>,
+    #[serde(default)]
+    registrations: Vec<Registration>,
 }
 
 /// Wire shape of `api.sh get teams <team> messages` — matches the
@@ -548,7 +568,12 @@ pub fn agmsg_members(team: String) -> Result<Vec<Member>, String> {
             let mut types = m.types;
             types.sort();
             types.dedup();
-            Member { name: m.name, types, project: m.project.unwrap_or_default() }
+            Member {
+                name: m.name,
+                types,
+                project: m.project.unwrap_or_default(),
+                registrations: m.registrations,
+            }
         })
         .collect();
     members.sort_by(|a, b| a.name.cmp(&b.name));
@@ -654,6 +679,37 @@ pub fn agmsg_join(
     std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
     let project = bash_path(std::path::Path::new(&project));
     run_script("join.sh", &[&team, &name, &agent_type, &project]).map(|_| ())
+}
+
+/// Change a member's registered project dir via set-project.sh — all of the
+/// member's registrations, or only one type's when `agent_type` is given.
+#[tauri::command]
+pub fn agmsg_set_project(
+    team: String,
+    name: String,
+    project: String,
+    agent_type: Option<String>,
+) -> Result<(), String> {
+    // Same MSYS->native handling as agmsg_join (#315): a project path read
+    // back from an existing registration arrives in MSYS form, but
+    // create_dir_all needs the native form or Windows builds the phantom
+    // C:\c\Users\... tree instead of the real one.
+    #[cfg(target_os = "windows")]
+    let project = msys_to_native(&project);
+    std::fs::create_dir_all(&project).map_err(|e| e.to_string())?;
+    let project = bash_path(std::path::Path::new(&project));
+    match &agent_type {
+        Some(ty) => run_script("set-project.sh", &[&team, &name, &project, "--type", ty]),
+        None => run_script("set-project.sh", &[&team, &name, &project]),
+    }
+    .map(|_| ())
+}
+
+/// Whether the installed core has set-project.sh (ships in core >= 1.1.13) —
+/// feature-gates the app's "change project dir" menu items on older installs.
+#[tauri::command]
+pub fn agmsg_supports_set_project() -> bool {
+    agmsg_base().join("scripts").join("set-project.sh").is_file()
 }
 
 /// Rename a member in a team (updates team config + rewrites message history).
@@ -1003,5 +1059,77 @@ mod tests {
         assert!(native_proj.is_dir(), "native project dir should be created");
         let got = std::fs::read_to_string(dir.path().join("arg4.txt")).unwrap();
         assert_eq!(got, msys_proj, "join.sh $4 should be the MSYS form");
+    }
+
+    /// agmsg_set_project copies agmsg_join's MSYS->native handling verbatim
+    /// (see there) — the same #315 guarantee applies: create_dir_all must
+    /// build the NATIVE dir, not the phantom C:\c\Users\... tree Windows
+    /// would derive from an unconverted MSYS project path. The fake
+    /// set-project.sh result is ignored so a bash hiccup can't mask the
+    /// create_dir_all check.
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn agmsg_set_project_creates_the_native_dir_not_the_phantom() {
+        let _base = fake_base(&[("set-project.sh", "exit 0")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let native_proj = tmp.path().join("agmsg-agents").join("alice");
+        // MSYS form, as a Windows registration stores it.
+        let msys_proj = to_bash_slashes(&native_proj.to_string_lossy());
+        let _ = super::agmsg_set_project("t".into(), "alice".into(), msys_proj, None);
+        assert!(
+            native_proj.is_dir(),
+            "agmsg_set_project must create the native dir, not a phantom C:\\c\\Users\\... tree",
+        );
+    }
+
+    /// End to end through a fake set-project.sh: the native dir is created,
+    /// the project ($3) arrives in MSYS form (storage/identity keys stay MSYS
+    /// while the filesystem side is native, same as join.sh's $4), and
+    /// `--type <ty>` is appended only when agent_type is Some.
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn agmsg_set_project_passes_msys_form_and_type_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        // Forward-slash base so both Rust (agmsg_base) and Git Bash ($AGMSG_APP_BASE
+        // expansion / redirect) accept it — a native backslash path gets mangled by
+        // MSYS argv/redirect handling.
+        let base = dir.path().to_string_lossy().replace('\\', "/");
+        let sdir = dir.path().join("scripts");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("set-project.sh"),
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$AGMSG_APP_BASE/args.txt\"\n",
+        )
+        .unwrap();
+        let _env = EnvGuard::set("AGMSG_APP_BASE", &base);
+
+        let native_proj = dir.path().join("agmsg-agents").join("bob");
+        let msys_proj = to_bash_slashes(&native_proj.to_string_lossy());
+
+        super::agmsg_set_project("t".into(), "bob".into(), msys_proj.clone(), None)
+            .expect("set-project should succeed");
+        assert!(native_proj.is_dir(), "native project dir should be created");
+        let got = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert_eq!(
+            got.lines().collect::<Vec<_>>(),
+            ["t", "bob", msys_proj.as_str()],
+            "project arg ($3) should be the MSYS form; --type absent when agent_type is None",
+        );
+
+        super::agmsg_set_project(
+            "t".into(),
+            "bob".into(),
+            msys_proj.clone(),
+            Some("claude-code".into()),
+        )
+        .expect("set-project with --type should succeed");
+        let got = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert_eq!(
+            got.lines().collect::<Vec<_>>(),
+            ["t", "bob", msys_proj.as_str(), "--type", "claude-code"],
+            "--type <ty> should be appended when agent_type is Some",
+        );
     }
 }

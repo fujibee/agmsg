@@ -138,14 +138,24 @@
       "title": "¿Cerrar {{name}}?",
       "body": "Esto detendrá {{name}}. No se puede deshacer.",
       "confirmLabel": "Cerrar panel"
+    },
+    "projectDir": {
+      "titleTeam": "Directorio del proyecto — {{team}}",
+      "titleAgent": "Directorio del proyecto — {{name}}",
+      "note": "Los cambios surten efecto la próxima vez que se inicie el agente. Los paneles ya en ejecución conservan su directorio actual.",
+      "save": "Guardar"
     }
   },
   "ctxMenu": {
+    "team": {
+      "setProject": "Cambiar directorio del proyecto…"
+    },
     "member": {
       "spawnTo": "Iniciar en ▸",
       "spawnNewTab": "Nueva pestaña",
       "existingTabsDivider": "— pestañas existentes —",
       "rename": "Renombrar…",
+      "setProject": "Cambiar directorio del proyecto…",
       "leave": "Quitar"
     },
     "pane": {
