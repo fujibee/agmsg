@@ -102,8 +102,20 @@ SHIM
   # still have been emitted, or it is lost forever (never re-offered).
   [[ "$output" == *"early"* ]]
   [[ "$output" != *"in-zteam"* ]]
-  # The failure is not swallowed: the loop's status is re-raised on exit.
-  [ "$status" -eq 5 ]
+  # And emitting is not enough: the hook runtime reads this stdout as control
+  # JSON ONLY on exit 0. The previous version of this test asserted status 5
+  # here, which reads as "the failure is not swallowed" but means the payload
+  # above is discarded by the runtime — the message is marked read and never
+  # shown, which is the loss this test exists to prevent (#658). Asserting the
+  # emission while asserting a status that throws it away made the defect look
+  # like the fix.
+  [ "$status" -eq 0 ]
+  # The failure is not swallowed either — it moved into the payload, which is
+  # the channel that survives. Named team and consequence, so a partial poll
+  # cannot be read as a complete one.
+  [[ "$output" == *"stopped early"* ]]
+  [[ "$output" == *"zteam"* ]]
+  [[ "$output" == *"stay unread"* ]]
   # testteam delivered-and-read; zteam untouched, so its message re-surfaces.
   [ "$(unread_count alice)" -eq 0 ]
   [ "$(sqlite3 "$DBPATH" "SELECT COUNT(*) FROM messages WHERE team='zteam' AND to_agent='alice' AND read_at IS NULL;" | tr -d '\r')" -eq 1 ]

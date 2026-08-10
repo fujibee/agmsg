@@ -145,6 +145,7 @@ OUTPUT=""
 # already accumulated still reaches an emit point, teams after the failing one
 # stay untouched (unread), and the failure status is re-raised on exit.
 CLAIM_RC=0
+CLAIM_FAILED_TEAM=""
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
   team_sql="$(_agmsg_sqlesc "$team")"
@@ -159,7 +160,7 @@ for team in "${TEAM_LIST[@]}"; do
   # role. That asymmetry is the Codex caveat documented in README — if a
   # Codex session actas'd into <name>, check-inbox is still polling
   # whatever whoami chose first, not <name>.
-  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}") || { CLAIM_RC=$?; break; }
+  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}") || { CLAIM_RC=$?; CLAIM_FAILED_TEAM="$team"; break; }
   case "$state" in
     other:*) continue ;;
   esac
@@ -168,7 +169,7 @@ for team in "${TEAM_LIST[@]}"; do
     SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
     FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
     ORDER BY created_at ASC;
-  ") || { CLAIM_RC=$?; break; }
+  ") || { CLAIM_RC=$?; CLAIM_FAILED_TEAM="$team"; break; }
   if [ -n "$RESULT" ]; then
     COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
     OUTPUT+="$COUNT new message(s) in $team:"$'\n'
@@ -200,16 +201,41 @@ for team in "${TEAM_LIST[@]}"; do
   fi
 done
 
-# No new messages. Both emit points re-raise a loop failure captured above:
-# exiting 0 here would convert "a team's query failed" into "nothing to
-# deliver", which is the silent half of #637.
+# The two emit points are NOT the same case, and treating them alike is what
+# lost messages.
+#
+# Nothing was accumulated: there is no delivery to protect, so the exit status
+# is free to carry the failure — and it must, because "no new messages" would
+# claim something this run never established. That is the half of #637 the
+# original comment here was right about, and it is unchanged.
+#
+# The status line is emitted only when the poll actually completed. Printing
+# "no new messages" and then exiting non-zero states something untrue on a
+# channel that is about to be discarded anyway.
 if [ -z "$OUTPUT" ]; then
+  [ "$CLAIM_RC" -eq 0 ] || exit "$CLAIM_RC"
   emit_status_json "agmsg: no new messages"
-  exit "$CLAIM_RC"
+  exit 0
 fi
 
-# New messages found
+# New messages found.
+#
+# This is the delivering path, and the rows above were marked read INSIDE the
+# loop before we got here. The hook runtime reads stdout as control JSON only
+# on exit 0, so a non-zero status here does not "re-raise the failure" — it
+# throws away the payload that already cost those rows their unread state. The
+# messages are consumed and never shown, which is a worse outcome than the one
+# the status was protecting against.
+#
+# So delivery and the report are separated: the messages go out with exit 0,
+# and the partial failure is stated inside the payload the operator actually
+# reads. Nothing upstream mistakes a partial poll for a complete one, because
+# the text says which team stopped it and that the rest are still unread.
 if [ -n "$OUTPUT" ]; then
+  if [ "$CLAIM_RC" -ne 0 ]; then
+    OUTPUT+="agmsg: this poll stopped early — team '$CLAIM_FAILED_TEAM' could not be read (status $CLAIM_RC)."$'\n'
+    OUTPUT+="agmsg: teams after it were not checked; their messages stay unread and will be offered again."$'\n'
+  fi
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
   ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
   cat <<ENDJSON
@@ -218,5 +244,5 @@ if [ -n "$OUTPUT" ]; then
   "reason": "$ESCAPED"
 }
 ENDJSON
-  exit "$CLAIM_RC"
+  exit 0
 fi
