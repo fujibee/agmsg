@@ -221,16 +221,27 @@ fi
 # New messages found.
 #
 # This is the delivering path, and the rows above were marked read INSIDE the
-# loop before we got here. The hook runtime reads stdout as control JSON only
-# on exit 0, so a non-zero status here does not "re-raise the failure" — it
-# throws away the payload that already cost those rows their unread state. The
-# messages are consumed and never shown, which is a worse outcome than the one
-# the status was protecting against.
+# loop before we got here. The documented hook contract is that stdout is read
+# as control JSON only on exit 0. Measured (Claude Code 2.1.226, one-shot
+# `claude -p`, a synthetic probe hook -- not this script, not an interactive
+# session): the stdout control JSON was processed on exit 0, 1, 2, and 3 alike.
+# So this codebase currently depends on an area where the documented contract
+# and the observed implementation disagree -- see
+# https://github.com/fujibee/agmsg/issues/658 for the measurement.
 #
-# So delivery and the report are separated: the messages go out with exit 0,
-# and the partial failure is stated inside the payload the operator actually
-# reads. Nothing upstream mistakes a partial poll for a complete one, because
-# the text says which team stopped it and that the rest are still unread.
+# This fix is correct either way, which is why it doesn't bet on which
+# behavior is real: if a runtime DOES discard stdout on non-zero exit (as
+# documented), leaving the old `exit "$CLAIM_RC"` here would throw away the
+# payload that already cost these rows their unread state -- consumed and
+# never shown, worse than the failure this status was meant to protect
+# against. If a runtime does NOT discard it (as measured here), the old
+# non-zero exit was not needed to preserve the delivery or report the
+# partial failure, because the payload already carries both.
+# Exiting 0 unconditionally on this path is safe under both, so delivery and
+# the report are separated: the messages go out with exit 0, and the partial
+# failure is stated inside the payload the operator actually reads. Nothing
+# upstream mistakes a partial poll for a complete one, because the text says
+# which team stopped it and that the rest are still unread.
 if [ -n "$OUTPUT" ]; then
   if [ "$CLAIM_RC" -ne 0 ]; then
     OUTPUT+="agmsg: this poll stopped early — team '$CLAIM_FAILED_TEAM' could not be read (status $CLAIM_RC)."$'\n'

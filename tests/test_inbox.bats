@@ -102,13 +102,20 @@ SHIM
   # still have been emitted, or it is lost forever (never re-offered).
   [[ "$output" == *"early"* ]]
   [[ "$output" != *"in-zteam"* ]]
-  # And emitting is not enough: the hook runtime reads this stdout as control
-  # JSON ONLY on exit 0. The previous version of this test asserted status 5
-  # here, which reads as "the failure is not swallowed" but means the payload
-  # above is discarded by the runtime — the message is marked read and never
-  # shown, which is the loss this test exists to prevent (#658). Asserting the
-  # emission while asserting a status that throws it away made the defect look
-  # like the fix.
+  # And emitting is not enough on its own: the documented hook contract is
+  # that stdout is read as control JSON only on exit 0. (Measured separately,
+  # not by this test: Claude Code 2.1.226 via one-shot `claude -p` with a
+  # synthetic probe hook processed the JSON on exit 0, 1, 2, and 3 alike --
+  # https://github.com/fujibee/agmsg/issues/658. This assertion holds
+  # regardless of which behavior a given runtime actually implements, which
+  # is the point: it pins the script's OWN exit code, not a claim about what
+  # any runtime does with it.) The previous version of this test asserted
+  # status 5 here, which reads as "the failure is not swallowed" but leaves
+  # the delivering path dependent on a non-zero exit for something it cannot
+  # both carry a real payload and safely claim failure with -- see the
+  # `check-inbox.sh` comment at this same branch for why exit 0 is correct
+  # either way. Asserting the emission while asserting a non-zero status made
+  # the defect look like the fix.
   [ "$status" -eq 0 ]
   # The failure is not swallowed either — it moved into the payload, which is
   # the channel that survives. Named team and consequence, so a partial poll
