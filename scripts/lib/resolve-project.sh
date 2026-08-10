@@ -372,6 +372,45 @@ agmsg_any_agent_ancestor_pid() {
   return 1
 }
 
+# True iff ANY process anywhere on this machine currently looks like a known
+# agent type (see agmsg_pid_is_agent) — not an ancestor of any particular pid,
+# just a live one somewhere in the whole process table.
+#
+# Exists to tell a blind detector from a true negative. agmsg_any_agent_ancestor_pid
+# failing to find an ancestor for one specific pid means one of two very
+# different things: that pid's own launching session really did end, or ps
+# simply cannot see ANY agent process from anywhere in this environment
+# (headless CI, a container with no agent runtime, a sandbox) — in which case
+# every bare watcher looks ancestor-less from the instant it starts, whether
+# orphaned or not, and "not found" carries no information about that specific
+# watcher at all (#737 review: an age floor alone does not fix this, it only
+# delays a normal watcher's false-positive reap past however long the floor
+# is set to). A caller that only reaps once this returns true is reaping on
+# a specific absence, not a blanket one.
+#
+# Not a proof either way for the *individual* watcher being checked — a
+# machine can have one live session while a DIFFERENT session's watcher is
+# genuinely orphaned — but it is what turns "no ancestor" from meaningless in
+# a blind environment into meaningful in one that demonstrably is not blind.
+#
+# Override hook, same shape as the others: AGMSG_ANY_AGENT_PROCESS_EXISTS set
+# to a non-empty value forces true, set empty forces false, unset runs the
+# real scan.
+agmsg_any_agent_process_exists() {
+  if [ -n "${AGMSG_ANY_AGENT_PROCESS_EXISTS+set}" ]; then
+    [ -n "$AGMSG_ANY_AGENT_PROCESS_EXISTS" ]
+    return
+  fi
+  command -v ps >/dev/null 2>&1 || return 1
+  local pid t
+  for pid in $(ps -eo pid= 2>/dev/null); do
+    for t in claude-code codex gemini antigravity copilot opencode; do
+      agmsg_pid_is_agent "$pid" "$t" && return 0
+    done
+  done
+  return 1
+}
+
 agmsg_project_marker_path() { printf '%s/proj.%s.project' "$(_agmsg_run_dir)" "$1"; }
 
 # Persist <project> as the real root for agent <pid>. Best-effort.

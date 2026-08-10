@@ -69,6 +69,16 @@ _run_reaper_with_kill_failing() {
     agmsg_reap_orphan_bare_watchers "$$" )
 }
 
+@test "any_agent_process_exists: AGMSG_ANY_AGENT_PROCESS_EXISTS overrides the real scan" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/resolve-project.sh"
+  AGMSG_ANY_AGENT_PROCESS_EXISTS="" run agmsg_any_agent_process_exists
+  [ "$status" -ne 0 ]
+  AGMSG_ANY_AGENT_PROCESS_EXISTS=1 run agmsg_any_agent_process_exists
+  [ "$status" -eq 0 ]
+}
+
 @test "any_agent_ancestor_pid: no match when the starting pid does not exist" {
   # A nonexistent pid has no ppid to walk to, so the real walk (no override)
   # must fail at the first hop. Deliberately not testing this against a real
@@ -107,6 +117,11 @@ _run_reaper_with_kill_failing() {
   # for real deployments, not for a test that already controls every other
   # variable (#737 review).
   export AGMSG_REAP_GRACE_SECONDS=0
+  # These tests exercise ancestor/sid/kill-signal logic specifically, not
+  # whether the environment can resolve agent ancestors at all — pin the
+  # blindness gate open (#737 review) so a CI runner (no agent process
+  # anywhere) and a dev machine (a real one right here) behave identically.
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=1
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out.log" 2>/dev/null 3>&- 4>&- &
@@ -155,6 +170,11 @@ _run_reaper_with_kill_failing() {
   # not the age floor added in #737 review (which would otherwise protect a
   # seconds-old watcher regardless of ancestor).
   export AGMSG_REAP_GRACE_SECONDS=0
+  # These tests exercise ancestor/sid/kill-signal logic specifically, not
+  # whether the environment can resolve agent ancestors at all — pin the
+  # blindness gate open (#737 review) so a CI runner (no agent process
+  # anywhere) and a dev machine (a real one right here) behave identically.
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=1
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out2.log" 2>/dev/null 3>&- 4>&- &
@@ -190,6 +210,11 @@ _run_reaper_with_kill_failing() {
   # for real deployments, not for a test that already controls every other
   # variable (#737 review).
   export AGMSG_REAP_GRACE_SECONDS=0
+  # These tests exercise ancestor/sid/kill-signal logic specifically, not
+  # whether the environment can resolve agent ancestors at all — pin the
+  # blindness gate open (#737 review) so a CI runner (no agent process
+  # anywhere) and a dev machine (a real one right here) behave identically.
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=1
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$real_sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out3.log" 2>/dev/null 3>&- 4>&- &
@@ -228,6 +253,11 @@ _run_reaper_with_kill_failing() {
   # for real deployments, not for a test that already controls every other
   # variable (#737 review).
   export AGMSG_REAP_GRACE_SECONDS=0
+  # These tests exercise ancestor/sid/kill-signal logic specifically, not
+  # whether the environment can resolve agent ancestors at all — pin the
+  # blindness gate open (#737 review) so a CI runner (no agent process
+  # anywhere) and a dev machine (a real one right here) behave identically.
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=1
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out4.log" 2>/dev/null 3>&- 4>&- &
@@ -267,6 +297,10 @@ _run_reaper_with_kill_failing() {
   # only genuinely orphaned ones).
   export AGMSG_AGENT_PID=""
   export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+  # This test is specifically about the age floor, not the blindness gate
+  # added afterward (#737 review) — pin the gate open so it isolates the
+  # grace period alone.
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=1
 
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
     >"$TEST_SKILL_DIR/out5.log" 2>/dev/null 3>&- 4>&- &
@@ -281,6 +315,40 @@ _run_reaper_with_kill_failing() {
   _run_reaper
   sleep 1
   kill -0 "$wpid" 2>/dev/null   # still alive: too young to be a reap candidate yet
+
+  kill "$wpid" 2>/dev/null || true
+  wait "$wpid" 2>/dev/null || true
+}
+
+@test "a normal bare-id watcher is never reaped while the environment cannot resolve any agent ancestor at all (#737 review)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-bare-blind-env"
+
+  # The age floor alone does NOT fix this: a normal, still-alive watcher in an
+  # environment where NO process anywhere is ever a recognizable agent binary
+  # (headless CI, a container) crosses the grace period exactly like an
+  # orphan would, and gets killed on the next session-start with a fully
+  # correct-looking sid/argv match. Zeroing the grace period here isolates
+  # that: with the age floor out of the way, only the blindness gate stands
+  # between this watcher and a kill.
+  export AGMSG_AGENT_PID=""
+  export AGMSG_ANY_AGENT_ANCESTOR_PID=""
+  export AGMSG_REAP_GRACE_SECONDS=0
+  export AGMSG_ANY_AGENT_PROCESS_EXISTS=""
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code \
+    >"$TEST_SKILL_DIR/out6.log" 2>/dev/null 3>&- 4>&- &
+  local wpid=$!
+  local pf="$TEST_SKILL_DIR/run/watch.$sid.pid"
+  for i in $(seq 1 50); do
+    [ -f "$pf" ] && break
+    sleep 0.1
+  done
+  [ -f "$pf" ]
+
+  _run_reaper
+  sleep 1
+  kill -0 "$wpid" 2>/dev/null   # still alive: the detector is blind here, so it must not act at all
 
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true

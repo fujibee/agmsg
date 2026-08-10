@@ -457,6 +457,19 @@ agmsg_reap_orphan_bare_watchers() {
   local self="${1:-$$}" f sid pid cmd mtime now
   [ -d "$run" ] || return 0
   command -v ps >/dev/null 2>&1 || return 0
+  # Detector-blindness gate, checked ONCE for the whole pass rather than per
+  # watcher: if no process anywhere on this machine looks like a known agent
+  # type, "no ancestor" for any individual watcher carries no information —
+  # it is what EVERY bare watcher looks like here, orphaned or not (headless
+  # CI, a container, this test suite's own bats runner). An age floor alone
+  # does not fix that: it only delays the same false-positive reap past
+  # however long the floor is set to, and a normal watcher that outlives it
+  # gets killed on the next session-start with a fully correct-looking sid/
+  # argv match (#737 review, raised independently by two reviewers). Refusing
+  # to reap AT ALL while the detector is demonstrably blind is what keeps
+  # "not found" meaning "checked and absent" instead of "couldn't have found
+  # it either way".
+  agmsg_any_agent_process_exists || return 0
   now=$(date +%s)
   for f in "$run"/watch.*.pid; do
     [ -f "$f" ] || continue
@@ -466,21 +479,11 @@ agmsg_reap_orphan_bare_watchers() {
     _agmsg_pid_valid "$pid" || continue
     [ "$pid" = "$self" ] && continue
     _agmsg_pid_alive "$pid" || continue
-    # Grace period: a bare watcher that just started has had no chance to
-    # prove it is orphaned. "No agent ancestor" is not rare here — it is what
-    # EVERY bare watcher looks like, from the instant it starts, in any
-    # environment where nothing in the process tree is ever a recognizable
-    # agent binary (headless CI, a container, this test suite's own bats
-    # runner). Without an age floor, this reaper would kill a bare watcher
-    # seconds into its life just as readily as one orphaned for a week — and
-    # did: session-start.sh's own "compact dedup" test starts a watcher and
-    # immediately re-fires session-start, and CI (no agent process anywhere)
-    # showed the reaper killing that live, seconds-old watcher on both
-    # ubuntu-latest and macos-latest (#737 review). Requiring the pidfile to
-    # be at least AGMSG_REAP_GRACE_SECONDS old is what keeps "no ancestor"
-    # meaning "had time to prove it and still couldn't" rather than "hasn't
-    # been alive long enough to matter either way". Override exists so tests
-    # can shrink the window instead of sleeping real wall-clock seconds.
+    # Grace period, defense-in-depth alongside the blindness gate above: a
+    # bare watcher that just started has had no chance to prove it is
+    # orphaned even in an environment the gate above has already confirmed is
+    # NOT blind. Override exists so tests can shrink the window instead of
+    # sleeping real wall-clock seconds.
     mtime="$(compat_file_mtime "$f" 2>/dev/null || echo "$now")"
     [ $(( now - mtime )) -ge "${AGMSG_REAP_GRACE_SECONDS:-120}" ] || continue
     agmsg_any_agent_ancestor_pid "$pid" >/dev/null 2>&1 && continue
