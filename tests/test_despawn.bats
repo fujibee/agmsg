@@ -8,21 +8,38 @@ load test_helper
 
 setup() {
   setup_test_env
-  # Never inherit a real herdr environment from the test runner. A watcher
-  # started here that keeps the host's HERDR_PANE_ID will, on ctrl:despawn,
-  # close the developer's own pane — the suite kills the session running it.
+  # Never inherit real tmux/herdr placement state from the test runner so
+  # graceful-control tests remain independent of host placement context.
   # This belongs in setup, not on individual watch.sh launches: guarding each
   # launch site means every test added later has to remember, and one that
   # did not (the #439 read_at test, added after this file first grew herdr
   # awareness) is exactly how a real host pane got closed.
-  unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+  unset TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+  DESPAWN_WATCH_PID=""
   export PROJ="/tmp/agmsg-despawn-proj"
   export RUN="$TEST_SKILL_DIR/run"
   mkdir -p "$RUN"
 }
 
 teardown() {
+  if [ -n "${DESPAWN_WATCH_PID:-}" ]; then
+    kill "$DESPAWN_WATCH_PID" 2>/dev/null || true
+    wait "$DESPAWN_WATCH_PID" 2>/dev/null || true
+  fi
   teardown_test_env
+}
+
+_stub_tmux_for_force() {
+  local stub_bin="$1" call_log="$2"
+  mkdir -p "$stub_bin"
+  export TMUX_CALL_LOG="$call_log"
+  : > "$call_log"
+  cat > "$stub_bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+exit 0
+STUB
+  chmod +x "$stub_bin/tmux"
 }
 
 @test "despawn: graceful — ctrl:despawn makes the member drop its role" {
@@ -30,16 +47,20 @@ teardown() {
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   # Make the member session look alive so the leader sees a live lock to wait on.
   setup_live_owner "$RUN" sess-m
+  # A recorded herdr placement makes the provider-neutral manual-close result
+  # observable without authorizing an automatic herdr command.
+  # Graceful teardown must delete this now-stale record after the role drops.
+  # No final newline exercises graceful record reporting without letting
+  # `read`'s EOF status abort the set -e script.
+  printf 'herdr:wC:p42\t%s\tclaude-code' "$PROJ" > "$RUN/spawn.team__alice"
 
-  # Unset TMUX_PANE and HERDR_PANE_ID: the ctrl:despawn handler runs
-  # `tmux kill-pane` / `herdr pane close`, and a watcher launched from inside
-  # the developer's environment would inherit the REAL pane id and close the
-  # session running the tests. With both empty, the handler takes the "close
-  # manually" branch — role-drop is still asserted.
+  # Keep the integration watcher detached from host placement state. Graceful
+  # control teardown must not depend on a provider environment.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
-  local wpid=$! i
+  DESPAWN_WATCH_PID=$!
+  local i
   # Wait for the watcher to attach (it claims the lock + writes the ready sentinel).
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
   [ -e "$RUN/ready.team__alice" ]
@@ -48,13 +69,18 @@ teardown() {
   run bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=ok"* ]]
+  [[ "$output" == *"note=role-lock-free-close-manually"* ]]
+  [[ "$output" == *"close its recorded pane/window manually"* ]]
+  [ ! -f "$RUN/spawn.team__alice" ]
 
   # Member dropped its role: lock released and registration gone.
   [ ! -f "$RUN/actas.team__alice.session" ]
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]
 
-  kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+  wait_for_pid_exit "$DESPAWN_WATCH_PID"
+  wait "$DESPAWN_WATCH_PID" 2>/dev/null || true
+  DESPAWN_WATCH_PID=""
 }
 
 # read_at for the most recent message with the given body, empty if unread.
@@ -89,18 +115,22 @@ _read_at_for_body() {
 
 @test "despawn --force: kills recorded placement and drops registration without the member" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  # Placement as spawn would have recorded it (pane %99 doesn't exist; kill is
-  # best-effort/no-op here — we assert the registration + lock + record effects).
+  # Placement as spawn would have recorded it. A private tmux stub captures the
+  # explicit force call so this test can never reach a host tmux server.
   printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
   printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  local stub_bin="$TEST_SKILL_DIR/stub-bin"
+  local tmux_log="$TEST_SKILL_DIR/tmux-calls.log"
+  _stub_tmux_for_force "$stub_bin" "$tmux_log"
 
-  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  run env PATH="$stub_bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   [[ "$output" == *"status=forced"* ]]
   [ ! -f "$RUN/spawn.team__alice" ]                 # placement record cleaned
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
+  grep -Fx "kill-pane -t %99" "$tmux_log"
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -124,8 +154,8 @@ _read_at_for_body() {
 @test "despawn: a broad (non-actas) watcher ignores ctrl:despawn and does not self-destruct" {
   # Regression for the self-kill bug: a leader's default watcher subscribes to
   # EVERY project role. If it acted on a ctrl:despawn addressed to one of them,
-  # it would run `tmux kill-pane -t $TMUX_PANE` against the leader's OWN pane and
-  # take down the leader session. A broad watcher must skip the control message.
+  # it would reset a role it does not own and take down the leader session. A
+  # broad watcher must skip the control message.
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team boss claude-code "$PROJ" >/dev/null
@@ -153,6 +183,31 @@ _read_at_for_body() {
   run bash "$SCRIPTS/despawn.sh" team leader alice
   [ "$status" -eq 0 ]
   [[ "$output" == *"no-live-lock"* ]]
+}
+
+@test "despawn: graceful tolerates and removes an empty placement record" {
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  : > "$RUN/spawn.team__alice"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"note=no-live-lock"* ]]
+  [[ "$output" != *"close-manually"* ]]
+  [ ! -f "$RUN/spawn.team__alice" ]
+}
+
+@test "despawn: no-live recorded placement reports manual close before deleting its record" {
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  printf 'herdr:wC:p42\t%s\tcodex\n' "$PROJ" > "$RUN/spawn.team__alice"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"note=no-live-lock-close-manually"* ]]
+  [[ "$output" == *"close its recorded pane/window manually"* ]]
+  [[ "$output" != *"use --force"* ]]
+  [ ! -f "$RUN/spawn.team__alice" ]
 }
 
 @test "despawn --force: kills a herdr: placement via herdr pane close" {

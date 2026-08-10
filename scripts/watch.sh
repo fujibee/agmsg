@@ -420,50 +420,23 @@ while true; do
       while IFS=$'\x1f' read -r id ts team from to body; do
         [ -z "$id" ] && continue
         # Control message: a leader's `despawn` sends `ctrl:despawn` to this
-        # role. Tear ourselves down rather than printing it — drop the role
-        # (releases the lock + registration) then close our own tmux pane,
-        # which also ends the agent CLI sharing it. Deterministic teardown, no
-        # dependence on the agent LLM noticing the message. See #109.
+        # role. Tear down the logical role rather than printing it. Pane/window
+        # closure is deliberately manual for every placement provider: inherited
+        # ids and legacy placement records do not prove generation-bound
+        # ownership. See #109 and #514.
         if [ "$body" = "ctrl:despawn" ]; then
           mark_read "$id" "$team" "$to"
           LAST="$id"; persist_watermark
           # Only an EXCLUSIVE watcher dedicated to exactly this role tears
-          # itself down. A broad-subscription watcher (e.g. a leader whose
-          # default watcher subscribes to every project role, including the
-          # despawn target) must NOT act on it — its $TMUX_PANE is the leader's
-          # own pane, so killing it would take down the leader's session. The
-          # spawned member's watcher runs in actas mode (ACTIVE_NAME=$to) in its
-          # own pane; that's the one meant to respond. See #109.
+          # the role down. A broad-subscription watcher (for example a leader
+          # subscribed to every project role) must not reset a role it does not
+          # own. The spawned member's watcher runs in actas mode
+          # (ACTIVE_NAME=$to); that is the intended responder. See #109.
           if [ -z "$ACTIVE_NAME" ] || [ "$to" != "$ACTIVE_NAME" ]; then
             continue
           fi
-          # Read the placement record BEFORE reset.sh. reset.sh releases the
-          # actas lock, and the leader's despawn deletes the record as soon as
-          # it observes that lock go free — so reading it afterwards races the
-          # cleanup and would intermittently see nothing.
-          placed_id=""
-          spawn_rec="$(agmsg_spawn_path "$team" "$to")"
-          [ -f "$spawn_rec" ] && IFS=$'\t' read -r placed_id _ _ < "$spawn_rec"
           "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$to" "$SESSION_ID" >/dev/null 2>&1 || true
-          if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
-            tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
-          # Closing a herdr pane needs more than "a pane id is in the
-          # environment". HERDR_* is inherited by every descendant of a herdr
-          # pane, so a watcher merely STARTED inside one — a developer running
-          # the test suite, or any agent that actas'd by hand — carries the
-          # HOST pane's id. Acting on that closes the host. Require both the
-          # full herdr environment (matching spawn's own detection) and proof
-          # that agmsg itself placed this pane: the recorded placement for this
-          # (team, agent) must name exactly the pane we are sitting in.
-          # Otherwise fall through to the manual branch. This is the herdr
-          # counterpart of the tmux path's ACTIVE_NAME gating (#109).
-          elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
-               && [ "$placed_id" = "herdr:$HERDR_PANE_ID" ] \
-               && command -v herdr >/dev/null 2>&1; then
-            herdr pane close "$HERDR_PANE_ID" 2>/dev/null || true
-          else
-            echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
-          fi
+          echo "agmsg watch: despawned '$to' (role dropped); close this window manually" >&2
           exit 0
         fi
         if ! printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"; then
