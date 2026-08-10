@@ -315,6 +315,63 @@ agmsg_agent_pid() {
   return 1
 }
 
+# Same walk as agmsg_agent_pid, generalized two ways: it starts from an
+# explicit <pid> (default: $$) instead of always the caller's own process, and
+# it accepts an ancestor of ANY known type instead of one named type. Exists
+# for exactly one caller class: code that must ask "does this OTHER pid still
+# have some owning agent session" without knowing which type launched it —
+# which is precisely the situation a bare instance id leaves behind (#693). A
+# bare id means agmsg_agent_pid already failed once for this same pid asking
+# about one type; asking again for the same single type would just repeat the
+# same negative, so this checks every type the binary map distinguishes.
+#
+# The type list mirrors _agmsg_agent_binaries' named cases, not its wildcard
+# default — the default ("claude codex gemini") is already a subset of what
+# checking "claude-code" and "codex" and "gemini" individually covers, so
+# looping the named cases is exhaustive without a second source of truth to
+# keep in sync (agmsg_known_types walks driver directories on disk and is
+# built for a different question — eligibility to run a session — not "which
+# binary names has this file ever mapped a pid against").
+#
+# Does NOT prove the pid's original launching session is dead. A sandboxed
+# `ps`, an unusual launch topology, or a chain deeper than 20 hops makes this
+# walk blind, and blind looks identical to gone — the same trade-off
+# agmsg_grok_ancestor_pid already ships with for one type. A caller reaping on
+# a miss here is accepting that trade-off, not discovering a new one.
+#
+# Override hook, same shape and same reason as AGMSG_AGENT_PID: when
+# AGMSG_ANY_AGENT_ANCESTOR_PID is set, it pins the answer instead of walking
+# the tree — a non-empty value is echoed as-is, empty forces "no ancestor". A
+# distinct variable rather than reusing AGMSG_AGENT_PID because the two calls
+# answer about different pids (the caller's own vs. an arbitrary <start>); one
+# override pinning both would make a test that needs them to disagree — an
+# orphaned OTHER watcher next to a live self, or vice versa — impossible to
+# express.
+agmsg_any_agent_ancestor_pid() {
+  local start="${1:-$$}"
+  if [ -n "${AGMSG_ANY_AGENT_ANCESTOR_PID+set}" ]; then
+    case "$AGMSG_ANY_AGENT_ANCESTOR_PID" in
+      '')       return 1 ;;
+      *[!0-9]*) return 1 ;;
+      *) printf '%s' "$AGMSG_ANY_AGENT_ANCESTOR_PID"; return 0 ;;
+    esac
+  fi
+  local pid="$start" hops=0 t
+  while [ "${pid:-0}" -gt 1 ] && [ "$hops" -lt 20 ]; do
+    pid=$(compat_get_ppid "$pid" 2>/dev/null || true)
+    [ -z "$pid" ] && return 1
+    [ "$pid" = "0" ] && return 1
+    for t in claude-code codex gemini antigravity copilot opencode; do
+      if agmsg_pid_is_agent "$pid" "$t"; then
+        printf '%s' "$pid"
+        return 0
+      fi
+    done
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 agmsg_project_marker_path() { printf '%s/proj.%s.project' "$(_agmsg_run_dir)" "$1"; }
 
 # Persist <project> as the real root for agent <pid>. Best-effort.

@@ -25,7 +25,8 @@
 # so "last dot-segment is numeric" unambiguously marks the composite form.
 #
 # Requires: SKILL_DIR set. agmsg_instance_id / agmsg_normalize_instance_id
-# additionally require resolve-project.sh sourced (for agmsg_agent_pid);
+# additionally require resolve-project.sh sourced (for agmsg_agent_pid), as
+# does agmsg_reap_orphan_bare_watchers (for agmsg_any_agent_ancestor_pid);
 # agmsg_instance_alive and the pure helpers do not.
 
 # Guard against double-source (these are sourced transitively via actas-lock.sh
@@ -386,6 +387,55 @@ agmsg_reap_orphan_grok_watchers() {
   done <<EOF
 $(ps -eo pid=,args= 2>/dev/null)
 EOF
+}
+
+# Reap watch.sh processes whose recorded session id is bare and whose own
+# process now has no live agent-type ancestor of any kind (#693).
+#
+# A composite id is already self-checked every poll cycle, from inside the
+# watcher, against agmsg_instance_alive (#67, watch.sh's liveness guard). A
+# bare id has no equivalent: agmsg_instance_alive's bare branch answers a
+# different question (upgrade compat — does some live cc-instance record
+# still reference this sid from before the composite scheme existed), and a
+# session that never resolved to a pid in the first place never writes a
+# cc-instance record for that branch to find. Extending the composite check's
+# MECHANISM (kill -0 an embedded pid) to bare ids is not available — there is
+# no pid embedded in a bare id to check. This is the other mechanism the gap
+# needs: reap from outside, at a moment some OTHER live session can look, by
+# walking the watcher's OWN pid for ANY known agent ancestor (see
+# agmsg_any_agent_ancestor_pid) rather than trying to resolve the one the
+# watcher itself already failed to find at launch.
+#
+# Generalizes agmsg_reap_orphan_grok_watchers (one type, found via a ps-argv
+# pattern match) to every type, found via the pidfile the watcher itself
+# already writes — no pattern needed, and no dependency on the watcher's argv
+# still containing a recognizable type token.
+#
+# Specific-PID kill ONLY, same as the grok reaper: never a pattern kill.
+# Skips composite ids (self-checked already), <self_pid>, and any watcher
+# whose recorded pid no longer matches a live watch.sh process (pid reuse).
+agmsg_reap_orphan_bare_watchers() {
+  local run="${SKILL_DIR:?agmsg_reap_orphan_bare_watchers requires SKILL_DIR}/run"
+  local self="${1:-$$}" f sid pid cmd
+  [ -d "$run" ] || return 0
+  command -v ps >/dev/null 2>&1 || return 0
+  for f in "$run"/watch.*.pid; do
+    [ -f "$f" ] || continue
+    sid="${f#"$run"/watch.}"; sid="${sid%.pid}"
+    agmsg_instance_is_composite "$sid" && continue
+    pid="$(cat "$f" 2>/dev/null || true)"
+    _agmsg_pid_valid "$pid" || continue
+    [ "$pid" = "$self" ] && continue
+    _agmsg_pid_alive "$pid" || continue
+    agmsg_any_agent_ancestor_pid "$pid" >/dev/null 2>&1 && continue
+    # Defensive, same reason as session-start.sh's stale-pidfile pass: a
+    # recycled pid pointing at an unrelated process must never be signalled.
+    cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+    case "$cmd" in
+      *"$SKILL_DIR/scripts/watch.sh"*) kill "$pid" 2>/dev/null || true; rm -f "$f" ;;
+      *) ;;
+    esac
+  done
 }
 
 # True iff <token> identifies a still-live instance.

@@ -198,6 +198,14 @@ for f in "$RUN_DIR"/watch.*.pid; do
   _agmsg_pid_alive_local "$pid" || rm -f "$f"
 done
 
+# Reap watchers whose recorded session id is bare and whose own process now
+# has no live agent-type ancestor of any kind. The pass above only catches a
+# watcher whose PROCESS died without cleaning up its pidfile; this one is for
+# the opposite shape — the process is still very much alive, but the id it
+# was launched with never resolved to a pid in the first place, so it has no
+# equivalent to the composite branch's per-cycle liveness self-check (#693).
+agmsg_reap_orphan_bare_watchers "$$" 2>/dev/null || true
+
 # Garbage-collect actas exclusivity locks whose owner session_id no longer
 # maps to a live cc-instance. Must run after the dead cc-instance cleanup
 # above, since the liveness check enumerates the remaining cc-instance.*
