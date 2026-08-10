@@ -370,6 +370,40 @@ agmsg_args_is_grok_watcher() {
   [ "$saw_type" = 1 ] && [ "$saw_proj" = 1 ]
 }
 
+# True iff <args> is an actual `<shell> <path>/watch.sh <sid> ...` invocation
+# for THIS EXACT <sid> — not merely a watch.sh process for some other session,
+# and not a process whose command line happens to mention watch.sh as text
+# rather than as the executed program. Same boundary agmsg_args_is_grok_watcher
+# already draws (program position, not substring), generalized to check the
+# session-id positional instead of a fixed type/project pair — the reaper has
+# no fixed type or project to check here, only the sid the pidfile's own name
+# promised.
+#
+# Needed because a pidfile's promise can outlive its truth: once its original
+# process exits without cleaning up, the OS can hand that same pid to an
+# unrelated, currently-live `watch.sh <other-sid> ...`. A cmdline-contains-
+# "watch.sh" check cannot tell that apart from the real thing, and would kill
+# a live, legitimate watcher for a different session (#737 review).
+agmsg_args_is_watcher_for_sid() {
+  local args="$1" want_sid="${2:-}" a1 a2
+  [ -n "$args" ] || return 1
+  [ -n "$want_sid" ] || return 1
+  set -f
+  # shellcheck disable=SC2086
+  set -- $args
+  set +f
+  [ "$#" -ge 1 ] || return 1
+  a1="${1##*/}"
+  a2=""; [ "$#" -ge 2 ] && a2="${2##*/}"
+  if [ "$a1" = "watch.sh" ]; then
+    [ "$#" -ge 2 ] && [ "$2" = "$want_sid" ]
+  elif [ "$a2" = "watch.sh" ]; then
+    [ "$#" -ge 3 ] && [ "$3" = "$want_sid" ]
+  else
+    return 1
+  fi
+}
+
 agmsg_reap_orphan_grok_watchers() {
   local project="$1" self="${2:-$$}" pid args
   [ -n "$project" ] || return 0
@@ -413,7 +447,11 @@ EOF
 #
 # Specific-PID kill ONLY, same as the grok reaper: never a pattern kill.
 # Skips composite ids (self-checked already), <self_pid>, and any watcher
-# whose recorded pid no longer matches a live watch.sh process (pid reuse).
+# whose recorded pid is no longer THIS sid's watch.sh — including when it has
+# been reused by an unrelated, currently-live watch.sh for a DIFFERENT
+# session (see agmsg_args_is_watcher_for_sid; a cmdline-contains-"watch.sh"
+# check alone cannot tell the two apart and would kill a live watcher for the
+# wrong session, #737 review).
 agmsg_reap_orphan_bare_watchers() {
   local run="${SKILL_DIR:?agmsg_reap_orphan_bare_watchers requires SKILL_DIR}/run"
   local self="${1:-$$}" f sid pid cmd
@@ -428,13 +466,22 @@ agmsg_reap_orphan_bare_watchers() {
     [ "$pid" = "$self" ] && continue
     _agmsg_pid_alive "$pid" || continue
     agmsg_any_agent_ancestor_pid "$pid" >/dev/null 2>&1 && continue
-    # Defensive, same reason as session-start.sh's stale-pidfile pass: a
-    # recycled pid pointing at an unrelated process must never be signalled.
+    # Re-read cmdline right before signalling (not a value captured earlier in
+    # the loop), narrowing the pid-reuse race to the smallest window this
+    # helper can offer, and verify it is THIS exact sid's watch.sh invocation.
     cmd="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
-    case "$cmd" in
-      *"$SKILL_DIR/scripts/watch.sh"*) kill "$pid" 2>/dev/null || true; rm -f "$f" ;;
-      *) ;;
-    esac
+    agmsg_args_is_watcher_for_sid "$cmd" "$sid" || continue
+    # Signal only; never remove the pidfile here (#737 review). `kill`
+    # succeeding is proof the signal was accepted, not that the process has
+    # exited — watch.sh's own EXIT trap owns that, and only removes PIDFILE
+    # when it still records $$ (the same ownership contract every other
+    # cleanup path in this codebase respects). A kill failure (EPERM,
+    # already-gone-but-not-yet-reaped, anything else `|| true` swallows) must
+    # leave the pidfile in place: it is the only discovery record a future
+    # pass has, and deleting it on a failed signal would turn a live, still-
+    # consuming orphan into one no GC can ever find again — worse than #693's
+    # original "consumes forever", not a fix of it.
+    kill "$pid" 2>/dev/null || true
   done
 }
 
