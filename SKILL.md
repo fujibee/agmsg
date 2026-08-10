@@ -32,6 +32,8 @@ fi
 
 After this runs once, `~/.agents/skills/agmsg/` is populated and you can skip Step 0 on future invocations.
 
+**If the argument/intent is `doctor` (with or without further flags): do NOT run whoami.sh, do NOT enter the join flow (Steps 1-2a). Go straight to the `doctor.sh` line under Step 2b and stop there.** `doctor` reports the health of the whole installation and exists specifically for when registration or delivery is broken — it must work even before you have an identity, so it never goes through Steps 1-2a.
+
 ### Step 1: Check identity
 
 ```bash
@@ -155,6 +157,14 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 #   --force              tear down from the recorded placement, no message
 #   --timeout N          seconds to wait for graceful teardown (default 30)
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
+
+# Read-only health check: registrations, actas lock status, and delivery mode
+# per (project, type). Default (no flags) covers the WHOLE installation —
+# every team, project, and type — not just the current one; narrow with
+# --project/--type/--team (combinable) only when asked to. Exit codes: 0
+# clean, 1 one or more warnings, 2 usage/resolution error. --redacted masks
+# paths and names, safe to paste into a report.
+~/.agents/skills/agmsg/scripts/doctor.sh [--project <path>] [--type <type>] [--team <team>] [--redacted]
 ```
 
 ## Permission prompts (Claude Code)

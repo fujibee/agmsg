@@ -32,6 +32,7 @@ commands:
   reset [agent]
   actas <agent>
   drop <agent>
+  doctor [--project <path>] [--type <type>] [--team <team>] [--redacted]
 EOF
 }
 
@@ -278,6 +279,16 @@ case "$COMMAND" in
     fi
     echo "To act as '$name' in this PowerShell session, run:"
     echo "  \$env:AGMSG_TEAM = '$team_name'; \$env:AGMSG_AGENT = '$name'"
+    ;;
+
+  doctor)
+    # No identity resolution -- doctor.sh needs no TEAM/AGENT, and this
+    # dispatcher's own --project/--type/--team globals are for resolving
+    # identity context for OTHER commands, a different purpose from doctor's
+    # own same-named flags (which scope its report, not an identity). Passed
+    # straight through: whatever follows "doctor" on the command line is
+    # doctor.sh's own argv verbatim, exactly as documented in the templates.
+    run_script doctor.sh "$@"
     ;;
 
   *)

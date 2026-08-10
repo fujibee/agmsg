@@ -7,6 +7,8 @@ Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER dir
 
 **Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/__SKILL_NAME__/scripts/send.sh myteam alice bob "hello"'`. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
 
+**If the argument is "doctor" (with or without further flags): do NOT run whoami.sh, do NOT enter the join flow below. Go straight to the "doctor" entry under Execute and stop there.** `doctor` reports the health of the whole installation and exists specifically for when registration or delivery is broken — it must work even before you have an identity, so it never goes through the section below.
+
 ## Identity
 
 If you already know your AGENT and TEAMS from a previous `/__SKILL_NAME__` call in this session, skip to **Execute** below.
@@ -42,6 +44,7 @@ Four possible outputs:
   > - `/__SKILL_NAME__ send <agent> <message>` — send a message
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
+  > - `/__SKILL_NAME__ doctor` — check registration/lock/delivery health across the installation
 
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
 
@@ -163,6 +166,15 @@ If argument is "hook on" (legacy alias):
 If argument is "hook off" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set off grok-build "$(pwd)"`
 2. Tell the user: "Delivery mode set to 'off'."
+
+If argument is "doctor" (no further args):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/doctor.sh`
+2. Show the output to the user. Exit code: 0 = clean, 1 = one or more warnings (the output still shows everything -- show it in full), 2 = usage/resolution error.
+
+If argument starts with "doctor" followed by flags (e.g. "doctor --project /path/to/project"):
+1. Pass the flags straight through: `~/.agents/skills/__SKILL_NAME__/scripts/doctor.sh <flags>`
+2. Supported flags, all optional and combinable: `--project <path>`, `--type <type>`, `--team <team>`, `--redacted` (masks paths and names, safe to paste into a report). Only use these when the user explicitly asks to narrow the scope -- bare `doctor` (no flags) already covers the whole installation and is the normal way to run it.
+3. Show the output to the user.
 
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" grok-build`
