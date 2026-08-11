@@ -324,7 +324,7 @@ agmsg_delivery_print_watcher_status() {
 }
 
 agmsg_delivery_runtime_status_default() {
-  local type="${1:-}" project="${2:-}"
+  local type="${1:-}" project="${2:-}" team_filter="${3:-}"
 
   # Per-identity receiver liveness when (type, project) is known and identities
   # are registered. Types with a different runtime (codex bridge) override this
@@ -335,6 +335,12 @@ agmsg_delivery_runtime_status_default() {
     if [ -n "$pairs" ]; then
       while IFS=$'\t' read -r team name _rest; do
         if [ -z "$team" ] || [ -z "$name" ]; then
+          continue
+        fi
+        # A caller scoped to one team (doctor.sh's --team) sees only that
+        # team's own identities here -- otherwise this project/type-wide
+        # call leaks every other team's liveness into a team-scoped report.
+        if [ -n "$team_filter" ] && [ "$team" != "$team_filter" ]; then
           continue
         fi
         agmsg_delivery_print_watcher_status "$team" "$name" "$project" "$type"
@@ -674,6 +680,10 @@ do_set() {
 do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
+  # Optional: narrows the default runtime status's per-identity watcher
+  # lines to one team (doctor.sh's --team). Empty means unfiltered, same as
+  # every caller before this argument existed.
+  local TEAM="${3:-}"
 
   # Mode is derived from the project's settings.local.json — there's no
   # global mode value. When called without <type> <project>, we can't infer
@@ -686,7 +696,7 @@ do_status() {
     agmsg_delivery_status "$TYPE" "$PROJECT"
   fi
 
-  agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
+  agmsg_delivery_runtime_status "$TYPE" "$PROJECT" "$TEAM"
 }
 
 kill_all_watchers() {
