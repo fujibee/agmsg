@@ -3,8 +3,21 @@
 # Unit tests for codex-bridge-launcher.sh thread resolution (#350).
 # The launcher must bind the bridge to the role's RECORDED codex thread instead
 # of the app-server's ambiguous "loaded" thread (which a co-resident codex thread
-# in the same cwd could otherwise capture). A mock bridge (AGMSG_CODEX_BRIDGE_CMD)
-# records the --thread the launcher passes.
+# in the same cwd could otherwise capture). A mock bridge records the --thread
+# the launcher passes.
+#
+# The mock replaces codex-bridge.js itself (the file the launcher's DEFAULT
+# bridge_run resolves to) rather than being swapped in via AGMSG_CODEX_BRIDGE_CMD
+# (#595). AGMSG_CODEX_BRIDGE_CMD is a real, documented user-facing override (a
+# custom bridge wrapper), and codex-bridge-launcher.sh takes a materially
+# different code path for it (a synchronous wait on the launched process) than
+# for its default codex-bridge.js path -- exercising that override path here
+# tested a branch these tests have no interest in and does not run for anyone
+# using agmsg without a custom wrapper, and its wait, sized for a real bridge
+# process's lifetime, raced these tests' shorter deregistration-response
+# assertions. Only tests/ files change here: setup_test_env already copies the
+# whole scripts/ tree into an isolated $TEST_SKILL_DIR per test, so overwriting
+# codex-bridge.js below mutates only that disposable copy.
 
 load test_helper
 
@@ -16,19 +29,78 @@ setup() {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
   export CAPTURE="$TEST_SKILL_DIR/thread-capture.txt"
-  export MOCK="$TEST_SKILL_DIR/mock-bridge.sh"
-  cat > "$MOCK" <<EOF
+  # A leaked AGMSG_CODEX_BRIDGE_CMD from the ambient environment (not this
+  # file, which no longer sets it) would silently put the launcher back on the
+  # override code path this suite is no longer testing -- unset it explicitly
+  # rather than relying on it merely being absent here (#595).
+  unset AGMSG_CODEX_BRIDGE_CMD
+  [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]
+  # Overwrite the (already-isolated, per-test) copy of codex-bridge.js with a
+  # mock that records its argv. AGMSG_NODE is the documented override for the
+  # Node binary codex-bridge-launcher.sh resolves this file through; pointing
+  # it at bash makes bash the interpreter for this file regardless of its .js
+  # name, so the launcher's default (no-custom-wrapper) path runs unmodified.
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
 [ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
-  chmod +x "$MOCK"
-  export AGMSG_CODEX_BRIDGE_CMD="$MOCK"
+  chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
 }
 
-teardown() { teardown_test_env; }
+# PIDs of live per-role child launchers for this test's project: any process
+# whose argv contains both LAUNCHER and PROJ, one line per pid. Not scoped to a
+# single role name -- teardown must reap every role's child a test spawned
+# (e.g. "the identity cache still sees a role added mid-loop" joins a second
+# role, "bob", mid-test), unlike count_child_launchers below, which measures
+# one specific role on purpose. This also does not dedupe transient
+# command-substitution subshells by parent pid -- for killing that distinction
+# does not matter, signaling and waiting on a subshell that has already
+# exited on its own is a harmless no-op.
+_launcher_child_pids() {
+  ps -Ao pid=,args= 2>/dev/null | grep -F "$LAUNCHER" | grep -F "$PROJ" | awk '{print $1}'
+}
+
+# PIDs of bridge processes this test's launchers started. The bridge itself
+# runs as "bash codex-bridge.js ..." -- its argv never contains LAUNCHER, so
+# _launcher_child_pids cannot see it, and a child launcher's EXIT trap only
+# releases its runtime lock; it does not kill a bridge it already nohup'd. Read
+# from pidfiles instead, which live under this test's own $RUN_DIR ($TEST_
+# SKILL_DIR is unique per test), so this cannot reach another test's process.
+_launcher_bridge_pids() {
+  local f
+  for f in "$RUN_DIR"/codex-bridge.*.pid; do
+    [ -f "$f" ] || continue
+    cat "$f" 2>/dev/null
+  done
+}
+
+# A test's own kill/wait sequence reaches the dispatcher and the short-lived
+# parent it was handed, but a per-role child (nohup'd, independent of both) and
+# the bridge process it launched are not direct children of anything a test
+# holds a pid for, so they are not swept by "kill $dispatcher; kill $parent"
+# alone -- the child only self-exits once it next notices its parent is gone,
+# and never kills its own bridge except when it does so as part of noticing
+# deregistration. Snapshot the pid set once, signal all of it, then wait for
+# all of it, rather than interleaving kill/wait per pid against a ps/pidfile
+# view that can keep changing underneath. Reaping here, and WAITING for the
+# reap rather than just signaling and moving on, is what keeps
+# teardown_test_env's rm -rf from racing a process still touching this test's
+# $TEST_SKILL_DIR (#595/#615).
+teardown() {
+  local pid pids
+  pids="$(_launcher_child_pids; _launcher_bridge_pids)"
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait_for_pid_exit "$pid" || true
+  done
+  teardown_test_env
+}
 
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {

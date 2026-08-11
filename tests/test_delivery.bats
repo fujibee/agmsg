@@ -906,6 +906,67 @@ JSON
   [ ! -f "$TEST_SKILL_DIR/run/watch.empty-pid.pid" ]
 }
 
+# watch.sh records its own $$ into watch.<token>.pid, so the pid recorded there
+# is minted in the MSYS pid space. The stale-pidfile sweep just above this in
+# session-start.sh ("Same defensive pass for stale watcher pidfiles") used to
+# probe it with _agmsg_pid_alive, which under MSYSTEM asks tasklist -- and
+# tasklist has no record of an MSYS-only pid, so a live watcher read as dead
+# and its pidfile got removed, freeing the next session to spawn a duplicate.
+# Routed through _agmsg_pid_alive_local (kill -0) instead. Unlike the "leaves
+# alive watcher pidfiles alone (when bound to a live CC instance)" test below,
+# this one binds NO cc-instance record, so only the sweep itself -- not the
+# separate dead-cc-instance passes above it -- decides the outcome.
+@test "session-start.sh: stale-pidfile sweep keeps a live watcher pidfile tasklist cannot see (#567-style regression)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+
+  sleep 30 3>&- &
+  local live_pid=$!
+  echo "$live_pid" > "$TEST_SKILL_DIR/run/watch.sweep-live.pid"
+
+  printf '{"session_id":"x"}' | env MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+
+  [ -f "$TEST_SKILL_DIR/run/watch.sweep-live.pid" ]
+
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
+}
+
+# Native-Windows companion of the test above: exercises the real MSYS pid space
+# and the real tasklist.exe instead of a stub, so it proves the fix against the
+# actual environment the bug was found in rather than a model of it. No
+# cc-instance binding here either, for the same isolation reason.
+@test "session-start.sh: stale-pidfile sweep keeps a live watcher pidfile under real Git Bash (#567-style regression, native Windows only)" {
+  skip_unless_windows "exercises the real MSYS pid space and real tasklist"
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  sleep 30 3>&- &
+  local live_pid=$!
+  echo "$live_pid" > "$TEST_SKILL_DIR/run/watch.sweep-live-native.pid"
+
+  printf '{"session_id":"x"}' | bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" >/dev/null
+
+  [ -f "$TEST_SKILL_DIR/run/watch.sweep-live-native.pid" ]
+
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
+}
+
 @test "session-start.sh leaves alive watcher pidfiles alone (when bound to a live CC instance)" {
   mkdir -p "$TEST_SKILL_DIR/teams/myteam"
   cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
@@ -2891,4 +2952,34 @@ EOF
   # Three seatless identities, one probe.
   [ "$(wc -c < "$calls" | tr -d ' ')" = "1" ]
   [[ "$output" == *"2 threads loaded"* ]]
+}
+
+@test "delivery status (codex): a thread already seated elsewhere is not called unexpected" {
+  # A loaded thread seats ONE role. When the only loaded thread belongs to alice,
+  # bob having no seat is the correct state — the old wording called it
+  # unexpected because it counted loaded threads rather than unclaimed ones.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/hash.sh"
+  # The record has to land in the tree delivery.sh will read, so the helper needs
+  # the test's skill dir rather than the one it would derive for itself.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/role-session.sh"
+  agmsg_role_session_record team alice thr-alice "$TEST_PROJECT" codex
+  [ -n "$(agmsg_role_session_uuid team alice)" ]
+  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$(printf '%s' "$TEST_PROJECT" | agmsg_sha1).port"
+
+  local fake="$TEST_SKILL_DIR/fake-node-loaded"
+  { printf '#!/usr/bin/env bash\n'; printf 'printf %%s\\\\n thr-alice\n'; } > "$fake"
+  chmod +x "$fake"
+
+  AGMSG_NODE="$fake" run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Codex bridge: team/bob has no session recorded (the one loaded thread is already seated by another role)"* ]]
+  [[ "$output" != *"That combination is unexpected"* ]]
 }

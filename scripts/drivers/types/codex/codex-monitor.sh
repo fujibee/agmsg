@@ -17,6 +17,12 @@ source "$SCRIPT_DIR/../../../lib/compat.sh"
 # _agmsg_pid_alive for the app-server reuse decision below.
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
+# agmsg_write_atomic: the port file is published, not just written — a reader
+# turns its contents into a URL, and a numeric PREFIX of a real port is itself
+# a valid port, so no reader-side check can tell a half-written file from a
+# good one. Only the writer can make that state unobservable.
+# shellcheck source=../../../lib/registry-lock.sh
+source "$SCRIPT_DIR/../../../lib/registry-lock.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -198,7 +204,7 @@ if [ -z "$PORT" ]; then
     rm -f "$SERVER_PID" "$VERSION_FILE"
     exec_plain_codex
   fi
-  printf '%s' "$PORT" > "$PORT_FILE"
+  agmsg_write_atomic "$PORT_FILE" "$PORT"
   # Stamp the version that owns this server so a later launch from a different
   # codex build recreates it instead of reusing a stale one.
   printf '%s' "$CODEX_VERSION" > "$VERSION_FILE"

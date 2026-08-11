@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.13] - 2026-08-01
+
+### Fixed
+- Resolve the app-server from the port file when the variable is absent (#591)
+- Route every shell-minted pid through the local probe (#567) (#584)
+- Seat a role from the app-server's loaded threads, not rollout files (#583)
+- Probe the app-server with the local-pid helper, not the tasklist one (#567) (#582)
+
 ## [1.1.12] - 2026-07-31
 
 ### Added
@@ -360,6 +368,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.1.13]: https://github.com/fujibee/agmsg/compare/app-v0.4.0...v1.1.13
 [1.1.12]: https://github.com/fujibee/agmsg/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/fujibee/agmsg/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/fujibee/agmsg/compare/app-v0.3.0...v1.1.10

@@ -191,7 +191,7 @@ for f in "$RUN_DIR"/watch.*.pid; do
     rm -f "$f"
     continue
   fi
-  _agmsg_pid_alive "$pid" || rm -f "$f"
+  _agmsg_pid_alive_local "$pid" || rm -f "$f"
 done
 
 # Garbage-collect actas exclusivity locks whose owner session_id no longer

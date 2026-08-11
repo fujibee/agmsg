@@ -144,3 +144,30 @@ _assert_startup_was_delayed() {
   [ "$status" -eq 1 ]
   [[ "$output" =~ "no available subscription" ]]
 }
+
+# --- #605: when the exclusion above empties the whole subscription, name the
+#     lock file and whether cc-instance.<pid> backs the owner. A composite
+#     owner with no matching cc-instance file is instance-id.sh's
+#     unconditional-alive branch -- the one worth being able to spot. ------
+@test "watch-once: #605 names the lock path and reports cc-instance as absent" {
+  local lock="$TEST_SKILL_DIR/run/actas.team__alice.session"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '%s\n' "deadbeef-thread.$$" > "$lock"
+  bash "$SCRIPTS/send.sh" team bob alice "locked out" >/dev/null
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 1 --interval 1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"lock=$lock"* ]]
+  [[ "$output" == *"cc-instance=absent"* ]]
+}
+
+@test "watch-once: #605 facts stay quiet when another pair still resolves" {
+  setup_live_owner "$TEST_SKILL_DIR/run" other-sid
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice other-sid >/dev/null
+  bash "$SCRIPTS/send.sh" team alice bob "for bob, not alice" >/dev/null
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --team team --timeout 1 --interval 1
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "status=pending" ]]
+  [[ "$output" != *"lock="* ]]
+}

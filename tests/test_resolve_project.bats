@@ -220,10 +220,16 @@ JSON
 
 @test "marker-gc: drops a marker whose pid is ESRCH-dead" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
-  agmsg_write_project_marker 4242 "$ROOT"
-  kill() { echo "bash: kill: (4242) - No such process" >&2; return 1; }
+  # A pid that is genuinely gone, so the real ps agrees with the stubbed kill
+  # (same rationale as test_instance_id.bats's gone_pid helper). The magic
+  # number 4242 this used to hardcode is a live process on some CI runners,
+  # which made the ps cross-check in _agmsg_pid_alive_local report the marker
+  # as still owned by a live agent and skip the GC (#595).
+  local gone; gone="$(bash -c 'echo $$')"; wait_for_pid_exit "$gone" || true
+  agmsg_write_project_marker "$gone" "$ROOT"
+  kill() { echo "bash: kill: ($gone) - No such process" >&2; return 1; }
   agmsg_marker_gc_stale
-  [ ! -f "$(agmsg_project_marker_path 4242)" ]
+  [ ! -f "$(agmsg_project_marker_path "$gone")" ]
 }
 
 @test "marker-gc: sourcing resolve-project.sh alone provides the liveness helper" {

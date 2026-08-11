@@ -230,6 +230,7 @@ while True:
   [ "$(cat "$base.pid")" != "$foreign_pid" ]
 
   kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
 }
 
 
@@ -380,4 +381,16 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
   [[ "$output" != *"did not report a listening port"* ]]
+}
+
+@test "codex monitor: the port file is published atomically, never written in place" {
+  # A reader turns this file's contents into a URL, and a numeric PREFIX of a
+  # real port is itself a valid port — 5296 while 52962 is being written names a
+  # DIFFERENT app-server, possibly another project's, which would answer and let
+  # its thread be seated here. No reader-side check can tell those apart, so the
+  # partial state has to be unobservable rather than filtered.
+  local src="$SCRIPTS/drivers/types/codex/codex-monitor.sh"
+  grep -q 'agmsg_write_atomic "$PORT_FILE"' "$src"
+  # No truncating redirect to the published path.
+  ! grep -qE '>[[:space:]]*"\$PORT_FILE"' "$src"
 }

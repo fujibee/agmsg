@@ -99,17 +99,40 @@ agmsg_codex_probe_loaded_count() {
   [ -n "${_AGMSG_CODEX_LOADED_PROBED:-}" ] && return 0
   _AGMSG_CODEX_LOADED_PROBED=1
   _AGMSG_CODEX_LOADED_COUNT=""
+  _AGMSG_CODEX_LOADED_LIST=""
   port_file="$RUN_DIR/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
   port="$(cat "$port_file" 2>/dev/null || true)"
   [ -n "$port" ] || return 0
   node_bin="$(agmsg_resolve_node 2>/dev/null || true)"
   [ -n "$node_bin" ] || return 0
   { command -v "$node_bin" >/dev/null 2>&1 || [ -x "$node_bin" ]; } || return 0
-  _AGMSG_CODEX_LOADED_COUNT="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
+  # Keep the ids, not only how many. The count answers "is anything loaded";
+  # telling a missing seat apart from someone else's seat needs the ids
+  # themselves, and re-asking would cost a second connect and could disagree
+  # with the first.
+  _AGMSG_CODEX_LOADED_LIST="$("$node_bin" "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js" \
     --app-server "ws://127.0.0.1:$port" --print-loaded-threads \
     --connect-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" \
-    --request-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" 2>/dev/null | grep -c . || true)"
+    --request-timeout-ms "${AGMSG_CODEX_STATUS_PROBE_TIMEOUT_MS:-1500}" 2>/dev/null | grep . || true)"
+  _AGMSG_CODEX_LOADED_COUNT="$(printf '%s' "$_AGMSG_CODEX_LOADED_LIST" | grep -c . || true)"
   return 0
+}
+
+# How many loaded threads no role has claimed yet. Same subtraction
+# codex-record-session.sh makes when it decides whether it can identify a
+# session; the diagnostic needs it to tell "nobody seated this" apart from
+# "someone else already did". Operates on the list the probe already fetched.
+# Prints the count, or nothing when it could not be worked out. Empty is not
+# zero: zero says "someone else holds it", and a caller that reads a failure as
+# zero would state that as fact. The same distinction probe_ran keeps on the
+# seating side.
+_agmsg_codex_unseated_count() {
+  local seated
+  [ -n "${_AGMSG_CODEX_LOADED_LIST:-}" ] || return 0
+  seated="$(mktemp "${TMPDIR:-/tmp}/agmsg-dxseated.XXXXXX" 2>/dev/null)" || return 0
+  agmsg_role_session_recorded_uuids codex 2>/dev/null | grep . | sort -u > "$seated" || true
+  printf '%s\n' "$_AGMSG_CODEX_LOADED_LIST" | sort -u | comm -23 - "$seated" | grep -c . || true
+  rm -f "$seated"
 }
 
 # Why a role has no bridge. A seat (role-session record) is what every layer of
@@ -138,8 +161,19 @@ agmsg_codex_report_missing_bridge() {
       echo "  Start Codex through monitor mode in this project; the seat is recorded then."
       ;;
     1)
-      echo "Codex bridge: $team/$name has no session recorded, though one thread is loaded"
-      echo "  That combination is unexpected -- the seat is normally written for it."
+      # A loaded thread belongs to at most ONE role. If the one that is loaded is
+      # already seated elsewhere, this role having no seat is the correct state,
+      # not a surprise -- the count says how many threads are loaded, not how many
+      # are still unclaimed, and only the second would make a missing seat odd.
+      # Only an established zero earns the calmer message; an unknown falls
+      # through to the wording that asks a human to look.
+      if [ "$(_agmsg_codex_unseated_count)" = "0" ]; then
+        echo "Codex bridge: $team/$name has no session recorded (the one loaded thread is already seated by another role)"
+        echo "  Nothing to do: a thread seats one role. Start Codex for this role to give it its own."
+      else
+        echo "Codex bridge: $team/$name has no session recorded, though one thread is loaded"
+        echo "  That combination is unexpected -- the seat is normally written for it."
+      fi
       ;;
     *)
       echo "Codex bridge: $team/$name has no session recorded ($_AGMSG_CODEX_LOADED_COUNT threads loaded, none identifiable as its session)"
@@ -156,6 +190,7 @@ agmsg_delivery_runtime_status() {
   local pairs found=0 any_alive=0
   _AGMSG_CODEX_LOADED_PROBED=""
   _AGMSG_CODEX_LOADED_COUNT=""
+  _AGMSG_CODEX_LOADED_LIST=""
   pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
 
   if [ -z "$pairs" ]; then

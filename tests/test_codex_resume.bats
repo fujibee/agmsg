@@ -347,3 +347,83 @@ fake_node_failing() {
     bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
   [ "$(recorded_uuid team alice)" = "thread-A" ]
 }
+
+# --- seating without the app-server environment variable (#583 follow-up) ---
+#
+# The variable does not arrive on the path #579 is about. Under codex 0.146
+# `--remote` this script runs inside the app-server process, and codex-monitor.sh
+# cannot export into that context: the URL does not exist until the server's
+# banner has been parsed, which is after the server is running. The port file
+# carries the same string, so seating has to work from it alone.
+
+record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
+  local hash
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$4" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_NODE="$(fake_node_printing "$1")" \
+      bash "$TYPES/codex/codex-record-session.sh" "$2" "$3" "$4" )
+}
+
+@test "codex record: seats from the port file when the app-server variable never arrives" {
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-seated\nthr-unclaimed\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team bob thr-seated "$proj" codex
+  record_with_loaded_via_port_file "$ids" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
+}
+
+@test "codex record: no port file and no variable records nothing, it does not guess" {
+  # Fail closed. Without a way to ask, the answer is "could not ask" -- never
+  # "asked and found nothing" -- so no weaker signal may seat a thread here.
+  local proj ids; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-unclaimed\n' > "$ids"
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: a half-written port file is not turned into a URL" {
+  local proj ids hash; proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-unclaimed\n' > "$ids"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'not-a-port' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
+@test "codex record: a digits-only value outside the port range is not turned into a URL" {
+  # Digits alone do not make a port. A prefix of a real port is also all digits,
+  # which is why the writer publishes atomically — this bounds what anything
+  # else could leave behind.
+  local proj ids hash bad
+  proj="$(mktemp -d)"; ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-unclaimed\n' > "$ids"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  for bad in 0 65536 999999 00042; do
+    printf '%s' "$bad" > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+    ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+      AGMSG_NODE="$(fake_node_printing "$ids")" \
+        bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+    [ -z "$(recorded_uuid team alice)" ] || { echo "seated from port '$bad'"; false; }
+  done
+  # …and the boundary values that ARE ports still work.
+  printf '65535' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+  [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
+}

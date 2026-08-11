@@ -20,7 +20,7 @@ agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 agmsg_subscription_pairs() {
   local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}"
   local scripts_dir="$SKILL_DIR/scripts"
-  local pairs filtered skipped held state result
+  local pairs filtered skipped skip_facts held state result cc
 
   pairs="$("$scripts_dir/identities.sh" "$project" "$type")"
   if [ -n "$active_name" ]; then
@@ -31,6 +31,7 @@ agmsg_subscription_pairs() {
 
   filtered=""
   skipped=""
+  skip_facts=""
   held=""
   local team agent
   while IFS=$'\t' read -r team agent; do
@@ -42,6 +43,17 @@ agmsg_subscription_pairs() {
           held="${held:+$held }${team}/${agent}(${state#other:})"
         else
           skipped="${skipped:+$skipped }${team}/${agent}(${state#other:})"
+          # The two facts #605 needs that the line above doesn't carry: the
+          # lock file's real path (percent-encoded, not reconstructable by
+          # hand) and whether cc-instance.<pid> backs a composite owner --
+          # absent there is instance-id.sh's unconditional-alive branch.
+          skip_facts="${skip_facts}agmsg watch:   lock=$(actas_lock_path "$team" "$agent")"
+          if agmsg_instance_is_composite "${state#other:}"; then
+            cc="absent"
+            [ -f "$SKILL_DIR/run/cc-instance.${state##*.}" ] && cc="present"
+            skip_facts="$skip_facts cc-instance=$cc"
+          fi
+          skip_facts="$skip_facts"$'\n'
         fi
         continue
         ;;
@@ -62,6 +74,11 @@ agmsg_subscription_pairs() {
 
   if [ -n "$skipped" ]; then
     echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
+    # Only when the exclusion left nothing to subscribe to (#605) -- a busy
+    # pair alongside others that still resolve stays quiet.
+    if [ -z "$filtered" ]; then
+      printf '%s' "$skip_facts" >&2
+    fi
   fi
   if [ -n "$held" ]; then
     echo "agmsg watch: cannot claim (held by other sessions): $held" >&2
