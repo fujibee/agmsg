@@ -110,7 +110,14 @@ compat_get_comm() {
       fi
       ;;
     *)
-      ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null
+      # `ps -o comm=` prints the executable path on macOS. Piping it through
+      # `xargs basename` splits that path on whitespace (and eats quotes), so a
+      # binary under e.g. "~/Library/Application Support/..." resolves to
+      # "Application". Take the basename of the whole string instead.
+      local _comm
+      _comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+      [ -n "$_comm" ] || return 1
+      basename -- "$_comm" 2>/dev/null
       ;;
   esac
 }
