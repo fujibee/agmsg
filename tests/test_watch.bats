@@ -432,13 +432,21 @@ _wait_for_file_contains() {
 
 # --- #93: parallel --continue/--resume sessions sharing a session_id ---
 
-# Poll up to ~3s for <pidfile> to record <want_pid>.
+# Poll up to ~10s for <pidfile> to record <want_pid>. A watcher relaunch does
+# a real fork + lock-acquire + SIGTERM-the-predecessor + self-write before the
+# pidfile reflects it, and a loaded CI runner can push that past the 3s this
+# used to allow -- the flake #595 caught on a macos-latest shard. On timeout,
+# reports what it was waiting for and what it last saw, per #595's ask for a
+# failure message that distinguishes "never arrived" from "arrived as
+# something else" rather than a bare assertion failure.
 _wait_pidfile() {
-  local pf="$1" want="$2" i
-  for i in $(seq 1 30); do
-    [ -f "$pf" ] && [ "$(cat "$pf" 2>/dev/null)" = "$want" ] && return 0
+  local pf="$1" want="$2" i seen
+  for i in $(seq 1 100); do
+    seen="$(cat "$pf" 2>/dev/null || true)"
+    [ -f "$pf" ] && [ "$seen" = "$want" ] && return 0
     sleep 0.1
   done
+  echo "_wait_pidfile: timed out waiting for '$pf' to record pid $want (last saw: '${seen:-<missing>}')" >&2
   return 1
 }
 
