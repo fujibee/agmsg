@@ -439,14 +439,35 @@ _wait_for_file_contains() {
 # reports what it was waiting for and what it last saw, per #595's ask for a
 # failure message that distinguishes "never arrived" from "arrived as
 # something else" rather than a bare assertion failure.
+#
+# `last saw` alone is the LAST poll and nothing else, so it cannot separate
+# "the file never appeared" from "it appeared, then went away again" -- and
+# those two have different causes. The distinct values, with the poll they
+# were first seen at, are kept instead, and whether the wanted pid is still
+# alive at the timeout, which separates "the successor died before writing"
+# from "the successor is running and something removed its record".
 _wait_pidfile() {
-  local pf="$1" want="$2" i seen
+  # `last` starts at a value no read can produce -- seeded with "" it would
+  # swallow the first observation in the case that matters most, a file that
+  # is missing from the very first poll.
+  local pf="$1" want="$2" i seen last="__no_poll_yet__" trail=""
   for i in $(seq 1 100); do
     seen="$(cat "$pf" 2>/dev/null || true)"
     [ -f "$pf" ] && [ "$seen" = "$want" ] && return 0
+    if [ "$seen" != "$last" ]; then
+      trail="$trail poll$i='${seen:-<missing>}'"
+      last="$seen"
+    fi
     sleep 0.1
   done
   echo "_wait_pidfile: timed out waiting for '$pf' to record pid $want (last saw: '${seen:-<missing>}')" >&2
+  echo "_wait_pidfile: distinct observations, first poll each:$trail" >&2
+  if kill -0 "$want" 2>/dev/null; then
+    echo "_wait_pidfile: pid $want is ALIVE at the timeout" >&2
+  else
+    echo "_wait_pidfile: pid $want is GONE at the timeout" >&2
+  fi
+  ls -la "$(dirname "$pf")" >&2 2>/dev/null || true
   return 1
 }
 
