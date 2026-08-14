@@ -442,32 +442,57 @@ _wait_for_file_contains() {
 #
 # `last saw` alone is the LAST poll and nothing else, so it cannot separate
 # "the file never appeared" from "it appeared, then went away again" -- and
-# those two have different causes. The distinct values, with the poll they
-# were first seen at, are kept instead, and whether the wanted pid is still
-# alive at the timeout, which separates "the successor died before writing"
-# from "the successor is running and something removed its record".
+# those two have different causes. The distinct values are kept instead, with
+# the poll each was first seen at.
+#
+# Four states, not two. `cat` returns the empty string for a path that does
+# not exist, a file that exists and is empty, and a file that exists and
+# cannot be read; collapsing them into one `<missing>` loses the difference
+# this trail exists to show (raised in review). They are named apart.
+_observe_pidfile() {
+  local pf="$1" v
+  if [ ! -e "$pf" ]; then printf '<no-file>'; return 0; fi
+  if [ ! -r "$pf" ]; then printf '<unreadable>'; return 0; fi
+  v="$(cat "$pf" 2>/dev/null || true)"
+  if [ -z "$v" ]; then printf '<empty>'; else printf '%s' "$v"; fi
+}
+
 _wait_pidfile() {
   # `last` starts at a value no read can produce -- seeded with "" it would
   # swallow the first observation in the case that matters most, a file that
   # is missing from the very first poll.
   local pf="$1" want="$2" i seen last="__no_poll_yet__" trail=""
   for i in $(seq 1 100); do
-    seen="$(cat "$pf" 2>/dev/null || true)"
-    [ -f "$pf" ] && [ "$seen" = "$want" ] && return 0
+    seen="$(_observe_pidfile "$pf")"
+    [ "$seen" = "$want" ] && return 0
     if [ "$seen" != "$last" ]; then
-      trail="$trail poll$i='${seen:-<missing>}'"
+      trail="$trail poll$i='$seen'"
       last="$seen"
     fi
     sleep 0.1
   done
-  echo "_wait_pidfile: timed out waiting for '$pf' to record pid $want (last saw: '${seen:-<missing>}')" >&2
+  echo "_wait_pidfile: timed out waiting for '$pf' to record pid $want (last saw: '$seen')" >&2
   echo "_wait_pidfile: distinct observations, first poll each:$trail" >&2
+  # What this can say about $want, and no more: signal 0 reaching a pid does
+  # not establish that the pid is still the process we started -- pids are
+  # reused (raised in review). So the command line is printed rather than a
+  # liveness verdict, and the reader decides.
   if kill -0 "$want" 2>/dev/null; then
-    echo "_wait_pidfile: pid $want is ALIVE at the timeout" >&2
+    echo "_wait_pidfile: signal 0 reaches pid $want; its command line now is:" >&2
+    ps -o pid=,stat=,etime=,command= -p "$want" >&2 2>/dev/null || echo "  (ps could not describe it)" >&2
   else
-    echo "_wait_pidfile: pid $want is GONE at the timeout" >&2
+    echo "_wait_pidfile: signal 0 does not reach pid $want (exited, or never ours)" >&2
   fi
+  # The watcher writes its own log beside the pidfile and says there what it
+  # was doing. A successor that is running and has not yet claimed the slot is
+  # waiting on something, and this is the only place that says what.
+  echo "_wait_pidfile: run dir and watcher logs:" >&2
   ls -la "$(dirname "$pf")" >&2 2>/dev/null || true
+  for _l in "$(dirname "$pf")"/watch.*.log; do
+    [ -f "$_l" ] || continue
+    echo "--- $_l" >&2
+    tail -20 "$_l" >&2 2>/dev/null || true
+  done
   return 1
 }
 
