@@ -1,3 +1,12 @@
+# MEASUREMENT PROBE — not for merge (fujibee/agmsg#769).
+#
+# One comment, in a shell file, so `tests.yml`'s docs-only detector does NOT
+# skip the suite. The point is to run `bats (ubuntu-latest 4/4)` against an
+# otherwise unchanged `integration/remote`, because that shard cannot be
+# observed any other way: the workflow runs on pull requests only, and the
+# failing assertion does not reproduce on a macOS machine.
+#
+# This branch is closed without merging once the shard has reported.
 #!/usr/bin/env bash
 set -u
 # shellcheck disable=SC1091
