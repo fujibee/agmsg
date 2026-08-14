@@ -449,12 +449,22 @@ _wait_for_file_contains() {
 # not exist, a file that exists and is empty, and a file that exists and
 # cannot be read; collapsing them into one `<missing>` loses the difference
 # this trail exists to show (raised in review). They are named apart.
+#
+# Existence is decided by a test; readability is decided by THE READ. `-r`
+# only predicts what a read would do, and a read can still fail after it
+# passes -- a permission change, a replacement, a path that is not a regular
+# file, an I/O error. Classifying on `-r` and then swallowing the read's
+# failure with `|| true` reports `<empty>`, merging the two states this
+# exists to separate (raised in review; the chmod control drove the `-r`
+# branch and never reached the failing read).
 _observe_pidfile() {
   local pf="$1" v
   if [ ! -e "$pf" ]; then printf '<no-file>'; return 0; fi
-  if [ ! -r "$pf" ]; then printf '<unreadable>'; return 0; fi
-  v="$(cat "$pf" 2>/dev/null || true)"
-  if [ -z "$v" ]; then printf '<empty>'; else printf '%s' "$v"; fi
+  if v="$(cat "$pf" 2>/dev/null)"; then
+    if [ -z "$v" ]; then printf '<empty>'; else printf '%s' "$v"; fi
+  else
+    printf '<unreadable>'
+  fi
 }
 
 _wait_pidfile() {
