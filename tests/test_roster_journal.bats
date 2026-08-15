@@ -365,3 +365,47 @@ EOS
   # And the roster is exactly as it was.
   [ "$(config_field "$config" '$.agents.alice.member_id')" = "$before" ]
 }
+
+@test "roster sync bounds a local child that never finishes, and releases the lock (#817)" {
+  skip_on_windows "POSIX signal delivery is not supported by this test"
+  # THE CASE THE FIELD REPORT DESCRIBES, made deterministic: a child that
+  # neither runs to completion nor lets the shell exit. Release used to be the
+  # EXIT trap alone, which is sound when this shell reaches its own exit — a
+  # child that fails to launch or exits non-zero still gets there — and not
+  # sound here. The shell waits, the trap never runs, and `.config.lock` is
+  # held by a live process that will never finish. The next start then fails on
+  # `File exists`, and the team is unusable.
+  #
+  # The fake IGNORES TERM, so the grace period and the KILL are exercised too;
+  # a fake that exits on TERM would leave the harder half of the path untested.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake status=0
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  fake="$TEST_SKILL_DIR/fake-node-unkillable"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  run env AGMSG_SYNC_NODE_BIN="$fake" AGMSG_ROSTER_SYNC_TIMEOUT_S=2 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  # A bounded FAILURE, not a hang and not a success.
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q 'did not finish within'
+  # And the lock is gone, which is the whole point: the next start must not
+  # meet `.config.lock: File exists` left by a process that is no longer there.
+  [ ! -d "$team_dir/.config.lock" ]
+  # The child is gone as well — released after the reap, never beside a live
+  # writer.
+  refute pgrep -f "$fake"
+}
