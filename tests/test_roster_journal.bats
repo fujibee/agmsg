@@ -540,3 +540,23 @@ _roster_state_digest() {
   [ -n "$close_at" ]
   [ "$close_at" -gt "$spawn_at" ]
 }
+
+@test "the timeout setting is validated before the lock is taken (#821)" {
+  # WHY THIS IS STRUCTURAL, having tried the other way: moving the validation
+  # back after `agmsg_lock_acquire` and `agmsg_roster_ensure` leaves every
+  # behavioural assertion green. The refusal still releases the lock, and
+  # `agmsg_roster_ensure` is idempotent, so "the team's state is unchanged"
+  # cannot tell the two orders apart. Measured — that mutation was run and
+  # stayed green.
+  #
+  # What the order buys is that a setting error never takes the critical
+  # section at all, which matters on a machine where taking it is the risky
+  # part. So the order is asserted where it lives, with both anchors required
+  # to exist so this cannot pass by finding nothing.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh" check_at lock_at
+  check_at="$(grep -n 'AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive' "$sh" | head -1 | cut -d: -f1)"
+  lock_at="$(grep -n '^agmsg_lock_acquire "\$team_dir"$' "$sh" | head -1 | cut -d: -f1)"
+  [ -n "$check_at" ]
+  [ -n "$lock_at" ]
+  [ "$check_at" -lt "$lock_at" ]
+}
