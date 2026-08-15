@@ -459,3 +459,35 @@ EOF
   [ "$status" -eq 0 ]
   [ -e "$ran" ]
 }
+
+@test "the roster child does not inherit the descriptor used to hand it stdin (#821)" {
+  # `<&9` duplicates the caller's stdin onto the child's fd 0 and leaves fd 9
+  # open beside it unless the redirection closes it. The child then holds the
+  # caller's stream twice — the class that hung a shard twice tonight, arriving
+  # through the descriptor added to fix it.
+  #
+  # Asserted from INSIDE the child, because that is the only place the answer
+  # exists: a reader of the source can be told `9<&-` is there, and reading is
+  # what let this back in.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local seen="$TEST_SKILL_DIR/child-fd9" fake="$TEST_SKILL_DIR/fake-node-fd"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'if : <&9 2>/dev/null; then printf open > "$AGMSG_TEST_FD_SEEN"'
+    printf '%s\n' 'else printf closed > "$AGMSG_TEST_FD_SEEN"; fi'
+    printf '%s\n' 'exit 0'
+  } > "$fake"
+  chmod +x "$fake"
+
+  run env AGMSG_TEST_FD_SEEN="$seen" AGMSG_SYNC_NODE_BIN="$fake" \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+  [ "$status" -eq 0 ]
+  # The child ran at all — without this the assertion below passes on a file
+  # that was never written.
+  [ -e "$seen" ]
+  [ "$(cat "$seen")" = "closed" ]
+  [ ! -d "$team_dir/.config.lock" ]
+}
