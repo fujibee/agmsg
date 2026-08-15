@@ -438,7 +438,10 @@ _roster_state_digest() {
 
   local before; before="$(_roster_state_digest "$team_dir")"
   local bad
-  for bad in 0 -1 abc 1.5; do
+  # The last is all digits and still unusable: `[ "$x" -le 0 ]` on it is beyond
+  # the shell's integers and errors, which under `set -e` would end the script
+  # with no sentence at all — a silent refusal, which is the thing being fixed.
+  for bad in 0 -1 abc 1.5 999999999999999999999999999999; do
     rm -f "$ran"
     run env AGMSG_TEST_RAN="$ran" AGMSG_SYNC_NODE_BIN="$fake" \
       AGMSG_ROSTER_SYNC_TIMEOUT_S="$bad" \
@@ -559,4 +562,44 @@ _roster_state_digest() {
   [ -n "$check_at" ]
   [ -n "$lock_at" ]
   [ "$check_at" -lt "$lock_at" ]
+}
+
+@test "an unusable timeout is refused without waiting for the lock (#821)" {
+  # THE ORDER, MEASURED — not read.
+  #
+  # A held lock is what makes the two orders observably different: validating
+  # first refuses at once, validating after `agmsg_lock_acquire` spends the
+  # whole lock budget and then reports a lock timeout instead. Without a holder
+  # both orders look identical from outside, which is why the first attempt at
+  # this control could not discriminate and the property was asserted
+  # structurally.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo" ran="$TEST_SKILL_DIR/child-ran2"
+  local fake="$TEST_SKILL_DIR/fake-node-records2"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$AGMSG_TEST_RAN"' 'exit 0' > "$fake"
+  chmod +x "$fake"
+
+  # Somebody else holds it. Made by hand rather than by another driver: what
+  # matters is that the directory is there, which is exactly what the lock is.
+  mkdir -p "$team_dir/.config.lock"
+
+  local began=$SECONDS
+  run env AGMSG_TEST_RAN="$ran" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_LOCK_SECONDS=10 AGMSG_ROSTER_SYNC_TIMEOUT_S=0 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+  local took=$((SECONDS - began))
+
+  [ "$status" -ne 0 ]
+  # The SETTING is what it complains about, not the lock: reaching the lock at
+  # all means the check ran too late.
+  printf '%s' "$output" | grep -q 'AGMSG_ROSTER_SYNC_TIMEOUT_S'
+  refute grep -q 'timed out acquiring registry lock' <<<"$output"
+  # And it did not spend the lock budget getting there.
+  [ "$took" -lt 5 ]
+  [ ! -e "$ran" ]
+  # Someone else's lock is still theirs.
+  [ -d "$team_dir/.config.lock" ]
+  rmdir "$team_dir/.config.lock"
 }

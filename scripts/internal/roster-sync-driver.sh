@@ -29,9 +29,15 @@ ROSTER_SYNC_BUDGET_S="${AGMSG_ROSTER_SYNC_TIMEOUT_S:-120}"
 # is started — and before the lock is taken, because refusing after the lock
 # and after `agmsg_roster_ensure` would mean a setting error had already moved
 # the team's state and taken the critical section (raised in review).
+# The length is checked with the digits, because a value can be all digits and
+# still be unusable: `[ "$x" -le 0 ]` on a thirty-digit number is beyond what
+# the shell's integers hold, and it errors — under `set -e` that ends this
+# script with the shell's own status and none of the sentence below, which is
+# the silent refusal this guard exists to remove (raised in review). Nine
+# digits is over thirty years in seconds; nothing legitimate reaches it.
 case "$ROSTER_SYNC_BUDGET_S" in
-  ''|*[!0-9]*)
-    echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive whole number of seconds, got '${AGMSG_ROSTER_SYNC_TIMEOUT_S:-}'" >&2
+  ''|*[!0-9]*|??????????*)
+    echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive whole number of seconds, at most nine digits, got '${AGMSG_ROSTER_SYNC_TIMEOUT_S:-}'" >&2
     exit 15 ;;
 esac
 if [ "$ROSTER_SYNC_BUDGET_S" -le 0 ]; then
