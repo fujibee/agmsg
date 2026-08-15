@@ -29,7 +29,7 @@ agmsg_roster_ensure "$team_dir" "$config"
 
 node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 
-# THE CRITICAL SECTION IS BOUNDED IN TIME, NOT ONLY IN SCOPE (#817).
+# THE CRITICAL SECTION IS BOUNDED IN TIME, NOT ONLY IN SCOPE (#821).
 #
 # The scope is right and stays: `roster-sync.mjs` is the read-modify-write of
 # the journal and state this lock exists to serialise. It does no network —
@@ -48,8 +48,25 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 # So the wait has a ceiling, and passing it is a failure with a name rather
 # than a hang. The traps stay as the backup they always were.
 ROSTER_SYNC_BUDGET_S="${AGMSG_ROSTER_SYNC_TIMEOUT_S:-120}"
+# A BOUND THAT CANNOT BE READ IS NOT A BOUND. `read -t` rejects a zero, a
+# negative or a non-numeric budget by failing immediately, and its failure is
+# indistinguishable here from "the writer is gone" — so a mistyped setting
+# would turn the ceiling off and leave the wait unbounded, silently, which is
+# the defect this file is closing (raised in review). Checked before anything
+# is started, and refused by name.
+case "$ROSTER_SYNC_BUDGET_S" in
+  ''|*[!0-9]*)
+    agmsg_lock_release
+    echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive whole number of seconds, got '${AGMSG_ROSTER_SYNC_TIMEOUT_S:-}'" >&2
+    exit 15 ;;
+esac
+if [ "$ROSTER_SYNC_BUDGET_S" -le 0 ]; then
+  agmsg_lock_release
+  echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be greater than zero, got '$ROSTER_SYNC_BUDGET_S'" >&2
+  exit 15
+fi
 
-# THE BOUND COSTS NO EXTRA PROCESS, and on this machine that is the point.
+# THE BOUND ADDS NO PROCESS THAT OUTLIVES THE CALL (#821).
 #
 # The first version put a watchdog beside the child: one more process per
 # roster operation. The leading explanation for the field failure is process
@@ -61,7 +78,16 @@ ROSTER_SYNC_BUDGET_S="${AGMSG_ROSTER_SYNC_TIMEOUT_S:-120}"
 # one end of a FIFO it never writes to; when it exits, that end closes and the
 # read here returns end-of-file. `read -t` distinguishes the two outcomes by
 # status: >128 means the budget expired, and anything else means the writer is
-# gone. One process runs — node — exactly as before this change.
+# gone.
+#
+# What this does NOT claim is "no extra process at all": `mktemp`, `mkfifo` and
+# `rm` are external commands and each is a spawn (raised in review; an earlier
+# version of this comment said "one process runs, exactly as before", which is
+# false). They are short-lived and sequential, where a watchdog is concurrent
+# and lives as long as the operation — and on a machine that is refusing
+# spawns, a process held open beside every roster call is the shape that
+# matters. Each of the three is checked: a failure to make the temp path or the
+# FIFO falls back to the unbounded path and says so on stderr.
 # A path to make the FIFO at, and nothing written to it: the child never sends
 # anything, and what this waits for is the moment its end closes.
 _roster_fifo="$(mktemp -u 2>/dev/null)" || _roster_fifo=""
@@ -77,8 +103,15 @@ if [ "$_roster_bounded" = "1" ]; then
   # fd 0. Measured, as every operation failing with "input is invalid".
   exec 9<&0
   "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
-    "$server" "$remote" "$protocol" "$@" <&9 3>&- 4>&- 8> "$_roster_fifo" &
+    "$server" "$remote" "$protocol" "$@" <&9 9<&- 3>&- 4>&- 8> "$_roster_fifo" &
   _roster_child=$!
+  # BOTH COPIES GO. `<&9` duplicates the caller's stdin onto fd 0 and leaves
+  # fd 9 open beside it, so node would hold that stream twice and this shell
+  # would hold it until its own exit — the same "a child keeps the caller's
+  # streams" class fixed twice tonight, reintroduced by the descriptor used to
+  # fix it (raised in review). The child closes its saved copy in the
+  # redirection above; this closes ours the moment it is no longer needed.
+  exec 9<&-
   exec 8< "$_roster_fifo"
   rm -f "$_roster_fifo"
 

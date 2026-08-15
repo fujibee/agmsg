@@ -366,10 +366,17 @@ EOS
   [ "$(config_field "$config" '$.agents.alice.member_id')" = "$before" ]
 }
 
-@test "roster sync bounds a local child that never finishes, and releases the lock (#817)" {
+@test "roster sync bounds a local child that never finishes, and releases the lock (#821)" {
   skip_on_windows "POSIX signal delivery is not supported by this test"
-  # THE CASE THE FIELD REPORT DESCRIBES, made deterministic: a child that
-  # neither runs to completion nor lets the shell exit. Release used to be the
+  # A child that neither runs to completion nor lets the shell exit.
+  #
+  # NOT the Windows failure reported on #817: that one is explained by a
+  # holder-metadata write whose failure is swallowed, and by the parent
+  # SIGKILLing this driver after a stdin error — neither of which is this, and
+  # neither of which has been reproduced. What is deterministic here is the
+  # property #821 states, and nothing beyond it.
+  #
+  # Release used to be the
   # EXIT trap alone, which is sound when this shell reaches its own exit — a
   # child that fails to launch or exits non-zero still gets there — and not
   # sound here. The shell waits, the trap never runs, and `.config.lock` is
@@ -408,4 +415,47 @@ EOF
   # The child is gone as well — released after the reap, never beside a live
   # writer.
   refute pgrep -f "$fake"
+}
+
+@test "roster sync refuses a timeout setting it cannot honour, and does not start the child (#821)" {
+  # `read -t` rejects a zero, a negative or a non-numeric budget by failing
+  # immediately, and that failure is indistinguishable from "the writer is
+  # gone" — so a mistyped setting used to turn the ceiling off and leave the
+  # wait unbounded. A bound that a typo removes is not a bound.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo" ran="$TEST_SKILL_DIR/child-ran"
+  local fake="$TEST_SKILL_DIR/fake-node-records"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$AGMSG_TEST_RAN"' 'exit 0' > "$fake"
+  chmod +x "$fake"
+
+  local bad
+  for bad in 0 -1 abc 1.5; do
+    rm -f "$ran"
+    run env AGMSG_TEST_RAN="$ran" AGMSG_SYNC_NODE_BIN="$fake" \
+      AGMSG_ROSTER_SYNC_TIMEOUT_S="$bad" \
+      bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+        018f3f7e-0000-7000-8000-000000000001 \
+        018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+    # Named, not silent, and not a bare non-zero.
+    [ "$status" -ne 0 ]
+    printf '%s' "$output" | grep -q 'AGMSG_ROSTER_SYNC_TIMEOUT_S'
+    # The child is never started: refusing after the work has begun would
+    # leave the state half-written for a setting error.
+    [ ! -e "$ran" ]
+    # And the lock does not survive the refusal.
+    [ ! -d "$team_dir/.config.lock" ]
+  done
+
+  # EMPTY IS NOT INVALID — it is unset, and unset takes the default. Asserting
+  # a refusal here would pin the opposite of what `${VAR:-120}` does, and the
+  # first version of this case did exactly that: it read the default path as a
+  # missing guard. Measured, as this test failing against correct code.
+  rm -f "$ran"
+  run env AGMSG_TEST_RAN="$ran" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S="" \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+  [ "$status" -eq 0 ]
+  [ -e "$ran" ]
 }
