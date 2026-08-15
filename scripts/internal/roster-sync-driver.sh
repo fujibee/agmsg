@@ -20,6 +20,26 @@ protocol="${5:?Missing protocol version}"; shift 5
 config="${AGMSG_SYNC_LOCAL_ROSTER_FILE:-$SKILL_DIR/teams/$team/config.json}"
 team_dir="$(cd "$(dirname "$config")" && pwd)"
 
+ROSTER_SYNC_BUDGET_S="${AGMSG_ROSTER_SYNC_TIMEOUT_S:-120}"
+# A BOUND THAT CANNOT BE READ IS NOT A BOUND. `read -t` rejects a zero, a
+# negative or a non-numeric budget by failing immediately, and its failure is
+# indistinguishable here from "the writer is gone" — so a mistyped setting
+# would turn the ceiling off and leave the wait unbounded, silently, which is
+# the defect this file is closing (raised in review). Checked before anything
+# is started — and before the lock is taken, because refusing after the lock
+# and after `agmsg_roster_ensure` would mean a setting error had already moved
+# the team's state and taken the critical section (raised in review).
+case "$ROSTER_SYNC_BUDGET_S" in
+  ''|*[!0-9]*)
+    echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive whole number of seconds, got '${AGMSG_ROSTER_SYNC_TIMEOUT_S:-}'" >&2
+    exit 15 ;;
+esac
+if [ "$ROSTER_SYNC_BUDGET_S" -le 0 ]; then
+  echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be greater than zero, got '$ROSTER_SYNC_BUDGET_S'" >&2
+  exit 15
+fi
+
+
 agmsg_lock_acquire "$team_dir"
 # agmsg_lock_acquire already installs EXIT cleanup and exit-on-INT/TERM traps.
 # Keep those handlers: replacing them with release-only handlers would let a
@@ -47,25 +67,6 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 #
 # So the wait has a ceiling, and passing it is a failure with a name rather
 # than a hang. The traps stay as the backup they always were.
-ROSTER_SYNC_BUDGET_S="${AGMSG_ROSTER_SYNC_TIMEOUT_S:-120}"
-# A BOUND THAT CANNOT BE READ IS NOT A BOUND. `read -t` rejects a zero, a
-# negative or a non-numeric budget by failing immediately, and its failure is
-# indistinguishable here from "the writer is gone" — so a mistyped setting
-# would turn the ceiling off and leave the wait unbounded, silently, which is
-# the defect this file is closing (raised in review). Checked before anything
-# is started, and refused by name.
-case "$ROSTER_SYNC_BUDGET_S" in
-  ''|*[!0-9]*)
-    agmsg_lock_release
-    echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be a positive whole number of seconds, got '${AGMSG_ROSTER_SYNC_TIMEOUT_S:-}'" >&2
-    exit 15 ;;
-esac
-if [ "$ROSTER_SYNC_BUDGET_S" -le 0 ]; then
-  agmsg_lock_release
-  echo "agmsg: roster sync $operation failed for team '$team': AGMSG_ROSTER_SYNC_TIMEOUT_S must be greater than zero, got '$ROSTER_SYNC_BUDGET_S'" >&2
-  exit 15
-fi
-
 # THE BOUND ADDS NO PROCESS THAT OUTLIVES THE CALL (#821).
 #
 # The first version put a watchdog beside the child: one more process per

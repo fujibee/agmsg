@@ -417,6 +417,14 @@ EOF
   refute pgrep -f "$fake"
 }
 
+# Everything under the team directory that a roster operation would move, as
+# one string: names, sizes and contents. Used to say "unchanged" about state
+# that already exists, which is what a refusal before the lock has to leave.
+_roster_state_digest() {
+  local dir="$1"
+  ( cd "$dir" 2>/dev/null && ls -la . && cat ./*.json ./*.jsonl 2>/dev/null ) | shasum | cut -d' ' -f1
+}
+
 @test "roster sync refuses a timeout setting it cannot honour, and does not start the child (#821)" {
   # `read -t` rejects a zero, a negative or a non-numeric budget by failing
   # immediately, and that failure is indistinguishable from "the writer is
@@ -428,6 +436,7 @@ EOF
   printf '%s\n' '#!/usr/bin/env bash' ': > "$AGMSG_TEST_RAN"' 'exit 0' > "$fake"
   chmod +x "$fake"
 
+  local before; before="$(_roster_state_digest "$team_dir")"
   local bad
   for bad in 0 -1 abc 1.5; do
     rm -f "$ran"
@@ -442,6 +451,11 @@ EOF
     # The child is never started: refusing after the work has begun would
     # leave the state half-written for a setting error.
     [ ! -e "$ran" ]
+    # And the team's state is UNCHANGED: the refusal happens before the lock
+    # and before `agmsg_roster_ensure`, so a mistyped setting moves nothing.
+    # Compared against what was there, because the journal is created by join
+    # and "it does not exist" would be asserting the wrong thing.
+    [ "$(_roster_state_digest "$team_dir")" = "$before" ]
     # And the lock does not survive the refusal.
     [ ! -d "$team_dir/.config.lock" ]
   done
@@ -476,18 +490,53 @@ EOF
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'if : <&9 2>/dev/null; then printf open > "$AGMSG_TEST_FD_SEEN"'
     printf '%s\n' 'else printf closed > "$AGMSG_TEST_FD_SEEN"; fi'
+    # THE PARENT'S COPY, asked of the parent. With the FIFO design this child is
+    # spawned by the driver shell itself, so $PPID is the driver and its
+    # descriptor table answers directly where one is readable. Where it is not
+    # -- macOS has no /proc -- this records that it could not look, rather than
+    # reporting "closed" from an instrument that cannot see.
+    printf '%s\n' 'if [ -d "/proc/$PPID/fd" ]; then'
+    printf '%s\n' '  if [ -e "/proc/$PPID/fd/9" ]; then printf parent-open > "$AGMSG_TEST_FD_PARENT"'
+    printf '%s\n' '  else printf parent-closed > "$AGMSG_TEST_FD_PARENT"; fi'
+    printf '%s\n' 'else printf parent-unreadable > "$AGMSG_TEST_FD_PARENT"; fi'
     printf '%s\n' 'exit 0'
   } > "$fake"
   chmod +x "$fake"
 
-  run env AGMSG_TEST_FD_SEEN="$seen" AGMSG_SYNC_NODE_BIN="$fake" \
+  local parent_seen="$TEST_SKILL_DIR/parent-fd9"
+  run env AGMSG_TEST_FD_SEEN="$seen" AGMSG_TEST_FD_PARENT="$parent_seen" \
+    AGMSG_SYNC_NODE_BIN="$fake" \
     bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
       018f3f7e-0000-7000-8000-000000000001 \
       018f3f7e-0000-7000-8000-000000000002 1 </dev/null
   [ "$status" -eq 0 ]
-  # The child ran at all — without this the assertion below passes on a file
-  # that was never written.
+  # The child ran at all — without this the assertions below pass on files
+  # that were never written.
   [ -e "$seen" ]
+  [ -e "$parent_seen" ]
   [ "$(cat "$seen")" = "closed" ]
+  # Where the descriptor table is readable, the parent's copy is gone too.
+  # Where it is not, the case says so instead of asserting an answer it did
+  # not get: an instrument that cannot look must not report "closed".
+  case "$(cat "$parent_seen")" in
+    parent-unreadable) : ;;
+    *) [ "$(cat "$parent_seen")" = "parent-closed" ] ;;
+  esac
   [ ! -d "$team_dir/.config.lock" ]
+}
+
+@test "the driver's own copy of that descriptor is closed after the spawn (#821)" {
+  # A STRUCTURAL CHECK, and it is here because the behavioural one above cannot
+  # run everywhere: reading another live process's descriptors needs /proc, and
+  # macOS has none. Reverting the parent's close would then be green on half
+  # the matrix — which is how a leak survives.
+  #
+  # So the order is asserted where it lives: the spawn, then `exec 9<&-`, with
+  # both anchors required to exist so this cannot pass by finding nothing.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh" spawn_at close_at
+  spawn_at="$(grep -n '<&9 9<&- 3>&- 4>&- 8> "\$_roster_fifo" &' "$sh" | head -1 | cut -d: -f1)"
+  close_at="$(grep -n '^  exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
+  [ -n "$spawn_at" ]
+  [ -n "$close_at" ]
+  [ "$close_at" -gt "$spawn_at" ]
 }
