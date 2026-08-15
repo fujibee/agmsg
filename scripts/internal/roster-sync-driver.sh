@@ -113,7 +113,14 @@ if [ "$_roster_bounded" = "1" ]; then
   # redirection above; this closes ours the moment it is no longer needed.
   exec 9<&-
   exec 8< "$_roster_fifo"
-  rm -f "$_roster_fifo"
+  # `|| true` because this file runs under `set -e` and `rm` is an external
+  # command: a spawn refused, or a filesystem that will not unlink, would end
+  # this shell HERE — while the child is still running — and the EXIT trap
+  # would release the lock beside a live writer. That is worse than the leak
+  # being fixed, and it is the one place this fix could create it (raised in
+  # review). The FIFO is already open on fd 8; unlinking it is tidiness, and
+  # tidiness may not decide whether the lock is held.
+  rm -f "$_roster_fifo" || true
 
   _roster_read_status=0
   read -r -t "$ROSTER_SYNC_BUDGET_S" _roster_ignored <&8 || _roster_read_status=$?
