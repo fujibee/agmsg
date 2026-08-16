@@ -776,7 +776,7 @@ EOF
   # <config>` has to appear as one run of text, because a cmdline carrying a
   # different operation and a different config can satisfy three independent
   # `contains` checks at once.
-  grep -q '\*"\$s \$operation \$c"\*' "$sh"
+  grep -q '\*" \$s \$operation \$c "\*' "$sh"
   # And no shell-side path is matched against the cmdline directly.
   run grep -nE 'case "\$cmd" in.*\$(SCRIPT_DIR|config)' "$sh"
   [ "$status" -ne 0 ]
@@ -821,6 +821,37 @@ EOF
   local real="node $script $operation $conf"
   run bash -c "case \"$real\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
   [ "$status" -eq 0 ]
+
+  # AND AN ORDERED SUBSTRING IS STILL A SUBSTRING (raised in review). Without
+  # boundaries the needle for `/teams/demo/config.json` matches a run whose
+  # config is `/teams/demo/config.json.bak`, and a script at
+  # `/x/opt/agmsg/.../roster-sync.mjs` contains our absolute path as a tail.
+  # Both are different runs that would read as ours.
+  local suffixed="node $script $operation $conf.bak 018f 018f 1"
+  local prefixed="node /x$script $operation $conf 018f 018f 1"
+
+  # The premise: the UNBOUNDED needle accepts both. This is what was shipped.
+  run bash -c "case \"$suffixed\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -eq 0 ]
+  run bash -c "case \"$prefixed\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -eq 0 ]
+
+  # The padded, boundary-requiring form refuses both...
+  run bash -c "case \" $suffixed \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  [ "$status" -ne 0 ]
+  run bash -c "case \" $prefixed \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  [ "$status" -ne 0 ]
+  # ...and still accepts the real run, including when the config is the last
+  # argument on the line, which is what the padding is for.
+  run bash -c "case \" node $script $operation $conf 018f 1 \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  [ "$status" -eq 0 ]
+  run bash -c "case \" node $script $operation $conf \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  [ "$status" -eq 0 ]
+
+  # And the driver uses the padded form rather than the bare one.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh"
+  grep -q 'local padded=" \$cmd "' "$sh"
+  grep -q '\*" \$s \$operation \$c "\*' "$sh"
 }
 
 @test "a recycled pid is neither signalled nor read as gone (#821)" {

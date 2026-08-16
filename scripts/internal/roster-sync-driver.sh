@@ -157,13 +157,24 @@ _roster_inner_state() {
     script_win="$(cygpath -m "$script_sh" 2>/dev/null || true)"
     config_win="$(cygpath -m "$config" 2>/dev/null || true)"
   fi
+  # AND THE NEEDLE NEEDS ARGV BOUNDARIES (raised in review). An ordered
+  # substring is still a substring: with the config `/teams/demo/config.json`,
+  # the pattern matched a command line whose config was
+  # `/teams/demo/config.json.bak` — and, on the other side, a script at
+  # `/x/opt/agmsg/.../roster-sync.mjs` contains our absolute path as a tail.
+  # Both are different runs reading as ours.
+  #
+  # Padding the haystack with one space at each end lets a single pattern
+  # require a boundary on both sides without a separate end-of-string case:
+  # an argument at either extreme now has the space the pattern asks for.
+  local padded=" $cmd "
   local s c
   for s in "$script_sh" "$script_win"; do
     [ -n "$s" ] || continue
     for c in "$config" "$config_win"; do
       [ -n "$c" ] || continue
-      case "$cmd" in
-        *"$s $operation $c"*) printf 'ours\n'; return ;;
+      case "$padded" in
+        *" $s $operation $c "*) printf 'ours\n'; return ;;
       esac
     done
   done
