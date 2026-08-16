@@ -118,7 +118,15 @@ EOF_UN
 #!/usr/bin/env bash
 # Only the `-l -p <pid>` form is used here; anything else falls through to the
 # real ps, so nothing outside this stub's purpose is affected.
+#
+# AND IT ANSWERS ONLY FOR A PID THAT IS STILL THERE. MSYS2's ps lists processes;
+# once the MSYS side has exited there is no row and no WINPID column to read. An
+# earlier version of this stub returned `900000 + pid` whatever the state, which
+# made the pid-to-WINPID mapping immortal -- and an immortal mapping hides the
+# defect these cases are about, because the code could always find a WINPID no
+# matter when it asked (raised in review on #840).
 if [ "$1" = "-l" ] && [ "$2" = "-p" ]; then
+  /bin/kill -0 "$3" 2>/dev/null || exit 1
   printf 'PID WINPID PPID STATE\n'
   printf '%s %s 1 S\n' "$3" "$((900000 + $3))"
   exit 0
@@ -248,6 +256,11 @@ run_windows_driver() {
   [ -f "$TASKKILL_LOG" ]
   # The tree, by the WINPID the ps stub derived for this engine -- not the pid.
   grep -qF "/PID $((900000 + ENGINE)) /T" "$TASKKILL_LOG"
+  # AND THE NATIVE SIDE IS GONE. Only taskkill clears this marker, so it is the
+  # thing that says the process under the MSYS shell ended rather than the shell.
+  # Asserted separately from the log line: a taskkill aimed at the wrong WINPID
+  # would still write a log entry (raised in review on #840).
+  [ ! -e "$ALIVE_DIR/$((900000 + ENGINE))" ]
 }
 
 @test "compat_signal_pid_tree: off Windows it does not reach for taskkill (#831)" {
@@ -278,11 +291,16 @@ EOF_SIG
 }
 
 @test "compat_pid_gone: one probe saying gone is not enough (#831)" {
-  # The property the rest of it stands on, on its own. The POSIX probe says gone;
-  # the Windows side says alive; the answer must be "not gone".
+  # The property the rest of it stands on. The POSIX probe says gone; the Windows
+  # side says alive; the answer must be "not gone".
+  #
+  # A REAL process, because the `ps` stub now answers only for a pid that is
+  # still there -- which is the point of it, and which makes an invented number
+  # unusable here.
   stub_windows
-  local pid=4242
-  win_mark_alive "$pid"
+  local live
+  sleep 30 & live=$!
+  win_mark_alive "$live"
 
   cat > "$TEST_SKILL_DIR/gone.sh" <<'EOF_GONE'
 #!/usr/bin/env bash
@@ -294,15 +312,144 @@ compat_pid_gone "$1" || rc=$?
 echo "gone rc=$rc"
 EOF_GONE
   run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
-      bash "$TEST_SKILL_DIR/gone.sh" "$pid"
+      bash "$TEST_SKILL_DIR/gone.sh" "$live"
   grep -qF 'gone rc=1' <<<"$output"
 
-  # NEGATIVE CONTROL, in the same case: with the Windows side also saying gone,
-  # the answer flips. Otherwise "never gone" would pass the assertion above.
-  rm -f "$ALIVE_DIR/$((900000 + pid))"
+  # NEGATIVE CONTROL, in the same case: with the Windows side also saying gone --
+  # the native process ended while the MSYS one lingers -- the answer flips.
+  # Without this, "never gone" would satisfy the assertion above.
+  rm -f "$ALIVE_DIR/$((900000 + live))"
   run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
-      bash "$TEST_SKILL_DIR/gone.sh" "$pid"
+      bash "$TEST_SKILL_DIR/gone.sh" "$live"
   grep -qF 'gone rc=0' <<<"$output"
+
+  kill "$live" 2>/dev/null || true
+}
+
+@test "compat_pid_gone: no WINPID means the Windows side was not asked, not gone (#831)" {
+  # "COULD NOT ASK" IS NOT "GONE". Every way of failing to reach the Windows side
+  # used to fall through to gone -- which is the collapse #652 was about, rebuilt
+  # inside the function written to prevent it (raised in review on #840).
+  #
+  # Here `ps` cannot produce a WINPID. The POSIX probe says gone. The answer must
+  # still be "not gone", because nothing has actually said the process ended.
+  stub_windows
+  local blind="$TEST_SKILL_DIR/no-winpid"
+  mkdir -p "$blind"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$blind/ps"
+  cp "$WINSTUB/uname" "$WINSTUB/tasklist" "$blind/"
+  chmod +x "$blind/ps" "$blind/uname" "$blind/tasklist"
+
+  cat > "$TEST_SKILL_DIR/gone2.sh" <<'EOF_GONE2'
+#!/usr/bin/env bash
+. "$SCRIPTS/lib/instance-id.sh"
+. "$SCRIPTS/lib/compat.sh"
+_agmsg_pid_alive_local() { return 1; }
+rc=0
+compat_pid_gone "$1" || rc=$?
+echo "gone rc=$rc"
+EOF_GONE2
+  run env SCRIPTS="$SCRIPTS" PATH="$blind:$PATH" MSYSTEM=MINGW64 \
+      bash "$TEST_SKILL_DIR/gone2.sh" 4242
+  grep -qF 'gone rc=1' <<<"$output"
+}
+
+@test "compat_pid_gone: no tasklist means the Windows side was not asked either (#831)" {
+  # The other way of not being able to ask. A WINPID is available and the probe
+  # itself is missing; the answer is the same, and it is asserted separately
+  # because these are two different failures on two different lines.
+  stub_windows
+  local notl="$TEST_SKILL_DIR/no-tasklist"
+  mkdir -p "$notl"
+  cp "$WINSTUB/uname" "$WINSTUB/ps" "$notl/"
+  chmod +x "$notl/uname" "$notl/ps"
+  local live
+  sleep 30 & live=$!
+
+  cat > "$TEST_SKILL_DIR/gone3.sh" <<'EOF_GONE3'
+#!/usr/bin/env bash
+. "$SCRIPTS/lib/instance-id.sh"
+. "$SCRIPTS/lib/compat.sh"
+_agmsg_pid_alive_local() { return 1; }
+rc=0
+compat_pid_gone "$1" || rc=$?
+echo "gone rc=$rc"
+EOF_GONE3
+  # PATH without the real one either, so `tasklist` is genuinely absent.
+  run env SCRIPTS="$SCRIPTS" PATH="$notl:/usr/bin:/bin" MSYSTEM=MINGW64 \
+      bash "$TEST_SKILL_DIR/gone3.sh" "$live"
+  grep -qF 'gone rc=1' <<<"$output"
+
+  kill "$live" 2>/dev/null || true
+}
+
+@test "compat_signal_pid_tree: the WINPID is taken BEFORE the signal (#831)" {
+  # THE ORDER OF TWO LINES, ON ITS OWN.
+  #
+  # `ps` is what turns a pid into a WINPID, and it stops answering once the MSYS
+  # side has exited. So a `kill` sent first can remove the only means of naming
+  # the native process still running underneath -- which is not a hypothetical,
+  # it is the reported symptom: the kill returns and node.exe is still there.
+  #
+  # Called with NO winpid argument deliberately. The reap resolves one while it
+  # can still prove ownership and passes it in, and that defends this function
+  # from its own ordering -- so a case that supplies it cannot see the bug. This
+  # one leaves the function to resolve it (raised in review on #840).
+  stub_windows
+  local live
+  sleep 30 & live=$!
+  win_mark_alive "$live"
+
+  cat > "$TEST_SKILL_DIR/order.sh" <<'EOF_ORDER'
+#!/usr/bin/env bash
+. "$SCRIPTS/lib/instance-id.sh"
+. "$SCRIPTS/lib/compat.sh"
+compat_signal_pid_tree "$1" TERM
+EOF_ORDER
+  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+      bash "$TEST_SKILL_DIR/order.sh" "$live"
+  [ "$status" -eq 0 ]
+
+  # The MSYS side is gone -- the POSIX signal did that, and after it `ps` has no
+  # row to read a WINPID from.
+  local i=0
+  while kill -0 "$live" 2>/dev/null && [ "$i" -lt 200 ]; do i=$((i + 1)); sleep 0.01; done
+  run kill -0 "$live"
+  [ "$status" -ne 0 ]
+
+  # And the native side went WITH it, by the right name.
+  [ -f "$TASKKILL_LOG" ]
+  grep -qF "/PID $((900000 + live)) /T" "$TASKKILL_LOG"
+  [ ! -e "$ALIVE_DIR/$((900000 + live))" ]
+}
+
+@test "compat_pid_gone: a tasklist that FAILS is not a tasklist that said gone (#831)" {
+  # The third way of not being able to ask, and the one that looks most like an
+  # answer: the probe is present and runs and exits non-zero. Asserted separately
+  # from "absent", because they are two different lines.
+  stub_windows
+  local broken="$TEST_SKILL_DIR/broken-tasklist"
+  mkdir -p "$broken"
+  cp "$WINSTUB/uname" "$WINSTUB/ps" "$broken/"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$broken/tasklist"
+  chmod +x "$broken/uname" "$broken/ps" "$broken/tasklist"
+  local live
+  sleep 30 & live=$!
+
+  cat > "$TEST_SKILL_DIR/gone4.sh" <<'EOF_GONE4'
+#!/usr/bin/env bash
+. "$SCRIPTS/lib/instance-id.sh"
+. "$SCRIPTS/lib/compat.sh"
+_agmsg_pid_alive_local() { return 1; }
+rc=0
+compat_pid_gone "$1" || rc=$?
+echo "gone rc=$rc"
+EOF_GONE4
+  run env SCRIPTS="$SCRIPTS" PATH="$broken:$PATH" MSYSTEM=MINGW64 \
+      bash "$TEST_SKILL_DIR/gone4.sh" "$live"
+  grep -qF 'gone rc=1' <<<"$output"
+
+  kill "$live" 2>/dev/null || true
 }
 
 @test "compat_pid_gone: without instance-id.sh it refuses rather than answering gone (#831)" {

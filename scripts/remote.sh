@@ -2107,7 +2107,7 @@ _remote_sync_engine_status() {
 # cannot be recovered by the operator, while a stale record is what `status`
 # already knows how to describe.
 _remote_sync_engine_reap_owned() {
-  local team="$1" owned_pid="$2" state pid signal attempts
+  local team="$1" owned_pid="$2" state pid signal attempts owned_winpid=""
   for signal in TERM KILL; do
     # OWNERSHIP IS RE-DERIVED EVERY PASS, AND IT IS NOT THE PID NUMBER.
     #
@@ -2119,15 +2119,24 @@ _remote_sync_engine_reap_owned() {
     IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
     if compat_pid_gone "$owned_pid"; then return 2; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
-    compat_signal_pid_tree "$owned_pid" "$signal"
+    # THE WINDOWS NAME IS TAKEN HERE, WHILE THE LINE ABOVE STILL PROVES IT IS
+    # OURS, AND IT IS KEPT. `ps` stops answering for a pid whose MSYS side has
+    # exited, so the POSIX signal below can remove the only means of naming the
+    # native process still running underneath -- which is the reported symptom,
+    # "the kill returns and node.exe is still there". Resolving it after the
+    # signal reproduces the bug this function exists to fix (#840 review). The
+    # same mapping then carries through the signal, the taskkill, and the
+    # confirmation that it went.
+    [ -n "$owned_winpid" ] || owned_winpid="$(_compat_get_winpid "$owned_pid" 2>/dev/null || true)"
+    compat_signal_pid_tree "$owned_pid" "$signal" "$owned_winpid"
     attempts=0
     while [ "$attempts" -lt 100 ]; do
-      compat_pid_gone "$owned_pid" && return 0
+      compat_pid_gone "$owned_pid" "$owned_winpid" && return 0
       attempts=$((attempts + 1))
       sleep 0.01
     done
   done
-  compat_pid_gone "$owned_pid"
+  compat_pid_gone "$owned_pid" "$owned_winpid"
 }
 
 # Upgrade a team that predates local ids: mint a team_id AND a member_id for
