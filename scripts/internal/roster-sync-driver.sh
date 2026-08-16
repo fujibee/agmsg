@@ -105,16 +105,44 @@ _roster_inner_state() {
     printf 'unknown\n'
     return
   fi
+  # "UNUSABLE" AND "DEAD" ARE NOT THE SAME ANSWER (raised in review).
+  #
+  # `_agmsg_pid_alive_local` starts by rejecting a pid outside the POSIX
+  # ceiling and returns 1 for it — the same 1 it returns for "no such
+  # process". A digits-only value can be unusable: `2147483648` passes the
+  # crude filter at the call site and is refused here, and reading that
+  # refusal as `gone` releases the lock on a question that could not be asked.
+  # So the validator is consulted FIRST, and its refusal is `unknown`.
+  if ! _agmsg_pid_valid "$_roster_inner" 2147483647; then
+    printf 'unknown\n'
+    return
+  fi
   if ! _agmsg_pid_alive_local "$_roster_inner"; then
     printf 'gone\n'
     return
   fi
   local cmd
   cmd="$(compat_get_cmdline "$_roster_inner" 2>/dev/null || true)"
-  case "$cmd" in
-    *"$SCRIPT_DIR/roster-sync.mjs $operation $config"*) printf 'ours\n' ;;
-    *) printf 'unknown\n' ;;
-  esac
+  # PLATFORM-AWARE, because a raw `case` compares two different alphabets.
+  #
+  # Under Git Bash the shell's path is `/c/Users/...` while a native process
+  # reports `C:/Users/...`, so a raw match answers "not ours" about a process
+  # that IS ours — silently, because a non-match is the ordinary answer.
+  # `agmsg_cmdline_names_path` exists for exactly this and takes the `cygpath
+  # -m` second look; `_remote_sync_engine_status` already uses it. Reaching for
+  # a bare `case` here would have made Windows keep the lock on every timeout,
+  # on its own healthy child (raised in review).
+  #
+  # BOTH paths, and the operation between them, because either alone is too
+  # loose: the script path is shared by every team, and a config path with a
+  # different operation is a different run.
+  if agmsg_cmdline_names_path "$cmd" "$SCRIPT_DIR/roster-sync.mjs" \
+    && agmsg_cmdline_names_path "$cmd" "$config"; then
+    case "$cmd" in
+      *" $operation "*) printf 'ours\n'; return ;;
+    esac
+  fi
+  printf 'unknown\n'
 }
 
 # Signalling has exactly one safe answer, so it gets its own name rather than

@@ -637,6 +637,135 @@ EOF
   rmdir "$team_dir/.config.lock" 2>/dev/null || true
 }
 
+@test "a numeric but unusable pid is not read as a child that exited (#821)" {
+  skip_on_windows "POSIX signal semantics are not supported by this test"
+  # A THIRD WAY INTO "GONE", AND THE OTHER TWO CASES DO NOT REACH IT.
+  #
+  # `_agmsg_pid_alive_local` refuses a pid above the POSIX ceiling and returns
+  # 1 for it -- the same 1 it returns for "no such process". So a value that
+  # is all digits but out of range, like 2147483648, passed the crude filter
+  # at the call site, was refused by the validator, and that refusal read as
+  # `gone` and released the lock. "Could not ask" became "it is dead".
+  #
+  # `not-a-pid` does not exercise this: it is cleared to empty at the call
+  # site and never reaches the validator. This value does.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir made substituted
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  made="$TEST_SKILL_DIR/mktemp-made-oob"
+  substituted="$TEST_SKILL_DIR/pidfile-oob"
+  shimdir="$TEST_SKILL_DIR/shim-oob"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+
+  fake="$TEST_SKILL_DIR/fake-node-oob-pid"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+trap '' TERM
+( i=0
+  while [ "$i" -lt 25 ]; do
+    pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
+    if [ -n "$pidfile" ] && [ -s "$pidfile" ]; then
+      # INT32_MAX + 1: every character is a digit, and no process can have it.
+      printf '2147483648\n' > "$pidfile"
+      printf 'oob\n' > "$AGMSG_TEST_SUBSTITUTED"
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+) &
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_SUBSTITUTED="$substituted" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=4 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  local driver_status="$status" driver_out="$output"
+  [ "$(cat "$substituted" 2>/dev/null || true)" = "oob" ]
+  [ "$driver_status" -eq 18 ]
+  printf '%s' "$driver_out" | grep -q 'could not be established'
+  [ -d "$team_dir/.config.lock" ]
+
+  local leftover
+  leftover="$(pgrep -f "$fake" || true)"
+  if [ -n "$leftover" ]; then
+    kill $leftover 2>/dev/null || true
+    sleep 1
+    kill -9 $leftover 2>/dev/null || true
+  fi
+  rmdir "$team_dir/.config.lock" 2>/dev/null || true
+}
+
+@test "the argv match survives the Windows path alphabet (#821)" {
+  # THE COMPARISON RUNS ON TWO ALPHABETS, AND THIS MACHINE ONLY HAS ONE.
+  #
+  # Under Git Bash the shell's own path is `/c/Users/...` while a native
+  # process reports `C:/Users/...`, so a raw `case` answers "not ours" about a
+  # process that IS ours -- and silently, since a non-match is the ordinary
+  # answer. `scripts/lib/compat.sh` documents it, measured on a reporting
+  # machine, and `agmsg_cmdline_names_path` exists to take the `cygpath -m`
+  # second look.
+  #
+  # There is no Windows here, so the DIFFERENCE is driven instead: a `cygpath`
+  # stub maps this suite's real paths into the `C:/` form, and the comparator
+  # is handed a cmdline written in that form. If the driver ever goes back to
+  # a raw `case`, this is what reddens -- on the alphabet difference alone,
+  # with everything else identical.
+  source "$SCRIPTS/lib/compat.sh"
+
+  local shimdir="$TEST_SKILL_DIR/shim-cygpath"
+  mkdir -p "$shimdir"
+  # `-m` is the mixed form. The stub answers only for it, so a call with any
+  # other flag cannot accidentally satisfy the assertions below.
+  # `/c/Users/x` becomes `C:/Users/x` -- the drive letter REPLACES the leading
+  # `/c`, it is not prepended to it. Prepending leaves the original substring
+  # intact, so a raw match still fires and the case measures nothing; the
+  # premise control below caught exactly that on the first attempt.
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' '[ "$1" = "-m" ] || exit 1'
+    printf '%s\n' 'printf "C:%s\\n" "${2#/c}"'
+  } > "$shimdir/cygpath"
+  chmod +x "$shimdir/cygpath"
+
+  local script="/c/Users/agent/.agents/skills/agmsg/scripts/internal/roster-sync.mjs"
+  local conf="/c/Users/agent/.agents/skills/agmsg/teams/demo/config.json"
+  local native_cmd="node.exe C:${script#/c} reconcile C:${conf#/c}"
+
+  # POSITIVE CONTROL ON THE PREMISE: the raw comparison really does fail on
+  # this input. Without it, the assertions below could pass because the two
+  # forms happened to match, and the case would be measuring nothing.
+  run bash -c "case \"$native_cmd\" in *\"$script\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -ne 0 ]
+
+  # With cygpath present, the same input is recognised.
+  PATH="$shimdir:$PATH" agmsg_cmdline_names_path "$native_cmd" "$script"
+  PATH="$shimdir:$PATH" agmsg_cmdline_names_path "$native_cmd" "$conf"
+
+  # And it is not a rubber stamp: another team's config is still refused.
+  local other="/c/Users/agent/.agents/skills/agmsg/teams/other/config.json"
+  run env PATH="$shimdir:$PATH" bash -c \
+    "source '$SCRIPTS/lib/compat.sh'; agmsg_cmdline_names_path '$native_cmd' '$other'"
+  [ "$status" -ne 0 ]
+}
+
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
   skip_on_windows "POSIX signal semantics are not supported by this test"
   # "I SENT A SIGNAL" IS NOT "THE PROCESS IS GONE" (raised as BLOCKING).
