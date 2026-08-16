@@ -493,11 +493,14 @@ _roster_state_digest() {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'if : <&9 2>/dev/null; then printf open > "$AGMSG_TEST_FD_SEEN"'
     printf '%s\n' 'else printf closed > "$AGMSG_TEST_FD_SEEN"; fi'
-    # THE PARENT'S COPY, asked of the parent. With the FIFO design this child is
-    # spawned by the driver shell itself, so $PPID is the driver and its
-    # descriptor table answers directly where one is readable. Where it is not
-    # -- macOS has no /proc -- this records that it could not look, rather than
-    # reporting "closed" from an instrument that cannot see.
+    # THE PARENT'S COPY, asked of the parent. $PPID here is the WRAPPER shell
+    # that carries node's pid, not the driver -- an earlier version of this
+    # comment said it was the driver, and that stopped being true when the
+    # wrapper was introduced. The assertion did not need changing: whoever the
+    # parent is, it must not be holding the caller's stdin, and this is the
+    # instrument that caught the wrapper doing exactly that. Where the table
+    # cannot be read -- macOS has no /proc -- this records that it could not
+    # look, rather than reporting "closed" from an instrument that cannot see.
     printf '%s\n' 'if [ -d "/proc/$PPID/fd" ]; then'
     printf '%s\n' '  if [ -e "/proc/$PPID/fd/9" ]; then printf parent-open > "$AGMSG_TEST_FD_PARENT"'
     printf '%s\n' '  else printf parent-closed > "$AGMSG_TEST_FD_PARENT"; fi'
@@ -534,14 +537,39 @@ _roster_state_digest() {
   # macOS has none. Reverting the parent's close would then be green on half
   # the matrix — which is how a leak survives.
   #
-  # So the order is asserted where it lives: the spawn, then `exec 9<&-`, with
-  # both anchors required to exist so this cannot pass by finding nothing.
-  local sh="$SCRIPTS/internal/roster-sync-driver.sh" spawn_at close_at
-  spawn_at="$(grep -n '<&9 9<&- 3>&- 4>&- 8> "\$_roster_fifo" &' "$sh" | head -1 | cut -d: -f1)"
-  close_at="$(grep -n '^  exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
-  [ -n "$spawn_at" ]
-  [ -n "$close_at" ]
-  [ "$close_at" -gt "$spawn_at" ]
+  # So the order is asserted where it lives, with every anchor required to
+  # exist so this cannot pass by finding nothing.
+  #
+  # THERE ARE THREE COPIES OF fd 9, NOT TWO, AND THAT IS WHY THIS CASE CHANGED.
+  # The wrapper that carries node's pid is a shell of its own, and it inherits
+  # fd 9 like anything else. Its earlier version closed it nowhere, so the
+  # caller's stdin was held for the whole operation by a process that neither
+  # the child's close nor the driver's reaches. CI caught it on the /proc half.
+  # Each close is anchored separately below, after the spawn it belongs to.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh"
+  local node_at wrapper_close_at group_at parent_close_at
+
+  # 1. node is handed the descriptor and drops its saved copy in one redirection.
+  node_at="$(grep -n '"\$@" <&9 9<&- &$' "$sh" | head -1 | cut -d: -f1)"
+  # 2. the wrapper closes its own copy — indented inside the brace group.
+  wrapper_close_at="$(grep -n '^    exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
+  # 3. the brace group is backgrounded.
+  group_at="$(grep -n '^  } 3>&- 4>&- 8> "\$_roster_fifo" &$' "$sh" | head -1 | cut -d: -f1)"
+  # 4. the driver closes its copy — at the driver's own indent, which is why
+  #    the two `exec 9<&-` anchors cannot be confused for one another.
+  parent_close_at="$(grep -n '^  exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
+
+  [ -n "$node_at" ]
+  [ -n "$wrapper_close_at" ]
+  [ -n "$group_at" ]
+  [ -n "$parent_close_at" ]
+
+  # The wrapper's close is after node has the descriptor, and before the group
+  # ends — remove it and this is the assertion that goes red.
+  [ "$wrapper_close_at" -gt "$node_at" ]
+  [ "$wrapper_close_at" -lt "$group_at" ]
+  # The driver's close is after the group is spawned.
+  [ "$parent_close_at" -gt "$group_at" ]
 }
 
 @test "the timeout setting is validated before the lock is taken (#821)" {

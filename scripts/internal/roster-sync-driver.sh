@@ -137,6 +137,21 @@ if [ "$_roster_bounded" = "1" ]; then
     "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
       "$server" "$remote" "$protocol" "$@" <&9 9<&- &
     _rs_node=$!
+    # THE WRAPPER'S OWN COPY, AND IT IS A THIRD ONE. Introducing this shell to
+    # carry the pid put a process between the driver and node that inherits
+    # fd 9 and was closing it nowhere — so the caller's stdin was held for the
+    # whole operation by something neither the child's `9<&-` nor the parent's
+    # `exec 9<&-` reaches. The same class as the two closes around it, made
+    # reachable again by the shell added to fix a different one.
+    #
+    # CI found this, and the case that found it is the behavioural half whose
+    # comment said `$PPID` is the driver. It stopped being the driver when this
+    # brace group appeared; the assertion then read THIS shell's table and
+    # reported fd 9 open, which was the truth.
+    #
+    # Closed here rather than in the group's redirection list, because node
+    # above still needs it: `<&9` is read when that command starts.
+    exec 9<&-
     printf '%s\n' "$_rs_node" > "$_roster_pidfile"
     _rs_rc=0
     wait "$_rs_node" || _rs_rc=$?
