@@ -2016,15 +2016,25 @@ _remote_sync_engine_start_locked() {
 }
 
 _remote_sync_engine_stop() {
-  local team="$1" pidfile pid state
+  local team="$1" pidfile pid state reaped=0
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   [ -f "$pidfile" ] || return 0
   IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
   if [ "$state" = "running" ]; then
-    if ! _remote_sync_engine_reap_owned "$team" "$pid"; then
-      echo "agmsg: sync engine pid $pid did not stop" >&2
-      return 1
-    fi
+    # 0 (signalled and gone) and 2 (already gone) are both "not running now",
+    # which is all this function needs. 2 cannot actually arrive here -- the
+    # `state = running` above already required the pid to be alive -- and it is
+    # accepted rather than left to fall into the failure branch by accident.
+    # `|| reaped=$?` and not a bare call: this file runs under `set -e`, where a
+    # bare call returning 1 exits the script instead of reaching the message
+    # below. The cost of the idiom is that errexit is off while the reap runs;
+    # the reap states every one of its outcomes with an explicit `return`.
+    _remote_sync_engine_reap_owned "$team" "$pid" || reaped=$?
+    case $reaped in
+      0|2) ;;
+      *)   echo "agmsg: sync engine pid $pid did not stop" >&2
+           return 1 ;;
+    esac
   fi
   rm -f "$pidfile"
   # The cycle record goes with the engine that made it. Left behind, the NEXT
@@ -2074,11 +2084,25 @@ _remote_sync_engine_status() {
   fi
 }
 
+# Returns 0 when it SIGNALLED the engine and the engine went, 2 when the engine
+# already read as gone and nothing was signalled, 1 when it could not stop it.
+#
+# THE DIFFERENCE BETWEEN 0 AND 2 IS WHO IS SPEAKING. 0 is this function's own
+# act; 2 is a reading, and a reading can be wrong -- on Windows a live engine
+# read as dead (#652), so this returned "reaped" for a process that was pulling
+# at the time. The caller then deleted its pidfile and walked away, and every
+# later `sync start` added another one beside it: three invocations, three live
+# engines, and `status` reporting stopped (#831).
+#
+# #832 fixed that probe. The separation stays because the harm does not depend on
+# WHICH misreading happens: a record deleted for a process that is still running
+# cannot be recovered by the operator, while a stale record is what `status`
+# already knows how to describe.
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
     IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
-    if ! _agmsg_pid_alive_local "$owned_pid"; then return 0; fi
+    if ! _agmsg_pid_alive_local "$owned_pid"; then return 2; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
     kill "-$signal" "$owned_pid" 2>/dev/null || true
     attempts=0
@@ -2900,9 +2924,19 @@ cmd_sync_start() {
     # A lock that cannot be retaken must not swallow the diagnostic below, so
     # the failure is reported and the files are left rather than removed blind:
     # a stale pidfile is what `status` already knows how to describe.
-    local relocked=1
+    #
+    # AND ONLY WHEN THIS CALL ACTUALLY STOPPED IT. `_remote_sync_engine_reap_owned`
+    # answers 0 when it signalled the engine and the engine went, and 2 when the
+    # engine merely READ as gone. Clearing the records on 2 is what left orphans:
+    # a live engine misread as dead had its pidfile deleted, `status` then said
+    # stopped, and the next `sync start` added another engine beside it -- three
+    # invocations, three live engines (#831). On 2 the records are left, because
+    # a stale pidfile is something `status` describes and an operator can act on,
+    # while a running process with no record is not.
+    local relocked=1 reaped=0
     agmsg_lock_acquire "$TEAMS_DIR/$team" || relocked=0
-    if _remote_sync_engine_reap_owned "$team" "$started_pid"; then
+    _remote_sync_engine_reap_owned "$team" "$started_pid" || reaped=$?   # `set -e`: see _remote_sync_engine_stop
+    if [ "$reaped" -eq 0 ] || [ "$reaped" -eq 2 ]; then
       if [ "$relocked" -eq 1 ]; then
         # AND ONLY IF IT IS STILL OURS. Retaking the lock stops the file from
         # changing under the removal; it does not make the file this call's to
@@ -2912,16 +2946,30 @@ cmd_sync_start() {
         # points at, which is the shape `set-endpoint` already warns about.
         local recorded
         recorded="$(cat "$(_remote_sync_engine_pidfile "$team")" 2>/dev/null || true)"
-        if [ "$recorded" = "$started_pid" ]; then
+        if [ "$recorded" = "$started_pid" ] && [ "$reaped" -eq 0 ]; then
           rm -f "$(_remote_sync_engine_pidfile "$team")"
           rm -f "$(_remote_sync_engine_cycle_stamp "$team")"   # same reason as in _remote_sync_engine_stop
         fi
         agmsg_lock_release
       else
         echo "agmsg: could not retake the registry lock to clear the engine's records for '$team'" >&2
-        echo "  the engine is stopped; its pidfile is left, and 'remote.sh status' reads it as stale." >&2
+        if [ "$reaped" -eq 0 ]; then
+          echo "  the engine is stopped; its pidfile is left, and 'remote.sh status' reads it as stale." >&2
+        else
+          # NOT "the engine is stopped". Nothing was signalled on this path, so
+          # whether it is running is exactly what is not known here. The line
+          # said it unconditionally, and a message that names the wrong state is
+          # worse than none: it is the only thing the operator has.
+          echo "  its pidfile is left, and it is the only thing naming that pid." >&2
+        fi
       fi
       echo "agmsg: sync engine for '$team' did not become ready" >&2
+      if [ "$reaped" -eq 2 ]; then
+        echo "agmsg:   pid $started_pid read as already gone, so nothing was signalled." >&2
+        echo "agmsg:   its records are left in place: if that reading was wrong the" >&2
+        echo "agmsg:   engine is still running, and this is the only thing naming it." >&2
+        echo "agmsg:   'remote.sh status $(agmsg_shq "$team")' reads them." >&2
+      fi
       return 1
     fi
     [ "$relocked" -eq 1 ] && agmsg_lock_release
