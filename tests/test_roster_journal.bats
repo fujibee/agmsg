@@ -9,6 +9,30 @@ setup() {
 }
 
 teardown() {
+  # NOTHING THIS FILE STARTS MAY OUTLIVE IT.
+  #
+  # Several cases here are driven by a fake node that ignores TERM, and one is
+  # deliberately a process the driver must NOT be able to stop. When such a
+  # case fails -- or when someone runs a mutation against it -- the fixture is
+  # left running. That is the shape `scripts/lib/close-fds.sh` and
+  # `tests/test_spawn_fd_guard.bats` exist for: a leaked process can hold a
+  # shard open long after every case has reported. Five were found alive on
+  # this machine at once while this file was being written.
+  #
+  # Matched on TEST_SKILL_DIR, which `mktemp -d` makes fresh for every single
+  # case, so this can only ever name processes this case started -- never
+  # another suite's, and never another worktree's.
+  if [ -n "${TEST_SKILL_DIR:-}" ]; then
+    local stragglers
+    stragglers="$(pgrep -f "$TEST_SKILL_DIR" 2>/dev/null || true)"
+    if [ -n "$stragglers" ]; then
+      # shellcheck disable=SC2086
+      kill $stragglers 2>/dev/null || true
+      sleep 1
+      # shellcheck disable=SC2086
+      kill -9 $stragglers 2>/dev/null || true
+    fi
+  fi
   teardown_test_env
 }
 
@@ -533,40 +557,112 @@ EOF
   refute pgrep -f "$fake"
 }
 
-@test "the lock is not released until the inner child is confirmed gone (#821)" {
-  # A STRUCTURAL CHECK, AND THE REASON IS A LIMIT I COULD NOT GET AROUND.
+@test "the lock is KEPT when the inner child cannot be confirmed gone (#821)" {
+  skip_on_windows "POSIX signal semantics are not supported by this test"
+  # "I SENT A SIGNAL" IS NOT "THE PROCESS IS GONE" (raised as BLOCKING).
   #
-  # The property: "I sent a signal" is not "the process is gone". The inner
-  # process is a GRANDCHILD, so `wait` cannot speak for it, and every `kill`
-  # above discards its result. The release must therefore be gated on ASKING.
+  # The inner process is a GRANDCHILD, so `wait` cannot speak for it, and
+  # every `kill` on that path discards its result. Without asking, the release
+  # rested on nothing: a refused signal, and the lock came off beside a live
+  # writer.
   #
-  # The behavioural case would need a process that survives SIGKILL, and on a
-  # machine where this suite can run, there is none: KILL is only refused
-  # under EPERM (a sandbox) or an uninterruptible wait, and neither can be
-  # produced here. I tried and could not, and I would rather say that than
-  # ship a case that passes for a reason unrelated to the property.
+  # DRIVING IT NEEDED A PROCESS THE DRIVER CANNOT KILL, and SIGKILL cannot be
+  # ignored -- it is refused only under EPERM or an uninterruptible wait. So
+  # the case uses EPERM, which is the realistic half anyway (a sandbox that
+  # will not let us signal, #505): it makes the recorded pid **1**, which no
+  # ordinary user may signal. `kill -0 1` answers `Operation not permitted`,
+  # and `_agmsg_pid_alive_local` reads every non-ESRCH failure as alive --
+  # which is the conservative direction this gate needs.
   #
-  # So the gate is asserted where it lives, with both anchors required to
-  # exist so this cannot pass by finding nothing -- the same guard that caught
-  # the spawn anchor going stale on the previous head.
-  local sh="$SCRIPTS/internal/roster-sync-driver.sh" ask_at release_at keep_at
-  # The question is asked with the repo's own instrument, not a bare kill -0.
-  ask_at="$(grep -n '_agmsg_pid_alive_local "\$_roster_inner"' "$sh" | tail -1 | cut -d: -f1)"
-  # The lock is deliberately kept by emptying the library's own list.
-  keep_at="$(grep -n '^        AGMSG_HELD_LOCKS=""$' "$sh" | head -1 | cut -d: -f1)"
-  # The timeout path's release, which must come after the question.
-  release_at="$(grep -n '^      agmsg_lock_release$' "$sh" | head -1 | cut -d: -f1)"
+  # Nothing in the driver is stubbed. The pidfile is a real file whose path
+  # the `mktemp` shim already reports, and the fake node overwrites it the way
+  # a pid recycled under the driver's feet would.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir made
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
 
-  [ -n "$ask_at" ]
-  [ -n "$keep_at" ]
-  [ -n "$release_at" ]
-  [ "$release_at" -gt "$ask_at" ]
-  [ "$keep_at" -gt "$ask_at" ]
-  [ "$keep_at" -lt "$release_at" ]
-  # And the instrument is the sourced one, so this cannot be satisfied by a
-  # bare `kill -0` reintroduced beside it -- which a repo-wide check also
-  # refuses, from the other direction.
-  grep -q 'source "\$SKILL_DIR/scripts/lib/instance-id.sh"' "$sh"
+  made="$TEST_SKILL_DIR/mktemp-made-keep"
+  shimdir="$TEST_SKILL_DIR/shim-keep"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+
+  # The second real file the driver makes is the pidfile (the first is the
+  # sentinel; the FIFO's `mktemp -u` creates nothing and is not logged). The
+  # fake waits for the wrapper to have written it, then replaces the number.
+  fake="$TEST_SKILL_DIR/fake-node-unkillable-pid"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+# STDOUT IS LET GO HERE, IN THE FIXTURE, AND THAT IS ITS OWN FINDING.
+#
+# Without this the case hangs -- and not because of the property under test.
+# This fake is deliberately one the driver CANNOT kill, so it outlives the
+# run; while it holds the caller's stdout, `run` waits for an end-of-file
+# that never comes. That is inherent to "a child we may not signal", not
+# something the lock gate could fix, and it is reported to the reviewers as
+# an observation rather than fixed inside this PR. Released here so the case
+# measures the lock and nothing else.
+exec >/dev/null 2>&1
+trap '' TERM
+( sleep 1
+  pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
+  if [ -n "$pidfile" ] && [ -e "$pidfile" ]; then
+    printf '1\n' > "$pidfile"
+    # Recorded HERE, not read back from the pidfile afterwards: the driver
+    # deletes that file on its way out, so a check made after the run finds
+    # an empty string whether or not the substitution happened. Measured --
+    # the first version of this control failed for exactly that reason, on a
+    # run whose status was already the 17 this case is about.
+    printf 'substituted\n' > "$AGMSG_TEST_SUBSTITUTED"
+  fi
+) &
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  local substituted="$TEST_SKILL_DIR/pid-substituted"
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_SUBSTITUTED="$substituted" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=4 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  # POSITIVE CONTROL ON THE SETUP: the substitution must actually have
+  # happened, or this case is measuring an ordinary timeout that would have
+  # reached the same branch for a different reason.
+  [ -s "$made" ]
+  [ "$(cat "$substituted" 2>/dev/null || true)" = "substituted" ]
+
+  # A distinct, named refusal -- not 14, which is the "stopped and released"
+  # outcome and would mean the gate did not fire.
+  [ "$status" -eq 17 ]
+  printf '%s' "$output" | grep -q 'STILL RUNNING'
+  # THE LOCK IS STILL THERE. This is the assertion the whole finding is about:
+  # a release here would be a release beside a writer we could not stop.
+  [ -d "$team_dir/.config.lock" ]
+  # And the operator is told where it is, since nothing will clean it up.
+  printf '%s' "$output" | grep -q "$team_dir/.config.lock"
+
+  # The real fake node is still running -- it is not pid 1 and this test owns
+  # it, so it is stopped here by the pid the shell knows.
+  local leftover
+  leftover="$(pgrep -f "$fake" || true)"
+  if [ -n "$leftover" ]; then
+    kill $leftover 2>/dev/null || true
+    sleep 1
+    kill -9 $leftover 2>/dev/null || true
+  fi
+  rmdir "$team_dir/.config.lock" 2>/dev/null || true
 }
 
 @test "a partial temp setup leaves nothing behind (#821)" {
@@ -579,9 +675,14 @@ EOF
   # full. A feature answering a full filesystem by adding a file to it is the
   # wrong shape.
   #
-  # The stub fails only from the SECOND call on, so the first `mktemp -u`
-  # succeeds and the sentinel's does not. The previous cases all failed every
-  # call, which never produced this shape.
+  # THE STUB FAILS FROM THE THIRD CALL ON, and the number is the whole point.
+  #
+  # The first call is `mktemp -u`, which only generates a NAME — it creates
+  # nothing. So failing from the second call leaves no file either, and the
+  # case then passes whether or not anything sweeps up. Measured: with the
+  # sweep deleted the case stayed GREEN, which is what sent this comment here.
+  # Failing from the third leaves exactly one real file — the sentinel — with
+  # the pidfile refused, which is the partial state.
   bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
   local team_dir="$TEST_SKILL_DIR/teams/demo"
   local shimdir counter before after fake
@@ -590,40 +691,57 @@ EOF
   chmod +x "$fake"
 
   counter="$TEST_SKILL_DIR/mktemp-calls"
+  local made="$TEST_SKILL_DIR/mktemp-made"
   shimdir="$TEST_SKILL_DIR/shim-partial-mktemp"
   mkdir -p "$shimdir"
+  # THE SHIM RECORDS WHAT IT ACTUALLY CREATED, and that is not decoration.
+  #
+  # The first version of this case counted files in `$TMPDIR` before and
+  # after. It could not have failed: on macOS `mktemp` with no template
+  # IGNORES `TMPDIR` and writes to the per-user directory under /var/folders,
+  # so the count was taken of a directory the driver never touched. Measured
+  # -- with the sweep deleted the case stayed green, twice.
+  #
+  # So the paths are logged as they are handed out, and only when the file is
+  # really there (`-u` generates a name and creates nothing). The assertion is
+  # then about those exact paths, wherever the platform decided to put them.
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' 'n=$(cat "$AGMSG_TEST_MKTEMP_COUNTER" 2>/dev/null || echo 0)'
     printf '%s\n' 'n=$((n + 1)); printf %s "$n" > "$AGMSG_TEST_MKTEMP_COUNTER"'
-    printf '%s\n' '[ "$n" -ge 2 ] && exit 1'
-    printf '%s\n' 'exec /usr/bin/mktemp "$@"'
+    printf '%s\n' '[ "$n" -ge 3 ] && exit 1'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
   } > "$shimdir/mktemp"
   chmod +x "$shimdir/mktemp"
 
-  # Every temp path this driver could have created lives in TMPDIR, so the
-  # question is asked of the directory itself: what is in it before, and what
-  # is in it after. Counting entries rather than naming them, because the
-  # names are generated and the assertion is about residue, not identity.
-  export TMPDIR="$TEST_SKILL_DIR/tmp-partial"
-  mkdir -p "$TMPDIR"
-  before="$(find "$TMPDIR" -type f | wc -l | tr -d ' ')"
-
   run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
-    AGMSG_TEST_MKTEMP_COUNTER="$counter" TMPDIR="$TMPDIR" \
+    AGMSG_TEST_MKTEMP_COUNTER="$counter" AGMSG_TEST_MKTEMP_MADE="$made" \
     bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
       018f3f7e-0000-7000-8000-000000000001 \
       018f3f7e-0000-7000-8000-000000000002 1 </dev/null
 
   # It took the refusal, which is what a partial setup must do.
   [ "$status" -eq 16 ]
-  # POSITIVE CONTROL ON THE STUB: without this, a stub that never ran would
-  # leave the case asserting "no residue" about a run that had no temps to
-  # leave. Two calls means the first succeeded and the second was refused --
-  # exactly the partial shape.
-  [ "$(cat "$counter")" -ge 2 ]
-  after="$(find "$TMPDIR" -type f | wc -l | tr -d ' ')"
-  [ "$after" -eq "$before" ]
+  # POSITIVE CONTROL ON THE STUB: three calls means the sentinel's `mktemp`
+  # really ran and the pidfile's was refused -- the partial shape, rather than
+  # the "nothing was ever made" one the other cases already cover.
+  [ "$(cat "$counter")" -ge 3 ]
+  # AND A POSITIVE CONTROL ON THE INSTRUMENT: at least one file really
+  # existed, so "none of them is left" is not a sentence about an empty list.
+  [ -s "$made" ]
+  before="$(wc -l < "$made" | tr -d ' ')"
+  [ "$before" -ge 1 ]
+  after=0
+  while IFS= read -r leftover; do
+    [ -n "$leftover" ] || continue
+    if [ -e "$leftover" ]; then
+      after=$((after + 1))
+      echo "left behind: $leftover" >&2
+    fi
+  done < "$made"
+  [ "$after" -eq 0 ]
   [ ! -d "$team_dir/.config.lock" ]
 }
 
