@@ -133,15 +133,40 @@ _roster_inner_state() {
   # a bare `case` here would have made Windows keep the lock on every timeout,
   # on its own healthy child (raised in review).
   #
-  # BOTH paths, and the operation between them, because either alone is too
-  # loose: the script path is shared by every team, and a config path with a
-  # different operation is a different run.
-  if agmsg_cmdline_names_path "$cmd" "$SCRIPT_DIR/roster-sync.mjs" \
-    && agmsg_cmdline_names_path "$cmd" "$config"; then
-    case "$cmd" in
-      *" $operation "*) printf 'ours\n'; return ;;
-    esac
+  # THE ORDERED TRIPLE, NOT THREE INDEPENDENT SIGHTINGS (raised in review).
+  #
+  # Asking "does the cmdline contain the script path" AND "does it contain
+  # this config" AND "does it contain this operation somewhere" is three
+  # questions, and three questions do not add up to "this operation, on this
+  # config". A command line carrying a different operation and a different
+  # config can satisfy all three at once — the operation from one place, the
+  # config from another. Two existence checks are not a relation.
+  #
+  # So the needle is the sequence the driver actually spawns:
+  #     <script> <operation> <config>
+  # and it has to appear as one run of text.
+  #
+  # BOTH ALPHABETS, because the shell's `/c/Users/...` and a native process's
+  # `C:/Users/...` are the same path written differently. `cygpath -m` is the
+  # conversion `agmsg_cmdline_names_path` uses for exactly this; it is called
+  # here rather than that function because the needle must be composed from
+  # converted PARTS — handing a whole sentence to a path converter would not
+  # do what it says.
+  local script_sh="$SCRIPT_DIR/roster-sync.mjs" script_win="" config_win=""
+  if command -v cygpath >/dev/null 2>&1; then
+    script_win="$(cygpath -m "$script_sh" 2>/dev/null || true)"
+    config_win="$(cygpath -m "$config" 2>/dev/null || true)"
   fi
+  local s c
+  for s in "$script_sh" "$script_win"; do
+    [ -n "$s" ] || continue
+    for c in "$config" "$config_win"; do
+      [ -n "$c" ] || continue
+      case "$cmd" in
+        *"$s $operation $c"*) printf 'ours\n'; return ;;
+      esac
+    done
+  done
   printf 'unknown\n'
 }
 

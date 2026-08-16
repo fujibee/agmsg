@@ -765,20 +765,62 @@ EOF
     "source '$SCRIPTS/lib/compat.sh'; agmsg_cmdline_names_path '$native_cmd' '$other'"
   [ "$status" -ne 0 ]
 
-  # AND THE DRIVER MUST ACTUALLY USE IT. Everything above measures the
-  # comparator; none of it would notice the driver going back to a raw
-  # comparison, and that is precisely the regression to guard -- measured, by
-  # reverting the driver to `case` and watching every assertion above stay
-  # green. There is no Windows here to catch it behaviourally, so the driver's
-  # side is asserted where it lives.
+  # AND THE DRIVER MUST ACTUALLY USE THE CONVERSION. Everything above measures
+  # the comparator; none of it would notice the driver going back to a raw
+  # comparison -- measured, by reverting the driver and watching every
+  # assertion above stay green. There is no Windows here to catch that
+  # behaviourally, so the driver's side is asserted where it lives.
   local sh="$SCRIPTS/internal/roster-sync-driver.sh"
-  # It calls the comparator for both paths...
-  grep -q 'agmsg_cmdline_names_path "\$cmd" "\$SCRIPT_DIR/roster-sync.mjs"' "$sh"
-  grep -q 'agmsg_cmdline_names_path "\$cmd" "\$config"' "$sh"
-  # ...and nowhere matches a shell-side path against the cmdline directly,
-  # which is the shape that is blind on Windows.
+  grep -q 'cygpath -m' "$sh"
+  # THE ORDERED TRIPLE, not three separate sightings. `<script> <operation>
+  # <config>` has to appear as one run of text, because a cmdline carrying a
+  # different operation and a different config can satisfy three independent
+  # `contains` checks at once.
+  grep -q '\*"\$s \$operation \$c"\*' "$sh"
+  # And no shell-side path is matched against the cmdline directly.
   run grep -nE 'case "\$cmd" in.*\$(SCRIPT_DIR|config)' "$sh"
   [ "$status" -ne 0 ]
+}
+
+@test "the argv match is a sequence, not three sightings (#821)" {
+  # TWO EXISTENCE CHECKS ARE NOT A RELATION (raised in review).
+  #
+  # The predicate used to ask three separate questions: does the cmdline
+  # contain the script path, does it contain this config, does it contain this
+  # operation anywhere. A command line can satisfy all three while being a
+  # DIFFERENT run -- the operation supplied by one part of it and the config by
+  # another. This drives exactly that shape.
+  #
+  # The driver's own predicate is not reachable from here without running it,
+  # so the composition is measured on the same text the driver builds: the
+  # ordered needle must reject this cmdline, and the three loose checks must
+  # each accept it. That contrast is the whole finding.
+  local script="/opt/agmsg/scripts/internal/roster-sync.mjs"
+  local conf="/opt/agmsg/teams/demo/config.json"
+  local other="/opt/agmsg/teams/other/config.json"
+  local operation="reconcile"
+
+  # A real command line for a DIFFERENT run: `apply` on another team's config,
+  # with the word `reconcile` present for an unrelated reason.
+  local decoy="node $script apply $other --note reconcile "
+
+  # The three loose checks all say yes -- this is the premise, and without it
+  # the assertion below would prove nothing.
+  case "$decoy" in *"$script"*) : ;; *) return 1 ;; esac
+  case "$decoy" in *"$other"*) : ;; *) return 1 ;; esac
+  case "$decoy" in *" $operation "*) : ;; *) return 1 ;; esac
+
+  # The ordered needle says no, for this team's config...
+  run bash -c "case \"$decoy\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -ne 0 ]
+  # ...and for the other team's too, because the OPERATION does not line up.
+  run bash -c "case \"$decoy\" in *\"$script $operation $other\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -ne 0 ]
+
+  # Positive control: the needle does match the run it describes.
+  local real="node $script $operation $conf"
+  run bash -c "case \"$real\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
+  [ "$status" -eq 0 ]
 }
 
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
