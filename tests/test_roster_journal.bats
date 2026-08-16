@@ -571,19 +571,28 @@ EOF
   # something else by the time the timeout path reads it. The earlier version
   # sent TERM and then KILL to whatever it said.
   #
-  # So the case makes the recorded pid **1** -- alive, certainly not ours, and
-  # not signallable by an ordinary user. That is one substitution standing in
-  # for both hazards: a recycled number, and (through EPERM) a process this
-  # process may not touch.
+  # THE STAND-IN IS A PROCESS THIS CASE OWNS, NOT PID 1. An earlier version
+  # substituted 1: alive, certainly not ours, and unsignallable -- which made
+  # the driver aim TERM and KILL at init on every run of this suite, and
+  # proved nothing about restraint either, because a signal to pid 1 leaves no
+  # trace an ordinary user can read (raised in review, and right).
   #
-  # What it must produce is the UNKNOWN outcome: pid 1 not signalled, our own
-  # child's fate undetermined, and therefore the lock kept. Reading it as
-  # "gone" would release on an answer never obtained; reading it as "still
-  # ours" would mean the driver had adopted a stranger.
+  # A `sleep` this case starts answers both. Its argv does not match, so it
+  # models a recycled number; and because the case owns it, "no signal was
+  # delivered" is DIRECTLY OBSERVABLE -- if TERM had been sent, it would be
+  # gone. It is still alive at the end, or this case fails.
+  #
+  # What the run must produce is the UNKNOWN outcome: nothing signalled, our
+  # own child's fate undetermined, and therefore the lock kept. Reading it as
+  # "gone" would release on an answer never obtained; reading it as "ours"
+  # would mean the driver had adopted a stranger.
   #
   # Nothing in the driver is stubbed. The pidfile is a real file whose path
   # the `mktemp` shim already reports, and the fake node overwrites it the way
   # a pid recycled under the driver's feet would.
+  local stranger
+  sleep 120 &
+  stranger=$!
   bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
   local team_dir="$TEST_SKILL_DIR/teams/demo"
   local config="$team_dir/config.json"
@@ -632,7 +641,7 @@ trap '' TERM
   while [ "$i" -lt 25 ]; do
     pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
     if [ -n "$pidfile" ] && [ -e "$pidfile" ] && [ -s "$pidfile" ]; then
-      printf '1\n' > "$pidfile"
+      printf '%s\n' "$AGMSG_TEST_STRANGER_PID" > "$pidfile"
       # Recorded HERE, not read back from the pidfile afterwards: the driver
       # deletes that file on its way out, so a check made after the run finds
       # an empty string whether or not the substitution happened. Measured --
@@ -651,7 +660,7 @@ EOF
   local substituted="$TEST_SKILL_DIR/pid-substituted"
   run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
     AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_SUBSTITUTED="$substituted" \
-    AGMSG_ROSTER_SYNC_TIMEOUT_S=4 \
+    AGMSG_TEST_STRANGER_PID="$stranger" AGMSG_ROSTER_SYNC_TIMEOUT_S=4 \
     bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
       018f3f7e-0000-7000-8000-000000000001 \
       018f3f7e-0000-7000-8000-000000000002 1 </dev/null
@@ -662,23 +671,38 @@ EOF
   [ -s "$made" ]
   [ "$(cat "$substituted" 2>/dev/null || true)" = "substituted" ]
 
+  # KEPT BEFORE ANY OTHER `run`, because `run` overwrites `$output` -- the
+  # positive control below is itself a `run`, and with the assertions in the
+  # other order it silently began grepping the control's output instead of the
+  # driver's. Measured, as an assertion that failed on text that was there.
+  local driver_status="$status" driver_out="$output"
+
   # 18, the UNKNOWN outcome -- not 14 ("stopped and confirmed gone", which
-  # would mean the gate did not fire) and not 17 ("still ours and running",
-  # which would mean the driver had decided pid 1 was its own child).
-  [ "$status" -eq 18 ]
-  printf '%s' "$output" | grep -q 'no longer identifiable'
-  # AND IT SAYS IT DID NOT SIGNAL. This is the half that matters most: the
-  # earlier version sent TERM and KILL to whatever the file said, so a
-  # recycled number meant signalling a stranger.
-  printf '%s' "$output" | grep -q 'NOT signalled'
+  # would mean the gate did not fire) and not 17 ("ours and still running",
+  # which would mean the driver had adopted a stranger.)
+  [ "$driver_status" -eq 18 ]
+  printf '%s' "$driver_out" | grep -q 'could not be established'
   # THE LOCK IS STILL THERE. This is the assertion the whole finding is about:
   # a release here would be a release beside a writer we could not stop.
   [ -d "$team_dir/.config.lock" ]
   # And the operator is told where it is, since nothing will clean it up.
-  printf '%s' "$output" | grep -q "$team_dir/.config.lock"
+  printf '%s' "$driver_out" | grep -q "$team_dir/.config.lock"
 
-  # The real fake node is still running -- it is not pid 1 and this test owns
-  # it, so it is stopped here by the pid the shell knows.
+  # THE OBSERVATION THAT MATTERS, and it is a measurement rather than a
+  # reading of the driver's own prose: the process whose number was in the
+  # pidfile is STILL ALIVE. TERM would have ended it. This is what "a
+  # recycled pid is not signalled" means, checked on the process itself.
+  kill -0 "$stranger" 2>/dev/null
+  # Positive control on that check: the same assertion must be able to fail.
+  # A pid this case never started is not alive, and if `kill -0` could not
+  # tell the difference the line above would prove nothing.
+  run kill -0 999999
+  [ "$status" -ne 0 ]
+
+  kill "$stranger" 2>/dev/null || true
+  # The real fake node outlives the driver by design, so it is stopped here by
+  # the pid the shell knows. The teardown catches it too; this keeps the
+  # window short.
   local leftover
   leftover="$(pgrep -f "$fake" || true)"
   if [ -n "$leftover" ]; then

@@ -81,15 +81,46 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 # child; argv alone would accept a match on a pid that is already gone. The
 # suffix is specific rather than convenient: `$config` is per-team, so a
 # roster sync for a DIFFERENT team cannot satisfy it.
-_roster_inner_still_ours() {
-  [ -n "${_roster_inner:-}" ] || return 1
-  _agmsg_pid_alive_local "$_roster_inner" || return 1
+# THREE ANSWERS, AND A BOOLEAN CANNOT CARRY THEM (raised in review, twice).
+#
+# The first version of this returned true/false, so every caller had to read
+# "false" as "gone" — and false covered two very different things: the process
+# really has exited, and the process is alive but we could not establish that
+# it is ours. Releasing the lock is only safe for the first. Collapsing them
+# put the unsafe reading on the default path, which is the same shape as every
+# other defect in this PR.
+#
+# So it prints one of three words:
+#
+#   ours     alive, and still carrying this operation's argv
+#   gone     not alive — the only answer that authorises a release
+#   unknown  everything else, and it is NOT a residual category:
+#              * no pid recorded at all (the wrapper never got that far, so
+#                whether node started is not known — this used to read as
+#                "gone" and release)
+#              * alive, argv does not match — a recycled number, OR our child
+#                with an argv this platform would not hand over
+_roster_inner_state() {
+  if [ -z "${_roster_inner:-}" ]; then
+    printf 'unknown\n'
+    return
+  fi
+  if ! _agmsg_pid_alive_local "$_roster_inner"; then
+    printf 'gone\n'
+    return
+  fi
   local cmd
   cmd="$(compat_get_cmdline "$_roster_inner" 2>/dev/null || true)"
   case "$cmd" in
-    *"$SCRIPT_DIR/roster-sync.mjs $operation $config"*) return 0 ;;
+    *"$SCRIPT_DIR/roster-sync.mjs $operation $config"*) printf 'ours\n' ;;
+    *) printf 'unknown\n' ;;
   esac
-  return 1
+}
+
+# Signalling has exactly one safe answer, so it gets its own name rather than
+# every call site re-deriving it from the word.
+_roster_inner_still_ours() {
+  [ "$(_roster_inner_state)" = "ours" ]
 }
 
 # THE CRITICAL SECTION IS BOUNDED IN TIME, NOT ONLY IN SCOPE (#821).
@@ -396,10 +427,14 @@ if [ "$_roster_wait" != "none" ]; then
     # here too. It costs nothing when the inner really has exited: the
     # predicate fails on its first call and this reads exactly as it did
     # before.
-    if [ -s "$_roster_sentinel" ] && _roster_inner_still_ours; then
+    # AND IT ASKS FOR THE WORD, NOT FOR A YES/NO. Gating this on
+    # `_roster_inner_still_ours` was the same collapse one layer up: "not
+    # ours" released the lock, and "not ours" includes "alive, unidentifiable"
+    # (raised in review). Only `gone` may pass.
+    if [ -s "$_roster_sentinel" ] && [ "$(_roster_inner_state)" != "gone" ]; then
       AGMSG_HELD_LOCKS=""
       rm -f "$_roster_sentinel" "$_roster_pidfile" || true
-      echo "agmsg: roster sync $operation failed for team '$team': the wrapper recorded an exit status, but process $_roster_inner is still running this operation's roster-sync. The team lock is being KEPT rather than released. Stop that process, then remove $team_dir/.config.lock" >&2
+      echo "agmsg: roster sync $operation failed for team '$team': the wrapper recorded an exit status, but process '$_roster_inner' could not be confirmed to have exited (state: $(_roster_inner_state)). The team lock is being KEPT rather than released. Check that process, then remove $team_dir/.config.lock" >&2
       exit 17
     fi
     if [ -s "$_roster_sentinel" ]; then
@@ -442,45 +477,30 @@ if [ "$_roster_wait" != "none" ]; then
       # toward "not ours". Their conjunction therefore errs toward "gone" —
       # the WRONG direction — so a pid that is alive but unrecognisable is
       # reported as UNKNOWN below rather than folded into either answer.
-      _roster_gone=1
-      _roster_unknown=0
-      if [ -n "$_roster_inner" ]; then
-        _roster_confirm_deadline=$((SECONDS + 5))
-        while [ "$SECONDS" -lt "$_roster_confirm_deadline" ]; do
-          if _roster_inner_still_ours; then
-            # `|| true` for the third time, and for the same contract: exiting
-            # here would release the lock through the trap without ever
-            # reaching the decision below.
-            sleep 1 || true
-          else
-            break
-          fi
-        done
-        if _roster_inner_still_ours; then
-          _roster_gone=0
-        elif _agmsg_pid_alive_local "$_roster_inner"; then
-          # ALIVE, BUT NO LONGER RECOGNISABLE. Two readings, and this cannot
-          # tell them apart: our child exited and something else took the
-          # number, or our child is there and its argv could not be read (a
-          # platform where `compat_get_cmdline` answers nothing, a sandbox).
-          #
-          # Reported as its own state rather than folded into either. Calling
-          # it "gone" would release the lock on the strength of an answer that
-          # was never obtained, which is the class this whole review round has
-          # been about.
-          _roster_gone=0
-          _roster_unknown=1
-        fi
-      fi
+      # Waited on only while the answer is `ours` — the one state in which the
+      # process may still be finishing. `gone` and `unknown` are both terminal
+      # here: nothing about waiting turns an unreadable argv into a readable
+      # one.
+      _roster_confirm_deadline=$((SECONDS + 5))
+      while [ "$(_roster_inner_state)" = "ours" ] && [ "$SECONDS" -lt "$_roster_confirm_deadline" ]; do
+        # `|| true` for the third time, and for the same contract: exiting
+        # here would release the lock through the trap without ever reaching
+        # the decision below.
+        sleep 1 || true
+      done
 
-      if [ "$_roster_gone" = "0" ] && [ "$_roster_unknown" = "1" ]; then
+      # ONE READ OF THE WORD, THEN THREE ARMS. Taken once rather than per
+      # branch so the arms cannot disagree about what was observed.
+      _roster_state="$(_roster_inner_state)"
+
+      if [ "$_roster_state" = "unknown" ]; then
         AGMSG_HELD_LOCKS=""
         rm -f "$_roster_sentinel" "$_roster_pidfile" || true
-        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and process $_roster_inner is alive but no longer identifiable as this operation's child — it was NOT signalled, because the number may since have been reused by an unrelated process. Whether our own child is still running could not be determined, so the team lock is being KEPT. Check that process, then remove $team_dir/.config.lock" >&2
+        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and its fate could not be established — the recorded pid was '$_roster_inner', which is either absent or alive without this operation's argv. Nothing was signalled on that number, because it may since have been reused by an unrelated process. The team lock is being KEPT rather than released, since releasing it beside a writer that may still be running can corrupt the roster journal. Check that process, then remove $team_dir/.config.lock" >&2
         exit 18
       fi
 
-      if [ "$_roster_gone" = "0" ]; then
+      if [ "$_roster_state" = "ours" ]; then
         # THE LOCK IS KEPT, ON PURPOSE, AND THE OPERATOR IS TOLD.
         #
         # Emptying `AGMSG_HELD_LOCKS` is how the lock survives: the EXIT trap
@@ -499,6 +519,16 @@ if [ "$_roster_wait" != "none" ]; then
         exit 17
       fi
 
+      # ONLY `gone` REACHES HERE, AND IT IS SAID RATHER THAN LEFT IMPLIED.
+      # The two arms above return, so falling through means the word was
+      # `gone` — but a fourth state added later would fall through too, and
+      # inherit a release nobody meant to give it. This refuses instead.
+      if [ "$_roster_state" != "gone" ]; then
+        AGMSG_HELD_LOCKS=""
+        rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+        echo "agmsg: roster sync $operation failed for team '$team': internal error — the roster child's state was reported as '$_roster_state', which this code does not know how to act on. The team lock is being KEPT rather than released. Remove $team_dir/.config.lock once you are satisfied nothing is writing to the team" >&2
+        exit 19
+      fi
       rm -f "$_roster_sentinel" "$_roster_pidfile" || true
       # Released here rather than left to the EXIT trap. The trap is the
       # mechanism that is not reached when a child never returns, and a fix
