@@ -28,13 +28,15 @@ Four possible outputs:
 `not_joined=true available_teams=<t1,t2,...>` (or `available_teams=none`)
 → Show the user the available teams from the output, then:
 
+  Before first-time setup, inspect the user's request. If they ask to join, import, or bring in a team that already exists on a server, do not call `join.sh`. Go directly to `remote pull` under Execute. First run `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh --json --scope all`; if a same-named local team has `binding_state` `none` or `disconnected`, stop and ask the user how to proceed. After pull succeeds, return to Identity setup so the user can register a new local agent in the pulled team.
+
   > **First-time setup required.**
   > Joining a team so this agent can send and receive messages.
   > - **Team name**: a group of agents that can message each other (available: <list from output>)
   > - **Agent name**: this agent's identity within the team
 
   1. Ask: "Enter a team name (joins existing or creates new)"
-  2. If the team name given already appears in `available_teams`, run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` to see the current roster (name, type, project) and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. Then ask: "Enter a name for this agent (suggestions: <name1>, <name2>, <name3> — or type your own)". For a brand-new team, skip the roster check and just ask: "Enter a name for this agent".
+  2. If the team name given already appears in `available_teams`, run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` to see the current roster (name, type, project) and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. Then ask: "Enter a name for this agent (suggestions: <name1>, <name2>, <name3> — or type your own)". For a brand-new team, skip the roster check and just ask: "Enter a name for this agent".
   3. **You MUST use join.sh** — run: `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <agent_name> claude-code "$(pwd)"`
   4. Show the result and explain:
 
@@ -99,6 +101,25 @@ Four possible outputs:
 
 Then continue with the user's subcommand. This catches the case where the user invokes `/__SKILL_NAME__` as the first prompt before the SessionStart-hook directive has been acted on.
 
+**Permission prompts.** Every command here runs through the Bash tool, so each call is gated by the permission system until the script directory is allowlisted. Without this the user is asked to confirm essentially every `__SKILL_NAME__` call. Add to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(/Users/<you>/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(bash ~/.agents/skills/__SKILL_NAME__/scripts/*)",
+      "Bash(bash /Users/<you>/.agents/skills/__SKILL_NAME__/scripts/*)"
+    ]
+  }
+}
+```
+
+Four entries because a rule matches the command string as written, and these scripts are invoked both as `~/...` and as an absolute path, with or without an explicit `bash` prefix. Replace `/Users/<you>` with the user's home directory.
+
+**Every subcommand needs its own match.** Per [Claude Code's permission docs](https://code.claude.com/docs/en/permissions), a rule must match each subcommand independently, and the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines. Chaining two `__SKILL_NAME__` scripts is fine — both match the entries above. The prompt returns when a subcommand those entries do not cover rides along: `delivery.sh status … ; printenv AGMSG_SPAWNED` prompts because of the `printenv`, not because of the `;`. Splitting it into its own call does not remove that prompt — it only keeps it from gating the `__SKILL_NAME__` call. Allowlist the command as well if it needs to be prompt-free.
+
 **Sandbox compatibility.** When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/__SKILL_NAME__/`. If monitor mode fails with write/permission errors there, add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
 
 ```json
@@ -131,6 +152,10 @@ AGMSG_BODY
 If argument is "history":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/history.sh $TEAM $AGENT`
 
+If argument starts with "team list" (e.g. "team list", "team list --json", "team list --scope project"):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh <the rest of the args after "team list", unchanged>`
+2. This is a distinct command from bare "team" below — check for "team list" FIRST so "list" is never mistaken for a team name.
+
 If argument is "team":
 1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM`
 
@@ -145,7 +170,7 @@ AGMSG_BODY
 ```
 
 If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
-1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
+1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" claude-code` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. Read TEAMS from the in-session whoami state (it may be a single team or comma-separated). For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> claude-code "$(pwd)"`. For multiple teams, ask the user which team to join the new role into, then run join.sh for that team.
 4. **Pre-flight claim** the actas exclusivity lock so this role isn't already owned by another live session: `~/.agents/skills/__SKILL_NAME__/scripts/actas-claim.sh "$(pwd)" claude-code <name> "$CLAUDE_CODE_SESSION_ID"`. Read the `status=` line of the output:
@@ -156,11 +181,14 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
    a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
    b. **If a matching task is found**: TaskStop it.
    c. **If no matching task is found** (typical when /__SKILL_NAME__ actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop entirely. There is no Monitor to stop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow.
-   d. **Only if the project's delivery mode is `monitor` or `both`** (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`), invoke a fresh Monitor, regardless of whether step b or c applied:
-      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`
-      - description: `agmsg inbox stream (acting as <name>)`
-      - persistent: true
-      Otherwise (mode `turn` or `off`), leave it stopped — `actas` must not start automatic delivery a project wasn't configured for.
+   d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
+      - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor, regardless of whether step b or c applied:
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`
+        - description: `agmsg inbox stream (acting as <name>)`
+        - persistent: true
+      - **`mode: turn`**: leave it stopped, silently. `has_st=1` is the one case `delivery.sh` can actually confirm was a deliberate choice — someone configured turn-based delivery for this project — so `actas` starting nothing here needs no explanation.
+      - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped (`actas` must not start automatic delivery a project wasn't configured for), but **do not treat this as silently deliberate**. `delivery.sh` cannot tell whether someone ran `mode off` here or this project was simply never configured — both leave the exact same settings file (#687 review round 3). **Tell the user** — e.g. "agmsg delivery hooks are not installed for this project; automatic delivery remains stopped. Run `/__SKILL_NAME__ mode <choice>` if you want to configure it." Keep it matter-of-fact, not a warning. Do not report `actas` as complete without saying this.
+      - **`mode: off (unrecognized: ...)`**: leave it stopped too (same rule — do not guess a mode), but this is a stronger case than the no-hooks-installed one above: `delivery.sh` could not even find or read a settings file for this project, most often because the working directory does not match how the project was actually registered. **Tell the user explicitly** — e.g. "agmsg could not find a delivery configuration for this project at `<path from the message>` — delivery is stopped, but this may mean the project isn't registered here rather than that it was deliberately turned off. Check the path, or run `/__SKILL_NAME__ mode <choice>` to configure it explicitly." Do not report `actas` as complete without saying this — a silent stop here is indistinguishable from the other off cases and is what let this go unnoticed before (#687).
    The 4th argument to `watch.sh` restricts the subscription to messages addressed to `<name>` only — other roles' inbound messages stop reaching this session until another `actas` or session end.
 6. Set the session's active FROM to `<name>` — use `<name>` in every `send.sh` call for the rest of this session.
 7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from; receive restricted to `<name>` only."
@@ -173,11 +201,14 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
    a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
    b. **If a matching task is found**: TaskStop it.
    c. **If no matching task is found**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
-   d. **Only if the project's delivery mode is `monitor` or `both`** (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`), invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
-      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`
-      - description: `agmsg inbox stream`
-      - persistent: true
-      Otherwise (mode `turn` or `off`), leave it stopped.
+   d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"` and read its **first line**.
+      - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`
+        - description: `agmsg inbox stream`
+        - persistent: true
+      - **`mode: turn`**: leave it stopped, silently — the one case `delivery.sh` can confirm was deliberate.
+      - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped, but say so — same reasoning as the `actas` step this mirrors: this state is indistinguishable from "never configured" (#687 review round 3), so do not report it as deliberate. Do not report the drop as complete without mentioning it.
+      - **`mode: off (unrecognized: ...)`**: leave it stopped, but say so with the stronger diagnostic — same reasoning as the `actas` step this mirrors (#687). Do not report the drop as complete without mentioning it.
 4. Tell the user: "Dropped role `<name>` from this project."
 
 If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code alice --window"):
@@ -228,3 +259,94 @@ If argument is "version":
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code`
 2. Tell the user the result.
+
+If argument starts with "rename" but not "rename-team":
+1. Accept only an explicit user request. Parse either `<team> <old_name> <new_name>`, or `<old_name> <new_name>` only when this agent belongs to exactly one team.
+2. Never invent either name. Before execution, repeat the resolved team, old name, and new name and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/rename.sh <team> <old_name> <new_name>`
+4. Show the result. For a connected team, the `member_renamed` journal event propagates the rename to other machines.
+
+If argument starts with "rename-team":
+1. Accept only an explicit user request. Parse `<old_team> <new_team>`.
+2. Never invent either team name. Before execution, repeat the old and new team names and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/rename-team.sh <old_team> <new_team>`
+4. Show the result.
+
+If argument starts with "remote connect":
+1. Parse the required `--endpoint <url>` and `<team>`, plus optional `--e2ee`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh connect --endpoint <url> [--e2ee] <team>`
+3. Show the output to the user. Plain sync is the default; pass `--e2ee` only when the user explicitly requests end-to-end encryption. The choice is fixed by the first connect.
+4. End by showing this copy-paste command for the other machine, with the actual endpoint and team substituted: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh pull --endpoint <actual-url> <actual-team>`
+
+If argument starts with "remote pull":
+1. When the user asks to join or bring in a team that already exists on a server, NEVER use `join.sh`, create a team, or create a same-named local team. Always use remote pull.
+2. Before pulling, check for a same-named local team. If one already exists without an active remote connection, stop and ask the user how to proceed; do not overwrite, merge, connect, or rename it on your own.
+3. Parse the required `--endpoint <url>` and `<team>`, plus optional `--team-id <uuid>`.
+4. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh pull --endpoint <url> [--team-id <uuid>] <team>`
+5. Show the output to the user.
+
+Machine B needs its own install, not just its own environment variables.
+Only `remote.sh`, `remote-sync.sh`, `key.sh` and the two internal helpers read
+`AGMSG_SYNC_CONNECTION_DIR`; `send.sh`, `history.sh`, `team.sh` and `inbox.sh`
+resolve the team config from the install directory. So a pull driven by
+environment variables alone succeeds, and the send that is supposed to confirm
+it then reports the team as missing — the failure lands one step after the
+cause. See "Use a separate install for testing" in `docs/remote-setup.md`.
+
+**What e2ee changes, and what it doesn't.** The local store stays plaintext either way — `history`, `inbox`, and `send` read and write exactly the same regardless of a team's encryption setting. Only the SERVER side differs: an e2ee team's server rows carry `cipher: age-v1` and hold sealed ciphertext, so `from`, `to`, and `body` are not readable there; a plain team's rows are not sealed. Keys never pass through the server — moving one to another machine means carrying a handoff bundle by hand (`key handoff` above).
+
+**Readable local history is therefore not evidence that a team is unencrypted.** To state whether a given team is e2ee, ask the program — `remote status <team>` below — never infer it from what you can read locally.
+
+If argument starts with "remote unlock":
+1. Parse `<team>`, `--bundle <file>`, and `--confirm-digest <sha256>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh unlock <team> --bundle <file> --confirm-digest <sha256>`
+3. The snapshot digest must be compared over a separate live channel. Never infer or auto-confirm it. The bundle is permanent secret key material; tell the user to transfer and handle it only through their own trusted channel, never by pasting it into agent chat.
+4. Show the complete result, including the imported-envelope count and engine PID.
+5. The advanced form with repeatable `--snapshot` plus `--identity` or `--identity-stdin` remains available when explicitly requested.
+
+If argument starts with "remote status":
+1. Parse an optional `<team>` and `--json`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh status [<team>] [--json]`
+3. Show the output to the user.
+
+If argument starts with "remote sync start":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh sync start <team>`
+3. Show the output to the user.
+
+If argument starts with "remote disconnect":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh disconnect <team>`
+3. Show the output to the user.
+
+If argument starts with "remote forget":
+1. Parse the required `<team>`. This permanently deletes that team's local roster, history, keys, trust, and sync state, but never changes the server.
+2. Do not add `--yes` yourself. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/remote.sh forget <team>`
+3. The command requires the user to confirm in their terminal. If this agent has no interactive terminal, show the deletion summary and tell the user to rerun the displayed command directly; never bypass confirmation for them.
+
+If argument starts with "key generate" followed by an optional team name:
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh generate [<team>]`
+2. Show the full output to the user, including the mandatory key-backup notice — do not summarize it away.
+
+If argument starts with "key show":
+1. Parse an optional team name and `--reveal-secret`.
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/key.sh show [<team>] [--reveal-secret]`
+3. `--reveal-secret` requires a real interactive terminal and is refused in agent mode — if the user wants to reveal a secret, tell them to run it themselves directly in their own terminal rather than through you.
+4. Show the output to the user.
+
+If argument starts with "key handoff" followed by a team name:
+1. Parse optional `--out <file>` and run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/key.sh handoff <team> [--out <file>]`
+2. The output bundle contains every epoch identity and is itself permanent secret key material. Never read it into agent chat or display its contents.
+3. Show the bundle path, latest snapshot digest, and full secrecy warning.
+
+If argument starts with "key import" followed by a team name:
+1. **Do not ask the user to paste the private identity into this chat, and do not run this command yourself.** This identity is a permanent secret. Tell the user to run this directly in their own terminal:
+   ```
+   read -rsp 'Identity: ' IDENTITY; echo
+   printf '%s' "$IDENTITY" | ~/.agents/skills/__SKILL_NAME__/scripts/key.sh import <team> --identity-stdin
+   unset IDENTITY
+   ```
+2. Ask them to paste back only the command's output (never the identity itself) once it's done.
+3. **No advanced/automation env-var path is offered for key import** — not even a pre-existing, before-session variable. An identity file is a permanent secret; always use the human-in-own-terminal flow above.
+
+`key rotate` and device-pairing `key request`/`key approve` are not available yet (they refuse unconditionally and change no state) — if the user asks for either, tell them so rather than attempting to run them.

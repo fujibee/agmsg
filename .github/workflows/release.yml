@@ -47,6 +47,21 @@ jobs:
             echo "::error::Tag ($version) does not match VERSION file ($file_version). Bump VERSION + run scripts/release/sync-version.sh before tagging." >&2
             exit 1
           fi
+          # A prerelease must not become what `npm install agmsg` gives people.
+          # Decided from the version itself rather than passed in by whoever
+          # pushes the tag, because that is the one mistake this workflow
+          # exists to make impossible.
+          #
+          # npm reads nothing from the version string on its own: with no
+          # --tag, `1.2.0-rc.1` publishes as `latest` exactly like `1.2.0`.
+          # As of 2026-08-07 `npm view agmsg dist-tags` is `{ latest: 1.1.13 }`
+          # and nothing else, so before this there was no tag a prerelease
+          # could have landed on.
+          if [[ "$version" == *-* ]]; then
+            echo "dist_tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Releasing $version"
 
@@ -75,16 +90,23 @@ jobs:
       - name: Publish to npm
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          DIST_TAG: ${{ steps.ver.outputs.dist_tag }}
         run: |
           published=$(npm view "agmsg@$VERSION" version 2>/dev/null || true)
           if [[ "$published" == "$VERSION" ]]; then
             echo "agmsg@$VERSION already on npm — skipping publish"
             exit 0
           fi
+          echo "publishing agmsg@$VERSION under dist-tag '$DIST_TAG'"
           # --provenance attaches a signed GitHub attestation linking the
           # tarball to this workflow run. No NODE_AUTH_TOKEN — auth comes
           # from the Trusted Publisher OIDC exchange.
-          npm publish --access public --provenance
+          #
+          # Provenance attests a tarball against a PUBLIC source repository,
+          # which this one is. The private copy of this workflow drops the
+          # flag for that reason; the reason is inverted here, not shared, so
+          # it does not travel back with the dist-tag.
+          npm publish --access public --provenance --tag "$DIST_TAG"
 
       # Build release notes for this tag from Conventional Commits, matching
       # the CHANGELOG.md format. `--latest` emits only the newest release's
@@ -102,6 +124,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
+          DIST_TAG: ${{ steps.ver.outputs.dist_tag }}
         run: |
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo "Release v$VERSION already exists — skipping"
@@ -111,6 +134,21 @@ jobs:
           if [ ! -s RELEASE_NOTES.md ]; then
             echo "Release $VERSION. See [commit history](../../commits/v$VERSION) for details." > RELEASE_NOTES.md
           fi
+          # The same decision, on the other surface it is visible from. A
+          # release candidate that is not npm's `latest` must not be the
+          # repository's latest release either — `gh release create` marks
+          # whatever it makes as latest unless told, so leaving this out
+          # publishes the rc as the release the front page offers.
+          #
+          # A string rather than an array, which is what the private copy
+          # uses. Expanding an EMPTY array as "${arr[@]}" is an unbound
+          # variable under `set -u` in bash 3.2, and this step is one nobody
+          # runs until a release is already half done. The runner's shell does
+          # not set -u today, so the array form works — but "works because of
+          # a flag nobody set" is the kind of thing a later edit removes.
+          prerelease=
+          if [ "$DIST_TAG" != latest ]; then prerelease=--prerelease; fi
           gh release create "v$VERSION" \
             --title "v$VERSION" \
-            --notes-file RELEASE_NOTES.md
+            --notes-file RELEASE_NOTES.md \
+            ${prerelease:+"$prerelease"}

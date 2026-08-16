@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from "rea
  * locks a CSS animation of the given period to the wall clock: at any real
  * moment, every element sampling this at ITS OWN animation-start instant
  * lands on the same frame, regardless of when each one actually started
- * animating (koit: unsynced pulsing across panes read as noisy; getting
+ * animating (unsynced pulsing across panes read as noisy; getting
  * them to pulse together "looks cool"). The instant of sampling matters —
  * see PulseDot below for why this can't just be computed once and shared.
  */

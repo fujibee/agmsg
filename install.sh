@@ -221,6 +221,11 @@ echo ""
 
 # --- Update mode ---
 if [ "$UPDATE_ONLY" = true ]; then
+  # Captured before CMD_NAME gets defaulted/resolved below, so it still means
+  # "the caller typed --cmd" specifically (#553's shim-force decision needs
+  # exactly that, not "we ended up with some skill name one way or another").
+  CMD_WAS_EXPLICIT=false
+  [ -n "$CMD_NAME" ] && CMD_WAS_EXPLICIT=true
   # Find existing install. If --cmd was passed, update exactly that skill;
   # otherwise preserve the historical "first installed agmsg skill" behavior.
   if [ -n "$CMD_NAME" ]; then
@@ -320,10 +325,42 @@ if [ "$UPDATE_ONLY" = true ]; then
   # types/ -> scripts/drivers/types/ move. Re-running install regenerates it with
   # the new path; install is idempotent and overwrites only an agmsg shim (a
   # user's own codex binary fails is_agmsg_shim and is left untouched).
+  #
+  # Forced ONLY when the caller typed --cmd (CMD_WAS_EXPLICIT, captured above
+  # before CMD_NAME could be defaulted/resolved to anything else): that is
+  # the documented recovery path for #553 (a different install's --cmd having
+  # clobbered the shim), and naming the target explicitly is what makes
+  # reclaiming it safe. Bare `--update` (no --cmd) resolves SKILL_DIR by
+  # scanning for an existing install WITHOUT failing closed on more than one
+  # candidate on this base (#599; the fail-closed fix is PR #659, not yet
+  # merged here) -- so on a multi-install machine, bare `--update` today can
+  # land on an install the caller never named at all. Forcing unconditionally
+  # would let THAT arbitrarily-selected install steal the shim from another
+  # one, compounding #599 with a #553-shaped consequence (review finding).
+  # Not forcing means bare `--update` still refreshes a shim this SAME
+  # install already owns (the common single-install case, unaffected either
+  # way) but no longer silently reaches past a shim someone else owns.
+  #
+  # Capture status into a variable rather than piping it straight into
+  # `grep -q` (measured, not theoretical): status now prints a second "owner:"
+  # line (#553), and `grep -q` exits the instant it matches the first line,
+  # closing its end of the pipe. status's own `echo` of the second line then
+  # hits a reader that is already gone -- SIGPIPE, a nonzero exit for that
+  # stage -- and under this script's `pipefail`, that alone flips the whole
+  # `if` to false even though grep DID match. A one-line status (as this had
+  # before #553) never triggers it: there is no second write for the closed
+  # pipe to reject. Capturing first reads status to completion regardless of
+  # how many lines it prints, so growing its output again later can't reopen
+  # this.
   CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
-  if [ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null | grep -q '^installed:'; then
-    AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" install >/dev/null 2>&1 \
-      && echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
+  CODEX_SHIM_STATUS=""
+  [ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
+  if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
+    CODEX_SHIM_FORCE=""
+    [ "$CMD_WAS_EXPLICIT" = true ] && CODEX_SHIM_FORCE=1
+    if AGMSG_CODEX_SHIM_INSTALL_QUIET=1 AGMSG_CODEX_SHIM_FORCE="$CODEX_SHIM_FORCE" "$CODEX_SHIM" install >/dev/null; then
+      echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
+    fi
   fi
   install_windows_helpers
   INSTALLED_VERSION="$(agmsg_source_version)"
@@ -390,11 +427,24 @@ cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
 chmod +x "$SKILL_DIR/scripts/"*.sh
 chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
 # Re-point an existing Codex monitor shim at the new path on a reinstall over an
-# older layout (no-op when no agmsg shim is present). See the --update block above.
+# older layout (no-op when no agmsg shim is present). See the --update block
+# above. NOT forced (#553): unlike --update, a fresh install here gives no
+# signal that the caller means to take over an EXISTING install's shim, so a
+# --cmd for a second/different name must not silently repoint it away from
+# whichever install already owns it. codex-shim-install.sh itself refuses that
+# and says whose it is; surface that here instead of swallowing it.
 CODEX_SHIM="$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh"
-if [ -x "$CODEX_SHIM" ] && AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null | grep -q '^installed:'; then
-  AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" install >/dev/null 2>&1 \
-    && echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
+CODEX_SHIM_STATUS=""
+[ -x "$CODEX_SHIM" ] && CODEX_SHIM_STATUS="$(AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" status 2>/dev/null || true)"
+if printf '%s' "$CODEX_SHIM_STATUS" | grep -q '^installed:'; then
+  # Stdout suppressed (mirrors the --update block's success case above);
+  # stderr is NOT, since codex-shim-install.sh's own refusal already names the
+  # current owner and the exact consequence of forcing -- repeating a
+  # shorter, separate version of that here would risk saying something
+  # different from what actually happens.
+  if AGMSG_CODEX_SHIM_INSTALL_QUIET=1 "$CODEX_SHIM" install >/dev/null; then
+    echo "  + refreshed Codex monitor shim (~/.agents/bin/codex)"
+  fi
 fi
 install_windows_helpers
 
@@ -409,6 +459,12 @@ printf '%s\n' "$INSTALLED_VERSION" > "$SKILL_DIR/VERSION"
 if [ ! -f "$SKILL_DIR/db/messages.db" ]; then
   bash "$SKILL_DIR/scripts/internal/init-db.sh"
 fi
+
+# Nothing moves stores here. Installing must not change where a team's messages
+# live: programs outside agmsg read the shared store directly, and an install
+# that relocated their data would break them without anything saying so. A team
+# moves to its own store only when connecting requires it, and only that team —
+# see scripts/drivers/partition/ and internal/migrate-team-store.sh.
 
 # Initialize config
 if [ ! -f "$SKILL_DIR/db/config.yaml" ]; then

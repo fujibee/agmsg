@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/storage.sh"
-DB="$(agmsg_db_path)"
+# The install-time bootstrap is not team-scoped: it runs before any team
+# exists, and what it creates is the legacy `messages` table plus the store
+# file itself. It therefore takes the non-team resolver, not a selector.
+DB="$(_agmsg_runtime_db_path)"
 DB_DIR="$(dirname "$DB")"
 mkdir -p "$DB_DIR"
 

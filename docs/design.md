@@ -141,7 +141,11 @@ must track the same resolved project); direct shell invocations and
 | `check-inbox.sh` | Hook entry point — cooldown, check, notify |
 | `config.sh` | Read/write user config (YAML) |
 
-All scripts use only `bash` and `sqlite3`. No python3 dependency.
+The scripts listed above are all in the **core** dependency tier: `bash`
+and `sqlite3` only, no python3. See Dependencies below for the full
+tiered picture — E2EE (`key.sh`) and remote (`remote.sh`, `team-list.sh`)
+add their own binaries on top of core, only for installs that use those
+features.
 
 ## Install Layout
 
@@ -168,8 +172,71 @@ Claude Code command is installed separately to `~/.claude/commands/<cmd>.md`.
 
 ## Dependencies
 
-- **bash** — shell
-- **sqlite3** — database and JSON manipulation (JSON1 extension)
-- **awk/sed** — text processing (config, TOML editing)
+Dependencies are scoped to the feature that needs them, not installed up
+front as one bundle — a local-only install stays minimal, and each
+additional feature brings only the binaries it personally needs (settled
+2026-07-25: "dependencies stay closed to the scope of the feature
+that needs them"; the specific tiers below are that principle applied to
+the facts of the current codebase, checked directly rather than assumed —
+an earlier draft of this section wrongly implied a single linear
+core→E2EE→remote chain and missed that Node is required independent of
+either).
 
-No python3, no node, no network, no daemon.
+- **core (local-only messaging)** — `bash`, `sqlite3` (database and JSON
+  manipulation via the JSON1 extension), `awk`/`sed` (config, TOML
+  editing). Covers `send`/`inbox`/`history`/`team`/`join`/`leave`/`rename`
+  and everything else that only talks to the local SQLite store. No
+  python3, no node, no network, no daemon.
+- **codex agent type / launcher-based spawn** — core, plus `node`
+  (`scripts/lib/node.sh` resolves it; the Codex monitor delivery bridge,
+  `codex-bridge.js`, is a Node program). `spawn.sh` dies explicitly
+  (`'node' not found on PATH — spawning '<type>' requires Node.js`) for
+  any agent type with a launcher. Independent of E2EE/remote below —
+  this dependency already exists on `main`.
+- **E2EE (end-to-end-encrypted team keys)** — core, plus `age`/`age-keygen`
+  (`key.sh`). Only needed if a team uses an encrypted key profile.
+- **remote control plane (connect/status/disconnect/pending, team list)**
+  — core, plus `python3` (`remote.sh`, `team-list.sh`, and their
+  `scripts/internal/*.py` helpers, which do strict response/config
+  validation in Python rather than reimplementing that logic in bash).
+  Only needed if a team connects to the sync service. Every entry point
+  calls `agmsg_require_python3` (`scripts/lib/require-python3.sh`) before
+  its first `python3` invocation and fails fast with an install message
+  if it's unusable — modeled on `key.sh`'s existing `age` preflight
+  check. This matters beyond a clean error message: on macOS, invoking a
+  bare `python3` when Xcode Command Line Tools aren't installed triggers
+  the OS's own CLT-install dialog rather than a normal "not found" error.
+  Worse, `command -v python3` alone cannot detect this case — Apple ships
+  a `/usr/bin/python3` trampoline that genuinely exists on PATH even
+  without CLT installed, so a plain PATH check reports success right up
+  until something actually executes it. A raw string comparison against
+  `/usr/bin/python3` isn't enough either: PATH can resolve python3
+  through a symlink (e.g. `~/bin/python3 -> /usr/bin/python3`) whose
+  literal text differs from the trampoline path even though executing it
+  still reaches the trampoline, so the resolved path is followed through
+  every symlink hop — relative or absolute, portable to BSD/macOS
+  `readlink`, which has no `-f`/canonicalize flag — to its physical
+  target before comparing. The check additionally consults
+  `xcode-select -p` (a real, always-present, non-interactive binary that
+  only inspects installed-tool state) whenever that canonical target is
+  `/usr/bin/python3` on Darwin — python3 itself is never executed to
+  probe for its own usability, on any platform, under any circumstance;
+  "try running it and see what happens" is exactly the category of fix
+  this exists to avoid.
+- **remote sync data plane (the Stage-1 polling sync client)** — core,
+  plus `node` (`remote-sync.sh` execs `internal/remote-sync.mjs` and its
+  companion `.mjs` helpers via `AGMSG_SYNC_NODE_BIN`/`agmsg_resolve_node`).
+  A second, independent reason a remote-connected team needs Node,
+  separate from the control plane's python3 need above.
+
+`doctor` (`remote.sh doctor`) checks `age`, `python3`, and `node`, sharing
+the same judgment helpers (`agmsg_python3_usable`, `agmsg_node_usable`)
+that the actual preflight gates use, so the diagnostic display and the
+gates can never disagree. `agmsg_node_usable` (`scripts/lib/node.sh`)
+reuses `agmsg_resolve_node`'s own resolution contract (`AGMSG_NODE`
+override, version-manager paths, PATH) rather than a separate raw
+`command -v node` check, so doctor's judgment of "usable" always matches
+what `remote-sync.sh` itself would actually try to run.
+
+No persistent daemon at any tier. The core tier alone makes no network
+calls; the remote tiers do, by definition.

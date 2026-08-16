@@ -59,3 +59,21 @@ agmsg_resolve_node() {
   printf '%s\n' "node"
   return 0
 }
+
+# agmsg_node_usable -- 0 if agmsg_resolve_node's answer is actually usable,
+# 1 otherwise. agmsg_resolve_node always returns SOMETHING (falling back to
+# the bare string "node" even when nothing was found), so callers that need
+# to know whether Node is genuinely available (e.g. a doctor/preflight
+# check) must not treat a non-empty return value alone as success. Same
+# path-vs-bare-name idiom already used by
+# scripts/drivers/storage/jsonl.sh's _jsonl_sync_available, pulled up here
+# so every caller shares one resolution+usability contract instead of each
+# reimplementing its own judgment of what "usable" means.
+agmsg_node_usable() {
+  local node; node="$(agmsg_resolve_node)"
+  if [ "${node#*/}" != "$node" ]; then
+    [ -x "$node" ]
+  else
+    command -v "$node" >/dev/null 2>&1
+  fi
+}

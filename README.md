@@ -64,6 +64,8 @@ That's it. The slash command prompts you for a team name and an agent name on fi
 
 Prefer to inspect the code first, track the latest `main`, or pick a custom command name? See [Install](#install) below for the `setup.sh` one-liner, `git clone`, and the Claude Code plugin marketplace paths.
 
+To sync a team between two installs through the self-hosted reference server, follow [Remote setup](docs/remote-setup.md).
+
 ## How it works
 
 agmsg is a thin transport. Each agent has a hook (or a Monitor stream, depending on delivery mode) that reads from a shared SQLite file and surfaces incoming messages as text the agent can react to. Sending is a `send.sh` call that appends a row. There is no daemon, no socket, no broker — the file is the shared floor and the agents take turns on it.
@@ -245,8 +247,8 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 
 | mode | mechanism | latency | who it's for |
 |---|---|---|---|
-| **`monitor`** (default on Claude Code) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
-| **`turn`** (default on Codex / Copilot CLI / OpenCode) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode (no Monitor tool); Claude Code users on a quieter loop |
+| **`monitor`** (default on Claude Code; on OpenCode with the opencode-sentinel plugin) | SessionStart hook → Monitor tool → blocking SQLite stream | ~5s | Claude Code users wanting real-time push |
+| **`turn`** (default on Codex / Copilot CLI / OpenCode without the plugin) | Stop hook fires `check-inbox.sh` between assistant turns | until your next interaction | Codex / Copilot CLI / OpenCode users not running monitor; Claude Code users on a quieter loop |
 | **`both`** | monitor primary, turn as per-session safety net | ~5s; falls back to turn-end on watcher failure | belt-and-suspenders |
 | **`off`** | no automatic delivery | manual `/agmsg` only | minimalists |
 
@@ -320,7 +322,7 @@ The Copilot installer drops a `SKILL.md` at `~/.copilot/skills/agmsg/` so `/agms
 $agmsg
 ```
 
-Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode is supported for manual and turn/off delivery workflows. It currently supports `mode turn` and `mode off`; `monitor`, `both`, and `spawn opencode` are not supported.
+Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typed skill is placed automatically alongside the default Codex-typed shared skill). Use `--agent-type opencode` only for OpenCode-only environments where Codex is not installed. OpenCode supports `mode monitor` (via the external [`opencode-sentinel`](https://github.com/tsukimiya/opencode-sentinel) plugin; without it the rule instructs a fallback to turn mode, which the agent follows rather than agmsg enforcing it), `mode turn`, and `mode off`. `spawn opencode` is available via `opencode --prompt` (TUI mode, which stays resident after the boot prompt's turn). `both` is not supported.
 
 This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
 
@@ -581,8 +583,8 @@ to change), and write through the existing scripts (`send.sh`, `join.sh`,
 ## Community
 
 - **Product Hunt**: #5 Product of the Day, [2026-06-09 launch](https://www.producthunt.com/products/agmsg) — 219 upvotes, 39 comments
-- **Derivative projects**: `agmsg-shogi`, `agmsg-go`, `agmsg-mcp` (community-built)
-- **External contributors**: [@MiuraKatsu](https://github.com/MiuraKatsu) (Gemini support + whoami auto-detect), [@roundrop](https://github.com/roundrop) (Copilot CLI support), [@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP) (native Windows / Git Bash), [@kenshin-yamada](https://github.com/kenshin-yamada) (watcher scoping fix), [@utenadev](https://github.com/utenadev) (OpenCode contribution), [@lucianlamp](https://github.com/lucianlamp) (native Windows PowerShell helpers), [@tatsuya6502](https://github.com/tatsuya6502) (sandboxed Bash tool support)
+- **Community projects** (also on the [showcase](https://agmsg.cc)): [`agkanban`](https://github.com/lucianlamp/agkanban) — multi-agent kanban board that pairs with agmsg; [`agmsg-office`](https://github.com/shinshin86/agmsg-office) — replays message logs as characters speaking on a stage; [`agmsg-viewer`](https://github.com/utenadev/agmsg-viewer) — message history in a chat interface in the browser; [`agmsg-bubblelog`](https://github.com/dreiachse-cyber/agmsg-bubblelog) — replays a team's log locally as a messenger-style thread; [`agmsg-tui`](https://github.com/rrrrnmtsu/agmsg-tui) — Rust/ratatui terminal client, friendly to SSH, mosh, and tmux
+- **External contributors**: [@MiuraKatsu](https://github.com/MiuraKatsu) (Gemini support + whoami auto-detect), [@roundrop](https://github.com/roundrop) (Copilot CLI support), [@TOMONOSUKEJP](https://github.com/TOMONOSUKEJP) (native Windows / Git Bash), [@kenshin-yamada](https://github.com/kenshin-yamada) (watcher scoping fix), [@utenadev](https://github.com/utenadev) (OpenCode contribution), [@lucianlamp](https://github.com/lucianlamp) (native Windows PowerShell helpers), [@tatsuya6502](https://github.com/tatsuya6502) (sandboxed Bash tool support), [@Masashi-Ono0611](https://github.com/Masashi-Ono0611) (project-path validation, watchdog and watcher fixes), [@chemica-tan](https://github.com/chemica-tan) (Windows codex bridge: project compare and port parsing), [@otsune](https://github.com/otsune) (Git Bash quoting from PowerShell), [@tsukimiya](https://github.com/tsukimiya) (OpenCode: resident spawn and monitor delivery)
 
 ## Project site (agmsg.cc)
 

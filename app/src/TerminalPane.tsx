@@ -30,7 +30,7 @@ type Props = {
    * focusable descendant of the container div below, so a plain onFocus
    * there catches it via the bubbled focusin React normalizes to. Lets the
    * app track "which pane in this tab was last actually used" for the
-   * external file-drop fallback target (koit: prefer the focused pane over
+   * external file-drop fallback target (prefer the focused pane over
    * just the tab's first one). */
   onFocusPane?: (id: string) => void;
 };

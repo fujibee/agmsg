@@ -57,7 +57,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Sent to nobody" ]]
   local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages WHERE team='brandnewteam';")
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM events WHERE type='message_sent' AND team='brandnewteam';")
   [ "$n" -eq 1 ]
 }
 

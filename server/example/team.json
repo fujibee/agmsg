@@ -1,0 +1,17 @@
+{
+  "team_id": "018f3f7e-0000-7000-8000-000000000001",
+  "team_name": "example-team",
+  "members": [
+    {
+      "member_id": "018f3f7e-0000-7000-8000-000000000010",
+      "name": "worker-1",
+      "registrations": [
+        {
+          "registration_id": "018f3f7e-0000-7000-8000-000000000011",
+          "installation_id": "018f3f7e-0000-7000-8000-000000000012",
+          "type": "codex"
+        }
+      ]
+    }
+  ]
+}

@@ -177,8 +177,11 @@ source "$SCRIPT_DIR/lib/validate.sh"
 # never bypass team-name path safety.
 agmsg_validate_team_name "$TEAM" || exit 1
 
-DB="$(agmsg_db_path)"
+agmsg_storage_load
+DB="$(agmsg_db_path "$TEAM")"
 
+# Keep the full-schema bootstrap (registry + storage tables) for a first-ever
+# command; the message write itself goes through the storage facade below.
 [ -f "$DB" ] || bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
 
 # #355: reject a from/to that isn't registered in <team> — an unnoticed typo
@@ -223,39 +226,11 @@ if [ "$FORCE" -ne 1 ]; then
   _agmsg_roster_check "to" "$TO" || exit 1
 fi
 
-# Escape EVERY interpolated value as a SQL string literal, not just body: a
-# team/agent name containing a single quote would otherwise break the INSERT
-# (correctness) or change its meaning (injection surface).
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
-
-# #378: a command substitution — `$(...)` — always drops ALL of its trailing
-# newlines, no matter how many there are. TEAM/FROM/TO can never contain a
-# newline (validate.sh rejects control characters), but BODY legitimately
-# can now that --stdin/--body-file read it verbatim, and plugging it into
-# the INSERT below via a plain `$(_agmsg_sqlesc "$BODY")` would silently
-# eat any trailing newline(s) the caller asked to send. Appending a
-# non-newline sentinel before escaping moves the trailing newline(s) into
-# the middle of the captured text (where command substitution does not
-# touch them), then the sentinel is stripped back off — preserving BODY's
-# trailing newline(s) exactly instead of losing them the same way TEAM/
-# FROM/TO's escaping still does (harmlessly, since those can't have any).
-_BODY_SQL="$(_agmsg_sqlesc "${BODY}X")"
-_BODY_SQL="${_BODY_SQL%X}"
-INSERT="INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('$(_agmsg_sqlesc "$TEAM")', '$(_agmsg_sqlesc "$FROM")', '$(_agmsg_sqlesc "$TO")', '$_BODY_SQL');"
-
-# Retry once after ensuring the schema. Under a concurrent first-write fan-out
-# (leader → N members against a fresh/override store), one process can see the
-# DB file exist before the winning initializer has finished creating the table,
-# so its INSERT would hit "no such table". init-db.sh is idempotent + uses the
-# busy_timeout, so re-running it waits for the schema, then the INSERT lands.
-# See #114.
-# Pipe the SQL via stdin (not as an argv) so a large body cannot overflow the
-# OS command-line limit (the "Argument list too long" crash).
-if ! printf '%s
-' "$INSERT" | agmsg_sqlite "$DB" 2>/dev/null; then
-  bash "$SCRIPT_DIR/internal/init-db.sh" >/dev/null
-  printf '%s
-' "$INSERT" | agmsg_sqlite "$DB"
-fi
+# Write through the storage axis (§2.1 storage_send) — the active driver now owns
+# the message log (an append-only message_sent event), not a direct INSERT.
+# storage_send re-inits its schema idempotently before writing, which subsumes the
+# #114 concurrent first-write race the old path retried around (a process seeing
+# the DB file before the table exists just creates it). The new id is not surfaced.
+storage_send "$TEAM" "$FROM" "$TO" "$BODY" >/dev/null
 
 echo "Sent to $TO in team $TEAM"

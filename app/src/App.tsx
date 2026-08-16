@@ -55,7 +55,11 @@ import "./App.css";
 
 export type Member = { name: string; types: string[]; project: string };
 type Message = {
-  id: number;
+  // Opaque. api.sh's contract: "Every id (message ids included) is a JSON
+  // string, never a bare number." Event-log ids are UUIDs; only the legacy
+  // table's were integers. Used as a React key and as the paging cursor,
+  // neither of which needs it to be ordered or numeric.
+  id: string;
   team: string;
   from: string;
   to: string;
@@ -113,7 +117,7 @@ export type LoginShellInfo = { cmd: string; args: string[]; home: string };
 // fallback: an earlier version defaulted to bash when `info` was still
 // unresolved, which raced the mount-effect fetch (app just launched, user
 // immediately hits "+") — broken on Windows (no bash), and not the user's
-// actual login shell even on unix (co1 review, PR #431). Pure so the
+// actual login shell even on unix (review, PR #431). Pure so the
 // no-fallback contract is unit-testable without mounting the app.
 export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: string, cwd: string | undefined): Pane | null {
   if (!info) return null;
@@ -124,7 +128,7 @@ export function shellPaneFrom(info: LoginShellInfo | null, id: string, label: st
 // getLoginShell await — false if the user switched teams while it was in
 // flight. Committing anyway would silently add a window under the stale
 // team (hidden — only the current team's windows render) while `active`
-// pointed at it (co1, PR #431).
+// pointed at it (#431).
 export function shellTabStillValid(currentTeam: string, requestedTeam: string): boolean {
   return currentTeam === requestedTeam;
 }
@@ -138,7 +142,7 @@ export function shellTabStillValid(currentTeam: string, requestedTeam: string): 
 // hidden-active bug openShellTab's shellTabStillValid guards against — a
 // window's `team` never changes after creation, so if the current team no
 // longer matches `requestedTeam` the window can't be a live tab regardless
-// of whether it's still present in `windows` (co1, PR #431).
+// of whether it's still present in `windows` (#431).
 export function shellSplitStillValid(
   windows: ReadonlyArray<Pick<Window, "id" | "team">>,
   windowId: string,
@@ -156,7 +160,7 @@ export function shellSplitStillValid(
 // dropped; ESC-prefixed bytes are terminal control sequences, not text.
 // The whole drop is rejected rather than stripping the offending bytes:
 // stripping would silently turn the dropped path into a DIFFERENT, wrong
-// path instead of the one actually dropped (co1 review, PR #481).
+// path instead of the one actually dropped (review, PR #481).
 const DROP_PATH_CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 export function hasUnsafeDropPath(paths: string[]): boolean {
@@ -167,7 +171,7 @@ export function hasUnsafeDropPath(paths: string[]): boolean {
 // null if any of them fails the control-character check above (the whole
 // drop is rejected, not just the unsafe path — see its doc). Deliberately
 // NOT shell-quoted: the target of a drop is almost always an agent CLI's
-// own prompt line (koit's framing — "same as cc/codex"), not a literal
+// own prompt line (the framing — "same as cc/codex"), not a literal
 // shell command, and quoting broke path recognition there in live testing
 // — Claude Code's own file-path heuristic doesn't match a quote-wrapped
 // string, it just reads as plain text (Codex tolerated quotes fine, but
@@ -180,7 +184,7 @@ export function joinDroppedPaths(paths: string[]): string | null {
 // Which pane, if any, a dropped file should land in when it didn't land on
 // any specific pane cell (dropped on the sidebar, tab bar, Team Room, ...)
 // — the active tab's actually-focused pane if it has one, else its first
-// pane, per koit's spec ("特定できない場合はactiveへ" — koit's follow-up
+// pane, per the spec ("特定できない場合はactiveへ" — a follow-up
 // live-testing feedback: prefer the focused pane specifically, not just
 // whichever leaf happens to be first in the tree). A pane found directly
 // under the cursor is always already in the active window (inactive
@@ -270,7 +274,7 @@ const CLICK_SUPPRESS_WINDOW_MS = 300;
 // just when it ended. Scoping by pane matters: a global timestamp alone
 // would suppress a deliberate click on some OTHER pane header too, just
 // because it happens to land within the window of an unrelated pane's drag
-// finishing (co1 review, PR #481, 3rd round).
+// finishing (review, PR #481, 3rd round).
 export type DragFinishInfo = { paneId: string; finishedAt: number } | null;
 
 // Whether the pane-header's onClick should treat an incoming click as the
@@ -282,7 +286,7 @@ export type DragFinishInfo = { paneId: string; finishedAt: number } | null;
 // even one that lands inside the same window, isn't ALSO wrongly
 // suppressed; an unbounded "consume exactly one click" native listener had
 // its own problems (see git history), but a per-pane bounded ref without
-// consuming still over-suppresses. Pure so the co1-requested regressions
+// consuming still over-suppresses. Pure so the review-requested regressions
 // are unit-testable without simulating real pointer/click event sequences.
 export function shouldSuppressClickAfterDrag(dragFinish: DragFinishInfo, paneId: string, now: number): boolean {
   return dragFinish !== null && dragFinish.paneId === paneId && now - dragFinish.finishedAt < CLICK_SUPPRESS_WINDOW_MS;
@@ -442,7 +446,7 @@ export default function App() {
   // Same idea, over the app-user chat pane's own header: { x, y }.
   const [chatMenu, setChatMenu] = useState<{ x: number; y: number } | null>(null);
 
-  // Closes every context/dropdown menu (koit: opening a second one while a
+  // Closes every context/dropdown menu (opening a second one while a
   // first is still open used to stack both — right-clicking a different
   // target, or clicking a different trigger button, never went through the
   // background click-away handler that normally closes these, since it's
@@ -510,7 +514,7 @@ export default function App() {
   const [externalDropPaneId, setExternalDropPaneId] = useState<string | null>(null);
   // Most recently focused pane, across the whole app (TerminalPane's
   // onFocusPane) — the external-file-drop fallback target when a drop
-  // misses every pane cell (koit: prefer the active tab's actual focused
+  // misses every pane cell (prefer the active tab's actual focused
   // pane over just its first one). A plain ref, not state — nothing renders
   // off this, it's only read inside the drag-drop effect below, so tracking
   // it as state would just be a re-render on every pane focus change for no
@@ -561,7 +565,7 @@ export default function App() {
   // The stale-context guard openShellTab/openShellInWindow re-check after
   // their getLoginShell await (see below) — a real gap now that login_shell
   // resolution can take real time, during which the user can switch teams
-  // or close the target tab (co1, PR #431).
+  // or close the target tab (#431).
   const teamRef = useRef<string>("");
   teamRef.current = team;
   // The current tab/window id, for the external-file-drop handler (mount-
@@ -574,8 +578,8 @@ export default function App() {
   // below) if this component ever unmounts mid-gesture — App itself never
   // does in practice (root component, lives for the whole session), but the
   // event listeners it registers live on `document`/`window`, outside
-  // React's own teardown, so nothing else would ever clear them (co1
-  // review, PR #481).
+  // React's own teardown, so nothing else would ever clear them
+  // (review, PR #481).
   const activePaneDragCancelRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     return () => activePaneDragCancelRef.current?.();
@@ -590,7 +594,7 @@ export default function App() {
   // drag. Scoped per-pane and consumed on use, not a global unbounded
   // "consume the next click" listener or a bare timestamp — both over-
   // suppress in different ways (see shouldSuppressClickAfterDrag's own doc
-  // and git history; co1 review, PR #481, rounds 2 and 3).
+  // and git history; review, PR #481, rounds 2 and 3).
   const dragJustFinishedRef = useRef<DragFinishInfo>(null);
   const applyAgentState = useCallback((paneId: string, state: RawState) => {
     setPaneStatus((current) => applyStateChange(current, paneId, state));
@@ -598,7 +602,7 @@ export default function App() {
 
   // Cell size in CSS px. The ref is for snapping a divider drag to whole
   // terminal rows/cols — read once at drag-start, doesn't need a re-render
-  // on every fit. The state twin drives the gap BETWEEN panes below (koit:
+  // on every fit. The state twin drives the gap BETWEEN panes below (it
   // should be a full terminal cell per axis, herdr-style, not an arbitrary
   // fixed px value) — that one has to be real React state since it feeds
   // rendered CSS. Every pane uses the same fixed font today, so any one of
@@ -612,7 +616,7 @@ export default function App() {
 
   // Which divider (by dividerDragKey, below) is currently being dragged —
   // state, not a captured DOM element, so the highlight survives a
-  // grid-segment transpose remounting the divider mid-drag (co1 review,
+  // grid-segment transpose remounting the divider mid-drag (review,
   // PR #390).
   const [draggingDividerKey, setDraggingDividerKey] = useState<string | null>(null);
 
@@ -638,7 +642,7 @@ export default function App() {
   // Cozy grouping: collapse runs of consecutive messages with the same from→to
   // into one header + stacked bodies (Slack/Discord style), so short bursts stay
   // light while long messages still line up.
-  const groups: { key: number; from: string; to: string; items: Message[] }[] = [];
+  const groups: { key: string; from: string; to: string; items: Message[] }[] = [];
   for (const m of roomMessages) {
     const last = groups[groups.length - 1];
     if (last && last.from === m.from && last.to === m.to) last.items.push(m);
@@ -692,7 +696,7 @@ export default function App() {
   // hasn't landed yet (real race: app just launched, user immediately hits
   // "+" or "Open shell"). Returns null on failure — callers must NOT
   // fall back to a guessed shell (e.g. "bash"): broken on Windows, and not
-  // the user's actual login shell even on unix (co1 review, PR #431).
+  // the user's actual login shell even on unix (review, PR #431).
   const getLoginShell = useCallback(async (): Promise<LoginShellInfo | null> => {
     if (loginShell) return loginShell;
     try {
@@ -1074,7 +1078,7 @@ export default function App() {
       // A free-shell pane has no "still running, look at the error" state
       // worth preserving the way an agent's crash banner does
       // (TerminalPane's own pty-exit listener writes that inline) — its own
-      // exit/Ctrl-D is a deliberate "done here" (koit), so the pane (and its
+      // exit/Ctrl-D is a deliberate "done here", so the pane (and its
       // tab, if it was the last one) just goes away instead of sitting on a
       // dead prompt. Agent panes are untouched — this only fires for panes
       // flagged `shell`.
@@ -1088,7 +1092,7 @@ export default function App() {
   // Dragging a file from Finder/Explorer onto the app used to hand off to
   // the webview's own default drop navigation — for an image, that meant
   // the whole window replaced its content with the image and the app was
-  // stuck (koit bug report). Tauri's dragDropEnabled (tauri.conf.json,
+  // stuck (reported in use). Tauri's dragDropEnabled (tauri.conf.json,
   // flipped on for this feature) intercepts the OS-level drop entirely and
   // routes it through this native event instead, which is also what makes
   // the fix and the feature the same change: with nothing left to hand off
@@ -1119,7 +1123,7 @@ export default function App() {
         // device pixels, which DOES need the devicePixelRatio divide. Using
         // .toLogical() unconditionally halved every coordinate on a 2x
         // Retina Mac, which was consistently landing in/near the top-left
-        // pane regardless of actual drop position (koit bug report).
+        // pane regardless of actual drop position (reported in use).
         const { x, y } = isWindows
           ? event.payload.position.toLogical(window.devicePixelRatio)
           : event.payload.position;
@@ -1197,11 +1201,11 @@ export default function App() {
   // poking around — not agmsg's business). Awaits getLoginShell (see the
   // mount-effect section above) rather than reading `loginShell` state
   // directly — null means it's genuinely unresolved/unresolvable, at which
-  // point shellPaneFrom itself refuses to guess a fallback shell (co1, PR
+  // point shellPaneFrom itself refuses to guess a fallback shell (review, PR
   // #431); getLoginShell has already surfaced startupError in that case, so
   // callers just bail out with no pane. cwd defaults to the current team's
   // project dir (teamProject) rather than wherever the shell would
-  // otherwise start — koit: re-cd'ing from $HOME every time is tedious —
+  // otherwise start — re-cd'ing from $HOME every time is tedious —
   // falling back to $HOME only when no project dir is configured. Shared by
   // openShellTab (new tab) and openShellInWindow (split into an existing
   // tab) below; both only ever act on the current team's tabs (windowMenu
@@ -1218,7 +1222,7 @@ export default function App() {
   // a microtask) — the user can switch teams while it's in flight, which
   // would otherwise add the new window under the STALE `team` closed over
   // at click time (hidden, since only the current team's windows render)
-  // while `active` still points at it (co1, PR #431). Bail out rather than
+  // while `active` still points at it (#431). Bail out rather than
   // create an orphaned, invisible tab if the team moved on.
   const openShellTab = useCallback(async () => {
     const requestedTeam = team;
@@ -1239,7 +1243,7 @@ export default function App() {
   // pane, `active` pointing at a dead id), or the team can just switch
   // while the window itself stays open — it's now a hidden tab under the
   // team the user navigated away from, so splitting into it and activating
-  // it reproduces the same hidden-active bug (co1, PR #431).
+  // it reproduces the same hidden-active bug (#431).
   const openShellInWindow = useCallback(
     async (windowId: string) => {
       const requestedTeam = team;
@@ -1256,7 +1260,7 @@ export default function App() {
 
   // True when `windowId`'s tab currently has a free-shell pane in it — the
   // signal spawnMember's sidebar-click site uses to decide "spawn this agent
-  // beside the shell in the same tab" (koit's design B) instead of the
+  // beside the shell in the same tab" (design B) instead of the
   // default "open a new tab".
   const windowHasShellPane = useCallback((windowId: string) => {
     const w = windowsRef.current.find((w) => w.id === windowId);
@@ -1359,7 +1363,7 @@ export default function App() {
   // this is a plain click, and the existing onClick handler on the same
   // button (unchanged) fires normally once pointerup lands back on it.
   //
-  // Lifecycle robustness (co1 review, PR #481 — the first version only
+  // Lifecycle robustness (review, PR #481 — the first version only
   // listened for pointermove/pointerup/Escape):
   // - setPointerCapture on the source button, released on cleanup: without
   //   it, the pointer leaving the OS window before release means pointerup
@@ -1378,7 +1382,7 @@ export default function App() {
   //   gesture as a drag. dragJustFinishedRef (declared above, checked by
   //   the pane-header's own onClick) is a per-pane, short bounded window
   //   rather than an unbounded "consume the next click" listener — see its
-  //   own doc for why (co1 review, PR #481, 2nd round: a drag that ends via
+  //   own doc for why (review, PR #481, 2nd round: a drag that ends via
   //   blur/pointercancel/unmount with the pointer released outside the app
   //   never gets a matching click to consume at all, so a pending listener
   //   would sit on the button forever and wrongly swallow the next,
@@ -1664,7 +1668,8 @@ export default function App() {
       const startW = sidebarWidth;
       // 180, not 140 — narrower than that wraps the brand-row's + New
       // button and the sidebar-title row's All/None filter links onto a
-      // second line (koit). Full collapse (the rail toggle) is the way to
+      // second line, which reads as broken rather than compact. Full collapse
+      // (the rail toggle) is the way to
       // go narrower than a usable full sidebar now anyway.
       const onMove = (ev: MouseEvent) =>
         setSidebarWidth(Math.max(180, Math.min(520, startW + ev.clientX - startX)));
@@ -1756,7 +1761,7 @@ export default function App() {
     // own doc).
     const MIN_PANE_PX = 120;
     const cursorClass = axis === "col" ? "resizing-col" : "resizing-row";
-    // koit: prefers the divider snapping to whole terminal cells over a
+    // prefers the divider snapping to whole terminal cells over a
     // free pixel drag (herdr-inspired, though herdr itself had nothing
     // reusable here — this is agmsg's own design). Every pane shares the
     // same fixed font, so one representative cell size (captured by any
@@ -1867,7 +1872,7 @@ export default function App() {
           style={{ width: sidebarCollapsed ? undefined : sidebarWidth }}
         >
           {/* Collapse toggle — level with the traffic lights, expanded state
-              only (koit: it looked fine there, "closing is perfect"). At
+              only (it looked fine there, "closing is perfect"). At
               44px wide the collapsed sidebar sits entirely under the
               traffic-light cluster, so ANY button in this same slim strip
               would overlap them there — collapsed state expands via the
@@ -1884,13 +1889,13 @@ export default function App() {
             </div>
           )}
           {sidebarCollapsed ? (
-            // Icon-only rail (koit design): the agmsg mark (click to
+            // Icon-only rail (by design): the agmsg mark (click to
             // expand) → + (new team/agent, same menu as full view) → team
             // icon (click opens a team-switch popup, replacing the
             // <select>) → spacer → the app-user avatar + a settings button
             // at the bottom. No running-dot / member list — spawning/
             // messaging isn't offered from here at all. Icons are lucide
-            // (koit: prefer a real icon set over ad-hoc unicode
+            // (prefer a real icon set over ad-hoc unicode
             // glyphs/hand-drawn SVGs).
             <div className="sidebar-collapsed-rail">
               <button
@@ -2296,7 +2301,7 @@ export default function App() {
                     // The gap between two adjacent panes is each side's own
                     // padding added together, so half a cell per side makes
                     // a full terminal cell of gap at the shared seam
-                    // (koit/herdr: the gap should read as "one cell", not
+                    // (the gap should read as "one cell", not
                     // an arbitrary fixed px value — falls back to the old
                     // fixed padding before any pane has fit and reported
                     // its real cell size).

@@ -112,7 +112,7 @@ live_pid() { echo "$$"; }
   [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
 }
 
-# Case 2: simulates the exact race window aggie-co flagged on re-review.
+# Case 2: simulates the exact race window flagged on re-review.
 # We pre-populate lock_path with a live-owner record (modeling "winner A
 # has installed its lock"), then drive a claim() call that on its first
 # try_claim *would* see stale if it observed the prior state — but in our

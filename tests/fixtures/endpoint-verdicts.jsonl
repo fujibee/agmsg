@@ -1,0 +1,71 @@
+{"endpoint": "http://192.168.191.205:8787", "verdict": "allow", "why": "the case #717 exists for: a LAN machine named by its address, no tunnel"}
+{"endpoint": "http://10.1.2.3:8787", "verdict": "allow", "why": "10/8"}
+{"endpoint": "http://10.0.0.1:8787", "verdict": "allow", "why": "a zero octet is an ordinary address"}
+{"endpoint": "http://172.16.0.9:8787", "verdict": "allow", "why": "172.16/12, low edge"}
+{"endpoint": "http://172.31.255.254:8787", "verdict": "allow", "why": "172.16/12, high edge"}
+{"endpoint": "http://192.168.0.1:8787", "verdict": "allow", "why": "192.168/16, a zero octet"}
+{"endpoint": "http://169.254.10.1:8787", "verdict": "allow", "why": "169.254/16 link-local"}
+{"endpoint": "http://127.0.0.1:8787", "verdict": "allow", "why": "loopback keeps working"}
+{"endpoint": "http://127.1.2.3:8787", "verdict": "allow", "why": "all of 127/8, not just .0.0.1"}
+{"endpoint": "http://localhost:8787", "verdict": "allow", "why": "the one name allowed over http"}
+{"endpoint": "http://LOCALHOST:8787", "verdict": "allow", "why": "host comparison is case-insensitive"}
+{"endpoint": "http://[::1]:8787", "verdict": "allow", "why": "IPv6 loopback"}
+{"endpoint": "http://[fd00::1]:8787", "verdict": "allow", "why": "fc00::/7 unique local"}
+{"endpoint": "http://[fc00::1]:8787", "verdict": "allow", "why": "fc00::/7, low edge"}
+{"endpoint": "http://[fdff::1]:8787", "verdict": "allow", "why": "fc00::/7, high edge"}
+{"endpoint": "http://[fe80::1]:8787", "verdict": "allow", "why": "fe80::/10 link-local, low edge. Kept allowed deliberately, with the zone-index rows below refused: a host with one interface reaches this without a zone, and removing the range would buy no safety. Recorded because 'allowed but unusable' should not sit here unexplained"}
+{"endpoint": "http://[FE80::1]:8787", "verdict": "allow", "why": "an IPv6 literal is not case-sensitive either"}
+{"endpoint": "http://[febf::1]:8787", "verdict": "allow", "why": "fe80::/10, high edge"}
+{"endpoint": "https://example.com", "verdict": "allow", "why": "https is unaffected by any of this"}
+{"endpoint": "https://192.168.1.10:8787", "verdict": "allow", "why": "https to a literal, also unaffected"}
+{"endpoint": "https://8.8.8.8:8787", "verdict": "allow", "why": "https to a public literal is an ordinary thing to do"}
+{"endpoint": "http://8.8.8.8:8787", "verdict": "deny", "why": "a public address over http"}
+{"endpoint": "http://9.255.255.255:8787", "verdict": "deny", "why": "just below 10/8"}
+{"endpoint": "http://11.0.0.0:8787", "verdict": "deny", "why": "just above 10/8"}
+{"endpoint": "http://172.15.255.255:8787", "verdict": "deny", "why": "just below 172.16/12"}
+{"endpoint": "http://172.32.0.1:8787", "verdict": "deny", "why": "just outside 172.16/12"}
+{"endpoint": "http://192.169.0.1:8787", "verdict": "deny", "why": "neighbour of 192.168/16"}
+{"endpoint": "http://169.253.0.1:8787", "verdict": "deny", "why": "just below 169.254/16"}
+{"endpoint": "http://169.255.0.1:8787", "verdict": "deny", "why": "just above 169.254/16"}
+{"endpoint": "http://192.168.1.256:8787", "verdict": "deny", "why": "an octet over 255 is not an address"}
+{"endpoint": "http://[2001:db8::1]:8787", "verdict": "deny", "why": "a public IPv6 literal over http"}
+{"endpoint": "http://[2001:4860::1]:8787", "verdict": "deny", "why": "another public IPv6 literal"}
+{"endpoint": "http://[fbff::1]:8787", "verdict": "deny", "why": "just below fc00::/7"}
+{"endpoint": "http://[fe00::1]:8787", "verdict": "deny", "why": "above fc00::/7, below fe80::/10"}
+{"endpoint": "http://[fe7f::1]:8787", "verdict": "deny", "why": "just below fe80::/10"}
+{"endpoint": "http://[fec0::1]:8787", "verdict": "deny", "why": "just above fe80::/10"}
+{"endpoint": "http://[fc::1]:8787", "verdict": "deny", "why": "reads like fc00::/7 but its first group is 0x00fc; the ranges are numeric, not a spelling"}
+{"endpoint": "http://[fe8::1]:8787", "verdict": "deny", "why": "the same trap against fe80::/10"}
+{"endpoint": "http://127.0.0.1.evil.com", "verdict": "deny", "why": "a NAME that reads like loopback and resolves wherever its owner points it"}
+{"endpoint": "http://localhost.evil.com", "verdict": "deny", "why": "a NAME that reads like localhost"}
+{"endpoint": "http://192.168.1.10.evil.com", "verdict": "deny", "why": "a NAME that reads like a LAN address"}
+{"endpoint": "http://example.com:8787", "verdict": "deny", "why": "an ordinary name over http; names are https-only"}
+{"endpoint": "http://2130706433/", "verdict": "deny", "why": "decimal notation; a form that has to be decoded first is not an IP literal"}
+{"endpoint": "http://0x7f000001/", "verdict": "deny", "why": "hex notation"}
+{"endpoint": "http://0177.0.0.1/", "verdict": "deny", "why": "octal notation"}
+{"endpoint": "http://192.168.01.1/", "verdict": "deny", "why": "a leading zero is how octal is spelled; the address must read as written"}
+{"endpoint": "http://010.0.0.1:8787", "verdict": "deny", "why": "leading zero in the first octet"}
+{"endpoint": "http://192.168.1.01:8787", "verdict": "deny", "why": "leading zero in the last octet"}
+{"endpoint": "http://192.168.1.1./", "verdict": "deny", "why": "trailing dot; not the literal as written"}
+{"endpoint": "http://[::ffff:192.168.1.1]:8787", "verdict": "deny", "why": "an embedded IPv4 is not treated as private on either side"}
+{"endpoint": "http://evil.com@192.168.1.1/", "verdict": "deny", "why": "userinfo: what the eye lands on is not the host"}
+{"endpoint": "http://192.168.1.1@evil.com:8787", "verdict": "deny", "why": "userinfo the other way round; the host is evil.com"}
+{"endpoint": "http://[fe80::1%eth0]:8787", "verdict": "deny", "why": "a zone index names an interface on the machine reading the URL, not part of the address; the endpoint is stored in the binding and re-read by a later process, where eth0 means something else. WHATWG URL has no host zone ID either, so Node cannot parse it at all"}
+{"endpoint": "http://[fe80::1%25eth0]:8787", "verdict": "deny", "why": "the percent-encoded spelling of the same thing; both spellings are in the table so that normalising one into the other cannot open a gap"}
+{"endpoint": "http://[fd00::1%25eth0]:8787", "verdict": "deny", "why": "a zone index on a unique-local literal, refused for the same reason"}
+{"endpoint": "http://[2001:4860::1%eth0]:8787", "verdict": "deny", "why": "a public literal carrying a zone index: refused twice over. Here so that a change loosening the zone rule cannot pass by also breaking the range check — with only private literals carrying zones, allowing zones and breaking the ranges look the same from outside"}
+{"endpoint": "ftp://192.168.1.1", "verdict": "deny", "why": "neither http nor https"}
+{"endpoint": "not-a-url", "verdict": "deny", "why": "not a URL at all"}
+{"endpoint": "http://192.168.01.1:8787", "verdict": "deny", "why": "leading-zero octet: reads as 192.168.1.1 after Number(), which is a decoding step, and the rule is that the address is readable as written. Also how the octal forms are spelled."}
+{"endpoint": "http://192.168.1.1:99999", "verdict": "deny", "why": "port out of range: urlsplit does not validate it, new URL refuses it — the divergence this row exists to pin"}
+{"endpoint": "http://192.168.1.1:abc", "verdict": "deny", "why": "port is not a number"}
+{"endpoint": "http://192.168.1.1:65536", "verdict": "deny", "why": "one past the top of the range"}
+{"endpoint": "http://192.168.1.1:+80", "verdict": "deny", "why": "a sign is not part of a port"}
+{"endpoint": "http://192.168.1.1:65535", "verdict": "allow", "why": "the top of the range is a valid port"}
+{"endpoint": "http://192.168.1.1:", "verdict": "allow", "why": "empty port means the scheme default; both parsers accept it"}
+{"endpoint": "https://exa mple.com", "verdict": "deny", "why": "a space in the host: urlsplit hands it back, the WHATWG parser refuses it"}
+{"endpoint": "https://%zz", "verdict": "deny", "why": "malformed percent-escape in the host"}
+{"endpoint": "http://exa mple.com", "verdict": "deny", "why": "same malformed host on the http branch"}
+{"endpoint": "https://example.com", "verdict": "allow", "why": "an ordinary name over https"}
+{"endpoint": "https://ex..ample.com", "verdict": "allow", "why": "doubled dot: odd, but both parsers accept it — not tightened beyond Node"}
+{"endpoint": "https://xn--wgv71a.example", "verdict": "allow", "why": "punycode name over https"}

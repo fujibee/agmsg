@@ -145,7 +145,7 @@ agmsg_role_session_record() {
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
   dir="$(_actas_lock_dir)"
-  mkdir -p "$dir" 2>/dev/null || return 0
+  mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
   {
@@ -212,6 +212,25 @@ agmsg_role_session_lookup_by_name() {
       cat "$f" 2>/dev/null || true
       return 0
     fi
+  done
+  return 0
+}
+
+# Print the session id of every record of <type>, one per line (unordered, may
+# repeat across teams). Empty if none. Used by codex seat resolution (#579) to
+# subtract already-claimed threads from the app-server's loaded set: what is left
+# is the session that has not been seated yet.
+agmsg_role_session_recorded_uuids() {
+  local type="$1" dir f t v
+  [ -n "$type" ] || return 0
+  dir="$(_actas_lock_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/role-session.*; do
+    [ -f "$f" ] || continue
+    t="$(_agmsg_role_session_field "$f" type)"
+    [ "$t" = "$type" ] || continue
+    v="$(_agmsg_role_session_field "$f" session)"
+    [ -n "$v" ] && printf '%s\n' "$v"
   done
   return 0
 }

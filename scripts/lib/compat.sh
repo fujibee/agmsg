@@ -58,6 +58,46 @@ _compat_cim_cmdline() {
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
+# Does <cmdline> name <path>?
+#
+# It has to be asked as a function because the two sides are written in
+# different alphabets and only one of them is ours. `compat_get_cmdline` returns
+# what the OS says a process was started with; the path we compare it against
+# came out of this shell. Under Git Bash those disagree for the same file:
+# `$SKILL_DIR` is `/c/Users/...`, and a native binary launched from it reports
+# `C:/Users/...`. A `case` on one against the other never fires -- so every
+# check built that way answers "not ours" about a process that IS ours, and
+# does it silently, because a non-match is the ordinary answer.
+#
+# Measured on the reporting machine (#652): the sync engine was alive, its
+# `/proc/<pid>/cmdline` read
+#   "C:\Program Files\nodejs\node.exe" C:/Users/.../internal/remote-sync.mjs run --team ossb
+# while the comparison held /c/Users/.../internal/remote-sync.mjs. Forcing the
+# CIM source instead of /proc returned the same `C:/` form, so this is not about
+# where the cmdline is read from -- both sources speak Windows.
+#
+# Five call sites compared a shell path against an OS cmdline this way. Four of
+# them decide whether to kill a stale watcher, so on Windows they answered "not
+# ours" and left it running.
+#
+# `cygpath -m` is the mixed form -- `C:/Users/...`, forward slashes -- which is
+# what MSYS hands a native binary, and therefore what the process reports.
+# Off Windows there is no cygpath and this is the plain match and nothing else,
+# the same escape `agmsg_sql_readfile_path` takes.
+agmsg_cmdline_names_path() {
+  local cmdline="$1" path="$2" native
+  [ -n "$cmdline" ] && [ -n "$path" ] || return 1
+  case "$cmdline" in *"$path"*) return 0 ;; esac
+  command -v cygpath >/dev/null 2>&1 || return 1
+  native="$(cygpath -m "$path" 2>/dev/null || true)"
+  [ -n "$native" ] || return 1
+  # Identical forms would make this second look a copy of the first, not a
+  # second chance at it.
+  [ "$native" != "$path" ] || return 1
+  case "$cmdline" in *"$native"*) return 0 ;; esac
+  return 1
+}
+
 compat_get_cmdline() {
   local pid="$1"
   [ -z "$pid" ] && return 1
@@ -130,6 +170,35 @@ compat_uuidgen() {
       substr(hex(randomblob(2)),2) || '-' ||
       hex(randomblob(6)));"
   fi | tr -d '\r'
+}
+
+# Generate a UUIDv7: 48-bit millisecond timestamp, version 7, RFC 4122
+# variant, and random tail bytes. Keep this in the core dependency tier:
+# /dev/urandom supplies the random bytes without invoking Python or another
+# optional runtime. No counter or other persistent state.
+compat_uuid7() {
+  local ms hex rnd
+  ms=$(( $(date -u +%s) * 1000 ))
+  hex=$(printf '%012x' "$ms")
+  rnd=$(head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf '%s-%s-7%s-8%s-%s\n' \
+    "${hex:0:8}" "${hex:8:4}" "${rnd:0:3}" "${rnd:3:3}" "${rnd:6:12}"
+}
+
+# Get file size in bytes.
+# Replaces: stat -f %z (macOS) / stat -c %s (Linux/MSYS2)
+#
+# Same split as compat_file_mtime below, and added for the same kind of caller:
+# a bounded log has to know when to rotate, and `wc -c` on a file being
+# appended to is a second read of the whole thing.
+compat_file_size() {
+  local file="$1"
+  [ -z "$file" ] && return 1
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    macos)  stat -f %z "$file" 2>/dev/null ;;
+    *)      stat -c %s "$file" 2>/dev/null ;;
+  esac
 }
 
 # Get file modification time as epoch seconds.

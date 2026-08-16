@@ -14,13 +14,13 @@
 # agmsg-owned entries); the existing lib convention is for sourced modules to
 # reference caller-set globals rather than re-resolve them.
 
-sql_readfile_path() {
-  local path="$1"
-  if command -v cygpath >/dev/null 2>&1; then
-    path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
-  fi
-  printf '%s' "$path" | sed "s/'/''/g"
-}
+# This file used to carry its own copy of the path converter. One definition
+# now, in lib/sqlpath.sh — see the note there for why a second copy is worse
+# than no copy (#669).
+if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/sqlpath.sh"
+fi
 
 # Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
 # entry is "agmsg-owned" when one of its inner hooks references a path under
@@ -36,10 +36,10 @@ strip_agmsg_event_file() {
   local path="$1"
   local event="$2"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   # Write the result with writefile() rather than redirecting sqlite3's CLI
   # output. On strict sqlite3 builds (>= 3.50, shipped on Windows) the CLI
   # renders control bytes — e.g. a CR that rode in on a CRLF settings file —
@@ -105,7 +105,7 @@ add_event_entry_file() {
   local cmd="$3"
   local windows_wrap="${4:-}"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
 
   # Build the entry with SQLite's own json_object()/json_array() so SQLite does
   # every JSON-level escape. Raw values go in as ordinary SQL string literals
@@ -127,7 +127,7 @@ add_event_entry_file() {
 
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file for why
   # (strict sqlite3 caret-escapes control bytes in CLI output, #143/#102).
   # Validate writefile()'s byte count vs the content length — see
@@ -163,10 +163,10 @@ add_event_entry_file() {
 prune_empty_hooks_file() {
   local path="$1"
   local sql_path
-  sql_path=$(sql_readfile_path "$path")
+  sql_path=$(agmsg_sql_readfile_path "$path")
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
-  tmp_sql=$(sql_readfile_path "$tmp")
+  tmp_sql=$(agmsg_sql_readfile_path "$tmp")
   # writefile() instead of CLI redirect — see strip_agmsg_event_file (#143/#102).
   # Validate writefile()'s byte count vs the content length — see
   # strip_agmsg_event_file for why the exit code alone is insufficient (#162).

@@ -20,6 +20,8 @@ source "$SCRIPT_DIR/lib/validate.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/roster-journal.sh"
 agmsg_validate_team_name "$TEAM" || exit 1
 agmsg_validate_agent_name "$AGENT_ID" || exit 1
 
@@ -41,6 +43,8 @@ fi
 # can't be clobbered (#141). The team dir exists (checked above); read the config
 # under the lock.
 agmsg_lock_acquire "$TEAMS_DIR/$TEAM" || exit 1
+agmsg_roster_ensure "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
 # Check if agent exists.
@@ -56,6 +60,32 @@ EXISTS=$(agmsg_sqlite_mem \
 if [ -z "$EXISTS" ] || [ "$EXISTS" = "null" ]; then
   echo "Agent $AGENT_ID not in team $TEAM"
   exit 1
+fi
+
+# An id-bearing team's identity history survives its last local placement.
+# Append the authority event first, then replace the derived config cache while
+# the same registry lock is still held. A retry after an interrupted cache write
+# reprojects the already-durable event instead of minting another identity.
+if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
+  MEMBER_ID=$(agmsg_sqlite_mem \
+    "SELECT COALESCE(json_extract('$CONFIG_ESCAPED', '\$.agents.' || '$AGENT_ID_SQL' || '.member_id'),'');")
+  [ -n "$MEMBER_ID" ] || {
+    echo "agmsg: journaled member '$AGENT_ID' has no member_id" >&2
+    exit 1
+  }
+  agmsg_roster_append_left "$TEAMS_DIR/$TEAM" "$MEMBER_ID" "$AGENT_ID" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  agmsg_roster_project_config "$TEAMS_DIR/$TEAM" "$TEAM_CONFIG"
+  CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
+  AGENT_COUNT=$(agmsg_sqlite_mem \
+    "SELECT count(*) FROM json_each(json_extract('$CONFIG_ESCAPED', '\$.agents'));")
+  agmsg_lock_release
+  if [ "$AGENT_COUNT" -eq 0 ]; then
+    echo "Left team $TEAM (team retained — identity history is preserved)"
+  else
+    echo "Left team $TEAM"
+  fi
+  exit 0
 fi
 
 # Remove agent

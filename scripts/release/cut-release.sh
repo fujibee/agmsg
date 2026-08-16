@@ -4,8 +4,9 @@ set -euo pipefail
 # cut-release.sh <version> — prepare a release PR.
 #
 #   1. bump VERSION + sync derived files (package.json, plugin.json)
-#   2. regenerate CHANGELOG.md from Conventional Commits (git-cliff)
-#   3. open a "release: <version>" PR — and STOP.
+#   2. regenerate CHANGELOG.md from Conventional Commits (git-cliff) — for a
+#      STABLE version only; a prerelease leaves the file alone (see below)
+#   3. open a "release: <version>" PR against the branch you are on — and STOP.
 #
 # Merging the PR and pushing the tag are deliberately left to a human: review the
 # version bump + changelog, merge, then push the tag. This script NEVER enables
@@ -21,7 +22,15 @@ set -euo pipefail
 #           https://github.com/orhun/git-cliff/releases) and gh authenticated
 #           as the fujibee account (direnv pins GH_TOKEN for this repo).
 #
+# The release branch is whichever branch you are on, not `main`. A prerelease
+# cut from an integration branch is a real case -- 1.2.0-rc.1 through rc.3 were
+# all cut from `integration/remote` -- and this script used to refuse it with
+# "must be on main". The work did not stop when it refused; it got done by hand,
+# and the hand path silently dropped the step this script also does (#679). A
+# checker that declines leaves no trace, so its absence looks like its approval.
+#
 # Usage: scripts/release/cut-release.sh 1.0.4
+#        scripts/release/cut-release.sh 1.2.0-rc.4   # from integration/remote
 
 die() { echo "cut-release: $*" >&2; exit 1; }
 
@@ -40,12 +49,23 @@ command -v git-cliff >/dev/null 2>&1 \
   || die "git-cliff not found — install it (brew install git-cliff) and retry"
 command -v gh >/dev/null 2>&1 || die "gh not found"
 
-# Must be on a clean, up-to-date main, and authenticated as fujibee.
+# Must be on a clean, up-to-date release branch, and authenticated as fujibee.
+#
+# BASE is the branch being released FROM and the branch the PR targets. Taking
+# it from HEAD rather than hardcoding `main` is the whole of #679: the assertion
+# was about where releases usually come from, not about anything that makes a
+# release wrong.
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
-[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "must be on main"
+BASE="$(git rev-parse --abbrev-ref HEAD)"
+case "$BASE" in
+  HEAD) die "HEAD is detached — switch to the branch you are releasing from" ;;
+  release/*) die "already on a release branch ($BASE) — switch to its base first" ;;
+esac
 git fetch origin -q
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
-  || die "local main is not in sync with origin/main — pull first"
+git rev-parse --verify -q "origin/$BASE" >/dev/null \
+  || die "origin/$BASE does not exist — push '$BASE' before cutting from it"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BASE")" ] \
+  || die "local $BASE is not in sync with origin/$BASE — pull first"
 who="$(gh api user --jq .login 2>/dev/null || true)"
 [ "$who" = "fujibee" ] || die "gh identity is '$who', expected 'fujibee' (check direnv .envrc)"
 
@@ -53,7 +73,26 @@ TAG="v$VERSION"
 git rev-parse "$TAG" >/dev/null 2>&1 && die "tag $TAG already exists"
 BRANCH="release/$TAG"
 
-echo "==> Preparing $TAG on branch $BRANCH"
+# A prerelease does not get a CHANGELOG section.
+#
+# Not a new rule -- the rule already in force, written down. 1.2.0-rc.1, rc.2
+# and rc.3 were all cut this way, and CHANGELOG.md carries no `rc.` section for
+# any of them; the GitHub Release notes come from release.yml's own
+# `git-cliff --latest` instead. The reason is that the section would be written
+# on the integration branch and later merged into `main`, giving `main` a
+# section for a version it never had.
+#
+# It is decided from the version string rather than the branch, because that is
+# what the claim is about: `1.2.0-rc.4` says prerelease, and a stable version
+# cut from a side branch should still get its section.
+case "$VERSION" in
+  *-*) PRERELEASE=1 ;;
+  *)   PRERELEASE=0 ;;
+esac
+
+echo "==> Preparing $TAG on branch $BRANCH (base: $BASE)"
+[ "$PRERELEASE" -eq 1 ] \
+  && echo "    prerelease: CHANGELOG.md is left alone; release notes come from release.yml"
 git switch -c "$BRANCH"
 
 # 1. bump + sync
@@ -61,34 +100,50 @@ echo "$VERSION" > VERSION
 ./scripts/release/sync-version.sh
 
 # 2. regenerate the changelog including this release's section
-git-cliff --tag "$TAG" -o CHANGELOG.md
+FILES="VERSION package.json .claude-plugin/plugin.json"
+if [ "$PRERELEASE" -eq 0 ]; then
+  git-cliff --tag "$TAG" -o CHANGELOG.md
+  FILES="$FILES CHANGELOG.md"
+fi
 
 # 3. commit + push the release PR
-git add VERSION package.json .claude-plugin/plugin.json CHANGELOG.md
+# shellcheck disable=SC2086
+git add $FILES
 git commit -m "release: $VERSION"
 git push -u origin "$BRANCH"
 
-echo "==> Opening release PR"
-gh pr create --base main --head "$BRANCH" \
+if [ "$PRERELEASE" -eq 1 ]; then
+  CHANGELOG_LINE="- CHANGELOG.md deliberately untouched — prerelease notes come from \`release.yml\`'s own \`git-cliff --latest\`"
+else
+  CHANGELOG_LINE="- CHANGELOG.md regenerated from Conventional Commits"
+fi
+
+echo "==> Opening release PR against $BASE"
+gh pr create --base "$BASE" --head "$BRANCH" \
   --title "release: $VERSION" \
-  --body "Automated release of \`$VERSION\`.
+  --body "Automated release of \`$VERSION\` from \`$BASE\`.
 
 - VERSION bump + synced \`package.json\` / \`.claude-plugin/plugin.json\`
-- CHANGELOG.md regenerated from Conventional Commits
+$CHANGELOG_LINE
 
 Merging this and pushing \`$TAG\` triggers the publish pipeline (npm + GitHub Release)."
 
 # Intentionally STOP here. Auto-merge is never enabled; merging and tagging are
 # human-gated (see the header). Print the remaining manual steps.
+if [ "$PRERELEASE" -eq 1 ]; then
+  CHANGELOG_STEP=" (no CHANGELOG section: prerelease)."
+else
+  CHANGELOG_STEP=" + the CHANGELOG [$VERSION] section."
+fi
 cat <<EOF
 
-==> Release PR opened for $TAG. Auto-merge is intentionally NOT enabled.
+==> Release PR opened for $TAG against $BASE. Auto-merge is intentionally NOT enabled.
     Finish the release by hand — each step is a deliberate gate:
-      1. Review the PR: VERSION bump + the CHANGELOG [$VERSION] section.
+      1. Review the PR: the VERSION bump$CHANGELOG_STEP
       2. Wait for required checks, then merge:
            gh pr merge $BRANCH --squash --delete-branch
-      3. Update main and tag (the tag push fires release.yml → npm publish):
-           git switch main && git pull --ff-only origin main
+      3. Update $BASE and tag (the tag push fires release.yml → npm publish):
+           git switch $BASE && git pull --ff-only origin $BASE
            git tag $TAG && git push origin $TAG
       4. Approve the 'production' deployment when prompted, to publish to npm.
 EOF

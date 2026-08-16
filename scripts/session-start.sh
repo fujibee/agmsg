@@ -46,6 +46,10 @@ source "$SCRIPT_DIR/lib/storage.sh"
 source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/role-session.sh"  # role->session reverse lookup (#339)
+# Only DEFINES agmsg_close_inherited_fds; nothing is closed here. The type
+# plug calls it inside a subshell around its own long-lived spawn, so this
+# shell's descriptors are untouched. See lib/close-fds.sh.
+source "$SCRIPT_DIR/lib/close-fds.sh"
 
 # Identity sanity check — no point launching a watcher with an empty pair set.
 PAIRS=$("$SCRIPT_DIR/identities.sh" "$PROJECT" "$TYPE" 2>/dev/null || true)
@@ -164,15 +168,14 @@ for f in "$RUN_DIR"/cc-instance.*; do
     orphan_pidfile="$RUN_DIR/watch.$dead_sid.pid"
     if [ -f "$orphan_pidfile" ]; then
       orphan_pid=$(cat "$orphan_pidfile" 2>/dev/null || true)
-      if [ -n "$orphan_pid" ] && _agmsg_pid_alive "$orphan_pid"; then
+      if [ -n "$orphan_pid" ] && _agmsg_pid_alive_local "$orphan_pid"; then
         # Defensive: only kill if the pid's command line actually matches
         # our watch.sh. Defends against pid recycling — a stale pidfile
         # could point at an unrelated process that took the same pid.
         cmd=$(compat_get_cmdline "$orphan_pid" 2>/dev/null || true)
-        case "$cmd" in
-          *"$SKILL_DIR/scripts/watch.sh"*) kill "$orphan_pid" 2>/dev/null || true ;;
-          *) ;;  # not our watcher anymore; leave it alone
-        esac
+        if agmsg_cmdline_names_path "$cmd" "$SKILL_DIR/scripts/watch.sh"; then
+          kill "$orphan_pid" 2>/dev/null || true
+        fi   # otherwise it is not our watcher anymore; leave it alone
       fi
       rm -f "$orphan_pidfile"
     fi
@@ -191,7 +194,7 @@ for f in "$RUN_DIR"/watch.*.pid; do
     rm -f "$f"
     continue
   fi
-  _agmsg_pid_alive "$pid" || rm -f "$f"
+  _agmsg_pid_alive_local "$pid" || rm -f "$f"
 done
 
 # Garbage-collect actas exclusivity locks whose owner session_id no longer
@@ -210,17 +213,9 @@ agmsg_marker_gc_stale 2>/dev/null || true
 AGENT_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 [ -n "$AGENT_PID" ] && agmsg_write_project_marker "$AGENT_PID" "$PROJECT" 2>/dev/null || true
 
-# Garbage-collect stream watermarks (#107) and readiness sentinels (#108) whose
-# owner session_id is no longer alive — left behind when a watcher dies without
-# running its EXIT trap (SIGKILL, terminal crash). Runs after the dead
-# cc-instance cleanup so actas_lock_sid_alive reflects current liveness. Both
-# are advisory (a live watcher rewrites them on attach; spawn clears the
-# sentinel before use), so this is hygiene, not correctness.
-for f in "$RUN_DIR"/watch.*.watermark; do
-  [ -f "$f" ] || continue
-  wm_sid=${f##*/}; wm_sid=${wm_sid#watch.}; wm_sid=${wm_sid%.watermark}
-  actas_lock_sid_alive "$wm_sid" || rm -f "$f"
-done
+# Garbage-collect readiness sentinels (#108) whose owner session_id is no longer
+# alive. Read progress is store-owned, so there is no per-session watermark to
+# collect.
 for f in "$RUN_DIR"/ready.*; do
   [ -f "$f" ] || continue
   rd_sid=$(cat "$f" 2>/dev/null || true)
@@ -240,13 +235,61 @@ if [ -n "$CC_PID" ]; then
       prev_pidfile="$RUN_DIR/watch.$prev.pid"
       if [ -f "$prev_pidfile" ]; then
         prev_pid=$(cat "$prev_pidfile" 2>/dev/null || true)
-        if [ -n "$prev_pid" ] && _agmsg_pid_alive "$prev_pid"; then
+        if [ -n "$prev_pid" ] && _agmsg_pid_alive_local "$prev_pid"; then
           kill "$prev_pid" 2>/dev/null || true
         fi
       fi
     fi
   fi
   printf '%s\n' "$INSTANCE_ID" > "$STATE"
+fi
+
+# --- Start the engine for a connected team that has none (#761, #774). ---
+# A reboot leaves every sync engine dead and nothing restarts one: the five
+# commands that start it are all operator actions. `connected` keeps printing,
+# `send` keeps succeeding locally, and the only symptom is messages not arriving
+# — which reads as "nobody wrote anything". This is the first moment after a
+# reboot when anything of ours runs, so it is where it gets started.
+#
+# #765 made the absence VISIBLE here, in this block, and that was the right
+# first step and not enough: the warning appeared only when someone opened a
+# session, and it asked the person for something the machine can do. Starting it
+# is the same trigger doing the whole job.
+#
+# BEFORE the three directive blocks below rather than inside them: there are
+# three ways out of this script (a watcher already streaming, the actas variant,
+# and the default), and a line added to one of them is missing from the other
+# two.
+#
+# WHICH TEAMS. `status` is asked for CONNECTED teams — the binding, not the
+# engine. Whether an engine is running is `sync start`'s question, under the
+# lock that makes the answer true; asking it here as well is the second answer
+# that diverges (see scripts/lib/sync-autostart.sh).
+#
+# Best-effort, and bounded IN TIME as well as in outcome. `status` is a
+# subprocess and needs python3; if it cannot run, this does nothing rather than
+# guessing. A start that fails never fails the session, and a start that is SLOW
+# never delays the Monitor directive below: the helper waits for a whole-call
+# budget (`AGMSG_SYNC_AUTOSTART_TIMEOUT_S`, 5s) and then leaves the start
+# running and moves on. An agent that will not open because a sync engine was
+# thinking is worse than a sync engine that is down.
+#
+# Reaches `monitor` and `both` only — this hook is not installed for `turn` or
+# `off`, so those modes still get the absence only from `status`.
+if [ -x "$SKILL_DIR/scripts/remote.sh" ] && [ -r "$SKILL_DIR/scripts/lib/sync-autostart.sh" ]; then
+  # shellcheck source=scripts/lib/sync-autostart.sh
+  . "$SKILL_DIR/scripts/lib/sync-autostart.sh"
+  _connected_teams="$("$SKILL_DIR/scripts/remote.sh" status 2>/dev/null \
+    | awk -F'\t' '$2 ~ /^connected/ {print $1}' || true)"
+  if [ -n "$_connected_teams" ]; then
+    # Word splitting on newlines only: a team name may contain a space, and
+    # `$(...)` unquoted would split it into two names that start nothing.
+    _old_ifs="$IFS"; IFS=$'\n'
+    # shellcheck disable=SC2086
+    set -- $_connected_teams
+    IFS="$_old_ifs"
+    agmsg_sync_autostart "$SKILL_DIR/scripts/remote.sh" "$@" || true
+  fi
 fi
 
 # --- Skip directive when a watcher is already alive for this instance. ---
@@ -258,7 +301,7 @@ fi
 WATCHER_PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$WATCHER_PIDFILE" ]; then
   existing=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
-  if [ -n "$existing" ] && _agmsg_pid_alive "$existing"; then
+  if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
     cat <<EOF
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.

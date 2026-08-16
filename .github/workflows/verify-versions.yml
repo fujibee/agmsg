@@ -6,11 +6,18 @@
 
 name: verify-versions
 
+# `integration/remote` is here because releases are cut from it. Every
+# prerelease so far -- 1.2.0-rc.1 through rc.3 -- was cut from that branch, so
+# its release PR targeted `integration/remote` and this check never ran on any
+# of them. `release.yml` runs the same `--check` at tag time and would have
+# stopped a bad tag, so nothing shipped out of sync; the cost was that the
+# failure would have surfaced at publish instead of at review, on a branch
+# nobody could see it coming from (#679).
 on:
   push:
-    branches: [main]
+    branches: [main, integration/remote]
   pull_request:
-    branches: [main]
+    branches: [main, integration/remote]
 
 jobs:
   check:

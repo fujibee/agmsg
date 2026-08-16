@@ -53,7 +53,7 @@ make_transcript() {
 
 @test "transcript_exists: empty uuid or project is not found" {
   make_transcript "uuid-123" "/Users/me/proj"
-  ! agmsg_transcript_exists "" "/Users/me/proj"
+  refute agmsg_transcript_exists "" "/Users/me/proj"
   ! agmsg_transcript_exists "uuid-123" ""
 }
 

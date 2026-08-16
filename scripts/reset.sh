@@ -26,6 +26,8 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/registry-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/roster-journal.sh"
 # Agent names that would misroute the $.agents.<name> JSON path below (#87
 # cluster — '.', '/', '\', '"', '[', ']' all have path meaning to json1).
 # shellcheck disable=SC1091
@@ -92,6 +94,8 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     LOCK_FAILED=1
     continue
   fi
+  agmsg_roster_ensure "$TEAM_DIR" "$TEAM_CONFIG"
+  agmsg_roster_project_config "$TEAM_DIR" "$TEAM_CONFIG"
   CONFIG_ESCAPED=$(sed "s/'/''/g" "$TEAM_CONFIG")
 
   # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT
@@ -137,8 +141,9 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   fi
 
   FILTERED=$(agmsg_sqlite_mem "
-    SELECT json_object(
-      'registrations',
+    SELECT json_set(
+      '$NORMALIZED_ESCAPED',
+      '\$.registrations',
       COALESCE((
         SELECT json_group_array(json(value))
         FROM json_each(json_extract('$NORMALIZED_ESCAPED', '\$.registrations'))
@@ -167,7 +172,18 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
     FROM json_each(json_extract('$(printf '%s' "$UPDATED" | sed "s/'/''/g")', '\$.agents'));
   ")
 
-  if [ "$AGENT_COUNT" -eq 0 ]; then
+  if [ "$REMAINING" -eq 0 ] && agmsg_roster_has_journal "$TEAM_DIR"; then
+    MEMBER_ID=$(agmsg_sqlite_mem \
+      "SELECT COALESCE(json_extract('$AGENT_ESCAPED', '\$.member_id'),'');")
+    [ -n "$MEMBER_ID" ] || {
+      echo "agmsg: journaled member '$TARGET_AGENT' has no member_id" >&2
+      exit 1
+    }
+    agmsg_roster_append_left "$TEAM_DIR" "$MEMBER_ID" "$TARGET_AGENT" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    agmsg_roster_project_config "$TEAM_DIR" "$TEAM_CONFIG"
+    agmsg_lock_release
+  elif [ "$AGENT_COUNT" -eq 0 ]; then
     rm -f "$TEAM_CONFIG"
     agmsg_lock_release
     rmdir "$TEAM_DIR" 2>/dev/null || true

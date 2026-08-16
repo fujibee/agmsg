@@ -42,7 +42,15 @@ After this runs once, `~/.agents/skills/agmsg/` is populated and you can skip St
 
 ### Step 2a: If not in a team — join one
 
-Ask the user for a team name. If it's an existing team, run `team.sh <team>` first to see the current roster and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role/number suffixes like `aggie-cc1`/`aggie-cc2`, or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. For a brand-new team, skip the roster check and just ask. Then run:
+Before first-time setup, inspect the user's request. If they ask to join,
+import, or bring in a team that already exists on a server, do not run
+`join.sh`. Go directly to the `remote pull` command under Step 2b. Before
+pulling, run `team-list.sh --json --scope all`; if a same-named local team has
+`binding_state` `none` or `disconnected`, stop and ask the user how to proceed.
+After pull succeeds, return here so the user can register a new local agent in
+the team that pull just created.
+
+Ask the user for a team name. If it's an existing team, run `team.sh <team>` first to see the current roster and note the names already in use. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label like `codex`/`cc`). Either way, names must not collide with the roster. For a brand-new team, skip the roster check and just ask. Then run:
 
 ```bash
 ~/.agents/skills/agmsg/scripts/join.sh <team> <agent_name> <type> "$(pwd)" [--force]
@@ -83,8 +91,26 @@ AGMSG_BODY
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
 
+# Export a team's message history as JSONL — one message_sent record per line,
+# chronological. Default to stdout (pipeable); --out <file> writes a file.
+# --agent limits to one agent; --limit keeps the most recent N (omit = all
+# currently retained). Output is plaintext (the local store is plaintext).
+~/.agents/skills/agmsg/scripts/export.sh --team <team> [--agent <agent>] [--limit N] [--out <file>]
+
 # List team members
 ~/.agents/skills/agmsg/scripts/team.sh <team>
+
+# List every locally known team (read-only, secret-free — "agmsg team list").
+# Distinct from `team.sh <team>` above: check for "team list" FIRST so
+# "list" is never mistaken for a team name. --json emits a strict,
+# versioned object ({schema_version, teams: [{name, remote_team_id, scope,
+# binding_state}]}) and exits non-zero with NO payload if any team was
+# unreadable or the count was truncated — never a partial list dressed up
+# as complete. See scripts/team-list.sh's own header comment for the exact
+# enums and why onboarding_state/promote_eligible/blocked_reason are
+# deliberately NOT in this schema yet (their meaning depends on ADR 0010,
+# which hasn't landed).
+~/.agents/skills/agmsg/scripts/team-list.sh [--json] [--scope all|project] [<project_path>]
 
 # Leave a team
 ~/.agents/skills/agmsg/scripts/leave.sh <team> <agent_id>
@@ -121,7 +147,7 @@ AGMSG_BODY
 # If <name> is new and none was given upfront (bare `actas`, or the user asks
 # for a suggestion), check the target team's roster first (team.sh <team>).
 # Look for a naming convention already in play (e.g. a shared base name with
-# role/number suffixes like aggie-cc1/aggie-cc2, or names derived from the
+# role and number suffixes (<base>-<role><n>), or names derived from the
 # team name) and, when one exists, propose 2-3 unused names that extend it;
 # otherwise propose 2-3 short, distinctive names. Either way, names must not
 # collide with the roster. Ask the user to pick before continuing.
@@ -176,6 +202,150 @@ AGMSG_BODY
 ~/.agents/skills/agmsg/scripts/despawn.sh <team> <from> <name> [--force] [--timeout N]
 ```
 
+### Rename
+
+If argument starts with "rename" but not "rename-team":
+1. Accept only an explicit user request. Parse either `<team> <old_name> <new_name>`,
+   or `<old_name> <new_name>` only when this agent belongs to exactly one team.
+2. Never invent either name. Before execution, repeat the resolved team, old name,
+   and new name and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/rename.sh <team> <old_name> <new_name>`
+4. Show the result. For a connected team, the `member_renamed` journal event
+   propagates the rename to other machines.
+
+If argument starts with "rename-team":
+1. Accept only an explicit user request. Parse `<old_team> <new_team>`.
+2. Never invent either team name. Before execution, repeat the old and new team
+   names and ask the user to confirm. Wait for confirmation.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/rename-team.sh <old_team> <new_team>`
+4. Show the result.
+
+### Remote sync
+
+Remote setup is no-auth. Do not ask for a token or create one.
+
+If argument starts with "remote connect":
+1. Parse the required `--endpoint <url>` and `<team>`, plus optional `--e2ee`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh connect --endpoint <url> [--e2ee] <team>`
+3. Show the output to the user. Plain sync is the default; pass `--e2ee` only
+   when the user explicitly requests end-to-end encryption. The choice is
+   fixed by the first connect.
+4. End by showing this copy-paste command for the other machine, with the
+   actual endpoint and team substituted:
+   `bash ~/.agents/skills/agmsg/scripts/remote.sh pull --endpoint <actual-url> <actual-team>`
+
+If argument starts with "remote pull":
+1. When the user asks to join or bring in a team that already exists on a
+   server, NEVER use `join.sh`, create a team, or create a same-named local
+   team. Always use remote pull.
+2. Before pulling, check for a same-named local team. If one already exists
+   without an active remote connection, stop and ask the user how to proceed;
+   do not overwrite, merge, connect, or rename it on your own.
+3. Parse the required `--endpoint <url>` and `<team>`, plus optional
+   `--team-id <uuid>`.
+4. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh pull --endpoint <url> [--team-id <uuid>] <team>`
+5. Show the output to the user.
+
+Machine B needs its own install, not just its own environment variables.
+Only `remote.sh`, `remote-sync.sh`, `key.sh` and the two internal helpers read
+`AGMSG_SYNC_CONNECTION_DIR`; `send.sh`, `history.sh`, `team.sh` and `inbox.sh`
+resolve the team config from the install directory. So a pull driven by
+environment variables alone succeeds, and the send that is supposed to confirm
+it then reports the team as missing — the failure lands one step after the
+cause. See "Use a separate install for testing" in `docs/remote-setup.md`.
+
+If argument starts with "remote unlock":
+1. Parse `<team>`, `--bundle <file>`, and `--confirm-digest <sha256>`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh unlock <team> --bundle <file> --confirm-digest <sha256>`
+3. The snapshot digest must be compared over a separate live channel. Never
+   infer or auto-confirm it. The bundle is permanent secret key material; tell
+   the user to transfer and handle it only through their own trusted channel,
+   never by pasting it into agent chat.
+4. Show the complete result, including the imported-envelope count and engine
+   PID.
+5. The advanced form with repeatable `--snapshot` plus `--identity` or
+   `--identity-stdin` remains available when explicitly requested.
+
+If argument starts with "remote status":
+1. Parse an optional `<team>` and `--json`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh status [<team>] [--json]`
+3. Show the output to the user.
+
+If argument starts with "remote sync start":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh sync start <team>`
+3. Show the output to the user.
+
+If argument starts with "remote disconnect":
+1. Parse the required `<team>`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/remote.sh disconnect <team>`
+3. Show the output to the user.
+
+If argument starts with "remote forget":
+1. Parse the required `<team>`. This permanently deletes that team's local
+   roster, history, keys, trust, and sync state, but never changes the server.
+2. Do not add `--yes` yourself. Run:
+   `bash ~/.agents/skills/agmsg/scripts/remote.sh forget <team>`
+3. The command requires the user to confirm in their terminal. If this agent
+   has no interactive terminal, show the deletion summary and tell the user to
+   rerun the displayed command directly; never bypass confirmation for them.
+
+### End-to-end encryption
+
+If argument starts with "key generate" followed by an optional team name:
+1. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh generate [<team>]`
+2. Show the full output to the user, including the mandatory key-backup notice.
+
+If argument starts with "key show":
+1. Parse an optional team name and `--reveal-secret`.
+2. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh show [<team>] [--reveal-secret]`
+3. `--reveal-secret` requires a real interactive terminal and is refused in
+   agent mode. Tell the user to run it directly in their own terminal.
+4. Show the output to the user.
+
+If argument starts with "key handoff" followed by a team name:
+1. Parse optional `--out <file>` and run:
+   `bash ~/.agents/skills/agmsg/scripts/key.sh handoff <team> [--out <file>]`
+2. The output bundle contains every epoch identity and is itself permanent
+   secret key material. Never read it into agent chat or display its contents.
+3. Show the bundle path, latest snapshot digest, and full secrecy warning.
+
+If argument starts with "key import" followed by a team name:
+1. Do not ask the user to paste the private identity into this chat, and do not
+   run the command yourself. Tell the user to run this in their own terminal:
+   ```
+   read -rsp 'Identity: ' IDENTITY; echo
+   printf '%s' "$IDENTITY" | ~/.agents/skills/agmsg/scripts/key.sh import <team> --identity-stdin
+   unset IDENTITY
+   ```
+2. Ask them to paste back only the command output, never the identity itself.
+3. Do not offer an environment-variable path. An identity file is a permanent
+   secret; always use the human-in-own-terminal flow above.
+
+`key rotate` and device-pairing `key request`/`key approve` are not available
+yet. If the user asks for one, tell them so instead of attempting to run it.
+
+## Permission prompts (Claude Code)
+
+Every agmsg step above runs through the host's Bash tool, so on Claude Code each call is gated by the permission system until you allowlist the script directory. Add these to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.agents/skills/agmsg/scripts/*)",
+      "Bash(/Users/<you>/.agents/skills/agmsg/scripts/*)",
+      "Bash(bash ~/.agents/skills/agmsg/scripts/*)",
+      "Bash(bash /Users/<you>/.agents/skills/agmsg/scripts/*)"
+    ]
+  }
+}
+```
+
+Four entries rather than one because a rule matches the command string as written: the scripts are invoked both as `~/...` and as an absolute path, and with or without an explicit `bash` prefix. Replace `/Users/<you>` with your home directory, and the `agmsg` path segment with your command name if you installed under a different one.
+
+**Every subcommand needs its own match.** [Claude Code's permission docs](https://code.claude.com/docs/en/permissions) state that a rule must match each subcommand independently, and that the recognized separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines. Chaining two agmsg scripts is fine — both match the entries above. What reintroduces the prompt is mixing in a command those entries do not cover: `delivery.sh status … ; printenv AGMSG_SPAWNED` prompts because of the `printenv`, not because of the `;`. Splitting it into its own call does not remove that prompt — it only keeps it from gating the agmsg call. Allowlist the command as well if it needs to be prompt-free.
+
 ## Sandbox compatibility (Claude Code)
 
 When Claude Code's sandbox is enabled, `watch.sh` (monitor mode) runs inside the sandbox and needs to write pidfiles and SQLite WAL files under `~/.agents/skills/agmsg/`. Add an allowlist entry to `~/.claude/settings.json` (or project-level `.claude/settings.local.json`):
@@ -202,4 +372,4 @@ The allowlist merges across scopes and takes effect immediately — no restart n
 - **Teams**: `~/.agents/skills/agmsg/teams/<name>/config.json`
 - **Concurrency**: WAL allows multiple readers + 1 writer without conflicts
 - **No daemon**: Direct DB access via `sqlite3` CLI
-- **Dependencies**: bash, sqlite3 (no python3 required)
+- **Dependencies**: bash, sqlite3 (no python3 required) for core messaging; `remote`/`key` additionally need `curl`, `python3`, and `age`/`age-keygen`, but only if those commands are used

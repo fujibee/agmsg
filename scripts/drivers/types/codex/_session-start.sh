@@ -166,7 +166,7 @@ EOF
   pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
   if [ -f "$pidfile" ]; then
     bridge_pid=$(cat "$pidfile" 2>/dev/null || true)
-    if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
       exit 0
     fi
   fi
@@ -183,16 +183,33 @@ EOF
   fi
   local storage_dir
   storage_dir="$(agmsg_storage_dir)"
-  nohup "${bridge_run[@]}" \
-    --project "$PROJECT" \
-    --workspace-root "$storage_dir" \
-    --workspace-root "$SKILL_DIR/teams" \
-    --workspace-root "$SKILL_DIR/run" \
-    --type "$TYPE" \
-    "${bridge_pairs[@]}" \
-    --thread "$thread_id" \
-    --app-server "$app_server" \
-    --inline-inbox \
-    >>"$log" 2>&1 3>&- 4>&- &
+  # The bridge outlives this hook, so it must not carry the harness's
+  # descriptors — the same leak that hung a macOS CI shard from the launcher.
+  #
+  # This file is SOURCED into session-start.sh's global context, so calling the
+  # close here directly would shut descriptors belonging to the shell that
+  # sourced us. The subshell is what makes it safe: the close applies to the
+  # forked child, which is the process that goes on to become the bridge, and
+  # the parent keeps everything it had (review P1).
+  #
+  # The `3>&- 4>&-` stays on the spawn line as well. test_spawn_fd_guard.bats
+  # requires it there and says why: a file-level close can sit inside a
+  # function, inside a branch that never runs, or after the spawn it is meant
+  # to cover, so the guard is checked per line and the redundancy is deliberate.
+  # The subshell close is the part that reaches the descriptors bats numbered.
+  (
+    agmsg_close_inherited_fds
+    nohup "${bridge_run[@]}" \
+      --project "$PROJECT" \
+      --workspace-root "$storage_dir" \
+      --workspace-root "$SKILL_DIR/teams" \
+      --workspace-root "$SKILL_DIR/run" \
+      --type "$TYPE" \
+      "${bridge_pairs[@]}" \
+      --thread "$thread_id" \
+      --app-server "$app_server" \
+      --inline-inbox \
+      >>"$log" 2>&1 3>&- 4>&- &
+  )
   exit 0
 }

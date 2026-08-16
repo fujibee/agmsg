@@ -196,7 +196,7 @@ EOF
   [[ "$output" == *"no agmsg-* directory was found"* ]]
 }
 
-@test "setup: tarball fallback works even if a failed git clone left a partial dest dir (#296 co1 finding)" {
+@test "setup: tarball fallback works even if a failed git clone left a partial dest dir (#296 finding)" {
   stub_git_fail_partial_dest
   stub_curl_tarball_success main
 

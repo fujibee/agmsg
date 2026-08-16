@@ -54,8 +54,8 @@ if echo "$INPUT" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' 2>/
   exit 0
 fi
 
-# Defer to the monitor watcher when one is alive for this session.
-# Avoids double-delivery when delivery.mode = both. The session id field name
+# The session id is still resolved: the actas-ownership check further down
+# needs it. Only the deferral that used to follow it is gone. The field name
 # differs by vendor: Claude Code emits snake_case "session_id"; Grok Build (and
 # Cursor) emit camelCase "sessionId". Try snake first (claude-code unaffected),
 # then camel, then the GROK_SESSION_ID env Grok injects into every hook.
@@ -66,21 +66,37 @@ SESSION_ID=$(printf '%s' "$INPUT" \
   | sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   | head -1)
 [ -z "$SESSION_ID" ] && SESSION_ID="${GROK_SESSION_ID:-}"
-if [ -n "$SESSION_ID" ]; then
-  # The monitor watcher keys its pidfile (and its actas owner, below) on the
-  # per-process instance id (#93), not the bare session_id. Normalize to the
-  # same token so this Stop-hook defers to a live watcher in `both` mode instead
-  # of double-delivering.
-  SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$TYPE")"
-  PIDFILE="$SKILL_DIR/run/watch.$SESSION_ID.pid"
-  if [ -f "$PIDFILE" ]; then
-    WATCH_PID=$(cat "$PIDFILE" 2>/dev/null || true)
-    # EPERM-aware liveness (_agmsg_pid_alive): a sandbox-unsignalable watcher is still alive.
-    if [ -n "$WATCH_PID" ] && _agmsg_pid_alive "$WATCH_PID"; then
-      exit 0
-    fi
-  fi
-fi
+# Normalized to the per-process instance id (#93), which is the token the
+# actas owner file is keyed on.
+[ -n "$SESSION_ID" ] && SESSION_ID="$(agmsg_normalize_instance_id "$SESSION_ID" "$TYPE")"
+
+# No deferral to a live watcher (#694).
+#
+# This used to exit here whenever a watcher process was alive for this session,
+# to avoid double delivery in `both` mode. The condition was LIVENESS, and the
+# failure `both` exists for preserves liveness exactly: a watcher that is alive
+# and delivering nothing. So the one mode advertised as a safety net stood down
+# in front of the one situation it was wanted for. On 2026-08-08 a session with
+# a broken watcher was switched to `both` to recover delivery and nothing
+# changed; what worked was `mode turn`, which stops the watcher, which removes
+# the liveness signal, which lets this hook run.
+#
+# Removing it does not double-deliver, and that is measured rather than
+# assumed. Both sides consume through the same state:
+#
+#   watcher      storage_read_cursor_consume -> inserts a `message_read` event
+#                per delivered id AND advances read_cursors.local_position
+#   this hook    storage_list_unread -> excludes rows at or below that cursor
+#                AND rows with a `message_read` event
+#
+# So a message the watcher has emitted is not offered here. The remaining
+# window is an interleave: this hook SELECTs, the watcher emits and consumes
+# the same row, then this hook marks it read. Bounded by one poll interval, and
+# the trade is explicit -- a rare duplicate line against a mode that silently
+# delivered nothing at all.
+#
+# Deferral was an optimisation, not a correctness requirement. The read state
+# is the correctness requirement, and it was already there.
 
 # Identify agent and teams
 WHOAMI=$("$SCRIPT_DIR/whoami.sh" "$PROJECT" "$TYPE")
@@ -127,77 +143,168 @@ fi
 mkdir -p "$SKILL_DIR/run"
 touch "$MARKER"
 
-# Check for unread messages and mark as read
-DB="$(agmsg_db_path)"
-if [ ! -f "$DB" ]; then exit 0; fi
+# Check for unread messages and mark as read. Ask the active driver whether a
+# store exists (driver-level, works for jsonl too) — don't create one on a poll.
+# The check is per team, inside the loop below: a store is selected per team
+# now, so "this team has no store yet" is a normal state, and answering it
+# once for the whole process would silently stop delivery for every OTHER
+# team the moment one of them was uninitialized.
+agmsg_storage_load
 
-_agmsg_sqlesc() { printf %s "$1" | sed "s/'/''/g"; }
-AGENT_SQL="$(_agmsg_sqlesc "$AGENT")"
-
+# Messages are marked read inside this loop; the whole batch is emitted after
+# it. Under `set -e` an unguarded command substitution ends the script the
+# moment it fails -- and a failure while processing a LATER team lands after
+# an EARLIER team's rows were already stamped read_at, before either emit
+# point. Those messages are read, undelivered, and never offered again.
+# Measured on 8a2fe623: first_deliveries=0 first_read=1 second_unread=1 rc=5.
+#
+# So a failure stops the loop instead of ending the script, and what was
+# already accumulated is delivered.
+#
+# The failure is reported IN THE PAYLOAD, not by the exit status. The documented
+# contract is that stdout is read as control JSON only on exit 0 -- and the
+# measurement disagrees with it (see the emit points below, and #658). Either
+# way this is the safe shape: if a runtime does discard on non-zero, exiting
+# non-zero here throws away a payload whose rows are already marked read, which
+# is what the first attempt at this fix did on exactly the path that was broken.
+# When there are messages to hand over the status is 0 and the text says the
+# poll was partial; only when there is nothing to deliver does the status carry
+# the failure.
 OUTPUT=""
+LOOP_RC=0
+LOOP_FAILED_TEAM=""
 IFS=',' read -ra TEAM_LIST <<< "$TEAMS"
 for team in "${TEAM_LIST[@]}"; do
-  team_sql="$(_agmsg_sqlesc "$team")"
-  # Honor actas exclusivity locks. If (team, AGENT) is currently held by
-  # another live session, that session is the owner of that role's inbox —
-  # don't deliver here. Mirrors the per-pair filtering watch.sh does for
-  # CC sessions (#62), giving Stop-hook delivery (codex / claude-code
-  # turn-mode) the same "respect peer locks" guarantee.
+  storage_store_exists "$team" || continue
+
+  # ONE guarded boundary for everything that reads or formats — and it must NOT
+  # be invoked from a condition context.
   #
-  # Note: AGENT comes from whoami.sh, which returns the first registered
-  # agent for (project, type). It is NOT the session's in-memory actas
-  # role. That asymmetry is the Codex caveat documented in README — if a
-  # Codex session actas'd into <name>, check-inbox is still polling
-  # whatever whoami chose first, not <name>.
-  state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
-  case "$state" in
-    other:*) continue ;;
+  # `RESULT=$(...) || _rc=$?` looks equivalent and is not. Putting the
+  # substitution on the left of `||` makes the whole thing a tested command, and
+  # errexit is then suppressed for what runs inside it — including the `set -e`
+  # the subshell sets for itself. Measured: storage_init returned 13,
+  # storage_list_unread carried on regardless, the assignment landed empty and
+  # SUCCEEDED, and the `[ -n "" ] || exit 98` two lines later became the
+  # subshell's status. A backend failure arrived at the caller as "this team has
+  # no unread messages", and the poll reported a clean turn.
+  #
+  # A single non-conditional assignment with errexit lifted around it does not
+  # have that property: the subshell's own `set -e` aborts at the first failure
+  # and its status is what `$?` holds. The lift is two lines wide and restored
+  # immediately.
+  #
+  # This is also why the failing operations are not listed with `|| return`
+  # inside: an enumeration is short by one the next time an operation is added,
+  # which is the defect this file exists to fix.
+  #
+  # The first attempt listed the substitutions and guarded each -- and missed
+  # one (`_arr`), which is the whole failure mode this file is about: an
+  # enumeration is short by one and the one it is short by is the defect. A
+  # subshell with its own errexit does not need the list. Anything in here that
+  # fails ends the subshell, and its status is read from `$?` below instead of
+  # ending the script.
+  #
+  # 97 and 98 are the two ordinary reasons to skip a team, carried as statuses
+  # because a subshell cannot `continue` its caller's loop.
+  set +e
+  RESULT=$(
+    set -euo pipefail
+    # Honor actas exclusivity locks. If (team, AGENT) is held by another live
+    # session, that session owns that role's inbox — don't deliver here.
+    # Mirrors watch.sh's per-pair filtering (#62).
+    #
+    # AGENT comes from whoami.sh: the first registered agent for
+    # (project, type), NOT the session's in-memory actas role — the Codex
+    # caveat documented in README.
+    state=$(actas_lock_state "$team" "$AGENT" "${SESSION_ID:-}")
+    # The leading `(` is load-bearing, not style. bash 3.2 -- which is /bin/bash
+    # on macOS, and what the macOS CI jobs run -- scans `$( ... )` for its
+    # closing paren without understanding `case`, so an unbalanced pattern paren
+    # ends the substitution early and the `;;` that follows is a syntax error.
+    # The whole file failed to parse; every check-inbox test on macOS died with
+    # "syntax error near unexpected token `;;'". Balancing the paren fixes it and
+    # is identical under bash 5.
+    case "$state" in (other:*) exit 97 ;; esac
+
+    # Unread via the storage facade (§2.1 storage_list_unread = events ∪ legacy),
+    # JSONL parsed in one pass with sqlite's JSON funcs (no jq; cf. lib/hooks-json.sh).
+    # id is kept so the mark step below targets exactly the rows shown.
+    UNREAD_JSONL=$(storage_list_unread "$team" "$AGENT")
+    [ -n "$UNREAD_JSONL" ] || exit 98
+    _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
+    agmsg_sqlite ':memory:' "
+      SELECT json_extract(value,'\$.from') || char(31) ||
+             replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
+             json_extract(value,'\$.at') || char(31) ||
+             json_extract(value,'\$.id')
+      FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+    "
+  )
+  _rc=$?
+  set -e
+  case "$_rc" in
+    0)     ;;
+    97|98) continue ;;
+    *)     LOOP_RC=$_rc; LOOP_FAILED_TEAM="$team"; break ;;
   esac
 
-  RESULT=$(agmsg_sqlite "$DB" "
-    SELECT id || char(31) || from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
-    FROM messages WHERE team='$team_sql' AND to_agent='$AGENT_SQL' AND read_at IS NULL
-    ORDER BY created_at ASC;
-  ")
-  if [ -n "$RESULT" ]; then
-    COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
-    OUTPUT+="$COUNT new message(s) in $team:"$'\n'
-    IDS=""
-    while IFS=$'\x1f' read -r id from body ts; do
-      OUTPUT+="  [$ts] $from: $body"$'\n'
-      case "$id" in
-        ''|*[!0-9]*) ;; # defensive: never splice a non-numeric value into SQL
-        *) IDS="${IDS:+$IDS,}$id" ;;
-      esac
-    done <<< "$RESULT"
-    OUTPUT+=$'\n'
-    # Test seam: a two-file barrier that lets the race regression test land a
-    # message deterministically between display and mark. No-op unless set.
-    if [ -n "${AGMSG_TEST_MARK_BARRIER:-}" ]; then
-      : > "$AGMSG_TEST_MARK_BARRIER.reached"
-      _agmsg_barrier_waited=0
-      while [ ! -e "$AGMSG_TEST_MARK_BARRIER.release" ]; do
-        sleep 0.05
-        _agmsg_barrier_waited=$((_agmsg_barrier_waited + 1))
-        [ "$_agmsg_barrier_waited" -ge 200 ] && break # 10s safety cap
-      done
-    fi
-    # Mark as read — only the ids captured above, so a message that arrives
-    # between the SELECT and this UPDATE is not marked read unseen.
-    if [ -n "$IDS" ]; then
-      agmsg_sqlite "$DB" "UPDATE messages SET read_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN ($IDS);" 2>/dev/null || true
-    fi
+  COUNT=$(printf '%s\n' "$RESULT" | grep -c . || true)
+  OUTPUT+="$COUNT new message(s) in $team:"$'\n'
+  IDS=()
+  while IFS=$'\x1f' read -r from body ts id; do
+    [ -n "$id" ] || continue
+    OUTPUT+="  [$ts] $from: $body"$'\n'
+    IDS+=("$id")
+  done <<< "$RESULT"
+  OUTPUT+=$'\n'
+  # Test seam: a two-file barrier that lets the race regression test land a
+  # message deterministically between display and mark. No-op unless set.
+  if [ -n "${AGMSG_TEST_MARK_BARRIER:-}" ]; then
+    : > "$AGMSG_TEST_MARK_BARRIER.reached"
+    _agmsg_barrier_waited=0
+    while [ ! -e "$AGMSG_TEST_MARK_BARRIER.release" ]; do
+      sleep 0.05
+      _agmsg_barrier_waited=$((_agmsg_barrier_waited + 1))
+      [ "$_agmsg_barrier_waited" -ge 200 ] && break # 10s safety cap
+    done
+  fi
+  # Mark read via the facade (§2.1 storage_mark_read_batch): recipient-scoped,
+  # idempotent; a legacy id records a message_read event without mutating the
+  # legacy row (§2.4). Only the ids collected from the rows actually displayed
+  # above — never a blanket match — so a message that arrives after the SELECT
+  # can never be marked read unseen.
+  if [ "${#IDS[@]}" -gt 0 ]; then
+    storage_mark_read_batch "$team" "$AGENT" "${IDS[@]}" >/dev/null 2>&1 || true
   fi
 done
 
-# No new messages
-if [ -z "$OUTPUT" ]; then
-  emit_status_json "agmsg: no new messages"
-  exit 0
-fi
-
-# New messages found
+# The exit code cannot carry both the delivery and the failure report.
+#
+# The DOCUMENTED contract is that stdout is read as control JSON only on exit 0.
+# MEASURED (Claude Code 2.1.226, one-shot `claude -p`, a synthetic probe hook --
+# not this script, not an interactive session): the stdout control JSON was
+# processed on exit 0, 1, 2 and 3 alike. So this codebase depends on an area
+# where the documented contract and the observed implementation disagree; the
+# measurement is on #658.
+#
+# This fix is correct either way, which is why it does not bet on which is real.
+# If a runtime DOES discard stdout on a non-zero exit, as documented, then
+# emitting the messages and then exiting non-zero throws away the payload that
+# already cost these rows their unread state -- consumed and never shown, worse
+# than the failure the status was meant to report. If it does NOT discard it, as
+# measured, the non-zero exit was never needed to preserve the delivery or to
+# report the partial failure, because the payload already carries both.
+#
+# Delivery and the report are separated: the messages go out with exit 0, and
+# the partial failure is stated inside the payload the operator actually reads.
+# Nothing upstream sees a partial poll as a complete one, because the text says
+# so.
 if [ -n "$OUTPUT" ]; then
+  if [ "$LOOP_RC" -ne 0 ]; then
+    OUTPUT+="agmsg: this poll stopped early — team '$LOOP_FAILED_TEAM' could not be read (status $LOOP_RC)."$'\n'
+    OUTPUT+="agmsg: teams after it were not checked; their messages stay unread and will be offered again."$'\n'
+  fi
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
   ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
   cat <<ENDJSON
@@ -206,5 +313,14 @@ if [ -n "$OUTPUT" ]; then
   "reason": "$ESCAPED"
 }
 ENDJSON
+  # Exit 0 even when the poll failed part-way: this is the delivering path, and
+  # a non-zero status here throws the delivery away.
   exit 0
 fi
+
+# Nothing was accumulated. There is no delivery to protect, so the status is
+# free to carry the failure — and it must, because "no new messages" here would
+# claim something this run never established.
+[ "$LOOP_RC" -eq 0 ] || exit "$LOOP_RC"
+emit_status_json "agmsg: no new messages"
+exit 0

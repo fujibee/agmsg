@@ -3,8 +3,21 @@
 # Unit tests for codex-bridge-launcher.sh thread resolution (#350).
 # The launcher must bind the bridge to the role's RECORDED codex thread instead
 # of the app-server's ambiguous "loaded" thread (which a co-resident codex thread
-# in the same cwd could otherwise capture). A mock bridge (AGMSG_CODEX_BRIDGE_CMD)
-# records the --thread the launcher passes.
+# in the same cwd could otherwise capture). A mock bridge records the --thread
+# the launcher passes.
+#
+# The mock replaces codex-bridge.js itself (the file the launcher's DEFAULT
+# bridge_run resolves to) rather than being swapped in via AGMSG_CODEX_BRIDGE_CMD
+# (#595). AGMSG_CODEX_BRIDGE_CMD is a real, documented user-facing override (a
+# custom bridge wrapper), and codex-bridge-launcher.sh takes a materially
+# different code path for it (a synchronous wait on the launched process) than
+# for its default codex-bridge.js path -- exercising that override path here
+# tested a branch these tests have no interest in and does not run for anyone
+# using agmsg without a custom wrapper, and its wait, sized for a real bridge
+# process's lifetime, raced these tests' shorter deregistration-response
+# assertions. Only tests/ files change here: setup_test_env already copies the
+# whole scripts/ tree into an isolated $TEST_SKILL_DIR per test, so overwriting
+# codex-bridge.js below mutates only that disposable copy.
 
 load test_helper
 
@@ -16,19 +29,78 @@ setup() {
   bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
 
   export CAPTURE="$TEST_SKILL_DIR/thread-capture.txt"
-  export MOCK="$TEST_SKILL_DIR/mock-bridge.sh"
-  cat > "$MOCK" <<EOF
+  # A leaked AGMSG_CODEX_BRIDGE_CMD from the ambient environment (not this
+  # file, which no longer sets it) would silently put the launcher back on the
+  # override code path this suite is no longer testing -- unset it explicitly
+  # rather than relying on it merely being absent here (#595).
+  unset AGMSG_CODEX_BRIDGE_CMD
+  [ -z "${AGMSG_CODEX_BRIDGE_CMD:-}" ]
+  # Overwrite the (already-isolated, per-test) copy of codex-bridge.js with a
+  # mock that records its argv. AGMSG_NODE is the documented override for the
+  # Node binary codex-bridge-launcher.sh resolves this file through; pointing
+  # it at bash makes bash the interpreter for this file regardless of its .js
+  # name, so the launcher's default (no-custom-wrapper) path runs unmodified.
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
 [ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
-  chmod +x "$MOCK"
-  export AGMSG_CODEX_BRIDGE_CMD="$MOCK"
+  chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_NODE="$(command -v bash)"
   export LAUNCHER="$SCRIPTS/drivers/types/codex/codex-bridge-launcher.sh"
 }
 
-teardown() { teardown_test_env; }
+# PIDs of live per-role child launchers for this test's project: any process
+# whose argv contains both LAUNCHER and PROJ, one line per pid. Not scoped to a
+# single role name -- teardown must reap every role's child a test spawned
+# (e.g. "the identity cache still sees a role added mid-loop" joins a second
+# role, "bob", mid-test), unlike count_child_launchers below, which measures
+# one specific role on purpose. This also does not dedupe transient
+# command-substitution subshells by parent pid -- for killing that distinction
+# does not matter, signaling and waiting on a subshell that has already
+# exited on its own is a harmless no-op.
+_launcher_child_pids() {
+  ps -Ao pid=,args= 2>/dev/null | grep -F "$LAUNCHER" | grep -F "$PROJ" | awk '{print $1}'
+}
+
+# PIDs of bridge processes this test's launchers started. The bridge itself
+# runs as "bash codex-bridge.js ..." -- its argv never contains LAUNCHER, so
+# _launcher_child_pids cannot see it, and a child launcher's EXIT trap only
+# releases its runtime lock; it does not kill a bridge it already nohup'd. Read
+# from pidfiles instead, which live under this test's own $RUN_DIR ($TEST_
+# SKILL_DIR is unique per test), so this cannot reach another test's process.
+_launcher_bridge_pids() {
+  local f
+  for f in "$RUN_DIR"/codex-bridge.*.pid; do
+    [ -f "$f" ] || continue
+    cat "$f" 2>/dev/null
+  done
+}
+
+# A test's own kill/wait sequence reaches the dispatcher and the short-lived
+# parent it was handed, but a per-role child (nohup'd, independent of both) and
+# the bridge process it launched are not direct children of anything a test
+# holds a pid for, so they are not swept by "kill $dispatcher; kill $parent"
+# alone -- the child only self-exits once it next notices its parent is gone,
+# and never kills its own bridge except when it does so as part of noticing
+# deregistration. Snapshot the pid set once, signal all of it, then wait for
+# all of it, rather than interleaving kill/wait per pid against a ps/pidfile
+# view that can keep changing underneath. Reaping here, and WAITING for the
+# reap rather than just signaling and moving on, is what keeps
+# teardown_test_env's rm -rf from racing a process still touching this test's
+# $TEST_SKILL_DIR (#595/#615).
+teardown() {
+  local pid pids
+  pids="$(_launcher_child_pids; _launcher_bridge_pids)"
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait_for_pid_exit "$pid" || true
+  done
+  teardown_test_env
+}
 
 # Write a role-session record (team, agent) -> thread for a project.
 put_record() {
@@ -99,7 +171,7 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3
   printf '%s\n' 99999999 > "$RUN_DIR/codex-bridge.team.alice.pid"
-  run_launcher & local driver_pid=$!
+  run_launcher 3>&- & local driver_pid=$!
 
   local i recorded=""
   for i in {1..50}; do
@@ -292,14 +364,18 @@ wait_for_child_count() {
 
 @test "launcher: a re-registered role gets a fresh child after deregistration (#485)" {
   put_record team alice thread-alice "$PROJ" codex
-  export MOCK_BRIDGE_SLEEP=12
+  # A custom bridge command is waited synchronously by its role launcher. Keep
+  # the mock lifetime below wait_for_child_count's 10-second ceiling so this
+  # test measures deregistration, not the intentionally blocking test adapter.
+  export MOCK_BRIDGE_SLEEP=2
   sleep 20 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
   local dispatcher=$!
   [ "$(wait_for_child_count 1)" -eq 1 ]
 
   # Deregistering the role retires its child through the existing re-exec path.
-  bash "$SCRIPTS/leave.sh" team alice >/dev/null 2>&1 || true
+  run bash "$SCRIPTS/leave.sh" team alice
+  [ "$status" -eq 0 ]
   [ "$(wait_for_child_count 0)" -eq 0 ]
 
   # The dispatcher must have forgotten the pair. Otherwise known_pairs still
@@ -348,4 +424,54 @@ wait_for_child_count() {
   wait "$dispatcher" 2>/dev/null || true
   kill "$parent" 2>/dev/null || true
   wait "$parent" 2>/dev/null || true
+}
+
+# --- which pid space (#567) ---
+
+@test "launcher: starts the bridge when tasklist cannot see the parent (#567)" {
+  skip_on_windows "stubs tasklist to model Git Bash; the real one is authoritative there"
+  # Every pid the launcher waits on -- PARENT_PID, LIFETIME_PID, the dispatcher
+  # lock owner -- is minted by $! or $$ in one of these shells, so under Git Bash
+  # it is numbered in the MSYS space and `tasklist` has no record of it. A probe
+  # that asks tasklist calls the live parent dead: the startup loop is never
+  # entered, the supervision loop never runs, and no bridge is ever launched.
+  # Measured on our own Windows runner -- $$, $! and a pid read back from a
+  # pidfile all report tasklist_hits=0 while kill -0 answers yes.
+  local stubdir="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stubdir/tasklist"
+  chmod +x "$stubdir/tasklist"
+
+  put_record team alice thread-msys "$PROJ" codex
+
+  sleep 6 3>&- & local p=$!
+  MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  wait "$p" 2>/dev/null || true
+  local i
+  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+
+  # A bridge was launched at all -- this is what the whole class costs on Windows.
+  [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
+  grep -q -- '--thread thread-msys' "$CAPTURE"
+}
+
+@test "launcher: windows-native starts the bridge (#567)" {
+  skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
+  # The counterpart to codex-monitor's windows-native test, and the half #582
+  # does NOT fix: reaching the bridged handoff is not the same as delivering a
+  # message. PARENT_PID is codex-monitor.sh's own $$, so on Git Bash the loops
+  # at :291 and :381 are asking tasklist about an MSYS pid -- false on the first
+  # evaluation, which means neither loop turns over and no bridge is ever
+  # started. Real tasklist, no stub.
+  put_record team alice thread-win "$PROJ" codex
+
+  sleep 6 3>&- & local p=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
+  wait "$p" 2>/dev/null || true
+  local i
+  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+
+  [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
+  grep -q -- '--thread thread-win' "$CAPTURE"
 }

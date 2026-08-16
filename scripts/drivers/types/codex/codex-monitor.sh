@@ -10,10 +10,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# This starts the codex app-server and the bridge launcher, both of which
+# outlive it. The `3>&- 4>&-` on those spawn lines closes the two descriptors
+# we can name; the harness's is not one of them. See lib/close-fds.sh.
+# shellcheck source=../../../lib/close-fds.sh
+source "$SCRIPT_DIR/../../../lib/close-fds.sh"
+agmsg_close_inherited_fds
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
 # shellcheck source=../../../lib/compat.sh
 source "$SCRIPT_DIR/../../../lib/compat.sh"
+# _agmsg_pid_alive for the app-server reuse decision below.
+# shellcheck source=../../../lib/instance-id.sh
+source "$SCRIPT_DIR/../../../lib/instance-id.sh"
+# agmsg_write_atomic: the port file is published, not just written — a reader
+# turns its contents into a URL, and a numeric PREFIX of a real port is itself
+# a valid port, so no reader-side check can tell a half-written file from a
+# good one. Only the writer can make that state unobservable.
+# shellcheck source=../../../lib/registry-lock.sh
+source "$SCRIPT_DIR/../../../lib/registry-lock.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -121,8 +136,14 @@ if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   # Reuse only when OUR recorded app-server is still alive AND its port answers,
   # so a foreign process that grabbed the same port after ours died is not
   # mistaken for the bridge app-server.
+  #
+  # _local for the same reason as the wait loop below: this file records $! (see
+  # the `> "$SERVER_PID"` further down), and reading it back through a pidfile
+  # does not move the number into the Windows pid space. Asking tasklist about it
+  # never matches, so a live app-server reads as dead and every launch starts
+  # another one beside it.
   if [ -n "$existing_port" ] && [ -n "$existing_pid" ] \
-    && kill -0 "$existing_pid" 2>/dev/null && port_alive "$existing_port"; then
+    && _agmsg_pid_alive_local "$existing_pid" && port_alive "$existing_port"; then
     # Confirm the recorded pid is actually OUR codex app-server before trusting OR
     # killing it: a recycled pid could belong to an unrelated process while the
     # recorded port happens to answer via something else. Only reuse/kill when the
@@ -159,16 +180,32 @@ if [ -z "$PORT" ]; then
   # free of any Node dependency — only the bridge (codex-bridge.js) needs Node, and
   # it degrades on its own if Node is missing rather than taking down the TUI. See #170.
   : > "$SERVER_LOG"
-  "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 &
+  # fds 3 and 4 are closed for the same reason remote.sh closes them around the
+  # sync engine: under bats, fd 3 is the TAP pipe, and a daemon that inherits it
+  # holds the whole test file open until the CI timeout. This app-server is
+  # built to outlive its caller -- that is what the pidfile and the reuse checks
+  # below are for -- so it is exactly the shape that keeps the pipe open.
+  "$REAL_CODEX" app-server --listen "ws://127.0.0.1:0" >>"$SERVER_LOG" 2>&1 3>&- 4>&- &
   server_bg="$!"
   echo "$server_bg" > "$SERVER_PID"
+  # codex 0.144+ colorizes this banner even when stdout is a redirected file
+  # (NO_COLOR is ignored), so strip ANSI SGR sequences before matching.
+  ansi_esc="$(printf '\033')"
   for _ in $(seq 1 100); do
-    PORT="$(sed -n 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SERVER_LOG" | head -1)"
+    PORT="$(sed -n -e "s/${ansi_esc}\[[0-9;]*m//g" -e 's#.*listening on: ws://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' "$SERVER_LOG" | head -1)"
     [ -n "$PORT" ] && break
     # Stop waiting the moment the app-server exits (e.g. a codex release dropped
     # `app-server --listen ws://`): no point burning the full timeout before we
     # fail open.
-    kill -0 "$server_bg" 2>/dev/null || break
+    #
+    # _local, deliberately: this pid came from $! in this shell, so it is numbered
+    # in the MSYS pid space, and `tasklist` -- which is what the plain helper asks
+    # under MSYSTEM -- has no record of it. It answered "dead" on the first pass
+    # here, seconds before the banner, and every Windows launch since 1.1.12 fell
+    # back to plain codex with no bridge (#567). Not a bare `kill -0` either: the
+    # EPERM reading still has to hold, or a sandbox that cannot signal our own
+    # child fails us open the same way (#505).
+    _agmsg_pid_alive_local "$server_bg" || break
     sleep 0.1
   done
   if [ -z "$PORT" ]; then
@@ -178,7 +215,7 @@ if [ -z "$PORT" ]; then
     rm -f "$SERVER_PID" "$VERSION_FILE"
     exec_plain_codex
   fi
-  printf '%s' "$PORT" > "$PORT_FILE"
+  agmsg_write_atomic "$PORT_FILE" "$PORT"
   # Stamp the version that owns this server so a later launch from a different
   # codex build recreates it instead of reusing a stale one.
   printf '%s' "$CODEX_VERSION" > "$VERSION_FILE"
@@ -198,7 +235,9 @@ export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
-"$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" >/dev/null 2>&1 &
+# Same guard: the launcher is detached on purpose and outlives this script, so
+# an inherited fd 3 would outlive the test file that started it.
+"$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" >/dev/null 2>&1 3>&- 4>&- &
 
 cd "$PROJECT"
 # Guard the array expansion: under bash 3.2 + `set -u`, "${CODEX_ARGS[@]}" on an

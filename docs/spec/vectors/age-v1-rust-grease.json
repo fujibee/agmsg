@@ -1,0 +1,17 @@
+{
+  "profile": "age-v1",
+  "fixture": "rust-age-0.12.1-grease",
+  "producer": "age crate 0.12.1",
+  "binding_from": "age-v1-vectors.json",
+  "recipient_set": "team_a",
+  "x25519_stanza_count": 1,
+  "total_stanza_count": 2,
+  "age_file_sha256": "f5dcf8829c201570ccf855d106ebc52e7339d3250285acd84022a9ffcb6d4603",
+  "decrypted_frame_sha256": "6c12c093ea0471a1c19cd8eb0475723411a72ca848b128289c5d19458487aae9",
+  "envelope": {
+    "v": 1,
+    "cipher": "age-v1",
+    "key_id": "epoch-1",
+    "blob": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBHaVRZNmN6ZFpyOW1HRTlBWC9nRHNnNUc1SXhNUzRmTzFqcXNzdkVmNEVBCmplMVZSOTJJZ0lTS1cyY1d4ZlFJWTVuWUdSN1VHTGlSUU45cDVzckFBdW8KLT4gbj8yaC1ncmVhc2Ugcih2MzggKyBFX1xwegowTGNBUmJBQ1FqOXA2T1VvaFhZUlpEMW1VeFlubzNYN00rYkpvMjZranFvKzZueURiQkF5Ci0tLSB2c1dwZzlXVFhXY2o2OFBkNm05NVZqdm5tMWtrbzdDT3oxdFE3UTdrcUI4CpjSSqhQTD8GyXDn7XdVYpRzq1XVHiFLLnU8o1hN4l8nicrxBt0TtNge3xCa5It9VWaOltXIaHuDIXg6gLJuRRdtE7SgUeME7lL/DUdqcjPotfXmbdaoevikj7QGm/jKWCVGPMIyGjZYIjAm6F4gp5km71Ge1Z9ozgJz1wcHXO23oZX4b/U5h0U85QWSPmfC4t/NQPVYBFVJFKwQppCS2LfCifb+pwHxUk6rT8KF6KCZ2nWX58SyedF0VNJNIJ4pGodcpdEPDJiABS4KLXMy7tvKrM4aX0SbM9kaDPL8slJbmQ=="
+  }
+}

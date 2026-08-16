@@ -4,6 +4,12 @@ set -euo pipefail
 # The launcher is detached from codex-monitor.sh and may outlive the shell that
 # invoked it. Never retain test-harness result/trace descriptors through the
 # dispatcher -> role child -> bridge process chain.
+#
+# 3 and 4 are closed here, as early as the script can, and then EVERY inherited
+# descriptor is closed once lib/close-fds.sh is reachable (just below). Naming
+# the two we expect is not enough: the harness picks the number, and a bridge
+# that kept it hung a macOS CI shard for 25 minutes with every test already
+# green. See scripts/lib/close-fds.sh.
 exec 3>&- 4>&-
 
 # Runs outside Codex's tool sandbox and owns the app-server connections. The
@@ -24,8 +30,22 @@ ROLE_PAIR="${5:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 RUN_DIR="$SKILL_DIR/run"
+# Before anything long-lived is spawned. Nothing above forks a process that
+# outlives this script, so closing here is as good as closing at line 1 — and
+# it is the earliest point at which lib/ is resolvable.
+# shellcheck source=../../../lib/close-fds.sh
+source "$SCRIPT_DIR/../../../lib/close-fds.sh"
+agmsg_close_inherited_fds
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
+# The liveness helpers. Every lifetime and lock-owner check below goes through
+# one of them, chosen by where the pid was minted: _agmsg_pid_alive_local for
+# the ones this shell or codex-monitor.sh produced, _agmsg_pid_alive for the
+# bridge's own pid, which the bridge records itself (#567).
+# Sourced explicitly rather than relied on transitively through role-session.sh,
+# which only pulls it in when actas-lock.sh has not already been loaded.
+# shellcheck source=../../../lib/instance-id.sh
+source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
@@ -56,7 +76,7 @@ mkdir -p "$RUN_DIR"
 # to start first. Tests/older launchers without the sidecar retain parent-PID
 # fallback behavior.
 LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! kill -0 "$LIFETIME_PID" 2>/dev/null; then
+if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
@@ -89,7 +109,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    if [ -n "$owner" ] && _agmsg_pid_alive_local "$owner"; then
       return 1
     fi
     if [ -n "${AGMSG_TEST_DISPATCHER_STALE_BARRIER:-}" ]; then
@@ -112,7 +132,7 @@ acquire_runtime_lock() {
       trap 'exit 0' INT TERM
       return 0
     fi
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    if [ -n "$owner" ] && _agmsg_pid_alive_local "$owner"; then
       return 1
     fi
     sleep 0.05
@@ -237,7 +257,7 @@ if [ -z "$ROLE_PAIR" ]; then
   acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
-    && kill -0 "$LIFETIME_PID" 2>/dev/null; do
+    && _agmsg_pid_alive_local "$LIFETIME_PID"; do
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     [ "$IDENTITY_CACHE_FRESH" = "1" ] || poll_reset
@@ -283,7 +303,7 @@ acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
 # its registration disappears, so a re-registered role gets a fresh child.
 ids=""
 startup_attempts=0
-while kill -0 "$PARENT_PID" 2>/dev/null && [ "$startup_attempts" -lt 20 ]; do
+while _agmsg_pid_alive_local "$PARENT_PID" && [ "$startup_attempts" -lt 20 ]; do
   ids="$(resolve_identity || true)"
   [ -n "$ids" ] && break
   startup_attempts=$((startup_attempts + 1))
@@ -333,7 +353,7 @@ ids="$safe_ids"
 # A role record may be written by actas later in this same first turn. An empty
 # safe set is therefore transient, not terminal: retry while the parent lives.
 if [ -z "$ids" ]; then
-  kill -0 "$PARENT_PID" 2>/dev/null || exit 0
+  _agmsg_pid_alive_local "$PARENT_PID" || exit 0
   sleep 0.3
   exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
 fi
@@ -373,7 +393,7 @@ else
 fi
 
 deregistered_ticks=0
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+while _agmsg_pid_alive_local "$PARENT_PID"; do
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
@@ -393,7 +413,10 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
       if [ -f "$pidfile" ]; then
         old_pid=""
         IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-        [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+        # _agmsg_pid_valid, not just non-empty: `kill 0` signals this
+        # launcher's own process group, so a corrupt pidfile would tear down
+        # the dispatcher and its siblings instead of one stale bridge.
+        _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
       fi
       exit 0
     fi
@@ -410,7 +433,7 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
     if [ -f "$pidfile" ]; then
       old_pid=""
       IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
     fi
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
@@ -451,7 +474,7 @@ EOF
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
-    if [ -n "$bridge_pid" ] && kill -0 "$bridge_pid" 2>/dev/null; then
+    if [ -n "$bridge_pid" ] && _agmsg_pid_alive "$bridge_pid"; then
       # Reuse only when the live bridge is bound to the CURRENT app-server. A
       # codex upgrade makes codex-monitor.sh kill the stale app-server and start a
       # fresh one on a new port (#237); a bridge still bound to the old URL stays

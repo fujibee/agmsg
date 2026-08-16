@@ -55,23 +55,22 @@ INSTANCE_ID="$(agmsg_instance_id "$SESSION_ID" "$TYPE")"
 PIDFILE="$RUN_DIR/watch.$INSTANCE_ID.pid"
 if [ -f "$PIDFILE" ]; then
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  # EPERM-aware liveness (_agmsg_pid_alive): don't skip cleaning a live watcher.
-  if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
+  # _agmsg_pid_alive_local: EPERM-aware, so a live watcher still gets cleaned --
+  # and no tasklist, which cannot see the $$ watch.sh recorded (#567).
+  if [ -n "$pid" ] && _agmsg_pid_alive_local "$pid"; then
     # Defensive: only kill if the pid's command line still looks like our
     # watch.sh. Pids can be recycled — a stale pidfile could point at an
     # unrelated process that took the same pid.
     cmd=$(compat_get_cmdline "$pid" 2>/dev/null || true)
-    case "$cmd" in
-      *"$SKILL_DIR/scripts/watch.sh"*) kill "$pid" 2>/dev/null || true ;;
-      *) ;;
-    esac
+    if agmsg_cmdline_names_path "$cmd" "$SKILL_DIR/scripts/watch.sh"; then
+      kill "$pid" 2>/dev/null || true
+    fi
   fi
   rm -f "$PIDFILE"
 fi
 
-# Drop the per-session stream watermark (see #107) — the session is ending, so
-# there is no restart to resume; a future session_id reuse should start fresh.
-rm -f "$RUN_DIR/watch.$INSTANCE_ID.watermark" 2>/dev/null || true
+# Read progress is store-owned and intentionally survives session end. There is
+# no per-session delivery watermark in the unified cursor model.
 
 # Clean the cc-instance entry that points at this instance id. The enclosing
 # CC process may itself be exiting (matcher=logout/etc.), in which case its

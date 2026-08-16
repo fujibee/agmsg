@@ -165,7 +165,7 @@ function gridSegments(
     // OTHER axis. E.g. for row(colChain, colChain), a column's eventual
     // row-node spans that column's own width but the WHOLE original height
     // (both rows combined), not just the one row segRect came from — using
-    // segRect's height directly here would be wrong (co1/self-review catch:
+    // segRect's height directly here would be wrong (self-review catch:
     // the naive version undersized every segment's drag bounds to just its
     // own row/column instead of the full space its transposed node owns).
     const bounds: PaneRect =
@@ -208,7 +208,7 @@ export function collectDividers(node: SplitNode, rect: PaneRect = FULL_RECT, pat
 }
 
 /**
- * A divider's identity across a grid-segment transpose (co1 review, PR
+ * A divider's identity across a grid-segment transpose (review, PR
  * #390): grabbing a grid-segment divider transposes its aligned grid at
  * drag-start (see transposeGrid's own doc), and for 3+ segment grids that
  * changes collectDividers' shape from "grid" divider keys to "single"
@@ -257,7 +257,7 @@ function zipPairs(a: SplitNode, b: SplitNode, pairAxis: SplitAxis, pairRatio: nu
  * just that one seam into its own independent node, rather than needing
  * every divider to already be independently addressable up front.
  *
- * Self-inverse ONLY for the 2-column/2-row case (co1 review — the doc here
+ * Self-inverse ONLY for the 2-column/2-row case (review — the doc here
  * previously overclaimed this generally): transposing
  * row(col(1,2;c),col(3,4;c);r) twice does return the original tree, because
  * the transposed result col(row(1,3;r),row(2,4;r);c) is ITSELF a valid
@@ -275,7 +275,7 @@ function zipPairs(a: SplitNode, b: SplitNode, pairAxis: SplitAxis, pairRatio: nu
  * single-divider, whole-grid-drag fallback applies there, same as any
  * asymmetric or manually-adjusted tree today. Deliberately scoped to
  * exactly this one shape — a further generalization to partially-aligned
- * nested arrangements is out of scope (confirmed with koit).
+ * nested arrangements is out of scope (settled deliberately).
  */
 export function transposeGrid(node: SplitNode): SplitNode {
   if (node.kind === "leaf") return node;
@@ -348,7 +348,7 @@ function contains(node: SplitNode, paneId: string): boolean {
  * dragged pane, so there is nothing to move.
  *
  * A missing `targetPaneId` (not found anywhere in `node`) is also a no-op,
- * returning `node` unchanged (co1 review — was missing): without this
+ * returning `node` unchanged (review — was missing): without this
  * guard, splicing `newPaneId` out first and then failing to find
  * `targetPaneId` to replace would silently drop the dragged pane from the
  * tree entirely, since `replaceLeaf` is itself a no-op when the target
@@ -443,7 +443,7 @@ function tileRowSizes(n: number): number[] {
 /**
  * Discards whatever tree currently exists and rebuilds a fresh canonical
  * tree for `preset` from `paneIds` — a one-shot RESET, not a persisted mode
- * (confirmed with koit: picking Vertical/Horizontal/Tile from the menu just
+ * (settled deliberately: picking Vertical/Horizontal/Tile from the menu just
  * re-arranges the tab back to that pattern; it doesn't lock out further
  * manual divider drags or split-drops afterward).
  */

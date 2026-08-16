@@ -61,6 +61,97 @@ EOF
   [[ "$output" =~ "Codex app-server bridge" ]]
 }
 
+# --- the log names who wrote each line (#784) ---------------------------
+#     The launcher appends this process's stderr to a per-identity log that has
+#     more than one writer by construction, and lines were reported spliced
+#     mid-word. Three things reach that file from the bridge and only one is a
+#     log record: diagnostics (ours, whole lines), the child app-server's own
+#     stderr (arbitrary chunks), and agent message deltas (partial by name).
+#     These pin what can be pinned from a POSIX machine: a diagnostic says who
+#     wrote it, it never continues someone else's half-line, and stdout is left
+#     alone.
+#
+#     `grep -q` rather than `[[ ]]` in the non-last positions: on bash 3.2,
+#     which is what macOS CI runs, a false `[[ ]]` there reports ok.
+
+@test "codex-bridge: every diagnostic line carries the pid that wrote it" {
+  # stderr only, so a prefix leaking into stdout cannot be mistaken for this
+  # passing. `2>&1 >/dev/null` in that order keeps stderr and drops stdout.
+  run bash -c 'node "$1" 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 1 ]
+  # `[<digits>] ` and then the message, on one line — the prefix is what makes
+  # a spliced line show two pids instead of reading as a single line.
+  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] codex-bridge: --project is required$'
+}
+
+@test "codex-bridge: a diagnostic never continues the half-line streamed output left open" {
+  # THE SHAPE #784 REPORTED, REACHED INSIDE ONE PROCESS. An agent message delta
+  # is partial by name, so it ends mid-word; before the funnel, the diagnostic
+  # that followed it landed on the same physical line and the record was
+  # unreadable without any second writer and without any platform question.
+  run bash -c 'node -e "
+    const { writeErr, logLine } = require(process.argv[1]);
+    writeErr(\"delta-ending-mid\");
+    logLine(\"codex-bridge: the diagnostic after it\");
+  " "$1" 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+  # The streamed bytes are unchanged and on their own line...
+  printf '%s\n' "$output" | grep -qx 'delta-ending-mid'
+  # ...and the diagnostic starts a line of its own, prefix first.
+  printf '%s\n' "$output" | grep -qE '^\[[0-9]+\] codex-bridge: the diagnostic after it$'
+  # `refute`, not `!`: a bare `! cmd` does not trip errexit on either bash.
+  refute grep -q 'delta-ending-midcodex-bridge' <<<"$output"
+}
+
+@test "codex-bridge: only one place writes to stderr, so the funnel cannot be bypassed" {
+  # The property above is only true while every write goes through `writeErr`.
+  # A future `process.stderr.write` added elsewhere would silently reopen the
+  # hole this test exists to close, so the count is pinned rather than the
+  # behaviour of the writers that exist today.
+  # Comment lines are stripped first: this file explains the funnel by naming
+  # `process.stderr.write` in prose, and counting those would make the check
+  # measure the commentary rather than the calls.
+  run bash -c "grep -v '^[[:space:]]*\(//\|\*\)' \"\$1\" | grep -c 'process\.stderr\.write'" _ "$TYPES/codex/codex-bridge.js"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+@test "codex-bridge: a multi-byte character split across child stderr chunks survives byte-for-byte" {
+  # THROUGH THE PRODUCTION WIRING, not by calling the funnel directly: what is
+  # being pinned is that the child's stderr reaches the log undecoded, and only
+  # the real `child.stderr` handler can show that.
+  #
+  # The app-server writes a 3-byte character with the split INSIDE it, in two
+  # `data` events. Decoding each chunk on arrival — which an earlier revision of
+  # this change did — turns both halves into replacement characters and destroys
+  # the child's diagnostic. That is data loss the direct Buffer write it
+  # replaced did not have.
+  local fake="$TEST_SKILL_DIR/fake-split-utf8.js"
+  cat >"$fake" <<'EOF'
+const full = Buffer.from("日本語\n", "utf8");
+process.stderr.write(full.subarray(0, 4));       // ends mid-character
+setTimeout(() => {
+  process.stderr.write(full.subarray(4));
+  setTimeout(() => process.exit(0), 20);
+}, 20);
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run bash -c 'node "$1" --project "$2" --team team --name alice --timeout 1 --interval 1 --max-wakes 1 2>&1 >/dev/null' _ "$TYPES/codex/codex-bridge.js" "$PROJ"
+  printf '%s\n' "$output" | grep -q '日本語'
+  # `refute`, not `!`: a bare `! cmd` does not trip errexit on either bash.
+  refute grep -q $'\ufffd' <<<"$output"
+}
+
+@test "codex-bridge: stdout is NOT prefixed — it is an interface, not a diagnostic" {
+  # `--resolve-only`, the thread-id list and `usage()` are read by people and
+  # asserted by other tests here. Prefixing them would change a contract, so
+  # this fails if the prefix ever spreads to stdout.
+  run node "$TYPES/codex/codex-bridge.js" --help
+  [ "$status" -eq 0 ]
+  printf '%s\n' "${lines[0]}" | grep -q '^Usage:'
+  [[ ! "$output" =~ \[[0-9]+\]\  ]]
+}
+
 @test "codex-bridge: toPosixPath maps Windows drive paths to POSIX paths" {
   run node -e 'const { toPosixPath } = require(process.argv[1]); const expected = "/c/Users/me/OneDrive/codex-work"; if (toPosixPath(String.raw`C:\Users\me\OneDrive\codex-work`) !== expected) process.exit(1); if (toPosixPath("C:/Users/me/OneDrive/codex-work") !== expected) process.exit(1);' "$TYPES/codex/codex-bridge.js"
   [ "$status" -eq 0 ]
@@ -243,7 +334,7 @@ const server = net.createServer((socket) => {
 server.listen(sock);
 EOF
 
-  node "$fake" "$sock" "$log" &
+  node "$fake" "$sock" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -S "$sock" ] && break
@@ -376,7 +467,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break
@@ -428,7 +519,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break
@@ -496,7 +587,7 @@ server.listen(0, "127.0.0.1", () => {
 });
 EOF
 
-  node "$fake" "$portfile" "$log" &
+  node "$fake" "$portfile" "$log" 3>&- &
   local server_pid="$!"
   for _ in {1..50}; do
     [ -s "$portfile" ] && break

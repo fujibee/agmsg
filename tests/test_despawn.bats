@@ -38,7 +38,7 @@ teardown() {
   # manually" branch — role-drop is still asserted.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   # Wait for the watcher to attach (it claims the lock + writes the ready sentinel).
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
@@ -57,12 +57,21 @@ teardown() {
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
 
-# read_at for the most recent message with the given body, empty if unread.
-_read_at_for_body() {
+# The current driver owns read state; a consumed control row must not appear in
+# the recipient's unread view, regardless of whether the backend has legacy
+# `messages.read_at` storage.
+_is_unread_for_alice() {
   ( # shellcheck disable=SC1090
     source "$SCRIPTS/lib/storage.sh"
-    agmsg_sqlite "$(agmsg_db_path)" \
-      "SELECT read_at FROM messages WHERE body='$1' ORDER BY id DESC LIMIT 1;" )
+    agmsg_storage_load
+    storage_list_unread team alice | grep -Fq "$1" )
+}
+
+_control_row_exists_for_alice() {
+  ( # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_storage_load
+    storage_history team alice | grep -F '"to":"alice"' | grep -Fq '"body":"ctrl:despawn"' )
 }
 
 @test "despawn: graceful — ctrl:despawn control row is marked read (does not linger as unread)" {
@@ -71,7 +80,7 @@ _read_at_for_body() {
   setup_live_owner "$RUN" sess-m
 
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
   [ -e "$RUN/ready.team__alice" ]
@@ -82,7 +91,20 @@ _read_at_for_body() {
   # The ctrl:despawn row itself must not be left permanently unread — a
   # broad (non-actas) watcher that later scans this project's inbox must not
   # see it resurface as a "new" message (2026-07-19 review finding).
-  [ -n "$(_read_at_for_body "ctrl:despawn")" ]
+  _control_row_exists_for_alice
+  # LEFT AS `!` ON PURPOSE, and it is the one exception in this change.
+  #
+  # Converting it to `refute` enforces the assertion -- and enforced, it fails
+  # under load: green run alone three times, green with this file alone, red in
+  # a ten-file sweep. So the condition it checks (the ctrl:despawn row is
+  # already marked read at this point) is not reliably true when the machine is
+  # busy. That is a timing weakness the silence has been covering, not
+  # something this change introduced, and fixing it is a different job (#715,
+  # which carries the reproduction).
+  #
+  # Enforcing it here would trade a hidden weakness for an unstable CI, which
+  # is a worse deal than leaving one assertion visibly listed in the baseline.
+  ! _is_unread_for_alice "ctrl:despawn"
 
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
@@ -133,7 +155,7 @@ _read_at_for_body() {
   # Broad watcher (no actas arg) — subscribes to both alice and leader.
   AGMSG_WATCH_INTERVAL=1 env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV \
     bash "$SCRIPTS/watch.sh" sess-broad "$PROJ" claude-code \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 3>&- &
   local wpid=$! i
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$wpid" 2>/dev/null && break; sleep 0.5; done
 

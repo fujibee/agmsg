@@ -32,7 +32,7 @@ known() {
 @test "plugin: an external type under <root>/plugins is ignored until trusted" {
   mk_ext_type "$TEST_SKILL_DIR/plugins" foo
   run known
-  ! echo "$output" | grep -qx foo
+  refute grep -qx foo <<<"$output"
   run bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_dir foo"
   [ "$status" -ne 0 ]
 }
@@ -68,7 +68,7 @@ known() {
   local ext="$TEST_SKILL_DIR/extra"
   mk_ext_type "$ext" baz
   run bash -c "export AGMSG_PLUGIN_DIRS='$ext'; source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u"
-  ! echo "$output" | grep -qx baz
+  refute grep -qx baz <<<"$output"
   AGMSG_PLUGIN_DIRS="$ext" bash "$SCRIPTS/plugin.sh" trust types/baz
   run bash -c "export AGMSG_PLUGIN_DIRS='$ext'; source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u"
   echo "$output" | grep -qx baz

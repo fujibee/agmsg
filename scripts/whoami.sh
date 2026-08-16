@@ -16,75 +16,34 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/compat.sh"
-
-# Auto-detect CLI type from environment variables and the process tree, driven by
-# the per-type manifests' `detect=` (env-var names) and `detect_proc=` (process
-# name globs) keys — no hardcoded type list lives here.
-detect_cli_type() {
-  # `detect=` / `detect_proc=` tokens are split with `read -ra` (IFS word-split,
-  # NO pathname expansion) rather than an unquoted `for x in $list` — a file in
-  # the caller's cwd matching a pattern like `claude-*` must not glob-eat the
-  # pattern. (Plain `set -f` can't be used here: agmsg_known_types discovers types
-  # via a `*/` glob that must keep working.)
-
-  # 1. Environment variables. Sorted registry order preserves the historical
-  # precedence: a runtime's own session vars (CLAUDE_CODE_SESSION_ID, CODEX_*) are
-  # checked before the GEMINI_* family, which users also set for the SDK without
-  # the CLI. `detect=explicit` (and types with no detect=) are never auto-detected.
-  local _t _v _detect _toks
-  while IFS= read -r _t; do
-    [ -n "$_t" ] || continue
-    _detect="$(agmsg_type_get "$_t" detect)"
-    if [ -z "$_detect" ] || [ "$_detect" = "explicit" ]; then
-      continue
-    fi
-    read -ra _toks <<<"$_detect"
-    for _v in "${_toks[@]}"; do
-      if [ -n "${!_v:-}" ]; then
-        echo "$_t"
-        return 0
-      fi
-    done
-  done <<EOF
-$(agmsg_known_types | sort -u)
-EOF
-
-  # 2. Process-tree detection via each type's `detect_proc=` name globs. Walk up
-  # from this process; at each ancestor the first type whose glob matches wins
-  # (the globs are disjoint, so order within a level is irrelevant).
-  local pid=$$ max_depth=10 depth=0 proc_name _pats _pat
-  while [ $depth -lt $max_depth ] && [ "$pid" != "1" ] && [ -n "$pid" ]; do
-    proc_name=$(compat_get_comm "$pid" 2>/dev/null || true)
-    if [ -n "$proc_name" ]; then
-      while IFS= read -r _t; do
-        [ -n "$_t" ] || continue
-        _pats="$(agmsg_type_get "$_t" detect_proc)"
-        [ -n "$_pats" ] || continue
-        read -ra _toks <<<"$_pats"
-        for _pat in "${_toks[@]}"; do
-          # $_pat is intentionally an UNQUOTED glob pattern matched against the
-          # process name; read -ra already kept it out of pathname expansion.
-          # shellcheck disable=SC2254
-          case "$proc_name" in
-            $_pat) echo "$_t"; return 0 ;;
-          esac
-        done
-      done <<EOF
-$(agmsg_known_types | sort -u)
-EOF
-    fi
-
-    # Move to parent process
-    pid=$(compat_get_ppid "$pid" 2>/dev/null || true)
-    depth=$((depth + 1))
-  done
-
-  # Default fallback
-  echo "claude-code"
-}
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/detect-cli-type.sh"
 
 PROJECT_PATH="${1:?Usage: whoami.sh <project_path> [type]}"
-AGENT_TYPE="${2:-$(detect_cli_type)}"
+AGENT_TYPE="${2:-$(agmsg_detect_cli_type)}"
+
+# Reject an unknown type the caller ASKED for, the same check join.sh makes
+# (#783). Without it a wrong or misspelled $2 reads all the way through to
+# `not_joined=true` — a true answer to a different question ("are you
+# registered under this exact, wrong type?"), which looks like ordinary output
+# rather than an error, so nobody doubts it and they go and join again.
+#
+# GUARDED ON $2 BEING PRESENT, following doctor.sh's --type check, and that is
+# not tidiness. agmsg_detect_cli_type's value is NOT guaranteed to be a member of
+# the registry: two of its three exits echo a name read out of
+# agmsg_known_types, but the third is the literal `claude-code` fallback at the
+# end of lib/detect-cli-type.sh, which no registry lookup stands behind.
+# Validating the RESOLVED value ties
+# the no-argument path to that literal still being discoverable — so a broken
+# install, or a trust decision that drops the built-in base, would stop
+# everyone rather than only the person who mistyped a type. Measured: with
+# `claude-code` renamed out of scripts/drivers/types/, validating the resolved
+# value turns a plain `whoami.sh <project>` into exit 1, while the same tree
+# without the check still answers.
+if [ -n "${2:-}" ] && ! agmsg_is_known_type "$AGENT_TYPE"; then
+  echo "Unknown agent type: '$AGENT_TYPE' (supported: $(agmsg_known_types | sort -u | paste -sd, - | sed 's/,/, /g'))" >&2
+  exit 1
+fi
 
 # SCRIPT_DIR is already resolved above (before sourcing the type registry).
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

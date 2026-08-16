@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agmsg
+      POSTGRES_USER: agmsg
+      POSTGRES_PASSWORD: agmsg-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agmsg -d agmsg"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - agmsg-postgres:/var/lib/postgresql/data
+
+  server:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://agmsg:agmsg-local-only@postgres:5432/agmsg
+      - HOST=0.0.0.0
+      - PORT=8787
+      - AGMSG_RETENTION_MAX_LIVE_MESSAGES
+    ports:
+      - "8787:8787"
+
+volumes:
+  agmsg-postgres:

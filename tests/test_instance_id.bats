@@ -152,16 +152,39 @@ teardown() { teardown_test_env; }
   _agmsg_pid_alive 12345
 }
 
+# A pid that is genuinely gone, so the real ps agrees with the stubbed kill.
+# Stubbing kill alone stopped being enough once "dead" required ps to agree:
+# a made-up number like 999 IS a running process on some hosts, which is
+# exactly the case the cross-check exists to catch.
+gone_pid() {
+  local pid
+  pid="$(bash -c 'echo $$')"
+  wait_for_pid_exit "$pid" || true
+  echo "$pid"
+}
+
 @test "pid_alive: ESRCH 'No such process' reads as dead" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
-  kill() { echo "bash: kill: (999) - No such process" >&2; return 1; }
-  ! _agmsg_pid_alive 999
+  local gone; gone="$(gone_pid)"
+  kill() { echo "bash: kill: ($gone) - No such process" >&2; return 1; }
+  ! _agmsg_pid_alive "$gone"
 }
 
 @test "pid_alive: lowercase 'no such process' (zsh wording) also reads as dead" {
   skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
-  kill() { echo "kill: (999) - no such process" >&2; return 1; }
-  ! _agmsg_pid_alive 999
+  local gone; gone="$(gone_pid)"
+  kill() { echo "kill: ($gone) - no such process" >&2; return 1; }
+  ! _agmsg_pid_alive "$gone"
+}
+
+@test "pid_alive: ESRCH is not enough while ps still shows the process" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # kill(2) and ps must agree before a pid is called dead. ps does not depend on
+  # signalling permission at all, so it is what stops "cannot signal" from
+  # becoming "not running" — and calling a live pid dead is how a running
+  # owner's lock gets reclaimed out from under it.
+  kill() { echo "bash: kill: ($$) - No such process" >&2; return 1; }
+  _agmsg_pid_alive $$
 }
 
 @test "pid_alive: EPERM 'Operation not permitted' reads as alive (sandbox)" {
@@ -236,8 +259,8 @@ teardown() { teardown_test_env; }
 # treated as distinct owners — the collision that broke the actas lock is gone.
 @test "actas: same session_id, different pid -> distinct live owners (#93)" {
   skip_on_windows "instance-id live PID liveness under Git Bash (#182)"
-  sleep 60 & local pa=$!
-  sleep 60 & local pb=$!
+  sleep 60 3>&- & local pa=$!
+  sleep 60 3>&- & local pb=$!
   local ta="sess.$pa" tb="sess.$pb"
 
   # pa claims; pb is refused because pa is a live, distinct owner.
@@ -354,25 +377,25 @@ teardown() { teardown_test_env; }
 }
 
 @test "args_is_grok_watcher: matches a real watcher invocation (#245)" {
-  local proj="/Users/x/projects/comms-agent"
+  local proj="/Users/x/projects/notes-app"
   agmsg_args_is_grok_watcher "bash /skills/agmsg/scripts/watch.sh sess.1 $proj grok-build" "$proj"
 }
 
 @test "args_is_grok_watcher: matches an empty-sid watcher (double space) (#245)" {
-  local proj="/Users/x/projects/comms-agent"
+  local proj="/Users/x/projects/notes-app"
   agmsg_args_is_grok_watcher "bash /skills/agmsg/scripts/watch.sh  $proj grok-build" "$proj"
 }
 
 @test "args_is_grok_watcher: excludes a shell that merely mentions the strings (#245)" {
   # A process running `grep watch.sh ... grok-build` would be wrongly killed by a
   # loose substring match. watch.sh is not the executed program here.
-  local proj="/Users/x/projects/comms-agent"
+  local proj="/Users/x/projects/notes-app"
   run agmsg_args_is_grok_watcher "/bin/zsh -c grep watch.sh foo grok-build $proj" "$proj"
   [ "$status" -ne 0 ]
 }
 
 @test "args_is_grok_watcher: excludes a watcher for a different project (#245)" {
-  run agmsg_args_is_grok_watcher "bash /s/watch.sh sess.1 /other/proj grok-build" "/Users/x/comms-agent"
+  run agmsg_args_is_grok_watcher "bash /s/watch.sh sess.1 /other/proj grok-build" "/Users/x/notes-app"
   [ "$status" -ne 0 ]
 }
 
@@ -405,4 +428,186 @@ teardown() { teardown_test_env; }
   run agmsg_reap_orphan_grok_watchers "/tmp/agmsg-no-such-project-xyz" $$
   [ "$status" -eq 0 ]
   kill -0 $$
+}
+
+# --- liveness: "can I signal this" is not "is this running" ---
+
+# A pid that exists but this user cannot signal, so `kill -0` fails with EPERM
+# rather than ESRCH. pid 1 is that on any normal desktop or CI runner; when the
+# suite runs as root, or in a container where pid 1 is ours, there is no such
+# pid to borrow and the distinction under test cannot be staged.
+require_eperm_pid() {
+  local err
+  # An `A && skip` list is a FAILING command on exactly the run we want, which
+  # bats' errexit turns into a test failure instead of a skip.
+  if kill -0 1 2>/dev/null; then skip "pid 1 is signalable here; no EPERM fixture available"; fi
+  # `|| true`: the substitution's status is the failing kill, and a bare
+  # assignment carrying it trips errexit before the case can decide anything.
+  err="$(export LC_ALL=C; kill -0 1 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "pid 1 does not exist here" ;;
+  esac
+}
+
+@test "instance-id: an unsignalable pid is alive, not dead" {
+  require_eperm_pid
+  run _agmsg_pid_alive 1
+  [ "$status" -eq 0 ]
+}
+
+@test "instance-id: liveness rejects a dead pid, and anything that is not a pid" {
+  local dead
+  dead="$(bash -c 'echo $$')"
+  wait_for_pid_exit "$dead" || true
+  run _agmsg_pid_alive "$dead"; [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "";     [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "abc";  [ "$status" -ne 0 ]
+  run _agmsg_pid_alive "12x";  [ "$status" -ne 0 ]
+  run _agmsg_pid_alive $$;     [ "$status" -eq 0 ]
+}
+
+@test "instance-id: 0 is not a live pid, it is this process group" {
+  # `kill -0 0` SUCCEEDS: 0 addresses the caller's own process group, not pid 0.
+  # A digits-only check therefore called 0 alive, and callers kill whatever this
+  # reports alive — `kill 0` TERMs the group, the caller included. All it takes
+  # is a pidfile holding 0.
+  run kill -0 0; [ "$status" -eq 0 ]
+  local bad
+  for bad in 0 00 000 0123; do
+    run _agmsg_pid_alive "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive $bad reported alive"; false; }
+    run _agmsg_pid_valid "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_valid $bad accepted it"; false; }
+  done
+  run _agmsg_pid_valid $$;   [ "$status" -eq 0 ]
+  run _agmsg_pid_valid "";   [ "$status" -ne 0 ]
+  run _agmsg_pid_valid "1x"; [ "$status" -ne 0 ]
+}
+
+@test "instance-id: a pid too large for pid_t is dead, not alive forever" {
+  # Past INT32_MAX kill(1) rejects the ARGUMENT instead of reporting ESRCH, and
+  # everything that is not ESRCH is read as EPERM, i.e. alive. Unbounded, an
+  # oversized value in a pidfile reads as alive forever: its lock is never
+  # reclaimed and its bridge is never restarted.
+  local err
+  err="$(export LC_ALL=C; kill -0 2147483648 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "kill treats out-of-range pids as ESRCH here" ;;
+  esac
+  local bad
+  for bad in 2147483648 4294967296 999999999999999999999; do
+    run _agmsg_pid_valid "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_valid $bad accepted it"; false; }
+    run _agmsg_pid_alive "$bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive $bad reported alive"; false; }
+  done
+  # The boundary itself is a legal pid value and must still be accepted.
+  run _agmsg_pid_valid 2147483647; [ "$status" -eq 0 ]
+  run _agmsg_pid_valid 9999999;    [ "$status" -eq 0 ]
+}
+
+@test "instance-id: the pid ceiling is the platform's, not one number" {
+  # A Windows process id is a DWORD, and liveness there reads the native process
+  # table through tasklist rather than kill(1)'s signed pid_t. Applying the
+  # POSIX ceiling to it would call a legitimate native pid dead and its live
+  # watcher stale. Only the bound depends on MSYSTEM, so both sides are
+  # checkable from either host.
+  run env MSYSTEM=MINGW64 bash -c \
+    'SKILL_DIR="'"$SKILL_DIR"'"; . "$SKILL_DIR/scripts/lib/instance-id.sh"
+     _agmsg_pid_valid 2147483648 || exit 1
+     _agmsg_pid_valid 4294967295 || exit 2
+     _agmsg_pid_valid 4294967296 && exit 3
+     _agmsg_pid_valid 0 && exit 4
+     exit 0'
+  [ "$status" -eq 0 ]
+
+  # POSIX keeps the signed pid_t ceiling.
+  run _agmsg_pid_valid 2147483648; [ "$status" -ne 0 ]
+  run _agmsg_pid_valid 4294967295; [ "$status" -ne 0 ]
+}
+
+@test "instance-id: liveness answers alive on the builtin, before any subshell" {
+  # The launcher polls liveness in loops that were deliberately made fork-free
+  # (#466/#496). Routing them through a helper is only acceptable while the
+  # common answer — alive — is still decided by the builtin, so the cheap check
+  # has to come first and has to be able to return on its own.
+  local body fast slow
+  # The fast path lives in the _local helper now; _agmsg_pid_alive delegates to
+  # it once the Windows branch declines. A function call is not a fork, so the
+  # property this test exists for is unchanged -- but it has to be read where
+  # the code is.
+  body="$(declare -f _agmsg_pid_alive_local)"
+  fast="$(printf '%s\n' "$body" | grep -n 'kill -0 .*&& return 0;$' | grep -v '\$(' | head -1 | cut -d: -f1)"
+  slow="$(printf '%s\n' "$body" | grep -n 'kill -0 .*2>&1' | head -1 | cut -d: -f1)"
+  [ -n "$fast" ]
+  [ -n "$slow" ]
+  [ "$fast" -lt "$slow" ]
+  # And the delegation is a plain call, not a subshell, so the fork-free claim
+  # survives the split.
+  printf '%s\n' "$(declare -f _agmsg_pid_alive)" | grep -q '^ *_agmsg_pid_alive_local "\$pid"$'
+}
+
+# --- which pid space (#567) ---
+
+@test "pid_alive_local: a pid we minted is alive even where tasklist cannot see it" {
+  skip_on_windows "stubs tasklist; the real one is authoritative on Windows"
+  # MSYSTEM steers _agmsg_pid_alive into its tasklist branch. tasklist reports
+  # Windows pids, and a pid from $! or $$ in one of these shells is numbered in
+  # the MSYS space, so it is absent -- which the plain helper reads as dead.
+  # _local is the one that must not ask.
+  local stub="$BATS_TEST_TMPDIR/stub-bin"
+  mkdir -p "$stub"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stub/tasklist"
+  chmod +x "$stub/tasklist"
+
+  MSYSTEM=MINGW64 PATH="$stub:$PATH" _agmsg_pid_alive_local $$
+  # The counterpart, pinned so the split is not a distinction without a
+  # difference: the same live pid reads as dead through the plain helper.
+  ! MSYSTEM=MINGW64 PATH="$stub:$PATH" _agmsg_pid_alive $$
+}
+
+@test "pid_alive_local: an oversized pid is dead on Windows too" {
+  skip_on_windows "POSIX kill path; the ceiling is what is under test"
+  # The validator widens to the DWORD range when MSYSTEM is set, because a
+  # Windows pid is a DWORD and tasklist is only asked to match a number. But
+  # _local hands the value to kill(1) even there, and past INT32_MAX kill
+  # rejects the argument rather than reporting ESRCH -- which reads as alive.
+  # Inheriting the wide ceiling would make an oversized pidfile value alive
+  # forever: lock never reclaimed, bridge never restarted (#505).
+  local err
+  err="$(export LC_ALL=C; kill -0 2147483648 2>&1)" || true
+  case "$err" in
+    *[Nn]'o such process'*) skip "kill treats out-of-range pids as ESRCH here" ;;
+  esac
+  local bad
+  for bad in 2147483648 4294967295; do
+    run env MSYSTEM=MINGW64 bash -c \
+      ". '$SCRIPTS/lib/instance-id.sh'; _agmsg_pid_alive_local $bad"
+    [ "$status" -ne 0 ] || { echo "_agmsg_pid_alive_local $bad reported alive"; false; }
+  done
+  # The platform ceiling itself is untouched: the same value is still a legal
+  # thing to ask tasklist about.
+  run env MSYSTEM=MINGW64 bash -c \
+    ". '$SCRIPTS/lib/instance-id.sh'; _agmsg_pid_valid 4294967295"
+  [ "$status" -eq 0 ]
+}
+
+@test "pid_alive_local: EPERM still reads as alive (sandbox)" {
+  skip_on_windows "POSIX kill path"
+  # The reason the fix is not a bare `kill -0`: a pid we minted is still a pid a
+  # sandbox may refuse to let us signal, and #505 is what made that not mean dead.
+  kill() { echo "bash: kill: (1) - Operation not permitted" >&2; return 1; }
+  _agmsg_pid_alive_local 1
+}
+
+@test "no shipped script decides liveness with a bare kill -0" {
+  # #500's lesson: a partially-hardened file reads as a fixed one. Every
+  # liveness check must go through _agmsg_pid_alive, which is EPERM-aware and
+  # cross-checks ps; instance-id.sh is where that check is implemented, so it
+  # is the one file allowed to call kill -0 directly.
+  local offenders
+  offenders="$(cd "$BATS_TEST_DIRNAME/.." && grep -rn -e 'kill -0' -e 'kill -s 0' scripts bin 2>/dev/null \
+    | grep -v '^scripts/lib/instance-id.sh:' \
+    | grep -v ':[0-9]*: *#' || true)"
+  [ -z "$offenders" ] || { echo "$offenders"; false; }
 }

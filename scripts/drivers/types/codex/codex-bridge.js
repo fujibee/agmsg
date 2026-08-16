@@ -56,10 +56,103 @@ Options:
                           of total duration — only true silence trips it.
   --inline-inbox          Read inbox in the bridge and include message text in the turn input.
   --resolve-only          Print resolved team/name and exit.
+  --print-loaded-threads  Print the app-server's loaded thread ids (one per
+                          line) and exit. Needs --app-server. Used by
+                          codex-record-session.sh to seat a role without
+                          guessing from rollout files (#579).
   --help                  Show this help.
 
 Set AGMSG_CODEX_APP_SERVER_CMD to override the app-server command for tests.`);
 }
+
+// EVERY DIAGNOSTIC LINE NAMES THE PROCESS THAT WROTE IT, AND REACHES THE FILE
+// IN ONE WRITE.
+//
+// The launcher appends this process's stderr to a per-identity log
+// (`codex-bridge-launcher.sh`: `>>"$log" 2>&1`), and that file has more than
+// one writer by construction: the bridge that is running, plus every launch
+// attempt that finds it already there, says so, and exits. Two such lines were
+// reported spliced mid-word, and other logs were reported losing their line
+// beginnings (#784).
+//
+// This does not claim to prevent that, and it is deliberately not written as
+// if it did. What it does:
+//
+//   ONE WRITE PER LINE. The newline is part of the same `write` as the text,
+//   so a line is never split into two writes by this side. Whether two
+//   processes' writes can still interleave is a property of the platform's
+//   append, not of this code — and the report is from Windows/Git Bash, where
+//   that is exactly the open question.
+//
+//   THE WRITER IS NAMED. A spliced line now carries two pids, and a line that
+//   lost its beginning no longer starts with `[<pid>] `. Corruption that
+//   cannot be prevented from here can at least stop being invisible: the log
+//   is the only evidence for the other reports on that platform, and one that
+//   is quietly wrong is worse than one that is obviously wrong.
+//
+// stdout is deliberately NOT prefixed. `usage()`, the thread-id list and
+// `--resolve-only` are read by people and asserted by tests; a prefix there
+// would change an interface, not a diagnostic.
+//
+// THREE THINGS REACH STDERR FROM THIS FILE, and only one of them is a log
+// record. Derived by grepping every write rather than by listing the ones that
+// came to mind — the first version of this change named only the first and was
+// wrong about the other two (raised in review):
+//
+//   1. DIAGNOSTICS — `console.error`, forty-odd sites. Whole lines, ours.
+//      These are the log records: prefixed, one write each.
+//   2. CHILD DIAGNOSTICS — the app-server's own stderr, forwarded in whatever
+//      chunks it arrives in. Not ours to frame: a chunk is not a line, and
+//      buffering it would delay someone's only view of a child that is hanging.
+//   3. STREAMED AGENT OUTPUT — `agent/message/delta`, partial BY NAME. There is
+//      no newline to wait for; that is what makes it a delta.
+//
+// 2 and 3 are passed through unchanged and are NOT log records. What they must
+// not do is make a log record unreadable, and before this they could: a delta
+// that ends mid-word, followed immediately by a diagnostic, produces one
+// physical line containing both — the exact shape reported in #784, reachable
+// INSIDE ONE PROCESS with no concurrent writer and no platform question.
+//
+// So everything goes through one funnel that remembers whether the last byte
+// was a newline, and a diagnostic starts a fresh line when it was not.
+const LOG_PREFIX = `[${process.pid}] `;
+
+let atLineStart = true;
+
+// The funnel. Streamed content passes through byte-for-byte; all it does is
+// keep the flag honest.
+//
+// A BUFFER IS WRITTEN AS A BUFFER. The first version of this decoded every
+// chunk with `toString()`, which is wrong at exactly the boundary this code
+// exists for: a multi-byte character split across two `data` events decodes to
+// a replacement character in each half, and the child's diagnostic arrives
+// corrupted — a regression the direct `process.stderr.write(chunk)` it replaced
+// did not have (raised in review). "byte-for-byte" has to be true of the code,
+// not only of the comment.
+//
+// The newline flag comes from the last BYTE for a Buffer and the last CHARACTER
+// for a string. Those agree: `\n` is 0x0a and is never part of a multi-byte
+// UTF-8 sequence.
+function writeErr(text) {
+  if (text === undefined || text === null || text.length === 0) return;
+  // One call, string or Buffer alike: `process.stderr.write` takes both, and
+  // keeping it to one is what lets a test assert that nothing writes to stderr
+  // outside this function.
+  process.stderr.write(text);
+  atLineStart = typeof text === "string" ? text.endsWith("\n") : text[text.length - 1] === 0x0a;
+}
+
+function logLine(...args) {
+  const line = `${LOG_PREFIX}${require("util").format(...args)}\n`;
+  // The leading newline is the whole point: without it this diagnostic would
+  // continue whatever half-line a delta or a child chunk left open.
+  writeErr(atLineStart ? line : `\n${line}`);
+}
+
+// Rebound rather than applied at the forty-odd call sites: a helper that has
+// to be remembered is one a later line will forget, and the point of this
+// change is that EVERY diagnostic carries the pid.
+console.error = logLine;
 
 function die(message) {
   console.error(`codex-bridge: ${message}`);
@@ -104,6 +197,8 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === "--resolve-only") {
       opts.resolveOnly = true;
+    } else if (arg === "--print-loaded-threads") {
+      opts.printLoadedThreads = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
     } else if (arg === "--workspace-root") {
@@ -148,6 +243,14 @@ function parseArgs(argv) {
   }
 
   if (opts.help) return opts;
+  // The loaded-thread probe neither watches an inbox nor resolves an identity,
+  // so every option below is meaningless to it. --project in particular is the
+  // one thing its caller cannot supply usefully: a project is how you find a
+  // ROLE, and the probe exists precisely because no role is seated yet.
+  if (opts.printLoadedThreads) {
+    if (!opts.appServer) die("--print-loaded-threads requires --app-server");
+    return opts;
+  }
   if (!opts.project) die("--project is required");
   if (opts.workspaceRoots.some((root) => !root)) die("--workspace-root requires a path");
   opts.workspaceRoots = [...new Set([opts.project, ...opts.workspaceRoots])];
@@ -263,7 +366,10 @@ class AppServerClient {
     });
 
     this.child.stderr.on("data", (chunk) => {
-      process.stderr.write(chunk);
+      // Through the funnel so a chunk that does not end in a newline cannot
+      // leave the next diagnostic continuing the child's half-line. The Buffer
+      // is passed on undecoded: see `writeErr`.
+      writeErr(chunk);
     });
 
     const lines = readline.createInterface({ input: this.child.stdout });
@@ -814,7 +920,7 @@ class CodexBridge {
     this.pendingWake = false;
     this.watchHandle = null;
     this.wakeCount = 0;
-    this.lastWakeMaxId = 0;
+    this.lastWakeMaxId = "";
     this.staleWakeCount = 0;
     this.watchFailureCount = 0;
     this.watchRearmTimer = null;
@@ -875,6 +981,32 @@ class CodexBridge {
     await this.initialize();
     await this.ensureThread();
     await this.armWatch();
+    // After armWatch, not before: the seat is a claim that this role is being
+    // delivered to, and until the watch is armed that is not yet true.
+    this.recordSeat();
+  }
+
+  // Write the seat from the thread the bridge actually armed on (#579). Seating
+  // before this point can only ever be inference -- the app-server is the one
+  // that knows which thread this session got, and it does not know it until the
+  // resume above succeeded. So whatever seeded the seat earlier, the value it
+  // guessed is replaced here by one the app-server confirmed.
+  //
+  // Best-effort by design: a failure to record costs the NEXT session a resume,
+  // not this one, which is already armed and delivering. Never let it take the
+  // bridge down.
+  recordSeat() {
+    if (!this.threadId || this.threadId === "loaded") return;
+    for (const pair of this.identities) {
+      try {
+        spawnSync(BASH_BIN, [
+          path.join(SCRIPT_DIR, "codex-record-session.sh"),
+          pair.team, pair.name, toPosixPath(this.opts.project),
+        ], { cwd: SKILL_DIR, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: this.threadId } });
+      } catch (error) {
+        console.error(`codex-bridge: could not record seat for ${pair.team}/${pair.name}: ${error.message}`);
+      }
+    }
   }
 
   clientHandler(method, handler) {
@@ -1250,7 +1382,9 @@ class CodexBridge {
 
   onAgentMessageDelta(params) {
     if (params.threadId !== this.threadId) return;
-    process.stderr.write(params.delta);
+    // Same funnel: a delta is partial by name, so the flag it leaves behind is
+    // what stops the next diagnostic from joining it into one line (#784).
+    writeErr(params.delta);
     // Watchdog re-arm on this activity is handled generically by
     // client.onThreadActivity (see run()), covering every notification type,
     // not just this one.
@@ -1382,7 +1516,9 @@ class CodexBridge {
   }
 
   isStaleWake(maxId) {
-    if (maxId <= 0 || this.lastWakeMaxId !== maxId) {
+    // maxId is an OPAQUE token (the unread frontier id from watch-once), compared
+    // only for equality — never ordered. An empty token means "no unread".
+    if (!maxId || this.lastWakeMaxId !== maxId) {
       this.lastWakeMaxId = maxId;
       this.staleWakeCount = 0;
       return false;
@@ -1461,14 +1597,41 @@ function readPid(file) {
 }
 
 function parseMaxId(stdout) {
-  const match = String(stdout || "").match(/\bmax_id=([0-9]+)/);
-  return match ? Number(match[1]) : 0;
+  // max_id is now an opaque token (UUIDv7 / legacy decimal / any whitespace-free
+  // string), not an integer — return it verbatim for equality-only comparison.
+  const match = String(stdout || "").match(/\bmax_id=(\S+)/);
+  return match ? match[1] : "";
 }
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     usage();
+    return;
+  }
+
+  // Read-only probe: no identities, no pidfile, no thread resumed. Runs before
+  // resolveIdentities because seating a role is exactly what has not happened
+  // yet when this is called -- requiring an identity here would be circular.
+  if (opts.printLoadedThreads) {
+    const client = createAppServerClient(opts);
+    try {
+      // start() arms the connection; ready() is what resolves once the WebSocket
+      // handshake has completed. Awaiting start() alone sends the first request
+      // into a socket that is not connected yet.
+      client.start();
+      await client.ready?.();
+      await client.request("initialize", {
+        clientInfo: { name: "agmsg-codex-bridge", title: "agmsg Codex bridge", version: readVersion() },
+        capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: [] },
+      });
+      client.notify("initialized");
+      const response = await client.request("thread/loaded/list", {});
+      const ids = response && Array.isArray(response.data) ? response.data : [];
+      if (ids.length > 0) console.log(ids.join("\n"));
+    } finally {
+      client.stop();
+    }
     return;
   }
 
@@ -1486,4 +1649,8 @@ if (require.main === module) {
   main().catch((error) => die(error.message));
 }
 
-module.exports = { toPosixPath };
+// `writeErr` and `logLine` are exported for the same reason `toPosixPath` is:
+// the property that matters — a diagnostic never continues someone else's
+// half-line — is a property of these two together, and driving them directly
+// is the only way to state it without standing up an app-server.
+module.exports = { toPosixPath, writeErr, logLine };

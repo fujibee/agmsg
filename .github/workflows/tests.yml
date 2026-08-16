@@ -1,6 +1,7 @@
 name: tests
 
-# Run the full Bats suite on every PR and on pushes to main. The suite is
+# Run the full Bats suite on PRs targeting main or integration/remote and on
+# pushes to main. The suite is
 # fast (~2 min) and this repo is public, so GitHub-hosted runners are free —
 # running everything every time is simpler and safer than selectively running
 # "only the changed tests", which would miss regressions in shared libs
@@ -24,15 +25,44 @@ name: tests
 # CHANGELOG, etc). SKILL.md is deliberately EXCLUDED — the suite asserts on it
 # (tests/test_install.bats checks it has no unsubstituted placeholder), so a
 # SKILL.md change must run the suite. Anything not on the allowlist runs it too.
+#
+# `docs_only` only decides the bats suite. `age-v1-contract` and
+# `storage-jsonl` are additional, narrower jobs (crypto vectors / the jsonl
+# storage driver) that used to gate on the same flag, so anything that turned
+# `docs_only` false forced both of them to run in full regardless of whether
+# the diff had anything to do with either -- concretely, a
+# `docs/remote-setup*.md`-only diff (which must flip docs_only so the suite
+# that reads it still runs, see below) also ran a ~5-minute age-v1 job and two
+# ~1-minute jsonl jobs that never touch that file (#706). `contracts_needed`
+# is `docs_only`'s negation for most paths, but for `tests/test_remote*.bats`
+# specifically it is a membership check against a DERIVED read-set (the
+# explicit entry points age-v1-contract/storage-jsonl invoke, plus whichever
+# bats files currently `grep -rl 'skip_if_no_age'`) rather than "the glob
+# matched, so true". A hand exception for the one file that first exposed
+# this (`tests/test_remote_setup_doc.bats`) fixed that one file and left four
+# more real files the same glob sweeps in without reading either contract
+# (`test_remote_forget`/`test_remote_status_liveness`/`test_remote_sync`/
+# `test_remote_sync_engine`) — see the classifier below for the derivation
+# itself.
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, integration/remote]
 
 permissions:
   contents: read
+
+env:
+  # Number of parallel bats shards per OS. The matrix and the shard helper must
+  # stay in lockstep; the stable summary job below verifies that they do.
+  SHARD_TOTAL: 4
+  # Pinned so the Windows sqlite cache key means something: a hit is the same
+  # binary, not whatever the feed is serving today (#824). Bumping this is one
+  # cache miss and one trip to chocolatey, which is the only time the community
+  # feed is asked at all.
+  WINDOWS_SQLITE_VERSION: '3.53.4'
 
 jobs:
   # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
@@ -43,6 +73,9 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       app_changed: ${{ steps.detect.outputs.app_changed }}
+      server_changed: ${{ steps.detect.outputs.server_changed }}
+      sync_changed: ${{ steps.detect.outputs.sync_changed }}
+      contracts_needed: ${{ steps.detect.outputs.contracts_needed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,6 +91,9 @@ jobs:
             echo "Event is '$EVENT' (not pull_request) — running the full suite."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "app_changed=true" >> "$GITHUB_OUTPUT"
+            echo "server_changed=true" >> "$GITHUB_OUTPUT"
+            echo "sync_changed=true" >> "$GITHUB_OUTPUT"
+            echo "contracts_needed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
@@ -65,45 +101,74 @@ jobs:
           echo "$changed"
           docs_only=true
           app_changed=false
+          server_changed=false
+          sync_changed=false
+          contracts_needed=false
+          # The actual test-file read-set for age-v1-contract/storage-jsonl,
+          # DERIVED rather than named (#706 recurred once already from a hand
+          # exception, and a hand exception is what this replaces): the four
+          # explicit entry points those two jobs invoke below, plus whichever
+          # bats files currently gate on age -- computed the exact same way
+          # age-v1-contract discovers its own age-gated files further down in
+          # this file (`grep -rl 'skip_if_no_age'`), so a file gaining or
+          # losing that marker is picked up here without anyone touching this
+          # workflow. `tests/test_remote*.bats` alone matches six files by
+          # name and only one of them (test_remote.bats) is in this set; the
+          # other five (including the walkthroughs' own guard test) do not
+          # read either contract, and naming each one as its own exception is
+          # the same defect this replaces, just moved.
+          contract_test_files="$(printf '%s\n' \
+            tests/sync_cipher.test.mjs \
+            tests/test_sync_cipher.bats \
+            tests/test_jsonl_remote_sync.bats \
+            tests/test_storage_contract.bats \
+            $(grep -rl 'skip_if_no_age' tests/*.bats 2>/dev/null || true))"
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
+              docs/remote-setup*.md) docs_only=false ;;
               docs/*) ;;
               site/*) ;;
               app/*) app_changed=true ;;
+              server/*) docs_only=false; server_changed=true; contracts_needed=true ;;
+              # Split from the broad sync-engine arm below on purpose:
+              # `tests/test_remote*.bats` decides `sync_changed` for six real
+              # bats files (all of them ARE the sync engine's own tests, or
+              # at least reachable from this glob by name), but only some of
+              # them are in `contract_test_files` above. contracts_needed is
+              # therefore a membership check against the derived set, not an
+              # unconditional true the way `sync_changed` on the same line
+              # is -- that half of this arm is correct as broad, this half
+              # was not.
+              tests/test_remote*.bats)
+                docs_only=false; sync_changed=true
+                if printf '%s\n' "$contract_test_files" | grep -qxF -- "$f"; then
+                  contracts_needed=true
+                fi
+                ;;
+              scripts/remote*.sh|scripts/internal/*|scripts/drivers/storage/*|scripts/lib/*|tests/*sync*.*|server/test/sync-client.integration.test.ts|.github/workflows/tests.yml) docs_only=false; sync_changed=true; contracts_needed=true ;;
               llms.txt|llms-full.txt) ;;
               README.md|CHANGELOG.md|CONTRIBUTING.md|PRIVACY.md|ARCHITECTURE.md|RELEASING.md|LICENSE) ;;
               # NOTE: SKILL.md is intentionally not here — the suite tests it.
-              *) docs_only=false ;;
+              *) docs_only=false; contracts_needed=true ;;
             esac
           done <<< "$changed"
-          echo "Result: docs_only=$docs_only app_changed=$app_changed"
+          echo "Result: docs_only=$docs_only app_changed=$app_changed server_changed=$server_changed sync_changed=$sync_changed contracts_needed=$contracts_needed"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "app_changed=$app_changed" >> "$GITHUB_OUTPUT"
+          echo "server_changed=$server_changed" >> "$GITHUB_OUTPUT"
+          echo "sync_changed=$sync_changed" >> "$GITHUB_OUTPUT"
+          echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
 
-  bats:
-    name: bats (${{ matrix.os }})
+  bats-shard:
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
     # block the PR). When changes failed, docs_only is empty → heavy steps run.
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
-    # Bound a hung runner/test so a stall fails fast (and is re-runnable) instead
-    # of pinning this REQUIRED check for the GitHub default of 6h.
-    #
-    # Keep this comfortably above the real suite time, not just above it. The
-    # cap was 15 when the suite ran in ~5 min; the suite has since grown to 728
-    # tests and macOS measures 11m57s-14m10s, leaving 1-3 min of headroom. The
-    # result was that ~47% of macOS runs (9 of 19 sampled) were killed mid-suite
-    # at ~15m18s, at whatever test happened to be running — a REQUIRED check
-    # behaving like a coin flip on PRs that changed nothing relevant. 25 matches
-    # the app-test-windows job below.
-    #
-    # If the suite grows enough that this cap starts firing again, raise it (or
-    # split the suite) rather than re-running until it passes: a job that always
-    # dies at the same elapsed time is a timeout, not a flaky test.
-    # bats-windows sets its own timeout; this covers ubuntu/macos.
+    # A shard has generous headroom under this cap; a timeout is a genuine hang.
     timeout-minutes: 25
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
@@ -111,12 +176,29 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+
+      - name: Compute this shard's test files
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD" -gt "$SHARD_TOTAL" ]; then
+            echo "::error::matrix shard $SHARD exceeds SHARD_TOTAL=$SHARD_TOTAL"
+            exit 1
+          fi
+          .github/scripts/shard-tests.sh "$SHARD" "$SHARD_TOTAL" > shard-files.txt
+          if [ ! -s shard-files.txt ]; then
+            echo "::error::shard $SHARD of $SHARD_TOTAL was assigned no test files"
+            exit 1
+          fi
 
       - name: Ensure sqlite3 is available (Linux)
         if: runner.os == 'Linux' && needs.changes.outputs.docs_only != 'true'
@@ -140,9 +222,288 @@ jobs:
           sqlite3 --version
           bats --version
 
-      - name: Run bats suite
+      # Diagnostics for the shards that report every test ok and then sit
+      # silent until the job's cap. The sampler writes to a file and never to
+      # this step's stdout: a process holding that pipe is one of the things
+      # under suspicion, so the instrument must not be able to cause what it is
+      # measuring. It closes fds 3 and 4 for the same reason, and gives itself a
+      # hard lifetime so it cannot outlive the job it is watching.
+      - name: Start hang sampler
         if: needs.changes.outputs.docs_only != 'true'
-        run: bats --print-output-on-failure tests/
+        continue-on-error: true
+        run: |
+          set +e
+          cat > "$RUNNER_TEMP/sampler.sh" <<'SAMPLER'
+          #!/usr/bin/env bash
+          out="$RUNNER_TEMP/hang-samples.txt"
+          : > "$out"
+          for i in $(seq 1 46); do
+            [ -f "$RUNNER_TEMP/bats-done" ] && { echo "== bats finished, sampler stopping at sample $i" >> "$out"; break; }
+            {
+              echo "===== sample $i  $(date -u +%H:%M:%S)"
+              ps -ef 2>/dev/null | grep -vE '\[' | tail -n +2
+              # One lsof over every candidate at once. Per-pid calls put the two
+              # ends of a pipe in separate blocks minutes apart in the log, and
+              # a reader has to spot that two numbers match; in the 08-01 hang
+              # nobody did, and a 14-line cap had cut the decisive line anyway.
+              pids="$(ps -eo pid=,comm= 2>/dev/null \
+                | awk '$2 ~ /node|python|bats|bash/ {printf "%s%s", sep, $1; sep=","}')"
+              if [ -n "$pids" ]; then
+                lsof -F pcftDin -p "$pids" 2>/dev/null > "$RUNNER_TEMP/sample-lsof.txt"
+                echo "----- pipes held by more than one process:"
+                awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/sample-lsof.txt"
+                echo "----- every descriptor they hold (no cap):"
+                lsof -p "$pids" 2>/dev/null
+              fi
+              echo "----- bats temp dirs left behind:"
+              ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
+                | awk 'tolower($0) ~ /bats/ { n++; if (n <= 20) print }'
+            } >> "$out" 2>&1
+            sleep 30
+          done
+          SAMPLER
+          chmod +x "$RUNNER_TEMP/sampler.sh"
+          nohup "$RUNNER_TEMP/sampler.sh" >/dev/null 2>&1 3>&- 4>&- &
+          echo "sampler pid $!"
+
+      - name: Run bats suite (this shard)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          set +e
+          xargs bats --print-output-on-failure < shard-files.txt
+          status=$?
+          : > "$RUNNER_TEMP/bats-done"
+          exit $status
+
+      # always() so this also runs when the job is cancelled at its cap, which
+      # is the only case that matters here.
+      # continue-on-error and a best-effort body: this step exists to describe a
+      # failure, and a probe that returns non-zero -- lsof on a pid that has just
+      # exited, a grep that matches nothing -- must never be what turns a green
+      # shard red. The runner's default shell is `bash -e`, so -e is dropped
+      # explicitly and every probe is allowed to fail. `head` is avoided in
+      # pipelines for the same reason: it closes the pipe early and SIGPIPEs
+      # whatever was writing.
+      - name: Hang forensics
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        run: |
+          set +e
+          set +o pipefail 2>/dev/null || true
+          echo "##### live snapshot at $(date -u +%H:%M:%S 2>/dev/null)"
+          ps -ef 2>/dev/null | awk 'NR > 1 && NR <= 61'
+          # One snapshot over every candidate, so both ends of a pipe are in the
+          # same dump and can be matched by machine rather than by eye.
+          pids="$(ps -eo pid=,comm= 2>/dev/null \
+            | awk '$2 ~ /node|python|bats|bash|sleep/ {printf "%s%s", sep, $1; sep=","}')"
+          if [ -n "$pids" ]; then
+            lsof -F pcftDin -p "$pids" 2>/dev/null > "$RUNNER_TEMP/forensic-lsof.txt"
+          else
+            : > "$RUNNER_TEMP/forensic-lsof.txt"
+          fi
+          echo "##### pipes held by more than one process:"
+          echo "##### (a shard that reported every test ok and is still open is usually one of these:"
+          echo "#####  a process that outlived its caller, holding the pipe bats is waiting to see close)"
+          awk -f "$GITHUB_WORKSPACE/.github/scripts/pipe-holders.awk" "$RUNNER_TEMP/forensic-lsof.txt"
+          echo "##### every descriptor those processes hold (no per-pid cap):"
+          lsof -p "$pids" 2>/dev/null
+          echo "##### bats temp remnants:"
+          ls -la "${TMPDIR:-/tmp}" 2>/dev/null \
+            | awk 'tolower($0) ~ /bats/ { n++; if (n <= 20) print }'
+          echo "##### sampler timeline:"
+          if [ -s "$RUNNER_TEMP/hang-samples.txt" ]; then
+            cat "$RUNNER_TEMP/hang-samples.txt" 2>/dev/null
+          else
+            echo "(no samples)"
+          fi
+          exit 0
+
+      - name: Upload hang samples
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-samples-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/hang-samples.txt
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Record which files this shard ran
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-manifest-${{ matrix.os }}-${{ matrix.shard }}
+          path: shard-files.txt
+          retention-days: 1
+
+  # Keep the required check name stable even if the shard count changes.
+  bats:
+    name: bats
+    needs: [changes, bats-shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shard results
+        env:
+          RESULT: ${{ needs.bats-shard.result }}
+        run: |
+          set -euo pipefail
+          case "$RESULT" in
+            success) ;;
+            skipped) echo "::error::the bats shards did not run"; exit 1 ;;
+            *) echo "::error::the bats shards did not all pass (result: $RESULT)"; exit 1 ;;
+          esac
+
+      - name: Docs-only change — no shard manifests to verify
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Diff is documentation-only; shard manifests are not expected."
+
+      - name: Download shard manifests
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bats-manifest-*
+          path: manifests
+
+      - name: Verify the shards covered the whole suite
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          set -euo pipefail
+          expected="$(find tests -maxdepth 1 -name '*.bats' | LC_ALL=C sort)"
+          status=0
+          for os in ubuntu-latest macos-latest; do
+            actual="$(cat manifests/bats-manifest-"$os"-*/shard-files.txt | LC_ALL=C sort)"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::$os shards do not exactly cover tests/*.bats"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  # The age-v1 vectors are shared normative fixtures. Exercise them with the
+  # pinned standard age implementation instead of accepting only mock crypto
+  # or skipping on runners that do not preinstall age.
+  age-v1-contract:
+    name: age-v1 contract
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Was 10, sized for the vectors and one filtered test. This job now runs
+    # every age-gated test -- about a hundred, across two files -- on top of a
+    # go install, so the old cap would have turned a slow runner into a
+    # cancellation rather than a result.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docs-only change — skipping contract
+        if: needs.changes.outputs.contracts_needed == 'false'
+        run: echo "Diff does not touch anything the age-v1 contract reads; skipping."
+
+      - uses: actions/setup-go@v5
+        if: needs.changes.outputs.contracts_needed != 'false'
+        with:
+          go-version: '1.25.x'
+
+      - name: Ensure SQLite and jq are available
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          sqlite3 --version >/dev/null 2>&1 && jq --version >/dev/null 2>&1 || {
+            sudo apt-get update
+            sudo apt-get install -y sqlite3 jq
+          }
+
+      - name: Install pinned age implementation
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          go install filippo.io/age/cmd/age@v1.3.1
+          go install filippo.io/age/cmd/age-keygen@v1.3.1
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+
+      - name: Run age-v1 shared vectors
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          age_bin="$(go env GOPATH)/bin/age"
+          AGMSG_AGE_BIN="$age_bin" node --test tests/sync_cipher.test.mjs
+          AGMSG_AGE_BIN="$age_bin" bats --print-output-on-failure tests/test_sync_cipher.bats
+          AGMSG_AGE_BIN="$age_bin" bats --print-output-on-failure tests/test_jsonl_remote_sync.bats
+          AGE_BIN="$age_bin" node docs/spec/vectors/verify-age-v1-vectors.mjs
+
+      # Every test that gates itself on age, discovered from the tree rather than
+      # listed here. A list is how #567 happened on the Windows side: a file the
+      # list did not name ran in no job at all, and CI went on reporting green
+      # while never executing it. The same hole was open here -- 31 tests gate on
+      # age, the shards skip them for want of the binary, and this job named one
+      # of them, so 30 were executed nowhere. Two of those were already red.
+      - name: Run every age-gated test
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          command -v age >/dev/null
+          command -v age-keygen >/dev/null
+          files="$(grep -rl 'skip_if_no_age' tests/*.bats | sort | tr '\n' ' ')"
+          echo "age-gated files: $files"
+          # A discovery that finds nothing must fail loudly. Silently running no
+          # tests is indistinguishable from running them all successfully, which
+          # is the failure this step exists to end.
+          [ -n "$files" ] || { echo "::error::no age-gated test files found; the discovery is broken"; exit 1; }
+          # shellcheck disable=SC2086
+          bats --print-output-on-failure $files
+
+  # Continuously verify that the storage contract is backend-portable: run the
+  # SAME driver-agnostic contract suite against the jsonl driver (the sqlite run
+  # is covered by the `bats` job above). This catches silent rot in jsonl as the
+  # contract evolves. Not a required check yet (promote once stable). duckdb is an
+  # opt-in accelerator, absent on the runner, so the jq path is exercised here.
+  storage-jsonl:
+    name: storage contract (jsonl, ${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      # Both userlands — the jsonl driver shells out to jq/sed/sort/cksum/paste,
+      # whose behaviour differs between GNU (Linux) and BSD (macOS).
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docs-only change — skipping
+        if: needs.changes.outputs.contracts_needed == 'false'
+        run: echo "Diff does not touch anything the jsonl storage contract reads; skipping."
+
+      - name: Ensure jq + sqlite3 (Linux)
+        if: runner.os == 'Linux' && needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          jq --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+          sqlite3 --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y sqlite3; }
+
+      - name: Install bats
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        if: needs.changes.outputs.contracts_needed != 'false'
+        run: |
+          jq --version
+          sqlite3 --version
+          bats --version
+
+      - name: Run the storage contract against the jsonl driver
+        if: needs.changes.outputs.contracts_needed != 'false'
+        env:
+          AGMSG_STORAGE_DRIVER: jsonl
+        run: bats --print-output-on-failure tests/test_storage_contract.bats
 
   # Windows coverage for the native helpers shipped in #103 (Git Bash runner,
   # sqlite3 compatibility shim, cygpath normalization). The POSIX-assuming suite
@@ -174,6 +535,39 @@ jobs:
           - leg: install helpers
             filter: "[Ww]indows"
             target: tests/test_install.bats
+            sqlite: true
+          # The Windows runtime path, which nothing here covered until #567: a
+          # change to how liveness is decided on Windows shipped through a CI
+          # that never decided liveness on Windows. Everything else about that
+          # class is proved against a `tasklist` stub on a POSIX host, which
+          # shows what the code does when a probe says "not found" -- not that
+          # Git Bash says it, and not that a launch survives it.
+          #
+          # These two run with the real tasklist and the real MSYS pid space,
+          # and they assert the EFFECT rather than the premise: the TUI reaches
+          # its bridged --remote handoff, and a bridge is actually started.
+          # Reaching the handoff is not delivering a message -- they are
+          # separate failure points and each has its own test.
+          - leg: windows runtime (#567)
+            filter: "windows-native"
+            target: tests/test_codex_monitor.bats tests/test_codex_bridge_launcher.bats
+            sqlite: true
+          # The roster driver's staged input (#817). Same reasoning as the leg
+          # above, one layer down: the fix is for Windows, and two of the things
+          # it rests on -- an ordinary file descriptor arriving as Git Bash's
+          # stdin, and a temp file that cannot be unlinked while open -- behave
+          # differently there than on the hosts that were measured. The engine's
+          # own bats leg is ubuntu and macos only, so this selects the two tests
+          # that would notice and runs them on the platform in question.
+          - leg: driver input (#817)
+            filter: "driver-input"
+            target: tests/test_remote_sync_driver_input.bats
+            # No sqlite3: these two drive a mock bash driver and never open a
+            # store. Installing it anyway made this leg red for an outage in a
+            # third-party package feed, on a run where its own tests never
+            # started -- a leg that fails for something it does not use reports
+            # on that thing, not on the code.
+            sqlite: false
     defaults:
       run:
         # bats is bash; on Windows runners `shell: bash` is Git Bash, the same
@@ -186,25 +580,70 @@ jobs:
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the Windows bats legs."
 
-      # chocolatey's community feed intermittently returns 504, which leaves the
-      # runner with no sqlite3 at all ("Chocolatey installed 0/0 packages").
-      # Retry rather than let a transient feed outage redden an unrelated PR.
+      # A THIRD PARTY'S BAD MINUTE MUST NOT BE REPORTED AS THIS CHANGE'S RED
+      # (#824). `choco install sqlite -y --no-progress` was one call with no
+      # retry, no cache and — the part that did the damage — no check. On a 503
+      # from the community feed it printed "Chocolatey installed 0/0 packages"
+      # and EXITED ZERO, so the step went green, the version step's
+      # `|| echo "not found"` turned a missing binary into a success line, and
+      # the red landed three steps later on `Run tests`. Measured on
+      # run 31869238895: steps 4, 5, 6 and 7 all `success`, step 8 `failure`,
+      # with `sqlite3: command not found` in step 7's own log.
+      #
+      # Reading that check list, the failure belongs to the change under test.
+      # It did not. The feed's flakiness is not ours to fix; which step goes red
+      # is.
+      #
+      # EVERY STEP HERE IS GATED ON `matrix.sqlite`, which #822 added. A leg that
+      # never opens a store must not be stopped by a package feed either — that
+      # is the contract #822 built, and hardening the install would have
+      # cancelled it by making `driver input (#817)` depend on chocolatey again.
+      #
+      # The restore is tried first so most runs never ask the feed at all: the
+      # key is the pinned version, so a hit is the same binary and a miss is the
+      # only thing that needs the network.
+      - name: Restore sqlite3 (cache)
+        if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
+        id: sqlite-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\SQLite
+            C:\ProgramData\chocolatey\bin\sqlite3.exe
+          key: sqlite3-${{ runner.os }}-choco-${{ env.WINDOWS_SQLITE_VERSION }}
+
       - name: Install sqlite3
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite && steps.sqlite-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          # Three attempts with a widening pause. The observed failures are 503
+          # and 504 from `community.chocolatey.org`, and they are per-request
+          # rather than an outage: on run 31869238895 the two Windows legs ran
+          # concurrently and one of them installed fine.
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            choco install sqlite -y --no-progress
-            if ($LASTEXITCODE -eq 0) { exit 0 }
-            Write-Host "::warning::choco install sqlite failed (attempt $attempt of 3); retrying"
-            Start-Sleep -Seconds 15
+            choco install sqlite --version=$env:WINDOWS_SQLITE_VERSION -y --no-progress
+            if (Test-Path 'C:\ProgramData\chocolatey\bin\sqlite3.exe') { exit 0 }
+            Write-Host "::warning::sqlite3 not installed on attempt $attempt; the chocolatey feed is answering errors"
+            Start-Sleep -Seconds (10 * $attempt)
           }
-          Write-Host "::error::sqlite3 could not be installed after 3 attempts"
-          exit 1
+          exit 0   # the hard check is its own step, so a retry loop cannot decide the colour
 
       - name: Put chocolatey shims on PATH (Git Bash form)
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
         run: echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+
+      # THE STEP THAT IS ALLOWED TO BE RED ABOUT THIS. Separate from the install
+      # on purpose: whether the dependency is present is a different question
+      # from whether one `choco` invocation worked, and only this one may decide
+      # the job's colour. Named so the check list says what is wrong — a reader
+      # seeing this red does not go looking through the diff.
+      - name: sqlite3 must be present, or this leg is about chocolatey
+        if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
+        run: |
+          if ! sqlite3 --version; then
+            echo "::error::sqlite3 is missing. The chocolatey community feed did not serve it (503/504 seen on 2026-08-15). This leg reports on that, NOT on the change under test — see #824."
+            exit 1
+          fi
 
       - name: Install bats
         if: needs.changes.outputs.docs_only != 'true'
@@ -213,16 +652,27 @@ jobs:
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
-      # Fail HERE if a tool is missing, not three minutes later inside the suite.
-      # The trailing `|| echo` this used to end with turned a missing sqlite3
-      # into a passing step, so the real symptom surfaced as unrelated install
-      # tests failing with "sqlite3 is required but not found" — which reads as
-      # a defect in whatever PR happened to be running.
       - name: Show tool versions
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash --version | head -1
-          sqlite3 --version || sqlite3.exe --version
+          # Two changes here, pulling in opposite directions (#824).
+          #
+          # The `|| sqlite3.exe --version || echo "sqlite3 not found on PATH"`
+          # fallback is gone: it turned a missing binary into a success line, so
+          # nothing between a failed install and `Run tests` said anything was
+          # wrong. Absence is decided by the presence check above, which is
+          # allowed to be red about it.
+          #
+          # Without the fallback this line would fail on a leg that never
+          # installs sqlite3 — `driver input (#817)` carries `sqlite: false`
+          # precisely so a package feed cannot stop a leg driving a mock bash
+          # driver. Reporting a version it was never meant to have would
+          # re-create, one step lower, the coupling #822 removed.
+          # `matrix.sqlite` is a fixed value from the matrix above.
+          if [ "${{ matrix.sqlite }}" = "true" ]; then
+            sqlite3 --version
+          fi
           bats --version
 
       - name: Run tests
@@ -311,6 +761,144 @@ jobs:
         if: needs.changes.outputs.app_changed != 'false'
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+  # PostgreSQL-backed contract tests for the independent reference server and
+  # Stage-1 clients. Like app-check, this always reports and skips heavy work
+  # only when the diff provably touches neither side of that boundary.
+  server-check:
+    name: remote server
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agmsg_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agmsg_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No server or sync changes — skipping checks
+        if: needs.changes.outputs.server_changed == 'false' && needs.changes.outputs.sync_changed == 'false'
+        run: echo "Diff does not touch server/ or the Stage-1 client — reporting green without running remote integration checks."
+
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        run: npm ci
+
+      - name: Typecheck
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        run: npm run typecheck
+
+      - name: PostgreSQL integration tests
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agmsg_test
+        run: npm test
+
+      - name: Build
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        run: npm run build
+
+      - name: Compiled start smoke test
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agmsg_test
+          LOG_LEVEL: silent
+        run: |
+          npm start > "$RUNNER_TEMP/agmsg-server.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/agmsg-server.log"
+          exit 1
+
+      - name: Docker image and health smoke test
+        if: needs.changes.outputs.server_changed != 'false' || needs.changes.outputs.sync_changed != 'false'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agmsg_test
+          CONTAINER_NAME: agmsg-reference-ci-${{ github.run_id }}
+        run: |
+          docker build -t agmsg-reference-server:ci .
+          docker run --detach --name "$CONTAINER_NAME" --network host \
+            --env DATABASE_URL \
+            --env HOST=127.0.0.1 --env PORT=8788 --env LOG_LEVEL=silent \
+            agmsg-reference-server:ci
+          cleanup() {
+            docker rm --force "$CONTAINER_NAME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          healthy=false
+          for _attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8788/v1/health >/dev/null; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$healthy" != true ]; then
+            docker logs "$CONTAINER_NAME"
+            exit 1
+          fi
+          # A container really registering a team and serving a read, through the
+          # current protocol: the client mints the team_id and posts it to
+          # /v1/connect, and the data plane takes the team from its header. No
+          # token is exchanged and no credential is presented, because none
+          # exists to present.
+          docker exec "$CONTAINER_NAME" node --input-type=module -e '
+            const endpoint = "http://127.0.0.1:8788";
+            const team = "018f3f7e-0000-7000-8000-000000000901";
+            const common = {"Agmsg-Protocol-Version": "1"};
+            const connected = await fetch(`${endpoint}/v1/connect`, {
+              method: "POST",
+              headers: {...common, "Content-Type": "application/json"},
+              body: JSON.stringify({
+                team_id: team,
+                team_name: "ci-docker-onboarding",
+                members: [],
+              }),
+            });
+            if (connected.status !== 200) {
+              console.error("connect:", connected.status, await connected.text());
+              process.exit(1);
+            }
+            const members = await fetch(`${endpoint}/v1/members`, {
+              headers: {...common, "Agmsg-Team-ID": team},
+            });
+            if (members.status !== 200) {
+              console.error("members:", members.status, await members.text());
+              process.exit(1);
+            }
+          '
+
   # Windows leg for the app: the command layer's bash resolution and path
   # conversion are all behind cfg(windows) and had never run in CI — the very
   # 0.1.1→0.1.3 regressions (WSL bash.exe, backslash argv). This runs cargo test
@@ -348,3 +936,59 @@ jobs:
       - name: Rust tests
         if: needs.changes.outputs.app_changed != 'false'
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Internal team names must not reach what we publish. This runs on EVERY diff,
+  # with no docs-only skip: the docs tree is exactly where prose names people,
+  # and a check that skips the files most likely to carry the problem is
+  # decoration. It costs one node process over `git ls-files`.
+  #
+  # SHAPE ONLY, AND THAT IS A DECISION, NOT AN ACCIDENT.
+  #
+  # Seat names have a shape (<base>-cc<n> / <base>-co<n>), so a pattern catches
+  # the whole class -- including seats nobody has created yet -- while putting
+  # no name into this repository. That half runs here.
+  #
+  # Names with no shape (a person's handle, a project nickname) are NOT checked
+  # by CI. Checking them needs the list of them, and the only way to give CI
+  # that list is to hand it to GitHub as a secret -- publishing, to a third
+  # party, the names the rule exists to keep unpublished. So that half runs
+  # before push, from a private checkout that holds the list, and never here.
+  #
+  # A green here therefore means "no seat-shaped name", not "no internal name".
+  # The script prints that in a banner rather than letting the distinction live
+  # only in this comment. `none` is passed explicitly for the same reason: an
+  # UNSET list is exit 2, so a run that checks half of what it claims can only
+  # happen because someone wrote it down, never because a variable was missing.
+  enforced-assertions:
+    name: enforceable assertions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Always runs and always reports, like every other job here: a job that
+    # skips on some diffs is a required context that can sit pending forever
+    # (see the paths-ignore note at the top of this file). It reads only
+    # `tests/*.bats`, so it is cheap enough to run unconditionally rather than
+    # to gate.
+    steps:
+      - uses: actions/checkout@v4
+
+      # No bats, no bash 3.2, no runners: this is a static read of the test
+      # sources. The BEHAVIOUR it encodes was measured on both shells (#670);
+      # what runs here is the count.
+      - name: No new assertion that cannot fail
+        run: .github/scripts/check-enforced-assertions.sh
+
+  private-names:
+    name: internal names
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `none` is written out here on purpose: it is the difference between
+      # "we check the shapes" and "nobody configured anything".
+      - name: Check the shapes we publish (unshaped names are checked before push)
+        run: AGMSG_PRIVATE_NAMES=none node scripts/check-private-names.mjs

@@ -76,7 +76,7 @@ describe("computeRects", () => {
     expect(rects.get("p4")).toEqual({ left: 50, top: 50, width: 50, height: 50 });
   });
 
-  // Invariant (aggie review, recommendation 4): rects tile the unit rect
+  // Invariant (an earlier review, recommendation 4): rects tile the unit rect
   // exactly for a range of generated trees, not just the hand-picked cases
   // above — no gaps, no overlaps, areas sum to the whole.
   it("invariant: leaf rects always tile the full rect with no gaps or overlaps", () => {
@@ -278,7 +278,7 @@ describe("insertBeside", () => {
     expect(insertBeside(tree, "p1", "left", "p1")).toBe(tree);
   });
 
-  // co1 + aggie review: without this guard, splicing newPaneId out FIRST
+  // an earlier review: without this guard, splicing newPaneId out FIRST
   // and only then failing to find a nonexistent targetPaneId would return
   // "the tree minus newPaneId" — silently dropping the dragged pane
   // entirely rather than leaving it in place. Reachable via a real UI race
@@ -442,7 +442,7 @@ describe("clampRatio / minRatioForPx", () => {
   });
 });
 
-describe("invariants (aggie review, recommendation 4)", () => {
+describe("invariants (an earlier review, recommendation 4)", () => {
   it("round-trip: leaves(spliceOutLeaf(insertAsNewLeaf(t, id), id)) === leaves(t)", () => {
     const trees: SplitNode[] = [
       leaf("solo"),
@@ -597,7 +597,7 @@ describe("transposeGrid", () => {
     expect(transposeGrid(transposeGrid(tree))).toEqual(tree);
   });
 
-  // co1 review: self-inverse does NOT generalize past 2 columns/rows — a
+  // review: self-inverse does NOT generalize past 2 columns/rows — a
   // transposed 3-column grid's own top-level children no longer match each
   // other (a 1-level leaf-pair vs. a 2-level chain), so a second
   // transposeGrid call is just a no-op rather than reconstructing the
@@ -658,7 +658,7 @@ describe("transposeGrid", () => {
 });
 
 describe("dividerDragKey", () => {
-  it("stays the same across a grid-segment transpose (regression, co1 review PR #390)", () => {
+  it("stays the same across a grid-segment transpose (regression, review PR #390)", () => {
     // A 3-column aligned grid: transposing a grid-segment divider from one
     // of these turns the OTHER segments' dividers from "grid-segment" into
     // "single" (a 2x2 grid stays grid-shaped either way — this needed 3+
