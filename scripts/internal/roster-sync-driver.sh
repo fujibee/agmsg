@@ -419,9 +419,11 @@ if [ "$_roster_wait" != "none" ]; then
     case "$_roster_inner" in
       ''|*[!0-9]*|0*) _roster_inner="" ;;
     esac
-    # WHAT WAS ACTUALLY SENT IS RECORDED, because the state can change under
-    # us between one signal and the next (raised in review, and it stood for
-    # three rounds before I read it properly).
+    # WHAT WAS ACTUALLY ATTEMPTED IS RECORDED, because the state can change
+    # under us between one signal and the next (raised in review, and it stood
+    # for three rounds before I read it properly). "Attempted" is the whole
+    # claim — see the note below, and do not widen this heading back to
+    # "sent": the block would then state two different contracts.
     #
     # The predicate is re-asked before TERM and again before KILL, which is
     # right — but it means a pid that was `ours` at the first can be `unknown`
