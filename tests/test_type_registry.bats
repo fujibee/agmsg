@@ -125,13 +125,32 @@ write_node_launcher_fixtures() {
   # The negative half alone would pass on a file that says nothing at all, so
   # both halves are asserted, and the count is explicit for the same reason as
   # the #682 test above.
+  # A template is an installer INPUT: install.sh renders it with
+  # `sed s/__SKILL_NAME__/$CMD_NAME/g`, so a route written with a literal
+  # `agmsg` sends an agent installed as `--cmd m` at somebody else's install
+  # — and rotation changes key state, so that is not a cosmetic slip. The
+  # path is therefore asserted per surface kind, not as one shared substring:
+  # matching only `key.sh rotate <team>` is green for both spellings and
+  # would have let this through.
   local surface count=0
   for surface in "$BATS_TEST_DIRNAME"/../scripts/drivers/types/*/template.md \
                  "$BATS_TEST_DIRNAME"/../SKILL.md; do
     [ -f "$surface" ] || continue
     count=$((count + 1))
-    grep -Fq 'key.sh rotate <team>' "$surface" \
-      || { echo "does not route key rotate: $surface" >&2; return 1; }
+    case "$surface" in
+      */SKILL.md)
+        # The top-level skill doc is a rendered artifact, not an input: it
+        # carries no placeholder at all, so here the literal is correct.
+        grep -Fq 'bash ~/.agents/skills/agmsg/scripts/key.sh rotate <team>' "$surface" \
+          || { echo "SKILL.md does not route rotate through the literal install path: $surface" >&2; return 1; }
+        ;;
+      *)
+        grep -Fq 'bash ~/.agents/skills/__SKILL_NAME__/scripts/key.sh rotate <team>' "$surface" \
+          || { echo "template does not route rotate through __SKILL_NAME__: $surface" >&2; return 1; }
+        ! grep -Fq '~/.agents/skills/agmsg/' "$surface" \
+          || { echo "template hardcodes the default install name: $surface" >&2; return 1; }
+        ;;
+    esac
     grep -Fq 'Device pairing (`key request` / `key approve`) is not implemented' "$surface" \
       || { echo "does not state the pairing commands are absent: $surface" >&2; return 1; }
     ! grep -qiE 'rotat(e|ion)[^.]*not available' "$surface" \

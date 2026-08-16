@@ -238,7 +238,7 @@ If argument starts with "key import" followed by a team name:
 If argument starts with "key rotate" followed by a team name:
 1. Rotation mints a replacement epoch for a team that already has a key and announces it on the roster journal. It requires an existing current key, an identity journal (connect or migrate the team first), and `age`; it refuses with a message naming whichever is missing.
 2. Confirm with the user before running it. It changes the team's key state, and every other machine has to receive the new identity out of band.
-3. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh rotate <team>`
+3. Run: `bash ~/.agents/skills/__SKILL_NAME__/scripts/key.sh rotate <team>`
 4. Show the output: epoch, key_id, and recipient fingerprint. The private key is never written to the journal. Revealing it needs `key show <team> --key-id <id> --reveal-secret`, which is refused in agent mode — tell the user to run that in their own terminal.
 5. Messages before the acknowledged rotation boundary remain readable with the old key.
 
