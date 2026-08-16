@@ -868,3 +868,71 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *alice* ]]
 }
+
+# --- provenance across path spaces (#830) --------------------------------
+#     The test above passes on any POSIX host because `$SCRIPT_DIR` and
+#     `git rev-parse --show-toplevel` agree there. On Windows they do not:
+#     bash hands out `/tmp/tmp.XXXX/agmsg` and git answers
+#     `C:/Users/.../tmp.XXXX/agmsg`, so the equality guarding the describe
+#     branch was always false and every Git Bash install silently recorded the
+#     fallback instead. This reproduces that mismatch on this host.
+
+@test "install: records provenance even when git reports the toplevel in another path space (#830)" {
+  # A git that answers `rev-parse --show-toplevel` in native Windows form and
+  # passes everything else — including `describe` — through to the real one.
+  # Rewriting only that one answer is what makes this a model of the platform
+  # rather than a broken git.
+  local shim_dir="$FAKE_HOME/shim-git"
+  mkdir -p "$shim_dir"
+  cat >"$shim_dir/git" <<'SHIM'
+#!/usr/bin/env bash
+real="$(PATH="${PATH#*:}" command -v git)"
+for a in "$@"; do
+  if [ "$a" = "--show-toplevel" ]; then
+    top="$("$real" "$@")" || exit $?
+    # `/tmp/x` -> `C:/tmp/x`: a different space, same directory.
+    printf 'C:%s\n' "$top"
+    exit 0
+  fi
+done
+exec "$real" "$@"
+SHIM
+  chmod +x "$shim_dir/git"
+
+  # BOTH HALVES OF THE PLATFORM, or the model is one-sided. Windows does not
+  # merely disagree about the path — it also ships `cygpath`, which is how the
+  # two forms are reconciled. Stubbing only the disagreement made the first
+  # version of this test unable to exercise the fix at all: it fell back, and
+  # the fix looked broken when it was the model that was incomplete.
+  cat >"$shim_dir/cygpath" <<'CYG'
+#!/usr/bin/env bash
+# -m is the mixed form; the only flag the code under test passes.
+printf 'C:%s\n' "${@: -1}"
+CYG
+  chmod +x "$shim_dir/cygpath"
+
+  # The premise, checked rather than assumed: the shim really does answer in
+  # the other form, so a green result below cannot come from the shim being
+  # bypassed.
+  run env PATH="$shim_dir:$PATH" git -C "$REPO_ROOT" rev-parse --show-toplevel
+  [ "$status" -eq 0 ]
+  [[ "$output" == C:* ]]
+
+  # What the describe branch WOULD record, taken from the real git.
+  local expected
+  expected="$(git -C "$REPO_ROOT" describe --tags --always --dirty --abbrev=7 --match 'v[0-9]*')"
+  [ -n "$expected" ]
+  # And what the fallback would record, so the assertion below is known to
+  # tell them apart. Without this the test passes on the fallback: the VERSION
+  # file holds a plausible version string too, which is how the first version
+  # of this test stayed green with the fix reverted.
+  local fallback=""
+  [ -f "$REPO_ROOT/VERSION" ] && fallback="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
+  [ "$expected" != "$fallback" ]
+
+  run env PATH="$shim_dir:$PATH" env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$status" -eq 0 ]
+  [ -f "$SK/VERSION" ]
+  run cat "$SK/VERSION"
+  [ "$output" = "$expected" ]
+}

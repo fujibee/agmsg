@@ -49,7 +49,25 @@ agmsg_source_version() {
   # app's own version comparison (agmsg_core_version_status in agmsg.rs)
   # can't parse as semver, which it then treats as "outdated" unconditionally.
   top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -n "$top" ] && [ "$top" = "$SCRIPT_DIR" ] \
+  # THE TWO SIDES ARE IN DIFFERENT PATH SPACES ON WINDOWS, so the equality was
+  # always false there and every Git Bash install recorded the VERSION file
+  # instead of the describe string (#830):
+  #
+  #   $SCRIPT_DIR            /tmp/tmp.XXXX/agmsg        MSYS form, from bash
+  #   git --show-toplevel    C:/Users/.../tmp.XXXX/agmsg  native form, from git
+  #
+  # `cygpath -m` is the mixed form git reports — the same second chance this
+  # file already takes for the writable paths below, and the same one
+  # `agmsg_cmdline_names_path` takes in compat.sh, where the identical mismatch
+  # made four watcher-ownership checks answer "not ours" on Windows.
+  #
+  # Off Windows there is no cygpath, `native` stays empty, and this is the plain
+  # comparison and nothing else.
+  native=""
+  if command -v cygpath >/dev/null 2>&1; then
+    native="$(cygpath -m "$SCRIPT_DIR" 2>/dev/null || true)"
+  fi
+  if [ -n "$top" ] && { [ "$top" = "$SCRIPT_DIR" ] || { [ -n "$native" ] && [ "$top" = "$native" ]; }; } \
       && v="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty --abbrev=7 --match 'v[0-9]*' 2>/dev/null)" \
       && [ -n "$v" ]; then
     printf '%s' "$v"
