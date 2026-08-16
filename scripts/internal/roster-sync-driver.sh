@@ -123,61 +123,23 @@ _roster_inner_state() {
   fi
   local cmd
   cmd="$(compat_get_cmdline "$_roster_inner" 2>/dev/null || true)"
-  # PLATFORM-AWARE, because a raw `case` compares two different alphabets.
+  # THE WHOLE QUESTION LIVES IN `agmsg_roster_argv_is_ours`, and it lives in
+  # `scripts/lib/roster-journal.sh` rather than here so that its cases can
+  # drive IT rather than a copy of it. Inline, the only way to reach it was to
+  # run the driver, so the tests re-implemented the comparison and then
+  # asserted on this file with `grep` -- which measures a duplicate and a
+  # spelling, never the thing production calls (raised in review).
   #
-  # Under Git Bash the shell's path is `/c/Users/...` while a native process
-  # reports `C:/Users/...`, so a raw match answers "not ours" about a process
-  # that IS ours — silently, because a non-match is the ordinary answer.
-  # `agmsg_cmdline_names_path` exists for exactly this and takes the `cygpath
-  # -m` second look; `_remote_sync_engine_status` already uses it. Reaching for
-  # a bare `case` here would have made Windows keep the lock on every timeout,
-  # on its own healthy child (raised in review).
-  #
-  # THE ORDERED TRIPLE, NOT THREE INDEPENDENT SIGHTINGS (raised in review).
-  #
-  # Asking "does the cmdline contain the script path" AND "does it contain
-  # this config" AND "does it contain this operation somewhere" is three
-  # questions, and three questions do not add up to "this operation, on this
-  # config". A command line carrying a different operation and a different
-  # config can satisfy all three at once — the operation from one place, the
-  # config from another. Two existence checks are not a relation.
-  #
-  # So the needle is the sequence the driver actually spawns:
-  #     <script> <operation> <config>
-  # and it has to appear as one run of text.
-  #
-  # BOTH ALPHABETS, because the shell's `/c/Users/...` and a native process's
-  # `C:/Users/...` are the same path written differently. `cygpath -m` is the
-  # conversion `agmsg_cmdline_names_path` uses for exactly this; it is called
-  # here rather than that function because the needle must be composed from
-  # converted PARTS — handing a whole sentence to a path converter would not
-  # do what it says.
-  local script_sh="$SCRIPT_DIR/roster-sync.mjs" script_win="" config_win=""
-  if command -v cygpath >/dev/null 2>&1; then
-    script_win="$(cygpath -m "$script_sh" 2>/dev/null || true)"
-    config_win="$(cygpath -m "$config" 2>/dev/null || true)"
+  # What it holds, and why, is documented beside it: quotes stripped first
+  # because a native Windows command line quotes any argument containing a
+  # space; both path alphabets, because `/c/Users/...` and `C:/Users/...` are
+  # the same path; the ordered triple with argument boundaries, because three
+  # separate `contains` checks are three questions and an ordered substring is
+  # still a substring.
+  if agmsg_roster_argv_is_ours "$cmd" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config"; then
+    printf 'ours\n'
+    return
   fi
-  # AND THE NEEDLE NEEDS ARGV BOUNDARIES (raised in review). An ordered
-  # substring is still a substring: with the config `/teams/demo/config.json`,
-  # the pattern matched a command line whose config was
-  # `/teams/demo/config.json.bak` — and, on the other side, a script at
-  # `/x/opt/agmsg/.../roster-sync.mjs` contains our absolute path as a tail.
-  # Both are different runs reading as ours.
-  #
-  # Padding the haystack with one space at each end lets a single pattern
-  # require a boundary on both sides without a separate end-of-string case:
-  # an argument at either extreme now has the space the pattern asks for.
-  local padded=" $cmd "
-  local s c
-  for s in "$script_sh" "$script_win"; do
-    [ -n "$s" ] || continue
-    for c in "$config" "$config_win"; do
-      [ -n "$c" ] || continue
-      case "$padded" in
-        *" $s $operation $c "*) printf 'ours\n'; return ;;
-      esac
-    done
-  done
   printf 'unknown\n'
 }
 

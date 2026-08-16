@@ -386,3 +386,63 @@ agmsg_roster_project_config() {
   fi
   agmsg_write_atomic "$config" "$updated"
 }
+
+# agmsg_roster_argv_is_ours <cmdline> <script-path> <operation> <config-path>
+#
+# "Is this command line the roster-sync run I started?" — the whole question,
+# in one place, callable.
+#
+# IT LIVES HERE SO IT CAN BE DRIVEN DIRECTLY. It began inside
+# `roster-sync-driver.sh`, where the only way to reach it was to run the
+# driver — so its cases ended up re-implementing the comparison in the test
+# file and asserting on the driver with `grep`. That measures a copy and the
+# spelling of the original, never the original itself (raised in review).
+#
+# The answer must be conservative in ONE direction. A false "yes" sends TERM
+# and KILL to a process that is not ours; a false "no" leaves a lock held and
+# reported. So every widening below is deliberate and bounded, and anything
+# unrecognised is "no".
+agmsg_roster_argv_is_ours() {
+  local cmdline="$1" script="$2" operation="$3" config="$4"
+  [ -n "$cmdline" ] && [ -n "$script" ] && [ -n "$operation" ] && [ -n "$config" ] || return 1
+
+  # QUOTES COME OFF FIRST. A native Windows command line quotes any argument
+  # containing a space, so `compat_get_cmdline` can return
+  #   "C:/Users/First Last/.../roster-sync.mjs" reconcile "C:/Users/.../config.json"
+  # and an unquoted needle never matches it — the real child then reads as
+  # unknown and its lock is kept (raised in review). Removing the quote
+  # characters cannot merge two arguments: the space that separated them is
+  # still there.
+  local haystack=" ${cmdline//\"/} "
+
+  # BOTH ALPHABETS. The shell's `/c/Users/...` and a native process's
+  # `C:/Users/...` are the same path written differently, and `cygpath -m` is
+  # the conversion `agmsg_cmdline_names_path` uses for it. It is applied to
+  # the PARTS, because the needle is composed from them — handing a whole
+  # sentence to a path converter would not do what it says.
+  local script_win="" config_win=""
+  if command -v cygpath >/dev/null 2>&1; then
+    script_win="$(cygpath -m "$script" 2>/dev/null || true)"
+    config_win="$(cygpath -m "$config" 2>/dev/null || true)"
+  fi
+
+  # THE ORDERED TRIPLE, WITH ARGUMENT BOUNDARIES. Three separate `contains`
+  # checks are three questions, and a command line carrying a different
+  # operation and a different config satisfies all three at once. And an
+  # ordered substring is still a substring: without the surrounding spaces,
+  # `/teams/demo/config.json` matches a run using `config.json.bak`, and our
+  # absolute script path is a tail of `/x/opt/.../roster-sync.mjs`. Padding
+  # the haystack lets one pattern require both boundaries, including for an
+  # argument at either end of the line.
+  local s c
+  for s in "$script" "$script_win"; do
+    [ -n "$s" ] || continue
+    for c in "$config" "$config_win"; do
+      [ -n "$c" ] || continue
+      case "$haystack" in
+        *" $s $operation $c "*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}

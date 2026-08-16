@@ -713,146 +713,100 @@ EOF
   rmdir "$team_dir/.config.lock" 2>/dev/null || true
 }
 
-@test "the argv match survives the Windows path alphabet (#821)" {
-  # THE COMPARISON RUNS ON TWO ALPHABETS, AND THIS MACHINE ONLY HAS ONE.
+@test "the production argv matcher: alphabet, quoting, order and boundaries (#821)" {
+  # DRIVEN THROUGH THE FUNCTION PRODUCTION CALLS, not a copy of it.
   #
-  # Under Git Bash the shell's own path is `/c/Users/...` while a native
-  # process reports `C:/Users/...`, so a raw `case` answers "not ours" about a
-  # process that IS ours -- and silently, since a non-match is the ordinary
-  # answer. `scripts/lib/compat.sh` documents it, measured on a reporting
-  # machine, and `agmsg_cmdline_names_path` exists to take the `cygpath -m`
-  # second look.
-  #
-  # There is no Windows here, so the DIFFERENCE is driven instead: a `cygpath`
-  # stub maps this suite's real paths into the `C:/` form, and the comparator
-  # is handed a cmdline written in that form. If the driver ever goes back to
-  # a raw `case`, this is what reddens -- on the alphabet difference alone,
-  # with everything else identical.
-  source "$SCRIPTS/lib/compat.sh"
+  # The earlier versions of these cases re-implemented the comparison with
+  # `bash -c case` and then asserted on the driver with `grep`. That measures
+  # a duplicate and a spelling; it cannot notice production diverging from
+  # either (raised in review). `agmsg_roster_argv_is_ours` now lives in
+  # `scripts/lib/roster-journal.sh` for exactly this reason, and every row
+  # below goes through it.
+  source "$SCRIPTS/lib/roster-journal.sh"
 
-  local shimdir="$TEST_SKILL_DIR/shim-cygpath"
-  mkdir -p "$shimdir"
-  # `-m` is the mixed form. The stub answers only for it, so a call with any
-  # other flag cannot accidentally satisfy the assertions below.
-  # `/c/Users/x` becomes `C:/Users/x` -- the drive letter REPLACES the leading
-  # `/c`, it is not prepended to it. Prepending leaves the original substring
-  # intact, so a raw match still fires and the case measures nothing; the
-  # premise control below caught exactly that on the first attempt.
-  {
-    printf '%s\n' '#!/bin/sh'
-    printf '%s\n' '[ "$1" = "-m" ] || exit 1'
-    printf '%s\n' 'printf "C:%s\\n" "${2#/c}"'
-  } > "$shimdir/cygpath"
-  chmod +x "$shimdir/cygpath"
-
-  local script="/c/Users/agent/.agents/skills/agmsg/scripts/internal/roster-sync.mjs"
-  local conf="/c/Users/agent/.agents/skills/agmsg/teams/demo/config.json"
-  local native_cmd="node.exe C:${script#/c} reconcile C:${conf#/c}"
-
-  # POSITIVE CONTROL ON THE PREMISE: the raw comparison really does fail on
-  # this input. Without it, the assertions below could pass because the two
-  # forms happened to match, and the case would be measuring nothing.
-  run bash -c "case \"$native_cmd\" in *\"$script\"*) exit 0 ;; esac; exit 1"
-  [ "$status" -ne 0 ]
-
-  # With cygpath present, the same input is recognised.
-  PATH="$shimdir:$PATH" agmsg_cmdline_names_path "$native_cmd" "$script"
-  PATH="$shimdir:$PATH" agmsg_cmdline_names_path "$native_cmd" "$conf"
-
-  # And it is not a rubber stamp: another team's config is still refused.
-  local other="/c/Users/agent/.agents/skills/agmsg/teams/other/config.json"
-  run env PATH="$shimdir:$PATH" bash -c \
-    "source '$SCRIPTS/lib/compat.sh'; agmsg_cmdline_names_path '$native_cmd' '$other'"
-  [ "$status" -ne 0 ]
-
-  # AND THE DRIVER MUST ACTUALLY USE THE CONVERSION. Everything above measures
-  # the comparator; none of it would notice the driver going back to a raw
-  # comparison -- measured, by reverting the driver and watching every
-  # assertion above stay green. There is no Windows here to catch that
-  # behaviourally, so the driver's side is asserted where it lives.
-  local sh="$SCRIPTS/internal/roster-sync-driver.sh"
-  grep -q 'cygpath -m' "$sh"
-  # THE ORDERED TRIPLE, not three separate sightings. `<script> <operation>
-  # <config>` has to appear as one run of text, because a cmdline carrying a
-  # different operation and a different config can satisfy three independent
-  # `contains` checks at once.
-  grep -q '\*" \$s \$operation \$c "\*' "$sh"
-  # And no shell-side path is matched against the cmdline directly.
-  run grep -nE 'case "\$cmd" in.*\$(SCRIPT_DIR|config)' "$sh"
-  [ "$status" -ne 0 ]
-}
-
-@test "the argv match is a sequence, not three sightings (#821)" {
-  # TWO EXISTENCE CHECKS ARE NOT A RELATION (raised in review).
-  #
-  # The predicate used to ask three separate questions: does the cmdline
-  # contain the script path, does it contain this config, does it contain this
-  # operation anywhere. A command line can satisfy all three while being a
-  # DIFFERENT run -- the operation supplied by one part of it and the config by
-  # another. This drives exactly that shape.
-  #
-  # The driver's own predicate is not reachable from here without running it,
-  # so the composition is measured on the same text the driver builds: the
-  # ordered needle must reject this cmdline, and the three loose checks must
-  # each accept it. That contrast is the whole finding.
   local script="/opt/agmsg/scripts/internal/roster-sync.mjs"
   local conf="/opt/agmsg/teams/demo/config.json"
   local other="/opt/agmsg/teams/other/config.json"
-  local operation="reconcile"
+  local op="reconcile"
 
+  # --- the run it describes ------------------------------------------------
+  agmsg_roster_argv_is_ours "node $script $op $conf 018f 018f 1" "$script" "$op" "$conf"
+  # config as the last argument on the line: the padding is what makes this
+  # work without a separate end-of-string branch.
+  agmsg_roster_argv_is_ours "node $script $op $conf" "$script" "$op" "$conf"
+
+  # --- QUOTED NATIVE ARGV --------------------------------------------------
+  # A native Windows command line quotes any argument containing a space. An
+  # unquoted needle never matches it, so the real child read as unknown and
+  # its lock was kept. This is the shape `compat_get_cmdline` returns from CIM.
+  local qs='C:/Users/First Last/.agents/skills/agmsg/scripts/internal/roster-sync.mjs'
+  local qc='C:/Users/First Last/.agents/skills/agmsg/teams/demo/config.json'
+  agmsg_roster_argv_is_ours "\"C:/Program Files/nodejs/node.exe\" \"$qs\" $op \"$qc\" 018f" \
+    "$qs" "$op" "$qc"
+  # ...and it is not a rubber stamp once the quotes are gone: another team's
+  # config, quoted the same way, is still refused.
+  local qo='C:/Users/First Last/.agents/skills/agmsg/teams/other/config.json'
+  run agmsg_roster_argv_is_ours "\"node.exe\" \"$qs\" $op \"$qo\" 018f" "$qs" "$op" "$qc"
+  [ "$status" -ne 0 ]
+  # ...nor is a different operation.
+  run agmsg_roster_argv_is_ours "\"node.exe\" \"$qs\" apply \"$qc\" 018f" "$qs" "$op" "$qc"
+  [ "$status" -ne 0 ]
+
+  # --- THREE SIGHTINGS ARE NOT A RELATION ----------------------------------
   # A real command line for a DIFFERENT run: `apply` on another team's config,
-  # with the word `reconcile` present for an unrelated reason.
-  local decoy="node $script apply $other --note reconcile "
-
-  # The three loose checks all say yes -- this is the premise, and without it
-  # the assertion below would prove nothing.
-  case "$decoy" in *"$script"*) : ;; *) return 1 ;; esac
-  case "$decoy" in *"$other"*) : ;; *) return 1 ;; esac
-  case "$decoy" in *" $operation "*) : ;; *) return 1 ;; esac
-
-  # The ordered needle says no, for this team's config...
-  run bash -c "case \"$decoy\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
+  # with the word `reconcile` present for an unrelated reason. It satisfies
+  # "contains the script", "contains a config" and "contains this operation"
+  # all at once.
+  local decoy="node $script apply $other --note $op "
+  run agmsg_roster_argv_is_ours "$decoy" "$script" "$op" "$conf"
   [ "$status" -ne 0 ]
-  # ...and for the other team's too, because the OPERATION does not line up.
-  run bash -c "case \"$decoy\" in *\"$script $operation $other\"*) exit 0 ;; esac; exit 1"
+  run agmsg_roster_argv_is_ours "$decoy" "$script" "$op" "$other"
   [ "$status" -ne 0 ]
 
-  # Positive control: the needle does match the run it describes.
-  local real="node $script $operation $conf"
-  run bash -c "case \"$real\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
-  [ "$status" -eq 0 ]
-
-  # AND AN ORDERED SUBSTRING IS STILL A SUBSTRING (raised in review). Without
-  # boundaries the needle for `/teams/demo/config.json` matches a run whose
-  # config is `/teams/demo/config.json.bak`, and a script at
-  # `/x/opt/agmsg/.../roster-sync.mjs` contains our absolute path as a tail.
-  # Both are different runs that would read as ours.
-  local suffixed="node $script $operation $conf.bak 018f 018f 1"
-  local prefixed="node /x$script $operation $conf 018f 018f 1"
-
-  # The premise: the UNBOUNDED needle accepts both. This is what was shipped.
-  run bash -c "case \"$suffixed\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
-  [ "$status" -eq 0 ]
-  run bash -c "case \"$prefixed\" in *\"$script $operation $conf\"*) exit 0 ;; esac; exit 1"
-  [ "$status" -eq 0 ]
-
-  # The padded, boundary-requiring form refuses both...
-  run bash -c "case \" $suffixed \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  # --- AN ORDERED SUBSTRING IS STILL A SUBSTRING ---------------------------
+  run agmsg_roster_argv_is_ours "node $script $op $conf.bak 018f" "$script" "$op" "$conf"
   [ "$status" -ne 0 ]
-  run bash -c "case \" $prefixed \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
+  run agmsg_roster_argv_is_ours "node /x$script $op $conf 018f" "$script" "$op" "$conf"
   [ "$status" -ne 0 ]
-  # ...and still accepts the real run, including when the config is the last
-  # argument on the line, which is what the padding is for.
-  run bash -c "case \" node $script $operation $conf 018f 1 \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
-  [ "$status" -eq 0 ]
-  run bash -c "case \" node $script $operation $conf \" in *\" $script $operation $conf \"*) exit 0 ;; esac; exit 1"
-  [ "$status" -eq 0 ]
 
-  # And the driver uses the padded form rather than the bare one.
-  local sh="$SCRIPTS/internal/roster-sync-driver.sh"
-  grep -q 'local padded=" \$cmd "' "$sh"
-  grep -q '\*" \$s \$operation \$c "\*' "$sh"
+  # --- THE WINDOWS ALPHABET, driven with a cygpath stub --------------------
+  # There is no Windows here, so the DIFFERENCE is driven instead. `/c/x`
+  # becomes `C:/x` -- the drive letter REPLACES the leading `/c` rather than
+  # being prepended to it; prepending leaves the original substring intact and
+  # a raw match still fires, which is what the premise control below caught on
+  # the first attempt.
+  local shimdir="$TEST_SKILL_DIR/shim-cygpath"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' '[ "$1" = "-m" ] || exit 1'
+    printf '%s\n' 'printf "C:%s\n" "${2#/c}"'
+  } > "$shimdir/cygpath"
+  chmod +x "$shimdir/cygpath"
+
+  local wsh="/c/Users/agent/.agents/skills/agmsg/scripts/internal/roster-sync.mjs"
+  local wconf="/c/Users/agent/.agents/skills/agmsg/teams/demo/config.json"
+  local native="node.exe C:${wsh#/c} $op C:${wconf#/c} 018f"
+
+  # PREMISE CONTROL: without cygpath the two alphabets do not match, so the
+  # row below is measuring the conversion and not a coincidence.
+  run agmsg_roster_argv_is_ours "$native" "$wsh" "$op" "$wconf"
+  [ "$status" -ne 0 ]
+  # With it, the same input is recognised.
+  PATH="$shimdir:$PATH" agmsg_roster_argv_is_ours "$native" "$wsh" "$op" "$wconf"
+  # And still refused for another team, converted the same way.
+  local wother="/c/Users/agent/.agents/skills/agmsg/teams/other/config.json"
+  run env PATH="$shimdir:$PATH" bash -c \
+    "source '$SCRIPTS/lib/roster-journal.sh'; agmsg_roster_argv_is_ours '$native' '$wsh' '$op' '$wother'"
+  [ "$status" -ne 0 ]
+
+  # --- and the driver calls it ---------------------------------------------
+  # The only structural assertion left, and it is about WIRING rather than
+  # about the comparison: everything above measures the real function, but
+  # nothing above would notice the driver ceasing to call it.
+  grep -q 'agmsg_roster_argv_is_ours "\$cmd"' "$SCRIPTS/internal/roster-sync-driver.sh"
 }
+
 
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
   skip_on_windows "POSIX signal semantics are not supported by this test"
