@@ -672,7 +672,7 @@ _roster_state_digest() {
   local node_at wrapper_close_at group_at parent_close_at
 
   # 1. node is handed the descriptor and drops its saved copy in one redirection.
-  node_at="$(grep -n '"\$@" <&9 9<&- &$' "$sh" | head -1 | cut -d: -f1)"
+  node_at="$(grep -n '"\$@" <&9 9<&- 3>&- 4>&- &$' "$sh" | head -1 | cut -d: -f1)"
   # 2. the wrapper closes its own copy — indented inside the brace group.
   wrapper_close_at="$(grep -n '^    exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
   # 3. the brace group is backgrounded.

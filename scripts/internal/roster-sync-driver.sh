@@ -192,8 +192,15 @@ if [ "$_roster_wait" != "none" ]; then
   # here: measured, as a three-second budget that had not returned after
   # seventeen minutes.
   {
+    # `3>&- 4>&-` HERE AS WELL AS ON THE GROUP, and the repetition is the point.
+    # The enclosing group already closes both, so node's descriptors were never
+    # actually at risk — but `tests/test_spawn_fd_guard.bats` reads the spawn
+    # LINE, deliberately: an exemption keyed on "something upstream closes them"
+    # accepts an `exec` inside a branch that never runs, or after the spawn it
+    # was supposed to cover. Redundancy is the cheaper mistake, and the same
+    # belt-and-braces pattern is already in `scripts/lib/sync-autostart.sh`.
     "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
-      "$server" "$remote" "$protocol" "$@" <&9 9<&- &
+      "$server" "$remote" "$protocol" "$@" <&9 9<&- 3>&- 4>&- &
     _rs_node=$!
     # THE WRAPPER'S OWN COPY, AND IT IS A THIRD ONE. Introducing this shell to
     # carry the pid put a process between the driver and node that inherits
