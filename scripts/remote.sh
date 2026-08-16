@@ -2414,7 +2414,8 @@ cmd_status() {
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
-    logfile log_offset=1
+    logfile log_offset=1 readiness_max="${AGMSG_SYNC_READY_TRIES:-1600}" \
+    readiness_budget="${AGMSG_SYNC_READY_SECONDS:-16}" readiness_started readiness_elapsed
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -2489,8 +2490,15 @@ cmd_sync_start() {
   # deciding whether to start and starting, and nothing after -- so that a marker
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
+  #
+  # BUDGETED IN TIME, NOT ITERATIONS (#779). The 1600 attempts were documented
+  # as roughly sixteen seconds, but every turn also starts the status probe,
+  # tail, awk and sleep. That arithmetic holds only where they are free. Keep
+  # the attempt ceiling as a safety cap, but make the stated wait a wall-clock
+  # budget: whichever arrives first ends readiness polling.
+  readiness_started="$(date +%s)"
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  while [ "$i" -lt "$readiness_max" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
@@ -2502,6 +2510,8 @@ cmd_sync_start() {
       break
     fi
     i=$((i + 1))
+    readiness_elapsed=$(( $(date +%s) - readiness_started ))
+    [ "$readiness_elapsed" -ge "$readiness_budget" ] && break
     sleep 0.01
   done
   if [ "$ready" -ne 1 ]; then
