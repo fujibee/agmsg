@@ -58,11 +58,21 @@ env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
   # stay in lockstep; the stable summary job below verifies that they do.
   SHARD_TOTAL: 4
-  # Pinned so the Windows sqlite cache key means something: a hit is the same
-  # binary, not whatever the feed is serving today (#824). Bumping this is one
-  # cache miss and one trip to chocolatey, which is the only time the community
-  # feed is asked at all.
+  # The Windows legs' sqlite3, pinned three ways (#824).
+  #
+  # This comment used to end "one trip to chocolatey, which is the only time
+  # the community feed is asked at all". There is no feed any more: the binary
+  # comes from one sqlite.org URL, and the hash is what makes the pin mean
+  # something rather than the version string alone.
+  #
+  # Bumping a release means changing all four together — YEAR and BUILD form
+  # the URL, VERSION is what `sqlite3 --version` will report, and SHA256 is the
+  # measured digest of that exact zip. A stale SHA256 fails the download step
+  # loudly, which is the intended way to find out one of them was missed.
   WINDOWS_SQLITE_VERSION: '3.53.4'
+  WINDOWS_SQLITE_YEAR: '2026'
+  WINDOWS_SQLITE_BUILD: '3530400'
+  WINDOWS_SQLITE_SHA256: 'f46ee2475de4cbe287e6e5f7d43c838796b14e7379cd216bdbb28d391429f9fc'
 
 jobs:
   # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
@@ -580,68 +590,83 @@ jobs:
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Diff is documentation-only; skipping the Windows bats legs."
 
-      # A THIRD PARTY'S BAD MINUTE MUST NOT BE REPORTED AS THIS CHANGE'S RED
-      # (#824). `choco install sqlite -y --no-progress` was one call with no
-      # retry, no cache and — the part that did the damage — no check. On a 503
-      # from the community feed it printed "Chocolatey installed 0/0 packages"
-      # and EXITED ZERO, so the step went green, the version step's
-      # `|| echo "not found"` turned a missing binary into a success line, and
-      # the red landed three steps later on `Run tests`. Measured on
-      # run 31869238895: steps 4, 5, 6 and 7 all `success`, step 8 `failure`,
-      # with `sqlite3: command not found` in step 7's own log.
+      # NO PACKAGE FEED ON THESE LEGS AT ALL (#824).
       #
-      # Reading that check list, the failure belongs to the change under test.
-      # It did not. The feed's flakiness is not ours to fix; which step goes red
-      # is.
+      # This used to be `choco install sqlite`. On 2026-08-15 the chocolatey
+      # community feed answered 503/504 for hours and every Windows leg went
+      # red for a reason that had nothing to do with the change under test —
+      # and worse, WHICH step went red depended on which phase of chocolatey's
+      # two-phase resolution happened to fail, so the same outage was not
+      # reproducible in place. Measured: `installed 0/1` exits non-zero and
+      # reddens the install; `installed 0/0` exits ZERO and the red lands three
+      # steps later on `Run tests`, reading as the diff's fault.
       #
-      # EVERY STEP HERE IS GATED ON `matrix.sqlite`, which #822 added. A leg that
-      # never opens a store must not be stopped by a package feed either — that
-      # is the contract #822 built, and hardening the install would have
-      # cancelled it by making `driver input (#817)` depend on chocolatey again.
+      # #827 made that legible — retry, cache, and a presence check that is the
+      # only step allowed to be red about it. This removes the cause instead.
+      # The issue's own Directions ranked the retry last, "the cheapest change
+      # and the least durable", and it was right: on a cache miss the leg still
+      # needed the feed. `bats` is a required check on `main` with
+      # enforce_admins, so a red Windows leg now blocks every landing.
       #
-      # The restore is tried first so most runs never ask the feed at all: the
-      # key is the pinned version, so a hit is the same binary and a miss is the
-      # only thing that needs the network.
+      # What is gone is the FEED, not the third party: sqlite.org is still
+      # somebody else's host. What it is not is a package index — no resolver,
+      # no two-phase lookup, no per-request 503 that serves one concurrent job
+      # and refuses another. One pinned URL, and a hash that says the bytes are
+      # the ones this pin was measured against.
+      #
+      # Not measured: whether the GitHub Windows image already ships sqlite3.
+      # It does not appear in the Windows 2022 or 2025 image manifests, which
+      # is the published list rather than a `where sqlite3` on a live runner.
       - name: Restore sqlite3 (cache)
         if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
         id: sqlite-cache
         uses: actions/cache@v4
         with:
-          path: |
-            C:\ProgramData\chocolatey\lib\SQLite
-            C:\ProgramData\chocolatey\bin\sqlite3.exe
-          key: sqlite3-${{ runner.os }}-choco-${{ env.WINDOWS_SQLITE_VERSION }}
+          path: C:\sqlite-tools
+          key: sqlite3-${{ runner.os }}-sqliteorg-${{ env.WINDOWS_SQLITE_VERSION }}
 
-      - name: Install sqlite3
+      - name: Fetch sqlite3 from sqlite.org
         if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite && steps.sqlite-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # Three attempts with a widening pause. The observed failures are 503
-          # and 504 from `community.chocolatey.org`, and they are per-request
-          # rather than an outage: on run 31869238895 the two Windows legs ran
-          # concurrently and one of them installed fine.
+          $ErrorActionPreference = 'Stop'
+          $url = "https://sqlite.org/$env:WINDOWS_SQLITE_YEAR/sqlite-tools-win-x64-$env:WINDOWS_SQLITE_BUILD.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite-tools.zip'
+          # Three attempts: one host having a bad second is still possible, it
+          # is just no longer a package index having a bad phase.
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            choco install sqlite --version=$env:WINDOWS_SQLITE_VERSION -y --no-progress
-            if (Test-Path 'C:\ProgramData\chocolatey\bin\sqlite3.exe') { exit 0 }
-            Write-Host "::warning::sqlite3 not installed on attempt $attempt; the chocolatey feed is answering errors"
-            Start-Sleep -Seconds (10 * $attempt)
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+              break
+            } catch {
+              Write-Host "::warning::sqlite.org fetch failed on attempt $attempt"
+              Start-Sleep -Seconds (10 * $attempt)
+            }
           }
-          exit 0   # the hard check is its own step, so a retry loop cannot decide the colour
+          if (-not (Test-Path $zip)) { exit 0 }   # the presence check below decides the colour
+          # THE HASH IS THE POINT. Without it this trades a feed that answers
+          # errors for a host that could answer anything, and the tests would
+          # run against whatever arrived.
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:WINDOWS_SQLITE_SHA256) {
+            Write-Host "::error::sqlite-tools zip hash mismatch. expected $env:WINDOWS_SQLITE_SHA256, got $actual"
+            exit 1
+          }
+          Expand-Archive -Path $zip -DestinationPath 'C:\sqlite-tools' -Force
 
-      - name: Put chocolatey shims on PATH (Git Bash form)
+      - name: Put sqlite3 on PATH (Git Bash form)
         if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
-        run: echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+        run: echo "/c/sqlite-tools" >> "$GITHUB_PATH"
 
-      # THE STEP THAT IS ALLOWED TO BE RED ABOUT THIS. Separate from the install
-      # on purpose: whether the dependency is present is a different question
-      # from whether one `choco` invocation worked, and only this one may decide
-      # the job's colour. Named so the check list says what is wrong — a reader
-      # seeing this red does not go looking through the diff.
-      - name: sqlite3 must be present, or this leg is about chocolatey
+      # THE STEP THAT IS ALLOWED TO BE RED ABOUT THIS, kept from #827 and still
+      # the load-bearing part: whatever supplies sqlite3, the step that decides
+      # the leg's colour must be the one that says the dependency is missing,
+      # not the one that runs the tests.
+      - name: sqlite3 must be present, or this leg is about its download
         if: needs.changes.outputs.docs_only != 'true' && matrix.sqlite
         run: |
           if ! sqlite3 --version; then
-            echo "::error::sqlite3 is missing. The chocolatey community feed did not serve it (503/504 seen on 2026-08-15). This leg reports on that, NOT on the change under test — see #824."
+            echo "::error::sqlite3 is missing — the pinned sqlite.org download did not arrive. This leg reports on that, NOT on the change under test — see #824."
             exit 1
           fi
 
