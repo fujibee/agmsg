@@ -114,12 +114,70 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 _roster_fifo="$(mktemp -u 2>/dev/null)" || _roster_fifo=""
 _roster_sentinel="$(mktemp 2>/dev/null)" || _roster_sentinel=""
 _roster_pidfile="$(mktemp 2>/dev/null)" || _roster_pidfile=""
-_roster_bounded=0
-if [ -n "$_roster_fifo" ] && [ -n "$_roster_sentinel" ] && [ -n "$_roster_pidfile" ] && mkfifo "$_roster_fifo" 2>/dev/null; then
-  _roster_bounded=1
+
+# FAILING TO BUILD THE BOUND MUST NOT RUN WITHOUT ONE (raised by three
+# reviewers, and they are right).
+#
+# This used to fall back to the foreground, unbounded call — the exact state
+# #821 forbids — and printed `running without a time bound` while doing it.
+# That is not a fallback. "The instrument could not be built, so the property
+# is dropped" reproduces the defect on precisely the machines least able to
+# afford it: a temp directory that is full or unwritable is the same condition
+# that makes a child hang, so the two arrive together.
+#
+# There are two ways to wait with a ceiling, and only the faster one needs a
+# FIFO:
+#
+#   fifo  a blocking read on a descriptor the wrapper holds. No polling, so no
+#         spawn while waiting — which is why it is preferred on a machine that
+#         is refusing spawns.
+#   poll  the sentinel is looked for on a timer. Costs one `sleep` per second
+#         of waiting, and needs nothing but the two temp files.
+#
+# Both bound the wait. Only when even `mktemp` fails is there no bound to be
+# had, and then this REFUSES: releases the lock and says why, rather than
+# taking the critical section for an unlimited time.
+_roster_wait=none
+if [ -n "$_roster_sentinel" ] && [ -n "$_roster_pidfile" ]; then
+  if [ -n "$_roster_fifo" ] && mkfifo "$_roster_fifo" 2>/dev/null; then
+    _roster_wait=fifo
+  else
+    _roster_fifo=""
+    _roster_wait=poll
+  fi
 fi
 
-if [ "$_roster_bounded" = "1" ]; then
+# THE WAY OUT, because a refusal with no override is a wall. An operator who
+# knows their filesystem cannot hold a temp file, and would rather risk the
+# lock than not sync at all, can say so — deliberately, by name, in the
+# environment. What is removed is the SILENT return to the old behaviour.
+if [ "$_roster_wait" = "none" ] && [ "${AGMSG_ROSTER_SYNC_UNBOUNDED:-0}" = "1" ]; then
+  echo "agmsg: roster sync $operation for team '$team': AGMSG_ROSTER_SYNC_UNBOUNDED=1 — running the local roster child with NO time bound; if it hangs it holds the team lock until this process is killed" >&2
+  "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
+    "$server" "$remote" "$protocol" "$@"
+  case "$operation" in
+    reconcile|apply) agmsg_roster_project_config "$team_dir" "$config" ;;
+  esac
+  exit 0
+fi
+
+if [ "$_roster_wait" = "none" ]; then
+  agmsg_lock_release
+  echo "agmsg: roster sync $operation failed for team '$team': cannot create the temporary files needed to bound the local roster child (is TMPDIR set to a path that exists and is writable, and is the filesystem full?); refusing rather than holding the team lock for an unlimited time. To run it anyway, set AGMSG_ROSTER_SYNC_UNBOUNDED=1." >&2
+  exit 16
+fi
+
+# One spawn, whichever wait follows: when there is no FIFO the wrapper's fd 8
+# goes to /dev/null, so the line that starts the child is the same in both
+# modes and its descriptor closing cannot drift between them.
+_roster_write_target="/dev/null"
+if [ "$_roster_wait" = "fifo" ]; then
+  _roster_write_target="$_roster_fifo"
+fi
+
+# Both remaining modes are bounded; `none` has already left, one way or the
+# other. The block is kept so the two waits sit inside one spawn/teardown.
+if [ "$_roster_wait" != "none" ]; then
   # fd 9 is this shell's stdin, kept for the child: a shell with job control
   # off gives an asynchronous command /dev/null for stdin, and backgrounding
   # the child silently took away the records the engine had already written to
@@ -156,7 +214,7 @@ if [ "$_roster_bounded" = "1" ]; then
     _rs_rc=0
     wait "$_rs_node" || _rs_rc=$?
     printf '%s\n' "$_rs_rc" > "$_roster_sentinel"
-  } 3>&- 4>&- 8> "$_roster_fifo" &
+  } 3>&- 4>&- 8> "$_roster_write_target" &
   _roster_child=$!
   # BOTH COPIES GO. `<&9` duplicates the caller's stdin onto fd 0 and leaves
   # fd 9 open beside it, so node would hold that stream twice and this shell
@@ -165,23 +223,44 @@ if [ "$_roster_bounded" = "1" ]; then
   # fix it (raised in review). The child closes its saved copy in the
   # redirection above; this closes ours the moment it is no longer needed.
   exec 9<&-
-  # The two opens rendezvous: a writer's `8>` does not complete until a reader
-  # arrives, so this cannot be left waiting for a writer that has already gone.
-  exec 8< "$_roster_fifo"
-  # `|| true` because this file runs under `set -e` and `rm` is an external
-  # command: a spawn refused, or a filesystem that will not unlink, would end
-  # this shell HERE — while the child is still running — and the EXIT trap
-  # would release the lock beside a live writer. That is worse than the leak
-  # being fixed, and it is the one place this fix could create it (raised in
-  # review). The FIFO is already open on fd 8; unlinking it is tidiness, and
-  # tidiness may not decide whether the lock is held.
-  rm -f "$_roster_fifo" || true
+  if [ "$_roster_wait" = "fifo" ]; then
+    # The two opens rendezvous: a writer's `8>` does not complete until a reader
+    # arrives, so this cannot be left waiting for a writer that has already gone.
+    exec 8< "$_roster_fifo"
+    # `|| true` because this file runs under `set -e` and `rm` is an external
+    # command: a spawn refused, or a filesystem that will not unlink, would end
+    # this shell HERE — while the child is still running — and the EXIT trap
+    # would release the lock beside a live writer. That is worse than the leak
+    # being fixed, and it is the one place this fix could create it (raised in
+    # review). The FIFO is already open on fd 8; unlinking it is tidiness, and
+    # tidiness may not decide whether the lock is held.
+    rm -f "$_roster_fifo" || true
 
-  # The read's own status is DELIBERATELY DISCARDED. It cannot be trusted to
-  # separate "the budget expired" from "the writer is gone" on Bash 3.2, and
-  # trusting it there is the defect this replaces.
-  read -r -t "$ROSTER_SYNC_BUDGET_S" _roster_ignored <&8 || true
-  exec 8<&-
+    # The read's own status is DELIBERATELY DISCARDED. It cannot be trusted to
+    # separate "the budget expired" from "the writer is gone" on Bash 3.2, and
+    # trusting it there is the defect this replaces.
+    read -r -t "$ROSTER_SYNC_BUDGET_S" _roster_ignored <&8 || true
+    exec 8<&-
+  else
+    # NO FIFO, AND STILL BOUNDED. The wrapper's fd 8 went to /dev/null, so
+    # there is nothing to read; what is watched instead is the sentinel the
+    # wrapper writes as its last act — the same fact, asked on a timer rather
+    # than by blocking.
+    #
+    # `-s` and not `-e`: the file was created empty by `mktemp`, so its mere
+    # existence says nothing. It is non-empty exactly once the status is in it.
+    #
+    # The cost is one `sleep` per second of waiting, and that is why this is
+    # the second choice rather than the only one — on a machine refusing
+    # spawns, a wait that spawns is the wrong shape. It is still the right
+    # trade against no bound at all.
+    #
+    # `SECONDS` is the shell's own counter, so the deadline needs no `date`.
+    _roster_deadline=$((SECONDS + ROSTER_SYNC_BUDGET_S))
+    while [ ! -s "$_roster_sentinel" ] && [ "$SECONDS" -lt "$_roster_deadline" ]; do
+      sleep 1
+    done
+  fi
 
   if [ -s "$_roster_sentinel" ]; then
     _roster_status="$(cat "$_roster_sentinel" 2>/dev/null || printf '13')"
@@ -225,14 +304,6 @@ if [ "$_roster_bounded" = "1" ]; then
       exit 14
     fi
   fi
-else
-  # No FIFO — an exotic filesystem, or a temp directory that does not support
-  # one. The previous behaviour is what remains: run it in the foreground and
-  # wait as long as it takes. Stated rather than silently degraded, because a
-  # bound that is sometimes absent is worse documentation than none.
-  echo "agmsg: roster sync $operation for team '$team': cannot create a FIFO in the temp directory; running without a time bound" >&2
-  "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
-    "$server" "$remote" "$protocol" "$@"
 fi
 
 case "$operation" in

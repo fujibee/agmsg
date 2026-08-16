@@ -417,6 +417,128 @@ EOF
   refute pgrep -f "$fake"
 }
 
+# A directory that shadows one command with a failing stub, for the two cases
+# below. Only the named command is replaced; everything else still resolves
+# normally, so the driver is exercised rather than a crippled shell.
+_shim_failing() {
+  local name="$1" dir="$TEST_SKILL_DIR/shim-$name"
+  mkdir -p "$dir"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$dir/$name"
+  chmod +x "$dir/$name"
+  printf '%s' "$dir"
+}
+
+@test "roster sync is still bounded when no FIFO can be made (#821)" {
+  skip_on_windows "POSIX signal delivery is not supported by this test"
+  # THE PATH THAT USED TO DROP THE PROPERTY. When `mkfifo` failed, this fell
+  # back to a foreground call with no ceiling and said `running without a time
+  # bound` — which is the state #821 exists to forbid, reached by the code
+  # meant to hold it. Three reviewers raised it independently.
+  #
+  # A FIFO is only the cheaper way to wait. Without one the sentinel is polled,
+  # and the ceiling is the same. This case is the difference between the two
+  # readings of "the instrument could not be built".
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shim
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  fake="$TEST_SKILL_DIR/fake-node-unkillable-nofifo"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+  shim="$(_shim_failing mkfifo)"
+
+  run env PATH="$shim:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=2 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  # Bounded, exactly as with a FIFO: a failure that names itself, no lock, no
+  # child. Same three assertions as the FIFO case, deliberately.
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q 'did not finish within'
+  [ ! -d "$team_dir/.config.lock" ]
+  refute pgrep -f "$fake"
+  # And it must NOT have announced that it was running unbounded — the old
+  # sentence is the marker of the path this case exists to remove.
+  #
+  # `!` and not `refute`: `refute` takes a command, and a pipe binds tighter,
+  # so `refute printf ... | grep` hands `refute` only the `printf` and asserts
+  # something else entirely. Measured — it failed against output that does not
+  # contain the string.
+  ! printf '%s' "$output" | grep -q 'without a time bound'
+}
+
+@test "roster sync refuses, rather than waiting unbounded, when it cannot build a bound (#821)" {
+  # `mkfifo` failing has a second way to wait. `mktemp` failing has none: with
+  # no sentinel there is nothing to watch, so the choice is between refusing
+  # and holding the team lock for an unlimited time. It refuses, and says how
+  # to override that on purpose.
+  #
+  # The child must not be started at all — running it and then complaining is
+  # the same unbounded wait with a better message.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local ran="$TEST_SKILL_DIR/refuse-child-ran" fake shim
+  fake="$TEST_SKILL_DIR/fake-node-marks"
+  printf '%s\n' '#!/bin/sh' 'printf ran > "$AGMSG_TEST_RAN"' 'exit 0' > "$fake"
+  chmod +x "$fake"
+  shim="$(_shim_failing mktemp)"
+
+  run env PATH="$shim:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_RAN="$ran" \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  [ "$status" -eq 16 ]
+  # The reason AND the way out, because a refusal with neither is a wall.
+  printf '%s' "$output" | grep -q 'cannot create the temporary files'
+  printf '%s' "$output" | grep -q 'AGMSG_ROSTER_SYNC_UNBOUNDED=1'
+  # The lock is released by the refusal itself.
+  [ ! -d "$team_dir/.config.lock" ]
+  # Nothing was run.
+  [ ! -e "$ran" ]
+}
+
+@test "the unbounded path is still reachable, but only by asking for it (#821)" {
+  # FAIL-CLOSED NEEDS A WAY OUT. An operator whose filesystem cannot hold a
+  # temp file may still prefer syncing to refusing, and can say so by name.
+  # What was removed is the SILENT return to that behaviour, not the behaviour.
+  #
+  # Driven by a child that exits immediately: this case is about the route
+  # being open and announced, and a hanging child here would hang the suite —
+  # which is the honest shape of "no bound".
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local ran="$TEST_SKILL_DIR/unbounded-child-ran" fake shim
+  fake="$TEST_SKILL_DIR/fake-node-quick"
+  printf '%s\n' '#!/bin/sh' 'printf ran > "$AGMSG_TEST_RAN"' 'exit 0' > "$fake"
+  chmod +x "$fake"
+  shim="$(_shim_failing mktemp)"
+
+  run env PATH="$shim:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_RAN="$ran" AGMSG_ROSTER_SYNC_UNBOUNDED=1 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  [ "$status" -eq 0 ]
+  # It ran, and it warned — an unbounded wait taken deliberately still has to
+  # be visible in the output of the run that took it.
+  [ -e "$ran" ]
+  printf '%s' "$output" | grep -q 'NO time bound'
+  [ ! -d "$team_dir/.config.lock" ]
+}
+
 # Everything under the team directory that a roster operation would move, as
 # one string: names, sizes and contents. Used to say "unchanged" about state
 # that already exists, which is what a refusal before the lock has to leave.
@@ -554,7 +676,7 @@ _roster_state_digest() {
   # 2. the wrapper closes its own copy — indented inside the brace group.
   wrapper_close_at="$(grep -n '^    exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
   # 3. the brace group is backgrounded.
-  group_at="$(grep -n '^  } 3>&- 4>&- 8> "\$_roster_fifo" &$' "$sh" | head -1 | cut -d: -f1)"
+  group_at="$(grep -n '^  } 3>&- 4>&- 8> "\$_roster_write_target" &$' "$sh" | head -1 | cut -d: -f1)"
   # 4. the driver closes its copy — at the driver's own indent, which is why
   #    the two `exec 9<&-` anchors cannot be confused for one another.
   parent_close_at="$(grep -n '^  exec 9<&-$' "$sh" | head -1 | cut -d: -f1)"
