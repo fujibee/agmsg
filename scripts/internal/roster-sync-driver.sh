@@ -418,12 +418,25 @@ if [ "$_roster_wait" != "none" ]; then
     case "$_roster_inner" in
       ''|*[!0-9]*|0*) _roster_inner="" ;;
     esac
+    # WHAT WAS ACTUALLY SENT IS RECORDED, because the state can change under
+    # us between one signal and the next (raised in review, and it stood for
+    # three rounds before I read it properly).
+    #
+    # The predicate is re-asked before TERM and again before KILL, which is
+    # right — but it means a pid that was `ours` at the first can be `unknown`
+    # at the second, through recycling or an argv that stopped being readable.
+    # The diagnostic then said "nothing was signalled on that number", which
+    # would be FALSE: TERM had already gone out. An operator reading that
+    # would go looking for a process nobody had touched.
+    _roster_sent_term=0
+    _roster_sent_kill=0
     # Signalled ONLY when it is still the process we started. Anything else is
     # left alone: the cost of not signalling our own child is a lock we keep
     # and report; the cost of signalling someone else's is a process we had no
     # business touching.
     if _roster_inner_still_ours; then
       kill -TERM "$_roster_inner" 2>/dev/null || true
+      _roster_sent_term=1
     fi
     # The wrapper needs no such check — it is this shell's own child, held in
     # `$!` and not reaped until below, so its number cannot have been recycled
@@ -439,6 +452,7 @@ if [ "$_roster_wait" != "none" ]; then
     # the TERM above, one branch later.
     if _roster_inner_still_ours; then
       kill -KILL "$_roster_inner" 2>/dev/null || true
+      _roster_sent_kill=1
     fi
     kill -KILL "$_roster_child" 2>/dev/null || true
     wait "$_roster_child" 2>/dev/null || true
@@ -520,9 +534,18 @@ if [ "$_roster_wait" != "none" ]; then
       _roster_state="$(_roster_inner_state)"
 
       if [ "$_roster_state" = "unknown" ]; then
+        # THE DIAGNOSTIC REPORTS WHAT HAPPENED, not what the usual case would
+        # have been. Two ways to arrive here, and they leave the machine in
+        # different states, so they get different sentences.
+        _roster_signal_note="Nothing was signalled on that number: it was never identifiable as this operation's child"
+        if [ "$_roster_sent_term" = "1" ] && [ "$_roster_sent_kill" = "1" ]; then
+          _roster_signal_note="TERM and KILL were both sent to that number while it still carried this operation's argv; it stopped being identifiable afterwards"
+        elif [ "$_roster_sent_term" = "1" ]; then
+          _roster_signal_note="TERM WAS SENT to that number while it still carried this operation's argv, and KILL was then WITHHELD because it no longer did — so a process may have been signalled once and not stopped"
+        fi
         AGMSG_HELD_LOCKS=""
         rm -f "$_roster_sentinel" "$_roster_pidfile" || true
-        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and its fate could not be established — the recorded pid was '$_roster_inner', which is either absent or alive without this operation's argv. Nothing was signalled on that number, because it may since have been reused by an unrelated process. The team lock is being KEPT rather than released, since releasing it beside a writer that may still be running can corrupt the roster journal. Check that process, then remove $team_dir/.config.lock" >&2
+        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and its fate could not be established — the recorded pid was '$_roster_inner', which is either absent or alive without this operation's argv. $_roster_signal_note. The team lock is being KEPT rather than released, since releasing it beside a writer that may still be running can corrupt the roster journal. Check that process, then remove $team_dir/.config.lock" >&2
         exit 18
       fi
 

@@ -752,6 +752,28 @@ EOF
   run agmsg_roster_argv_is_ours "\"node.exe\" \"$qs\" apply \"$qc\" 018f" "$qs" "$op" "$qc"
   [ "$status" -ne 0 ]
 
+  # --- A QUOTED DATA ARGUMENT IS NOT AN INVOCATION -------------------------
+  # The first quote fix deleted every `"` from the haystack. It is true that
+  # the space between two arguments survives that -- but a quote also carries
+  # "the spaces INSIDE me are not argument separators". Strip it, and one
+  # quoted argument that merely CONTAINS the triple becomes indistinguishable
+  # from a real invocation, and a stranger picked up through pid reuse would
+  # be signalled (raised in review).
+  run agmsg_roster_argv_is_ours "node other.js --note \"$script $op $conf\" x" \
+    "$script" "$op" "$conf"
+  [ "$status" -ne 0 ]
+  # Same shape with the native paths, since that is where quoting actually
+  # arises.
+  run agmsg_roster_argv_is_ours "node.exe other.js --note \"$qs $op $qc\" x" \
+    "$qs" "$op" "$qc"
+  [ "$status" -ne 0 ]
+  # And the four legitimate quotings are all accepted -- the two paths are
+  # quoted independently, because a path with a space in it is quoted and one
+  # without it is not.
+  agmsg_roster_argv_is_ours "node \"$script\" $op \"$conf\" x" "$script" "$op" "$conf"
+  agmsg_roster_argv_is_ours "node \"$script\" $op $conf x"     "$script" "$op" "$conf"
+  agmsg_roster_argv_is_ours "node $script $op \"$conf\" x"     "$script" "$op" "$conf"
+
   # --- THREE SIGHTINGS ARE NOT A RELATION ----------------------------------
   # A real command line for a DIFFERENT run: `apply` on another team's config,
   # with the word `reconcile` present for an unrelated reason. It satisfies
@@ -807,6 +829,113 @@ EOF
   grep -q 'agmsg_roster_argv_is_ours "\$cmd"' "$SCRIPTS/internal/roster-sync-driver.sh"
 }
 
+
+@test "a TERM already sent is reported, not denied (#821)" {
+  skip_on_windows "POSIX signal semantics are not supported by this test"
+  # THE STATE CAN CHANGE BETWEEN ONE SIGNAL AND THE NEXT, and the diagnostic
+  # used to deny it (raised in review, and it stood for three rounds because I
+  # kept answering the other reviewer's items and not this one).
+  #
+  # The predicate is re-asked before TERM and again before KILL -- which is
+  # right, and means a pid that was `ours` at the first can be `unknown` at
+  # the second, through recycling or an argv that stopped being readable. The
+  # message then said "nothing was signalled on that number", which is FALSE:
+  # TERM had already gone out. An operator would go looking for a process
+  # nobody had touched.
+  #
+  # WHAT HAD TO CHANGE IS THE ARGV OF A LIVE PID, not the pidfile. The driver
+  # reads the pidfile ONCE, so swapping its contents does nothing -- the first
+  # version of this case did that and measured an ordinary timeout (status 14,
+  # "confirmed gone"). The real scenario is pid REUSE: the number stays, the
+  # process behind it changes, and the argv stops matching.
+  #
+  # A pid cannot be recycled on demand, so the OBSERVATION is driven instead:
+  # `compat_get_cmdline` reads `ps -o args= -p` off Windows, and a `ps` stub
+  # answers truthfully until a marker appears and with a decoy afterwards. The
+  # fake node traps TERM and drops that marker from inside the handler, so the
+  # transition lands exactly between TERM and KILL. It does not exit from the
+  # handler, so it survives to be observed.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir made termed
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  made="$TEST_SKILL_DIR/mktemp-made-term"
+  termed="$TEST_SKILL_DIR/term-received"
+  shimdir="$TEST_SKILL_DIR/shim-term"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+
+  # The seam: truthful until the marker exists, a decoy afterwards. Only the
+  # `-o args=` form is intercepted, so nothing else that shells out to `ps` --
+  # `_agmsg_pid_alive_local`'s own cross-check among them -- is affected.
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'if [ "$1" = "-o" ] && [ "$2" = "args=" ] && [ -e "$AGMSG_TEST_TERMED" ]; then'
+    printf '%s\n' '  printf "%s\\n" "some-unrelated-process --after-recycle"'
+    printf '%s\n' '  exit 0'
+    printf '%s\n' 'fi'
+    printf '%s\n' 'exec /bin/ps "$@"'
+  } > "$shimdir/ps"
+  chmod +x "$shimdir/ps"
+
+  fake="$TEST_SKILL_DIR/fake-node-swaps-on-term"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+_on_term() { printf 'termed\n' > "$AGMSG_TEST_TERMED"; }
+trap _on_term TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_TERMED="$termed" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=3 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  local driver_status="$status" driver_out="$output"
+
+  # POSITIVE CONTROL: TERM really reached the child, so the run really did
+  # traverse `ours` -> signal -> `unknown`. Without this the case could pass
+  # on an ordinary never-identifiable timeout.
+  [ "$(cat "$termed" 2>/dev/null || true)" = "termed" ]
+
+  [ "$driver_status" -eq 18 ]
+  # It says TERM WENT OUT...
+  printf '%s' "$driver_out" | grep -q 'TERM WAS SENT'
+  # ...and that KILL was withheld once the number stopped being identifiable.
+  printf '%s' "$driver_out" | grep -q 'WITHHELD'
+  # ...and it does NOT claim nothing was signalled, which is the false
+  # sentence this case exists to remove.
+  ! printf '%s' "$driver_out" | grep -q 'Nothing was signalled'
+  [ -d "$team_dir/.config.lock" ]
+
+  # KILL WAS WITHHELD, observed on the process rather than read from the
+  # message: the child is still alive. It ignores nothing -- it has no KILL
+  # handler and could not have one -- so its survival is the evidence.
+  kill -0 "$(pgrep -f "$fake" | head -1)" 2>/dev/null
+
+  local leftover
+  leftover="$(pgrep -f "$fake" || true)"
+  if [ -n "$leftover" ]; then
+    kill $leftover 2>/dev/null || true
+    sleep 1
+    kill -9 $leftover 2>/dev/null || true
+  fi
+  rmdir "$team_dir/.config.lock" 2>/dev/null || true
+}
 
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
   skip_on_windows "POSIX signal semantics are not supported by this test"

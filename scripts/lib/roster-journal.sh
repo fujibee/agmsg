@@ -406,20 +406,25 @@ agmsg_roster_argv_is_ours() {
   local cmdline="$1" script="$2" operation="$3" config="$4"
   [ -n "$cmdline" ] && [ -n "$script" ] && [ -n "$operation" ] && [ -n "$config" ] || return 1
 
-  # QUOTES COME OFF FIRST. A native Windows command line quotes any argument
-  # containing a space, so `compat_get_cmdline` can return
-  #   "C:/Users/First Last/.../roster-sync.mjs" reconcile "C:/Users/.../config.json"
-  # and an unquoted needle never matches it — the real child then reads as
-  # unknown and its lock is kept (raised in review). Removing the quote
-  # characters cannot merge two arguments: the space that separated them is
-  # still there.
-  local haystack=" ${cmdline//\"/} "
-
-  # BOTH ALPHABETS. The shell's `/c/Users/...` and a native process's
-  # `C:/Users/...` are the same path written differently, and `cygpath -m` is
-  # the conversion `agmsg_cmdline_names_path` uses for it. It is applied to
-  # the PARTS, because the needle is composed from them — handing a whole
-  # sentence to a path converter would not do what it says.
+  # QUOTES ARE A BOUNDARY, NOT DECORATION — AND DELETING THEM DESTROYS ONE
+  # (raised in review, after an earlier version of this did exactly that).
+  #
+  # A native Windows command line quotes any argument containing a space, so
+  # `compat_get_cmdline` can return
+  #   "C:/Users/First Last/.../roster-sync.mjs" reconcile "C:/.../config.json"
+  # and an unquoted needle never matches it. The first fix stripped every `"`
+  # from the haystack. That is worse than it looks: it is true that the space
+  # between two arguments survives, but a quote also carries "the spaces INSIDE
+  # me are not argument separators". Strip it and
+  #   node other.js --note "<script> reconcile <config>"
+  # — one quoted data argument that merely CONTAINS the triple — becomes
+  # indistinguishable from a real invocation, and a stranger picked up through
+  # pid reuse would be signalled.
+  #
+  # So the quotes stay, and the FORMS the shell can legitimately produce are
+  # enumerated instead: either path may or may not be quoted, and the quote
+  # then sits outside the argument, where the boundary space still has to be.
+  local haystack=" $cmdline "
   local script_win="" config_win=""
   if command -v cygpath >/dev/null 2>&1; then
     script_win="$(cygpath -m "$script" 2>/dev/null || true)"
@@ -434,6 +439,11 @@ agmsg_roster_argv_is_ours() {
   # absolute script path is a tail of `/x/opt/.../roster-sync.mjs`. Padding
   # the haystack lets one pattern require both boundaries, including for an
   # argument at either end of the line.
+  #
+  # FOUR ACCEPTED FORMS PER PAIR, because either path may arrive quoted and
+  # they are quoted independently — a path with a space in it is quoted, one
+  # without it is not, and the two paths need not agree. The quote goes where
+  # the shell puts it: around the argument, INSIDE the boundary spaces.
   local s c
   for s in "$script" "$script_win"; do
     [ -n "$s" ] || continue
@@ -441,6 +451,9 @@ agmsg_roster_argv_is_ours() {
       [ -n "$c" ] || continue
       case "$haystack" in
         *" $s $operation $c "*) return 0 ;;
+        *" \"$s\" $operation \"$c\" "*) return 0 ;;
+        *" \"$s\" $operation $c "*) return 0 ;;
+        *" $s $operation \"$c\" "*) return 0 ;;
       esac
     done
   done
