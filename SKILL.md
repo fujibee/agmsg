@@ -303,8 +303,24 @@ If argument starts with "key import" followed by a team name:
 3. Do not offer an environment-variable path. An identity file is a permanent
    secret; always use the human-in-own-terminal flow above.
 
-`key rotate` and device-pairing `key request`/`key approve` are not available
-yet. If the user asks for one, tell them so instead of attempting to run it.
+If argument starts with "key rotate" followed by a team name:
+1. Rotation mints a replacement epoch for a team that already has a key and
+   announces it on the roster journal. It requires an existing current key, an
+   identity journal (connect or migrate the team first), and `age`; it refuses
+   with a message naming whichever is missing.
+2. Confirm with the user before running it. It changes the team's key state,
+   and every other machine has to receive the new identity out of band.
+3. Run: `bash ~/.agents/skills/agmsg/scripts/key.sh rotate <team>`
+4. Show the output: epoch, key_id, and recipient fingerprint. The private key
+   is never written to the journal. Revealing it needs
+   `key show <team> --key-id <id> --reveal-secret`, which is refused in agent
+   mode — tell the user to run that in their own terminal.
+5. Messages before the acknowledged rotation boundary remain readable with the
+   old key.
+
+Device pairing (`key request` / `key approve`) is not implemented — they are
+not `key.sh` subcommands, so a call prints usage and exits 1. If the user asks
+for one, tell them so instead of attempting to run it.
 
 ## Permission prompts (Claude Code)
 

@@ -295,8 +295,10 @@ cmd_generate() {
   existing="$(_key_read_config_field "$cfg" '$.remote_key.current.key_id')"
   if [ -n "$existing" ] && [ "$existing" != "null" ]; then
     agmsg_lock_release
-    echo "agmsg: team '$team' already has a key (key_id=$existing); rotation is not available in this release. To view it:" >&2
+    echo "agmsg: team '$team' already has a key (key_id=$existing). To view it:" >&2
     echo "  bash $(agmsg_shq "$SKILL_DIR/scripts/key.sh") show $(agmsg_shq "$team")" >&2
+    echo "To mint a replacement epoch instead:" >&2
+    echo "  bash $(agmsg_shq "$SKILL_DIR/scripts/key.sh") rotate $(agmsg_shq "$team")" >&2
     exit 1
   fi
 
