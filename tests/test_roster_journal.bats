@@ -918,7 +918,7 @@ EOF
 
   [ "$driver_status" -eq 18 ]
   # It says TERM WENT OUT...
-  printf '%s' "$driver_out" | grep -q 'TERM WAS SENT'
+  printf '%s' "$driver_out" | grep -q 'TERM was ATTEMPTED'
   # ...and that KILL was withheld once the number stopped being identifiable.
   printf '%s' "$driver_out" | grep -q 'WITHHELD'
   # ...and it does NOT claim nothing was signalled, which is the false
@@ -929,7 +929,7 @@ EOF
   # assertion incapable of failing -- exactly the class this PR is about.
   # `.github/scripts/check-enforced-assertions.sh` caught it; the baseline
   # went 638 -> 639 and named the line.
-  run bash -c 'printf "%s" "$1" | grep -q "Nothing was signalled"' _ "$driver_out"
+  run bash -c 'printf "%s" "$1" | grep -q "No signal was attempted"' _ "$driver_out"
   [ "$status" -ne 0 ]
   [ -d "$team_dir/.config.lock" ]
 
@@ -937,6 +937,102 @@ EOF
   # message: the child is still alive. It ignores nothing -- it has no KILL
   # handler and could not have one -- so its survival is the evidence.
   kill -0 "$(pgrep -f "$fake" | head -1)" 2>/dev/null
+
+  local leftover
+  leftover="$(pgrep -f "$fake" || true)"
+  if [ -n "$leftover" ]; then
+    kill $leftover 2>/dev/null || true
+    sleep 1
+    kill -9 $leftover 2>/dev/null || true
+  fi
+  rmdir "$team_dir/.config.lock" 2>/dev/null || true
+}
+
+@test "a number once judged not ours is not re-adopted for KILL (#821)" {
+  skip_on_windows "POSIX signal semantics are not supported by this test"
+  # THE OTHER DIRECTION OF THE TRANSITION, and it is a safety hole rather
+  # than a reporting one (raised in review).
+  #
+  # The predicate is re-asked before TERM and again before KILL, so a number
+  # can read `unknown` at the first and `ours` at the second -- recycling, or
+  # an instrument that failed once and recovered. The old code then sent KILL
+  # to a number it had just refused to send TERM to: escalating against
+  # something it had never established a claim on. Escalation is monotone now.
+  #
+  # Driven by CALL COUNT rather than by a timer, so there is no race: the
+  # `ps -o args=` stub answers with a decoy on its first call and truthfully
+  # after. The first call is the one before TERM.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir made calls
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  made="$TEST_SKILL_DIR/mktemp-made-readopt"
+  calls="$TEST_SKILL_DIR/ps-args-calls"
+  shimdir="$TEST_SKILL_DIR/shim-readopt"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'if [ "$1" = "-o" ] && [ "$2" = "args=" ]; then'
+    printf '%s\n' '  n=$(cat "$AGMSG_TEST_PS_CALLS" 2>/dev/null || echo 0)'
+    printf '%s\n' '  n=$((n + 1)); printf %s "$n" > "$AGMSG_TEST_PS_CALLS"'
+    printf '%s\n' '  if [ "$n" -eq 1 ]; then'
+    printf '%s\n' '    printf "%s\\n" "some-unrelated-process --before-recycle"'
+    printf '%s\n' '    exit 0'
+    printf '%s\n' '  fi'
+    printf '%s\n' 'fi'
+    printf '%s\n' 'exec /bin/ps "$@"'
+  } > "$shimdir/ps"
+  chmod +x "$shimdir/ps"
+
+  fake="$TEST_SKILL_DIR/fake-node-readopt"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+trap '' TERM
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_PS_CALLS="$calls" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=3 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  local driver_status="$status" driver_out="$output"
+
+  # POSITIVE CONTROL ON THE INSTRUMENT: the stub was consulted more than once,
+  # so the run really did ask before TERM and again afterwards. With a single
+  # call this would be an ordinary never-identifiable timeout and would prove
+  # nothing about re-adoption.
+  [ "$(cat "$calls" 2>/dev/null || echo 0)" -ge 2 ]
+
+  # THE CHILD IS STILL ALIVE. It ignores TERM, but nothing can ignore KILL --
+  # so its survival is the measurement that no KILL was sent to it. This is
+  # the assertion the finding is about.
+  local alive
+  alive="$(pgrep -f "$fake" | head -1 || true)"
+  [ -n "$alive" ]
+  kill -0 "$alive" 2>/dev/null
+
+  # And the diagnostic does not claim a signal it never attempted.
+  printf '%s' "$driver_out" | grep -q 'No signal was attempted'
+  [ -d "$team_dir/.config.lock" ]
+  # 17: alive and identifiable by the time the decision is taken. Not 14,
+  # which would mean the lock came off beside it.
+  [ "$driver_status" -eq 17 ]
 
   local leftover
   leftover="$(pgrep -f "$fake" || true)"
