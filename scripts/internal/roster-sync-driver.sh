@@ -7,6 +7,11 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SKILL_DIR/scripts/lib/registry-lock.sh"
 # shellcheck disable=SC1091
 source "$SKILL_DIR/scripts/lib/roster-journal.sh"
+# For `_agmsg_pid_alive_local`, which is where liveness is OWNED. A bare
+# `kill -0` here would be a second answer to "is it running?" beside the one
+# that file exists to give -- and a repo-wide check refuses one, correctly.
+# shellcheck disable=SC1091
+source "$SKILL_DIR/scripts/lib/instance-id.sh"
 
 operation="${1:?Missing operation}"; team="${2:?Missing team}"
 server="${3:?Missing server id}"; remote="${4:?Missing remote team id}"
@@ -83,9 +88,13 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 #
 # So the wait is bounded by a READ, not by a second process. The child is given
 # one end of a FIFO it never writes to; when it exits, that end closes and the
-# read here returns end-of-file. `read -t` distinguishes the two outcomes by
-# status: >128 means the budget expired, and anything else means the writer is
-# gone.
+# read here returns end-of-file.
+#
+# This USED TO SAY that `read -t` then distinguishes the two outcomes by
+# status — above 128 for the budget, anything else for a departed writer — AND
+# THAT WAS WRONG WHERE IT RUNS. The correction and its measurement are below;
+# the sentence is kept in the past tense so this file does not appear to state
+# two contracts at once.
 #
 # What this does NOT claim is "no extra process at all": `mktemp`, `mkfifo` and
 # `rm` are external commands and each is a spawn (raised in review; an earlier
@@ -93,8 +102,10 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 # false). They are short-lived and sequential, where a watchdog is concurrent
 # and lives as long as the operation — and on a machine that is refusing
 # spawns, a process held open beside every roster call is the shape that
-# matters. Each of the three is checked: a failure to make the temp path or the
-# FIFO falls back to the unbounded path and says so on stderr.
+# matters. What happens when one of them fails is NOT "fall back to the
+# unbounded path" — that is what this used to do, and it is the defect. See
+# the mode table below: no FIFO still bounds by polling, and no temp file at
+# all refuses.
 # A FIFO to notice the child's exit by, and a SENTINEL to say what happened.
 #
 # Two files, because one of them cannot answer both questions on the shell
@@ -145,6 +156,25 @@ if [ -n "$_roster_sentinel" ] && [ -n "$_roster_pidfile" ]; then
     _roster_fifo=""
     _roster_wait=poll
   fi
+fi
+
+# A PARTIAL SETUP LEAVES PART OF ITSELF BEHIND, AND `none` IS WHERE IT SHOWS
+# (raised in review).
+#
+# The three `mktemp` calls above run independently, so "could not build a
+# bound" is not one state: the sentinel can exist while the pidfile failed, or
+# the other way round. Both routes out of `none` — the override and the
+# refusal — used to walk past whatever had already been created, and the
+# failure that sends a run down here is *a temp directory that is full*. A
+# feature that responds to a full filesystem by adding a file to it is the
+# wrong shape, and it is the same self-defeating loop `sync-autostart.sh`
+# already carries a comment about.
+#
+# Swept once, here, before either route is taken. `rm -f` on an empty name is
+# a no-op, so the three cases (none created, one, two) need no branching, and
+# `|| true` because nothing below may hang on a failed unlink.
+if [ "$_roster_wait" = "none" ]; then
+  rm -f "$_roster_sentinel" "$_roster_pidfile" 2>/dev/null || true
 fi
 
 # THE WAY OUT, because a refusal with no override is a wall. An operator who
@@ -263,9 +293,22 @@ if [ "$_roster_wait" != "none" ]; then
     # trade against no bound at all.
     #
     # `SECONDS` is the shell's own counter, so the deadline needs no `date`.
+    #
+    # `|| true` ON THE SLEEP, for the same reason the `rm` above has one, and
+    # it is sharper here (raised in review). `sleep` is an external command
+    # under `set -e`; a refused spawn would end this shell HERE — with the
+    # wrapper and node already started and none of the terminate/KILL/reap
+    # below reached — and the EXIT trap would drop the lock beside a live
+    # writer. That is the contract this path is written to keep, broken by the
+    # one command it uses to wait. And this mode is *chosen* on machines that
+    # could not make a FIFO, which is the same population that refuses spawns.
+    #
+    # What a failing `sleep` costs instead: this loop spins on `SECONDS` until
+    # the deadline. Hot, and bounded, and it still terminates — the right
+    # trade against exiting mid-critical-section.
     _roster_deadline=$((SECONDS + ROSTER_SYNC_BUDGET_S))
     while [ ! -s "$_roster_sentinel" ] && [ "$SECONDS" -lt "$_roster_deadline" ]; do
-      sleep 1
+      sleep 1 || true
     done
   fi
 
@@ -284,7 +327,10 @@ if [ "$_roster_wait" != "none" ]; then
       kill -TERM "$_roster_inner" 2>/dev/null || true
     fi
     kill -TERM "$_roster_child" 2>/dev/null || true
-    sleep 2
+    # `|| true`: a failed spawn here would exit before the KILL and the reap,
+    # leaving the EXIT trap to release the lock beside a child that ignored
+    # TERM — the precise case this grace period exists for.
+    sleep 2 || true
     if [ -n "$_roster_inner" ]; then
       kill -KILL "$_roster_inner" 2>/dev/null || true
     fi
@@ -297,13 +343,80 @@ if [ "$_roster_wait" != "none" ]; then
       rm -f "$_roster_sentinel" "$_roster_pidfile" || true
       [ "$_roster_status" = "0" ] || exit "$_roster_status"
     else
+      # "I SENT A SIGNAL" IS NOT "THE PROCESS IS GONE" (raised as BLOCKING).
+      #
+      # Everything above discards its result: `kill -TERM ... || true`, then
+      # `kill -KILL ... || true`. Neither says whether anything died. The inner
+      # process is a GRANDCHILD, so `wait` cannot speak for it either — only
+      # the wrapper is this shell's child. So the release below used to rest on
+      # nothing at all: a signal refused by a sandbox, or a process wedged in an
+      # uninterruptible state, and the lock came off anyway with the writer
+      # still running. That is the one outcome this whole path exists to avoid,
+      # and the comment two branches up says so in as many words.
+      #
+      # So the question is ASKED, with the repo's own instrument.
+      # `_agmsg_pid_alive_local` is the right one of the two: this pid was
+      # minted by `$!` in one of these shells and read back from a pidfile one
+      # of them wrote. It reads EPERM as alive, treats a zombie as gone, and
+      # cross-checks with `ps` so a sandbox that refuses to signal cannot be
+      # mistaken for a process that is not there.
+      #
+      # WHICH WAY IT FAILS MATTERS MORE THAN WHETHER IT CAN. A pid can be
+      # reused, so this can be wrong in two directions:
+      #
+      #   wrong "alive"  the number was recycled by an unrelated process. The
+      #                  lock is then held when it need not be — visible,
+      #                  named, and fixable by hand.
+      #   wrong "dead"   the lock comes off beside a live writer. Silent, and
+      #                  it corrupts.
+      #
+      # The instrument is built to err toward "alive", and that is the
+      # direction this path needs. The conservative answer is the one that
+      # costs an operator a message rather than the journal.
+      _roster_gone=1
+      if [ -n "$_roster_inner" ]; then
+        _roster_confirm_deadline=$((SECONDS + 5))
+        while [ "$SECONDS" -lt "$_roster_confirm_deadline" ]; do
+          if _agmsg_pid_alive_local "$_roster_inner"; then
+            # `|| true` for the third time, and for the same contract: exiting
+            # here would release the lock through the trap without ever
+            # reaching the decision below.
+            sleep 1 || true
+          else
+            break
+          fi
+        done
+        if _agmsg_pid_alive_local "$_roster_inner"; then
+          _roster_gone=0
+        fi
+      fi
+
+      if [ "$_roster_gone" = "0" ]; then
+        # THE LOCK IS KEPT, ON PURPOSE, AND THE OPERATOR IS TOLD.
+        #
+        # Emptying `AGMSG_HELD_LOCKS` is how the lock survives: the EXIT trap
+        # calls `agmsg_lock_release`, which walks that list and does nothing
+        # when it is empty. The directory stays where it is. Reaching for the
+        # trap itself would fight the library that installed it; this uses the
+        # library's own state.
+        #
+        # This does not reopen #821. That property is "a child that hangs must
+        # not hold the critical section INDEFINITELY, silently" — and this
+        # shell exits, now, with the pid and the path to remove. What it
+        # refuses to do is claim a process was stopped when it was not.
+        AGMSG_HELD_LOCKS=""
+        rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and process $_roster_inner is STILL RUNNING after TERM and KILL. The team lock is being KEPT rather than released, because releasing it beside a live writer can corrupt the roster journal. Stop that process, then remove $team_dir/.config.lock" >&2
+        exit 17
+      fi
+
       rm -f "$_roster_sentinel" "$_roster_pidfile" || true
       # Released here rather than left to the EXIT trap. The trap is the
       # mechanism that is not reached when a child never returns, and a fix
       # that leans on it on the one path it exists for is not a fix. It still
       # runs afterwards and finds nothing to do.
       agmsg_lock_release
-      echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s; it was stopped and the team lock released" >&2
+      echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s; it was stopped, confirmed gone, and the team lock released" >&2
       # Stopping between the journal write and the state write leaves the two
       # out of step. Each is written by rename, so neither is torn — but that
       # the next run converges from every such point is NOT established, and is

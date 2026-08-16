@@ -477,6 +477,156 @@ EOF
   ! printf '%s' "$output" | grep -q 'without a time bound'
 }
 
+@test "a failing sleep does not drop the lock beside a live child (#821)" {
+  skip_on_windows "POSIX signal delivery is not supported by this test"
+  # THE WAIT'S OWN COMMAND CAN BE THE THING THAT FAILS (raised in review).
+  #
+  # `sleep` is external. Under `set -e` an unguarded one ends this shell where
+  # it stands — with the wrapper and node already started, and none of the
+  # terminate/KILL/reap reached — and the EXIT trap then releases the lock
+  # beside a live writer. That is the contract the timeout path is written to
+  # keep, broken by the command it waits with.
+  #
+  # Driven in POLL mode on purpose: poll is chosen on machines that could not
+  # make a FIFO, which is the same population that refuses spawns, so this is
+  # where the two failures actually meet. The grace `sleep` on the FIFO path
+  # is the same contract and is covered by the same stub — this run reaches
+  # both, since a poll-mode timeout still runs the TERM/grace/KILL sequence.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  fake="$TEST_SKILL_DIR/fake-node-unkillable-nosleep"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do read -r _ 2>/dev/null || :; done
+EOF
+  chmod +x "$fake"
+
+  # Both stubs in one directory: no FIFO (so poll is chosen) and no sleep (so
+  # every wait in the driver has to survive its own tool being broken). The
+  # fake node deliberately does NOT call sleep, so the stub cannot stop it.
+  shimdir="$TEST_SKILL_DIR/shim-nofifo-nosleep"
+  mkdir -p "$shimdir"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$shimdir/mkfifo"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$shimdir/sleep"
+  chmod +x "$shimdir/mkfifo" "$shimdir/sleep"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=2 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  # A NAMED failure — not the shell's own death from a failed sleep, which
+  # would arrive as an unexplained non-zero with no sentence at all.
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q 'did not finish within'
+  # The lock is gone BECAUSE the child was dealt with, not because a trap ran
+  # on the way out.
+  [ ! -d "$team_dir/.config.lock" ]
+  refute pgrep -f "$fake"
+}
+
+@test "the lock is not released until the inner child is confirmed gone (#821)" {
+  # A STRUCTURAL CHECK, AND THE REASON IS A LIMIT I COULD NOT GET AROUND.
+  #
+  # The property: "I sent a signal" is not "the process is gone". The inner
+  # process is a GRANDCHILD, so `wait` cannot speak for it, and every `kill`
+  # above discards its result. The release must therefore be gated on ASKING.
+  #
+  # The behavioural case would need a process that survives SIGKILL, and on a
+  # machine where this suite can run, there is none: KILL is only refused
+  # under EPERM (a sandbox) or an uninterruptible wait, and neither can be
+  # produced here. I tried and could not, and I would rather say that than
+  # ship a case that passes for a reason unrelated to the property.
+  #
+  # So the gate is asserted where it lives, with both anchors required to
+  # exist so this cannot pass by finding nothing -- the same guard that caught
+  # the spawn anchor going stale on the previous head.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh" ask_at release_at keep_at
+  # The question is asked with the repo's own instrument, not a bare kill -0.
+  ask_at="$(grep -n '_agmsg_pid_alive_local "\$_roster_inner"' "$sh" | tail -1 | cut -d: -f1)"
+  # The lock is deliberately kept by emptying the library's own list.
+  keep_at="$(grep -n '^        AGMSG_HELD_LOCKS=""$' "$sh" | head -1 | cut -d: -f1)"
+  # The timeout path's release, which must come after the question.
+  release_at="$(grep -n '^      agmsg_lock_release$' "$sh" | head -1 | cut -d: -f1)"
+
+  [ -n "$ask_at" ]
+  [ -n "$keep_at" ]
+  [ -n "$release_at" ]
+  [ "$release_at" -gt "$ask_at" ]
+  [ "$keep_at" -gt "$ask_at" ]
+  [ "$keep_at" -lt "$release_at" ]
+  # And the instrument is the sourced one, so this cannot be satisfied by a
+  # bare `kill -0` reintroduced beside it -- which a repo-wide check also
+  # refuses, from the other direction.
+  grep -q 'source "\$SKILL_DIR/scripts/lib/instance-id.sh"' "$sh"
+}
+
+@test "a partial temp setup leaves nothing behind (#821)" {
+  # `mktemp` IS CALLED THREE TIMES, INDEPENDENTLY (raised in review), so
+  # "could not build a bound" is not one state: the sentinel can exist while
+  # the pidfile failed. Both ways out of that state used to walk past whatever
+  # had already been made.
+  #
+  # It matters because of WHY this path is reached: a temp directory that is
+  # full. A feature answering a full filesystem by adding a file to it is the
+  # wrong shape.
+  #
+  # The stub fails only from the SECOND call on, so the first `mktemp -u`
+  # succeeds and the sentinel's does not. The previous cases all failed every
+  # call, which never produced this shape.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local shimdir counter before after fake
+  fake="$TEST_SKILL_DIR/fake-node-partial"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$fake"
+  chmod +x "$fake"
+
+  counter="$TEST_SKILL_DIR/mktemp-calls"
+  shimdir="$TEST_SKILL_DIR/shim-partial-mktemp"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'n=$(cat "$AGMSG_TEST_MKTEMP_COUNTER" 2>/dev/null || echo 0)'
+    printf '%s\n' 'n=$((n + 1)); printf %s "$n" > "$AGMSG_TEST_MKTEMP_COUNTER"'
+    printf '%s\n' '[ "$n" -ge 2 ] && exit 1'
+    printf '%s\n' 'exec /usr/bin/mktemp "$@"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+
+  # Every temp path this driver could have created lives in TMPDIR, so the
+  # question is asked of the directory itself: what is in it before, and what
+  # is in it after. Counting entries rather than naming them, because the
+  # names are generated and the assertion is about residue, not identity.
+  export TMPDIR="$TEST_SKILL_DIR/tmp-partial"
+  mkdir -p "$TMPDIR"
+  before="$(find "$TMPDIR" -type f | wc -l | tr -d ' ')"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_COUNTER="$counter" TMPDIR="$TMPDIR" \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  # It took the refusal, which is what a partial setup must do.
+  [ "$status" -eq 16 ]
+  # POSITIVE CONTROL ON THE STUB: without this, a stub that never ran would
+  # leave the case asserting "no residue" about a run that had no temps to
+  # leave. Two calls means the first succeeded and the second was refused --
+  # exactly the partial shape.
+  [ "$(cat "$counter")" -ge 2 ]
+  after="$(find "$TMPDIR" -type f | wc -l | tr -d ' ')"
+  [ "$after" -eq "$before" ]
+  [ ! -d "$team_dir/.config.lock" ]
+}
+
 @test "roster sync refuses, rather than waiting unbounded, when it cannot build a bound (#821)" {
   # `mkfifo` failing has a second way to wait. `mktemp` failing has none: with
   # no sentinel there is nothing to watch, so the choice is between refusing
