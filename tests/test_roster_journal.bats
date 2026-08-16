@@ -557,7 +557,7 @@ EOF
   refute pgrep -f "$fake"
 }
 
-@test "the lock is KEPT when the inner child cannot be confirmed gone (#821)" {
+@test "a recycled pid is neither signalled nor read as gone (#821)" {
   skip_on_windows "POSIX signal semantics are not supported by this test"
   # "I SENT A SIGNAL" IS NOT "THE PROCESS IS GONE" (raised as BLOCKING).
   #
@@ -566,13 +566,20 @@ EOF
   # rested on nothing: a refused signal, and the lock came off beside a live
   # writer.
   #
-  # DRIVING IT NEEDED A PROCESS THE DRIVER CANNOT KILL, and SIGKILL cannot be
-  # ignored -- it is refused only under EPERM or an uninterruptible wait. So
-  # the case uses EPERM, which is the realistic half anyway (a sandbox that
-  # will not let us signal, #505): it makes the recorded pid **1**, which no
-  # ordinary user may signal. `kill -0 1` answers `Operation not permitted`,
-  # and `_agmsg_pid_alive_local` reads every non-ESRCH failure as alive --
-  # which is the conservative direction this gate needs.
+  # AND A NUMBER IN A FILE IS NOT AN IDENTITY. A pid is recycled the moment
+  # its process is reaped, so the number the wrapper wrote can belong to
+  # something else by the time the timeout path reads it. The earlier version
+  # sent TERM and then KILL to whatever it said.
+  #
+  # So the case makes the recorded pid **1** -- alive, certainly not ours, and
+  # not signallable by an ordinary user. That is one substitution standing in
+  # for both hazards: a recycled number, and (through EPERM) a process this
+  # process may not touch.
+  #
+  # What it must produce is the UNKNOWN outcome: pid 1 not signalled, our own
+  # child's fate undetermined, and therefore the lock kept. Reading it as
+  # "gone" would release on an answer never obtained; reading it as "still
+  # ours" would mean the driver had adopted a stranger.
   #
   # Nothing in the driver is stubbed. The pidfile is a real file whose path
   # the `mktemp` shim already reports, and the fake node overwrites it the way
@@ -613,17 +620,29 @@ EOF
 # measures the lock and nothing else.
 exec >/dev/null 2>&1
 trap '' TERM
-( sleep 1
-  pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
-  if [ -n "$pidfile" ] && [ -e "$pidfile" ]; then
-    printf '1\n' > "$pidfile"
-    # Recorded HERE, not read back from the pidfile afterwards: the driver
-    # deletes that file on its way out, so a check made after the run finds
-    # an empty string whether or not the substitution happened. Measured --
-    # the first version of this control failed for exactly that reason, on a
-    # run whose status was already the 17 this case is about.
-    printf 'substituted\n' > "$AGMSG_TEST_SUBSTITUTED"
-  fi
+# SUBSTITUTED REPEATEDLY, NOT ONCE, because once is a race this suite loses.
+#
+# The wrapper writes the real pid AFTER spawning this process, so a single
+# write timed off a `sleep 1` can land first and simply be overwritten. Alone
+# the case passed; in the full file, under the load of twenty-odd other cases,
+# it did not -- measured, as a status of 14 where 18 was expected. Rewriting
+# until just before the driver's budget expires removes the timing question
+# from the case entirely.
+( i=0
+  while [ "$i" -lt 25 ]; do
+    pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
+    if [ -n "$pidfile" ] && [ -e "$pidfile" ] && [ -s "$pidfile" ]; then
+      printf '1\n' > "$pidfile"
+      # Recorded HERE, not read back from the pidfile afterwards: the driver
+      # deletes that file on its way out, so a check made after the run finds
+      # an empty string whether or not the substitution happened. Measured --
+      # the first version of this control failed for exactly that reason, on a
+      # run that had already reached the branch it was checking for.
+      printf 'substituted\n' > "$AGMSG_TEST_SUBSTITUTED"
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
 ) &
 while :; do sleep 1; done
 EOF
@@ -643,10 +662,15 @@ EOF
   [ -s "$made" ]
   [ "$(cat "$substituted" 2>/dev/null || true)" = "substituted" ]
 
-  # A distinct, named refusal -- not 14, which is the "stopped and released"
-  # outcome and would mean the gate did not fire.
-  [ "$status" -eq 17 ]
-  printf '%s' "$output" | grep -q 'STILL RUNNING'
+  # 18, the UNKNOWN outcome -- not 14 ("stopped and confirmed gone", which
+  # would mean the gate did not fire) and not 17 ("still ours and running",
+  # which would mean the driver had decided pid 1 was its own child).
+  [ "$status" -eq 18 ]
+  printf '%s' "$output" | grep -q 'no longer identifiable'
+  # AND IT SAYS IT DID NOT SIGNAL. This is the half that matters most: the
+  # earlier version sent TERM and KILL to whatever the file said, so a
+  # recycled number meant signalling a stranger.
+  printf '%s' "$output" | grep -q 'NOT signalled'
   # THE LOCK IS STILL THERE. This is the assertion the whole finding is about:
   # a release here would be a release beside a writer we could not stop.
   [ -d "$team_dir/.config.lock" ]

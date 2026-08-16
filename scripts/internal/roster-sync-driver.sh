@@ -12,6 +12,10 @@ source "$SKILL_DIR/scripts/lib/roster-journal.sh"
 # that file exists to give -- and a repo-wide check refuses one, correctly.
 # shellcheck disable=SC1091
 source "$SKILL_DIR/scripts/lib/instance-id.sh"
+# For `compat_get_cmdline`, which is how `scripts/remote.sh` already answers
+# "is this pid still the process I started?" on every platform this ships to.
+# shellcheck disable=SC1091
+source "$SKILL_DIR/scripts/lib/compat.sh"
 
 operation="${1:?Missing operation}"; team="${2:?Missing team}"
 server="${3:?Missing server id}"; remote="${4:?Missing remote team id}"
@@ -59,6 +63,34 @@ trap 'agmsg_lock_release; exit 129' HUP
 agmsg_roster_ensure "$team_dir" "$config"
 
 node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
+
+# "Is the recorded pid still the process this operation started?" — asked in
+# ONE place, so the signalling path and the release decision cannot come to
+# different answers. Two questions with one wording is how a gate ends up
+# guarding something narrower than the thing it authorises.
+#
+# A NUMBER IN A FILE IS NOT AN IDENTITY (raised as BLOCKING, and the answer
+# was already in this repo). A pid is recycled the moment its process is
+# reaped, so between the wrapper writing that number and the timeout path
+# reading it, it can belong to something else entirely.
+# `_remote_sync_engine_status` in `scripts/remote.sh` had already been here:
+# "A live PID is not enough: PID reuse can make an unrelated process pass
+# kill -0, so running requires the exact engine script/team suffix in argv."
+#
+# Both halves are required. Liveness alone reads a recycled number as our
+# child; argv alone would accept a match on a pid that is already gone. The
+# suffix is specific rather than convenient: `$config` is per-team, so a
+# roster sync for a DIFFERENT team cannot satisfy it.
+_roster_inner_still_ours() {
+  [ -n "${_roster_inner:-}" ] || return 1
+  _agmsg_pid_alive_local "$_roster_inner" || return 1
+  local cmd
+  cmd="$(compat_get_cmdline "$_roster_inner" 2>/dev/null || true)"
+  case "$cmd" in
+    *"$SCRIPT_DIR/roster-sync.mjs $operation $config"*) return 0 ;;
+  esac
+  return 1
+}
 
 # THE CRITICAL SECTION IS BOUNDED IN TIME, NOT ONLY IN SCOPE (#821).
 #
@@ -323,21 +355,53 @@ if [ "$_roster_wait" != "none" ]; then
     # that was writing under it may still be running, because letting the next
     # caller in beside a live writer is worse than the leak being fixed.
     _roster_inner="$(cat "$_roster_pidfile" 2>/dev/null || true)"
-    if [ -n "$_roster_inner" ]; then
+    # A leading zero, a negative, a word, or an empty file all mean the same
+    # thing here: there is no pid to work with. Cleared once, so the predicate
+    # refuses it in one place rather than every caller guessing.
+    case "$_roster_inner" in
+      ''|*[!0-9]*|0*) _roster_inner="" ;;
+    esac
+    # Signalled ONLY when it is still the process we started. Anything else is
+    # left alone: the cost of not signalling our own child is a lock we keep
+    # and report; the cost of signalling someone else's is a process we had no
+    # business touching.
+    if _roster_inner_still_ours; then
       kill -TERM "$_roster_inner" 2>/dev/null || true
     fi
+    # The wrapper needs no such check — it is this shell's own child, held in
+    # `$!` and not reaped until below, so its number cannot have been recycled
+    # while we still hold it.
     kill -TERM "$_roster_child" 2>/dev/null || true
     # `|| true`: a failed spawn here would exit before the KILL and the reap,
     # leaving the EXIT trap to release the lock beside a child that ignored
     # TERM — the precise case this grace period exists for.
     sleep 2 || true
-    if [ -n "$_roster_inner" ]; then
+    # Re-asked, not remembered: the grace period is exactly the window in
+    # which our child can exit and its number be handed to someone else. A
+    # KILL aimed at an answer obtained two seconds ago is the same defect as
+    # the TERM above, one branch later.
+    if _roster_inner_still_ours; then
       kill -KILL "$_roster_inner" 2>/dev/null || true
     fi
     kill -KILL "$_roster_child" 2>/dev/null || true
     wait "$_roster_child" 2>/dev/null || true
     # Read once more AFTER the reap: a wrapper that was finishing while this
     # side gave up would otherwise be reported as a timeout it never had.
+    #
+    # THE SENTINEL DOES NOT SHORT-CIRCUIT THE GATE (raised in review). It is
+    # written by the wrapper only after `wait` on node returned, so it *should*
+    # imply the inner process is gone — but that is an argument about the
+    # wrapper's code, not an observation of this machine, and the branch it
+    # guards is the one that releases the lock. So the same question is asked
+    # here too. It costs nothing when the inner really has exited: the
+    # predicate fails on its first call and this reads exactly as it did
+    # before.
+    if [ -s "$_roster_sentinel" ] && _roster_inner_still_ours; then
+      AGMSG_HELD_LOCKS=""
+      rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+      echo "agmsg: roster sync $operation failed for team '$team': the wrapper recorded an exit status, but process $_roster_inner is still running this operation's roster-sync. The team lock is being KEPT rather than released. Stop that process, then remove $team_dir/.config.lock" >&2
+      exit 17
+    fi
     if [ -s "$_roster_sentinel" ]; then
       _roster_status="$(cat "$_roster_sentinel" 2>/dev/null || printf '13')"
       rm -f "$_roster_sentinel" "$_roster_pidfile" || true
@@ -361,23 +425,29 @@ if [ "$_roster_wait" != "none" ]; then
       # cross-checks with `ps` so a sandbox that refuses to signal cannot be
       # mistaken for a process that is not there.
       #
-      # WHICH WAY IT FAILS MATTERS MORE THAN WHETHER IT CAN. A pid can be
-      # reused, so this can be wrong in two directions:
+      # AND IT ASKS THE SAME QUESTION THE SIGNALS DID, not a weaker one. An
+      # earlier version gated on liveness alone, which reads a recycled number
+      # as "our child is still running" (raised in review). The predicate is
+      # the pair — alive AND still carrying this operation's argv — so the two
+      # cannot drift apart.
       #
-      #   wrong "alive"  the number was recycled by an unrelated process. The
-      #                  lock is then held when it need not be — visible,
-      #                  named, and fixable by hand.
-      #   wrong "dead"   the lock comes off beside a live writer. Silent, and
-      #                  it corrupts.
+      # WHICH WAY IT FAILS MATTERS MORE THAN WHETHER IT CAN:
       #
-      # The instrument is built to err toward "alive", and that is the
-      # direction this path needs. The conservative answer is the one that
-      # costs an operator a message rather than the journal.
+      #   wrong "still ours"  the lock is held when it need not be — visible,
+      #                       named, and fixable by hand.
+      #   wrong "gone"        the lock comes off beside a live writer. Silent,
+      #                       and it corrupts.
+      #
+      # `_agmsg_pid_alive_local` errs toward "alive"; the argv match errs
+      # toward "not ours". Their conjunction therefore errs toward "gone" —
+      # the WRONG direction — so a pid that is alive but unrecognisable is
+      # reported as UNKNOWN below rather than folded into either answer.
       _roster_gone=1
+      _roster_unknown=0
       if [ -n "$_roster_inner" ]; then
         _roster_confirm_deadline=$((SECONDS + 5))
         while [ "$SECONDS" -lt "$_roster_confirm_deadline" ]; do
-          if _agmsg_pid_alive_local "$_roster_inner"; then
+          if _roster_inner_still_ours; then
             # `|| true` for the third time, and for the same contract: exiting
             # here would release the lock through the trap without ever
             # reaching the decision below.
@@ -386,9 +456,28 @@ if [ "$_roster_wait" != "none" ]; then
             break
           fi
         done
-        if _agmsg_pid_alive_local "$_roster_inner"; then
+        if _roster_inner_still_ours; then
           _roster_gone=0
+        elif _agmsg_pid_alive_local "$_roster_inner"; then
+          # ALIVE, BUT NO LONGER RECOGNISABLE. Two readings, and this cannot
+          # tell them apart: our child exited and something else took the
+          # number, or our child is there and its argv could not be read (a
+          # platform where `compat_get_cmdline` answers nothing, a sandbox).
+          #
+          # Reported as its own state rather than folded into either. Calling
+          # it "gone" would release the lock on the strength of an answer that
+          # was never obtained, which is the class this whole review round has
+          # been about.
+          _roster_gone=0
+          _roster_unknown=1
         fi
+      fi
+
+      if [ "$_roster_gone" = "0" ] && [ "$_roster_unknown" = "1" ]; then
+        AGMSG_HELD_LOCKS=""
+        rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+        echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s, and process $_roster_inner is alive but no longer identifiable as this operation's child — it was NOT signalled, because the number may since have been reused by an unrelated process. Whether our own child is still running could not be determined, so the team lock is being KEPT. Check that process, then remove $team_dir/.config.lock" >&2
+        exit 18
       fi
 
       if [ "$_roster_gone" = "0" ]; then
