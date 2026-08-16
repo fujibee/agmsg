@@ -38,6 +38,12 @@ compat_get_ppid() {
 }
 
 # Get Windows PID (WINPID) for an MSYS2 process.  Internal helper.
+#
+# NOT memoised, though `compat_pid_gone` reaches it from a poll that can turn
+# 1600 times. A cache here would be keyed on a pid, and a pid stops naming the
+# same process the moment that process exits -- which is the reuse hazard the
+# callers of this are built to survive. Paying a fork per turn on msys is the
+# cost; it is the same failure path #779 is already open about.
 _compat_get_winpid() {
   local pid="$1"
   ps -l -p "$pid" 2>/dev/null | awk '
@@ -55,6 +61,77 @@ _compat_cim_cmdline() {
   powershell.exe -NoProfile -Command \
     "(Get-CimInstance Win32_Process -Filter \"ProcessId=$winpid\").CommandLine" 2>/dev/null \
     | tr -d '\r' | tr '\\' '/'
+}
+
+# Is this process gone? Answered by EVERY probe available, not by one.
+#
+# THE TWO WRONG ANSWERS DO NOT COST THE SAME. A probe that wrongly says "alive"
+# costs a signal aimed at a pid whose ownership the caller still has to prove. A
+# probe that wrongly says "gone" leaves a live process nobody stops -- and that
+# is #831 exactly: on Windows 11 three `sync start` attempts each read a running
+# engine as dead, reported failure, and walked away, leaving three engines
+# pulling.
+#
+# Under Git Bash the pid these shells minted is an MSYS pid, which `tasklist`
+# does not report at all -- asking it about one answers "dead" for a running
+# process, which is how #567 lost every codex bridge -- so the Windows side is
+# asked about the WINPID instead, which is the same process under the name that
+# subsystem uses.
+#
+# `_agmsg_pid_alive_local` lives in instance-id.sh, which most callers of this
+# file do not source. Its absence must not be answerable: an undefined function
+# exits 127, which is not 0, which would have fallen straight through to "gone" --
+# the one answer this whole function exists to make hard to reach.
+compat_pid_gone() {
+  local pid="$1" winpid
+  if ! declare -f _agmsg_pid_alive_local >/dev/null 2>&1; then
+    printf 'agmsg: compat_pid_gone needs lib/instance-id.sh sourced\n' >&2
+    return 1
+  fi
+  _agmsg_pid_alive_local "$pid" && return 1
+  _agmsg_detect_platform
+  if [ "$_agmsg_platform" = "msys" ]; then
+    winpid="$(_compat_get_winpid "$pid" 2>/dev/null || true)"
+    case "$winpid" in
+      ''|*[!0-9]*) ;;
+      *) MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $winpid" 2>/dev/null | grep -q "$winpid" && return 1 ;;
+    esac
+  fi
+  return 0
+}
+
+# End a process tree this codebase started, on whatever the host calls it.
+#
+# `kill` alone is not enough under Git Bash. The sync engine is launched as
+# `bash remote-sync.sh`, which runs `node`; the MSYS signal reaches the MSYS-side
+# process and the native `node.exe` under it survives. Measured on Windows 11:
+# `sync start` had already aimed a kill at each of three engines that were still
+# running half an hour later (#831). Windows has no signal to deliver, so the
+# tree is ended by pid instead -- `/T` for the children, and `/F` only on the
+# second pass, after the polite attempt has been made and waited on.
+#
+# The POSIX signal goes first and unconditionally, including on msys: it is the
+# only thing that reaches the MSYS-side process, and everywhere else it is the
+# whole story. Neither half is allowed to fail this function -- a signal that
+# could not be delivered is not distinguishable here from one delivered to a
+# process that had already exited, and the caller decides by asking whether it
+# is gone.
+#
+# WHAT THIS DOES NOT CHECK is whether the pid is the caller's to end. `/T` ends a
+# whole tree, so on a recycled number that is somebody else's tree. Ownership is
+# proven before this is called, by the cmdline and not by the number.
+compat_signal_pid_tree() {
+  local pid="$1" sig="$2" winpid
+  kill "-$sig" "$pid" 2>/dev/null || true
+  _agmsg_detect_platform
+  [ "$_agmsg_platform" = "msys" ] || return 0
+  winpid="$(_compat_get_winpid "$pid" 2>/dev/null || true)"
+  case "$winpid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$sig" in
+    KILL) MSYS_NO_PATHCONV=1 taskkill /PID "$winpid" /T /F >/dev/null 2>&1 || true ;;
+    *)    MSYS_NO_PATHCONV=1 taskkill /PID "$winpid" /T    >/dev/null 2>&1 || true ;;
+  esac
+  return 0
 }
 
 # Get full command line of a process.  Replaces: ps -o args= -p <pid>
