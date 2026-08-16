@@ -95,11 +95,27 @@ node_bin="${AGMSG_SYNC_NODE_BIN:-${AGMSG_NODE:-node}}"
 # spawns, a process held open beside every roster call is the shape that
 # matters. Each of the three is checked: a failure to make the temp path or the
 # FIFO falls back to the unbounded path and says so on stderr.
-# A path to make the FIFO at, and nothing written to it: the child never sends
-# anything, and what this waits for is the moment its end closes.
+# A FIFO to notice the child's exit by, and a SENTINEL to say what happened.
+#
+# Two files, because one of them cannot answer both questions on the shell
+# this actually runs under. `read -t` returns 1 for a timeout AND 1 for
+# end-of-file on Bash 3.2 — measured on 3.2.57, which is what the macOS
+# runners use — so a bound written as `status > 128` is simply never taken
+# there. That is what happened: a two-second budget waited twenty-five
+# minutes, on the one platform whose bash cannot tell the two apart, while
+# every Linux leg stayed green because Bash 5 does distinguish them.
+#
+# So the ANSWER IS NOT THE RETURN CODE. The wrapper writes its child's exit
+# status to a sentinel as its last act; this side reads the sentinel. Present
+# means the wrapper finished — including when the command could not be exec'd
+# at all, because a failed exec sets `$?` in the wrapper and the wrapper still
+# reaches the write. Absent after the wait means the wrapper is still there,
+# which is the only case a bound is for.
 _roster_fifo="$(mktemp -u 2>/dev/null)" || _roster_fifo=""
+_roster_sentinel="$(mktemp 2>/dev/null)" || _roster_sentinel=""
+_roster_pidfile="$(mktemp 2>/dev/null)" || _roster_pidfile=""
 _roster_bounded=0
-if [ -n "$_roster_fifo" ] && mkfifo "$_roster_fifo" 2>/dev/null; then
+if [ -n "$_roster_fifo" ] && [ -n "$_roster_sentinel" ] && [ -n "$_roster_pidfile" ] && mkfifo "$_roster_fifo" 2>/dev/null; then
   _roster_bounded=1
 fi
 
@@ -109,8 +125,23 @@ if [ "$_roster_bounded" = "1" ]; then
   # the child silently took away the records the engine had already written to
   # fd 0. Measured, as every operation failing with "input is invalid".
   exec 9<&0
-  "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
-    "$server" "$remote" "$protocol" "$@" <&9 9<&- 3>&- 4>&- 8> "$_roster_fifo" &
+  # The wrapper records the READ CHILD'S pid before waiting on it, because the
+  # thing that has to be stopped on a timeout is the command, not the shell
+  # around it. Signalling the wrapper alone leaves the command orphaned, still
+  # holding this shell's stdout — and a caller that captures output then waits
+  # for an end-of-file that never comes. That is the same "an abandoned child
+  # keeps the caller's streams" defect fixed twice tonight, and it reappeared
+  # here: measured, as a three-second budget that had not returned after
+  # seventeen minutes.
+  {
+    "$node_bin" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config" \
+      "$server" "$remote" "$protocol" "$@" <&9 9<&- &
+    _rs_node=$!
+    printf '%s\n' "$_rs_node" > "$_roster_pidfile"
+    _rs_rc=0
+    wait "$_rs_node" || _rs_rc=$?
+    printf '%s\n' "$_rs_rc" > "$_roster_sentinel"
+  } 3>&- 4>&- 8> "$_roster_fifo" &
   _roster_child=$!
   # BOTH COPIES GO. `<&9` duplicates the caller's stdin onto fd 0 and leaves
   # fd 9 open beside it, so node would hold that stream twice and this shell
@@ -119,6 +150,8 @@ if [ "$_roster_bounded" = "1" ]; then
   # fix it (raised in review). The child closes its saved copy in the
   # redirection above; this closes ours the moment it is no longer needed.
   exec 9<&-
+  # The two opens rendezvous: a writer's `8>` does not complete until a reader
+  # arrives, so this cannot be left waiting for a writer that has already gone.
   exec 8< "$_roster_fifo"
   # `|| true` because this file runs under `set -e` and `rm` is an external
   # command: a spawn refused, or a filesystem that will not unlink, would end
@@ -129,39 +162,54 @@ if [ "$_roster_bounded" = "1" ]; then
   # tidiness may not decide whether the lock is held.
   rm -f "$_roster_fifo" || true
 
-  _roster_read_status=0
-  read -r -t "$ROSTER_SYNC_BUDGET_S" _roster_ignored <&8 || _roster_read_status=$?
+  # The read's own status is DELIBERATELY DISCARDED. It cannot be trusted to
+  # separate "the budget expired" from "the writer is gone" on Bash 3.2, and
+  # trusting it there is the defect this replaces.
+  read -r -t "$ROSTER_SYNC_BUDGET_S" _roster_ignored <&8 || true
   exec 8<&-
 
-  if [ "$_roster_read_status" -gt 128 ]; then
-    # The budget expired with the child still holding its end. Stop it, give it
-    # a moment, insist, and REAP it — the lock is not released while the process
+  if [ -s "$_roster_sentinel" ]; then
+    _roster_status="$(cat "$_roster_sentinel" 2>/dev/null || printf '13')"
+    wait "$_roster_child" 2>/dev/null || true
+    rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+    [ "$_roster_status" = "0" ] || exit "$_roster_status"
+  else
+    # No sentinel: the wrapper has not reached its last act. Stop it, give it a
+    # moment, insist, and REAP it — the lock is not released while the process
     # that was writing under it may still be running, because letting the next
     # caller in beside a live writer is worse than the leak being fixed.
+    _roster_inner="$(cat "$_roster_pidfile" 2>/dev/null || true)"
+    if [ -n "$_roster_inner" ]; then
+      kill -TERM "$_roster_inner" 2>/dev/null || true
+    fi
     kill -TERM "$_roster_child" 2>/dev/null || true
     sleep 2
+    if [ -n "$_roster_inner" ]; then
+      kill -KILL "$_roster_inner" 2>/dev/null || true
+    fi
     kill -KILL "$_roster_child" 2>/dev/null || true
     wait "$_roster_child" 2>/dev/null || true
-    # Released here rather than left to the EXIT trap. The trap is the mechanism
-    # that is not reached when a child never returns, and a fix that leans on it
-    # on the one path it exists for is not a fix. It still runs afterwards and
-    # finds nothing to do.
-    agmsg_lock_release
-    echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s; it was stopped and the team lock released" >&2
-    # Stopping between the journal write and the state write leaves the two out
-    # of step. Each is written by rename, so neither is torn — but that the next
-    # run converges from every such point is NOT established, and is recorded on
-    # the issue rather than claimed here.
-    exit 14
+    # Read once more AFTER the reap: a wrapper that was finishing while this
+    # side gave up would otherwise be reported as a timeout it never had.
+    if [ -s "$_roster_sentinel" ]; then
+      _roster_status="$(cat "$_roster_sentinel" 2>/dev/null || printf '13')"
+      rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+      [ "$_roster_status" = "0" ] || exit "$_roster_status"
+    else
+      rm -f "$_roster_sentinel" "$_roster_pidfile" || true
+      # Released here rather than left to the EXIT trap. The trap is the
+      # mechanism that is not reached when a child never returns, and a fix
+      # that leans on it on the one path it exists for is not a fix. It still
+      # runs afterwards and finds nothing to do.
+      agmsg_lock_release
+      echo "agmsg: roster sync $operation failed for team '$team': the local roster child did not finish within ${ROSTER_SYNC_BUDGET_S}s; it was stopped and the team lock released" >&2
+      # Stopping between the journal write and the state write leaves the two
+      # out of step. Each is written by rename, so neither is torn — but that
+      # the next run converges from every such point is NOT established, and is
+      # recorded on the issue rather than claimed here.
+      exit 14
+    fi
   fi
-
-  # End of file: the child is gone, and `wait` gives its status directly.
-  # `|| _roster_status=$?` because this file runs under `set -e` and `wait`
-  # returns the child's code — without it a node exiting 13 would kill this
-  # shell here, before anything below could report why.
-  _roster_status=0
-  wait "$_roster_child" || _roster_status=$?
-  [ "$_roster_status" = "0" ] || exit "$_roster_status"
 else
   # No FIFO — an exotic filesystem, or a temp directory that does not support
   # one. The previous behaviour is what remains: run it in the foreground and
