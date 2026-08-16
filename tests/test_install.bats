@@ -923,9 +923,15 @@ CYG
   # The premise, checked rather than assumed: the shim really does answer in
   # the other form, so a green result below cannot come from the shim being
   # bypassed.
+  #
+  # `[ "${output#C:}" != "$output" ]` rather than a `[[ ]]` prefix match: a
+  # non-last `[[ ]]` cannot fail the test on macOS bash 3.2 (#670), and this
+  # line exists to keep an unnoticed pass from happening. It would have been a
+  # blind check guarding against blind checks — which is the whole subject of
+  # this test.
   run env PATH="$shim_dir:$PATH" git -C "$REPO_ROOT" rev-parse --show-toplevel
   [ "$status" -eq 0 ]
-  [[ "$output" == C:* ]]
+  [ "${output#C:}" != "$output" ]
 
   # What the describe branch WOULD record, taken from the real git.
   local expected
