@@ -23,6 +23,15 @@
 # does not depend on that fix, because the harm does not depend on WHICH
 # misreading happens. A record deleted for a live process cannot be recovered by
 # the operator. A record left for a dead one is exactly what `status` describes.
+#
+# WHAT THIS FILE DOES NOT COVER. #831 names two independent directions and this
+# is the first of them. The second -- every engine appending to one shared log,
+# so lines tear into each other and every tool that reads that log, including the
+# readiness poll, reads fragments -- is untouched here, and no case below says
+# anything about it. Nothing here reduces the number of engines that CAN exist
+# either: two `sync start` calls that both misread still start two. What it
+# stops is the second half, where the record of one is deleted and nothing can
+# name it afterwards.
 
 load test_helper
 
