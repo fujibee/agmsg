@@ -61,8 +61,17 @@ agmsg_source_version() {
   # `agmsg_cmdline_names_path` takes in compat.sh, where the identical mismatch
   # made four watcher-ownership checks answer "not ours" on Windows.
   #
-  # Off Windows there is no cygpath, `native` stays empty, and this is the plain
-  # comparison and nothing else.
+  # The condition below is a CAPABILITY, not an operating system: where cygpath
+  # is not on PATH, `native` stays empty and this is the plain comparison and
+  # nothing else. Saying "off Windows" instead would be wider than the code —
+  # this file's own test drives the second branch on macOS and Linux by putting
+  # a cygpath stub on PATH.
+  #
+  # Where cygpath is absent, fails, returns nothing, or returns a path unequal
+  # to git's toplevel, the recorded value is the fallback, exactly as before.
+  # A wrong answer that happened to equal the toplevel would still take the
+  # describe branch, so this is a set of conditions and not a guarantee that
+  # the worst case is the old behaviour.
   native=""
   if command -v cygpath >/dev/null 2>&1; then
     native="$(cygpath -m "$SCRIPT_DIR" 2>/dev/null || true)"
