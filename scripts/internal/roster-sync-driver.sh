@@ -130,12 +130,13 @@ _roster_inner_state() {
   # asserted on this file with `grep` -- which measures a duplicate and a
   # spelling, never the thing production calls (raised in review).
   #
-  # What it holds, and why, is documented beside it: quotes stripped first
-  # because a native Windows command line quotes any argument containing a
-  # space; both path alphabets, because `/c/Users/...` and `C:/Users/...` are
-  # the same path; the ordered triple with argument boundaries, because three
-  # separate `contains` checks are three questions and an ordered substring is
-  # still a substring.
+  # What it holds, and why, is documented beside it: the quoted forms are
+  # enumerated rather than the quotes removed, because a quote is an argument
+  # boundary and deleting it lets a quoted DATA argument that merely contains
+  # the triple pass as an invocation; both path alphabets, because
+  # `/c/Users/...` and `C:/Users/...` are the same path; the ordered triple
+  # with argument boundaries, because three separate `contains` checks are
+  # three questions and an ordered substring is still a substring.
   if agmsg_roster_argv_is_ours "$cmd" "$SCRIPT_DIR/roster-sync.mjs" "$operation" "$config"; then
     printf 'ours\n'
     return

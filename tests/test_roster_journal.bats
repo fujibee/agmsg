@@ -494,11 +494,15 @@ EOF
   # And it must NOT have announced that it was running unbounded — the old
   # sentence is the marker of the path this case exists to remove.
   #
-  # `!` and not `refute`: `refute` takes a command, and a pipe binds tighter,
-  # so `refute printf ... | grep` hands `refute` only the `printf` and asserts
-  # something else entirely. Measured — it failed against output that does not
-  # contain the string.
-  ! printf '%s' "$output" | grep -q 'without a time bound'
+  # `run` AND A STATUS, and neither of the two shapes that come to mind first.
+  # `refute` takes a command and a pipe binds tighter, so
+  # `refute printf ... | grep` hands `refute` only the `printf` — measured, it
+  # failed against output that does not contain the string. And `! cmd` is
+  # what `.github/scripts/check-enforced-assertions.sh` refuses: it cannot
+  # fail a bats test unless it is the very last line, which makes the
+  # assertion's strength depend on where it happens to sit.
+  run bash -c 'printf "%s" "$1" | grep -q "without a time bound"' _ "$output"
+  [ "$status" -ne 0 ]
 }
 
 @test "a failing sleep does not drop the lock beside a live child (#821)" {
@@ -919,7 +923,14 @@ EOF
   printf '%s' "$driver_out" | grep -q 'WITHHELD'
   # ...and it does NOT claim nothing was signalled, which is the false
   # sentence this case exists to remove.
-  ! printf '%s' "$driver_out" | grep -q 'Nothing was signalled'
+  #
+  # `run` and a status, NOT `! cmd`: a non-last `! cmd` cannot fail a bats
+  # test anywhere, so writing the negation that way would have shipped an
+  # assertion incapable of failing -- exactly the class this PR is about.
+  # `.github/scripts/check-enforced-assertions.sh` caught it; the baseline
+  # went 638 -> 639 and named the line.
+  run bash -c 'printf "%s" "$1" | grep -q "Nothing was signalled"' _ "$driver_out"
+  [ "$status" -ne 0 ]
   [ -d "$team_dir/.config.lock" ]
 
   # KILL WAS WITHHELD, observed on the process rather than read from the
