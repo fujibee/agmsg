@@ -764,6 +764,21 @@ EOF
   run env PATH="$shimdir:$PATH" bash -c \
     "source '$SCRIPTS/lib/compat.sh'; agmsg_cmdline_names_path '$native_cmd' '$other'"
   [ "$status" -ne 0 ]
+
+  # AND THE DRIVER MUST ACTUALLY USE IT. Everything above measures the
+  # comparator; none of it would notice the driver going back to a raw
+  # comparison, and that is precisely the regression to guard -- measured, by
+  # reverting the driver to `case` and watching every assertion above stay
+  # green. There is no Windows here to catch it behaviourally, so the driver's
+  # side is asserted where it lives.
+  local sh="$SCRIPTS/internal/roster-sync-driver.sh"
+  # It calls the comparator for both paths...
+  grep -q 'agmsg_cmdline_names_path "\$cmd" "\$SCRIPT_DIR/roster-sync.mjs"' "$sh"
+  grep -q 'agmsg_cmdline_names_path "\$cmd" "\$config"' "$sh"
+  # ...and nowhere matches a shell-side path against the cmdline directly,
+  # which is the shape that is blind on Windows.
+  run grep -nE 'case "\$cmd" in.*\$(SCRIPT_DIR|config)' "$sh"
+  [ "$status" -ne 0 ]
 }
 
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
