@@ -350,7 +350,7 @@ following parameters, before any other action in this session.
 
 The 4th argument restricts receive to \`$ROLE_NAME\` only and re-claims its actas
 exclusivity lock — a resume restores context but not runtime state, so this
-re-establishes the role. Send with \`send.sh <team> $ROLE_NAME <to> --stdin\` and
+re-establishes the role. Send with \`send.sh ... $ROLE_NAME ... --stdin\` and
 the body on stdin (this session's active FROM is \`$ROLE_NAME\`) — a body you
 compose must not be passed as the deprecated positional argument, which your
 shell parses first and Windows truncates at 8186 bytes (#378). Each output line is one message:
@@ -376,8 +376,8 @@ before any other action in this session.
 
 This streams incoming agmsg messages into the session in real time. Each
 output line is one message: \`<ts> | <team> | <from> → <to> | <body>\`.
-React to messages as they arrive; reply with \`send.sh <team> <from> <to> --stdin\`
-and the body on stdin — a body you compose must not be passed as the deprecated
+React to messages as they arrive; reply with \`send.sh ... --stdin\` and the
+body on stdin — a body you compose must not be passed as the deprecated
 positional argument, which your shell parses first and Windows truncates at
 8186 bytes (#378).
 

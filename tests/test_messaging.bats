@@ -144,7 +144,7 @@ teardown() {
 @test "send: a --force after a '--' body still turns force mode on" {
   run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody -- --force --force
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Sent to nobody" ]]
+  printf '%s' "$output" | grep -qF -- "Sent to nobody"
   local stored
   stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='nobody';")
   [ "$stored" = "--force" ]
@@ -156,7 +156,7 @@ teardown() {
   # Assert WHICH failure this is. A bare status check would also pass on an
   # argument-parsing error, and then the pair would only show that the extra
   # argument turns failure into success — not that it turned force mode on.
-  [[ "$output" =~ "has no registered agents" ]]
+  printf '%s' "$output" | grep -qF -- "has no registered agents"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -184,7 +184,7 @@ teardown() {
   local body='price is `echo hi` and $(whoami) literally'
   run bash -c "printf '%s' \"\$1\" | bash \"\$2\" testteam alice bob --stdin" _ "$body" "$SCRIPTS/send.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Sent to bob" ]]
+  printf '%s' "$output" | grep -qF -- "Sent to bob"
   local stored
   stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
   [ "$stored" = "$body" ]
@@ -196,7 +196,7 @@ teardown() {
   printf '%s' "$body" > "$f"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Sent to bob" ]]
+  printf '%s' "$output" | grep -qF -- "Sent to bob"
   local stored
   stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
   [ "$stored" = "$body" ]
@@ -210,7 +210,7 @@ teardown() {
   printf 'a%.0s' $(seq 1 9000) > "$f"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Sent to bob" ]]
+  printf '%s' "$output" | grep -qF -- "Sent to bob"
   local len
   len=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT length(body) FROM messages WHERE to_agent='bob';")
   [ "$len" -eq 9000 ]
@@ -248,7 +248,7 @@ teardown() {
 @test "send: rejects a positional body combined with --stdin instead of silently picking one" {
   run bash "$SCRIPTS/send.sh" testteam alice bob "hello" --stdin
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "was already given" ]]
+  printf '%s' "$output" | grep -qF -- "was already given"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -271,7 +271,7 @@ teardown() {
 @test "send: rejects --body-file followed by another flag instead of swallowing it as the path" {
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --stdin
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "looks like a flag" ]]
+  printf '%s' "$output" | grep -qF -- "looks like a flag"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --force
   [ "$status" -ne 0 ]
   [[ "$output" =~ "looks like a flag" ]]
@@ -280,7 +280,7 @@ teardown() {
 @test "send: rejects a missing --body-file target with a clear error, not an empty message" {
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$TEST_SKILL_DIR/does-not-exist.txt"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "does not exist" ]]
+  printf '%s' "$output" | grep -qF -- "does not exist"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -291,7 +291,7 @@ teardown() {
   : > "$f"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "is empty" ]]
+  printf '%s' "$output" | grep -qF -- "is empty"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -300,7 +300,7 @@ teardown() {
 @test "send: rejects empty stdin with a clear error, not an empty message" {
   run bash -c "printf '' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "no data was read" ]]
+  printf '%s' "$output" | grep -qF -- "no data was read"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -315,7 +315,7 @@ teardown() {
 @test "send: rejects --stdin input containing a NUL byte instead of truncating it" {
   run bash -c "printf 'before\000after' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "NUL byte" ]]
+  printf '%s' "$output" | grep -qF -- "NUL byte"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -326,7 +326,7 @@ teardown() {
   printf 'before\000after' > "$f"
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "NUL byte" ]]
+  printf '%s' "$output" | grep -qF -- "NUL byte"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
