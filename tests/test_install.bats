@@ -904,10 +904,19 @@ SHIM
   # two forms are reconciled. Stubbing only the disagreement made the first
   # version of this test unable to exercise the fix at all: it fell back, and
   # the fix looked broken when it was the model that was incomplete.
+  # THE FLAG IS THE CLAIM, so this stub refuses to answer anything else. Real
+  # cygpath picks the output path space from the option: `-m` is the mixed form
+  # git reports, while the default and `-u` are the Unix form the comparison
+  # already holds — calling either of those would leave #830 exactly where it
+  # was. An earlier version printed `C:<last arg>` whatever it was handed, so
+  # dropping the flag or passing `-u` in production kept this test green
+  # (raised in review). Refusing is what makes the flag observable.
   cat >"$shim_dir/cygpath" <<'CYG'
 #!/usr/bin/env bash
-# -m is the mixed form; the only flag the code under test passes.
-printf 'C:%s\n' "${@: -1}"
+[ "$#" -eq 2 ] || { echo "cygpath stub: want 2 args, got $#: $*" >&2; exit 64; }
+[ "$1" = "-m" ] || { echo "cygpath stub: want -m, got '$1'" >&2; exit 64; }
+[ -f "$2/install.sh" ] || { echo "cygpath stub: not the source dir: '$2'" >&2; exit 64; }
+printf 'C:%s\n' "$2"
 CYG
   chmod +x "$shim_dir/cygpath"
 

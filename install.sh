@@ -34,7 +34,7 @@ AGENTS_DIR="$HOME/.agents"
 # uncommitted changes. Non-git (tarball via setup.sh/npx, no .git): fall back to
 # the canonical VERSION file. See #117.
 agmsg_source_version() {
-  local v top
+  local v top native
   # Only describe when SCRIPT_DIR is ITS OWN git checkout. `git describe`
   # searches ancestors for a .git, so a non-git copy unpacked under some other
   # git repo would otherwise record that PARENT repo's describe instead of
