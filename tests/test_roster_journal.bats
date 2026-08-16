@@ -557,6 +557,86 @@ EOF
   refute pgrep -f "$fake"
 }
 
+@test "an unusable pidfile is not read as a child that exited (#821)" {
+  skip_on_windows "POSIX signal semantics are not supported by this test"
+  # THE OTHER HALF OF "UNKNOWN", and it was the one the code got wrong for
+  # longest. With no usable pid there is nothing to ask about -- which is
+  # exactly why it must not be read as "the child exited". The wrapper writes
+  # that number before it waits, so an empty or garbled pidfile means the
+  # wrapper did not get that far, and whether node is running is unknown.
+  #
+  # The earlier versions cleared the variable and let the predicate return
+  # false, which every caller read as "gone" and released on. Mutating
+  # `unknown` back to `gone` for this branch left every other case green --
+  # measured -- which is what this case is here for.
+  bash "$SCRIPTS/join.sh" demo alice claude-code /tmp/a
+  local team_dir="$TEST_SKILL_DIR/teams/demo"
+  local config="$team_dir/config.json"
+  local member_id fake shimdir made substituted
+  member_id="$(config_field "$config" '$.agents.alice.member_id')"
+  source "$SCRIPTS/lib/roster-journal.sh"
+  agmsg_roster_append_left "$team_dir" "$member_id" alice "2026-01-01T00:00:00Z"
+
+  made="$TEST_SKILL_DIR/mktemp-made-garbled"
+  substituted="$TEST_SKILL_DIR/pidfile-garbled"
+  shimdir="$TEST_SKILL_DIR/shim-garbled"
+  mkdir -p "$shimdir"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'out=$(/usr/bin/mktemp "$@") || exit 1'
+    printf '%s\n' '[ -e "$out" ] && printf "%s\\n" "$out" >> "$AGMSG_TEST_MKTEMP_MADE"'
+    printf '%s\n' 'printf "%s\\n" "$out"'
+  } > "$shimdir/mktemp"
+  chmod +x "$shimdir/mktemp"
+
+  # Not empty but UNPARSEABLE, so the file still passes `-s` and the refusal
+  # has to come from reading the contents rather than from the file's size.
+  fake="$TEST_SKILL_DIR/fake-node-garbles-pidfile"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+trap '' TERM
+( i=0
+  while [ "$i" -lt 25 ]; do
+    pidfile="$(sed -n '2p' "$AGMSG_TEST_MKTEMP_MADE" 2>/dev/null)"
+    if [ -n "$pidfile" ] && [ -s "$pidfile" ]; then
+      printf 'not-a-pid\n' > "$pidfile"
+      printf 'garbled\n' > "$AGMSG_TEST_SUBSTITUTED"
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+) &
+while :; do sleep 1; done
+EOF
+  chmod +x "$fake"
+
+  run env PATH="$shimdir:$PATH" AGMSG_SYNC_NODE_BIN="$fake" \
+    AGMSG_TEST_MKTEMP_MADE="$made" AGMSG_TEST_SUBSTITUTED="$substituted" \
+    AGMSG_ROSTER_SYNC_TIMEOUT_S=4 \
+    bash "$SCRIPTS/internal/roster-sync-driver.sh" reconcile demo \
+      018f3f7e-0000-7000-8000-000000000001 \
+      018f3f7e-0000-7000-8000-000000000002 1 </dev/null
+
+  local driver_status="$status" driver_out="$output"
+  # POSITIVE CONTROL: the garbling must have happened, or this is measuring an
+  # ordinary timeout that reached the same branch for a different reason.
+  [ "$(cat "$substituted" 2>/dev/null || true)" = "garbled" ]
+
+  [ "$driver_status" -eq 18 ]
+  printf '%s' "$driver_out" | grep -q 'could not be established'
+  [ -d "$team_dir/.config.lock" ]
+
+  local leftover
+  leftover="$(pgrep -f "$fake" || true)"
+  if [ -n "$leftover" ]; then
+    kill $leftover 2>/dev/null || true
+    sleep 1
+    kill -9 $leftover 2>/dev/null || true
+  fi
+  rmdir "$team_dir/.config.lock" 2>/dev/null || true
+}
+
 @test "a recycled pid is neither signalled nor read as gone (#821)" {
   skip_on_windows "POSIX signal semantics are not supported by this test"
   # "I SENT A SIGNAL" IS NOT "THE PROCESS IS GONE" (raised as BLOCKING).
