@@ -94,7 +94,7 @@ It contains the engine's validated envelope selection and capability limits,
 but no credentials. The ABI is cipher-neutral: the driver creates the canonical
 envelope selected by the binding configuration. `none` is the default profile.
 The optional `age-v1` profile defined in
-[`../spec/age-v1-profile.md`](age-v1-profile.md) performs its
+[`age-v1` profile](age-v1-profile.md) performs its
 encrypt-once operation at this same boundary. Prepare receives only the public
 recipient manifest; age identity files remain in the HTTP engine's open path
 and never cross the storage-driver boundary.
