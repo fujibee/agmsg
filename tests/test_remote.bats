@@ -2597,6 +2597,61 @@ PY
   [[ "$output" == *"Some checks failed"* ]]
 }
 
+# --- SHA-256 availability (#861) -------------------------------------------
+
+# All three arms present but failing. Shadowing rather than emptying PATH:
+# connect needs most of the toolchain to reach the point under test, and a
+# PATH stripped far enough to hide these would stop it much earlier for
+# reasons that have nothing to do with #861.
+broken_digest_path() {
+  local dir tool
+  dir="$(mktemp -d)"
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\nexit 1\n' > "$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+  printf '%s' "$dir"
+}
+
+@test "remote doctor: reports a SHA-256 tool, and its absence does not fail the run" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" doctor
+  # Optional, exactly like age: a team on cipher "none" never computes one.
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[ ] SHA-256 tool on PATH"* ]]
+  [[ "$output" == *"All checks passed"* ]]
+}
+
+@test "remote doctor: reports the SHA-256 tool as present when one works" {
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[x] SHA-256 tool on PATH"* ]]
+}
+
+# The bug this preflight exists for: the first SHA-256 in a `connect --e2ee`
+# happens after the team is registered with the server, so the operator's news
+# of a missing tool arrived as a half-finished connect.
+@test "remote connect --e2ee: refuses BEFORE registering when no SHA-256 works" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHA-256"* ]]
+  # And the team is still unregistered. This is the half that makes it a
+  # PREflight: asserting only the message would pass just as well if the
+  # check ran after the POST.
+  run python3 -c "import json;print(json.load(open('$SCRIPTS/../teams/testteam/config.json')).get('remote_binding'))"
+  [ "$output" = "None" ]
+}
+
+# Plain sync never computes a SHA-256, so the same broken machine must still
+# be able to connect. Without this the preflight could be moved ahead of the
+# --e2ee test and nothing would notice.
+@test "remote connect without --e2ee: a broken SHA-256 tool does not block it" {
+  local broken; broken="$(broken_digest_path)"
+  run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+}
+
 @test "remote pull: a name is enough — no UUID is carried by hand" {
   # The team_id requirement existed to stand in for authentication, and this
   # server has none to stand in for. The second machine should never need a
