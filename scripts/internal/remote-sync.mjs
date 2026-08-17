@@ -1482,9 +1482,9 @@ async function send(config, path, init, authHeaders) {
 // The error code.
 //
 // THE PROTOCOL SHAPE IS THE NESTED ONE: `{ error: { code, message, details } }`,
-// built by `errorBody()` in the reference server (server/src/errors.ts) — which
-// is the definition, since server/spec/v1.md is marked SUPERSEDED. That is what
-// a new implementation should emit and what a reader here should take as the
+// specified in server/spec/v1.md under "Common response fields" and built by
+// `errorBody()` in the reference server (server/src/errors.ts). That is what a
+// new implementation should emit and what a reader here should take as the
 // contract.
 //
 // The bare-string branch is a BRIDGE, not a second valid shape. The hosted edge
