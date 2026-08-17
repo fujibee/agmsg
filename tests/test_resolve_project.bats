@@ -435,3 +435,9 @@ setup_git_repo() {
   [ "$result" = "$base/parent" ]
   rm -rf "$base"
 }
+
+@test "agent-binaries: cursor and grok-build map to their own process names (#856)" {
+  [ "$(_agmsg_agent_binaries cursor)" = "cursor-agent" ]
+  [ "$(_agmsg_agent_binaries grok-build)" = "grok" ]
+  [ "$(_agmsg_agent_binaries claude-code)" = "claude" ]
+}

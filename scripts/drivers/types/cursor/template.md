@@ -50,19 +50,25 @@ Four possible outputs:
      ```
      Choose delivery mode for incoming messages:
 
-       1) turn — Check inbox at the end of each assistant turn
-                  Stop hook pulls after each response.
+       1) turn    — Check inbox at the end of each assistant turn
+                     A .cursor/rules/agmsg.mdc rule has you run check-inbox.sh
+                     after tools.
 
-       2) off  — No automatic delivery
-                  Manual $__SKILL_NAME__ only.
+       2) monitor — Real-time push via Shell notify_on_output (BETA)
+                     Launches watch.sh through Shell + notify_on_output; each
+                     new message wakes this idle CLI session.
+
+       3) off     — No automatic delivery
+                     Manual $__SKILL_NAME__ only.
 
      [1]:
      ```
 
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
-     - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
+     - Map the chosen number to a mode (`1`→`turn`, `2`→`monitor`, `3`→`off`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> cursor "$(pwd)"`
-     - Cursor CLI has no Monitor tool, so `monitor` and `both` modes are not offered here.
+     - `both` is not supported.
+     - If you chose `monitor`, follow the "Ensure monitor is running first" step below now.
 
   6. Then check inbox for the newly joined team.
 
@@ -79,6 +85,14 @@ Four possible outputs:
 ## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
+
+**Ensure monitor is running first (monitor mode only).** If the project's delivery mode is `monitor` (check via `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status cursor "$(pwd)"`) and no `agmsg inbox stream` watcher is already streaming into this session, launch one now with Shell + `notify_on_output` (`block_until_ms: 0`):
+
+- command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${CURSOR_CONVERSATION_ID:--}" "$(pwd)" cursor`
+- title: `agmsg inbox stream`
+- `notify_on_output.pattern`: `^[0-9]{4}-[0-9]{2}-[0-9]{2}T|^ERROR:`
+
+Launch the watcher only once per session — if it is already streaming, do not start a second one. In `turn`/`off` mode there is no watcher; skip this.
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
@@ -113,22 +127,32 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" cursor` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> cursor "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
-4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Cursor CLI has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+4. **If delivery mode is `monitor`**, switch the watcher to the new role so receive is restricted to it:
+   a. If an `agmsg inbox stream` watcher is already running in this session, stop that background Shell.
+   b. Launch a fresh watcher with Shell + `notify_on_output`:
+      - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${CURSOR_CONVERSATION_ID:--}" "$(pwd)" cursor <name>`
+      - title: `agmsg inbox stream`
+   The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
+5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
+6. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" cursor <name>` to remove that role's registration.
 3. If the session's active FROM was `<name>`, clear that state.
-4. Tell the user: "Dropped role `<name>` from this project."
+4. **If delivery mode is `monitor`** and an `agmsg inbox stream` watcher is running, stop it, then relaunch with the default (no 4th arg) subscription:
+   - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${CURSOR_CONVERSATION_ID:--}" "$(pwd)" cursor`
+   - title: `agmsg inbox stream`
+5. Tell the user: "Dropped role `<name>` from this project."
 
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status cursor "$(pwd)"`
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
-1. Parse the mode. Cursor CLI supports only `turn` and `off` — reject `monitor` and `both` with: "Cursor CLI has no Monitor tool; only `turn` or `off` modes are supported."
+1. Parse the mode. Cursor CLI supports `turn`, `monitor`, and `off` — reject `both` with: "Cursor CLI does not support `both`; use `turn`, `monitor`, or `off`."
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> cursor "$(pwd)"`
+3. If the mode is `monitor`, follow the "Ensure monitor is running first" step above. If `turn` or `off` and a watcher is streaming, stop that background Shell.
 
 If argument is "hook on" (legacy alias):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set turn cursor "$(pwd)"`

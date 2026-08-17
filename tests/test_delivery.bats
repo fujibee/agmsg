@@ -2078,11 +2078,38 @@ JSON
   [ ! -f "$TEST_PROJECT/.cursor/rules/agmsg.mdc" ]
 }
 
-@test "cursor rejects monitor mode" {
+@test "delivery set monitor (cursor): writes a monitor rule and emits the launch directive" {
   run bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.cursor/rules/agmsg.mdc" ]
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  [[ "$output" == *"AGMSG-DIRECTIVE"* ]]
+  [[ "$output" == *"watch.sh"* ]]
+  [[ "$output" == *"notify_on_output"* ]]
+  [[ "$output" == *"CURSOR_CONVERSATION_ID:--"* ]]
+  local rule_file="$TEST_PROJECT/.cursor/rules/agmsg.mdc"
+  [ -f "$rule_file" ]
+  run cat "$rule_file"
+  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
+  [[ "$output" == *"notify_on_output"* ]]
+  [[ "$output" == *"watch.sh"* ]]
+  [[ "$output" == *"CURSOR_CONVERSATION_ID:--"* ]]
+  [[ "$output" == *"Do not use a plain background shell or \`/loop\`"* ]]
+}
+
+@test "delivery status (cursor): reports monitor when the monitor rule is present" {
+  bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "delivery set turn then monitor (cursor): rewrites the rule from turn to monitor" {
+  bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+  bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+  grep -q "agmsg-delivery-mode: monitor" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
 }
 
 @test "cursor rejects both mode" {
@@ -2092,10 +2119,10 @@ JSON
   [ ! -f "$TEST_PROJECT/.cursor/rules/agmsg.mdc" ]
 }
 
-@test "cursor rejects monitor: does NOT delete an existing turn rule" {
+@test "cursor rejects both: does NOT delete an existing turn rule" {
   bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT" >/dev/null
   [ -f "$TEST_PROJECT/.cursor/rules/agmsg.mdc" ]
-  run bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT"
+  run bash "$SCRIPTS/delivery.sh" set both cursor "$TEST_PROJECT"
   [ "$status" -ne 0 ]
   [ -f "$TEST_PROJECT/.cursor/rules/agmsg.mdc" ]
 }
@@ -2108,6 +2135,13 @@ JSON
   local count
   count=$(grep -c "check-inbox.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc")
   [ "$count" -eq 1 ]
+}
+
+@test "cursor template offers monitor via Shell notify_on_output (#856)" {
+  local template="$BATS_TEST_DIRNAME/../scripts/drivers/types/cursor/template.md"
+  grep -q "notify_on_output" "$template"
+  grep -q 'CURSOR_CONVERSATION_ID:--' "$template"
+  grep -q 'reject `both`' "$template"
 }
 
 @test "antigravity supports off mode: removes rule file" {
