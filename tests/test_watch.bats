@@ -845,3 +845,24 @@ _record_handover_events() {
   [ "$started" -eq 1 ]
   ! grep -q "Usage: watch.sh" "$out"
 }
+
+# Callers pass "${GROK_SESSION_ID:--}" (and the same pattern for other hosts)
+# so a launcher that drops a quoted-empty first arg cannot shift project/type.
+# watch.sh must fold "-" into the same generated-fallback path as "" (#236).
+@test "watch: sentinel '-' session_id resolves like an empty one (#855)" {
+  local out="$BATS_TEST_TMPDIR/dash-sid.out"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" - "$PROJ" claude-code alice >"$out" 2>&1 3>&- &
+  local pid=$!
+  # Folded to empty => a generated fallback id, so a watch.agmsg-*.pid appears.
+  local i started=0
+  for i in $(seq 1 25); do
+    if ls "$TEST_SKILL_DIR/run"/watch.agmsg-*.pid >/dev/null 2>&1; then started=1; break; fi
+    sleep 0.2
+  done
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  [ "$started" -eq 1 ]
+  # No literal "-" session id leaked into the run dir key space.
+  ! ls "$TEST_SKILL_DIR/run"/watch.-*.pid >/dev/null 2>&1
+  ! grep -q "Usage: watch.sh" "$out"
+  ! grep -q "ERROR: unknown agent type" "$out"
+}

@@ -36,6 +36,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/compat.sh"
 # in — notably Grok Build's `monitor` tool, where "$GROK_SESSION_ID" expands to
 # empty — still starts the watcher. project_path and agent_type are required.
 SESSION_ID="${1:-}"
+[ "$SESSION_ID" = "-" ] && SESSION_ID="" # #477: caller sentinel for empty session id
 PROJECT_PATH="${2:?Missing project_path}"
 AGENT_TYPE="${3:?Missing agent_type}"
 ACTIVE_NAME="${4:-}"
