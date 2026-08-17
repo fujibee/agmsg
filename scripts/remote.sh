@@ -354,7 +354,13 @@ _remote_http_post_json() {
   else
     http_code="000"
   fi
-  rm -f "$cfg" "$header_fifo"
+  # Only remove the fifo, never the caller's header file. On the cygpath path
+  # `header_fifo` IS `header_file`, so an unconditional `rm -f "$header_fifo"`
+  # here deletes the headers this function was asked to produce — before the
+  # caller has read them. The fifo exists only when a copier was started, so
+  # that is the condition to key on.
+  rm -f "$cfg"
+  [ -n "$copier_pid" ] && rm -f "$header_fifo"
   rmdir "$fifo_dir" 2>/dev/null || true
   trap - EXIT INT TERM
   printf '%s' "$http_code"
