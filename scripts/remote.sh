@@ -285,6 +285,17 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
+# _remote_curl_path <path> — render <path> for embedding INSIDE a curl -K config
+# file. On Windows/Git Bash, MSYS translates POSIX paths to Windows form only for
+# a native binary's argv, NOT for paths read from a config file's contents, so an
+# embedded /tmp or /c/.. path is unopenable by native curl (→ curl fails → the
+# caller's HTTP 000). cygpath -m yields a Windows drive path with FORWARD slashes;
+# -w is wrong here because curl's config parser treats backslashes as escapes.
+# Capability-gated on cygpath so macOS/Linux (no cygpath) are unchanged.
+_remote_curl_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 # _remote_http_post_json <url> <body_file> <out_body_file> <out_header_file> -> prints http_code
 # Posts <body_file> as the request body via a curl -K config file, so the
 # body (which holds the token) never appears in curl's own argv/ps. The
@@ -295,38 +306,50 @@ _remote_http_post_json() {
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
   header_fifo="$fifo_dir/header"
-  mkfifo "$header_fifo"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
-  # Reaped on both normal paths below (waited on success, killed and waited on
-  # failure), so this is short-lived by construction -- but the EXIT trap only
-  # removes files, it does not kill the copier. A signal arriving before curl
-  # opens the fifo therefore leaves it blocked on open() with no writer ever
-  # coming, and an inherited fd 3 would then hold a bats test file open to the
-  # timeout. Closing the fds costs nothing and removes that one path.
-  python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
-  copier_pid=$!
+  # FIX2 (Windows, PR-B): native curl cannot write to an MSYS named pipe (mkfifo
+  # is backed by a .lnk file), so where cygpath exists, dump headers straight to
+  # a regular file and skip the fifo + bounded-copy. macOS/Linux (no cygpath)
+  # keep the streaming, size-bounded path unchanged.
+  if command -v cygpath >/dev/null 2>&1; then
+    header_fifo="$header_file"
+    : > "$header_fifo"
+    copier_pid=""
+    trap 'rm -f "$cfg"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+  else
+    mkfifo "$header_fifo"
+    trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+    # Reaped on both normal paths below (waited on success, killed and waited on
+    # failure). Closing fd 3/4 avoids an inherited fd holding a test fifo open.
+    python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
+    copier_pid=$!
+  fi
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
-    printf 'dump-header = "%s"\n' "$header_fifo"
+    # FIX1 (Windows, PR-A): embedded paths must be curl-openable Windows paths.
+    printf 'dump-header = "%s"\n' "$(_remote_curl_path "$header_fifo")"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
-    printf 'data = "@%s"\n' "$body_file"
+    printf 'data = "@%s"\n' "$(_remote_curl_path "$body_file")"
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # FIX3 (PR-C): do not discard curl's stderr — on failure it is the only record
+  # of WHY (e.g. an unopenable embedded path). Capture, and surface on failure.
+  local curl_err; curl_err="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-err.XXXXXX")"
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ] && cat "$curl_err" >&2
+  rm -f "$curl_err"
   if [ "$curl_status" -ne 0 ]; then
-    kill "$copier_pid" 2>/dev/null || true
-    wait "$copier_pid" 2>/dev/null || true
+    [ -n "$copier_pid" ] && { kill "$copier_pid" 2>/dev/null || true; wait "$copier_pid" 2>/dev/null || true; }
     http_code="000"
-  elif wait "$copier_pid"; then
+  elif [ -z "$copier_pid" ] || wait "$copier_pid"; then
     http_code="$curl_output"
   else
     http_code="000"
