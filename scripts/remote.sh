@@ -306,17 +306,47 @@ _remote_http_post_json() {
   cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
   fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
   header_fifo="$fifo_dir/header"
-  mkfifo "$header_fifo"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
-  # Reaped on both normal paths below (waited on success, killed and waited on
-  # failure), so this is short-lived by construction -- but the EXIT trap only
-  # removes files, it does not kill the copier. A signal arriving before curl
-  # opens the fifo therefore leaves it blocked on open() with no writer ever
-  # coming, and an inherited fd 3 would then hold a bats test file open to the
-  # timeout. Closing the fds costs nothing and removes that one path.
-  python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
-  copier_pid=$!
+  # The headers go through a fifo so a hostile or broken server cannot make us
+  # buffer an unbounded response — bounded-copy.py enforces the ceiling while
+  # the transfer is still running. That mechanism needs a real named pipe.
+  #
+  # On Windows/Git Bash there is no real named pipe to have: MSYS emulates
+  # mkfifo with a .lnk file that only MSYS-aware programs understand, and curl
+  # there is a NATIVE binary. It cannot open what mkfifo made, so it fails and
+  # the caller sees the "000" it reports for every failure alike.
+  #
+  # Where cygpath exists, dump straight to the destination file and skip both
+  # the fifo and the copier. That gives up streaming enforcement of the size
+  # ceiling on that platform — curl's own `max-filesize` still applies to the
+  # BODY, and the header dump is what becomes unbounded. Stated rather than
+  # hidden, because it is a real difference between the platforms and not a
+  # detail of how the file is named.
+  #
+  # Gated on `command -v cygpath`, not on an OS name. Say what that probe
+  # actually asks, because it is narrower than the thing we care about: it is a
+  # CAPABILITY MARKER for an environment where MSYS fifos and a native curl
+  # coexist -- it does not test whether a real fifo can be made, and nothing
+  # here does. An earlier version of this comment claimed it did, which would
+  # have told the next reader that a machine passing the probe had been checked
+  # for the property that matters.
+  if command -v cygpath >/dev/null 2>&1; then
+    header_fifo="$header_file"
+    : > "$header_fifo"
+    copier_pid=""
+    trap 'rm -f "$cfg"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+  else
+    mkfifo "$header_fifo"
+    trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
+    # Reaped on both normal paths below (waited on success, killed and waited on
+    # failure), so this is short-lived by construction -- but the EXIT trap only
+    # removes files, it does not kill the copier. A signal arriving before curl
+    # opens the fifo therefore leaves it blocked on open() with no writer ever
+    # coming, and an inherited fd 3 would then hold a bats test file open to the
+    # timeout. Closing the fds costs nothing and removes that one path.
+    python3 "$SCRIPT_DIR/internal/bounded-copy.py" 65536 < "$header_fifo" > "$header_file" 3>&- 4>&- &
+    copier_pid=$!
+  fi
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "POST"\n'
@@ -334,15 +364,20 @@ _remote_http_post_json() {
     curl_status=$?
   fi
   if [ "$curl_status" -ne 0 ]; then
-    kill "$copier_pid" 2>/dev/null || true
-    wait "$copier_pid" 2>/dev/null || true
+    [ -n "$copier_pid" ] && { kill "$copier_pid" 2>/dev/null || true; wait "$copier_pid" 2>/dev/null || true; }
     http_code="000"
-  elif wait "$copier_pid"; then
+  elif [ -z "$copier_pid" ] || wait "$copier_pid"; then
     http_code="$curl_output"
   else
     http_code="000"
   fi
-  rm -f "$cfg" "$header_fifo"
+  # Only remove the fifo, never the caller's header file. On the cygpath path
+  # `header_fifo` IS `header_file`, so an unconditional `rm -f "$header_fifo"`
+  # here deletes the headers this function was asked to produce — before the
+  # caller has read them. The fifo exists only when a copier was started, so
+  # that is the condition to key on.
+  rm -f "$cfg"
+  [ -n "$copier_pid" ] && rm -f "$header_fifo"
   rmdir "$fifo_dir" 2>/dev/null || true
   trap - EXIT INT TERM
   printf '%s' "$http_code"
