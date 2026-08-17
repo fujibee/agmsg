@@ -68,6 +68,10 @@ source "$SCRIPT_DIR/lib/node.sh"
 # keyed on watcher-only concepts (session/actas) this engine does not have.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/instance-id.sh"
+# agmsg_sha256 -- the age-v1 checkpoint below is a SHA-256 of the snapshot, and
+# `shasum` is absent in Git for Windows' Git Bash.
+# shellcheck source=lib/hash.sh
+source "$SCRIPT_DIR/lib/hash.sh"
 
 TEAMS_DIR="$CONNECTION_ROOT/teams"
 CRED_ROOT="$CONNECTION_ROOT/run/remote-credentials"
@@ -247,6 +251,26 @@ cmd_doctor() {
     echo "  Debian/Ubuntu:         sudo apt install age"
     echo "  Windows (winget):      winget install FiloSottile.age"
     echo "See https://github.com/FiloSottile/age for other install methods."
+  fi
+  echo
+  # Reported with age, and optional for the same reason: only end-to-end
+  # encryption needs it. Not failed=1 -- a machine syncing with cipher "none"
+  # is fully functional without it. Listed at all because when it IS missing
+  # the symptom lands after the team is registered, which reads like a server
+  # problem rather than a missing tool.
+  # "usable", not "on PATH": presence and usability are different questions and
+  # this line answers the second one -- a tool that is installed and fails, or
+  # that returns the wrong digest for a known input, reports unusable here.
+  if agmsg_sha256_usable; then
+    echo "  [x] usable SHA-256 tool  (optional)"
+  else
+    echo "  [ ] usable SHA-256 tool  (optional)"
+    echo
+    echo "End-to-end encryption needs one of 'shasum', 'sha256sum' or 'openssl' for key"
+    echo "fingerprints and the age-v1 checkpoint. Remote sync without --e2ee does not use it:"
+    echo "  macOS (Homebrew):      brew install openssl"
+    echo "  Debian/Ubuntu:         sudo apt install coreutils"
+    echo "  Windows (Git Bash):    ships with Git for Windows; reinstall it if 'sha256sum' is missing"
   fi
   echo
   if agmsg_python3_usable; then
@@ -1867,7 +1891,7 @@ _remote_configure_keyed_team() {
     echo "agmsg: could not export the initial age-v1 snapshot for team '$team'; sync was not started." >&2
     return 1
   fi
-  snapshot_sha="$(shasum -a 256 "$snapshot_file" | awk '{print $1}')"
+  snapshot_sha="$(agmsg_sha256 < "$snapshot_file")"
   if ! bash "$SCRIPT_DIR/remote-sync.sh" configure \
       --team "$team" \
       --server "$endpoint" \
@@ -1921,6 +1945,16 @@ cmd_connect() {
       ;;
   esac
   key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
+  # Asked HERE: before the key is minted and before the registration POST.
+  # Every SHA-256 in the e2ee path -- the fingerprint printed by `key.sh
+  # generate`, and the age-v1 checkpoint that starts the sync engine -- happens
+  # at or after those, so a device without one used to register the team and
+  # only then fail, reporting "binding recorded, sync engine not started" for
+  # what is a missing command-line tool. Same category as the `age` preflight:
+  # a prerequisite of end-to-end encryption, so it is only asked under --e2ee.
+  if [ "$e2ee" -eq 1 ]; then
+    agmsg_require_sha256 || exit 1
+  fi
   if [ "$e2ee" -eq 1 ] && { [ -z "$key_id" ] || [ "$key_id" = "null" ]; }; then
     bash "$SCRIPT_DIR/key.sh" generate "$team" || exit 1
     key_id="$(_remote_read_config_field "$cfg" '$.remote_key.current.key_id')"
