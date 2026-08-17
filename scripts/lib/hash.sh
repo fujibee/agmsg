@@ -110,7 +110,7 @@ _agmsg_sha256_selected() {
   printf '%s\n' "$raw"
 }
 
-# ASK THE SELECTED TOOL A QUESTION WE KNOW THE ANSWER TO, ONCE PER PROCESS.
+# ASK THE SELECTED TOOL A QUESTION WE KNOW THE ANSWER TO, BEFORE EVERY DIGEST.
 #
 # `_agmsg_sha256_selected` accepts any 64 lowercase hex, which is the shape of
 # a digest and not the proof of one: a tool that exits 0 and prints a plausible
@@ -135,9 +135,11 @@ _agmsg_sha256_selected() {
 # not.
 #
 # So the cost is stated instead of avoided: one extra digest of a 5-byte input
-# per digest taken. The commands that take one take at most three (`key rotate`:
-# fingerprint, journal fingerprint, previous snapshot), and each is already
-# doing file and network work that dwarfs it.
+# per digest taken. The command that takes the most is `key rotate` with an
+# accepted rotation to check -- the accepted recipient's fingerprint, the new
+# recipient's journal fingerprint, the previous snapshot, and the short
+# fingerprint printed at the end: FOUR digests, so eight runs of the tool. Every
+# one of them sits beside file and lock work that dwarfs it.
 _agmsg_sha256_selftest() {
   local probe
   probe="$(printf '%s' probe | _agmsg_sha256_selected)" || return 1
@@ -165,8 +167,9 @@ agmsg_sha256() {
 # machine can produce a SHA-256, and presence on PATH is only a proxy for that:
 # a tool that is installed and fails answers "yes" to the proxy and "no" to the
 # question, which is the direction that hurts -- the preflight passes and the
-# digest fails later, which is the shape of #861 all over again. Costs one
-# subprocess, once, on a command that is about to make a network round trip.
+# digest fails later, which is the shape of #861 all over again. Costs two runs
+# of the tool -- `agmsg_sha256`'s self-test and this probe's own digest -- on a
+# command that is about to make a network round trip.
 #
 # Nothing more than "can this machine produce one", because the correctness
 # question moved into `agmsg_sha256` itself -- a preflight that knows something
