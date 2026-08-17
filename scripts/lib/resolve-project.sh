@@ -236,6 +236,7 @@ _agmsg_agent_binaries() {
     antigravity) echo "antigravity" ;;
     copilot)     echo "copilot" ;;
     opencode)    echo "opencode" ;;
+    grok-build)  echo "grok" ;;
     *)           echo "claude codex gemini" ;;
   esac
 }
