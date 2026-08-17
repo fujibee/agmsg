@@ -237,7 +237,6 @@ _agmsg_agent_binaries() {
     copilot)     echo "copilot" ;;
     opencode)    echo "opencode" ;;
     cursor)      echo "cursor-agent" ;;
-    grok-build)  echo "grok" ;;
     *)           echo "claude codex gemini" ;;
   esac
 }
