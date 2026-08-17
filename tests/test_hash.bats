@@ -130,9 +130,11 @@ sha256_under() {
     . "$1/lib/hash.sh"
     printf "%s" agmsg | agmsg_sha256 2>&1 >/dev/null
   ' _ "$SCRIPTS"
-  [[ "$output" == *shasum* ]]
-  [[ "$output" == *sha256sum* ]]
-  [[ "$output" == *openssl* ]]
+  # grep, not `[[ ]]`: a non-last `[[ ]]` cannot fail a test on bash 3.2, so the
+  # first two of three would have been decoration (#670).
+  grep -qF -- shasum <<<"$output"
+  grep -qF -- sha256sum <<<"$output"
+  grep -qF -- openssl <<<"$output"
 }
 
 @test "hash: agmsg_sha256_usable reports what agmsg_sha256 can actually do" {

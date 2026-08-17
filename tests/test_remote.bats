@@ -2618,7 +2618,7 @@ broken_digest_path() {
   run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" doctor
   # Optional, exactly like age: a team on cipher "none" never computes one.
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[ ] SHA-256 tool on PATH"* ]]
+  grep -qF -- '[ ] SHA-256 tool on PATH' <<<"$output"
   [[ "$output" == *"All checks passed"* ]]
 }
 
@@ -2635,7 +2635,7 @@ broken_digest_path() {
   local broken; broken="$(broken_digest_path)"
   run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" --e2ee testteam
   [ "$status" -ne 0 ]
-  [[ "$output" == *"SHA-256"* ]]
+  grep -qF -- 'SHA-256' <<<"$output"
   # And the team is still unregistered. This is the half that makes it a
   # PREflight: asserting only the message would pass just as well if the
   # check ran after the POST.
