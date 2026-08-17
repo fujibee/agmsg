@@ -285,6 +285,17 @@ cmd_doctor() {
 
 # --- shared HTTP helpers (B1: never put secrets in curl's own argv/ps) ---
 
+# _remote_curl_path <path> — render <path> for embedding INSIDE a curl -K config
+# file. On Windows/Git Bash, MSYS translates POSIX paths to Windows form only for
+# a native binary's argv, NOT for paths read from a config file's contents, so an
+# embedded /tmp or /c/.. path is unopenable by native curl (→ curl fails → the
+# caller's HTTP 000). cygpath -m yields a Windows drive path with FORWARD slashes;
+# -w is wrong here because curl's config parser treats backslashes as escapes.
+# Capability-gated on cygpath so macOS/Linux (no cygpath) are unchanged.
+_remote_curl_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 # _remote_http_post_json <url> <body_file> <out_body_file> <out_header_file> -> prints http_code
 # Posts <body_file> as the request body via a curl -K config file, so the
 # body (which holds the token) never appears in curl's own argv/ps. The
@@ -311,11 +322,11 @@ _remote_http_post_json() {
     printf 'request = "POST"\n'
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Agmsg-Protocol-Version: 1"\n'
-    printf 'dump-header = "%s"\n' "$header_fifo"
+    printf 'dump-header = "%s"\n' "$(_remote_curl_path "$header_fifo")"
     printf 'connect-timeout = "10"\n'
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
-    printf 'data = "@%s"\n' "$body_file"
+    printf 'data = "@%s"\n' "$(_remote_curl_path "$body_file")"
   } > "$cfg"
   if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
     :
