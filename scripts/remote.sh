@@ -384,11 +384,18 @@ _remote_http_get_json() {
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # Same reason as the POST helper: discarding stderr leaves "000" as the only
+  # thing anyone sees, and "000" is what this reports for every failure alike.
+  # `pull` goes through here, so a failure on this path was as undiagnosable as
+  # the connect one that cost a Windows run its afternoon.
+  local curl_err; curl_err="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-err.XXXXXX")"
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ] && cat "$curl_err" >&2
+  rm -f "$curl_err"
   [ "$curl_status" -eq 0 ] || curl_output="000"
   rm -f "$cfg"
   trap - EXIT INT TERM
