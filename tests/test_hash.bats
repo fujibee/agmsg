@@ -302,6 +302,33 @@ sha256_under() {
   [ "$status" -ne 0 ]
 }
 
+# NOTHING IN THE ENVIRONMENT CAN SAY "ALREADY CHECKED". The self-test was
+# memoised on one head, keyed on a plain shell variable that was read from the
+# environment — so exporting it turned the check off, which is an undocumented
+# override of a fail-closed contract. The memo is gone; this case is what stops
+# it coming back in a form that can be preseeded.
+#
+# Every plausible name is tried, because guessing the private name of a future
+# memo is not the point: the property is that NO inherited variable skips it.
+@test "hash: a preseeded environment cannot skip the self-test" {
+  local shim="$TEST_SKILL_DIR/preseeded"
+  mkdir -p "$shim"
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\ncat >/dev/null\necho "%s  -"\n' \
+      2222222222222222222222222222222222222222222222222222222222222222 > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  run env PATH="$shim:$PATH" \
+    _AGMSG_SHA256_VERIFIED=1 AGMSG_SHA256_VERIFIED=1 _AGMSG_SHA256_OK=1 \
+    "$BASH_BIN" -c '
+      . "$1/lib/hash.sh"
+      printf "%s" agmsg | agmsg_sha256 2>/dev/null
+    ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
 # THE FALLBACK IS FOR AN ABSENT TOOL, NOT A BROKEN ONE. Presence picks the arm;
 # a chosen arm that fails ends it, and the working tool behind it is not tried.
 # Asserted because it is a decision, and an undocumented decision becomes an

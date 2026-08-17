@@ -124,13 +124,21 @@ _agmsg_sha256_selected() {
 # anywhere near `connect`'s preflight. A list like that is exactly what was
 # already missed once.
 #
-# Memoised, so a command that takes several digests pays for one extra. That is
-# the limit of what this claims: the tool answered correctly when first asked in
-# this process, not that it will keep doing so.
+# RUN BEFORE EVERY DIGEST, AND NOT MEMOISED. It was, on one head, keyed on a
+# shell variable -- which review took apart twice over. The flag was read
+# straight from the environment, so `_AGMSG_SHA256_VERIFIED=1` in a preseeded
+# environment meant "already checked" and skipped the check outright: an
+# undocumented env override that turned a fail-closed contract off. And it did
+# not even work: every production call is `printf | agmsg_sha256` or
+# `x="$(agmsg_sha256 …)"`, both subshells, so the flag never reached the parent
+# and the self-test ran again anyway. The saving was imaginary and the hole was
+# not.
+#
+# So the cost is stated instead of avoided: one extra digest of a 5-byte input
+# per digest taken. The commands that take one take at most three (`key rotate`:
+# fingerprint, journal fingerprint, previous snapshot), and each is already
+# doing file and network work that dwarfs it.
 _agmsg_sha256_selftest() {
-  if [ "${_AGMSG_SHA256_VERIFIED:-0}" = 1 ]; then
-    return 0
-  fi
   local probe
   probe="$(printf '%s' probe | _agmsg_sha256_selected)" || return 1
   if [ "$probe" != 'ba9c736f19e7f60b7f6764adb0b7908c0a2b394e09b6c09863528c7f2bc86095' ]; then
@@ -138,7 +146,6 @@ _agmsg_sha256_selftest() {
     echo "Its answers cannot be used for key fingerprints or encryption checkpoints." >&2
     return 1
   fi
-  _AGMSG_SHA256_VERIFIED=1
 }
 
 agmsg_sha256() {
