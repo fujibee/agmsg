@@ -862,7 +862,7 @@ _record_handover_events() {
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   [ "$started" -eq 1 ]
   # No literal "-" session id leaked into the run dir key space.
-  ! ls "$TEST_SKILL_DIR/run"/watch.-*.pid >/dev/null 2>&1
-  ! grep -q "Usage: watch.sh" "$out"
-  ! grep -q "ERROR: unknown agent type" "$out"
+  refute ls "$TEST_SKILL_DIR/run"/watch.-*.pid >/dev/null 2>&1
+  refute grep -q "Usage: watch.sh" "$out"
+  refute grep -q "ERROR: unknown agent type" "$out"
 }
