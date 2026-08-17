@@ -1,10 +1,10 @@
 # Stage-1 local-first remote synchronization specification
 
-**Status:** dogfood specification
+**Status:** current
 **Last updated:** 2026-07-25
 
 The irreversible architectural decisions behind this contract are recorded in
-[ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md).
+[ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md).
 
 ## Context
 
@@ -34,9 +34,13 @@ storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <prot
 storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
 ```
 
-The SQLite driver is the Stage-1 implementation. Drivers that do not advertise
-the extension remain valid local-only drivers. Core must fail clearly rather
-than emulate these durability operations outside an unsupported driver.
+Two bundled drivers implement it. SQLite advertises
+`stage1-sync,stage1-resync,stage2-read-state`; JSONL advertises `stage1-sync`
+alone, so the recovery operation below is genuinely optional rather than
+optional in name — a client asking for it against JSONL is refused for want of
+the advertised capability, not left to discover a missing command. Drivers that
+advertise no extension remain valid local-only drivers. Core must fail clearly
+rather than emulate these durability operations outside an unsupported driver.
 
 The binding is keyed by immutable `server_instance_id`, the server's stable
 team/stream ID, and protocol version. Endpoint URL is deliberately absent: the
@@ -90,7 +94,7 @@ It contains the engine's validated envelope selection and capability limits,
 but no credentials. The ABI is cipher-neutral: the driver creates the canonical
 envelope selected by the binding configuration. `none` is the default profile.
 The optional `age-v1` profile defined in
-[`../spec/ref/age-v1-profile.md`](../../spec/ref/age-v1-profile.md) performs its
+[`../spec/age-v1-profile.md`](age-v1-profile.md) performs its
 encrypt-once operation at this same boundary. Prepare receives only the public
 recipient manifest; age identity files remain in the HTTP engine's open path
 and never cross the storage-driver boundary.
@@ -234,8 +238,8 @@ transport cursor automatically.
 
 ## References
 
-- [HTTP API v1](../../../server/spec/v1.md)
-- [ADR 0003: storage-axis ABI and scope](../../adr/0003-storage-axis-driver-abi-and-scope.md)
+- [HTTP API v1](../../server/spec/v1.md)
+- [ADR 0003: storage-axis ABI and scope](../adr/0003-storage-axis-driver-abi-and-scope.md)
 - [Retention-gap resynchronization](retention-gap-resynchronization.md)
-- [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md)
+- [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md)
 - Issue #441 (local-first cross-machine replication proposal)

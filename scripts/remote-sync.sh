@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage-1 polling synchronization client (dogfood; docs/spec/ref/stage-1-remote-sync.md).
+# Stage-1 polling synchronization client (dogfood; docs/spec/stage-1-remote-sync.md).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

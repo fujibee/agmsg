@@ -1,10 +1,10 @@
 # Operator-approved retention-gap resynchronization specification
 
-**Status:** dogfood specification
+**Status:** current
 **Last updated:** 2026-07-25
 
 The irreversible cursor and audit semantics behind this operation are recorded
-in [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md).
+in [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md).
 
 ## Context
 
@@ -203,6 +203,6 @@ live-row count without logging envelopes or credentials.
 
 - [Stage-1 remote synchronization](stage-1-remote-sync.md)
 - [Stage-2 read-state synchronization](read-state-synchronization.md)
-- [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md)
-- [ADR 0006: Composite read-state frontier](../../adr/ref/0006-composite-read-state-frontier.md)
-- [HTTP API v1](../../../server/spec/v1.md)
+- [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md)
+- [ADR 0006: Composite read-state frontier](../adr/0006-composite-read-state-frontier.md)
+- [HTTP API v1](../../server/spec/v1.md)

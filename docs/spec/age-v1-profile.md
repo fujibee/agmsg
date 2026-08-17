@@ -1,12 +1,12 @@
 # agmsg `age-v1` cipher profile
 
-**Status:** proposed (dogfood profile)
+**Status:** current
 **Profile identifier:** `age-v1`
 **Envelope version:** `1`
 
 This document pins the first encrypted envelope profile for the agmsg remote
 sync protocol. It extends the opaque envelope in
-[`server/spec/v1.md`](../../../server/spec/v1.md) without changing the HTTP message
+[`server/spec/v1.md`](../../server/spec/v1.md) without changing the HTTP message
 schema or the Stage-1 storage-driver durability boundary.
 
 `age-v1` is a standard binary [age v1 file][age-format], encrypted to native
@@ -357,7 +357,9 @@ by the HTTP v1 three-layer state model.
   protected with platform-appropriate file permissions. The reference client
   validates the exact native identity bytes and passes those same bytes to age
   over a private pipe, preventing a path substitution between validation and
-  open. HTTP bearer credentials and age identities are separate secrets.
+  open. The transport carries no secret of its own (see
+  [the HTTP API](../../server/spec/v1.md)), so an age identity is the only
+  secret on this path and reaching the server never substitutes for holding one.
 - The profile does not define padding. Team relationship, key epoch, age-file
   length, approximate recipient count and rotation pattern, server arrival
   time, traffic frequency, and sequence remain visible. A `key_id` is public

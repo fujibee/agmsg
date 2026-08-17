@@ -337,11 +337,11 @@ reevaluation without rewinding transport. It uses the Stage-1 specification's st
 so one explicit engine invocation reaches every candidate without an early
 permanent failure starving later records. The complete framing, record schemas,
 crash boundaries, and future reserved operation names are defined by
-[Stage-1 synchronization specification](ref/stage-1-remote-sync.md).
+[Stage-1 synchronization specification](stage-1-remote-sync.md).
 
 A driver may additionally advertise `stage1-resync` and implement the explicit
 operator recovery contract from the
-[retention-gap resynchronization specification](ref/retention-gap-resynchronization.md):
+[retention-gap resynchronization specification](retention-gap-resynchronization.md):
 
 ```text
 storage_sync_resync_status <local-team> <server-instance-id> <remote-team-id> <protocol-version> <accepted-floor>
@@ -358,7 +358,7 @@ audit, and result objects, including canonical sequence arithmetic and
 duplicate/unknown-field rejection.
 
 The independent Stage-2 extension from the
-[read-state synchronization specification](ref/read-state-synchronization.md) is advertised as
+[read-state synchronization specification](read-state-synchronization.md) is advertised as
 `capabilities=stage1-sync,stage2-read-state` and adds:
 
 ```text

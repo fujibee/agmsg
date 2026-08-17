@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Optional Stage-1 remote synchronization extension for the SQLite driver.
-# See docs/spec/ref/stage-1-remote-sync.md. All bulk input/output is JSONL.
+# See docs/spec/stage-1-remote-sync.md. All bulk input/output is JSONL.
 
 _sqlite_sync_uuid4() {
   local h n variant

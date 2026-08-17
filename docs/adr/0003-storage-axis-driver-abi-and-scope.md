@@ -7,14 +7,14 @@
 ## Context
 
 1.1.0 shipped the axis-generic driver registry and external-plugin opt-in
-([ADR 0002](../0002-driver-discovery-and-plugin-opt-in.md)). 1.1.1 implements the
+([ADR 0002](0002-driver-discovery-and-plugin-opt-in.md)). 1.1.1 implements the
 **storage axis** — the message store, made pluggable — with drivers `sqlite`
 (default), `jsonl`+`duckdb`, and `redis`. Before writing code, three
 architectural questions needed locking. An independent design pass (codex, this
 session) converged with the earlier Fugu-demo design (codex + gemini) and
 corrected an initial lean toward a subcommand ABI; this ADR records the
 converged decisions. ADRs are revisable, so it reaffirms or tightens
-[ADR 0001](../0001-storage-driver-pluginization.md) where that is the better choice.
+[ADR 0001](0001-storage-driver-pluginization.md) where that is the better choice.
 
 ## Decision
 
@@ -90,9 +90,9 @@ sqlite). 1.1.2 = `redis` (message store).
 
 ## References
 
-- Builds on [ADR 0001](../0001-storage-driver-pluginization.md) and
-  [ADR 0002](../0002-driver-discovery-and-plugin-opt-in.md).
+- Builds on [ADR 0001](0001-storage-driver-pluginization.md) and
+  [ADR 0002](0002-driver-discovery-and-plugin-opt-in.md).
 - Spec (where the `storage_*` signatures live, not this ADR):
-  [`docs/spec/driver-interface.md`](../../spec/driver-interface.md).
+  [`docs/spec/driver-interface.md`](../spec/driver-interface.md).
 - Implementation: #51 (epic), #203 (contract), #204 (facade + sqlite),
   #205 (event-log), #206 (call-site migration), #207 (jsonl+duckdb), #208 (redis).
