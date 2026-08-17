@@ -2081,34 +2081,34 @@ JSON
 @test "delivery set monitor (cursor): writes a monitor rule and emits the launch directive" {
   run bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
-  [[ "$output" == *"AGMSG-DIRECTIVE"* ]]
-  [[ "$output" == *"watch.sh"* ]]
-  [[ "$output" == *"notify_on_output"* ]]
-  [[ "$output" == *"CURSOR_CONVERSATION_ID:--"* ]]
+  grep -q "Delivery mode set to 'monitor'" <<<"$output"
+  grep -q "AGMSG-DIRECTIVE" <<<"$output"
+  grep -q "watch.sh" <<<"$output"
+  grep -q "notify_on_output" <<<"$output"
+  grep -q "CURSOR_CONVERSATION_ID:--" <<<"$output"
   local rule_file="$TEST_PROJECT/.cursor/rules/agmsg.mdc"
   [ -f "$rule_file" ]
   run cat "$rule_file"
-  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
-  [[ "$output" == *"notify_on_output"* ]]
-  [[ "$output" == *"watch.sh"* ]]
-  [[ "$output" == *"CURSOR_CONVERSATION_ID:--"* ]]
-  [[ "$output" == *"Do not use a plain background shell or \`/loop\`"* ]]
+  grep -q "agmsg-delivery-mode: monitor" <<<"$output"
+  grep -q "notify_on_output" <<<"$output"
+  grep -q "watch.sh" <<<"$output"
+  grep -q "CURSOR_CONVERSATION_ID:--" <<<"$output"
+  grep -q "Do not use a plain background shell or \`/loop\`" <<<"$output"
 }
 
 @test "delivery status (cursor): reports monitor when the monitor rule is present" {
   bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
-  [[ "$output" =~ "mode: monitor" ]]
+  grep -q "mode: monitor" <<<"$output"
 }
 
 @test "delivery set turn then monitor (cursor): rewrites the rule from turn to monitor" {
   bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
-  [[ "$output" =~ "mode: turn" ]]
+  grep -q "mode: turn" <<<"$output"
   bash "$SCRIPTS/delivery.sh" set monitor cursor "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status cursor "$TEST_PROJECT"
-  [[ "$output" =~ "mode: monitor" ]]
+  grep -q "mode: monitor" <<<"$output"
   grep -q "agmsg-delivery-mode: monitor" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
 }
 
