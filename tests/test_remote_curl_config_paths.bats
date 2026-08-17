@@ -9,43 +9,60 @@
 # curl as the literal string `/tmp/x`, which it cannot open. curl fails, and the
 # caller reports HTTP 000 -- a network-shaped symptom for a path-shaped fault.
 #
-# WHAT THIS FILE DRIVES. The production `_remote_http_post_json`, sourced from
-# `remote.sh`, with two stubs on PATH:
+# THE SAME BYTES, TWO CONSUMERS. That is what makes this hard to test honestly:
+# `/tmp/x` is openable by a POSIX curl and not by a native Windows one, so a
+# path string is only right or wrong RELATIVE TO WHO READS IT. The stubs here
+# are therefore capability-paired, and each test states which pairing it runs:
 #
-#   cygpath   present or absent, which is the capability the fix gates on
-#   curl      captures the config it was given, and OPENS WHAT IT NAMES
+#   PATH        an allowlist sandbox -- cygpath is ABSENT because this file did
+#               not link it, not because the host happens to lack one. Each arm
+#               asserts the capability it relies on before relying on it.
+#   curl        told which consumer it is playing. As `native-windows` it
+#               refuses a POSIX path the way real curl.exe would; as `posix` it
+#               refuses a Windows path. Neither accepts both.
+#   cygpath     -m yields forward slashes, -w yields backslashes -- really both,
+#               because telling them apart is the whole reason the fix names -m.
 #
-# The second half of that stub is the point. A stub that only records the
-# config would pass whatever the config said, including a path no curl could
-# open -- which is the defect. This one resolves the path the way MSYS would,
-# writes the headers, and FAILS if it cannot, so a wrong rendering shows up as
-# the same 000 the user got rather than as a passing assertion about a string.
+# An earlier version of this file got the second point wrong: its stub accepted
+# any absolute POSIX path whatever the platform, so it could not have failed on
+# the untranslated path that broke the user, and the file's own header claimed
+# otherwise. Review caught it. What follows is written so that the claim and the
+# stub say the same thing.
 
 load test_helper
+
+# Externals `remote.sh` needs to source, plus those `_remote_http_post_json`
+# and the curl stub call. Derived by sourcing under an empty PATH and adding
+# what it asked for, then reading the function for the rest: mktemp, mkfifo,
+# chmod, python3 (the bounded-copy reader), rm, rmdir.
+#
+# An allowlist rather than a subtraction, matching `path_without_python3` in
+# test_helper. A subtraction cannot express "cygpath is absent" on a machine
+# where cygpath lives in the same directory as mktemp, which is every Git Bash.
+SANDBOX_TOOLS=(bash dirname mktemp mkfifo chmod rm rmdir sed cp cat grep python3 uname)
 
 setup() {
   setup_test_env
 
-  STUB_BIN="$BATS_TEST_TMPDIR/bin"
-  mkdir -p "$STUB_BIN"
   CFG_CAPTURE="$BATS_TEST_TMPDIR/captured-config"
   export CFG_CAPTURE
 
   # The Windows drive prefix the fake cygpath maps onto. Any string works; what
-  # matters is that the two stubs agree, so the curl stub can undo it exactly
-  # the way a native binary on Windows resolves a real Windows path back to the
-  # same file.
+  # matters is that the stubs agree, so the curl stub can undo it exactly the
+  # way a native binary resolves a Windows path back to the same file.
   FAKE_ROOT="C:/msys64"
   export FAKE_ROOT
 
-  cat > "$STUB_BIN/curl" <<'STUB'
+  STUB_SRC="$BATS_TEST_TMPDIR/stubs"
+  mkdir -p "$STUB_SRC"
+
+  cat > "$STUB_SRC/curl" <<'STUB'
 #!/usr/bin/env bash
-# A stand-in for native curl on Windows: it reads the config, and it can only
-# open paths that a native binary could open.
+# Stands in for whichever curl the config is destined for. STUB_CURL_CONSUMER
+# decides which one, and the two do NOT accept the same strings -- that
+# asymmetry is the defect being tested, so a stub without it proves nothing.
 set -u
-cfg=""
-out=""
-prev=""
+cfg=""; out=""; prev=""
 for arg in "$@"; do
   case "$prev" in
     -K) cfg="$arg" ;;
@@ -56,37 +73,38 @@ done
 [ -n "$cfg" ] || { echo "STUB_CURL: no -K config" >&2; exit 2; }
 cp "$cfg" "$CFG_CAPTURE"
 
-# Undo the fake cygpath mapping, which is what the real MSYS/Windows pair does:
-# a Windows path names the same file the POSIX path did. A path in neither form
-# is one this stub cannot open -- and neither could curl.
+# Resolve an embedded path to something this consumer can open, or fail.
+#
+#   native-windows  only a Windows path opens. A POSIX path is a literal
+#                   filename with no such directory -- the reported bug.
+#   posix           only a POSIX path opens. A Windows path is a filename
+#                   containing a colon, which is not a path here.
 resolve() {
-  case "$1" in
-    "$FAKE_ROOT"/*) printf '%s' "/${1#"$FAKE_ROOT"/}" ;;
-    /*) printf '%s' "$1" ;;
+  case "$STUB_CURL_CONSUMER:$1" in
+    "native-windows:$FAKE_ROOT"/*) printf '%s' "/${1#"$FAKE_ROOT"/}" ;;
+    native-windows:*) return 1 ;;
+    posix:/*) printf '%s' "$1" ;;
+    posix:*) return 1 ;;
     *) return 1 ;;
   esac
 }
 
-# `data = "@<path>"` must name a readable file, or curl has nothing to post.
 data_field="$(sed -n 's/^data = "@\(.*\)"$/\1/p' "$cfg")"
 if [ -n "$data_field" ]; then
   if ! body="$(resolve "$data_field")" || [ ! -r "$body" ]; then
-    echo "STUB_CURL: cannot open data path: $data_field" >&2
+    echo "STUB_CURL($STUB_CURL_CONSUMER): cannot open data path: $data_field" >&2
     exit 26
   fi
 fi
 
-# `dump-header = "<path>"` must be openable for writing. On the real thing this
-# is the fifo the caller is already reading; failing to open it is exactly the
-# fault this fix exists for.
 hdr_field="$(sed -n 's/^dump-header = "\(.*\)"$/\1/p' "$cfg")"
 if [ -n "$hdr_field" ]; then
   if ! hdr="$(resolve "$hdr_field")"; then
-    echo "STUB_CURL: cannot open dump-header path: $hdr_field" >&2
+    echo "STUB_CURL($STUB_CURL_CONSUMER): cannot open dump-header path: $hdr_field" >&2
     exit 23
   fi
   printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr" || {
-    echo "STUB_CURL: dump-header not writable: $hdr_field" >&2
+    echo "STUB_CURL($STUB_CURL_CONSUMER): dump-header not writable: $hdr_field" >&2
     exit 23
   }
 fi
@@ -94,14 +112,10 @@ fi
 [ -z "$out" ] || printf '{"ok":true}' > "$out"
 printf '200'
 STUB
-  chmod +x "$STUB_BIN/curl"
+  chmod +x "$STUB_SRC/curl"
 
-  cat > "$STUB_BIN/cygpath" <<'STUB'
+  cat > "$STUB_SRC/cygpath" <<'STUB'
 #!/usr/bin/env bash
-# Mixed (-m) gives forward slashes; Windows (-w) gives backslashes. The
-# difference is the whole reason the fix names one of them, so the stub must
-# actually produce both -- returning the same string for either would make the
-# test unable to tell the two apart.
 set -u
 mode="$1"; path="$2"
 case "$mode" in
@@ -110,40 +124,70 @@ case "$mode" in
   *) echo "stub cygpath: unexpected mode $mode" >&2; exit 64 ;;
 esac
 STUB
-  chmod +x "$STUB_BIN/cygpath"
+  chmod +x "$STUB_SRC/cygpath"
 }
 
 teardown() { teardown_test_env; }
 
-# Runs the real helper with PATH arranged by the caller, and prints the http
-# code it returned. `cygpath` is present only when asked for.
-post_with() {
-  local with_cygpath="$1" body_file="$2"
-  local bin="$STUB_BIN"
-  if [ "$with_cygpath" = "no" ]; then
-    bin="$BATS_TEST_TMPDIR/bin-nocygpath"
-    mkdir -p "$bin"
-    ln -sf "$STUB_BIN/curl" "$bin/curl"
-  fi
-  run env PATH="$bin:$PATH" bash -c '
+# A PATH holding the allowlist, the curl stub, and cygpath only when asked.
+# Fails the test if the host is missing a tool: a silently short sandbox would
+# make the helper fail for a reason that has nothing to do with the fix.
+sandbox_path() {
+  local want_cygpath="$1" dir tool src
+  dir="$(mktemp -d "$BATS_TEST_TMPDIR/sandbox.XXXXXX")"
+  for tool in "${SANDBOX_TOOLS[@]}"; do
+    src="$(command -v "$tool")" || { echo "host lacks $tool" >&2; return 1; }
+    ln -s "$src" "$dir/$tool"
+  done
+  ln -s "$STUB_SRC/curl" "$dir/curl"
+  [ "$want_cygpath" = "yes" ] && ln -s "$STUB_SRC/cygpath" "$dir/cygpath"
+  printf '%s' "$dir"
+}
+
+# Runs the real helper under a sandbox PATH, and prints the http code. The
+# consumer the curl stub plays is named by the caller, so a test cannot
+# accidentally get a curl that accepts whatever the config happens to say.
+post_under() {
+  local bin="$1" consumer="$2" body_file="$3" extra="${4:-}"
+  run env PATH="$bin" STUB_CURL_CONSUMER="$consumer" CFG_CAPTURE="$CFG_CAPTURE" \
+    FAKE_ROOT="$FAKE_ROOT" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
+    '"$extra"'
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body_file"'" \
       "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header"
   '
 }
 
+@test "the sandbox decides whether cygpath exists — both directions (#850)" {
+  # The control on the instrument. Every arm below rests on the capability
+  # being what this file says it is, and on the host that is true by accident:
+  # macOS has no cygpath at all. If the sandbox were not really removing it,
+  # the negative arm would pass on any machine and fail on a Windows runner --
+  # which is the one machine this fix is for.
+  local without with
+  without="$(sandbox_path no)"
+  with="$(sandbox_path yes)"
+
+  run env PATH="$without" bash -c 'command -v cygpath >/dev/null 2>&1 && echo PRESENT || echo ABSENT'
+  [ "$output" = "ABSENT" ]
+
+  run env PATH="$with" bash -c 'command -v cygpath >/dev/null 2>&1 && echo PRESENT || echo ABSENT'
+  [ "$output" = "PRESENT" ]
+}
+
 @test "without cygpath the embedded paths are passed through byte for byte (#850)" {
-  # macOS and Linux have no cygpath, and this is the assertion that says the fix
-  # costs them nothing: the config must hold the exact strings the caller built.
+  # macOS and Linux, and the assertion that says the fix costs them nothing:
+  # the config must hold the exact strings the caller built.
+  local bin; bin="$(sandbox_path no)"
   body="$BATS_TEST_TMPDIR/body.json"
   printf '{"t":"secret"}' > "$body"
 
-  post_with no "$body"
+  post_under "$bin" posix "$body"
   [ "$status" -eq 0 ]
   [ "$output" = "200" ]
 
-  # The data path is one the test chose, so it can be compared exactly.
+  # The data path is one this test chose, so it can be compared exactly.
   grep -q -F -- "data = \"@$body\"" "$CFG_CAPTURE"
 
   # The header path is generated inside the helper, so what is asserted is its
@@ -157,15 +201,19 @@ post_with() {
 @test "with cygpath the DATA path is rendered in mixed Windows form (#850)" {
   # Two fields, two tests, because they are two effects of one line and can
   # regress apart. Asserting both in one test says "something is untranslated"
-  # -- which is true of either, and points at neither. Reverting the header
-  # field alone must not be able to fail this one.
+  # -- true of either, pointing at neither.
+  local bin; bin="$(sandbox_path yes)"
   body="$BATS_TEST_TMPDIR/body.json"
   printf '{"t":"secret"}' > "$body"
 
-  post_with yes "$body"
+  post_under "$bin" native-windows "$body"
   [ "$status" -eq 0 ]
-  [ "$output" = "200" ]
 
+  # Deliberately NOT asserting the 200 here. The stub refuses to open either
+  # field's path when it is untranslated, so a request fails whichever half is
+  # wrong -- and asserting the outcome in both field tests made them both go
+  # red for either mutation, which is the attribution this split exists to get.
+  # The outcome has its own test below.
   grep -q -F -- "data = \"@$FAKE_ROOT$body\"" "$CFG_CAPTURE"
 }
 
@@ -174,51 +222,74 @@ post_with() {
   # thinks of as "the file", and the header sink is generated inside the helper.
   # Translate one and not the other and curl opens the body, fails on the
   # header, and the caller reports 000 -- which reads as a header problem.
+  local bin; bin="$(sandbox_path yes)"
   body="$BATS_TEST_TMPDIR/body.json"
   printf '{"t":"secret"}' > "$body"
 
-  post_with yes "$body"
+  post_under "$bin" native-windows "$body"
   [ "$status" -eq 0 ]
-  [ "$output" = "200" ]
 
+  # Config bytes only, for the reason given in the DATA case above.
   hdr="$(sed -n 's/^dump-header = "\(.*\)"$/\1/p' "$CFG_CAPTURE")"
   case "$hdr" in "$FAKE_ROOT"/*) : ;; *) echo "header path not translated: $hdr"; return 1 ;; esac
+}
+
+@test "with both fields rendered, the request actually completes (#850)" {
+  # The outcome the two field tests deliberately leave alone. A native curl has
+  # to be able to open BOTH paths for the call to return a code at all, so this
+  # is the one assertion that fails for either field -- and that is its job:
+  # whatever regresses, the user's request stops working.
+  local bin; bin="$(sandbox_path yes)"
+  body="$BATS_TEST_TMPDIR/body.json"
+  printf '{"t":"secret"}' > "$body"
+
+  post_under "$bin" native-windows "$body"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
 }
 
 @test "the rendered paths carry forward slashes, never backslashes (#850)" {
   # `cygpath -w` also produces a valid Windows path, and it is the wrong one:
   # curl's config parser reads a backslash as an escape, so the path arrives
-  # corrupted. This is the assertion that separates -m from -w, and it is
-  # written against the config text rather than against the flag, because what
-  # breaks a user is the bytes curl parses.
+  # corrupted. Written against the config text rather than against the flag,
+  # because what breaks a user is the bytes curl parses.
+  local bin; bin="$(sandbox_path yes)"
   body="$BATS_TEST_TMPDIR/body.json"
   printf '{"t":"secret"}' > "$body"
 
-  post_with yes "$body"
+  post_under "$bin" native-windows "$body"
   [ "$status" -eq 0 ]
 
-  # No backslash anywhere in either embedded path.
-  ! grep -q '\\' "$CFG_CAPTURE"
+  refute grep -q '\\' "$CFG_CAPTURE"
 }
 
-@test "a path curl cannot open surfaces as HTTP 000, the way the user saw it (#850)" {
-  # The negative control for the stub itself. If the stub accepted any string as
-  # a path, every assertion above would pass on a broken rendering -- so make
-  # the rendering broken on purpose and confirm the stub notices.
+@test "an untranslated POSIX path reaching native curl is the reported 000 (#850)" {
+  # The defect itself, and the control on the stub. `_remote_curl_path` is
+  # replaced AFTER sourcing, so the production helper is still the one under
+  # test -- only its renderer is reduced to the passthrough it was before the
+  # fix. The consumer is the native Windows one, which cannot open /tmp/...
   #
-  # `_remote_curl_path` is replaced AFTER sourcing, so the production helper is
-  # still the one under test; only its path renderer is made to produce
-  # something no curl could open.
+  # Without this case the assertions above could all be passing on a config no
+  # curl would accept, which is exactly how the previous version of this file
+  # was wrong.
+  local bin; bin="$(sandbox_path yes)"
   body="$BATS_TEST_TMPDIR/body.json"
   printf '{"t":"secret"}' > "$body"
 
-  run env PATH="$STUB_BIN:$PATH" bash -c '
-    set -uo pipefail
-    . '"$SCRIPTS"'/remote.sh 2>/dev/null
-    _remote_curl_path() { printf "Z:\\\\nowhere\\\\%s" "$1"; }
-    _remote_http_post_json "https://example.invalid/v1/x" "'"$body"'" \
-      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header"
-  '
+  post_under "$bin" native-windows "$body" '_remote_curl_path() { printf "%s" "$1"; }'
+  [ "$status" -eq 0 ]
+  [ "$output" = "000" ]
+}
+
+@test "a Windows path reaching a POSIX curl is equally a 000 (#850)" {
+  # The mirror, so "native-windows refuses POSIX paths" is not read as "this
+  # stub refuses whatever the test needs it to". Each consumer refuses the
+  # other's form, and the fix is what puts the right form in front of each.
+  local bin; bin="$(sandbox_path no)"
+  body="$BATS_TEST_TMPDIR/body.json"
+  printf '{"t":"secret"}' > "$body"
+
+  post_under "$bin" posix "$body" '_remote_curl_path() { printf "%s%s" "$FAKE_ROOT" "$1"; }'
   [ "$status" -eq 0 ]
   [ "$output" = "000" ]
 }
