@@ -51,18 +51,61 @@ agmsg_sha1() {
 #
 # Do not add a `cksum` arm to "make this consistent with agmsg_sha1". The
 # inconsistency is the decision.
+#
+# THE FAILURE IS THE HELPER'S OWN, not the caller's shell options. Written as
+# `shasum -a 256 | awk …` this function's status was the status of `awk`, which
+# is delighted by the empty input a failed digest hands it — so "this FAILS"
+# held only because `key.sh` and `remote.sh` happen to `set -o pipefail` on
+# their second line. A caller without it got an empty success and carried it
+# into a fingerprint. Each tool is now run as its own command substitution with
+# its status checked here, so the refusal travels with the function.
+#
+# WHICH ARM RUNS IS DECIDED BY PRESENCE, AND A CHOSEN ARM THAT FAILS IS THE END.
+# The fallback exists for a tool that is ABSENT, not for one that is broken:
+# there is no second attempt after `shasum` is found and then fails. That is
+# deliberate — a machine whose `shasum` is broken has something wrong with it
+# that a quiet substitution would hide — and it is asserted below, so changing
+# it has to be a decision rather than a drift.
+#
+# The answer is then checked for being 64 lowercase hex. A tool that exits 0 and
+# prints a warning, a path, or an empty line has not failed as far as `$?` is
+# concerned, and this value is not a label: it is what two people read to each
+# other to confirm a key, and what the age-v1 checkpoint pins a snapshot with.
+# Lowercase specifically, because all three arms emit lowercase and a fourth
+# that did not would leave two machines disagreeing about a fingerprint that is
+# "the same".
+#
+# The two checks overlap on purpose and are not redundant: a tool that exits
+# non-zero while still printing a well-formed digest is caught only by the
+# status, and one that exits zero while printing anything else only by the
+# shape. There is a case for each below.
 agmsg_sha256() {
+  local raw
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
+    raw="$(shasum -a 256)" || return 1
+    raw="${raw%% *}"
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
+    raw="$(sha256sum)" || return 1
+    raw="${raw%% *}"
   elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 | awk '{print $NF}'
+    raw="$(openssl dgst -sha256)" || return 1
+    raw="${raw##* }"
   else
     echo "agmsg: no SHA-256 tool found on PATH (looked for shasum, sha256sum, openssl)." >&2
     echo "One of these is required for key fingerprints and end-to-end-encryption checkpoints." >&2
     return 1
   fi
+  case "$raw" in
+    *[!0-9a-f]*|'')
+      echo "agmsg: the SHA-256 tool on PATH answered with something that is not a digest." >&2
+      return 1
+      ;;
+  esac
+  [ "${#raw}" -eq 64 ] || {
+    echo "agmsg: the SHA-256 tool on PATH answered with ${#raw} characters, not a 64-hex digest." >&2
+    return 1
+  }
+  printf '%s\n' "$raw"
 }
 
 # True when agmsg_sha256 has something to run. Separated so a caller can ASK
@@ -79,10 +122,17 @@ agmsg_sha256() {
 # question, which is the direction that hurts -- the preflight passes and the
 # digest fails later, which is the shape of #861 all over again. Costs one
 # subprocess, once, on a command that is about to make a network round trip.
+#
+# Checked against a KNOWN digest, not against "something came back". A tool can
+# exit 0 and print sixty-four characters that are not the SHA-256 of the input,
+# and this probe is what stands between that and a fingerprint two people
+# believe they compared. `agmsg_sha256` refuses anything that is not 64
+# lowercase hex; this adds the only remaining question — whether it is the
+# right hex.
 agmsg_sha256_usable() {
   local probe
   probe="$(printf '%s' probe | agmsg_sha256 2>/dev/null)" || return 1
-  [ -n "$probe" ]
+  [ "$probe" = 'ba9c736f19e7f60b7f6764adb0b7908c0a2b394e09b6c09863528c7f2bc86095' ]
 }
 
 # Refuse to proceed without one, with the same install guidance shape the age

@@ -177,6 +177,141 @@ sha256_under() {
   [[ "$output" == *install* ]]
 }
 
+# THE REFUSAL WITHOUT THE CALLER'S HELP. Every case above runs under
+# `set -euo pipefail`, so none of them can tell "the helper failed" from "the
+# caller's pipefail noticed that the last stage got nothing". This one turns
+# pipefail OFF, which is the shell any caller that has not opted in provides.
+#
+# A PRESENT-BUT-BROKEN TOOL, NOT AN ABSENT ONE. The first version of this case
+# used an empty pathbox and could not fail: with no tool at all the helper takes
+# its `else` branch and returns 1 outright, which never depended on pipefail.
+# It measured nothing, and the mutation that should have reddened it did not.
+# A tool that is FOUND and then fails is the only path where the status of the
+# tool has to survive on its own.
+@test "hash: a broken tool is refused even when the caller has no pipefail" {
+  local shim="$TEST_SKILL_DIR/nopipefail"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nexit 1\n' > "$shim/shasum"
+  chmod +x "$shim/shasum"
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '
+    set +o pipefail
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256 2>/dev/null
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+# THE HALF THE SHAPE CHECK CANNOT SEE. A tool that exits non-zero while still
+# printing a well-formed digest passes every check on the answer and is caught
+# only by the status of the tool itself. Without this case, reverting the arms
+# to their piped form changes no result, because the 64-hex check happens to
+# catch every other broken-tool shape.
+@test "hash: a tool that fails while printing a plausible digest is refused" {
+  local shim="$TEST_SKILL_DIR/failsloud"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\ncat >/dev/null\necho "%s  -"\nexit 1\n' "$AGMSG_SHA256" > "$shim/shasum"
+  chmod +x "$shim/shasum"
+  # Control: the digest it prints is the RIGHT one, so nothing about the answer
+  # is what makes this fail.
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c 'printf x | shasum -a 256 | cut -d" " -f1'
+  [ "$output" = "$AGMSG_SHA256" ]
+
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '
+    set +o pipefail
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256 2>/dev/null
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "hash: and it still answers correctly with no pipefail when a tool is there" {
+  # The other half, so the case above cannot pass by refusing everything.
+  run env PATH="$PATH" "$BASH_BIN" -c '
+    set +o pipefail
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256
+  ' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$AGMSG_SHA256" ]
+}
+
+# EXIT 0 IS NOT A DIGEST. The broken-tool case above uses `exit 1`, which any
+# status check catches. This is the one that gets through a status check: a
+# tool that succeeds and prints something else -- a warning, a path, an empty
+# line -- and whose output would be carried into a fingerprint.
+@test "hash: a tool that exits 0 and prints a non-digest is refused" {
+  local shim="$TEST_SKILL_DIR/liar"
+  mkdir -p "$shim"
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\ncat >/dev/null\necho "warning: cannot read the input"\nexit 0\n' > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  # Control: it really does exit 0, so a status check alone would pass it.
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c 'printf x | shasum -a 256 >/dev/null'
+  [ "$status" -eq 0 ]
+
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256 2>/dev/null
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '. "$1/lib/hash.sh"; agmsg_sha256_usable' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+# 64 hex characters that are the WRONG 64. Nothing about the shape of the answer
+# says it is the digest of the input, and this value is the one two people read
+# to each other. The refusal here lives in the probe, not in agmsg_sha256 --
+# which is why the probe checks against a known digest rather than for content.
+@test "hash: a tool returning a well-formed but wrong digest is not usable" {
+  local shim="$TEST_SKILL_DIR/plausible"
+  mkdir -p "$shim"
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\ncat >/dev/null\necho "%s  -"\n' \
+      0000000000000000000000000000000000000000000000000000000000000000 > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  # Control: agmsg_sha256 itself accepts it, because it IS 64 lowercase hex.
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256
+  ' _ "$SCRIPTS"
+  [ "$status" -eq 0 ]
+  [ "$output" = 0000000000000000000000000000000000000000000000000000000000000000 ]
+
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '. "$1/lib/hash.sh"; agmsg_sha256_usable' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+}
+
+# THE FALLBACK IS FOR AN ABSENT TOOL, NOT A BROKEN ONE. Presence picks the arm;
+# a chosen arm that fails ends it, and the working tool behind it is not tried.
+# Asserted because it is a decision, and an undocumented decision becomes an
+# accident the first time someone "fixes" it.
+@test "hash: a broken first arm is not rescued by a working later one" {
+  local shim="$TEST_SKILL_DIR/firstbroken"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nexit 1\n' > "$shim/shasum"
+  chmod +x "$shim/shasum"
+  local box; box="$(pathbox firstbroken-real awk openssl)" || skip "openssl not installed"
+  # Control: openssl alone, in that box, does answer.
+  run sha256_under "$box"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$AGMSG_SHA256" ]
+
+  run env PATH="$shim:$box" "$BASH_BIN" -c '
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256 2>/dev/null
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
 # agmsg_sha1 is deliberately NOT changed by this work. Asserted here so that
 # "make the two consistent" has to break a test rather than pass review.
 @test "hash: agmsg_sha1 still answers with no digest tool at all (cksum arm)" {
