@@ -312,8 +312,13 @@ _remote_http_post_json() {
   # hidden, because it is a real difference between the platforms and not a
   # detail of how the file is named.
   #
-  # Gated on `command -v cygpath`, not on an OS name: what decides is whether a
-  # real fifo can be made, and that is what the probe asks.
+  # Gated on `command -v cygpath`, not on an OS name. Say what that probe
+  # actually asks, because it is narrower than the thing we care about: it is a
+  # CAPABILITY MARKER for an environment where MSYS fifos and a native curl
+  # coexist -- it does not test whether a real fifo can be made, and nothing
+  # here does. An earlier version of this comment claimed it did, which would
+  # have told the next reader that a machine passing the probe had been checked
+  # for the property that matters.
   if command -v cygpath >/dev/null 2>&1; then
     header_fifo="$header_file"
     : > "$header_fifo"
