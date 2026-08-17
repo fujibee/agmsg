@@ -95,6 +95,14 @@ _key_read_config_field() {
 # callers, which now take the value into a variable of its own before printing
 # it. An empty fingerprint is the worst possible output here -- both people see
 # the same blank and agree.
+#
+# THAT REFUSAL RIDES ON `set -o pipefail`, LINE 2. `agmsg_sha256` is in the
+# middle of this pipeline, and `cut` and `sed` are perfectly happy with the
+# empty input a failed digest leaves them: without pipefail the pipeline exits 0
+# with an empty string, the caller's assignment succeeds, and the label prints
+# with nothing after it. Dropping `pipefail` reddens both "no blank
+# fingerprint" cases in tests/test_key.bats, which is the control for this
+# paragraph -- if you are here because you want to simplify line 2, run them.
 _key_fingerprint() {
   printf '%s' "$1" | agmsg_sha256 | cut -c1-16 | sed 's/\(....\)/\1-/g;s/-$//'
 }
