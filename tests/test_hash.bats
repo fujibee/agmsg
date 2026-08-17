@@ -102,8 +102,14 @@ sha256_under() {
 
 # The whole point of the different last resort. agmsg_sha1 ends in `cksum` and
 # always answers; this one must refuse.
+#
+# `cksum` IS in the box on purpose. Without it this test passed a mutation that
+# added the cksum arm -- not because the refusal survived, but because the
+# sandbox had no cksum for the fallback to reach. It was measuring the box, not
+# the decision. On any real machine cksum is present, so that is the shape the
+# test has to run in.
 @test "hash: with no SHA-256 tool at all it FAILS instead of answering" {
-  local box; box="$(pathbox none awk)" || skip "awk not found"
+  local box; box="$(pathbox none awk cksum)" || skip "awk/cksum not found"
   # stderr discarded INSIDE: bats' `run` merges the two streams, so the
   # diagnostic would land in $output and the "nothing was printed" assertion
   # below would be measuring the error message.
@@ -119,7 +125,7 @@ sha256_under() {
 }
 
 @test "hash: the failure says which tools were looked for" {
-  local box; box="$(pathbox nonemsg awk)" || skip "awk not found"
+  local box; box="$(pathbox nonemsg awk cksum)" || skip "awk/cksum not found"
   run env PATH="$box" "$BASH_BIN" -c '
     . "$1/lib/hash.sh"
     printf "%s" agmsg | agmsg_sha256 2>&1 >/dev/null
@@ -130,7 +136,7 @@ sha256_under() {
 }
 
 @test "hash: agmsg_sha256_usable reports what agmsg_sha256 can actually do" {
-  local box; box="$(pathbox usable-no awk)" || skip "awk not found"
+  local box; box="$(pathbox usable-no awk cksum)" || skip "awk/cksum not found"
   run env PATH="$box" "$BASH_BIN" -c '. "$1/lib/hash.sh"; agmsg_sha256_usable' _ "$SCRIPTS"
   [ "$status" -ne 0 ]
 
@@ -160,7 +166,7 @@ sha256_under() {
 }
 
 @test "hash: agmsg_require_sha256 names a way to install one" {
-  local box; box="$(pathbox require awk)" || skip "awk not found"
+  local box; box="$(pathbox require awk cksum)" || skip "awk/cksum not found"
   run env PATH="$box" "$BASH_BIN" -c '
     . "$1/lib/hash.sh"
     agmsg_require_sha256 2>&1 >/dev/null
