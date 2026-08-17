@@ -79,7 +79,9 @@ agmsg_sha1() {
 # non-zero while still printing a well-formed digest is caught only by the
 # status, and one that exits zero while printing anything else only by the
 # shape. There is a case for each below.
-agmsg_sha256() {
+# The arms and the shape check, without the self-test below -- so the self-test
+# can call it without calling itself.
+_agmsg_sha256_selected() {
   local raw
   if command -v shasum >/dev/null 2>&1; then
     raw="$(shasum -a 256)" || return 1
@@ -108,6 +110,42 @@ agmsg_sha256() {
   printf '%s\n' "$raw"
 }
 
+# ASK THE SELECTED TOOL A QUESTION WE KNOW THE ANSWER TO, ONCE PER PROCESS.
+#
+# `_agmsg_sha256_selected` accepts any 64 lowercase hex, which is the shape of
+# a digest and not the proof of one: a tool that exits 0 and prints a plausible
+# but wrong value is accepted, and that value then becomes a fingerprint two
+# people read to each other, or the checkpoint that says a snapshot is the
+# snapshot it claims to be.
+#
+# The check lives HERE rather than at the callers because the alternative is a
+# list of entry points that must be kept complete -- `key.sh` is its own CLI and
+# `generate`, `show`, `import` and `rotate` all reach a digest without going
+# anywhere near `connect`'s preflight. A list like that is exactly what was
+# already missed once.
+#
+# Memoised, so a command that takes several digests pays for one extra. That is
+# the limit of what this claims: the tool answered correctly when first asked in
+# this process, not that it will keep doing so.
+_agmsg_sha256_selftest() {
+  if [ "${_AGMSG_SHA256_VERIFIED:-0}" = 1 ]; then
+    return 0
+  fi
+  local probe
+  probe="$(printf '%s' probe | _agmsg_sha256_selected)" || return 1
+  if [ "$probe" != 'ba9c736f19e7f60b7f6764adb0b7908c0a2b394e09b6c09863528c7f2bc86095' ]; then
+    echo "agmsg: the SHA-256 tool on PATH returned the wrong digest for a known input." >&2
+    echo "Its answers cannot be used for key fingerprints or encryption checkpoints." >&2
+    return 1
+  fi
+  _AGMSG_SHA256_VERIFIED=1
+}
+
+agmsg_sha256() {
+  _agmsg_sha256_selftest || return 1
+  _agmsg_sha256_selected
+}
+
 # True when agmsg_sha256 has something to run. Separated so a caller can ASK
 # before it starts, rather than discover it at the digest.
 #
@@ -123,24 +161,23 @@ agmsg_sha256() {
 # digest fails later, which is the shape of #861 all over again. Costs one
 # subprocess, once, on a command that is about to make a network round trip.
 #
-# Checked against a KNOWN digest, not against "something came back". A tool can
-# exit 0 and print sixty-four characters that are not the SHA-256 of the input,
-# and this probe is what stands between that and a fingerprint two people
-# believe they compared. `agmsg_sha256` refuses anything that is not 64
-# lowercase hex; this adds the only remaining question — whether it is the
-# right hex.
+# Nothing more than "can this machine produce one", because the correctness
+# question moved into `agmsg_sha256` itself -- a preflight that knows something
+# the digest path does not is the shape of #861, and for one head this function
+# was the only thing checking the answer while `key.sh` reached a digest by four
+# routes that never call it.
 agmsg_sha256_usable() {
-  local probe
-  probe="$(printf '%s' probe | agmsg_sha256 2>/dev/null)" || return 1
-  [ "$probe" = 'ba9c736f19e7f60b7f6764adb0b7908c0a2b394e09b6c09863528c7f2bc86095' ]
+  printf '%s' probe | agmsg_sha256 >/dev/null 2>&1
 }
 
 # Refuse to proceed without one, with the same install guidance shape the age
 # preflight uses.
 agmsg_require_sha256() {
   if ! agmsg_sha256_usable; then
-    echo "agmsg: end-to-end encryption needs a SHA-256 tool, and none was found on this device." >&2
-    echo "agmsg looks for 'shasum', then 'sha256sum', then 'openssl'. Install one, then retry:" >&2
+    echo "agmsg: end-to-end encryption needs a working SHA-256 tool, and this device has none." >&2
+    echo "One may be installed: a tool that is present but fails, or answers a known input" >&2
+    echo "wrongly, is reported here the same way as one that is absent -- neither can be used." >&2
+    echo "agmsg looks for 'shasum', then 'sha256sum', then 'openssl'. Install or repair one:" >&2
     echo "  macOS (Homebrew):      brew install openssl" >&2
     echo "  Debian/Ubuntu:         sudo apt install coreutils" >&2
     echo "  Windows (Git Bash):    ships with Git for Windows; reinstall it if 'sha256sum' is missing" >&2

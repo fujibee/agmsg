@@ -2618,14 +2618,17 @@ broken_digest_path() {
   run env PATH="$broken:$PATH" bash "$SCRIPTS/remote.sh" doctor
   # Optional, exactly like age: a team on cipher "none" never computes one.
   [ "$status" -eq 0 ]
-  grep -qF -- '[ ] SHA-256 tool on PATH' <<<"$output"
-  [[ "$output" == *"All checks passed"* ]]
+  # "usable", not "on PATH": this shim IS on PATH and fails when run, which is
+  # the distinction the line was reworded to keep -- see hash.sh.
+  grep -qF -- '[ ] usable SHA-256 tool' <<<"$output"
+  # grep, not `[[ ]]`: a non-last `[[ ]]` cannot fail a test on bash 3.2 (#670).
+  grep -qF -- 'All checks passed' <<<"$output"
 }
 
-@test "remote doctor: reports the SHA-256 tool as present when one works" {
+@test "remote doctor: reports the SHA-256 tool as usable when one works" {
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[x] SHA-256 tool on PATH"* ]]
+  grep -qF -- '[x] usable SHA-256 tool' <<<"$output"
 }
 
 # The bug this preflight exists for: the first SHA-256 in a `connect --e2ee`

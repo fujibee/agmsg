@@ -258,10 +258,13 @@ cmd_doctor() {
   # is fully functional without it. Listed at all because when it IS missing
   # the symptom lands after the team is registered, which reads like a server
   # problem rather than a missing tool.
+  # "usable", not "on PATH": presence and usability are different questions and
+  # this line answers the second one -- a tool that is installed and fails, or
+  # that returns the wrong digest for a known input, reports unusable here.
   if agmsg_sha256_usable; then
-    echo "  [x] SHA-256 tool on PATH  (optional)"
+    echo "  [x] usable SHA-256 tool  (optional)"
   else
-    echo "  [ ] SHA-256 tool on PATH  (optional)"
+    echo "  [ ] usable SHA-256 tool  (optional)"
     echo
     echo "End-to-end encryption needs one of 'shasum', 'sha256sum' or 'openssl' for key"
     echo "fingerprints and the age-v1 checkpoint. Remote sync without --e2ee does not use it:"

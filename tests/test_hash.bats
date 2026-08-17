@@ -264,11 +264,16 @@ sha256_under() {
   [ "$status" -ne 0 ]
 }
 
-# 64 hex characters that are the WRONG 64. Nothing about the shape of the answer
+# 64 hex characters that are the WRONG 64. Nothing about the shape of an answer
 # says it is the digest of the input, and this value is the one two people read
-# to each other. The refusal here lives in the probe, not in agmsg_sha256 --
-# which is why the probe checks against a known digest rather than for content.
-@test "hash: a tool returning a well-formed but wrong digest is not usable" {
+# to each other.
+#
+# THE REFUSAL IS agmsg_sha256'S OWN, not the preflight's. It was the preflight's
+# for one head, which left `key.sh` — its own CLI, four subcommands, none of
+# them going through `connect` — accepting the wrong value. Raised in review.
+# The case now pins both halves: the shape layer accepts it, and the function
+# every caller actually uses does not.
+@test "hash: a tool returning a well-formed but wrong digest is refused" {
   local shim="$TEST_SKILL_DIR/plausible"
   mkdir -p "$shim"
   local tool
@@ -277,13 +282,21 @@ sha256_under() {
       0000000000000000000000000000000000000000000000000000000000000000 > "$shim/$tool"
     chmod +x "$shim/$tool"
   done
-  # Control: agmsg_sha256 itself accepts it, because it IS 64 lowercase hex.
+  # Control: the shape layer accepts it, because it IS 64 lowercase hex. So the
+  # refusal below is the self-test and not something about the answer's form.
   run env PATH="$shim:$PATH" "$BASH_BIN" -c '
     . "$1/lib/hash.sh"
-    printf "%s" agmsg | agmsg_sha256
+    printf "%s" agmsg | _agmsg_sha256_selected
   ' _ "$SCRIPTS"
   [ "$status" -eq 0 ]
   [ "$output" = 0000000000000000000000000000000000000000000000000000000000000000 ]
+
+  run env PATH="$shim:$PATH" "$BASH_BIN" -c '
+    . "$1/lib/hash.sh"
+    printf "%s" agmsg | agmsg_sha256 2>/dev/null
+  ' _ "$SCRIPTS"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
 
   run env PATH="$shim:$PATH" "$BASH_BIN" -c '. "$1/lib/hash.sh"; agmsg_sha256_usable' _ "$SCRIPTS"
   [ "$status" -ne 0 ]

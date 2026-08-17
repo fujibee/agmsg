@@ -695,8 +695,38 @@ break_the_digest() {
   refute grep -qE 'Recipient fingerprint: *$' <<<"$output"
 }
 
-# The control for the two above: with the digest working, the same commands
-# print a fingerprint that is actually there. Without this, both tests would
+# A TOOL THAT SUCCEEDS AND LIES. The shim above exits 1, which any status check
+# catches. This one exits 0 and prints a well-formed digest that is not the
+# digest of the input — and `key.sh` is its own CLI: `generate`, `show`,
+# `import` and `rotate` all reach a digest without passing `connect`'s
+# preflight, so for one head the preflight was the only thing asking whether the
+# answer was right and none of these four asked it. Raised in review.
+#
+# Driven from `key.sh` deliberately, not from the helper: the claim is about
+# what this command does, and a helper-level case cannot fail if a caller stops
+# using the helper.
+@test "key generate: a tool that returns the wrong digest stops the command" {
+  skip_if_no_age
+  local shim="$TEST_SKILL_DIR/lying-digest"
+  mkdir -p "$shim"
+  local tool
+  for tool in shasum sha256sum openssl; do
+    printf '#!/bin/sh\ncat >/dev/null\necho "%s  -"\n' \
+      1111111111111111111111111111111111111111111111111111111111111111 > "$shim/$tool"
+    chmod +x "$shim/$tool"
+  done
+  # Control: it exits 0 and its answer has the shape of a digest, so nothing
+  # short of asking a question with a known answer distinguishes it.
+  run env PATH="$shim:$PATH" bash -c 'printf x | shasum -a 256'
+  [ "$status" -eq 0 ]
+
+  run env PATH="$shim:$PATH" bash "$SCRIPTS/key.sh" generate testteam
+  [ "$status" -ne 0 ]
+  refute grep -qE '1111111111111111' <<<"$output"
+}
+
+# The control for the three above: with the digest working, the same commands
+# print a fingerprint that is actually there. Without this, they would all
 # still pass if key.sh had simply stopped working entirely.
 @test "key generate: the working case still prints a non-empty fingerprint" {
   skip_if_no_age
