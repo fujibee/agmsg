@@ -849,7 +849,7 @@ _record_handover_events() {
 # Callers pass "${GROK_SESSION_ID:--}" (and the same pattern for other hosts)
 # so a launcher that drops a quoted-empty first arg cannot shift project/type.
 # watch.sh must fold "-" into the same generated-fallback path as "" (#236).
-@test "watch: sentinel '-' session_id resolves like an empty one (#855)" {
+@test "watch: sentinel '-' session_id resolves like an empty one (#477)" {
   local out="$BATS_TEST_TMPDIR/dash-sid.out"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" - "$PROJ" claude-code alice >"$out" 2>&1 3>&- &
   local pid=$!
