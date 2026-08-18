@@ -84,6 +84,15 @@
 # scheme itself once the concurrent effort to shorten these files (tracked
 # separately from #847/#848) lands and the numbers above are stale.
 #
+# FOLLOW-UP: whichever of that effort's PRs (#876 et al.) touches either file
+# named below changes its real cost, possibly enough to make pinning it
+# pointless or to make some other, currently-unremarkable file the next
+# hidden outlier. Re-run this script's own measurement method (correlate a
+# green run's `ok N` timestamps against each file, rank by seconds-per-test)
+# on main once that work lands, and drop or replace entries here based on
+# what it says then — this list is not meant to be permanent. The 30-minute
+# job cap in tests.yml is a separate decision and does not depend on this one.
+#
 # Matched by basename, not by the `$dir`-relative path `files` below uses, so
 # the pin still resolves when this script is invoked against a different
 # tests-dir (as several of this file's own tests do). A pinned name that no

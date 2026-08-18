@@ -91,7 +91,11 @@ union_of_shards() {
 # largest measured durations in the suite (722s and 380s; see
 # shard-tests.sh's own comment for the measurement). This test guards the
 # actual fix, not the metric that already worked.
-@test "the pinned-apart heavy files never share a shard, at any shard total (#847, #848)" {
+@test "the pinned-apart heavy files never share a shard, at any shard total >= 2 (#847, #848)" {
+  # total=1 is deliberately not checked: with one shard both pins wrap into
+  # slot 0 and land together by construction, same as every other file — the
+  # pin has nothing to separate them FROM at total=1, so that is not a case
+  # this property claims to hold.
   local pin1="test_remote_engine_start_refusal.bats"
   local pin2="test_remote_status_liveness.bats"
   local total i shard_files together
