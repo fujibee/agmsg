@@ -372,19 +372,54 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Beyond the workflow's `contents: read`, so the failure path can ask which
+    # shard stopped. Without it that call is a 403 the step swallows, and the
+    # listing below would be a feature that reads as present and never runs.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
+      # `result` is the matrix's roll-up: one word for twelve jobs, and the word
+      # it uses for a shard that ran out of `timeout-minutes` is `cancelled`.
+      # That cost an outside contributor a day. Two of their pull requests went
+      # red with every ubuntu shard, every Windows leg and three of four macOS
+      # shards green; the fourth had been stopped at exactly 25 minutes, and
+      # the only thing this job said was `result: cancelled`. Nothing on the
+      # page connected that to a runner limit, so it read as the repository
+      # rejecting their change.
+      #
+      # So name the jobs. The roll-up decides the exit code, as before; the
+      # listing is what makes the exit code actionable.
       - name: Check shard results
         env:
           RESULT: ${{ needs.bats-shard.result }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "$RESULT" in
-            success) ;;
-            skipped) echo "::error::the bats shards did not run"; exit 1 ;;
-            *) echo "::error::the bats shards did not all pass (result: $RESULT)"; exit 1 ;;
-          esac
+          if [ "$RESULT" = "success" ]; then exit 0; fi
+          if [ "$RESULT" = "skipped" ]; then echo "::error::the bats shards did not run"; exit 1; fi
+
+          # Best-effort: the diagnosis must never decide the outcome. A failure
+          # to list the jobs leaves the roll-up's own message standing rather
+          # than turning a red into a green or into a different red.
+          if gh api --paginate \
+               "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+               --jq '.jobs[] | select(.name | startswith("bats (")) | select(.conclusion != "success") | "\(.conclusion)\t\(.name)"' \
+               > /tmp/bad-shards.txt 2>/dev/null && [ -s /tmp/bad-shards.txt ]; then
+            echo "Shards that did not pass:"
+            sed 's/^/  /' /tmp/bad-shards.txt
+            if grep -q '^cancelled' /tmp/bad-shards.txt; then
+              echo
+              echo "A shard reported as 'cancelled' usually means it hit this workflow's"
+              echo "timeout-minutes rather than failing a test. Its log ends mid-suite and"
+              echo "names no failing case. That is a limit in this repository's CI, not a"
+              echo "defect in the change under test."
+            fi
+          fi
+          echo "::error::the bats shards did not all pass (result: $RESULT)"
+          exit 1
 
       - name: Docs-only change — no shard manifests to verify
         if: needs.changes.outputs.docs_only == 'true'
