@@ -294,8 +294,8 @@ post_under() {
   # The status line, not the whole stream. This consumer takes the fifo branch,
   # and a curl that refuses the config never opens the header fifo -- so the
   # copier stays blocked in open() until the failure path kills it, and bash on
-  # macOS reports that interrupted open on stderr. The noise rides on a request
-  # that was already failing; what this case is about is the code that comes
-  # back, so assert a line that IS 000 rather than a stream that equals it.
+  # macOS reports that interrupted open on stderr (#869). The noise rides on a
+  # request that was already failing; what this case is about is the code that
+  # comes back, so assert a line that IS 000 rather than a stream equal to it.
   grep -qFx -- '000' <<<"$output"
 }
