@@ -109,7 +109,13 @@ _stub_ps_printing() {
   esac
 
   # The real ps hands us a path with a space -- the premise of the stub above.
-  [[ "$raw" == *"Application Support"* ]]
+  # A non-last `[[ ]]` cannot fail the test on bash 3.2, so this states the
+  # premise the way the skip guard above already does.
+  case "$raw" in
+    *"Application Support"*) ;;
+    *) echo "ps reported [$raw], which does not carry the space-containing path" >&2
+       return 1 ;;
+  esac
 
   run compat_get_comm "$_PROC_PID"
   [ "$status" -eq 0 ]
