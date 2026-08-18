@@ -16,8 +16,8 @@ network health. Synchronizing read state is a separate contract, specified in
 [read-state synchronization](read-state-synchronization.md).
 
 The HTTP engine and the storage driver have different responsibilities. The
-engine owns transport, authentication, capability and binding validation,
-policy evaluation, retry classification, and polling. The driver owns every
+engine owns transport, capability and binding validation, policy evaluation,
+retry classification, and polling. The driver owns every
 local durability transition. In particular, the engine must never receive a
 new wire ID or envelope that was not already committed locally, and it must
 never advance a cursor ahead of durable local state.
@@ -56,8 +56,9 @@ same server database may move without invalidating its cursors. A different
 instance at the same URL is a different binding. The local team name selects
 local messages but is not the remote stream identity.
 
-Binding arguments contain no credentials or other secrets. Authentication
-material remains inside the HTTP engine. Bulk records never use argv: all input
+Binding arguments contain no credentials or other secrets, and neither does the
+transport: the HTTP contract carries no per-request credential, so there is no
+authentication material for either side to hold. Bulk records never use argv: all input
 and output use UTF-8 JSONL, one complete JSON object per line, so message data is
 not exposed through `ps(1)` and is not bounded by `ARG_MAX`.
 
