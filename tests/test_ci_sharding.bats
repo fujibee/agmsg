@@ -85,6 +85,57 @@ union_of_shards() {
   done
 }
 
+# The test above catches drift in the TOP TWO BY COUNT — exactly the metric
+# that misses the files pinned below (#847, #848): both are near the bottom
+# of the count-weighted sort (9 and 31 tests) despite carrying some of the
+# largest measured durations in the suite (722s and 380s; see
+# shard-tests.sh's own comment for the measurement). This test guards the
+# actual fix, not the metric that already worked.
+@test "the pinned-apart heavy files never share a shard, at any shard total (#847, #848)" {
+  local pin1="test_remote_engine_start_refusal.bats"
+  local pin2="test_remote_status_liveness.bats"
+  local total i shard_files together
+  for total in 2 3 4 5 8; do
+    together=0
+    for ((i = 1; i <= total; i++)); do
+      shard_files="$(cd "$REPO_ROOT" && bash "$SHARD" "$i" "$total")"
+      if grep -qF "$pin1" <<<"$shard_files" && grep -qF "$pin2" <<<"$shard_files"; then
+        together=1
+      fi
+    done
+    [ "$together" -eq 0 ]
+  done
+}
+
+@test "adding tests to an unrelated file does not reunite the pinned-apart files (#847 positive control)" {
+  # Reproduces #847's actual trigger, not a stand-in for it: that issue's
+  # collision was caused by appending @test cases to ONE file
+  # (test_roster_journal.bats) and having the repack land two OTHER, entirely
+  # untouched files in the same shard. This does the same append and checks
+  # the two files pinned above specifically, since a pin is exactly the part
+  # of the fix that is supposed to make this kind of drift unable to reunite
+  # them, whatever else in the tree changes shape.
+  local pin1="test_remote_engine_start_refusal.bats"
+  local pin2="test_remote_status_liveness.bats"
+  local dir="$BATS_TEST_TMPDIR/tests-plus"
+  mkdir -p "$dir"
+  cp "$REPO_ROOT"/tests/*.bats "$dir"/
+  local i
+  for i in $(seq 1 20); do
+    printf '\n@test "synthetic case %d" {\n  true\n}\n' "$i" >> "$dir/test_roster_journal.bats"
+  done
+
+  local shard1="" shard2="" shard_files
+  for i in 1 2 3 4; do
+    shard_files="$(cd "$REPO_ROOT" && bash "$SHARD" "$i" 4 "$dir")"
+    grep -qF "$pin1" <<<"$shard_files" && shard1="$i"
+    grep -qF "$pin2" <<<"$shard_files" && shard2="$i"
+  done
+  [ -n "$shard1" ]
+  [ -n "$shard2" ]
+  [ "$shard1" != "$shard2" ]
+}
+
 @test "shard-tests.sh rejects out-of-range and non-numeric arguments" {
   run bash "$SHARD" 0 4
   [ "$status" -eq 2 ]

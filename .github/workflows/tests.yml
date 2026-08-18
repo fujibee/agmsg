@@ -178,8 +178,27 @@ jobs:
     # block the PR). When changes failed, docs_only is empty → heavy steps run.
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
-    # A shard has generous headroom under this cap; a timeout is a genuine hang.
-    timeout-minutes: 25
+    # NOT "a timeout is a genuine hang" (#848): a cancellation here is a wall-
+    # clock cap being reached, and a shard that is still passing tests right up
+    # to the cap looks identical to one that is actually stuck. #857 hit this
+    # on macOS at 25m29s with all 335 of its tests ok and the last one landing
+    # at 24m53s -- a shard that finished normally a heartbeat too late, not a
+    # hang. Distinguishing the two needs the job's own log (does the last `ok`
+    # land seconds before cancellation, or does output stop cold with time
+    # left on the cap), not this number.
+    #
+    # Sized with real margin, not "generous" by assertion. Measured 2026-08-19
+    # (run 32193147987, macOS): the four shards ran 890s/824s/540s/1230s, and
+    # the heaviest (1230s) had 270s of the old 1500s cap left -- 18%. After
+    # #847's pin (shard-tests.sh) removes the two disproportionate files
+    # (722s, 380s) from the ordinary weighted pool, the worst remaining shard
+    # is estimated at the heavier pin's own floor (722s) plus a fair share of
+    # what is left of the suite (~2382s / 4 shards =~ 595s, generously ~700s
+    # unevenly) =~ 1420s, plus runner-speed variance -- call it 1700s. 1800s
+    # (30m) leaves real headroom over that estimate, not merely over last
+    # week's number. The 2 known intermittent reds (ubuntu 4/4's
+    # `_wait_pidfile`, windows runtime #567) are unrelated to this cap.
+    timeout-minutes: 30
     strategy:
       # Cover both GNU (Linux) and BSD (macOS) userlands — the scripts shell out
       # to sed/stat/mktemp/ps etc. whose flags differ between them.
