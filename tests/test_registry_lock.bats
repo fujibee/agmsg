@@ -468,3 +468,37 @@ write_holder() {  # write_holder <pid>
   # judged.
   [[ "$output" == *"first=0 second=1"* ]]
 }
+
+@test "lock: a breaker arriving after the lock changed hands leaves the new owner alone (#865)" {
+  # THE INTERLEAVING THE FIRST VERSION GOT WRONG, raised in review. Judging the
+  # holder and then renaming "whatever is at that path" are not the same thing:
+  # between them the lock can be broken by somebody else and re-taken by a new
+  # owner, and the rename then succeeds against the NEW holder — after which the
+  # rmdir removes a lock that is being used.
+  #
+  # Driven as the handoff, not as a repeat: the second breaker faces a live
+  # holder at the same path, which is precisely the state that used to be
+  # indistinguishable.
+  mkdir "$TEAM_DIR/.config.lock"
+  local gone; gone="$(dead_pid)"
+  write_holder "$gone"
+  start_live_holder
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" LIVE="$LIVE_PID" bash -c '
+    . "$LOCKLIB"
+    lock="$TEAM_DIR/.config.lock"
+    _agmsg_lock_break_dead "$lock" || { echo "first-refused"; exit 1; }
+    # A new owner takes the freed path and records itself, alive.
+    mkdir "$lock"
+    printf "token t\npid %s\ncommand join.sh\nhost h\n" "$LIVE" > "$lock.holder"
+    # The late breaker, still carrying the verdict it formed on the OLD holder.
+    if _agmsg_lock_break_dead "$lock"; then echo "late-broke-it"; else echo "late-refused"; fi
+    [ -d "$lock" ] && echo "lock-survived"
+    sed -n "s/^pid //p" "$lock.holder" | head -1
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"late-refused"* ]]
+  [[ "$output" == *"lock-survived"* ]]
+  # The new owner's record is intact — put back byte for byte, not consumed.
+  [[ "$output" == *"$LIVE_PID"* ]]
+  kill "$LIVE_PID" 2>/dev/null || true
+}

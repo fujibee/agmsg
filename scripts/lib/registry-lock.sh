@@ -90,22 +90,38 @@ _agmsg_lock_holder_gone() {
 
 # Break a lock whose recorded holder is gone.
 #
-# CLAIMED BEFORE IT IS BROKEN, and the claim is the holder file itself. Two
-# processes can reach the same verdict in the same instant; `mv` of a given file
-# succeeds for exactly one of them, so exactly one goes on to remove the
-# directory. The loser's `mv` fails and it re-evaluates — by which time the
-# winner has either taken the lock or left the path free.
+# CLAIM FIRST, JUDGE SECOND, and the order is the whole correctness argument.
 #
-# The claim also binds the removal to the holder that was JUDGED. If the lock
-# changed hands between the verdict and here, the file this renames is not the
-# file that was read, the rename fails, and no `rmdir` lands on a lock somebody
-# else has since taken.
+# The first version read the holder, decided it was dead, and then renamed
+# whatever was at that path. Review took it apart: between the two, a different
+# breaker can claim the old holder and remove the directory, a new owner can
+# take the same path and write a LIVE holder — and the rename then succeeds
+# against the new file, because the path is the same. The `rmdir` after it
+# removes the new owner's lock. "If the lock changed hands the rename fails" was
+# not true of a path.
+#
+# Renaming first makes the claim the thing that is judged. Two processes cannot
+# both claim: `mv` of a given file succeeds for exactly one of them. And once
+# the holder is claimed, nobody else can legitimately break this lock (the file
+# they would have to claim is gone) and no new owner can appear (the directory
+# is still there, so `mkdir` still fails) — so the directory removed below is
+# necessarily the one the claimed holder belonged to.
+#
+# A claim that turns out to be alive is put back. That costs a rename on a live
+# lock, which is why the caller checks `_agmsg_lock_holder_gone` first: the
+# cheap read filters the common case, and this is the judgement that counts.
 _agmsg_lock_break_dead() {
-  local lock="$1" claimed="$lock.dead.$$.${RANDOM:-0}"
+  local lock="$1" claimed="$lock.dead.$$.${RANDOM:-0}" pid
   mv "$lock.holder" "$claimed" 2>/dev/null || return 1
+  pid="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
+  if [ -z "$pid" ] || _agmsg_pid_alive_local "$pid"; then
+    # Alive, or nothing here can say otherwise. Put it back — the next reader
+    # must still find out who the lock says is holding it.
+    mv "$claimed" "$lock.holder" 2>/dev/null || true
+    return 1
+  fi
   if ! rmdir "$lock" 2>/dev/null; then
-    # Not taking it after all, so the next reader must still find out who the
-    # lock says is holding it.
+    # Not taking it after all, so the record goes back where it was.
     mv "$claimed" "$lock.holder" 2>/dev/null || true
     return 1
   fi
@@ -184,7 +200,20 @@ agmsg_lock_acquire() {
       # that sent the last three diagnoses after processes that were not there.
       if [ -f "$lock.holder" ]; then
         echo "agmsg: the lock records: $(tr '\n' ' ' < "$lock.holder" 2>/dev/null)" >&2
-        echo "agmsg: that process answered as alive, so this was contention." >&2
+        # ALIVE AND UNCHECKABLE ARE NOT THE SAME ANSWER. A holder file with no
+        # `pid` line, an empty one, or a value `_agmsg_pid_valid` rejects all
+        # leave `_agmsg_lock_holder_gone` false — which is "this could not be
+        # asked", not "it answered yes". Saying the second puts the operator
+        # back where the old message put them: hunting a process on the strength
+        # of a sentence that never checked (raised in review).
+        _agmsg_timeout_pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
+        if [ -z "$_agmsg_timeout_pid" ]; then
+          echo "agmsg: that record names no pid, so nothing here could ask whether it is held." >&2
+        elif _agmsg_pid_alive_local "$_agmsg_timeout_pid"; then
+          echo "agmsg: that process answered as alive, so this was contention." >&2
+        else
+          echo "agmsg: that process is not running — the lock was being broken as this wait ended." >&2
+        fi
       else
         echo "agmsg: the lock records no holder, so nothing here could ask whether it is held." >&2
         echo "agmsg: a lock with no holder record is not broken automatically — see #865." >&2
