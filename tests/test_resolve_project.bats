@@ -330,6 +330,53 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+@test "agent-binaries: process names come from the type manifest, not a hardcoded list" {
+  # cursor and grok-build have no case arm here and used to fall through to the
+  # "claude codex gemini" guess — so their detect_proc was ignored entirely.
+  run _agmsg_agent_binaries cursor
+  [ "$output" = "cursor-agent" ]
+  run _agmsg_agent_binaries grok-build
+  [ "$output" = "grok" ]
+  run _agmsg_agent_binaries codex
+  [ "$output" = "codex" ]
+}
+
+@test "pid-is-agent: a claude process is not accepted as an agent of another type" {
+  # This is what made a cursor member's project resolve to the project of
+  # whoever was asking: pid_is_agent said yes for the caller's own Claude Code
+  # process, so resolution took step 1 and read THAT session's project marker
+  # in preference to the member's own registration.
+  skip_on_windows "process argv faking via exec -a (#349)"
+  bash -c 'exec -a claude sleep 5' 3>&- &
+  local p=$!
+  sleep 0.3
+  run agmsg_pid_is_agent "$p" cursor
+  local st_cursor=$status
+  run agmsg_pid_is_agent "$p" claude-code
+  local st_cc=$status
+  kill "$p" 2>/dev/null || true
+  [ "$st_cursor" -ne 0 ]   # not a cursor agent
+  [ "$st_cc" -eq 0 ]       # still detected as its own type
+}
+
+@test "resolve: a member's project is not rewritten to the caller's by a cross-type marker" {
+  # End-to-end shape of the leak: a leader (claude-code) resolving a cursor
+  # member's path. The marker belongs to the leader's process and must not be
+  # consulted for a different type.
+  skip_on_windows "process argv faking via exec -a (#349)"
+  local member="$ROOT/sub/deep"
+  reg T cursoragent "$member" cursor
+  bash -c 'exec -a claude sleep 5' 3>&- &
+  local p=$!
+  sleep 0.3
+  agmsg_write_project_marker "$p" "/leader/project"
+  run env AGMSG_AGENT_PID="$p" bash -c \
+    'SKILL_DIR="$1"; . "$SKILL_DIR/scripts/lib/resolve-project.sh"; agmsg_resolve_project "$2" cursor' \
+    _ "$SKILL_DIR" "$member"
+  kill "$p" 2>/dev/null || true
+  [ "$output" != "/leader/project" ]
+}
+
 # --- end-to-end through entry scripts ---
 
 @test "whoami: subdir invocation resolves to the registered identity" {

@@ -46,6 +46,13 @@
 # shellcheck disable=SC1091
 . "$SKILL_DIR/scripts/lib/instance-id.sh"
 
+# agmsg_type_get: _agmsg_agent_binaries below reads each type's detect_proc from
+# its manifest rather than a hardcoded list. type-registry.sh resolves its own
+# lib dir and pulls in driver-registry.sh; neither sources this file, so there is
+# no cycle. Double-source guarded.
+# shellcheck disable=SC1091
+. "$SKILL_DIR/scripts/lib/type-registry.sh"
+
 _agmsg_run_dir() { printf '%s/run' "$SKILL_DIR"; }
 
 # Canonicalize a directory path by resolving symlinks to its physical location.
@@ -228,16 +235,48 @@ agmsg_find_registered_project_variant() {
 }
 
 # Map an agent type to the binary basename(s) its process may carry.
+# Process names that identify an agent of <type>, taken from the type manifest's
+# detect_proc (drivers/types/<name>/type.conf) so a type added by dropping in a
+# directory is recognized here too. Glob tokens ("cursor-agent-*") are dropped:
+# the matcher below already tries "<bin>-*" for every entry it is given.
+#
+# The case arms are the fallback for a type whose manifest carries no detect_proc
+# (antigravity, copilot). Reaching the last one used to be routine rather than
+# exceptional: every type without an arm — cursor, grok-build, hermes — matched
+# against "claude codex gemini", so agmsg_pid_is_agent accepted an enclosing
+# Claude Code process as, say, a cursor agent. agmsg_resolve_project step 1 then
+# read THAT session's project marker, and a cursor member's project resolved to
+# the project of whoever was asking. reset.sh, handed a correct path, looked for
+# the registration under the caller's project and reported "No registrations
+# removed" while it sat in the roster.
+#
+# Memoized per type: agmsg_pid_is_agent runs inside agmsg_agent_pid's ppid walk
+# (up to 20 hops), and a manifest read per hop is a filesystem scan per hop.
 _agmsg_agent_binaries() {
-  case "$1" in
-    claude-code) echo "claude" ;;
-    codex)       echo "codex" ;;
-    gemini)      echo "gemini" ;;
-    antigravity) echo "antigravity" ;;
-    copilot)     echo "copilot" ;;
-    opencode)    echo "opencode" ;;
-    *)           echo "claude codex gemini" ;;
-  esac
+  local type="$1" cache_var procs tok out=""
+  cache_var="_AGMSG_AGENT_BINS_$(printf '%s' "$type" | tr -c '[:alnum:]' '_')"
+  if [ -n "${!cache_var:-}" ]; then printf '%s\n' "${!cache_var}"; return 0; fi
+
+  if declare -F agmsg_type_get >/dev/null 2>&1; then
+    procs="$(agmsg_type_get "$type" detect_proc "" 2>/dev/null || true)"
+    for tok in $procs; do
+      case "$tok" in *'*'*) continue ;; esac
+      out="${out:+$out }$tok"
+    done
+  fi
+  if [ -z "$out" ]; then
+    case "$type" in
+      claude-code) out="claude" ;;
+      codex)       out="codex" ;;
+      gemini)      out="gemini" ;;
+      antigravity) out="antigravity" ;;
+      copilot)     out="copilot" ;;
+      opencode)    out="opencode" ;;
+      *)           out="claude codex gemini" ;;
+    esac
+  fi
+  printf -v "$cache_var" '%s' "$out"
+  printf '%s\n' "$out"
 }
 
 # Does <pid> currently look like an agent process of <type>? Checks both the
