@@ -147,15 +147,30 @@ sandbox_path() {
 # Runs the real helper under a sandbox PATH, and prints the http code. The
 # consumer the curl stub plays is named by the caller, so a test cannot
 # accidentally get a curl that accepts whatever the config happens to say.
+# STDERR GOES TO A FILE, NOT INTO $output.
+#
+# bats merges the two streams, and this helper's stderr is not reliably empty.
+# On a loaded macOS CI runner, bash reported
+#
+#   remote.sh: line NNN: .../agmsg-header-pipe.JVbrl7/header: Interrupted system call
+#
+# while opening the header fifo, and $output became that line followed by the
+# http code. Every exact comparison against "200" or "000" then fails on a code
+# that was in fact correct. Observed twice in one run, on a head that was green
+# on the author's machine: the difference is load, not platform.
+#
+# The http code is the only thing on stdout, so separating the streams is what
+# makes an exact comparison mean what it says.
 post_under() {
   local bin="$1" consumer="$2" body_file="$3" extra="${4:-}"
+  ERR_FILE="$BATS_TEST_TMPDIR/helper-stderr"
   run env PATH="$bin" STUB_CURL_CONSUMER="$consumer" CFG_CAPTURE="$CFG_CAPTURE" \
     FAKE_ROOT="$FAKE_ROOT" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
     '"$extra"'
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body_file"'" \
-      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header"
+      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$BATS_TEST_TMPDIR"'/out-header" 2>"'"$ERR_FILE"'"
   '
 }
 
