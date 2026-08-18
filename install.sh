@@ -93,6 +93,18 @@ UPDATE_ONLY=false
 INTERACTIVE=true
 AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
 
+# Types the installer renders their OWN shared SKILL.md for (their template.md
+# differs from codex's). Everything else -- codex itself, plus claude-code and
+# copilot, which keep separate dedicated copies elsewhere -- gets the codex-
+# typed shared SKILL.md. One list, read by three call sites below (fresh
+# install's template pick, --update's template pick, and --update's type
+# re-detection from the SKILL.md already on disk): before #846, the third site
+# hardcoded its own, narrower copy of this same set (missing opencode/hermes/
+# cursor) that had already drifted from the other two -- re-detecting one of
+# those three types as "codex" and then, via the template pick, overwriting
+# the SKILL.md the installer itself had written with the wrong flavor.
+AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
+
 configure_codex_sandbox() {
   # --- Configure Codex sandbox (if Codex is installed) ---
   # The Codex bridge writes pidfiles/sockets/request files under the
@@ -278,22 +290,28 @@ if [ "$UPDATE_ONLY" = true ]; then
   CMD_NAME="$SKILL_NAME"
   echo "  Updating $SKILL_NAME..."
   if [ -z "$AGENT_TYPE" ]; then
-    if grep -q "whoami.sh.*antigravity" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
-      AGENT_TYPE="antigravity"
-    elif grep -q "whoami.sh.*gemini" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
-      AGENT_TYPE="gemini"
-    elif grep -q "whoami.sh.*grok-build" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
-      AGENT_TYPE="grok-build"
-    else
-      AGENT_TYPE="codex"
-    fi
+    # Re-detect the type this install's shared SKILL.md was last rendered for,
+    # from the whoami.sh line its own template prints (#846) -- every
+    # renderable type's line is unambiguous against every other's; see the
+    # cross-grep this list is built from, noted alongside
+    # AGMSG_SHARED_SKILL_TPL_TYPES above. codex is not grepped for: it is the
+    # default a match against this list falls back to.
+    AGENT_TYPE="codex"
+    for _agmsg_t in $AGMSG_SHARED_SKILL_TPL_TYPES; do
+      if grep -q "whoami.sh.*$_agmsg_t" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
+        AGENT_TYPE="$_agmsg_t"
+        break
+      fi
+    done
+    unset _agmsg_t
   fi
-  # The shared SKILL.md uses the codex template by default; gemini/antigravity/
-  # opencode get their own. (claude-code and copilot reuse the codex-typed
-  # shared SKILL.md; their dedicated copies are dropped separately below.)
+  # The shared SKILL.md uses the codex template by default; the types in
+  # AGMSG_SHARED_SKILL_TPL_TYPES get their own. (claude-code and copilot reuse
+  # the codex-typed shared SKILL.md; their dedicated copies are dropped
+  # separately below.)
   TPL_TYPE="codex"
-  case "$AGENT_TYPE" in
-    gemini|antigravity|opencode|hermes|cursor|grok-build) TPL_TYPE="$AGENT_TYPE" ;;
+  case " $AGMSG_SHARED_SKILL_TPL_TYPES " in
+    *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
   esac
   sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path "$TPL_TYPE")" > "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
@@ -429,10 +447,10 @@ mkdir -p "$SKILL_DIR"/{scripts,types,db,agents}
 
 # SKILL.md is generated from the agent-specific command template, resolved from
 # the type manifest (scripts/drivers/types/<type>/template.md). The shared SKILL.md uses the
-# codex template by default; gemini/antigravity/opencode get their own.
+# codex template by default; the types in AGMSG_SHARED_SKILL_TPL_TYPES get their own.
 TPL_TYPE="codex"
-case "$AGENT_TYPE" in
-  gemini|antigravity|opencode|hermes|cursor|grok-build) TPL_TYPE="$AGENT_TYPE" ;;
+case " $AGMSG_SHARED_SKILL_TPL_TYPES " in
+  *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
 esac
 sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path "$TPL_TYPE")" > "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship

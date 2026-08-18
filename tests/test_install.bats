@@ -848,6 +848,28 @@ EOF
   ! grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
 }
 
+# Positive control for #846 (A), covering every type the installer can render a
+# shared SKILL.md for: install fresh with that type, then run bare --update
+# (no --agent-type, forcing the on-disk re-detection path) and confirm the
+# type survives. Before the fix, only antigravity/gemini/grok-build were
+# grepped for at re-detection time -- opencode/hermes/cursor silently fell
+# through to the codex default and got their SKILL.md overwritten with the
+# codex template, i.e. the installer clobbering what it had itself just
+# written. codex itself is included as the baseline case (it was never
+# grepped for and was never broken -- it IS the fallback).
+@test "install: bare --update preserves every renderable type's SKILL.md flavor (#846)" {
+  local t
+  for t in codex gemini antigravity opencode hermes cursor grok-build; do
+    local cmd="agmsg-$t"
+    HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd "$cmd" --agent-type "$t"
+    local skill_md="$FAKE_HOME/.agents/skills/$cmd/SKILL.md"
+    grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
+
+    HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd "$cmd"
+    grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
+  done
+}
+
 # The Windows leg of the bats matrix selects by test NAME (filter "[Ww]indows"),
 # and until this test existed it ran only the two install-helper checks above --
 # so join.sh, which is the first thing any Windows user runs, executed in no
