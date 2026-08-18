@@ -20,9 +20,10 @@ setup() {
   echo "$output"
   [ "$status" -eq 0 ]
   # A tree this size always has relative links; zero would mean the matcher
-  # stopped matching rather than that everything resolved.
-  [[ "$output" == *"parsed "* ]]
-  [[ "$output" != *"parsed 0 inline links"* ]]
+  # stopped matching rather than that everything resolved. Chained with `||` so
+  # the assertion can fail the test on bash 3.2 as well.
+  [[ "$output" == *"parsed "* ]] || { echo "no count line" >&2; return 1; }
+  [[ "$output" != *"parsed 0 inline links"* ]] || { echo "the inline matcher matched nothing" >&2; return 1; }
 }
 
 @test "the checker sees reference-style links, not only inline ones" {
@@ -47,11 +48,11 @@ setup() {
   run python3 "$CHECK" --no-git "$fix"
   echo "$output"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"doc.md -> missing-inline.md"* ]]
-  [[ "$output" == *"[gone]: missing-target.md"* ]]
-  [[ "$output" == *"[nowhere] has no definition"* ]]
+  [[ "$output" == *"doc.md -> missing-inline.md"* ]] || { echo "missed the inline pointer" >&2; return 1; }
+  [[ "$output" == *"[gone]: missing-target.md"* ]] || { echo "missed the reference definition" >&2; return 1; }
+  [[ "$output" == *"[nowhere] has no definition"* ]] || { echo "missed the undefined label" >&2; return 1; }
   # The backticked character class must not be read as a reference link.
-  [[ "$output" != *"a-z0-9"* ]]
+  [[ "$output" != *"a-z0-9"* ]] || { echo "read a regex in code as a reference link" >&2; return 1; }
 }
 
 @test "every document pointer inside the conformance vectors resolves" {
