@@ -3154,3 +3154,90 @@ _previous_count() {  # $1 = team
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/path" testteam
   [ "$status" -eq 0 ]
 }
+
+@test "remote status: an archived endpoint stored by an older version with raw control bytes leaks nothing (#849)" {
+  # validateEndpoint refuses control bytes NOW, but a binding written by an
+  # older version can still hold them, and the archive keeps whatever the
+  # binding held. The fixture below is such a binding: a capability-style
+  # path with a raw TAB inside it, and a raw LF in the host region.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local cfg="$TEST_SKILL_DIR/teams/testteam/config.json"
+  MOCK_PORT="$MOCK_PORT" python3 - "$cfg" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+port = os.environ["MOCK_PORT"]
+document["remote_binding"]["endpoint"] = (
+    "http://127.0.0.1\n:" + port + "/t/agsy_legacy_secret_849\ttail")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+    handle.write("\n")
+PY
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  # The archive keeps the legacy value verbatim (it is still the only pointer
+  # back), control bytes and all.
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" != "" ]
+
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  # No token, no capability path, exactly one previous line, and the
+  # replaced_at field intact beside it -- a raw TAB or LF in the stored
+  # endpoint must not split the line or bleed fragments into the output.
+  [ "$(grep -cF -- "previous: was bound to" <<<"$output")" -eq 1 ]
+  grep -qF -- "until 2" <<<"$output"
+  ! grep -qF -- "agsy_legacy_secret_849" <<<"$output"
+  ! grep -qF -- "/t/" <<<"$output"
+  ! grep -qF -- "tail" <<<"$output"
+}
+
+@test "pull: re-pointing an already-bound team archives the replaced binding too (#849)" {
+  # $.remote_binding has TWO wholesale writers -- _remote_write_binding and
+  # cmd_pull's bind-after-bootstrap write. The invariant "a re-point does not
+  # destroy the binding it replaces" has to hold at the writer boundary, so
+  # this drives the pull entry, not connect.
+  #
+  # The team pull re-points: a local team with a binding to another server
+  # and NO history -- cmd_pull's own guard names this the continue case ("a
+  # local shell with nothing in it"). Built the way an older install leaves
+  # it: config in place, binding written directly.
+  local pull_team_id="018f3f7e-2222-7000-8000-000000000002"
+  bash "$SCRIPTS/join.sh" rebound alice claude-code /tmp/project-a
+  local cfg="$TEST_SKILL_DIR/teams/rebound/config.json" old_instance
+  old_instance="018f3f7e-9999-7000-8000-00000000dead"
+  OLD_INSTANCE="$old_instance" PULL_TEAM_ID="$pull_team_id" python3 - "$cfg" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+document["team_id"] = os.environ["PULL_TEAM_ID"]
+document["remote_binding"] = {
+    "endpoint": "https://old-server.example:8443/t/former_home",
+    "server_instance_id": os.environ["OLD_INSTANCE"],
+    "remote_team_id": os.environ["PULL_TEAM_ID"],
+    "remote_team_name": "rebound",
+    "protocol_version": 1,
+    "cipher_profile": "none",
+    "connected_at": "2026-01-01T00:00:00Z",
+    "disconnected_at": None,
+    "binding_revision": 3,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(document, handle)
+    handle.write("\n")
+PY
+
+  run bash "$SCRIPTS/remote.sh" pull --endpoint "$ENDPOINT" \
+    --team-id "$pull_team_id" rebound
+  [ "$status" -eq 0 ] || { echo "pull refused: $output"; false; }
+
+  # The pull re-bound the team (different identity), and the binding it
+  # replaced is in the archive, not gone.
+  [ "$(_binding_field rebound server_instance_id)" != "$old_instance" ]
+  [ "$(_previous_count rebound)" = "1" ]
+  [ "$(_config_json_path rebound 'previous_bindings[0].server_instance_id')" = "$old_instance" ]
+  [ "$(_config_json_path rebound 'previous_bindings[0].endpoint')" = "https://old-server.example:8443/t/former_home" ]
+  [ -n "$(_config_json_path rebound 'previous_bindings[0].replaced_at')" ]
+}

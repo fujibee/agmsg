@@ -551,13 +551,78 @@ _remote_http_get_json() {
   printf '%s' "$curl_output"
 }
 
+# _remote_archive_replaced_binding <cfg_escaped> <new_server_instance_id> \
+#   <new_remote_team_id> <new_protocol_version> <stamp>
+#
+# Echoes the config document with the current $.remote_binding moved into
+# $.previous_bindings, when — and only when — the binding being written names
+# a DIFFERENT identity (#849). The caller passes the SQL-escaped document and
+# re-escapes what comes back before splicing it into its own write.
+#
+# EVERY site that replaces $.remote_binding wholesale must run its document
+# through this first. There are two such writers — _remote_write_binding
+# below, and cmd_pull's bind-after-bootstrap write — and the non-destruction
+# invariant of #849 holds at the writer boundary only if both archive. (The
+# binding_revision-only touch-ups elsewhere replace nothing and are not
+# writers in this sense.)
+#
+# One entry per (server_instance_id, remote_team_id, protocol_version): an
+# entry for the identity being archived is replaced by the newer copy, and an
+# entry matching the identity being written becomes the live binding again
+# and leaves the archive. The array is therefore bounded by the number of
+# distinct such identity tuples this team has ever been bound to -- one per
+# server in the common case, more if the same server re-registers the team
+# or the protocol version moves -- never by how often the team moved
+# between them.
+#
+# `capabilities` is dropped from the archived copy: it is refetched on every
+# connect, and an archived copy would be the one stale snapshot nobody
+# re-reads. Restoring a previous binding is a reconnect to its endpoint --
+# which refetches -- never a copy of the archived object back into
+# $.remote_binding.
+#
+# A current binding with no server_instance_id never completed a
+# registration; there is no partition behind it to point back to, so it is
+# replaced without being archived, same as before.
+_remote_archive_replaced_binding() {
+  local cfg_escaped="$1" new_instance_sql new_team_sql pv="$4" stamp="$5"
+  new_instance_sql="$(_agmsg_sqlesc "$2")"
+  new_team_sql="$(_agmsg_sqlesc "$3")"
+  agmsg_sqlite_mem \
+    "WITH cfg(doc) AS (SELECT '$cfg_escaped'),
+     cur(b) AS (SELECT json_extract(doc, '\$.remote_binding') FROM cfg),
+     kept(arr) AS (SELECT coalesce((
+       SELECT json_group_array(json(value))
+         FROM cfg, json_each(coalesce(json_extract(cfg.doc, '\$.previous_bindings'), '[]'))
+        WHERE NOT (json_extract(value, '\$.server_instance_id') IS json_extract((SELECT b FROM cur), '\$.server_instance_id')
+               AND json_extract(value, '\$.remote_team_id')     IS json_extract((SELECT b FROM cur), '\$.remote_team_id')
+               AND json_extract(value, '\$.protocol_version')   IS json_extract((SELECT b FROM cur), '\$.protocol_version'))
+          AND NOT (json_extract(value, '\$.server_instance_id') IS '$new_instance_sql'
+               AND json_extract(value, '\$.remote_team_id')     IS '$new_team_sql'
+               AND json_extract(value, '\$.protocol_version')   IS $pv)), '[]'))
+     SELECT CASE
+       WHEN (SELECT b FROM cur) IS NOT NULL
+        AND json_extract((SELECT b FROM cur), '\$.server_instance_id') IS NOT NULL
+        AND NOT (json_extract((SELECT b FROM cur), '\$.server_instance_id') IS '$new_instance_sql'
+             AND json_extract((SELECT b FROM cur), '\$.remote_team_id')     IS '$new_team_sql'
+             AND json_extract((SELECT b FROM cur), '\$.protocol_version')   IS $pv)
+       THEN json_set(doc, '\$.previous_bindings',
+              json_insert((SELECT arr FROM kept), '\$[#]',
+                json(json_set(json_remove((SELECT b FROM cur), '\$.capabilities'),
+                              '\$.replaced_at', '$(_agmsg_sqlesc "$stamp")'))))
+       ELSE doc
+     END FROM cfg;"
+}
+
 # _remote_write_binding <cfg> <endpoint> <binding_cipher> <resp_file>
 # Records the binding on the team config from a capability snapshot. No
 # credential is stored: the snapshot holds nothing that cannot be fetched
 # again, and the team_id is a value we minted ourselves.
 #
-# ONE writer for both the first connect and the adopt path below. Two copies of
-# this object would drift, and the second copy is the one nobody re-reads.
+# ONE writer for both the first connect and the adopt path below — but NOT
+# for every path: cmd_pull binds after its bootstrap with a write of its own,
+# which is why the archive step above is a shared primitive rather than a
+# private step of this function.
 _remote_write_binding() {
   local cfg="$1" endpoint="$2" binding_cipher="$3" resp_file="$4" \
     expected_binding_revision="${5:-}"
@@ -597,56 +662,12 @@ _remote_write_binding() {
   # survive this write untouched -- they are keyed on (server_instance_id,
   # remote_team_id, protocol_version) -- but the endpoint string in the binding
   # is the only pointer back to them, so overwriting it strands data that is
-  # still on disk. Before the replace, the current binding is moved into
-  # $.previous_bindings, a sibling key this function's wholesale json_set on
+  # still on disk. The shared archive primitive above moves the current
+  # binding into $.previous_bindings, a sibling key the wholesale json_set on
   # $.remote_binding never touches.
-  #
-  # One entry per (server_instance_id, remote_team_id, protocol_version): an
-  # entry for the identity being archived is replaced by the newer copy, and an
-  # entry matching the identity being written becomes the live binding again
-  # and leaves the archive. The array is therefore bounded by the number of
-  # distinct such identity tuples this team has ever been bound to -- one per
-  # server in the common case, more if the same server re-registers the team
-  # or the protocol version moves -- never by how often the team moved
-  # between them.
-  #
-  # `capabilities` is dropped from the archived copy: it is refetched on every
-  # connect (the comment atop this function is the contract), and an archived
-  # copy would be the one stale snapshot nobody re-reads. Restoring a previous
-  # binding is a reconnect to its endpoint -- which refetches -- never a copy
-  # of the archived object back into $.remote_binding.
-  #
-  # A current binding with no server_instance_id never completed a
-  # registration; there is no partition behind it to point back to, so it is
-  # replaced without being archived, same as before.
-  local archive_ts new_instance_sql new_team_sql archived_doc
-  archive_ts="$connected_at"
-  new_instance_sql="$(_agmsg_sqlesc "$server_instance_id")"
-  new_team_sql="$(_agmsg_sqlesc "$remote_team_id")"
-  archived_doc="$(agmsg_sqlite_mem \
-    "WITH cfg(doc) AS (SELECT '$cfg_escaped'),
-     cur(b) AS (SELECT json_extract(doc, '\$.remote_binding') FROM cfg),
-     kept(arr) AS (SELECT coalesce((
-       SELECT json_group_array(json(value))
-         FROM cfg, json_each(coalesce(json_extract(cfg.doc, '\$.previous_bindings'), '[]'))
-        WHERE NOT (json_extract(value, '\$.server_instance_id') IS json_extract((SELECT b FROM cur), '\$.server_instance_id')
-               AND json_extract(value, '\$.remote_team_id')     IS json_extract((SELECT b FROM cur), '\$.remote_team_id')
-               AND json_extract(value, '\$.protocol_version')   IS json_extract((SELECT b FROM cur), '\$.protocol_version'))
-          AND NOT (json_extract(value, '\$.server_instance_id') IS '$new_instance_sql'
-               AND json_extract(value, '\$.remote_team_id')     IS '$new_team_sql'
-               AND json_extract(value, '\$.protocol_version')   IS $protocol_version)), '[]'))
-     SELECT CASE
-       WHEN (SELECT b FROM cur) IS NOT NULL
-        AND json_extract((SELECT b FROM cur), '\$.server_instance_id') IS NOT NULL
-        AND NOT (json_extract((SELECT b FROM cur), '\$.server_instance_id') IS '$new_instance_sql'
-             AND json_extract((SELECT b FROM cur), '\$.remote_team_id')     IS '$new_team_sql'
-             AND json_extract((SELECT b FROM cur), '\$.protocol_version')   IS $protocol_version)
-       THEN json_set(doc, '\$.previous_bindings',
-              json_insert((SELECT arr FROM kept), '\$[#]',
-                json(json_set(json_remove((SELECT b FROM cur), '\$.capabilities'),
-                              '\$.replaced_at', '$(_agmsg_sqlesc "$archive_ts")'))))
-       ELSE doc
-     END FROM cfg;")"
+  local archived_doc
+  archived_doc="$(_remote_archive_replaced_binding "$cfg_escaped" \
+    "$server_instance_id" "$remote_team_id" "$protocol_version" "$connected_at")"
   cfg_escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$cfg_escaped', '\$.remote_binding', json_object(
@@ -1168,9 +1189,17 @@ cmd_pull() {
   case "$pulled_protocol" in ''|*[!0-9]*)
     echo "agmsg: server answered with an invalid protocol version" >&2; exit 1 ;; esac
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
-  local bind_at escaped caps_escaped updated
+  local bind_at escaped caps_escaped updated archived_doc
   bind_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   escaped=$(sed "s/'/''/g" "$cfg")
+  # This is the second wholesale writer of $.remote_binding (#849): a pull
+  # into a team that already holds a binding to a DIFFERENT server would
+  # otherwise replace it with no way back. Same archive primitive as
+  # _remote_write_binding, so the non-destruction invariant holds at the
+  # writer boundary, not just on the connect path.
+  archived_doc="$(_remote_archive_replaced_binding "$escaped" \
+    "$pulled_sid" "$pulled_id" "$pulled_protocol" "$bind_at")"
+  escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
   caps_escaped=$(printf '%s' "$pulled_caps" | sed "s/'/''/g")
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$escaped', '\$.remote_binding', json_object(
@@ -2502,18 +2531,28 @@ _remote_status_one() {
   # endpoint stays in the team's config, and the trailing line says so instead
   # of pretending the display is it.
   #
-  # TAB framing below rests on the endpoint alphabet: validateEndpoint refuses
-  # raw control bytes (tab/newline included) before a binding is ever written,
-  # so a stored endpoint cannot contain the separator or split a line.
-  local prev_line prev_endpoint prev_replaced prev_any=0
-  while IFS= read -r prev_line; do
-    [ -n "$prev_line" ] || continue
-    prev_endpoint="${prev_line%%$'\t'*}"
-    prev_replaced="${prev_line#*$'\t'}"
+  # One JSON object per row, NOT tab-separated fields: validateEndpoint now
+  # refuses raw control bytes, but a binding written by an OLDER version can
+  # hold an endpoint carrying them, and the archive keeps whatever the binding
+  # held. JSON escapes every byte below 0x20, so a row is one line whatever
+  # the endpoint contains; the per-field extraction below re-reads each row as
+  # JSON, and the printed values are additionally stripped of control bytes so
+  # nothing steers the terminal.
+  local prev_row prev_endpoint prev_replaced prev_any=0
+  while IFS= read -r prev_row; do
+    [ -n "$prev_row" ] || continue
+    prev_endpoint="$(agmsg_sqlite_mem \
+      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.e');")"
+    prev_replaced="$(agmsg_sqlite_mem \
+      "SELECT json_extract('$(printf '%s' "$prev_row" | sed "s/'/''/g")', '\$.a');")"
+    prev_endpoint="$(_remote_endpoint_display "$prev_endpoint")"
+    prev_endpoint="${prev_endpoint//[[:cntrl:]]/}"
+    prev_replaced="${prev_replaced//[[:cntrl:]]/}"
     prev_any=1
-    echo "		previous: was bound to $(_remote_endpoint_display "$prev_endpoint") until $prev_replaced"
+    echo "		previous: was bound to $prev_endpoint until $prev_replaced"
   done < <(agmsg_sqlite_mem \
-    "SELECT json_extract(value, '\$.endpoint') || char(9) || coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time')
+    "SELECT json_object('e', json_extract(value, '\$.endpoint'),
+                        'a', coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time'))
        FROM json_each(coalesce(json_extract('$(sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
   if [ "$prev_any" -eq 1 ]; then
     echo "		          to restore one, reconnect to its full endpoint — it is kept under previous_bindings in this team's config.json, and is not printed here because it can embed the access token"
