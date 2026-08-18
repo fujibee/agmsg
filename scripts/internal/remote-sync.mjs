@@ -3435,6 +3435,29 @@ export async function resyncCycle(config, acceptedFloor, dependencies = {}) {
 // credential. What it shares with the normal pull is the part that must not
 // diverge -- evaluatePull decides what may be imported, then roster mutations
 // and chat records go through the same two drivers as a connected cycle.
+/**
+ * A line of progress for a command that is otherwise silent for minutes (#882).
+ *
+ * STDERR, NEVER STDOUT. `cmd_pull` captures this process's stdout as the result
+ * channel -- `result="$(... pull-bootstrap ...)"` -- so anything written there
+ * is invisible until the command finishes AND rides in the same stream the
+ * caller greps for `pull_bootstrap_result`. stderr is not redirected by that
+ * caller, so it reaches the operator live and changes no parsing.
+ *
+ * WHY IT EXISTS: a verifier ran this against a real server, saw nothing for
+ * five minutes, concluded it had hung, and killed it. On Linux the same command
+ * takes 312 seconds and succeeds. Silence and a stall were indistinguishable,
+ * so thirty minutes went into diagnosing a command that was working.
+ *
+ * The lines separate FETCHING from APPLYING on purpose. Applying spawns a child
+ * process per batch; fetching does not. When this stops moving, which line it
+ * stopped on says which half to look at -- and on Windows, where the report
+ * came from, that is the whole question.
+ */
+function pullProgress(message) {
+  process.stderr.write(`agmsg: ${message}\n`);
+}
+
 export async function pullBootstrap(args, dependencies = {}) {
   const publicSnapshotCall = dependencies.publicSnapshotCall ?? publicSnapshot;
   const requestPublicCall = dependencies.requestPublicCall ?? requestPublic;
@@ -3452,6 +3475,7 @@ export async function pullBootstrap(args, dependencies = {}) {
 
   // There is no connected binding yet, so this one call validates itself
   // rather than going through the checks the rest of the pull relies on.
+  pullProgress(`pulling ${team} from ${serverUrl} -- this can take several minutes`);
   const teamSnapshot = await publicSnapshotCall(serverUrl, teamId);
   const config = {
     format_version: 1,
@@ -3475,8 +3499,10 @@ export async function pullBootstrap(args, dependencies = {}) {
   let imported = 0;
   let ageV1Envelopes = 0;
   for (;;) {
+    pullProgress(`fetching messages after ${cursor} (${imported} pulled so far)`);
     const page = await requestPublicCall(config,
       `/v1/teams/${teamId}/messages?after=${cursor}&limit=${limit}`);
+    pullProgress(`applying ${page.messages.length} messages`);
     const records = [];
     for (const message of page.messages) {
       if (message.envelope?.cipher === "age-v1") ageV1Envelopes += 1;

@@ -4085,3 +4085,55 @@ test("runLoop: a non-retryable error that is NOT a refusal still ends the loop",
     eventCall: async () => {},
   }), /config is unreadable/);
 });
+
+test("pull bootstrap reports progress on stderr and leaves stdout as the result channel", async () => {
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const serverId = "018f3f7e-0000-7000-8000-000000000002";
+  // Both streams are captured, not just the one under test. `cmd_pull` reads
+  // this process's stdout as the result -- result="$(... pull-bootstrap ...)"
+  // then greps it for pull_bootstrap_result -- so a progress line landing there
+  // is the regression this case exists to catch, and it is invisible unless
+  // stdout is measured too.
+  const out = [];
+  const err = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (chunk) => { out.push(String(chunk)); return true; };
+  process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
+  try {
+    await pullBootstrap({
+      team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787",
+    }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: serverId, team_id: teamId, team_name: "source",
+        min_available_seq: "0",
+      }),
+      requestPublicCall: async () => ({
+        messages: [{ id: "01", seq: "1", envelope: { v: 1, cipher: "plain", blob: "x" } }],
+        next_after: "1", has_more: false,
+      }),
+      evaluateCall: async () => ({
+        status: "importable", policy_revision: "0", local_security_revision: "0",
+      }),
+      driverCall: async () => [{ type: "sync_apply_result", transport_cursor: "1", corrupt_count: 0 }],
+      rosterDriverCall: async () => [],
+      eventCall: async () => {},
+    });
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+
+  // stdout: exactly the result, still parseable as one JSON line.
+  const stdoutLines = out.join("").split("\n").filter((line) => line !== "");
+  assert.equal(stdoutLines.length, 1);
+  assert.equal(JSON.parse(stdoutLines[0]).type, "pull_bootstrap_result");
+
+  // stderr: the operator can see it start, and can see it move. Both halves are
+  // named, because when this stops moving the line it stopped on says whether
+  // to look at the network or at the driver's child process.
+  const stderrText = err.join("");
+  assert.match(stderrText, /agmsg: pulling clone from http:\/\/127\.0\.0\.1:8787/);
+  assert.match(stderrText, /agmsg: fetching messages after /);
+  assert.match(stderrText, /agmsg: applying 1 messages/);
+});
