@@ -2622,7 +2622,10 @@ broken_digest_path() {
   # the distinction the line was reworded to keep -- see hash.sh.
   grep -qF -- '[ ] usable SHA-256 tool' <<<"$output"
   # grep, not `[[ ]]`: a non-last `[[ ]]` cannot fail a test on bash 3.2 (#670).
-  grep -qF -- 'All checks passed' <<<"$output"
+  # The summary was narrowed to "prerequisite" when doctor gained the lock
+  # report (#865): an unqualified "All checks passed." sitting above a stale
+  # lock and a removal command reads as cancelling the diagnosis.
+  grep -qF -- 'All prerequisite checks passed' <<<"$output"
 }
 
 @test "remote doctor: reports the SHA-256 tool as usable when one works" {
