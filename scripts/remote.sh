@@ -239,53 +239,81 @@ _remote_prompt_read() {
 # Not a check, so no `[x]`/`[ ]` and no effect on the exit code: a lock that
 # exists is not a failed prerequisite, and a doctor that exits non-zero because
 # a team is busy would be wrong every time somebody is joining.
+# One lock, reported. Split out so the two ways of finding them — a named team,
+# or a sweep — share this body and neither has to feed a loop from a string.
+# Joining the paths into one variable and reading it back would mean either an
+# unquoted heredoc, which runs command substitution on a team name, or unquoted
+# word splitting, which globs one.
+_remote_doctor_one_lock() {
+  local lock="$1" team holder pid state q
+  [ -d "$lock" ] || return 0
+  team="${lock%/.config.lock}"
+  team="${team##*/}"
+  if [ "$shown" -eq 0 ]; then
+    echo "Registry locks:"
+    shown=1
+  fi
+  holder="$lock.holder"
+  pid=""
+  [ -f "$holder" ] && pid="$(sed -n 's/^pid //p' "$holder" 2>/dev/null | head -1)"
+  # THREE ANSWERS, NOT TWO. "held" and "the holder is gone" are what the
+  # operator acts on; "cannot tell" is neither — a lock this could not ask
+  # about, and saying it is gone would be a guess. The guess that costs is the
+  # one that calls a live lock dead and then prints the command to remove it.
+  #
+  # WHICH IS WHY THE NUMBER IS VALIDATED BEFORE IT IS ASKED ABOUT.
+  # `_agmsg_pid_alive_local` returns false for a value it never put to the
+  # process table at all — non-numeric, leading zero, past the POSIX ceiling —
+  # and folding that into "not running" turned `pid not-a-pid` into a stale
+  # verdict with a removal beside it (raised in review). The same ceiling the
+  # helper uses, for the same reason it uses it.
+  if [ -z "$pid" ]; then
+    state="cannot tell — no holder recorded"
+  elif ! _agmsg_pid_valid "$pid" 2147483647; then
+    state="cannot tell — the holder record's pid is not a usable number"
+  elif _agmsg_pid_alive_local "$pid"; then
+    state="held — pid $pid is running"
+  else
+    state="stale — pid $pid is not running"
+  fi
+  echo "  $team: $state"
+  if [ -f "$holder" ]; then
+    echo "    records: $(tr '\n' ' ' < "$holder" 2>/dev/null)"
+  fi
+  echo "    created: $(ls -ld "$lock" 2>/dev/null || printf '%s (cannot stat)' "$lock")"
+  # QUOTED, because this is meant to be pasted. The store root and the team
+  # name can both contain a space, and an unquoted path becomes several
+  # arguments to `rm -r`. Same scheme as lib/shquote.sh.
+  q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\\\''/g")")"
+  if [ "$state" = "held — pid $pid is running" ]; then
+    echo "    a command is using this team. Nothing to do."
+  else
+    echo "    if no agmsg command is running for this team, remove it:"
+    echo "      rm -r $q"
+    [ -f "$holder" ] && echo "      rm -f $q.holder"
+    echo "    nothing but the lock lives in there — it holds no team data."
+  fi
+}
+
 _remote_doctor_locks() {
-  local only_team="${1:-}" lock team holder pid state shown=0 q
-  # Every team, or the one named. `for` over a glob rather than `find`, which is
-  # not on every PATH this tree is required to run under.
-  for lock in "$TEAMS_DIR"/*/.config.lock; do
-    [ -d "$lock" ] || continue
-    team="${lock%/.config.lock}"
-    team="${team##*/}"
-    [ -z "$only_team" ] || [ "$team" = "$only_team" ] || continue
-    if [ "$shown" -eq 0 ]; then
-      echo "Registry locks:"
-      shown=1
-    fi
-    holder="$lock.holder"
-    pid=""
-    [ -f "$holder" ] && pid="$(sed -n 's/^pid //p' "$holder" 2>/dev/null | head -1)"
-    # THREE ANSWERS, NOT TWO. "held" and "the holder is gone" are what the
-    # operator acts on; "no holder recorded" is neither — it is a lock this
-    # cannot ask about, written either by a version of the library that recorded
-    # nothing or by a process that was killed between creating the lock and
-    # writing its record. Reporting it as gone would be a guess, and the guess
-    # that costs is the one that says a live lock is dead.
-    if [ -z "$pid" ]; then
-      state="cannot tell — no holder recorded"
-    elif _agmsg_pid_alive_local "$pid"; then
-      state="held — pid $pid is running"
-    else
-      state="stale — pid $pid is not running"
-    fi
-    echo "  $team: $state"
-    if [ -f "$holder" ]; then
-      echo "    records: $(tr '\n' ' ' < "$holder" 2>/dev/null)"
-    fi
-    echo "    created: $(ls -ld "$lock" 2>/dev/null || printf '%s (cannot stat)' "$lock")"
-    # QUOTED, because this is meant to be pasted. The store root and the team
-    # name can both contain a space, and an unquoted path becomes several
-    # arguments to `rm -r`. Same scheme as lib/shquote.sh.
-    q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\\\''/g")")"
-    if [ "$state" = "held — pid $pid is running" ]; then
-      echo "    a command is using this team. Nothing to do."
-    else
-      echo "    if no agmsg command is running for this team, remove it:"
-      echo "      rm -r $q"
-      [ -f "$holder" ] && echo "      rm -f $q.holder"
-      echo "    nothing but the lock lives in there — it holds no team data."
-    fi
-  done
+  local only_team="${1:-}" lock shown=0
+  # A NAMED TEAM IS LOOKED AT DIRECTLY, and the sweep does not stop at `*`.
+  #
+  # Team names may begin with a dot — the validator rejects empty, `.`, `..`, a
+  # leading `-`, `/`, `\` and control characters, and nothing else — and `*`
+  # does not match a leading dot, so `.foo` was invisible to the sweep (raised
+  # in review). The two extra patterns cover `.foo` and `..foo`; `.` and `..`
+  # themselves cannot be team names.
+  #
+  # Globs rather than `find`, which is not on every PATH this tree is required
+  # to run under. Quoted, so a team name containing a space stays one path.
+  if [ -n "$only_team" ]; then
+    _remote_doctor_one_lock "$TEAMS_DIR/$only_team/.config.lock"
+  else
+    for lock in "$TEAMS_DIR"/*/.config.lock "$TEAMS_DIR"/.[!.]*/.config.lock "$TEAMS_DIR"/..?*/.config.lock; do
+      _remote_doctor_one_lock "$lock"
+    done
+  fi
   [ "$shown" -eq 0 ] || echo
 }
 
@@ -345,7 +373,11 @@ cmd_doctor() {
   echo
   _remote_doctor_locks "$team"
   if [ "$failed" -eq 0 ]; then
-    echo "All checks passed."
+    # NARROWED, because a lock report can sit above this line. "All checks
+    # passed." after "stale — pid 4711 is not running" and a `rm -r` reads as
+    # cancelling it, and the exit code deliberately does not move: a locked team
+    # is not a failed prerequisite (raised in review).
+    echo "All prerequisite checks passed."
   else
     echo "Some checks failed. See above."
     exit 1

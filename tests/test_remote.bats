@@ -115,7 +115,7 @@ skip_if_no_age() {
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"age / age-keygen on PATH"* ]]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 @test "remote doctor: is read-only (no token required, no state touched)" {
@@ -1550,7 +1550,7 @@ VALUES ('remote-pending.$key', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
     || skip "all doctor prerequisites are not installed"
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
@@ -2582,7 +2582,7 @@ PY
   local no_age; no_age="$(path_without_age)"
   run env PATH="$no_age" bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed"* ]]
+  [[ "$output" == *"All prerequisite checks passed"* ]]
   [[ "$output" == *"optional"* ]]
   [[ "$output" != *"is required for end-to-end encryption"* ]]
 }
@@ -2799,7 +2799,7 @@ make_lock() {  # make_lock <team> [pid]
   make_lock wedged "$gone"
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  grep -qF -- "All checks passed." <<<"$output"
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
 }
 
 @test "remote doctor <team>: reports that team's lock and not another's (#865)" {
@@ -2810,4 +2810,58 @@ make_lock() {  # make_lock <team> [pid]
   [ "$status" -eq 0 ]
   grep -qF -- "mine: stale" <<<"$output"
   refute grep -qF -- "theirs: stale" <<<"$output"
+}
+
+@test "remote doctor: a pid that was never asked about is not called stale (#865)" {
+  # THE VERDICT AND THE REMOVAL RIDE TOGETHER, so "false" from the liveness
+  # helper is not enough on its own: it is also false for a value the helper
+  # refused to put to the process table at all. `pid not-a-pid` and a number
+  # past the POSIX ceiling were being reported as stale, with `rm -r` beside
+  # them (raised in review).
+  make_lock badpid
+  printf 'token t\npid not-a-pid\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/badpid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "badpid: cannot tell" <<<"$output"
+  refute grep -qF -- "badpid: stale" <<<"$output"
+
+  # CONTROL: the helper does answer false for it, so this case is measuring the
+  # validation and not some other difference.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local not-a-pid"
+  [ "$status" -ne 0 ]
+}
+
+@test "remote doctor: a pid past the POSIX ceiling is not called stale (#865)" {
+  make_lock hugepid
+  printf 'token t\npid 2147483648\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/hugepid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "hugepid: cannot tell" <<<"$output"
+  refute grep -qF -- "hugepid: stale" <<<"$output"
+}
+
+@test "remote doctor: a team whose name begins with a dot is swept too (#865)" {
+  # `*` does not match a leading dot, and the team validator allows one — so the
+  # sweep walked past `.hidden` entirely (raised in review). The validator
+  # rejects empty, `.`, `..`, a leading `-`, `/`, `\` and control characters,
+  # and nothing else.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock .hidden "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- ".hidden: stale" <<<"$output"
+}
+
+@test "remote doctor: the summary does not cancel a lock finding (#865)" {
+  # "All checks passed." above a stale lock and a removal command reads as
+  # withdrawing them. The exit code deliberately stays 0 — a locked team is not
+  # a failed prerequisite — so the wording is what has to carry the distinction.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
+  refute grep -qE '^All checks passed\.$' <<<"$output"
 }
