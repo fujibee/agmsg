@@ -3454,8 +3454,14 @@ export async function resyncCycle(config, acceptedFloor, dependencies = {}) {
  * stopped on says which half to look at -- and on Windows, where the report
  * came from, that is the whole question.
  */
-function pullProgress(message) {
-  process.stderr.write(`agmsg: ${message}\n`);
+function pullProgress(startedAt, message) {
+  // Elapsed, because a terminal does not timestamp its own scrollback. Without
+  // it a report of "it printed this and then stopped" cannot say whether the
+  // stop was ten seconds or ten minutes -- and on the Linux run that finished,
+  // the whole thing took 312 seconds, so a slow phase and a stuck one look the
+  // same to whoever is watching.
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  process.stderr.write(`agmsg: [${elapsed}s] ${message}\n`);
 }
 
 export async function pullBootstrap(args, dependencies = {}) {
@@ -3475,7 +3481,8 @@ export async function pullBootstrap(args, dependencies = {}) {
 
   // There is no connected binding yet, so this one call validates itself
   // rather than going through the checks the rest of the pull relies on.
-  pullProgress(`pulling ${team} from ${serverUrl} -- this can take several minutes`);
+  const pullStartedAt = Date.now();
+  pullProgress(pullStartedAt, `pulling ${team} from ${serverUrl} -- this can take several minutes`);
   const teamSnapshot = await publicSnapshotCall(serverUrl, teamId);
   const config = {
     format_version: 1,
@@ -3499,10 +3506,10 @@ export async function pullBootstrap(args, dependencies = {}) {
   let imported = 0;
   let ageV1Envelopes = 0;
   for (;;) {
-    pullProgress(`fetching messages after ${cursor} (${imported} pulled so far)`);
+    pullProgress(pullStartedAt, `fetching messages after ${cursor} (${imported} pulled so far)`);
     const page = await requestPublicCall(config,
       `/v1/teams/${teamId}/messages?after=${cursor}&limit=${limit}`);
-    pullProgress(`applying ${page.messages.length} messages`);
+    pullProgress(pullStartedAt, `applying ${page.messages.length} messages`);
     const records = [];
     for (const message of page.messages) {
       if (message.envelope?.cipher === "age-v1") ageV1Envelopes += 1;
