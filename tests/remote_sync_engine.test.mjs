@@ -4133,7 +4133,7 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   // named, because when this stops moving the line it stopped on says whether
   // to look at the network or at the driver's child process.
   const stderrText = err.join("");
-  assert.match(stderrText, /agmsg: pulling clone from http:\/\/127\.0\.0\.1:8787/);
-  assert.match(stderrText, /agmsg: fetching messages after /);
-  assert.match(stderrText, /agmsg: applying 1 messages/);
+  assert.match(stderrText, /agmsg: \[\d+s\] pulling clone from http:\/\/127\.0\.0\.1:8787/);
+  assert.match(stderrText, /agmsg: \[\d+s\] fetching messages after /);
+  assert.match(stderrText, /agmsg: \[\d+s\] applying 1 messages/);
 });
