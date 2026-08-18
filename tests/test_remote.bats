@@ -115,7 +115,7 @@ skip_if_no_age() {
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"age / age-keygen on PATH"* ]]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 @test "remote doctor: is read-only (no token required, no state touched)" {
@@ -1550,7 +1550,7 @@ VALUES ('remote-pending.$key', $owner_pid, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
     || skip "all doctor prerequisites are not installed"
   run bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed."* ]]
+  [[ "$output" == *"All prerequisite checks passed."* ]]
 }
 
 PULL_TEAM_ID=018f3f7e-2222-7000-8000-000000000002
@@ -2582,7 +2582,7 @@ PY
   local no_age; no_age="$(path_without_age)"
   run env PATH="$no_age" bash "$SCRIPTS/remote.sh" doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"All checks passed"* ]]
+  [[ "$output" == *"All prerequisite checks passed"* ]]
   [[ "$output" == *"optional"* ]]
   [[ "$output" != *"is required for end-to-end encryption"* ]]
 }
@@ -2771,4 +2771,197 @@ assert_lookup_rejected() {
   [[ "$output" != *"command not found"* ]]
   [[ "$output" != *"No such file or directory"*"remote.sh"* ]]
   [[ "$output" != *"Usage: remote.sh unlock"* ]]
+}
+
+# --- doctor names the wedged lock, and removes nothing (#865) ---------------
+#
+# A registry lock left by a killed process is never broken: acquire waits out
+# its budget and says "timed out acquiring registry lock", which describes
+# contention, and no message anywhere names the directory to remove. `doctor` is
+# where that becomes findable.
+
+doctor_lock_dead_pid() {  # a pid that is genuinely not running
+  local p
+  sleep 0 &
+  p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s' "$p"
+}
+
+make_lock() {  # make_lock <team> [pid]
+  mkdir -p "$TEST_SKILL_DIR/teams/$1"
+  mkdir -p "$TEST_SKILL_DIR/teams/$1/.config.lock"
+  if [ -n "${2:-}" ]; then
+    printf 'token t\npid %s\ncommand join.sh\nhost h\n' "$2" \
+      > "$TEST_SKILL_DIR/teams/$1/.config.lock.holder"
+  fi
+}
+
+@test "remote doctor: a lock whose holder is gone is named, with the way out (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  # CONTROL: the pid really is not running, asserted before it is written into
+  # the holder — a number that merely happened to be free would make this pass
+  # for a reason that has nothing to do with the report.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $gone"
+  [ "$status" -ne 0 ]
+
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "wedged: stale — pid $gone is not running" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+  # REPORTS ONLY. The whole point of doing this before an automatic sweep is
+  # that a wrong verdict must not cost anything.
+  [ -d "$TEST_SKILL_DIR/teams/wedged/.config.lock" ]
+}
+
+@test "remote doctor: a lock whose holder is alive is not called stale (#865)" {
+  sleep 30 &
+  local live=$!
+  # CONTROL: alive at the moment doctor runs, not merely spawned.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $live"
+  [ "$status" -eq 0 ]
+
+  make_lock busy "$live"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "busy: held — pid $live is running" <<<"$output"
+  # And it must NOT offer to remove a lock somebody is using.
+  refute grep -qF -- "if no agmsg command is running for this team" <<<"$output"
+  kill "$live" 2>/dev/null || true
+}
+
+@test "remote doctor: a lock with no holder record says it cannot tell (#865)" {
+  # Neither "held" nor "gone": written by a version that recorded nothing, or by
+  # a process killed between creating the lock and writing its record. Guessing
+  # here is what would cost a live lock.
+  make_lock unknown
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "unknown: cannot tell — no holder recorded" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+}
+
+@test "remote doctor: says nothing about locks when there are none (#865)" {
+  # The negative control for the three above: the section is absent on a healthy
+  # install, so "Registry locks:" appearing at all is a finding.
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+}
+
+@test "remote doctor: a lock does not fail the run (#865)" {
+  # A team being locked is not a failed prerequisite. If it set the exit code,
+  # doctor would fail every time somebody is joining.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: reports that team's lock and not another's (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock mine "$gone"
+  make_lock theirs "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor mine
+  [ "$status" -eq 0 ]
+  grep -qF -- "mine: stale" <<<"$output"
+  refute grep -qF -- "theirs: stale" <<<"$output"
+}
+
+@test "remote doctor: a pid that was never asked about is not called stale (#865)" {
+  # THE VERDICT AND THE REMOVAL RIDE TOGETHER, so "false" from the liveness
+  # helper is not enough on its own: it is also false for a value the helper
+  # refused to put to the process table at all. `pid not-a-pid` and a number
+  # past the POSIX ceiling were being reported as stale, with `rm -r` beside
+  # them (raised in review).
+  make_lock badpid
+  printf 'token t\npid not-a-pid\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/badpid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "badpid: cannot tell" <<<"$output"
+  refute grep -qF -- "badpid: stale" <<<"$output"
+
+  # CONTROL: the helper does answer false for it, so this case is measuring the
+  # validation and not some other difference.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local not-a-pid"
+  [ "$status" -ne 0 ]
+}
+
+@test "remote doctor: a pid past the POSIX ceiling is not called stale (#865)" {
+  make_lock hugepid
+  printf 'token t\npid 2147483648\ncommand join.sh\nhost h\n' \
+    > "$TEST_SKILL_DIR/teams/hugepid/.config.lock.holder"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "hugepid: cannot tell" <<<"$output"
+  refute grep -qF -- "hugepid: stale" <<<"$output"
+}
+
+@test "remote doctor: a team whose name begins with a dot is swept too (#865)" {
+  # `*` does not match a leading dot, and the team validator allows one — so the
+  # sweep walked past `.hidden` entirely (raised in review). The validator
+  # rejects empty, `.`, `..`, a leading `-`, `/`, `\` and control characters,
+  # and nothing else.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock .hidden "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- ".hidden: stale" <<<"$output"
+}
+
+@test "remote doctor: the summary does not cancel a lock finding (#865)" {
+  # "All checks passed." above a stale lock and a removal command reads as
+  # withdrawing them. The exit code deliberately stays 0 — a locked team is not
+  # a failed prerequisite — so the wording is what has to carry the distinction.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All prerequisite checks passed." <<<"$output"
+  refute grep -qE '^All checks passed\.$' <<<"$output"
+}
+
+@test "remote doctor <team>: a traversal argument is refused and reads nothing (#865)" {
+  # The named-team lookup builds a path from the argument, and until this was
+  # added nothing had ever validated it — `cmd_doctor` only ever put the value
+  # in a header sentence. A sentinel outside the store proves the refusal is
+  # about reach and not about the string.
+  local outside="$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$outside/.config.lock"
+  printf 'token t\npid 1\ncommand join.sh\nhost h\n' > "$outside/.config.lock.holder"
+  # CONTROL: the sentinel is real and would be reported if it were reached —
+  # the same shape, under a team name, IS reported (the case above).
+  [ -d "$outside/.config.lock" ]
+
+  run bash "$SCRIPTS/remote.sh" doctor "../../$(basename "$BATS_TEST_TMPDIR")/outside"
+  [ "$status" -ne 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+  refute grep -qF -- "rm -r " <<<"$output"
+  grep -qF -- "invalid team name" <<<"$output"
+  # And it must not claim the prerequisites verdict for a question it refused.
+  refute grep -qF -- "All prerequisite checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: a slash in the name is refused (#865)" {
+  run bash "$SCRIPTS/remote.sh" doctor "a/b"
+  [ "$status" -ne 0 ]
+  grep -qF -- "invalid team name" <<<"$output"
+}
+
+@test "remote doctor <team>: an ordinary and a dot-leading name still resolve (#865)" {
+  # The validator allows both, and the direct lookup has to keep working for
+  # them — a refusal that took the legitimate names with it would be the
+  # cheapest way to pass the two cases above.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock plain "$gone"
+  make_lock .dotted "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor plain
+  [ "$status" -eq 0 ]
+  grep -qF -- "plain: stale" <<<"$output"
+  run bash "$SCRIPTS/remote.sh" doctor .dotted
+  [ "$status" -eq 0 ]
+  grep -qF -- ".dotted: stale" <<<"$output"
 }
