@@ -1924,6 +1924,25 @@ _remote_sync_engine_status() {
   fi
 }
 
+# How many turns the readiness poll takes before giving up.
+#
+# THE SHIPPED VALUE IS 1600 AND THIS DOES NOT CHANGE IT. The number is lifted out
+# of the loop so a test can ask for it without running it, and so the regression
+# suites can reach the give-up path without paying for the full ceiling -- five
+# of them were spending 12 minutes of a 25-minute CI shard on a wait whose length
+# none of them are about.
+#
+# `AGMSG_TEST_SYNC_READY_TURNS` is a test seam. A value that is not a positive
+# integer falls back to the shipped number rather than to zero: a resolver that
+# quietly answered nothing would turn every one of those suites back into a full
+# ceiling run, which is the failure this exists to remove.
+_remote_sync_ready_turns() {
+  case "${AGMSG_TEST_SYNC_READY_TURNS:-}" in
+    ''|*[!0-9]*) printf '1600' ;;
+    *)           printf '%s' "$AGMSG_TEST_SYNC_READY_TURNS" ;;
+  esac
+}
+
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
@@ -2685,7 +2704,9 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  local ready_turns
+  ready_turns="$(_remote_sync_ready_turns)"
+  while [ "$i" -lt "$ready_turns" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |

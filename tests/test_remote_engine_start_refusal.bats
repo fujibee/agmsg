@@ -113,7 +113,7 @@ skip_if_root() {
   printf '%s\n' 2147483647 > "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   chmod a-w "$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
 
-  run bash "$SCRIPTS/remote.sh" sync start testteam
+  run env AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
 
   # Captured before the next `run`, which overwrites $output.
@@ -133,7 +133,7 @@ skip_if_root() {
   # command fails on a team literally named "'testteam'" -- measured, that is
   # what the first version of this test did. A printed route has to be run the
   # way it is meant to be run.
-  run bash -c "bash '$SCRIPTS/remote.sh' $args"
+  run bash -c "AGMSG_TEST_SYNC_READY_TURNS=40 bash '$SCRIPTS/remote.sh' $args"
   # "not refused" is not enough: a remedy that no longer parses is answered with
   # a usage line, which is also not a refusal. Measured -- changing only the
   # printed verb (start -> begin) left this test green until the two assertions
@@ -159,7 +159,7 @@ skip_if_root() {
 @test "sync start: a writable run dir still starts an engine (#730)" {
   # The control. Without it, every assertion above is satisfied by a
   # `sync start` that refuses unconditionally.
-  run bash "$SCRIPTS/remote.sh" sync start testteam
+  run env AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam
   # The engine is real here and will fail to reach https://remote.example, so
   # this does not assert success -- only that the refusal above is not what
   # happened, and that the pidfile path was reachable.
@@ -192,7 +192,7 @@ skip_if_root() {
   local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   local starter i=0 j=0 freed=0
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
+  AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
   starter=$!
 
   # The engine existing is what says the START is over and the WAIT has begun.
@@ -315,7 +315,7 @@ skip_if_root() {
   local cycles="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
   local starter engine foreign i=0
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
+  AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
   starter=$!
   while [ ! -f "$pidfile" ] && [ "$i" -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
   [ -f "$pidfile" ]
@@ -364,7 +364,7 @@ skip_if_root() {
   local cycles="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
   local starter engine i=0 err="$TEST_SKILL_DIR/retake.err"
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
+  AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam >"$err" 2>&1 &
   starter=$!
   while [ ! -f "$pidfile" ] && [ "$i" -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
   [ -f "$pidfile" ]
