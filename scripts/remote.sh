@@ -2106,6 +2106,20 @@ _remote_sync_engine_status() {
 # WHICH misreading happens: a record deleted for a process that is still running
 # cannot be recovered by the operator, while a stale record is what `status`
 # already knows how to describe.
+# How many turns the readiness poll takes before giving up.
+#
+# A FUNCTION SO THE SHIPPED DEFAULT CAN BE CHECKED WITHOUT RUNNING IT. Bound by
+# a case that let the poll run to the ceiling, it cost 52 seconds -- half that
+# test file, on a CI shard already near its 25-minute cap, to hold one constant.
+# Asking the resolver costs nothing and pins the same two facts: unset means the
+# shipped 1600, and the seam is honoured when it is set.
+_remote_sync_ready_turns() {
+  case "${AGMSG_TEST_SYNC_READY_TURNS:-}" in
+    ''|*[!0-9]*) printf '1600' ;;
+    *)           printf '%s' "$AGMSG_TEST_SYNC_READY_TURNS" ;;
+  esac
+}
+
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts owned_winpid=""
   for signal in TERM KILL; do
@@ -2924,11 +2938,8 @@ cmd_sync_start() {
   # what the #831 regressions drive, and reaching it costs the full ceiling every
   # time -- six cases of that is minutes of CI for a number none of them are
   # about. A case that IS about the shipped ceiling leaves this unset.
-  local ready_turns=1600
-  case "${AGMSG_TEST_SYNC_READY_TURNS:-}" in
-    ''|*[!0-9]*) ;;
-    *) ready_turns="$AGMSG_TEST_SYNC_READY_TURNS" ;;
-  esac
+  local ready_turns
+  ready_turns="$(_remote_sync_ready_turns)"
   while [ "$i" -lt "$ready_turns" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&

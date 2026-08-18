@@ -480,22 +480,12 @@ EOF_NODEP
   # The ordinary path, unstubbed, so the Windows work above cannot have broken
   # the thing that already worked.
   #
-  # AND THE ONLY CASE THAT LEAVES THE READINESS CEILING ALONE. The others set
-  # AGMSG_TEST_SYNC_READY_TURNS, because reaching the give-up path costs the full
-  # 1600 turns and none of them are about that number. This one pays it, so the
-  # shipped default is on the path of something.
+  # The shipped ceiling is NOT exercised here any more -- it cost 52 seconds, half
+  # this file, and the case below pins the same constant for nothing.
   write_driver
-  local began ended
-  began="$(date +%s)"
-  run env SCRIPTS="$SCRIPTS" bash "$DRIVER" "$TEAM" honest
-  ended="$(date +%s)"
+  run env SCRIPTS="$SCRIPTS" AGMSG_TEST_SYNC_READY_TURNS=40 bash "$DRIVER" "$TEAM" honest
 
   grep -qF 'driver: cmd_sync_start rc=1' <<<"$output"
-  # AND THE SHIPPED CEILING IS STILL THE SHIPPED ONE. The seam defaults to 1600
-  # turns of a 0.01s sleep, so this path cannot return in under sixteen seconds.
-  # Asserted on the floor the sleep puts there, not on how long the forks take.
-  # Without this, the seam's default could be lowered and nothing would notice.
-  [ "$((ended - began))" -ge 15 ]
   local running
   running="$(pgrep -f "$PATTERN" | wc -l | tr -d ' ')"
   [ "$running" -eq 0 ]
@@ -623,4 +613,30 @@ EOF_FOREIGN
   [ -f "$PIDFILE" ]
 
   kill "$other" 2>/dev/null || true
+}
+
+@test "the shipped readiness ceiling is still 1600 turns (#831)" {
+  # THE CONSTANT, WITHOUT PAYING FOR IT. Letting the poll run to the ceiling was
+  # the honest way to bind this and cost 52 seconds on a shard already at its
+  # 25-minute cap; the resolver answers the same two questions in milliseconds.
+  #
+  # Both halves matter and are asserted separately: unset must mean the SHIPPED
+  # number, and the seam must actually be honoured -- a resolver that ignored the
+  # variable would make every other case in this file run the full ceiling
+  # silently, which is how the shard timed out in the first place.
+  cat > "$TEST_SKILL_DIR/turns.sh" <<'EOF_TURNS'
+#!/usr/bin/env bash
+. "$SCRIPTS/remote.sh"
+printf 'turns=%s\n' "$(_remote_sync_ready_turns)"
+EOF_TURNS
+
+  run env SCRIPTS="$SCRIPTS" bash "$TEST_SKILL_DIR/turns.sh"
+  grep -qF 'turns=1600' <<<"$output"
+
+  run env SCRIPTS="$SCRIPTS" AGMSG_TEST_SYNC_READY_TURNS=40 bash "$TEST_SKILL_DIR/turns.sh"
+  grep -qF 'turns=40' <<<"$output"
+
+  # And a non-numeric value is not a ceiling of zero: it falls back to shipped.
+  run env SCRIPTS="$SCRIPTS" AGMSG_TEST_SYNC_READY_TURNS=oops bash "$TEST_SKILL_DIR/turns.sh"
+  grep -qF 'turns=1600' <<<"$output"
 }
