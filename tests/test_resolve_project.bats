@@ -435,3 +435,8 @@ setup_git_repo() {
   [ "$result" = "$base/parent" ]
   rm -rf "$base"
 }
+
+@test "agent-binaries: cursor maps to cursor-agent (#856)" {
+  [ "$(_agmsg_agent_binaries cursor)" = "cursor-agent" ]
+  [ "$(_agmsg_agent_binaries claude-code)" = "claude" ]
+}
