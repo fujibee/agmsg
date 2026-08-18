@@ -2865,3 +2865,45 @@ make_lock() {  # make_lock <team> [pid]
   grep -qF -- "All prerequisite checks passed." <<<"$output"
   refute grep -qE '^All checks passed\.$' <<<"$output"
 }
+
+@test "remote doctor <team>: a traversal argument is refused and reads nothing (#865)" {
+  # The named-team lookup builds a path from the argument, and until this was
+  # added nothing had ever validated it — `cmd_doctor` only ever put the value
+  # in a header sentence. A sentinel outside the store proves the refusal is
+  # about reach and not about the string.
+  local outside="$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$outside/.config.lock"
+  printf 'token t\npid 1\ncommand join.sh\nhost h\n' > "$outside/.config.lock.holder"
+  # CONTROL: the sentinel is real and would be reported if it were reached —
+  # the same shape, under a team name, IS reported (the case above).
+  [ -d "$outside/.config.lock" ]
+
+  run bash "$SCRIPTS/remote.sh" doctor "../../$(basename "$BATS_TEST_TMPDIR")/outside"
+  [ "$status" -ne 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+  refute grep -qF -- "rm -r " <<<"$output"
+  grep -qF -- "invalid team name" <<<"$output"
+  # And it must not claim the prerequisites verdict for a question it refused.
+  refute grep -qF -- "All prerequisite checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: a slash in the name is refused (#865)" {
+  run bash "$SCRIPTS/remote.sh" doctor "a/b"
+  [ "$status" -ne 0 ]
+  grep -qF -- "invalid team name" <<<"$output"
+}
+
+@test "remote doctor <team>: an ordinary and a dot-leading name still resolve (#865)" {
+  # The validator allows both, and the direct lookup has to keep working for
+  # them — a refusal that took the legitimate names with it would be the
+  # cheapest way to pass the two cases above.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock plain "$gone"
+  make_lock .dotted "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor plain
+  [ "$status" -eq 0 ]
+  grep -qF -- "plain: stale" <<<"$output"
+  run bash "$SCRIPTS/remote.sh" doctor .dotted
+  [ "$status" -eq 0 ]
+  grep -qF -- ".dotted: stale" <<<"$output"
+}

@@ -308,6 +308,17 @@ _remote_doctor_locks() {
   # Globs rather than `find`, which is not on every PATH this tree is required
   # to run under. Quoted, so a team name containing a space stays one path.
   if [ -n "$only_team" ]; then
+    # VALIDATED BEFORE IT BECOMES A PATH. `cmd_doctor` takes its argument and,
+    # until this line, only ever put it in a header sentence — so nothing had
+    # ever checked it. Building `$TEAMS_DIR/$only_team/.config.lock` from it
+    # turned `doctor ../outside` into a read of a directory outside the store,
+    # reported with its records and a `rm -r` to paste (raised in review). The
+    # sweep it replaced never reached one only because no team was named that.
+    #
+    # The same validator every other team-taking path uses: it rejects empty,
+    # `.`, `..`, `/`, `\`, a leading `-` and control characters, and allows a
+    # leading dot and a space, which this reports on and must keep.
+    agmsg_validate_team_name "$only_team" || return 1
     _remote_doctor_one_lock "$TEAMS_DIR/$only_team/.config.lock"
   else
     for lock in "$TEAMS_DIR"/*/.config.lock "$TEAMS_DIR"/.[!.]*/.config.lock "$TEAMS_DIR"/..?*/.config.lock; do
@@ -371,7 +382,10 @@ cmd_doctor() {
     failed=1
   fi
   echo
-  _remote_doctor_locks "$team"
+  # A REJECTED TEAM NAME ENDS THE COMMAND. The validator prints why; carrying on
+  # to "All prerequisite checks passed." after refusing to look at what was
+  # asked about would report success for a question nobody answered.
+  _remote_doctor_locks "$team" || exit 1
   if [ "$failed" -eq 0 ]; then
     # NARROWED, because a lock report can sit above this line. "All checks
     # passed." after "stale — pid 4711 is not running" and a `rm -r` reads as
