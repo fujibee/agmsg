@@ -1,72 +1,57 @@
 #!/usr/bin/env bats
 
 # Relative pointers between documents are load-bearing and nothing was checking
-# them. `docs/spec/vectors/age-v1-vectors.json` has shipped a
-# `"profile_document": "../age-v1-profile.md"` that resolves to a path which
-# does not exist, and the conformance vectors are what a second implementation
-# reads first. A moved or renamed document breaks the same way and silently.
+# them. `docs/spec/vectors/age-v1-vectors.json` shipped a `profile_document`
+# resolving to a path that did not exist, and the conformance vectors are what a
+# second implementation reads first. A moved or renamed document breaks the same
+# way and silently.
 #
 # Scope is deliberately narrow: does the target exist. Anchors are stripped
 # rather than verified, because a missing heading and a missing file are
-# different failures and only the second one makes a reader follow a dead path.
+# different failures and only the second makes a reader follow a dead path.
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  CHECK="$BATS_TEST_DIRNAME/helpers/check_doc_links.py"
 }
 
-@test "every relative link in a tracked markdown file resolves" {
-  run python3 - "$ROOT" <<'PY'
-import os, re, subprocess, sys
-
-root = sys.argv[1]
-files = subprocess.run(
-    ["git", "-C", root, "ls-files", "*.md"],
-    capture_output=True, text=True, check=True).stdout.split()
-
-# Inline links only. A bare `(text)` in prose is not a link, so the opening
-# `](` is required, and the target must not be a URL, a mail address, or a
-# pure anchor.
-link = re.compile(r"\]\(\s*([^)\s]+?)\s*(?:\s+\"[^\"]*\")?\)")
-skip = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//|#)")
-
-broken = []
-checked = 0
-for rel in files:
-    path = os.path.join(root, rel)
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    # Fenced code blocks hold example commands and placeholder paths that are
-    # not links to anything in this tree.
-    text = re.sub(r"^```.*?^```", "", text, flags=re.S | re.M)
-    for target in link.findall(text):
-        if skip.match(target):
-            continue
-        target = target.split("#", 1)[0]
-        if not target:
-            continue
-        # docs/adr/template.md shows the supersede form with the number left
-        # blank; that is a slot to fill, not a pointer to follow.
-        if "XXXX" in target:
-            continue
-        checked += 1
-        resolved = os.path.normpath(os.path.join(os.path.dirname(path), target))
-        if not os.path.exists(resolved):
-            broken.append(f"{rel} -> {target}")
-
-print(f"checked {checked} relative links in {len(files)} markdown files")
-if broken:
-    for b in broken:
-        print("BROKEN:", b)
-    sys.exit(1)
-
-# A tree this size always has relative links; zero would mean the matcher
-# stopped matching rather than that everything resolved.
-if checked == 0:
-    print("BROKEN: matched no relative links at all -- the matcher is blind")
-    sys.exit(1)
-PY
+@test "every relative pointer in a tracked markdown file resolves" {
+  run python3 "$CHECK" "$ROOT"
   echo "$output"
   [ "$status" -eq 0 ]
+  # A tree this size always has relative links; zero would mean the matcher
+  # stopped matching rather than that everything resolved.
+  [[ "$output" == *"parsed "* ]]
+  [[ "$output" != *"parsed 0 inline links"* ]]
+}
+
+@test "the checker sees reference-style links, not only inline ones" {
+  # The first version of this checker matched `](` alone. That form is not the
+  # only one in the tree -- docs/spec/age-v1-profile.md uses
+  # `[age v1 file][age-format]` with its definition further down -- so a broken
+  # reference-style pointer was invisible to it. Asserting against a fixture
+  # rather than against the repository keeps this true when the repository
+  # happens to contain no broken example.
+  local fix="$BATS_TEST_TMPDIR/fixture"
+  mkdir -p "$fix"
+  printf '%s\n' \
+    '# fixture' \
+    '' \
+    'An [inline link](missing-inline.md).' \
+    'A [reference link][gone] and an [undefined one][nowhere].' \
+    'A regex in code is not a link: `[a-z0-9][a-z0-9._-]{0,63}`.' \
+    '' \
+    '[gone]: missing-target.md' \
+    > "$fix/doc.md"
+
+  run python3 "$CHECK" --no-git "$fix"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"doc.md -> missing-inline.md"* ]]
+  [[ "$output" == *"[gone]: missing-target.md"* ]]
+  [[ "$output" == *"[nowhere] has no definition"* ]]
+  # The backticked character class must not be read as a reference link.
+  [[ "$output" != *"a-z0-9"* ]]
 }
 
 @test "every document pointer inside the conformance vectors resolves" {
@@ -74,9 +59,9 @@ PY
 import json, os, subprocess, sys
 
 root = sys.argv[1]
-files = [f for f in subprocess.run(
+files = subprocess.run(
     ["git", "-C", root, "ls-files", "docs/spec/vectors/*.json"],
-    capture_output=True, text=True, check=True).stdout.split()]
+    capture_output=True, text=True, check=True).stdout.split()
 
 broken = []
 checked = 0
