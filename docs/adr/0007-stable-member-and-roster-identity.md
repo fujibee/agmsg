@@ -71,8 +71,8 @@ messages or free the old identity for silent reuse.
 When concurrent creators propose the same normalized new name, the first
 accepted `member_id` is canonical. Another ID is not merged by name. A local
 member awaiting remote acceptance remains `pending_remote_acceptance` and
-cannot act, send, create read facts, or participate in Stage 1 or Stage 2 until
-the server accepts that identity.
+cannot act, send, create read facts, or participate in message or read-state
+synchronization until the server accepts that identity.
 
 ### Roster mutations converge by dedupe then revision order
 
@@ -174,6 +174,6 @@ reconciliation protocol; matching display names are insufficient.
 
 - [Remote sync design](../design/remote-sync.md)
 - [HTTP API v1](../../server/spec/v1.md)
-- [Stage-2 read-state synchronization](../spec/read-state-synchronization.md)
+- [Read-state synchronization](../spec/read-state-synchronization.md)
 - [ADR 0005: Remote synchronization contract](0005-remote-sync-contract.md)
 - [ADR 0006: Composite read-state frontier](0006-composite-read-state-frontier.md)

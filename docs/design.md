@@ -223,7 +223,7 @@ either).
   probe for its own usability, on any platform, under any circumstance;
   "try running it and see what happens" is exactly the category of fix
   this exists to avoid.
-- **remote sync data plane (the Stage-1 polling sync client)** — core,
+- **remote sync data plane (the polling message-sync client)** — core,
   plus `node` (`remote-sync.sh` execs `internal/remote-sync.mjs` and its
   companion `.mjs` helpers via `AGMSG_SYNC_NODE_BIN`/`agmsg_resolve_node`).
   A second, independent reason a remote-connected team needs Node,

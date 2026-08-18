@@ -7,7 +7,7 @@
 This document pins the first encrypted envelope profile for the agmsg remote
 sync protocol. It extends the opaque envelope in
 [`server/spec/v1.md`](../../server/spec/v1.md) without changing the HTTP message
-schema or the Stage-1 storage-driver durability boundary.
+schema or the storage-driver durability boundary.
 
 `age-v1` is a standard binary [age v1 file][age-format], encrypted to native
 X25519 age recipients. It deliberately does not define another AEAD layer or a
@@ -291,7 +291,7 @@ atomically; a durable wire-only or `sealing` state is forbidden. Concurrent
 sealers for one local message may do redundant work, but only the transaction
 winner becomes visible and all callers subsequently emit that winner.
 
-The Stage-1 H1 rule is absolute: every retry, reconciliation attempt, crash
+The H1 rule is absolute: every retry, reconciliation attempt, crash
 recovery, export, and compaction replay for that wire ID MUST reuse the exact
 `v`, `cipher`, `key_id`, and `blob`. A client MUST NOT re-encrypt or re-encode
 the same published wire ID, even to the same recipients. A regression test MUST
@@ -320,7 +320,7 @@ context byte strings. Comparing only hashes, individual fields, or a prefix is
 insufficient. Implementations MUST NOT project any message field before this
 comparison succeeds.
 
-Failures map to the Stage-1 durable quarantine layer as follows:
+Failures map to the durable quarantine layer as follows:
 
 | Condition | Durable state |
 |---|---|

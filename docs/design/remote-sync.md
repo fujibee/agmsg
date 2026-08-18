@@ -8,7 +8,7 @@ hosted service, so it does not belong in this repository. Two further documents 
 history: `local-first-onboarding.md`, whose onboarding this document replaces,
 and `authentication-result-handoff.md`, a proposal for a seam this design does
 not have — see "No authentication" below for what it removes. Their reasoning
-is in the git history. Sync itself — Stage 1, read state,
+is in the git history. Sync itself — messages, read state,
 retention gaps, the envelope format — is unchanged and specified elsewhere.
 
 ## What a remote is

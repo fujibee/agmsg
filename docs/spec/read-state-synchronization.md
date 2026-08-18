@@ -1,4 +1,4 @@
-# Stage-2 read-state synchronization specification
+# Read-state synchronization specification
 
 **Status:** current
 **Last updated:** 2026-07-25
@@ -8,7 +8,7 @@ The irreversible read-state semantics behind this contract are recorded in
 
 ## Context
 
-Stage 1 deliberately separates remote transport progress, decrypt/import state,
+Message synchronization deliberately separates remote transport progress, decrypt/import state,
 and user or agent read state. The first two layers synchronize, but read state
 is still machine-local. A message read on one device can therefore be delivered
 again on another device.
@@ -88,7 +88,7 @@ The merge algebra is deliberately monotonic:
 - local frontiers advance only inside their originating store through local
   contiguous compaction and are never merged between machines.
 
-Read undo is not part of Stage 2. A future non-monotonic unread feature would
+Read undo is not part of this specification. A future non-monotonic unread feature would
 need an explicit generation or epoch rather than weakening these rules.
 
 ### Local consume contract
@@ -139,7 +139,7 @@ device joining after a nonzero floor and continued compaction above that floor.
 ### Wire-ID promotion and atomicity
 
 An exact read of a local-only message is initially keyed by its stable local
-message ID. Publishing a Stage-1 reservation or reconciling a pull mapping MUST,
+message ID. Publishing a message-synchronization reservation or reconciling a pull mapping MUST,
 in the same storage transaction, promote or alias that read fact to the durable
 wire ID. The promoted fact becomes eligible for upload only after the mapping
 has a canonical acknowledged `server_seq`; a server MUST NOT be asked to store
@@ -155,9 +155,9 @@ ID without fabricating a local projection. Import later applies the fact only
 after the envelope has passed policy/decrypt validation and has been durably
 projected.
 
-### Optional Stage-2 driver operations
+### Optional read-state driver operations
 
-A Stage-1 SQLite driver may advertise the additional
+A driver that already synchronizes messages may advertise the additional
 `stage2-read-state` capability and implement:
 
 ```text
@@ -224,7 +224,7 @@ a comparison boundary and need not still exist when the next page is read.
 Unknown and duplicate fields are rejected under the common v1 JSON rules.
 
 HTTP v1 bounds a team roster to 1,000 active members and rejects larger
-operator provisioning documents atomically. The Stage-2 context therefore fits
+operator provisioning documents atomically. The read-state context therefore fits
 in one authenticated roster response; the read-state item stream is still
 paginated because each member can contribute bounded exact exceptions.
 
@@ -300,7 +300,7 @@ Member rename preserves it. A team credential may synchronize any active member
 in its own team; cross-team access is impossible. Consequently, compromise of a
 team credential can destroy unread availability for every member by advancing
 their read state, in addition to reading and writing the team message stream.
-Stage 2 does not claim per-member credential isolation.
+This specification does not claim per-member credential isolation.
 
 ### Limit failure and recovery
 
@@ -326,9 +326,9 @@ forbidden.
 
 ### Explicitly out of scope
 
-Stage 3 server-sent events and wake delivery are not launch requirements and are
-not part of this specification. Stage 2 continues to use the existing polling loop. Stage
-3 should treat SSE and mobile wake as one team-scoped notification layer: a
+Server-sent events and wake delivery are not part of this specification, which
+continues to use the existing polling loop. Whenever they are specified, they
+should be treated as one team-scoped notification layer: a
 future iOS client may register an APNs device token, receive a Signal-style
 silent push, then pull, decrypt, and produce a local notification. The server
 still does not inspect recipients or message bodies.
@@ -348,6 +348,6 @@ still does not inspect recipients or message bodies.
 ## References
 
 - [ADR 0003: storage-axis ABI](../adr/0003-storage-axis-driver-abi-and-scope.md)
-- [Stage-1 remote synchronization](stage-1-remote-sync.md)
+- [Message synchronization](message-synchronization.md)
 - [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md)
 - [HTTP API v1](../../server/spec/v1.md)

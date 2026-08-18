@@ -301,7 +301,7 @@ its fast band, so its behaviour is **contractual**, not best-effort. A conformin
 Compaction must never touch `message_sent` records; it operates only on the
 redundant read-state markers layered over them.
 
-### 2.8 Optional Stage-1 remote synchronization extension
+### 2.8 Optional message-synchronization extension
 
 A driver that can make remote reconciliation atomic with its local message log
 may advertise `capabilities=stage1-sync` from `storage_describe` and implement:
@@ -332,12 +332,12 @@ prefix. Apply-pull atomically quarantines unchanged envelopes, reconciles mapped
 echoes or imports unmapped wire IDs once, and advances the transport cursor only
 after durable local outcomes. Transport, decrypt/import, and read progress are
 independent. Reprocess emits blocking quarantine records for explicit policy/key
-reevaluation without rewinding transport. It uses the Stage-1 specification's stable
+reevaluation without rewinding transport. It uses that specification's stable
 `(server_seq,wire_id)` keyset page and mandatory `sync_reprocess_page` trailer,
 so one explicit engine invocation reaches every candidate without an early
 permanent failure starving later records. The complete framing, record schemas,
 crash boundaries, and future reserved operation names are defined by
-[Stage-1 synchronization specification](stage-1-remote-sync.md).
+[message-synchronization specification](message-synchronization.md).
 
 A driver may additionally advertise `stage1-resync` and implement the explicit
 operator recovery contract from the
@@ -357,7 +357,7 @@ independent state layers. The retention-gap specification pins their exact stric
 audit, and result objects, including canonical sequence arithmetic and
 duplicate/unknown-field rejection.
 
-The independent Stage-2 extension from the
+The independent read-state extension from the
 [read-state synchronization specification](read-state-synchronization.md) is advertised as
 `capabilities=stage1-sync,stage2-read-state` and adds:
 

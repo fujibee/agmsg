@@ -1,4 +1,4 @@
-# Stage-1 local-first remote synchronization specification
+# Local-first message synchronization specification
 
 **Status:** current
 **Last updated:** 2026-07-25
@@ -10,8 +10,10 @@ The irreversible architectural decisions behind this contract are recorded in
 
 The storage-axis ABI in ADR 0003 covers local message storage and delivery. It
 does not define the crash boundaries needed to replicate a local-first store to
-the versioned HTTP API in `server/spec/v1.md`. Stage 1 adds polling push/pull for
-dogfood while keeping `storage_send` local and independent of network health.
+the versioned HTTP API in `server/spec/v1.md`. This specification adds polling
+push/pull of messages while keeping `storage_send` local and independent of
+network health. Synchronizing read state is a separate contract, specified in
+[read-state synchronization](read-state-synchronization.md).
 
 The HTTP engine and the storage driver have different responsibilities. The
 engine owns transport, authentication, capability and binding validation,
@@ -24,8 +26,8 @@ never advance a cursor ahead of durable local state.
 
 ### Optional synchronization extension
 
-A storage driver may advertise the Stage-1 extension and implement these four
-operations in addition to the ADR 0003 ABI:
+A storage driver may advertise the message-synchronization extension and
+implement these four operations in addition to the ADR 0003 ABI:
 
 ```text
 storage_sync_prepare_push <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit>
@@ -35,9 +37,13 @@ storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <proto
 ```
 
 More than one driver implements it, and they need not implement the same
-subset: the four operations above sit behind `stage1-sync`, while the recovery
-operation defined at the end of this document sits behind `stage1-resync`. A
-driver advertises each capability separately, so the recovery operation is
+subset: the four operations above sit behind the capability `stage1-sync`, while
+the recovery operation defined at the end of this document sits behind
+`stage1-resync`. Those two strings, and `stage2-read-state` in the read-state
+specification, are the names drivers already advertise; they are held fixed
+because an external driver advertises them too, and the numbers in them carry no
+meaning beyond telling the three capabilities apart. A driver advertises each
+capability separately, so the recovery operation is
 genuinely optional rather than optional in name — a client that asks for it
 where it is not advertised is refused for want of the capability, not left to
 discover a missing command. Drivers that advertise no extension remain valid
@@ -65,12 +71,12 @@ prevents a reused local position from inheriting stale remote state.
 
 The bundled JSONL driver realizes the same contract without a mutable sidecar
 database. `events.jsonl` is the single append journal for local events and sync
-state. Its Stage-1 local position is the byte offset immediately after the
+state. Its local synchronization position is the byte offset immediately after the
 originating top-level `message_sent` record, paired with a persistent file
 generation. This sync position is separate from the driver's ordinal delivery
 cursor.
 
-Every Stage-1 operation holds the existing `events.jsonl.lock`, reads a complete
+Every operation above holds the existing `events.jsonl.lock`, reads a complete
 snapshot through its locked EOF, folds the immutable state records, and appends
 at most one complete transition record with one append write followed by
 `fsync`. Reservation, acknowledgement, quarantine/import outcomes, and the
@@ -218,7 +224,7 @@ optional `stage1-resync` capability:
 storage_sync_resync       # operator-approved recovery after HTTP 410
 ```
 
-HTTP 410 remains terminal during normal Stage-1 polling. Only the explicit
+HTTP 410 remains terminal during ordinary polling. Only the explicit
 operator command defined by the retention-gap specification may transactionally record the unavailable
 gap and advance to an authenticated retention floor; the engine never resets a
 transport cursor automatically.

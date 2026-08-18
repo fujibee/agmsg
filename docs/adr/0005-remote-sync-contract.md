@@ -156,7 +156,7 @@ preserved identity bytes.
 ## Normative specifications
 
 - [HTTP API v1](../../server/spec/v1.md)
-- [Stage-1 local-first remote synchronization](../spec/stage-1-remote-sync.md)
+- [Local-first message synchronization](../spec/message-synchronization.md)
 - [Cipher-independent opaque-envelope server schema](../spec/server-opaque-envelope.md)
 - [Retention-gap resynchronization](../spec/retention-gap-resynchronization.md)
 - [Storage driver interface](../spec/driver-interface.md)
