@@ -592,6 +592,60 @@ _remote_write_binding() {
     fi
   fi
   cfg_escaped="$(sed "s/'/''/g" "$cfg")"
+  # A write that points the team at a DIFFERENT server must not orphan the
+  # binding it replaces (#849). The local sync rows and keys for the old server
+  # survive this write untouched -- they are keyed on (server_instance_id,
+  # remote_team_id, protocol_version) -- but the endpoint string in the binding
+  # is the only pointer back to them, so overwriting it strands data that is
+  # still on disk. Before the replace, the current binding is moved into
+  # $.previous_bindings, a sibling key this function's wholesale json_set on
+  # $.remote_binding never touches.
+  #
+  # One entry per (server_instance_id, remote_team_id, protocol_version): an
+  # entry for the identity being archived is replaced by the newer copy, and an
+  # entry matching the identity being written becomes the live binding again
+  # and leaves the archive. The array is therefore bounded by the number of
+  # distinct servers this team has ever been bound to, not by how often it
+  # moved between them.
+  #
+  # `capabilities` is dropped from the archived copy: it is refetched on every
+  # connect (the comment atop this function is the contract), and an archived
+  # copy would be the one stale snapshot nobody re-reads. Restoring a previous
+  # binding is a reconnect to its endpoint -- which refetches -- never a copy
+  # of the archived object back into $.remote_binding.
+  #
+  # A current binding with no server_instance_id never completed a
+  # registration; there is no partition behind it to point back to, so it is
+  # replaced without being archived, same as before.
+  local archive_ts new_instance_sql new_team_sql archived_doc
+  archive_ts="$connected_at"
+  new_instance_sql="$(_agmsg_sqlesc "$server_instance_id")"
+  new_team_sql="$(_agmsg_sqlesc "$remote_team_id")"
+  archived_doc="$(agmsg_sqlite_mem \
+    "WITH cfg(doc) AS (SELECT '$cfg_escaped'),
+     cur(b) AS (SELECT json_extract(doc, '\$.remote_binding') FROM cfg),
+     kept(arr) AS (SELECT coalesce((
+       SELECT json_group_array(json(value))
+         FROM cfg, json_each(coalesce(json_extract(cfg.doc, '\$.previous_bindings'), '[]'))
+        WHERE NOT (json_extract(value, '\$.server_instance_id') IS json_extract((SELECT b FROM cur), '\$.server_instance_id')
+               AND json_extract(value, '\$.remote_team_id')     IS json_extract((SELECT b FROM cur), '\$.remote_team_id')
+               AND json_extract(value, '\$.protocol_version')   IS json_extract((SELECT b FROM cur), '\$.protocol_version'))
+          AND NOT (json_extract(value, '\$.server_instance_id') IS '$new_instance_sql'
+               AND json_extract(value, '\$.remote_team_id')     IS '$new_team_sql'
+               AND json_extract(value, '\$.protocol_version')   IS $protocol_version)), '[]'))
+     SELECT CASE
+       WHEN (SELECT b FROM cur) IS NOT NULL
+        AND json_extract((SELECT b FROM cur), '\$.server_instance_id') IS NOT NULL
+        AND NOT (json_extract((SELECT b FROM cur), '\$.server_instance_id') IS '$new_instance_sql'
+             AND json_extract((SELECT b FROM cur), '\$.remote_team_id')     IS '$new_team_sql'
+             AND json_extract((SELECT b FROM cur), '\$.protocol_version')   IS $protocol_version)
+       THEN json_set(doc, '\$.previous_bindings',
+              json_insert((SELECT arr FROM kept), '\$[#]',
+                json(json_set(json_remove((SELECT b FROM cur), '\$.capabilities'),
+                              '\$.replaced_at', '$(_agmsg_sqlesc "$archive_ts")'))))
+       ELSE doc
+     END FROM cfg;")"
+  cfg_escaped="$(printf '%s' "$archived_doc" | sed "s/'/''/g")"
   updated=$(agmsg_sqlite_mem \
     "SELECT json_set('$cfg_escaped', '\$.remote_binding', json_object(
        'endpoint', '$(_agmsg_sqlesc "$endpoint")',
@@ -2436,6 +2490,18 @@ _remote_status_one() {
   else
     echo "		encryption: none"
   fi
+  # What this team was bound to before, and when it was replaced (#849). The
+  # archived binding is the only pointer back to that server's local sync rows
+  # and keys, so a repair must not depend on the operator remembering the URL.
+  local prev_line prev_endpoint prev_replaced
+  while IFS= read -r prev_line; do
+    [ -n "$prev_line" ] || continue
+    prev_endpoint="${prev_line%%$'\t'*}"
+    prev_replaced="${prev_line#*$'\t'}"
+    echo "		previous: was bound to $(_remote_endpoint_display "$prev_endpoint") until $prev_replaced — reconnect to that endpoint to restore it"
+  done < <(agmsg_sqlite_mem \
+    "SELECT json_extract(value, '\$.endpoint') || char(9) || coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time')
+       FROM json_each(coalesce(json_extract('$(sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
 }
 
 # _remote_status_json_one <team> — prints one JSONL object for <team>'s

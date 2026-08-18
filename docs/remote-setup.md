@@ -122,6 +122,14 @@ external tool reads the database file directly, resolve the team's new path
 instead of continuing to use the shared database path. Ask the agent for the
 team's store path, or use the command in [Reference](#reference).
 
+A team already connected somewhere else — say you are trying this server with a
+team you use against the hosted one — can be pointed here with the same
+command. The binding it had is not lost: it is kept in the team's config, and
+`remote status` shows each replaced endpoint with the time it was replaced.
+The local sync state and keys for the old server also stay on disk, so
+reconnecting to the old endpoint later restores the old binding and picks that
+state back up.
+
 **If you connected with `--e2ee`, export the handoff bundle now**, while you are
 still on the machine that holds the key:
 

@@ -64,6 +64,11 @@ cleanup_sync_engines() {
 teardown() {
   kill "$MOCK_SERVER_PID" 2>/dev/null || true
   wait "$MOCK_SERVER_PID" 2>/dev/null || true
+  if [ -n "${MOCK_SERVER_B_PID:-}" ]; then
+    kill "$MOCK_SERVER_B_PID" 2>/dev/null || true
+    wait "$MOCK_SERVER_B_PID" 2>/dev/null || true
+    MOCK_SERVER_B_PID=""
+  fi
 
   local cleanup_status=0
   if ! cleanup_sync_engines "$TEST_SKILL_DIR" "primary"; then
@@ -2967,4 +2972,141 @@ make_lock() {  # make_lock <team> [pid]
   run bash "$SCRIPTS/remote.sh" doctor .dotted
   [ "$status" -eq 0 ]
   grep -qF -- ".dotted: stale" <<<"$output"
+}
+
+# --- #849: pointing a team at a different server keeps the old binding ------
+#
+# The local sync rows and keys for a server are keyed on (server_instance_id,
+# remote_team_id, protocol_version) and survive a re-point untouched; the
+# endpoint string in the binding is the only pointer back to them. Before
+# #849, connect's wholesale json_set on $.remote_binding overwrote that
+# pointer, orphaning data that was still on disk.
+
+start_second_mock_server() {
+  : > "$TEST_SKILL_DIR/server-b.port"
+  MOCK_TEAM_CIPHER_PROFILE="${MOCK_TEAM_CIPHER_PROFILE-age-v1}" \
+    "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
+      </dev/null > "$TEST_SKILL_DIR/server-b.port" 2>"$TEST_SKILL_DIR/server-b.log" 3>&- &
+  MOCK_SERVER_B_PID=$!
+  wait_for_file_contains "$TEST_SKILL_DIR/server-b.port" '^[0-9][0-9]*$'
+  MOCK_PORT_B="$(cat "$TEST_SKILL_DIR/server-b.port")"
+  ENDPOINT_B="http://127.0.0.1:$MOCK_PORT_B"
+  # A different address is not a different server until the identity differs:
+  # rotate B's instance id so the two mocks are two servers, not one server
+  # reachable on two ports.
+  run curl -sS "$ENDPOINT_B/_test/rotate-server-id"
+  [ "$status" -eq 0 ]
+}
+
+_config_json_path() {  # $1 = team, $2 = full json path (no leading $.)
+  local cfg="$TEST_SKILL_DIR/teams/$1/config.json" resolved escaped
+  resolved="$(rf "$cfg")"
+  escaped="$(printf '%s' "$resolved" | sed "s/'/''/g")"
+  sqlite_mem "SELECT coalesce(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.$2'), '');"
+}
+
+_previous_count() {  # $1 = team
+  local cfg="$TEST_SKILL_DIR/teams/$1/config.json" resolved escaped
+  resolved="$(rf "$cfg")"
+  escaped="$(printf '%s' "$resolved" | sed "s/'/''/g")"
+  sqlite_mem "SELECT coalesce(json_array_length(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.previous_bindings')), 0);"
+}
+
+@test "connect: pointing at a different server archives the replaced binding (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a revision_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+  revision_a="$(_binding_field testteam binding_revision)"
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The live binding is B's.
+  [ "$(_binding_field testteam endpoint)" = "$ENDPOINT_B" ]
+  # A's binding is in the archive: same identity and endpoint it had, stamped
+  # with when it was replaced. Its capability snapshot is not carried along --
+  # capabilities are refetched on every connect, and an archived copy would be
+  # the one stale snapshot nobody re-reads.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$ENDPOINT" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" = "$instance_a" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].binding_revision')" = "$revision_a" ]
+  [ -n "$(_config_json_path testteam 'previous_bindings[0].replaced_at')" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].capabilities')" = "" ]
+}
+
+@test "connect: a round trip A -> B -> A restores A's binding and its partition rows (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a team_id journal
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+  team_id="$(_config_json_path testteam team_id)"
+  [ -n "$team_id" ]
+
+  # A row in A's partition of the local journal: the archived binding is the
+  # pointer back to rows like this one.
+  journal="$TEST_SKILL_DIR/teams/testteam/roster.jsonl"
+  printf '%s\n' "{\"type\":\"roster_synced\",\"mutation_id\":\"m-849\",\"server_seq\":\"8\",\"wire_id\":\"550e8400-e29b-41d4-a716-446655440849\",\"server_instance_id\":\"$instance_a\",\"remote_team_id\":\"$team_id\"}" >> "$journal"
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The archived endpoint string is the value the repair needs; connect to it.
+  local archived_endpoint
+  archived_endpoint="$(_config_json_path testteam 'previous_bindings[0].endpoint')"
+  [ "$archived_endpoint" = "$ENDPOINT" ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$archived_endpoint" testteam
+  [ "$status" -eq 0 ]
+
+  # The SAME server instance, adopted -- not a fresh registration.
+  [ "$(_binding_field testteam server_instance_id)" = "$instance_a" ]
+  # B is archived now; A's entry left the archive when A became current again.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$ENDPOINT_B" ]
+  # The row in A's partition survived the whole dance.
+  grep -qF -- "\"server_instance_id\":\"$instance_a\"" "$journal"
+}
+
+@test "connect: flipping between two servers keeps one archive entry per server (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local instance_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  # Two servers ever seen; the one not currently bound is the only entry, no
+  # matter how many times the team moved between them.
+  [ "$(_previous_count testteam)" = "1" ]
+  [ "$(_config_json_path testteam 'previous_bindings[0].server_instance_id')" = "$instance_a" ]
+}
+
+@test "connect: reconnecting to the same server does not create an archive entry (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  [ "$(_config_json_path testteam previous_bindings)" = "" ]
+}
+
+@test "remote status: shows the replaced endpoint after a re-point (#849)" {
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  [ "$status" -eq 0 ]
+  local endpoint_a="$ENDPOINT"
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  grep -qF -- "previous: was bound to $endpoint_a" <<<"$output"
+  grep -qF -- "reconnect to that endpoint to restore it" <<<"$output"
 }
