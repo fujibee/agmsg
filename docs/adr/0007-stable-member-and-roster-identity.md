@@ -1,6 +1,12 @@
 # ADR 0007: Stable member and roster identity
 
-**Status:** accepted
+**Status:** proposed
+
+Parts of this decision are in the tree and parts are not: stable `member_id` and
+the rename discipline are implemented, while the single-owner boundary, the
+`pending_remote_acceptance` gate, and the roster-mutation protocol have no
+implementation to point at. It stays proposed until a reader can check the whole
+of it, rather than being accepted on the strength of the part that shipped.
 **Date:** 2026-07-25
 **Deciders:** @fujibee
 
