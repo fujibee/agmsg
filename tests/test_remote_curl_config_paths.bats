@@ -291,5 +291,11 @@ post_under() {
 
   post_under "$bin" posix "$body" '_remote_curl_path() { printf "%s%s" "$FAKE_ROOT" "$1"; }'
   [ "$status" -eq 0 ]
-  [ "$output" = "000" ]
+  # The status line, not the whole stream. This consumer takes the fifo branch,
+  # and a curl that refuses the config never opens the header fifo -- so the
+  # copier stays blocked in open() until the failure path kills it, and bash on
+  # macOS reports that interrupted open on stderr. The noise rides on a request
+  # that was already failing; what this case is about is the code that comes
+  # back, so assert a line that IS 000 rather than a stream that equals it.
+  grep -qFx -- '000' <<<"$output"
 }
