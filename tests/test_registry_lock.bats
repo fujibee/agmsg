@@ -339,3 +339,132 @@ acquire() {  # runs the acquire in its own shell, with a short spin budget
   run diff "$BATS_TEST_TMPDIR/holder.before" "$TEAM_DIR/.config.lock.holder"
   [ "$status" -eq 0 ]
 }
+
+# --- a holder that is gone, and one that is not (#865) ----------------------
+#
+# The lock was permanent because acquire never asked whether the recorded holder
+# was still running. Both halves are here, and the second is the one that has to
+# hold: breaking a lock somebody IS using is worse than the leak this fixes.
+
+# A process that is alive for as long as the test needs it, and whose pid is
+# real. `sleep` rather than a made-up number: a pid that happens to be free
+# would make the "live" case pass for the wrong reason.
+start_live_holder() {
+  sleep 30 &
+  LIVE_PID=$!
+}
+
+# A pid that is genuinely not running: spawn, wait for it, then reuse the number.
+# `wait` is what makes this a measurement rather than a guess — the process has
+# been reaped before its number is written into the holder.
+dead_pid() {
+  local p
+  sleep 0 &
+  p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s' "$p"
+}
+
+write_holder() {  # write_holder <pid>
+  printf 'token %s\npid %s\ncommand %s\nhost %s\n' \
+    "test.token.$1" "$1" "join.sh" "testhost" > "$TEAM_DIR/.config.lock.holder"
+}
+
+@test "lock: a lock whose holder is gone is broken, and the acquire succeeds (#865)" {
+  mkdir "$TEAM_DIR/.config.lock"
+  local gone; gone="$(dead_pid)"
+  # CONTROL FIRST: the pid really is not running. Without this the case passes
+  # whenever the number happens to be free, which is not what it claims.
+  run env PID="$gone" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_pid_alive_local "$PID"'
+  [ "$status" -ne 0 ]
+
+  write_holder "$gone"
+  acquire
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"broke a registry lock"* ]]
+  [[ "$output" == *"holder is gone"* ]]
+  # HELD, not merely removed — and asserted INSIDE the acquiring shell, because
+  # its EXIT trap releases the lock the moment it returns. Checking afterwards
+  # would find no directory and prove nothing either way.
+  mkdir -p "$TEAM_DIR/.config.lock"
+  write_holder "$gone"
+  run env AGMSG_LOCK_TRIES=5 LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    agmsg_lock_acquire "$TEAM_DIR" 2>/dev/null
+    [ -d "$TEAM_DIR/.config.lock" ] && echo HELD
+    sed -n "s/^pid //p" "$TEAM_DIR/.config.lock.holder" | head -1
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HELD"* ]]
+  # The record is the new holder's, not the dead one's.
+  [[ "$output" != *"$gone"* ]]
+}
+
+@test "lock: a lock whose holder is ALIVE is never broken (#865)" {
+  mkdir "$TEAM_DIR/.config.lock"
+  start_live_holder
+  # CONTROL: the holder is alive AT THE MOMENT the acquire runs, asserted here
+  # rather than assumed from having spawned it — a `sleep` that failed to start
+  # would make this case pass by breaking a lock, which is the outcome it
+  # exists to forbid.
+  run env PID="$LIVE_PID" LOCKLIB="$LOCKLIB" bash -c '. "$LOCKLIB"; _agmsg_pid_alive_local "$PID"'
+  [ "$status" -eq 0 ]
+
+  write_holder "$LIVE_PID"
+  acquire
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"timed out acquiring registry lock"* ]]
+  [[ "$output" != *"broke a registry lock"* ]]
+  # And the holder record is untouched — the lock is still theirs.
+  run grep -c "^pid $LIVE_PID\$" "$TEAM_DIR/.config.lock.holder"
+  [ "$output" = "1" ]
+  kill "$LIVE_PID" 2>/dev/null || true
+}
+
+@test "lock: a lock with NO holder record is left alone, and the timeout says so (#865)" {
+  # The half this change does not take on: nothing here can tell a lock written
+  # by an older version from one created microseconds ago whose owner has not
+  # recorded itself yet, so it does not guess. Pinned so that changing it has to
+  # be a decision.
+  mkdir "$TEAM_DIR/.config.lock"
+  acquire
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"broke a registry lock"* ]]
+  [[ "$output" == *"records no holder"* ]]
+  [ -d "$TEAM_DIR/.config.lock" ]
+}
+
+@test "lock: the timeout on a live holder prints what the lock records (#865)" {
+  mkdir "$TEAM_DIR/.config.lock"
+  start_live_holder
+  write_holder "$LIVE_PID"
+  acquire
+  [ "$status" -ne 0 ]
+  # The pid is the part an operator acts on; asserting the whole line would
+  # pin the format instead.
+  [[ "$output" == *"the lock records:"* ]]
+  [[ "$output" == *"pid $LIVE_PID"* ]]
+  kill "$LIVE_PID" 2>/dev/null || true
+}
+
+@test "lock: two racing breakers, and only one of them removes the lock (#865)" {
+  # The claim-then-remove is what makes this safe: `mv` of one holder file
+  # succeeds for exactly one caller. Without it both would rmdir, and the second
+  # could take the directory away from a lock the first had already re-taken.
+  mkdir "$TEAM_DIR/.config.lock"
+  local gone; gone="$(dead_pid)"
+  write_holder "$gone"
+  run env LOCKLIB="$LOCKLIB" TEAM_DIR="$TEAM_DIR" bash -c '
+    . "$LOCKLIB"
+    a=1; b=1
+    _agmsg_lock_break_dead "$TEAM_DIR/.config.lock" && a=0
+    mkdir -p "$TEAM_DIR/.config.lock"
+    _agmsg_lock_break_dead "$TEAM_DIR/.config.lock" && b=0
+    echo "first=$a second=$b"
+  '
+  [ "$status" -eq 0 ]
+  # The second call faces a lock whose holder file it already consumed: it must
+  # refuse, because it cannot show that the directory now there is the one it
+  # judged.
+  [[ "$output" == *"first=0 second=1"* ]]
+}
