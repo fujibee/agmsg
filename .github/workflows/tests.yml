@@ -411,11 +411,30 @@ jobs:
 
           # Inside `if`, so a failed call cannot end the step: the roll-up below
           # stays the only thing that decides this job's status.
+          # The exact matrix shape, not the `bats (` prefix. Three Windows legs
+          # share that prefix and are gated separately -- they are NOT part of
+          # `needs.bats-shard.result`, so listing them here would let the
+          # diagnosis name an unrelated Windows failure as if it explained the
+          # roll-up. The prefix matched 11 jobs where the roll-up covers 8.
+          # 2 = the matrix's `os:` list (ubuntu-latest, macos-latest). If a third
+          # is added, `seen` stops matching and the listing goes quiet with a
+          # warning rather than describing the wrong set -- the failure mode
+          # this count exists to prevent, announcing itself.
+          expected=$(( SHARD_TOTAL * 2 ))
           if gh api --paginate \
                "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
-               --jq '.jobs[] | select(.name | startswith("bats (")) | "\(.conclusion)\t\(.name)"' \
+               --jq '.jobs[] | select(.name | test("^bats \\((ubuntu|macos)-latest [0-9]+/[0-9]+\\)$")) | "\(.conclusion)\t\(.name)"' \
                > "$listing" 2>/dev/null && [ -s "$listing" ]; then
-            echo "Matrix jobs seen: $(wc -l < "$listing" | tr -d ' ')"
+            seen=$(wc -l < "$listing" | tr -d ' ')
+            echo "Matrix jobs seen: $seen (expected $expected)"
+            # The control is the comparison, not the listing. A count that does
+            # not match means this query is no longer selecting the set the
+            # roll-up summarises, and the lines below would describe some other
+            # set of jobs.
+            [ "$seen" = "$expected" ] || {
+              echo "::warning::listed $seen matrix jobs, expected $expected — not reporting shard names from a set that does not match the roll-up"
+              : > "$listing"
+            }
           else
             echo "::warning::could not list the shard jobs (the diagnosis below will be missing)"
             : > "$listing"
