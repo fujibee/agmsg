@@ -221,6 +221,74 @@ _remote_prompt_read() {
 # token, no state change, safe whether or not the team is already connected.
 # Currently just the age-binary-presence check (§8) — the natural home for
 # any future preflight check added later.
+# WHICH DIRECTORY TO REMOVE — the thing that was missing (#865).
+#
+# A registry lock left behind by a killed process is never broken by anything:
+# nothing expires, nothing sweeps, and acquire waits out its budget and fails
+# with `timed out acquiring registry lock`, which describes contention. The
+# operator's next move is to look for the process holding it; there is no
+# process, and no message anywhere names the directory to remove. A machine in
+# that state cannot get itself out.
+#
+# This REPORTS and removes nothing. The report alone ends "cannot recover":
+# it says which team, what the lock records, whether that process is running,
+# and prints the removal as a line to paste. Sweeping automatically is a
+# separate decision with a worse failure mode — a wrong verdict takes a lock
+# away from a process that is using it — and it is not made here.
+#
+# Not a check, so no `[x]`/`[ ]` and no effect on the exit code: a lock that
+# exists is not a failed prerequisite, and a doctor that exits non-zero because
+# a team is busy would be wrong every time somebody is joining.
+_remote_doctor_locks() {
+  local only_team="${1:-}" lock team holder pid state shown=0 q
+  # Every team, or the one named. `for` over a glob rather than `find`, which is
+  # not on every PATH this tree is required to run under.
+  for lock in "$TEAMS_DIR"/*/.config.lock; do
+    [ -d "$lock" ] || continue
+    team="${lock%/.config.lock}"
+    team="${team##*/}"
+    [ -z "$only_team" ] || [ "$team" = "$only_team" ] || continue
+    if [ "$shown" -eq 0 ]; then
+      echo "Registry locks:"
+      shown=1
+    fi
+    holder="$lock.holder"
+    pid=""
+    [ -f "$holder" ] && pid="$(sed -n 's/^pid //p' "$holder" 2>/dev/null | head -1)"
+    # THREE ANSWERS, NOT TWO. "held" and "the holder is gone" are what the
+    # operator acts on; "no holder recorded" is neither — it is a lock this
+    # cannot ask about, written either by a version of the library that recorded
+    # nothing or by a process that was killed between creating the lock and
+    # writing its record. Reporting it as gone would be a guess, and the guess
+    # that costs is the one that says a live lock is dead.
+    if [ -z "$pid" ]; then
+      state="cannot tell — no holder recorded"
+    elif _agmsg_pid_alive_local "$pid"; then
+      state="held — pid $pid is running"
+    else
+      state="stale — pid $pid is not running"
+    fi
+    echo "  $team: $state"
+    if [ -f "$holder" ]; then
+      echo "    records: $(tr '\n' ' ' < "$holder" 2>/dev/null)"
+    fi
+    echo "    created: $(ls -ld "$lock" 2>/dev/null || printf '%s (cannot stat)' "$lock")"
+    # QUOTED, because this is meant to be pasted. The store root and the team
+    # name can both contain a space, and an unquoted path becomes several
+    # arguments to `rm -r`. Same scheme as lib/shquote.sh.
+    q="$(printf "'%s'" "$(printf '%s' "$lock" | sed "s/'/'\\\\''/g")")"
+    if [ "$state" = "held — pid $pid is running" ]; then
+      echo "    a command is using this team. Nothing to do."
+    else
+      echo "    if no agmsg command is running for this team, remove it:"
+      echo "      rm -r $q"
+      [ -f "$holder" ] && echo "      rm -f $q.holder"
+      echo "    nothing but the lock lives in there — it holds no team data."
+    fi
+  done
+  [ "$shown" -eq 0 ] || echo
+}
+
 cmd_doctor() {
   local team="${1:-}"
   echo "Checking prerequisites${team:+ for team '$team'}..."
@@ -275,6 +343,7 @@ cmd_doctor() {
     failed=1
   fi
   echo
+  _remote_doctor_locks "$team"
   if [ "$failed" -eq 0 ]; then
     echo "All checks passed."
   else

@@ -2714,3 +2714,100 @@ assert_lookup_rejected() {
   [[ "$output" != *"No such file or directory"*"remote.sh"* ]]
   [[ "$output" != *"Usage: remote.sh unlock"* ]]
 }
+
+# --- doctor names the wedged lock, and removes nothing (#865) ---------------
+#
+# A registry lock left by a killed process is never broken: acquire waits out
+# its budget and says "timed out acquiring registry lock", which describes
+# contention, and no message anywhere names the directory to remove. `doctor` is
+# where that becomes findable.
+
+doctor_lock_dead_pid() {  # a pid that is genuinely not running
+  local p
+  sleep 0 &
+  p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s' "$p"
+}
+
+make_lock() {  # make_lock <team> [pid]
+  mkdir -p "$TEST_SKILL_DIR/teams/$1"
+  mkdir -p "$TEST_SKILL_DIR/teams/$1/.config.lock"
+  if [ -n "${2:-}" ]; then
+    printf 'token t\npid %s\ncommand join.sh\nhost h\n' "$2" \
+      > "$TEST_SKILL_DIR/teams/$1/.config.lock.holder"
+  fi
+}
+
+@test "remote doctor: a lock whose holder is gone is named, with the way out (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  # CONTROL: the pid really is not running, asserted before it is written into
+  # the holder — a number that merely happened to be free would make this pass
+  # for a reason that has nothing to do with the report.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $gone"
+  [ "$status" -ne 0 ]
+
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "wedged: stale — pid $gone is not running" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+  # REPORTS ONLY. The whole point of doing this before an automatic sweep is
+  # that a wrong verdict must not cost anything.
+  [ -d "$TEST_SKILL_DIR/teams/wedged/.config.lock" ]
+}
+
+@test "remote doctor: a lock whose holder is alive is not called stale (#865)" {
+  sleep 30 &
+  local live=$!
+  # CONTROL: alive at the moment doctor runs, not merely spawned.
+  run bash -c ". \"$SCRIPTS/lib/instance-id.sh\"; _agmsg_pid_alive_local $live"
+  [ "$status" -eq 0 ]
+
+  make_lock busy "$live"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "busy: held — pid $live is running" <<<"$output"
+  # And it must NOT offer to remove a lock somebody is using.
+  refute grep -qF -- "if no agmsg command is running for this team" <<<"$output"
+  kill "$live" 2>/dev/null || true
+}
+
+@test "remote doctor: a lock with no holder record says it cannot tell (#865)" {
+  # Neither "held" nor "gone": written by a version that recorded nothing, or by
+  # a process killed between creating the lock and writing its record. Guessing
+  # here is what would cost a live lock.
+  make_lock unknown
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "unknown: cannot tell — no holder recorded" <<<"$output"
+  grep -qF -- "rm -r " <<<"$output"
+}
+
+@test "remote doctor: says nothing about locks when there are none (#865)" {
+  # The negative control for the three above: the section is absent on a healthy
+  # install, so "Registry locks:" appearing at all is a finding.
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  refute grep -qF -- "Registry locks:" <<<"$output"
+}
+
+@test "remote doctor: a lock does not fail the run (#865)" {
+  # A team being locked is not a failed prerequisite. If it set the exit code,
+  # doctor would fail every time somebody is joining.
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock wedged "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor
+  [ "$status" -eq 0 ]
+  grep -qF -- "All checks passed." <<<"$output"
+}
+
+@test "remote doctor <team>: reports that team's lock and not another's (#865)" {
+  local gone; gone="$(doctor_lock_dead_pid)"
+  make_lock mine "$gone"
+  make_lock theirs "$gone"
+  run bash "$SCRIPTS/remote.sh" doctor mine
+  [ "$status" -eq 0 ]
+  grep -qF -- "mine: stale" <<<"$output"
+  refute grep -qF -- "theirs: stale" <<<"$output"
+}
