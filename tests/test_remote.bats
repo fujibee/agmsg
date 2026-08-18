@@ -3108,5 +3108,49 @@ _previous_count() {  # $1 = team
   run bash "$SCRIPTS/remote.sh" status testteam
   [ "$status" -eq 0 ]
   grep -qF -- "previous: was bound to $endpoint_a" <<<"$output"
-  grep -qF -- "reconnect to that endpoint to restore it" <<<"$output"
+  grep -qF -- "kept under previous_bindings in this team's config.json" <<<"$output"
+}
+
+@test "remote status: a path-bearing archived endpoint is displayed host-only, kept exact in config (#849)" {
+  # For a hosted endpoint the path IS the capability. The archive must carry
+  # the exact value (it is the input to the restore), and status must not
+  # print it.
+  local cap; cap="$(_capability_endpoint)"
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
+  [ "$status" -eq 0 ]
+  local instance_a
+  instance_a="$(_binding_field testteam server_instance_id)"
+  [ -n "$instance_a" ]
+
+  start_second_mock_server
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT_B" testteam
+  [ "$status" -eq 0 ]
+
+  # The archive holds the exact path-bearing endpoint, verbatim.
+  [ "$(_config_json_path testteam 'previous_bindings[0].endpoint')" = "$cap" ]
+
+  # Status shows the host-only form plus the pointer to the config -- and
+  # leaks neither the token nor the capability path.
+  assert_no_capability "previous: was bound to $ENDPOINT until" \
+    bash "$SCRIPTS/remote.sh" status testteam
+
+  # The archived exact value is the restore input: reconnecting with it
+  # re-anchors to the same server instance.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$(_config_json_path testteam 'previous_bindings[0].endpoint')" testteam
+  [ "$status" -eq 0 ]
+  [ "$(_binding_field testteam server_instance_id)" = "$instance_a" ]
+}
+
+@test "connect: refuses an endpoint carrying a raw control byte (#849)" {
+  # The WHATWG parser deletes TAB/LF before parsing, so without the explicit
+  # refusal the raw stored endpoint and the URL actually used would disagree
+  # -- and the stored value would split any line-framed reader.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/pa	th" testteam
+  [ "$status" -ne 0 ]
+  grep -qF -- "must not contain control characters" <<<"$output"
+  # Control for the refusal's reach: the same endpoint without the control
+  # byte is accepted (the refusal is about the byte, not the path). /t/ is
+  # the path shape the mock serves the API beneath.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT/t/path" testteam
+  [ "$status" -eq 0 ]
 }

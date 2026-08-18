@@ -438,6 +438,20 @@ function zoneRefusal(host) {
 }
 
 export function validateEndpoint(rawEndpoint) {
+  // The WHATWG parser DELETES ASCII tab and newline (and trims leading and
+  // trailing C0/space) before parsing, so a URL carrying them can validate
+  // while the raw string -- which is what gets stored in the binding and
+  // later read back line-wise by consumers such as `remote status` -- still
+  // contains them. The premise of this validator (stated above) is that what
+  // is written in the URL is where the connection goes; a byte the parser
+  // silently removes breaks that premise, so it is refused rather than
+  // repaired (#849 review).
+  if (/[\u0000-\u001f\u007f]/.test(rawEndpoint)) {
+    return rejected(
+      "--endpoint must not contain control characters " +
+      "(tab, newline, or any byte below 0x20)",
+    );
+  }
   const authority = rawAuthority(rawEndpoint);
   if (authority === undefined) {
     return rejected("--endpoint must start with https:// (or http:// to a private IP address)");

@@ -605,8 +605,10 @@ _remote_write_binding() {
   # entry for the identity being archived is replaced by the newer copy, and an
   # entry matching the identity being written becomes the live binding again
   # and leaves the archive. The array is therefore bounded by the number of
-  # distinct servers this team has ever been bound to, not by how often it
-  # moved between them.
+  # distinct such identity tuples this team has ever been bound to -- one per
+  # server in the common case, more if the same server re-registers the team
+  # or the protocol version moves -- never by how often the team moved
+  # between them.
   #
   # `capabilities` is dropped from the archived copy: it is refetched on every
   # connect (the comment atop this function is the contract), and an archived
@@ -2493,15 +2495,29 @@ _remote_status_one() {
   # What this team was bound to before, and when it was replaced (#849). The
   # archived binding is the only pointer back to that server's local sync rows
   # and keys, so a repair must not depend on the operator remembering the URL.
-  local prev_line prev_endpoint prev_replaced
+  #
+  # Displayed through _remote_endpoint_display, which keeps scheme/host/port
+  # and DROPS the path -- for a hosted endpoint the path IS the capability.
+  # That means the printed form is NOT the value to reconnect with; the exact
+  # endpoint stays in the team's config, and the trailing line says so instead
+  # of pretending the display is it.
+  #
+  # TAB framing below rests on the endpoint alphabet: validateEndpoint refuses
+  # raw control bytes (tab/newline included) before a binding is ever written,
+  # so a stored endpoint cannot contain the separator or split a line.
+  local prev_line prev_endpoint prev_replaced prev_any=0
   while IFS= read -r prev_line; do
     [ -n "$prev_line" ] || continue
     prev_endpoint="${prev_line%%$'\t'*}"
     prev_replaced="${prev_line#*$'\t'}"
-    echo "		previous: was bound to $(_remote_endpoint_display "$prev_endpoint") until $prev_replaced — reconnect to that endpoint to restore it"
+    prev_any=1
+    echo "		previous: was bound to $(_remote_endpoint_display "$prev_endpoint") until $prev_replaced"
   done < <(agmsg_sqlite_mem \
     "SELECT json_extract(value, '\$.endpoint') || char(9) || coalesce(json_extract(value, '\$.replaced_at'), 'an unrecorded time')
        FROM json_each(coalesce(json_extract('$(sed "s/'/''/g" "$cfg")', '\$.previous_bindings'), '[]'));")
+  if [ "$prev_any" -eq 1 ]; then
+    echo "		          to restore one, reconnect to its full endpoint — it is kept under previous_bindings in this team's config.json, and is not printed here because it can embed the access token"
+  fi
 }
 
 # _remote_status_json_one <team> — prints one JSONL object for <team>'s
