@@ -83,6 +83,15 @@ teardown() {
 
 # A Git-Bash-shaped Windows side, on this host.
 #
+# `_AGMSG_COMPAT_NO_PROC=1` RIDES WITH `MSYSTEM` EVERYWHERE BELOW. Forcing the
+# msys branch on a POSIX host sends `compat_get_cmdline` down a road that reads
+# `/proc/<pid>/cmdline` when it can -- which macOS cannot and Linux can. On Linux
+# it therefore short-circuits past the stubbed Windows lookup and returns the
+# real cmdline with a TRAILING SPACE (`tr '\0' ' '` converts the final NUL), so
+# the ownership check's `*" run --team <team>"` suffix no longer matches, the
+# reap cannot prove the process is ours, and the engine survives. Green on macOS,
+# red on ubuntu, from a `/proc` that only one of them has.
+#
 #   ps -l -p <pid>   a WINPID column, as MSYS2's ps prints one. The number is
 #                    derived from the pid so each process has its own.
 #   tasklist         answers ALIVE for any WINPID whose marker file exists --
@@ -215,7 +224,7 @@ EOF_DRIVER
 # runs in the background and this waits for it.
 run_windows_driver() {
   local mode="$1" out="$TEST_SKILL_DIR/win-$mode.out" p i=0
-  env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       AGMSG_TEST_SYNC_READY_TURNS=40 \
       bash "$DRIVER" "$TEAM" "$mode" >"$out" 2>&1 &
   p=$!
@@ -311,7 +320,7 @@ rc=0
 compat_pid_gone "$1" || rc=$?
 echo "gone rc=$rc"
 EOF_GONE
-  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/gone.sh" "$live"
   grep -qF 'gone rc=1' <<<"$output"
 
@@ -319,7 +328,7 @@ EOF_GONE
   # the native process ended while the MSYS one lingers -- the answer flips.
   # Without this, "never gone" would satisfy the assertion above.
   rm -f "$ALIVE_DIR/$((900000 + live))"
-  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/gone.sh" "$live"
   grep -qF 'gone rc=0' <<<"$output"
 
@@ -349,7 +358,7 @@ rc=0
 compat_pid_gone "$1" || rc=$?
 echo "gone rc=$rc"
 EOF_GONE2
-  run env SCRIPTS="$SCRIPTS" PATH="$blind:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$blind:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/gone2.sh" 4242
   grep -qF 'gone rc=1' <<<"$output"
 }
@@ -376,7 +385,7 @@ compat_pid_gone "$1" || rc=$?
 echo "gone rc=$rc"
 EOF_GONE3
   # PATH without the real one either, so `tasklist` is genuinely absent.
-  run env SCRIPTS="$SCRIPTS" PATH="$notl:/usr/bin:/bin" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$notl:/usr/bin:/bin" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/gone3.sh" "$live"
   grep -qF 'gone rc=1' <<<"$output"
 
@@ -406,7 +415,7 @@ EOF_GONE3
 . "$SCRIPTS/lib/compat.sh"
 compat_signal_pid_tree "$1" TERM
 EOF_ORDER
-  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/order.sh" "$live"
   [ "$status" -eq 0 ]
 
@@ -445,7 +454,7 @@ rc=0
 compat_pid_gone "$1" || rc=$?
 echo "gone rc=$rc"
 EOF_GONE4
-  run env SCRIPTS="$SCRIPTS" PATH="$broken:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$broken:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/gone4.sh" "$live"
   grep -qF 'gone rc=1' <<<"$output"
 
@@ -562,7 +571,7 @@ EOF_UNKILL3
   chmod +x "$DRIVER"
 
   local out="$TEST_SKILL_DIR/winmsg.out" p i=0
-  env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       AGMSG_TEST_SYNC_READY_TURNS=40 \
       bash "$DRIVER" "$TEAM" >"$out" 2>&1 &
   p=$!
@@ -600,7 +609,7 @@ _remote_sync_engine_reap_owned "$1" "$2" || rc=$?
 echo "reap rc=$rc"
 EOF_FOREIGN
 
-  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 \
+  run env SCRIPTS="$SCRIPTS" PATH="$WINSTUB:$PATH" MSYSTEM=MINGW64 _AGMSG_COMPAT_NO_PROC=1 \
       bash "$TEST_SKILL_DIR/reap-foreign.sh" "$TEAM" "$other"
 
   # 1 = ownership not proven. Not 0, which would say this call stopped it, and

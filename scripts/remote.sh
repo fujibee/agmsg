@@ -3019,7 +3019,13 @@ cmd_sync_start() {
     # it. Measured: one after the first failed attempt, two after the second.
         {
       echo "agmsg: sync engine for '$team' did not become ready, and this command did not stop it."
-      echo "  pid $started_pid is still running."
+      # THE CAUSE IS NOT KNOWN HERE; THE CONSEQUENCE IS. Removing the cause
+      # claim took a measured fact out with it -- that the engine goes on
+      # retrying -- and #731's test was pinning exactly that fact, because it is
+      # what turns "a command failed" into "something is still running on your
+      # machine". The backoff is the engine's own documented loop, not an
+      # inference about this run.
+      echo "  pid $started_pid is still running, and it will keep retrying on a backoff."
       # WHY IT IS NOT READY IS NOT KNOWN HERE, and this used to say it was: that
       # it could not reach the server, and that nothing was syncing for the team.
       # Neither was measured. The engines this text was written for were reaching
