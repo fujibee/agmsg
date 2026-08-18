@@ -51,6 +51,23 @@ on:
   pull_request:
     branches: [main, integration/remote]
 
+# A superseded run keeps its macOS jobs queued, and those are the scarce ones.
+# Measured over the last 92 PR-branch runs: 65 of them (71%) had already been
+# overtaken by a later push to the same branch, and each was still holding four
+# macOS runner slots. In the worst two-hour window, thirteen runs piled up that
+# way and every one of them waited between 20 and 167 minutes for a macOS
+# runner, while ubuntu started in under a minute throughout. The wait is
+# self-inflicted: we queue behind our own obsolete runs.
+#
+# The group key is the PR number, so a new push to the same PR cancels the run
+# for the commit it replaced -- results nobody will read. Pushes to `main` fall
+# back to the SHA, which makes each of them its own group: they are never
+# cancelled (`cancel-in-progress` is false off the pull_request event) and never
+# serialise behind each other either, which a shared group would have done.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
