@@ -449,7 +449,7 @@ export function validateEndpoint(rawEndpoint) {
   if (/[\u0000-\u001f\u007f]/.test(rawEndpoint)) {
     return rejected(
       "--endpoint must not contain control characters " +
-      "(tab, newline, or any byte below 0x20)",
+      "(tab, newline, any byte below 0x20, or DEL)",
     );
   }
   const authority = rawAuthority(rawEndpoint);
