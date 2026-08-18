@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Bound the wait on the local child without spawning anything to do it (#821)
 - Record provenance when git answers in another path space (#830) (#842)
+- Stop telling every agent that key rotate is unavailable (#841)
 - The guard was on the wrong job's step, and it silenced a real one
 
 ## [1.2.0] - 2026-08-15
