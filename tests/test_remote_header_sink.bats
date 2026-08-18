@@ -126,14 +126,26 @@ sandbox_path() {
   printf '%s' "$dir"
 }
 
+# STDERR GOES TO A FILE, NOT INTO $output.
+#
+# bats merges the two streams, and this helper's stderr is not reliably empty:
+# on a loaded CI runner bash reported "Interrupted system call" while opening
+# the header fifo, which turned an $output of "200" into a diagnostic line
+# followed by "200". That is not hypothetical -- it reddened two cases in the
+# sibling file (#851) on macOS CI at a head that was green here, and the
+# non-marker arm below runs the same fifo.
+#
+# The http code is the only thing on stdout, so separating the streams is what
+# makes an exact comparison mean what it says.
 post_under() {
   local bin="$1" body_file="$2" header_out="$3"
+  ERR_FILE="$BATS_TEST_TMPDIR/helper-stderr"
   run env PATH="$bin" CALL_LOG="$CALL_LOG" REAL_MKFIFO="$REAL_MKFIFO" \
     REAL_PYTHON3="$REAL_PYTHON3" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body_file"'" \
-      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$header_out"'"
+      "'"$BATS_TEST_TMPDIR"'/out-body" "'"$header_out"'" 2>"'"$ERR_FILE"'"
   '
 }
 
