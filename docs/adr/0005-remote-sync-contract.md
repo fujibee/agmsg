@@ -75,9 +75,9 @@ per-agent wake decisions stay local.
 The synchronization server never chooses team keys and never receives plaintext
 private team or recovery keys. Sealing and opening happen client-side. This is
 a content-confidentiality boundary, not an anonymity claim: team identity, wire
-ID, sequence, server receipt time, envelope version, cipher, the scheme-defined
-key identifier (`key_id`), digest, size, timing, and traffic frequency remain
-visible as defined by the protocol.
+ID, sequence, server receipt time, envelope version, cipher, whichever key the
+scheme names for that envelope, digest, size, timing, and traffic frequency
+remain visible as defined by the protocol.
 
 ### Progress layers remain independent
 

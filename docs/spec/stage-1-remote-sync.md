@@ -34,13 +34,15 @@ storage_sync_apply_pull <local-team> <server-instance-id> <remote-team-id> <prot
 storage_sync_reprocess <local-team> <server-instance-id> <remote-team-id> <protocol-version> <limit> [<page-after>]
 ```
 
-Two bundled drivers implement it. SQLite advertises
-`stage1-sync,stage1-resync,stage2-read-state`; JSONL advertises `stage1-sync`
-alone, so the recovery operation below is genuinely optional rather than
-optional in name — a client asking for it against JSONL is refused for want of
-the advertised capability, not left to discover a missing command. Drivers that
-advertise no extension remain valid local-only drivers. Core must fail clearly
-rather than emulate these durability operations outside an unsupported driver.
+More than one driver implements it, and they need not implement the same
+subset: the four operations above sit behind `stage1-sync`, while the recovery
+operation defined at the end of this document sits behind `stage1-resync`. A
+driver advertises each capability separately, so the recovery operation is
+genuinely optional rather than optional in name — a client that asks for it
+where it is not advertised is refused for want of the capability, not left to
+discover a missing command. Drivers that advertise no extension remain valid
+local-only drivers. Core must fail clearly rather than emulate these durability
+operations outside an unsupported driver.
 
 The binding is keyed by immutable `server_instance_id`, the server's stable
 team/stream ID, and protocol version. Endpoint URL is deliberately absent: the
@@ -93,8 +95,7 @@ for an existing reservation.
 It contains the engine's validated envelope selection and capability limits,
 but no credentials. The ABI is cipher-neutral: the driver creates the canonical
 envelope selected by the binding configuration. `none` is the default profile.
-The optional `age-v1` profile defined in
-[`age-v1` profile](age-v1-profile.md) performs its
+The optional [`age-v1` profile](age-v1-profile.md) performs its
 encrypt-once operation at this same boundary. Prepare receives only the public
 recipient manifest; age identity files remain in the HTTP engine's open path
 and never cross the storage-driver boundary.
