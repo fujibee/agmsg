@@ -60,6 +60,32 @@ EOF_TURNS
   done
 }
 
+@test "an explicit zero is not a ceiling: it falls back to shipped (#831)" {
+  # THE ONE THE OTHER FALLBACK CASE DID NOT COVER. `0` is written in digits, so a
+  # guard that rejects only non-digits accepts it -- and a ceiling of zero ends
+  # the poll before it runs once. Every suite that drives the give-up path would
+  # then reach its assertions without the engine ever being waited on, and stay
+  # green while measuring nothing.
+  #
+  # The prose said "not a positive integer falls back". That was true of `oops`
+  # and false of `0`, and the cases tested `oops`, `-5`, `12x` -- none of them
+  # the digits-only shape the sentence was actually about (raised in review).
+  ask_turns
+  for zero in 0 00 000; do
+    run env SCRIPTS="$SCRIPTS" AGMSG_TEST_SYNC_READY_TURNS="$zero" bash "$TEST_SKILL_DIR/turns.sh"
+    grep -qF 'turns=1600' <<<"$output"
+  done
+}
+
+@test "a positive count with a leading zero is still that count (#831)" {
+  # THE NEGATIVE CONTROL FOR THE CASE ABOVE. "reject anything containing a zero"
+  # would satisfy it and quietly send `40` -> 1600, putting every seamed suite
+  # back on the full ceiling -- the exact regression this file exists to catch.
+  ask_turns
+  run env SCRIPTS="$SCRIPTS" AGMSG_TEST_SYNC_READY_TURNS=040 bash "$TEST_SKILL_DIR/turns.sh"
+  grep -qF 'turns=040' <<<"$output"
+}
+
 @test "an unset seam and an empty seam agree (#831)" {
   # `export FOO=` is not the same shape as never exporting it, and a case split
   # on `-n`/`-z` can tell them apart. Both must mean shipped.

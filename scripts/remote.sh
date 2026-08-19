@@ -1937,9 +1937,20 @@ _remote_sync_engine_status() {
 # quietly answered nothing would turn every one of those suites back into a full
 # ceiling run, which is the failure this exists to remove.
 _remote_sync_ready_turns() {
-  case "${AGMSG_TEST_SYNC_READY_TURNS:-}" in
-    ''|*[!0-9]*) printf '1600' ;;
-    *)           printf '%s' "$AGMSG_TEST_SYNC_READY_TURNS" ;;
+  local want="${AGMSG_TEST_SYNC_READY_TURNS:-}"
+  # Unset, or not written in digits at all.
+  case "$want" in
+    ''|*[!0-9]*) printf '1600'; return ;;
+  esac
+  # AND ZERO IS NOT A CEILING. `0` is digits-only, so a guard that only rejects
+  # non-digits accepts it and the poll ends before it begins -- every suite that
+  # drives the give-up path would then reach its assertions without the engine
+  # having been waited on at all, and stay green while measuring nothing. That is
+  # the failure this fallback is described as preventing, and the description was
+  # true of `oops` and false of `0` until review caught it. `00` counts too.
+  case "$want" in
+    *[1-9]*) printf '%s' "$want" ;;
+    *)       printf '1600' ;;
   esac
 }
 
