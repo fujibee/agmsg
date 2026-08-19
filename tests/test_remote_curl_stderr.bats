@@ -61,53 +61,6 @@ fi
 printf '200'
 STUB
   chmod +x "$STUB_SRC/curl"
-
-  # A python3 that records its own pid before becoming the real thing, so a
-  # copier left running is observable rather than assumed absent. `exec` keeps
-  # the pid, so the number in the log is the process the helper must reap.
-  COPIER_PIDS="$BATS_TEST_TMPDIR/copier-pids"
-  export COPIER_PIDS
-  : > "$COPIER_PIDS"
-  REAL_PYTHON3="$(command -v python3)"; export REAL_PYTHON3
-  cat > "$STUB_SRC/python3" <<'STUB'
-#!/usr/bin/env bash
-case "$*" in
-  *bounded-copy.py*) printf '%s\n' "$$" >> "$COPIER_PIDS" ;;
-esac
-exec "$REAL_PYTHON3" "$@"
-STUB
-  chmod +x "$STUB_SRC/python3"
-}
-
-# Nothing this file starts may outlive it. A test that leaves a copier blocked
-# on a fifo holds whatever descriptors it inherited, which is how three probes
-# in this series hung -- so the fixture reaps its own strays even when a case
-# fails, and says so rather than cleaning up silently.
-teardown() {
-  if [ -f "${COPIER_PIDS:-/nonexistent}" ]; then
-    while read -r pid; do
-      [ -n "$pid" ] || continue
-      if kill -0 "$pid" 2>/dev/null; then
-        echo "teardown: reaping copier $pid that the helper left running" >&2
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-      fi
-    done < "$COPIER_PIDS"
-  fi
-  teardown_test_env
-}
-
-# Fails the test when any recorded copier is still alive.
-refute_orphan_copier() {
-  local pid alive=""
-  while read -r pid; do
-    [ -n "$pid" ] || continue
-    kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
-  done < "$COPIER_PIDS"
-  if [ -n "$alive" ]; then
-    echo "copier still running:$alive" >&2
-    return 1
-  fi
 }
 
 sandbox_path() {
@@ -118,7 +71,6 @@ sandbox_path() {
     ln -s "$src" "$dir/$tool"
   done
   ln -s "$STUB_SRC/curl" "$dir/curl"
-  ln -sf "$STUB_SRC/python3" "$dir/python3"
   printf '%s' "$dir"
 }
 
@@ -134,7 +86,6 @@ post_with_curl() {
   printf '{"t":"secret"}' > "$body"
 
   run env PATH="$bin" TMPDIR="$RUN_TMPDIR" STUB_CURL_MODE="$mode" \
-    COPIER_PIDS="$COPIER_PIDS" REAL_PYTHON3="$REAL_PYTHON3" \
     STUB_CURL_STDERR="$stderr_text" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
@@ -220,7 +171,6 @@ post_with_curl() {
   chmod +x "$bin/cat"
 
   run env PATH="$bin" TMPDIR="$RUN_TMPDIR" STUB_CURL_MODE=fail \
-    COPIER_PIDS="$COPIER_PIDS" REAL_PYTHON3="$REAL_PYTHON3" \
     STUB_CURL_STDERR="curl: (26) Failed to open/read local data" bash -c '
     set -euo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
@@ -232,11 +182,32 @@ post_with_curl() {
   [ "$status" -eq 0 ]
   [ "$output" = "000" ]
 
-  # 2. Nothing is left running. The recorded pid is the copier's own, because
-  #    the wrapper execs and keeps it.
-  refute_orphan_copier
+  # 2. NOT ASSERTED HERE: that no copier survives. I tried four instruments and
+  #    each failed its own positive control on this machine, so the check would
+  #    have been a green that measured nothing:
+  #
+  #      a pid the copier records itself   the failure path kills it before the
+  #                                        forked shell runs its first line, so
+  #                                        the log comes back EMPTY
+  #      pgrep -f <full script path>       no match while the process is alive
+  #      pgrep -f bounded-copy.py          matched an unrelated shell whose argv
+  #                                        merely contained the string -- an
+  #                                        instrument that would kill the wrong
+  #                                        process
+  #      lsof +D <work dir>                nothing: a copier blocked in open()
+  #                                        holds no fd on it yet
+  #
+  #    The reason all four miss is one fact, measured: a copier waiting on the
+  #    fifo is still a forked BASH wearing its parent's command line -- `comm`
+  #    reads `bash`, and python3 is not exec'd until curl opens the pipe. It is
+  #    identifiable as "a child of that shell" and by nothing else, and once the
+  #    shell is gone so is that relation.
+  #
+  #    The reaping itself is in the production path above (kill then wait before
+  #    the code is returned). What is unproven is the absence of a survivor, and
+  #    that behaviour has its own issue: #864.
 
-  # 3. And nothing is left on disk.
+  # 3. Nothing is left on disk.
   refute ls -d "$RUN_TMPDIR"/agmsg-curl.* 2>/dev/null
 }
 
