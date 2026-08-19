@@ -940,6 +940,7 @@ class CodexBridge {
     this.turnActive = false;
     this.turnTimer = null;
     this.pendingWake = false;
+    this.startInFlight = false;
     this.watchHandle = null;
     this.wakeCount = 0;
     this.lastWakeMaxId = "";
@@ -1395,7 +1396,10 @@ class CodexBridge {
       return;
     }
     if (type === "idle") {
-      this.threadIdle = true;
+      // While a turn/start request is in flight, that start owns the state;
+      // a stale idle from the previous turn must not flip threadIdle under
+      // it. onTurnEnded() below is gated by the same ownership.
+      if (!this.startInFlight) this.threadIdle = true;
       // The real app-server signals idle but may never send turn/completed;
       // treat idle as the end of the turn so detection resumes. See #41.
       this.onTurnEnded().catch((error) =>
@@ -1419,6 +1423,14 @@ class CodexBridge {
   // real app-server does not reliably deliver turn/completed, so a bridge that
   // gates re-arm on it never re-arms and sleeps after one message. See #41.
   async onTurnEnded() {
+    // While our turn/start request is unanswered, every turn-end signal that
+    // funnels in here (a stale thread/status idle from the previous turn, a
+    // completion, a watchdog firing) is dropped: acting on it reset
+    // turnActive / threadIdle under the in-flight start and re-entered
+    // tryStartTurn with the same wake, injecting a duplicate turn whose inbox
+    // read — after the first read consumed the rows — was empty. A
+    // genuinely-ended new turn is closed by the idle watchdog (#41).
+    if (this.startInFlight) return;
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
@@ -1456,6 +1468,14 @@ class CodexBridge {
     const prompt = this.buildPrompt();
     this.turnActive = true;
     this.threadIdle = false;
+    // Claim the wake BEFORE the request goes out, not after it succeeds. With
+    // the claim left set across the await, a turn-end signal arriving mid-
+    // request re-entered this method with the same wake and started a second
+    // turn. The claim is restored on failure so the wake fires again (the
+    // inline inbox rows are already marked read by then, so the retry
+    // re-delivers the wake, not the payload — unchanged from before).
+    this.pendingWake = false;
+    this.startInFlight = true;
     try {
       await this.client.request("turn/start", {
         threadId: this.threadId,
@@ -1464,16 +1484,18 @@ class CodexBridge {
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
-      this.pendingWake = false;
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
+      this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
       throw error;
+    } finally {
+      this.startInFlight = false;
     }
   }
 
