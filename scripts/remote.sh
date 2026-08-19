@@ -441,10 +441,35 @@ _remote_curl_path() {
 # config file is 0600 and removed immediately after the call.
 _remote_http_post_json() {
   local url="$1" body_file="$2" out_file="$3" header_file="$4" cfg http_code \
-    fifo_dir header_fifo copier_pid curl_output curl_status=0
-  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
-  fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-header-pipe.XXXXXX")"
-  header_fifo="$fifo_dir/header"
+    work_dir header_fifo copier_pid curl_output curl_status=0 curl_err
+  # ONE ALLOCATION BEFORE THE TRAP, AND EVERYTHING ELSE INSIDE IT.
+  #
+  # Two things go wrong with the ordering this replaces, and this shape is the
+  # smallest one that closes both.
+  #
+  # A trap cannot expand what it cannot see. An EXIT trap set inside a function
+  # runs after that function's frame is gone, so a single-quoted body expands
+  # `$cfg` in the CALLER's scope, where no local of that name exists. It removes
+  # "" and returns 0, so the cleanup reads as working. Measured on bash 3.2.57
+  # and 5.3.15: a local is EMPTY inside an EXIT trap fired by errexit from
+  # within the function. `printf %q` fixes the value at set time and survives a
+  # TMPDIR containing spaces.
+  #
+  # And anything created BEFORE the trap is armed is unprotected. Making the
+  # config, then a directory, then arming the trap leaves a window where the
+  # second allocation fails and the first is stranded -- including a 0600 config
+  # naming the request body. Reordering cannot close it, because there is always
+  # a first allocation. So there is exactly one, and everything else is made
+  # inside a directory that is already condemned.
+  #
+  # It also removes a hazard rather than guarding it: the caller's header file
+  # lives OUTSIDE this directory, so `rm -rf` cannot reach it even on the marker
+  # path below, where `header_fifo` IS `header_file`.
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
+  trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
+  cfg="$work_dir/config"
+  curl_err="$work_dir/stderr"
+  : > "$cfg"
   chmod 600 "$cfg"
   # The headers go through a fifo so a hostile or broken server cannot make us
   # buffer an unbounded response — bounded-copy.py enforces the ceiling while
@@ -473,10 +498,9 @@ _remote_http_post_json() {
     header_fifo="$header_file"
     : > "$header_fifo"
     copier_pid=""
-    trap 'rm -f "$cfg"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
   else
+    header_fifo="$work_dir/header"
     mkfifo "$header_fifo"
-    trap 'rm -f "$cfg" "$header_fifo"; rmdir "$fifo_dir" 2>/dev/null || true' EXIT INT TERM
     # Reaped on both normal paths below (waited on success, killed and waited on
     # failure), so this is short-lived by construction -- but the EXIT trap only
     # removes files, it does not kill the copier. A signal arriving before curl
@@ -497,11 +521,21 @@ _remote_http_post_json() {
     printf 'max-filesize = "2097152"\n'
     printf 'data = "@%s"\n' "$(_remote_curl_path "$body_file")"
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # Do not discard curl's stderr. On failure it is the only record of WHY, and
+  # the caller only ever sees the HTTP code -- which this function reports as
+  # "000" for every kind of failure alike. A Windows run spent a long time on a
+  # bare 000 whose cause (curl could not open a path embedded in the config)
+  # was sitting in the stderr this line was throwing away.
+  #
+  # Captured rather than passed through, and shown only when curl actually
+  # failed: on the success path curl -sS is already silent, and a stray write
+  # to stderr here would land in the middle of a caller's output.
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ] && cat "$curl_err" >&2
   if [ "$curl_status" -ne 0 ]; then
     [ -n "$copier_pid" ] && { kill "$copier_pid" 2>/dev/null || true; wait "$copier_pid" 2>/dev/null || true; }
     http_code="000"
@@ -510,14 +544,11 @@ _remote_http_post_json() {
   else
     http_code="000"
   fi
-  # Only remove the fifo, never the caller's header file. On the cygpath path
-  # `header_fifo` IS `header_file`, so an unconditional `rm -f "$header_fifo"`
-  # here deletes the headers this function was asked to produce — before the
-  # caller has read them. The fifo exists only when a copier was started, so
-  # that is the condition to key on.
-  rm -f "$cfg"
-  [ -n "$copier_pid" ] && rm -f "$header_fifo"
-  rmdir "$fifo_dir" 2>/dev/null || true
+  # One directory holds the config, the error file and the fifo, so the normal
+  # path removes exactly what the trap would have. The caller's header file is
+  # not in it and was never at risk from this line -- which is the point of the
+  # layout rather than a condition to remember.
+  rm -rf "$work_dir"
   trap - EXIT INT TERM
   printf '%s' "$http_code"
 }
