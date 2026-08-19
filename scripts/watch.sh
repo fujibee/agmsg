@@ -702,7 +702,7 @@ while true; do
              COALESCE(json_extract(value,'\$.to'),'') || char(31) ||
              replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||
              COALESCE(json_extract(value,'\$.cursor'),'')
-      FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+      FROM json_each('${_arr//\'/\'\'}');
     " 2>/dev/null || true)"
 
     FINAL_CURSOR=""

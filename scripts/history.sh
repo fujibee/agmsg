@@ -44,7 +44,7 @@ ROWS=$(agmsg_sqlite ':memory:' "
          replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
          json_extract(value,'\$.at') || char(31) ||
          json_extract(value,'\$.id')
-  FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+  FROM json_each('${_arr//\'/\'\'}');
 ")
 
 # Read-state for the ●(unread)/○(read) marker (G2(c)): read-state is
@@ -62,7 +62,7 @@ while IFS= read -r r; do
   [ -n "$u" ] || continue
   uarr="[$(printf '%s' "$u" | paste -sd, -)]"
   ids=$(agmsg_sqlite ':memory:' "
-    SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');
+    SELECT json_extract(value,'\$.id') FROM json_each('${uarr//\'/\'\'}');
   ")
   UNREAD_IDS+="$ids"$'\n'
 done <<< "$RECIPIENTS"

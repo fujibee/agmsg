@@ -29,7 +29,7 @@ agmsg_sql_readfile_path() {
   if command -v cygpath >/dev/null 2>&1; then
     path=$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")
   fi
-  printf '%s' "$path" | sed "s/'/''/g"
+  printf '%s' "${path//\'/\'\'}"
 }
 
 # True when sqlite can actually open <path>.

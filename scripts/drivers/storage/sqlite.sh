@@ -23,7 +23,7 @@ _sqlite_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # than held in a driver-wide variable: these run inside command substitutions,
 # where an assignment made by a caller would not be visible anyway.
 _sqlite_db() { agmsg_db_path "$1"; }
-_sqlite_lit() { printf '%s' "$1" | sed "s/'/''/g"; }
+_sqlite_lit() { local s="$1" q="'"; printf '%s' "${s//$q/$q$q}"; }
 
 # Run a record-returning query: strip CR but PRESERVE the sqlite exit status
 # (pipefail), so a backend failure surfaces as a non-zero return instead of

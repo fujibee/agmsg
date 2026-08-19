@@ -48,7 +48,7 @@ ROWS=$(agmsg_sqlite ':memory:' "
          replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
          json_extract(value,'\$.at') || char(31) ||
          json_extract(value,'\$.id')
-  FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+  FROM json_each('${_arr//\'/\'\'}');
 ")
 
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
