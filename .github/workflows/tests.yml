@@ -52,6 +52,14 @@ on:
     branches: [main, integration/remote]
 
 # A superseded run keeps its macOS jobs queued, and those are the scarce ones.
+#
+# The numbers below are a HISTORICAL BASELINE, taken 2026-08-19 over the runs of
+# this workflow that existed then -- before #885 raised the shard timeout from 25
+# to 30 minutes and moved the heavy files between shards. The queue figures have
+# not been re-measured since. What #885 does not change is the mechanism this
+# block addresses: a run still asks for four macOS jobs, and a superseded run
+# still holds them.
+#
 # Measured over the last 92 PR-branch runs: 65 of them (71%) had already been
 # overtaken by a later push to the same branch, and each was still holding four
 # macOS runner slots. In the worst two-hour window, thirteen runs piled up that
