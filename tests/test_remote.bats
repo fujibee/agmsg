@@ -3189,9 +3189,9 @@ PY
   # endpoint must not split the line or bleed fragments into the output.
   [ "$(grep -cF -- "previous: was bound to" <<<"$output")" -eq 1 ]
   grep -qF -- "until 2" <<<"$output"
-  ! grep -qF -- "agsy_legacy_secret_849" <<<"$output"
-  ! grep -qF -- "/t/" <<<"$output"
-  ! grep -qF -- "tail" <<<"$output"
+  refute grep -qF -- "agsy_legacy_secret_849" <<<"$output"
+  refute grep -qF -- "/t/" <<<"$output"
+  refute grep -qF -- "tail" <<<"$output"
 }
 
 @test "pull: re-pointing an already-bound team archives the replaced binding too (#849)" {
