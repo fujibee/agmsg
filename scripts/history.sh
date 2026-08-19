@@ -71,10 +71,19 @@ while IFS= read -r r; do
   [ -n "$u" ] || continue
   uarr="[$(printf '%s' "$u" | paste -sd, -)]"
   # #777: a recipient's unread backlog grows independently of the display limit, so
-  # interpolating it into one argv element eventually exceeds ARG_MAX (measured on Linux:
-  # 2,097,152 was not enough for a 2,079-message team). Pass the statement on stdin
-  # instead, mirroring drivers/storage/sqlite-sync.sh:1082. printf is a bash builtin, so
-  # feeding it a large value does not exec and cannot hit ARG_MAX.
+  # interpolating it into one argv element eventually exceeds the ceiling on a SINGLE
+  # argument -- on Linux `MAX_ARG_STRLEN`, 131,072 bytes. Measured: the failing
+  # statement for a 2,079-message team was 125,945 bytes, which is nowhere near
+  # `ARG_MAX` (2,097,152 here) because ARG_MAX bounds argv plus environment in total,
+  # not any one element of it. The distinction decides the repair: splitting one long
+  # statement into several shorter arguments satisfies MAX_ARG_STRLEN and leaves
+  # ARG_MAX untouched, and a reader who has the wrong limit in mind reaches for the
+  # wrong fix. Note also that MAX_ARG_STRLEN is a kernel constant with no getconf key,
+  # so the limit that bites is the one the tools cannot show you.
+  #
+  # Pass the statement on stdin instead, mirroring drivers/storage/sqlite-sync.sh:1082.
+  # printf is a bash builtin, so feeding it a large value does not exec at all and can
+  # hit neither ceiling.
   _agmsg_unread_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-history-unread.XXXXXX") || continue
   trap 'rm -f "$_agmsg_unread_sql"' EXIT HUP INT TERM
   {
