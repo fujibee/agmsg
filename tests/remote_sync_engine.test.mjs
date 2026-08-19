@@ -4102,7 +4102,9 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
   try {
     await pullBootstrap({
-      team: "clone", "team-id": teamId, endpoint: "http://127.0.0.1:8787",
+      team: "clone", "team-id": teamId,
+      // The shape a hosted endpoint really has: the path IS the capability.
+      endpoint: "https://user:pa55word@sync.example.test:8443/t/agsy_SECRETCAP123?q=1#f",
     }, {
       publicSnapshotCall: async () => ({
         server_instance_id: serverId, team_id: teamId, team_name: "source",
@@ -4133,7 +4135,16 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   // named, because when this stops moving the line it stopped on says whether
   // to look at the network or at the driver's child process.
   const stderrText = err.join("");
-  assert.match(stderrText, /agmsg: \[\d+s\] pulling clone from http:\/\/127\.0\.0\.1:8787/);
+  assert.match(stderrText, /agmsg: \[\d+s\] pulling clone from sync\.example\.test:8443 /);
+  // WHAT MUST NOT BE THERE, named one piece at a time. This is the line a person
+  // pastes into an issue when a pull is taking too long, so the capability in
+  // the path, the credential before the host, and the query and fragment beside
+  // them all have to be absent -- and asserting the host is present does not say
+  // that any of them are gone.
+  for (const secret of ["agsy_SECRETCAP123", "pa55word", "/t/", "q=1", "#f"]) {
+    assert.ok(!stderrText.includes(secret), `stderr must not carry ${secret}`);
+  }
+  assert.ok(!out.join("").includes("agsy_SECRETCAP123"), "stdout must not carry it either");
   assert.match(stderrText, /agmsg: \[\d+s\] fetching messages after /);
   assert.match(stderrText, /agmsg: \[\d+s\] applying 1 messages/);
 });

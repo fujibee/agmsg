@@ -3482,7 +3482,24 @@ export async function pullBootstrap(args, dependencies = {}) {
   // There is no connected binding yet, so this one call validates itself
   // rather than going through the checks the rest of the pull relies on.
   const pullStartedAt = Date.now();
-  pullProgress(pullStartedAt, `pulling ${team} from ${serverUrl} -- this can take several minutes`);
+  // THE HOST, NEVER THE ENDPOINT. A hosted endpoint is `https://host/t/<token>`
+  // and that token IS the capability: anyone who reads it off a terminal, a
+  // screen share, or a pasted log can connect as this team. This line is the
+  // one people paste -- it exists because someone sat in front of a silent
+  // command for 79 minutes and then wrote an issue about it.
+  //
+  // `hostOf` rather than anything written here: it is `new URL(...).host`, which
+  // drops path, query, fragment AND userinfo, and is already the rule this file
+  // uses for the refusal record `status` prints. `remote.sh` holds the same rule
+  // in shell (`_remote_endpoint_display`), and the reason both drop the path
+  // before the userinfo is that an `@` inside a path would otherwise decide
+  // where the host ends -- a URL parser gets that right without being told.
+  //
+  // The team name is what makes host-only enough to name the destination: a
+  // team has one endpoint.
+  pullProgress(pullStartedAt,
+    `pulling ${team} from ${hostOf(serverUrl) ?? "an unreadable endpoint"}` +
+    " -- this can take several minutes");
   const teamSnapshot = await publicSnapshotCall(serverUrl, teamId);
   const config = {
     format_version: 1,
@@ -3506,7 +3523,13 @@ export async function pullBootstrap(args, dependencies = {}) {
   let imported = 0;
   let ageV1Envelopes = 0;
   for (;;) {
-    pullProgress(pullStartedAt, `fetching messages after ${cursor} (${imported} pulled so far)`);
+    // The cursor is the SERVER's value, and this path does not put it through
+    // `sequence()` before using it. A canonical sequence is digits; anything
+    // else goes to a terminal as a placeholder rather than as itself, because
+    // this line is pasted and control characters travel.
+    const shownCursor = /^[0-9]{1,20}$/.test(cursor) ? cursor : "an unreadable cursor";
+    pullProgress(pullStartedAt,
+      `fetching messages after ${shownCursor} (${imported} pulled so far)`);
     const page = await requestPublicCall(config,
       `/v1/teams/${teamId}/messages?after=${cursor}&limit=${limit}`);
     pullProgress(pullStartedAt, `applying ${page.messages.length} messages`);
