@@ -68,6 +68,7 @@ export default {
       copilot: "在终端中使用的 GitHub Copilot。",
       cursor: "Cursor 的无头 CLI 智能体。",
       opencode: "开源编程智能体。",
+      devin: "自主AI软件工程师CLI。",
       "grok-build": "xAI 的构建/编程智能体。",
       hermes: "轻量级中继智能体。",
       antigravity: "智能体编程环境。",

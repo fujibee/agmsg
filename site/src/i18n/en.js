@@ -70,6 +70,7 @@ export default {
       copilot: "GitHub Copilot in the shell.",
       cursor: "Cursor's headless CLI agent.",
       opencode: "Open-source coding agent.",
+      devin: "Autonomous AI software engineer CLI.",
       "grok-build": "xAI's build/coding agent.",
       hermes: "Lightweight relay agent.",
       antigravity: "Agentic coding environment.",

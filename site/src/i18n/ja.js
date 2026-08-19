@@ -68,6 +68,7 @@ export default {
       copilot: "シェルで使うGitHub Copilot",
       cursor: "Cursorのヘッドレス版CLIエージェント",
       opencode: "オープンソースのコーディングエージェント",
+      devin: "自律型AIソフトウェアエンジニアCLI",
       "grok-build": "xAIのビルド/コーディングエージェント",
       hermes: "軽量なリレーエージェント",
       antigravity: "エージェント型のコーディング環境",
