@@ -570,10 +570,19 @@ _remote_http_post_json() {
 # Nothing else is sent, because there is nothing else to send: this protocol
 # carries no credential at all (see cmd_connect).
 _remote_http_get_json() {
-  local url="$1" team_id="$2" out_file="$3" cfg curl_output curl_status=0
-  cfg="$(mktemp "${TMPDIR:-/tmp}/agmsg-curl-cfg.XXXXXX")"
+  local url="$1" team_id="$2" out_file="$3" cfg curl_output curl_status=0 \
+    curl_err work_dir
+  # One allocation, then the trap, then everything else inside it -- the same
+  # shape as the POST helper and for the same two reasons. A trap set inside a
+  # function cannot expand that function's locals when it fires, so the path is
+  # baked in with printf %q; and anything created before the trap is armed is
+  # unprotected, so only one thing is.
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-curl.XXXXXX")"
+  trap "rm -rf $(printf '%q' "$work_dir")" EXIT INT TERM
+  cfg="$work_dir/config"
+  curl_err="$work_dir/stderr"
+  : > "$cfg"
   chmod 600 "$cfg"
-  trap 'rm -f "$cfg"' EXIT INT TERM
   {
     printf 'url = "%s"\n' "$url"
     printf 'request = "GET"\n'
@@ -583,13 +592,26 @@ _remote_http_get_json() {
     printf 'max-time = "15"\n'
     printf 'max-filesize = "2097152"\n'
   } > "$cfg"
-  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>/dev/null); then
+  # Same reason as the POST helper: discarding stderr leaves "000" as the only
+  # thing anyone sees, and "000" is what this reports for every failure alike.
+  # `pull` goes through here, so a failure on this path was as undiagnosable as
+  # the connect one that cost a Windows run its afternoon.
+  if curl_output=$(curl -sS -o "$out_file" -w '%{http_code}' -K "$cfg" 2>"$curl_err"); then
     :
   else
     curl_status=$?
   fi
+  # The outcome is settled BEFORE the diagnosis is written, and the write is
+  # best-effort. As one fatal `&&` chain this line ended the function whenever
+  # `cat` failed -- a closed stderr, a reader that went away -- so being unable
+  # to explain a failure returned no code at all instead of the "000" this
+  # helper promises. Reviewed and reversed on the POST side; the same shape
+  # would have been wrong here.
   [ "$curl_status" -eq 0 ] || curl_output="000"
-  rm -f "$cfg"
+  if [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ]; then
+    cat "$curl_err" >&2 || true
+  fi
+  rm -rf "$work_dir"
   trap - EXIT INT TERM
   printf '%s' "$curl_output"
 }
