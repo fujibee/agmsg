@@ -4148,3 +4148,58 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   assert.match(stderrText, /agmsg: \[\d+s\] fetching messages after /);
   assert.match(stderrText, /agmsg: \[\d+s\] applying 1 messages/);
 });
+
+test("pull bootstrap prints a server cursor only when it is a canonical sequence", async () => {
+  // THE CURSOR IS THE SERVER'S, and this path does not put it through
+  // `sequence()` before using it: the bootstrap takes `min_available_seq` and
+  // then `next_after` as given. The progress line it lands on is the one people
+  // paste when a pull is slow, so a value that is not a sequence must not reach
+  // a terminal as itself -- an escape sequence in a pasted log is a terminal
+  // doing what it was told by whoever ran the server.
+  //
+  // Two pages, because the FIRST cursor is ours (`min_available_seq`, and the
+  // engine's own "0" when it is absent). Only the second `fetching` line can
+  // carry a value the server chose, so a single-page case proves nothing about
+  // this guard.
+  const ESC = String.fromCharCode(27);
+  const evil = `${ESC}[2Jwiped`;
+  const teamId = "018f3f7e-0000-7000-8000-000000000001";
+  const err = [];
+  const realErr = process.stderr.write.bind(process.stderr);
+  const realOut = process.stdout.write.bind(process.stdout);
+  process.stderr.write = (chunk) => { err.push(String(chunk)); return true; };
+  process.stdout.write = () => true;
+  let page = 0;
+  try {
+    await pullBootstrap({
+      team: "clone", "team-id": teamId, endpoint: "https://sync.example.test/t/agsy_X",
+    }, {
+      publicSnapshotCall: async () => ({
+        server_instance_id: "018f3f7e-0000-7000-8000-000000000002",
+        team_id: teamId, team_name: "source", min_available_seq: "0",
+      }),
+      requestPublicCall: async () => {
+        page += 1;
+        return page === 1
+          ? { messages: [], next_after: evil, has_more: true }
+          : { messages: [], next_after: "9", has_more: false };
+      },
+      evaluateCall: async () => ({ status: "importable" }),
+      driverCall: async () => [{ type: "sync_apply_result", transport_cursor: "1", corrupt_count: 0 }],
+      rosterDriverCall: async () => [],
+      eventCall: async () => {},
+    });
+  } finally {
+    process.stderr.write = realErr;
+    process.stdout.write = realOut;
+  }
+
+  const stderrText = err.join("");
+  assert.equal(page, 2, "the second page is what carries a server-chosen cursor");
+  // Our own first cursor still prints as itself -- the guard replaces what is
+  // not a sequence, not everything.
+  assert.match(stderrText, /fetching messages after 0 /);
+  assert.match(stderrText, /fetching messages after an unreadable cursor /);
+  assert.ok(!stderrText.includes(ESC), "no escape byte reaches stderr");
+  assert.ok(!stderrText.includes("wiped"), "and nothing that rode with it");
+});
