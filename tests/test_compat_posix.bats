@@ -109,7 +109,11 @@ _stub_ps_printing() {
   esac
 
   # The real ps hands us a path with a space -- the premise of the stub above.
-  [[ "$raw" == *"Application Support"* ]]
+  # grep, not `[[ ]]`: a non-last `[[ ]]` cannot fail a test on bash 3.2 (#670),
+  # and a premise that cannot fail is worse than no premise -- the assertions
+  # below would still run, against a `raw` that never had the shape they are
+  # about.
+  grep -qF -- 'Application Support' <<<"$raw"
 
   run compat_get_comm "$_PROC_PID"
   [ "$status" -eq 0 ]
