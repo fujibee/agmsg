@@ -34,6 +34,28 @@ _sqlite_data() {
   ( set -o pipefail; agmsg_sqlite "$(_sqlite_db "$1")" "$2" | tr -d '\r' )
 }
 
+# The same query, handed over stdin instead of on the command line (#882).
+#
+# FOR SQL WHOSE LENGTH GROWS WITH THE DATA, and only for that. A command line
+# has an operating-system limit and stdin does not, so any statement carrying a
+# list of ids -- one `IN (...)` entry per pulled message, per acked message, per
+# roster member -- has to arrive this way or it stops working at a size nobody
+# chose.
+#
+# The size that stops it is not large. Windows' CreateProcess caps the command
+# line at 32,767 characters; measured on a Windows machine, sqlite3 took 827
+# uuids as arguments and refused 837. A pull page carrying its ids twice
+# reaches that at about 400 messages, which is under half a default page, so a
+# team that had grown past it simply could not be pulled -- the failure the
+# report in #882 arrived as.
+#
+# `-batch` because this is a script rather than a session: without it sqlite3
+# reading a non-tty is still willing to treat a malformed line as an
+# interactive prompt, and the point of this path is that nobody is watching.
+_sqlite_data_stdin() {
+  ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" | tr -d '\r' )
+}
+
 # IN (...) list of "team:agent" pairs.
 _sqlite_pair_in() {
   local out="" p t a

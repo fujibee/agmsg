@@ -861,3 +861,77 @@ second line	after a tab"
   [ "$(sqlite3 "$db" "SELECT count(*) FROM events WHERE body IN ('hidden in front','the visible one');" | tr -d '\r')" -eq 0 ]
   [ "$(sqlite3 "$db" "SELECT count(*) FROM sync_quarantine WHERE wire_id IN ('550e8400-e29b-41d4-a716-4466554400e1','550e8400-e29b-41d4-a716-4466554400e2');" | tr -d '\r')" -eq 0 ]
 }
+
+# Builds a pull page of N distinct importable messages, so the only thing that
+# varies between two runs of the case below is how many ids the apply carries.
+_sync_page_of() {
+  local n="$1" i seq id
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    seq=$((i + 1))
+    id="$(printf '550e8400-e29b-41d4-a716-4466%08x' "$seq")"
+    jq -nc --arg id "$id" --arg seq "$seq" '
+      {type:"sync_pull_message",server_seq:$seq,id:$id,
+       server_received_at:"2026-07-20T13:00:00.000000Z",
+       envelope:{v:1,cipher:"none",key_id:null,blob:(
+         {body:("m" + $seq),created_at:"2026-07-20T13:00:00.000000Z",
+          from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+       status:"importable",policy_revision:"0",local_security_revision:"0",
+       projection:{body:("m" + $seq),created_at:"2026-07-20T13:00:00.000000Z",
+                   from_agent:"carol",to_agent:"bob"}}'
+    i=$((i + 1))
+  done
+  jq -nc --arg after "$n" '{type:"sync_pull_cursor",next_after:$after}'
+}
+
+# Records the length of every sqlite3 command line, then runs the real one.
+# Measuring the ARGUMENT LENGTH rather than waiting for an operating system to
+# refuse it is what makes this case mean the same thing on every platform: the
+# limit that broke #882 is Windows' 32,767 characters, and a test that only
+# went red where the limit is small would be green on the machines that run it.
+_sqlite_argv_recorder() {
+  local dir="$TEST_SKILL_DIR/argv-probe" real
+  real="$(command -v sqlite3)"
+  mkdir -p "$dir"
+  : > "$dir/lengths"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'joined="$*"' \
+    "printf '%s\\n' \"\${#joined}\" >> $(printf '%q' "$dir/lengths")" \
+    "exec $(printf '%q' "$real") \"\$@\"" > "$dir/sqlite3"
+  chmod +x "$dir/sqlite3"
+  printf '%s\n' "$dir"
+}
+
+_longest_argv() {
+  sort -n "$TEST_SKILL_DIR/argv-probe/lengths" | tail -1
+}
+
+@test "sync contract: applying a pull page does not grow the command line (#882)" {
+  # A Windows machine could not pull a team past a few hundred messages: the
+  # apply put one wire id per message into the SQL that reads the outcomes back,
+  # twice, and handed it to sqlite3 as an ARGUMENT. Measured on Windows, sqlite3
+  # took 827 uuids and refused 837; the command line caps at 32,767 characters.
+  # Nothing in the product chose that number, and the team that hit it was 2,079
+  # messages.
+  local probe short long
+  probe="$(_sqlite_argv_recorder)"
+
+  _sync_page_of 5 | PATH="$probe:$PATH" storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  short="$(_longest_argv)"
+
+  : > "$TEST_SKILL_DIR/argv-probe/lengths"
+  _sync_page_of 120 | PATH="$probe:$PATH" storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  long="$(_longest_argv)"
+
+  # The page really did get bigger -- without this the case would pass if both
+  # runs had silently applied nothing.
+  # The second page is a superset of the first, so the store holds 120 -- what
+  # this pins is that the larger apply really did import, which is what makes
+  # the length comparison above about anything.
+  [ "$(storage_history demo | jq -s 'length')" -eq 120 ]
+
+  # Before the fix this difference was 115 messages x 78 characters. The bound
+  # is deliberately loose: what must not happen is growth PER MESSAGE, and a
+  # cursor or a count moving by a few characters is not that.
+  [ "$long" -lt "$((short + 200))" ]
+}

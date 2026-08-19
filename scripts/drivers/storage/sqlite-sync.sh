@@ -766,7 +766,9 @@ storage_sync_reconcile_push() {
   done
   [ "$count" -gt 0 ] || return 13
 
-  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+  # Stdin, for the same reason as the pull outcomes (#882): `$values` gains an
+  # entry per acked message and a full catch-up push carries a thousand.
+  printf '%s\n' "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_sync_acks(
       local_position INTEGER UNIQUE,wire_id TEXT UNIQUE,server_seq TEXT UNIQUE);
     INSERT INTO incoming_sync_acks VALUES $values;
@@ -807,7 +809,7 @@ storage_sync_reconcile_push() {
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
-    COMMIT;" >/dev/null 2>&1 || return 12
+    COMMIT;" | agmsg_sqlite -batch "$db" >/dev/null 2>&1 || return 12
 
   _sqlite_data "$team" "SELECT json_object('type','sync_reconcile_result','push_cursor',
     CAST(push_cursor AS TEXT)) FROM sync_bindings WHERE local_team='$tl'
@@ -1091,7 +1093,11 @@ storage_sync_apply_pull() {
     AND status='corrupt_state') +
     (SELECT COUNT(*) FROM sync_conflicts WHERE server_instance_id='$server'
      AND remote_team_id='$remote' AND protocol_version=$protocol);" | tr -d '\r')
-  _sqlite_data "$team" "SELECT json_object('type','sync_apply_result','transport_cursor',
+  # STDIN, BECAUSE THIS ONE GROWS WITH THE PAGE (#882). `outcome_ids` gains an
+  # entry per pulled message and is embedded TWICE below, so the command line
+  # this used to be would pass about 400 messages on Windows and refuse the
+  # next one. Nothing else about the query changed.
+  _sqlite_data_stdin "$team" "SELECT json_object('type','sync_apply_result','transport_cursor',
     transport_cursor,'corrupt_count',$corrupt) FROM sync_bindings
     WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
       AND protocol_version=$protocol AND driver_generation='$generation';
@@ -1225,7 +1231,9 @@ EOF
     insert_local_agents="INSERT INTO local_read_agents VALUES $local_values;"
   fi
 
-  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
+  # Stdin, third of the same kind (#882): `$insert_members` carries one row per
+  # roster member and `$insert_local_agents` one per local agent.
+  printf '%s\n' "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
     $insert_members
@@ -1320,7 +1328,7 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
-    COMMIT;" >/dev/null || return 13
+    COMMIT;" | agmsg_sqlite -batch "$db" >/dev/null || return 13
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
       'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm
