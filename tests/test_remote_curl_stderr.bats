@@ -174,6 +174,15 @@ post_with_curl() {
     STUB_CURL_STDERR="curl: (26) Failed to open/read local data" bash -c '
     set -euo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
+    REAP_LOG="'"$RUN_TMPDIR"'/reap.log"
+    kill() { printf "kill %s\n" "$*" >> "$REAP_LOG"; builtin kill "$@"; }
+    wait() {
+      printf "wait %s\n" "$*" >> "$REAP_LOG"
+      builtin wait "$@"
+      local rc=$?
+      printf "wait-rc %s %s\n" "$*" "$rc" >> "$REAP_LOG"
+      return $rc
+    }
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body"'" \
       "'"$RUN_TMPDIR"'/out-body" "'"$RUN_TMPDIR"'/out-header"
   '
@@ -182,30 +191,32 @@ post_with_curl() {
   [ "$status" -eq 0 ]
   [ "$output" = "000" ]
 
-  # 2. NOT ASSERTED HERE: that no copier survives. I tried four instruments and
-  #    each failed its own positive control on this machine, so the check would
-  #    have been a green that measured nothing:
+  # 2. THE COPIER WAS REAPED, and the identity is the shell's own child table
+  #    rather than anything found in the process table afterwards.
   #
-  #      a pid the copier records itself   the failure path kills it before the
-  #                                        forked shell runs its first line, so
-  #                                        the log comes back EMPTY
-  #      pgrep -f <full script path>       no match while the process is alive
-  #      pgrep -f bounded-copy.py          matched an unrelated shell whose argv
-  #                                        merely contained the string -- an
-  #                                        instrument that would kill the wrong
-  #                                        process
-  #      lsof +D <work dir>                nothing: a copier blocked in open()
-  #                                        holds no fd on it yet
+  #    Four post-hoc instruments failed their positive controls before this one
+  #    (a pid the copier writes about itself, two pgrep forms, lsof on the work
+  #    dir), all for the same reason: a copier waiting on the fifo is still a
+  #    forked BASH wearing its parent's command line -- `comm` reads `bash` --
+  #    because python3 is not exec'd until curl opens the pipe. Nothing outside
+  #    can name it. But the shell that forked it can: `wait` is a builtin over
+  #    that shell's OWN waitable children, so a successful wait IS the
+  #    observation, and it needs no identity of its own.
   #
-  #    The reason all four miss is one fact, measured: a copier waiting on the
-  #    fifo is still a forked BASH wearing its parent's command line -- `comm`
-  #    reads `bash`, and python3 is not exec'd until curl opens the pipe. It is
-  #    identifiable as "a child of that shell" and by nothing else, and once the
-  #    shell is gone so is that relation.
-  #
-  #    The reaping itself is in the production path above (kill then wait before
-  #    the code is returned). What is unproven is the absence of a survivor, and
-  #    that behaviour has its own issue: #864.
+  #    `kill` and `wait` are shadowed in the driven shell and delegate to the
+  #    builtins, so production runs unchanged and only the seam is recorded.
+  reap="$RUN_TMPDIR/reap.log"
+  [ -s "$reap" ]
+  killed="$(sed -n 's/^kill //p' "$reap" | head -1)"
+  waited="$(sed -n 's/^wait //p' "$reap" | head -1)"
+  [ -n "$killed" ]
+  [ "$killed" = "$waited" ]
+
+  #    And the wait really collected that child: 127 is bash's "not a child of
+  #    this shell", which is what a stale or foreign pid returns.
+  rc="$(sed -n "s/^wait-rc $waited //p" "$reap" | head -1)"
+  [ -n "$rc" ]
+  [ "$rc" != "127" ]
 
   # 3. Nothing is left on disk.
   refute ls -d "$RUN_TMPDIR"/agmsg-curl.* 2>/dev/null
