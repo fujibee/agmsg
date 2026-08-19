@@ -2689,7 +2689,6 @@ JSON
   [[ "$output" != *"AGMSG-DIRECTIVE"* ]]
 }
 
-
 # --- grok-build (turn|off via a markdown rule file .grok/rules/agmsg.md) ---
 # Grok passive hooks can't inject (stdout is discarded), so grok delivers via the
 # rule-file self-poll model (like gemini/opencode): a .grok/rules/agmsg.md that

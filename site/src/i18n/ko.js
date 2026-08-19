@@ -68,10 +68,10 @@ export default {
       copilot: "셸에서 사용하는 GitHub Copilot.",
       cursor: "Cursor의 헤드리스 CLI 에이전트.",
       opencode: "오픈소스 코딩 에이전트.",
-      devin: "자율형 AI 소프트웨어 엔지니어 CLI.",
       "grok-build": "xAI의 빌드/코딩 에이전트.",
       hermes: "경량 릴레이 에이전트.",
       antigravity: "에이전틱 코딩 환경.",
+      devin: "자율형 AI 소프트웨어 엔지니어 CLI.",
     },
   },
   showcase: {
