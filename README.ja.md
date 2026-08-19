@@ -210,7 +210,7 @@ codex:
   --dangerously-skip-permissions: false  # `false`の値はフラグ自体を出力しない
 ```
 
-10種類のエージェントタイプのうち8つがspawn可能 — `claude-code`、`codex`、`grok-build`、`cursor`、`gemini`、`antigravity`、`copilot`、`opencode`。`hermes` と `devin` は不可 — 初期プロンプトを事前に仕込んだインタラクティブセッションを開始するモードがない。macOSが主なターゲットで、LinuxとWindowsはベストエフォート（ターミナルが未対応の場合はissueまたはPRを歓迎）。ヘッドレス環境 — tmuxもなく使えるターミナルもない — はエージェントCLIがインタラクティブなターミナルを必要とするためエラーになる。
+10種類のエージェントタイプのうち8つがspawn可能 — `claude-code`、`codex`、`grok-build`、`cursor`、`gemini`、`antigravity`、`copilot`、`opencode`。`hermes` は、初期プロンプトを事前に仕込んだインタラクティブセッションを開始する既知のCLIモードがないためspawn不可（#279）。`devin` は、同等のインタラクティブ起動方法がまだ検証されていないため、現時点ではspawnableとして扱っていない。macOSが主なターゲットで、LinuxとWindowsはベストエフォート（ターミナルが未対応の場合はissueまたはPRを歓迎）。ヘッドレス環境 — tmuxもなく使えるターミナルもない — はエージェントCLIがインタラクティブなターミナルを必要とするためエラーになる。
 
 ### spawnしたエージェントを終了する（`despawn`）
 
