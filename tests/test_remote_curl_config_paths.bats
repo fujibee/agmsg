@@ -175,7 +175,9 @@ sandbox_path() {
 # while opening the header fifo, and $output became that line followed by the
 # http code. Every exact comparison against "200" or "000" then fails on a code
 # that was in fact correct. Observed twice in one run, on a head that was green
-# on the author's machine: the difference is load, not platform.
+# on the author's machine. That is the boundary of what was observed -- a
+# loaded macOS CI runner produced it and no local run has. Load is the
+# candidate, not something any control here varied.
 #
 # The http code is the only thing on stdout, so separating the streams is what
 # makes an exact comparison mean what it says.
