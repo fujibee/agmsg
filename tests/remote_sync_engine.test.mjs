@@ -4085,3 +4085,70 @@ test("runLoop: a non-retryable error that is NOT a refusal still ends the loop",
     eventCall: async () => {},
   }), /config is unreadable/);
 });
+
+// THE COUNT IS THE PART THAT SAYS WHETHER THE TIMESTAMP IS NOW (#829).
+//
+// An engine that failed every cycle for six days kept the last success it ever
+// had, and `status` printed it alone. Recording the failures is what lets that
+// line stop reading as "working".
+const cycleFailureRun = async (script) => {
+  const failures = [];
+  let i = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    cycleCall: async () => {
+      const step = script[i++];
+      if (step === undefined) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      if (step === "refuse") { const no = new Error("no"); no.refusal = true; throw no; }
+      if (step === "fail") { const net = new Error("net"); net.retryable = true; throw net; }
+      return {};
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    isRefusalCall: (error) => error.refusal === true,
+    recordRefusalCall: async () => {},
+    clearRefusalCall: async () => {},
+    eventCall: async () => {},
+    nowCall: () => `T${failures.length + 1}`,
+    recordCycleCall: async () => {},
+    recordCycleFailureCall: async (team, at, count) => { failures.push([team, at, count]); },
+  }), /stop/);
+  return failures;
+};
+
+test("runLoop: failures are counted since the last success, refusals included", async () => {
+  assert.deepEqual(await cycleFailureRun(["fail", "fail"]),
+    [[config.local_team, "T1", 1], [config.local_team, "T2", 2]]);
+  // A REFUSAL COUNTS. It does not advance `consecutiveFailures` -- that drives
+  // the backoff and a refusal is not evidence the transport is degrading -- but
+  // it is exactly as much of a "nothing synced" as a timeout is, and #829 was
+  // six days of nothing but refusals.
+  assert.deepEqual(await cycleFailureRun(["refuse", "refuse"]),
+    [[config.local_team, "T1", 1], [config.local_team, "T2", 2]]);
+  // Mixed, and counted as one run of not-succeeding rather than two.
+  assert.deepEqual((await cycleFailureRun(["fail", "refuse", "fail"])).map(([, , n]) => n),
+    [1, 2, 3]);
+  // A success ends the run: the count answers "since the last success", so it
+  // starts again from one rather than continuing.
+  assert.deepEqual((await cycleFailureRun(["fail", "ok", "fail"])).map(([, , n]) => n), [1, 1]);
+  // And nothing is recorded when nothing fails.
+  assert.deepEqual(await cycleFailureRun(["ok", "ok"]), []);
+});
+
+test("runLoop: a failure record that throws does not change the loop", async () => {
+  // Same promise as the success record, on the path where things are already
+  // going wrong: bookkeeping must never be the reason a retry does not happen.
+  let cycles = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    cycleCall: async () => {
+      cycles += 1;
+      if (cycles > 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      const net = new Error("net"); net.retryable = true; throw net;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: (error) => error.retryable === true,
+    eventCall: async () => {},
+    recordCycleCall: async () => {},
+    recordCycleFailureCall: async () => { throw new Error("run directory is unwritable"); },
+  }), /stop/);
+  assert.equal(cycles, 3, "a failing record must not stop the loop from retrying");
+});

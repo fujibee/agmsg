@@ -2379,9 +2379,19 @@ _remote_status_one() {
   # useful thing, and "no cycles" beside "engine stopped" reads as a second fault
   # rather than the same one.
   if [ "$engine_state" = "running" ]; then
-    local stamp last_cycle
+    local stamp last_cycle failures
     stamp="$(_remote_sync_engine_cycle_stamp "$team")"
     last_cycle="$(_remote_read_config_field "$stamp" '$.last_success_at')"
+    # HOW MANY HAVE FAILED SINCE (#829). A success timestamp on its own cannot
+    # say whether it is the present state: an engine that has failed every cycle
+    # for six days still holds the last success it ever had, and this line
+    # printed it with nothing beside it. The machine in that report had not
+    # synced since the 13th and said "last successful sync 2026-08-13", which
+    # reads as working. It was found because two rosters disagreed, not here.
+    failures="$(_remote_read_config_field "$stamp" '$.failures_since_success')"
+    case "$failures" in
+      ''|null|0|*[!0-9]*) failures="" ;;
+    esac
     if [ -z "$last_cycle" ] || [ "$last_cycle" = "null" ]; then
       # Says what is absent, not what did not happen. The record is written
       # best-effort, so its absence covers three states this cannot tell apart:
@@ -2390,7 +2400,19 @@ _remote_status_one() {
       # unrecorded. "nothing has synced yet" picks one of the three and asserts
       # it -- a claim wider than the check, which is the defect this whole line
       # exists to remove from `status` rather than to reintroduce.
-      echo "		cycles: no successful cycle recorded since this engine started"
+      if [ -n "$failures" ]; then
+        # Two different absences. "Nothing recorded and nothing has failed" is a
+        # young engine; "nothing recorded and 17 have failed" is an engine that
+        # has never worked, and only the second is a fault.
+        echo "		cycles: no successful cycle recorded since this engine started; $failures have failed since it did"
+      else
+        echo "		cycles: no successful cycle recorded since this engine started"
+      fi
+    elif [ -n "$failures" ]; then
+      # The count, not an interpretation of it. Whether one failure is a blip
+      # and whether two hundred is a broken remote is not decided here -- what
+      # this line owes the reader is that the timestamp above is not now.
+      echo "		cycles: last successful sync $last_cycle; $failures have failed since"
     else
       echo "		cycles: last successful sync $last_cycle"
     fi
