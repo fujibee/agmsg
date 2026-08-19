@@ -1645,7 +1645,10 @@ class CodexBridge {
     const sections = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      // --quiet: an empty inbox must read back as EMPTY. The human-facing
+      // "No new messages." line is non-blank, passed tryStartTurn's emptiness
+      // check, and became the entire prompt of an injected turn.
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
       if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
     }
