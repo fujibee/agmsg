@@ -93,3 +93,25 @@ PY
   echo "$output"
   [ "$status" -eq 0 ]
 }
+
+@test "both CONTRIBUTING files state the same ADR lifecycle" {
+  # The rules were in two files and nothing compared them, so correcting one
+  # would have left the other telling contributors the opposite. The pairs below
+  # are the claims that differed before this suite existed: acceptance is not
+  # merging, a proposed record may be edited, and immutability starts at
+  # acceptance rather than at the file landing.
+  local en="$ROOT/CONTRIBUTING.md" ja="$ROOT/CONTRIBUTING.ja.md"
+
+  grep -Fq 'merging the file is not that moment' "$en" || { echo "en: acceptance is still tied to merging" >&2; return 1; }
+  grep -Fq 'マージされた時点は、その瞬間ではない' "$ja" || { echo "ja: acceptance is still tied to merging" >&2; return 1; }
+
+  grep -Fq 'may be edited in place' "$en" || { echo "en: proposed is not stated editable" >&2; return 1; }
+  grep -Fq 'その場で書き換えてよい' "$ja" || { echo "ja: proposed is not stated editable" >&2; return 1; }
+
+  grep -Fq 'Once accepted' "$en" || { echo "en: immutability is not scoped to accepted" >&2; return 1; }
+  grep -Fq 'accepted になった ADR' "$ja" || { echo "ja: immutability is not scoped to accepted" >&2; return 1; }
+
+  # The old unconditional claim must be gone from both, not just softened in one.
+  ! grep -Fq 'ADRs are immutable history' "$en" || { echo "en: still calls every ADR immutable" >&2; return 1; }
+  ! grep -Fq 'ADR は不変の履歴であり' "$ja" || { echo "ja: still calls every ADR immutable" >&2; return 1; }
+}
