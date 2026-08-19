@@ -38,14 +38,23 @@ fi
 
 # Parse to "from \x1f to \x1f body \x1f at \x1f id" rows (no jq; cf. lib/hooks-json.sh).
 _arr="[$(printf '%s' "$HIST_JSONL" | paste -sd, -)]"
-ROWS=$(agmsg_sqlite ':memory:' "
-  SELECT json_extract(value,'\$.from') || char(31) ||
-         json_extract(value,'\$.to') || char(31) ||
-         replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
-         json_extract(value,'\$.at') || char(31) ||
-         json_extract(value,'\$.id')
-  FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
-")
+# #777: same argv-length exposure on the display path. Capping --limit does not bound this
+# one either, because a single long body can carry it past the ceiling on its own.
+_agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-history-rows.XXXXXX") || exit 13
+trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
+{
+  printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.to') || char(31) ||"
+  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.id')"
+  printf "FROM json_each('"
+  printf '%s' "$_arr" | sed "s/'/''/g"
+  printf "');\n"
+} > "$_agmsg_rows_sql"
+ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
+rm -f "$_agmsg_rows_sql"
+trap - EXIT HUP INT TERM
 
 # Read-state for the ●(unread)/○(read) marker (G2(c)): read-state is
 # recipient-scoped and not carried on a history record, so derive it by unioning
@@ -61,9 +70,21 @@ while IFS= read -r r; do
   u=$(storage_list_unread "$TEAM" "$r") || continue
   [ -n "$u" ] || continue
   uarr="[$(printf '%s' "$u" | paste -sd, -)]"
-  ids=$(agmsg_sqlite ':memory:' "
-    SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');
-  ")
+  # #777: a recipient's unread backlog grows independently of the display limit, so
+  # interpolating it into one argv element eventually exceeds ARG_MAX (measured on Linux:
+  # 2,097,152 was not enough for a 2,079-message team). Pass the statement on stdin
+  # instead, mirroring drivers/storage/sqlite-sync.sh:1082. printf is a bash builtin, so
+  # feeding it a large value does not exec and cannot hit ARG_MAX.
+  _agmsg_unread_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-history-unread.XXXXXX") || continue
+  trap 'rm -f "$_agmsg_unread_sql"' EXIT HUP INT TERM
+  {
+    printf "SELECT json_extract(value,'\$.id') FROM json_each('"
+    printf '%s' "$uarr" | sed "s/'/''/g"
+    printf "');\n"
+  } > "$_agmsg_unread_sql"
+  ids=$(agmsg_sqlite ':memory:' < "$_agmsg_unread_sql")
+  rm -f "$_agmsg_unread_sql"
+  trap - EXIT HUP INT TERM
   UNREAD_IDS+="$ids"$'\n'
 done <<< "$RECIPIENTS"
 
