@@ -535,7 +535,16 @@ _remote_http_post_json() {
   else
     curl_status=$?
   fi
-  [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ] && cat "$curl_err" >&2
+  # THE DIAGNOSIS COMES AFTER THE OUTCOME IS SETTLED, AND CANNOT CHANGE IT.
+  #
+  # This used to be one `&& && cat` line placed before the branch below. Under
+  # `set -e` a failing `cat` -- a closed stderr, a reader that went away, a full
+  # disk -- ends the function on the spot: the copier is never reaped, the
+  # work_dir is never removed, and the caller gets no code at all instead of the
+  # "000" this helper promises for every failure. Being unable to explain a
+  # failure must not turn it into a different failure.
+  #
+  # So: reap and decide first, then write the diagnosis best-effort.
   if [ "$curl_status" -ne 0 ]; then
     [ -n "$copier_pid" ] && { kill "$copier_pid" 2>/dev/null || true; wait "$copier_pid" 2>/dev/null || true; }
     http_code="000"
@@ -543,6 +552,9 @@ _remote_http_post_json() {
     http_code="$curl_output"
   else
     http_code="000"
+  fi
+  if [ "$curl_status" -ne 0 ] && [ -s "$curl_err" ]; then
+    cat "$curl_err" >&2 || true
   fi
   # One directory holds the config, the error file and the fifo, so the normal
   # path removes exactly what the trap would have. The caller's header file is

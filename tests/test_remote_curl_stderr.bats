@@ -61,9 +61,54 @@ fi
 printf '200'
 STUB
   chmod +x "$STUB_SRC/curl"
+
+  # A python3 that records its own pid before becoming the real thing, so a
+  # copier left running is observable rather than assumed absent. `exec` keeps
+  # the pid, so the number in the log is the process the helper must reap.
+  COPIER_PIDS="$BATS_TEST_TMPDIR/copier-pids"
+  export COPIER_PIDS
+  : > "$COPIER_PIDS"
+  REAL_PYTHON3="$(command -v python3)"; export REAL_PYTHON3
+  cat > "$STUB_SRC/python3" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *bounded-copy.py*) printf '%s\n' "$$" >> "$COPIER_PIDS" ;;
+esac
+exec "$REAL_PYTHON3" "$@"
+STUB
+  chmod +x "$STUB_SRC/python3"
 }
 
-teardown() { teardown_test_env; }
+# Nothing this file starts may outlive it. A test that leaves a copier blocked
+# on a fifo holds whatever descriptors it inherited, which is how three probes
+# in this series hung -- so the fixture reaps its own strays even when a case
+# fails, and says so rather than cleaning up silently.
+teardown() {
+  if [ -f "${COPIER_PIDS:-/nonexistent}" ]; then
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "teardown: reaping copier $pid that the helper left running" >&2
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+      fi
+    done < "$COPIER_PIDS"
+  fi
+  teardown_test_env
+}
+
+# Fails the test when any recorded copier is still alive.
+refute_orphan_copier() {
+  local pid alive=""
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
+  done < "$COPIER_PIDS"
+  if [ -n "$alive" ]; then
+    echo "copier still running:$alive" >&2
+    return 1
+  fi
+}
 
 sandbox_path() {
   local dir tool src
@@ -73,6 +118,7 @@ sandbox_path() {
     ln -s "$src" "$dir/$tool"
   done
   ln -s "$STUB_SRC/curl" "$dir/curl"
+  ln -sf "$STUB_SRC/python3" "$dir/python3"
   printf '%s' "$dir"
 }
 
@@ -88,6 +134,7 @@ post_with_curl() {
   printf '{"t":"secret"}' > "$body"
 
   run env PATH="$bin" TMPDIR="$RUN_TMPDIR" STUB_CURL_MODE="$mode" \
+    COPIER_PIDS="$COPIER_PIDS" REAL_PYTHON3="$REAL_PYTHON3" \
     STUB_CURL_STDERR="$stderr_text" bash -c '
     set -uo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
@@ -145,17 +192,19 @@ post_with_curl() {
   refute ls -d "$RUN_TMPDIR"/agmsg-curl.* 2>/dev/null
 }
 
-@test "an early exit between the mktemp and the cleanup still sweeps the file (#850)" {
-  # The hole the explicit cleanup cannot cover: it only runs if the function
-  # GETS there. A signal is the obvious way out early and it is also the one I
-  # could not drive -- the probe hung, because the bounded copier keeps the run
-  # alive while curl is being waited on. A review pointed out that the signal is
-  # not the only exit, and errexit is a bounded one.
+@test "a diagnosis that cannot be written does not change the outcome (#850)" {
+  # THIS CASE ASSERTED THE OPPOSITE UNTIL REVIEW TURNED IT AROUND.
   #
-  # `cat` is the last command of the `&& &&` chain that shows the diagnosis, so
-  # under `set -e` a failing cat leaves the function immediately -- after the
-  # mktemp, before the rm. Everything that survives that has to come from the
-  # trap, which is exactly the property under test.
+  # The diagnosis used to be `[ ... ] && [ ... ] && cat "$curl_err" >&2` sitting
+  # before the failure arm. Under `set -e` a failing `cat` -- closed stderr, a
+  # reader that went away, a full disk -- ended the function there: no reap, no
+  # cleanup, and no http code at all where the contract promises "000".
+  #
+  # I wrote a test that drove exactly that and asserted it: nonzero status,
+  # empty stdout, and a comment noting the copier was left orphaned. It was
+  # measuring the defect and calling it the property. Being unable to EXPLAIN a
+  # failure must not turn it into a DIFFERENT failure, so all three of these are
+  # now the other way round.
   RUN_TMPDIR="$(mktemp -d "$BATS_TEST_TMPDIR/run.XXXXXX")"
   local bin; bin="$(sandbox_path)"
   local body="$RUN_TMPDIR/body.json"
@@ -163,36 +212,31 @@ post_with_curl() {
 
   # A `cat` that always fails, shadowing the real one for this run only. The
   # symlink is REMOVED first: `>` through a symlink writes to its target, which
-  # here is the system's own /bin/cat. The first attempt did exactly that and
+  # here is the system's own /bin/cat. An earlier version did exactly that and
   # was refused by the OS -- on a machine where it was not refused, this test
   # would have replaced a system binary.
   rm -f "$bin/cat"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$bin/cat"
   chmod +x "$bin/cat"
 
-  # Output goes to FILES, not to bats's capture pipe. On this path the bounded
-  # copier is never reaped -- the trap removes files and does not kill it -- so
-  # it outlives the shell still holding the inherited stdout and stderr. Those
-  # being a pipe is what makes `run` wait forever; those being files is what
-  # makes this test finish. The orphan is a real property of the early-exit
-  # path and is reported alongside this test rather than papered over.
   run env PATH="$bin" TMPDIR="$RUN_TMPDIR" STUB_CURL_MODE=fail \
+    COPIER_PIDS="$COPIER_PIDS" REAL_PYTHON3="$REAL_PYTHON3" \
     STUB_CURL_STDERR="curl: (26) Failed to open/read local data" bash -c '
     set -euo pipefail
     . '"$SCRIPTS"'/remote.sh 2>/dev/null
     _remote_http_post_json "https://example.invalid/v1/x" "'"$body"'" \
       "'"$RUN_TMPDIR"'/out-body" "'"$RUN_TMPDIR"'/out-header"
-  ' >"$RUN_TMPDIR/driver-stdout" 2>"$RUN_TMPDIR/driver-stderr"
-  # It leaves early: the function never reaches its `printf` of the code.
-  [ "$status" -ne 0 ]
-  [ ! -s "$RUN_TMPDIR/driver-stdout" ]
+  '
 
-  # And nothing is stranded. This is the trap's work, not the tail's -- and all
-  # three are asserted, because measuring this path is what showed the trap had
-  # never swept ANY of them. It expanded function locals after the frame was
-  # gone, removed empty strings, and returned 0.
-  refute ls "$RUN_TMPDIR"/agmsg-curl-err.* 2>/dev/null
-  refute ls "$RUN_TMPDIR"/agmsg-curl-cfg.* 2>/dev/null
+  # 1. The request still reports what it always reported.
+  [ "$status" -eq 0 ]
+  [ "$output" = "000" ]
+
+  # 2. Nothing is left running. The recorded pid is the copier's own, because
+  #    the wrapper execs and keeps it.
+  refute_orphan_copier
+
+  # 3. And nothing is left on disk.
   refute ls -d "$RUN_TMPDIR"/agmsg-curl.* 2>/dev/null
 }
 
