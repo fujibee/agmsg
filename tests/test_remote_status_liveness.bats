@@ -861,3 +861,66 @@ write_unownable_ps_fixture() {
   run bash -c "grep -v '^[[:space:]]*#' \"\$1\" | sed 's/_agmsg_pid_alive_local//g' | grep -c '_agmsg_pid_alive'" _ "$SCRIPTS/remote.sh"
   [ "$output" = "0" ]
 }
+
+
+@test "status: a success that is not the present state says so (#829)" {
+  # The report this exists for: an engine had failed every cycle for six days
+  # and `status` printed the last success it ever had, with nothing beside it.
+  # It read as working. The person who found it found it because two rosters
+  # disagreed -- this line told them nothing.
+  start_matching_engine
+  local fake_bin stamp
+  fake_bin="$(write_matching_ps_fixture)"
+  stamp="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
+
+  # A success and nothing else: unchanged, because a working engine must not
+  # grow a clause about failures it has not had.
+  printf '%s\n' '{"type":"sync_cycle_stamp","first_success_at":"2026-08-13T09:00:00.000Z","last_success_at":"2026-08-13T09:02:00.000Z"}' > "$stamp"
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "cycles: last successful sync 2026-08-13T09:02:00.000Z"
+  refute grep -qF -- "have failed since" <<<"$output"
+
+  # The same success, with failures recorded after it.
+  printf '%s\n' '{"type":"sync_cycle_stamp","first_success_at":"2026-08-13T09:00:00.000Z","last_success_at":"2026-08-13T09:02:00.000Z","last_failure_at":"2026-08-19T00:00:00.000Z","failures_since_success":6842}' > "$stamp"
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "cycles: last successful sync 2026-08-13T09:02:00.000Z; 6842 have failed since"
+}
+
+@test "status: a never-successful engine separates young from broken (#829)" {
+  # "Nothing recorded" covers an engine that started a second ago and one that
+  # has never completed a cycle in six days. Only the second is a fault, and
+  # the line said the same thing for both.
+  start_matching_engine
+  local fake_bin stamp
+  fake_bin="$(write_matching_ps_fixture)"
+  stamp="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
+
+  [ ! -e "$stamp" ]
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "cycles: no successful cycle recorded since this engine started"
+  refute grep -qF -- "have failed since it did" <<<"$output"
+
+  printf '%s\n' '{"type":"sync_cycle_stamp","last_failure_at":"2026-08-19T00:00:00.000Z","failures_since_success":91}' > "$stamp"
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "91 have failed since it did"
+}
+
+@test "status: a failure count it cannot read is absent, not zero (#829)" {
+  # The record is written best-effort by the engine, so a truncated or
+  # half-written file is a state this has to survive. A garbage value must not
+  # print as a count, and must not take the success line down with it.
+  start_matching_engine
+  local fake_bin stamp
+  fake_bin="$(write_matching_ps_fixture)"
+  stamp="$TEST_SKILL_DIR/run/remote-sync.testteam.cycles.json"
+  printf '%s\n' '{"type":"sync_cycle_stamp","last_success_at":"2026-08-13T09:02:00.000Z","failures_since_success":"lots"}' > "$stamp"
+  run env PATH="$fake_bin:$PATH" bash "$SCRIPTS/remote.sh" status testteam
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q -F -- "cycles: last successful sync 2026-08-13T09:02:00.000Z"
+  refute grep -qF -- "lots" <<<"$output"
+  refute grep -qF -- "have failed since" <<<"$output"
+}

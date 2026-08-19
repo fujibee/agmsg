@@ -137,10 +137,40 @@ async function recordCycleSuccess(team, at, writeFileCall = writeFile) {
       const existing = JSON.parse(await readFile(path, "utf8"));
       if (typeof existing?.first_success_at === "string") first = existing.first_success_at;
     } catch { /* no stamp yet, or unreadable: this cycle is the first we can name */ }
+    // The failure fields are DROPPED, not carried: they count what has gone
+    // wrong since the last success, and this is that success.
     await writeFileCall(path, `${JSON.stringify({
       type: "sync_cycle_stamp", first_success_at: first, last_success_at: at,
     })}\n`);
   } catch { /* best-effort: never fail a working cycle over its own bookkeeping */ }
+}
+
+// The other half of the same record, and the reason it exists (#829).
+//
+// A success timestamp alone cannot say whether it is the present state. An
+// engine whose every cycle has failed for six days keeps the last success it
+// ever had, and `status` printed it with nothing beside it -- so a machine that
+// had not synced since the 13th said "last successful sync 2026-08-13" and read
+// as working. The person who found it found it by noticing two rosters
+// disagreed, not from anything this client told them.
+//
+// Counted, not just stamped: "17 cycles have failed since" and "one failed a
+// moment ago" are different situations, and the count is the part that says
+// which. Same file, same lifetime, same best-effort promise as the success --
+// bookkeeping must never take down syncing, and under-reporting is the safe
+// direction if this write is the thing that fails.
+async function recordCycleFailure(team, at, consecutive, writeFileCall = writeFile) {
+  try {
+    const path = cycleStampPath(team);
+    let stamp = { type: "sync_cycle_stamp" };
+    try {
+      const existing = JSON.parse(await readFile(path, "utf8"));
+      if (existing && typeof existing === "object") stamp = { ...existing, type: "sync_cycle_stamp" };
+    } catch { /* no stamp yet, or unreadable: record the failure on its own */ }
+    await writeFileCall(path, `${JSON.stringify({
+      ...stamp, last_failure_at: at, failures_since_success: consecutive,
+    })}\n`);
+  } catch { /* best-effort, exactly like the success above */ }
 }
 
 // A refusal the caller can act on, recorded where something can read it (#773).
@@ -3090,6 +3120,7 @@ export async function runLoop(config, options, dependencies = {}) {
   const eventCall = dependencies.eventCall ?? event;
   const isRetryableCall = dependencies.isRetryableCall ?? isRetryable;
   const recordCycleCall = dependencies.recordCycleCall ?? recordCycleSuccess;
+  const recordCycleFailureCall = dependencies.recordCycleFailureCall ?? recordCycleFailure;
   const clearRefusalCall = dependencies.clearRefusalCall ?? clearRefusal;
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
@@ -3106,12 +3137,19 @@ export async function runLoop(config, options, dependencies = {}) {
 
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
+  // COUNTED SEPARATELY FROM `consecutiveFailures`, which drives the backoff and
+  // deliberately does not advance on a refusal. This one answers a different
+  // question -- "has anything worked since the last success" -- and a refusal
+  // is exactly as much of a no as a timeout is. Conflating them would leave the
+  // six-day refusal loop in #829 reporting a clean record.
+  let cyclesSinceSuccess = 0;
   for (;;) {
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {
       const result = await cycleCall(config, { pushLimit, pullLimit }, dependencies);
       consecutiveFailures = 0;
+      cyclesSinceSuccess = 0;
       // Here, and nowhere earlier: this is the one point at which a cycle is
       // known to have finished rather than to have been attempted.
       //
@@ -3169,12 +3207,20 @@ export async function runLoop(config, options, dependencies = {}) {
             status: error?.status ?? null, code: error?.code ?? null,
           });
         } catch { /* logging is best-effort */ }
+        cyclesSinceSuccess += 1;
+        try {
+          await recordCycleFailureCall(config.local_team, nowCall(), cyclesSinceSuccess);
+        } catch { /* best-effort, like every other note taken on this path */ }
         await sleepCall(MAX_BACKOFF_MS);
         continue;
       }
 
       if (!isRetryableCall(error)) throw error;
       consecutiveFailures += 1;
+      cyclesSinceSuccess += 1;
+      try {
+        await recordCycleFailureCall(config.local_team, nowCall(), cyclesSinceSuccess);
+      } catch { /* best-effort */ }
       const backoffMs = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (consecutiveFailures - 1));
       await sleepCall(backoffMs); // always back off after a failure, in either cadence
     }
