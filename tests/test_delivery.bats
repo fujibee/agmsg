@@ -2684,9 +2684,9 @@ JSON
 @test "delivery devin: accepts off without error" {
   run bash "$SCRIPTS/delivery.sh" set off devin "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Delivery mode set to 'off'" ]]
-  [[ "$output" =~ "manual inbox checks only" ]]
-  [[ "$output" != *"AGMSG-DIRECTIVE"* ]]
+  grep -qF "Delivery mode set to 'off'" <<<"$output"
+  grep -qF "manual inbox checks only" <<<"$output"
+  refute grep -qF "AGMSG-DIRECTIVE" <<<"$output"
 }
 
 # --- grok-build (turn|off via a markdown rule file .grok/rules/agmsg.md) ---
