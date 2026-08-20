@@ -350,9 +350,19 @@ if [ "$UPDATE_ONLY" = true ]; then
   # people to install is the release that stops them: joined on v1.2.0-rc.5,
   # upgraded as told, and now the binding they already had is rejected.
   #
-  # Narrow on purpose -- the set is meant to be exactly the set the engine
-  # refuses ON MODE, so this cannot correct a file into a state the engine still
-  # refuses, and cannot touch one it would have accepted:
+  # This is a HISTORICAL correction, not a sweep of every authority file. The
+  # set an older release's write path could have left wrong is exactly
+  # `teams/<team>/config.json`, because it is the only one written by shell
+  # under the caller's umask; `<storage>/remote-sync/<team>.json` and the
+  # retained age checkpoint are written by Node with an explicit 0600 on a
+  # fresh `wx` file, and that code is byte-identical at v1.2.0-rc.5. Those two
+  # are still authority files the engine refuses on mode -- a mode changed by
+  # hand is outside this walk, and the pasteable remedy in the refusal is what
+  # covers that case.
+  #
+  # Within what it does walk, the selection is meant to be exactly the files
+  # the engine refuses ON MODE, so this cannot correct a file into a state the
+  # engine still refuses, and cannot touch one it would have accepted:
   #
   #   -type f      a symlink is refused by the engine BEFORE mode is consulted
   #                ("must not be a symbolic link"), so chmod-ing one would
