@@ -7,7 +7,8 @@ setup() {
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
   export TEST_MONITOR_PID=""
-  export TEST_TUI_PID_FILE=""
+  export TEST_TUI_RELEASE_FILE=""
+  export TEST_TUI_EXIT_FILE=""
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
@@ -64,6 +65,7 @@ PY
   *)
     record_tui_term() {
       [ -z "${FAKE_TUI_TERM_LOG:-}" ] || printf 'tui TERM\n' > "$FAKE_TUI_TERM_LOG"
+      [ -z "${FAKE_TUI_EXIT_MARKER:-}" ] || : > "$FAKE_TUI_EXIT_MARKER"
       exit 143
     }
     trap record_tui_term TERM
@@ -92,11 +94,8 @@ teardown() {
     kill "$TEST_MONITOR_PID" 2>/dev/null || true
     wait "$TEST_MONITOR_PID" 2>/dev/null || true
   fi
-  if [ -n "${TEST_TUI_PID_FILE:-}" ] && [ -s "$TEST_TUI_PID_FILE" ]; then
-    pid="$(cat "$TEST_TUI_PID_FILE" 2>/dev/null)"
-    kill "$pid" 2>/dev/null || true
-    wait_for_pid_exit "$pid" || true
-  fi
+  [ -z "${TEST_TUI_RELEASE_FILE:-}" ] || : > "$TEST_TUI_RELEASE_FILE"
+  [ -z "${TEST_TUI_EXIT_FILE:-}" ] || wait_for_file "$TEST_TUI_EXIT_FILE" || true
   for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
     [ -f "$pf" ] || continue
     pid="$(cat "$pf" 2>/dev/null)"
@@ -224,14 +223,17 @@ EOF
   local launcher_term_log="$TEST_PROJECT/launcher-term.log"
   local launcher="$TEST_PROJECT/fake-launcher"
   local gate="$TEST_PROJECT/release-tui"
+  local tui_exit="$TEST_PROJECT/tui-exit"
   local server_ready="$TEST_PROJECT/server-ready"
   local launcher_ready="$TEST_PROJECT/launcher-ready"
   local tui_ready="$TEST_PROJECT/tui-ready"
   _make_term_recording_launcher "$launcher"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
 
   env FAKE_TERM_LOG="$term_log" FAKE_SERVER_READY_FILE="$server_ready" \
     FAKE_LAUNCHER_TERM_LOG="$launcher_term_log" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
-    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" FAKE_TUI_EXIT_MARKER="$tui_exit" \
     AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
     --invocation-scope scope-term --codex-command codex -- &
@@ -290,17 +292,20 @@ EOF
   local server_term="$TEST_PROJECT/server-term.log"
   local launcher_term="$TEST_PROJECT/launcher-term.log"
   local tui_term="$TEST_PROJECT/tui-term.log"
+  local tui_exit="$TEST_PROJECT/tui-exit"
+  local tui_pid_file="$TEST_PROJECT/tui.pid"
   local launcher="$TEST_PROJECT/fake-launcher"
   local key pidfile server_pid launcher_pid tui_pid monitor_status tui_gone lock_owner
   _make_term_recording_launcher "$launcher"
-  TEST_TUI_PID_FILE="$TEST_PROJECT/tui.pid"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
 
   key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd)" scope-direct-term | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
   pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
   env FAKE_TERM_LOG="$server_term" FAKE_SERVER_READY_FILE="$server_ready" \
     FAKE_LAUNCHER_TERM_LOG="$launcher_term" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
-    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
-    FAKE_TUI_PID_FILE="$TEST_TUI_PID_FILE" FAKE_TUI_TERM_LOG="$tui_term" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" FAKE_TUI_EXIT_MARKER="$tui_exit" \
+    FAKE_TUI_PID_FILE="$tui_pid_file" FAKE_TUI_TERM_LOG="$tui_term" \
     AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
     --invocation-scope scope-direct-term --codex-command codex -- &
@@ -311,7 +316,7 @@ EOF
   wait_for_file_contains "$tui_ready" '[0-9]'
   server_pid="$(cat "$pidfile")"
   launcher_pid="$(cat "$launcher_ready")"
-  tui_pid="$(cat "$TEST_TUI_PID_FILE")"
+  tui_pid="$(cat "$tui_pid_file")"
 
   kill -TERM "$TEST_MONITOR_PID"
   if wait "$TEST_MONITOR_PID"; then monitor_status=0; else monitor_status=$?; fi
@@ -320,7 +325,8 @@ EOF
   tui_gone=1
   if ! wait_for_pid_exit "$tui_pid"; then
     tui_gone=0
-    kill "$tui_pid" 2>/dev/null || true
+    : > "$gate"
+    wait_for_file "$tui_exit" || true
     wait_for_pid_exit "$tui_pid" || true
   fi
   lock_owner="$(. "$SCRIPTS/lib/storage.sh"; agmsg_runtime_lock_owner "codex-app-server:$key")"
