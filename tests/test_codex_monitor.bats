@@ -4,7 +4,7 @@ load test_helper
 
 setup() {
   setup_test_env
-  export TEST_PROJECT="$(mktemp -d)"
+  export TEST_PROJECT="$(cd "$(mktemp -d)" && pwd -P)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
   export TEST_MONITOR_PID=""
   export TEST_TUI_RELEASE_FILE=""
