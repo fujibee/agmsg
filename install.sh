@@ -350,36 +350,60 @@ if [ "$UPDATE_ONLY" = true ]; then
   # people to install is the release that stops them: joined on v1.2.0-rc.5,
   # upgraded as told, and now the binding they already had is rejected.
   #
-  # Narrow on purpose. Only `teams/*/config.json`, only the group and other
-  # WRITE bits, and only files that actually carry them — the same condition
-  # the engine checks, so this cannot correct a file into a state the engine
-  # still refuses, and cannot touch one it would have accepted.
+  # Narrow on purpose -- the set is meant to be exactly the set the engine
+  # refuses ON MODE, so this cannot correct a file into a state the engine still
+  # refuses, and cannot touch one it would have accepted:
+  #
+  #   -type f      a symlink is refused by the engine BEFORE mode is consulted
+  #                ("must not be a symbolic link"), so chmod-ing one would
+  #                change a file OUTSIDE the store and announce a repair that
+  #                repaired nothing. `[ -f ]` follows symlinks; this does not.
+  #   -perm -g+w   two tests, not one `-go+w`: `-perm -MODE` means ALL of the
+  #   -perm -o+w   named bits, so the combined form skips a file writable by
+  #                only one of them.
+  #   find, glob   `teams/*/config.json` silently drops a team whose name
+  #                begins with a dot, and lib/validate.sh allows those -- it
+  #                rejects `.` and `..` but not `.anything`. find descends
+  #                regardless of the leading character.
+  #   one traversal, not two `find` starts per binding.
   #
   # `go-w` rather than a numeric mode: the owner's bits and any read access the
   # operator deliberately granted are theirs, not ours to normalise.
   #
+  # Skipped on Windows, where the engine skips the mode check itself
+  # (`process.platform !== "win32"` guards it, and it is the LAST thing it
+  # consults). MSYS reports modes the filesystem does not really carry, so
+  # without this the walk would announce that the sync engine refuses a file the
+  # sync engine is perfectly happy with -- on every update, on the one platform
+  # where the sentence cannot be true.
+  #
   # Said out loud, per file. A permission change the operator cannot see is
   # indistinguishable from one that did not happen, and this one runs without
   # being asked for.
-  agmsg_fixed_bindings=0
-  for agmsg_binding in "$SKILL_DIR"/teams/*/config.json; do
-    [ -f "$agmsg_binding" ] || continue
-    # `find -perm` rather than parsing `stat`, whose format flags differ between
-    # BSD and GNU — the portability trap this file has hit before. `-maxdepth`
-    # goes before the test: GNU find warns when it trails one. Two tests, not a
-    # combined `-go+w`, because `-perm -MODE` means ALL of the named bits, so
-    # the combined form would silently skip a file writable by only one of them.
-    if [ -n "$(find "$agmsg_binding" -maxdepth 0 -perm -g+w 2>/dev/null)" ] ||
-       [ -n "$(find "$agmsg_binding" -maxdepth 0 -perm -o+w 2>/dev/null)" ]; then
-      if chmod go-w "$agmsg_binding" 2>/dev/null; then
-        echo "  + tightened $agmsg_binding (was group- or world-writable; the sync engine refuses those)"
-        agmsg_fixed_bindings=$((agmsg_fixed_bindings + 1))
-      else
-        echo "  ! could not tighten $agmsg_binding — run: chmod go-w $agmsg_binding" >&2
-      fi
-    fi
-  done
-  unset agmsg_binding agmsg_fixed_bindings
+  if ! is_windows_host; then
+    # Same scheme as lib/shquote.sh, inline rather than sourced: the installer
+    # must not depend on the tree it is in the middle of writing. A team name
+    # may contain a space or a single quote -- lib/validate.sh rejects only
+    # empty / `.` / `..` / `/` / `\` / a leading `-` / control characters -- so
+    # a path printed for someone to paste has to survive both.
+    agmsg_shq() {
+      printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+    }
+    # -print0 and `read -d ''` because the path is arbitrary UTF-8. A newline
+    # cannot appear in a team name (validate.sh rejects control characters), but
+    # nothing here needs to rely on that.
+    find "$SKILL_DIR/teams" -mindepth 2 -maxdepth 2 -name config.json -type f \
+      \( -perm -g+w -o -perm -o+w \) -print0 2>/dev/null |
+      while IFS= read -r -d '' agmsg_binding; do
+        if chmod go-w "$agmsg_binding" 2>/dev/null; then
+          echo "  + tightened $agmsg_binding (an older release left it group- or world-writable; the sync engine refuses those)"
+        else
+          printf '  ! could not tighten %s -- run: chmod go-w %s\n' \
+            "$agmsg_binding" "$(agmsg_shq "$agmsg_binding")" >&2
+        fi
+      done || true
+    unset -f agmsg_shq
+  fi
   chmod +x "$SKILL_DIR/scripts/"*.sh
   chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
