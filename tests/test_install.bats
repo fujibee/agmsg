@@ -1139,7 +1139,14 @@ CYG
   # the guard itself is measured on POSIX, where AGMSG_FORCE_WINDOWS drives
   # exactly the same branch with a mode that is real.
   if [ "$(( 8#$before & 8#0022 ))" -eq 0 ]; then
-    skip "modes are synthetic here (chmod 0664 left it $before); the guard is measured on POSIX"
+    # `return 0`, not `skip`. A skip after passing assertions still reports the
+    # row as skipped, so the two checks above -- which DID run and DID have to
+    # pass to get here -- are counted as unmeasured by every reader and tally.
+    # This ends the test normally and records the boundary in the output.
+    echo "boundary: modes are synthetic here (chmod 0664 left it $before);" \
+      "the 0664 premise is fixed on POSIX, where AGMSG_FORCE_WINDOWS drives" \
+      "the same branch with a real mode"
+    return 0
   fi
   [ "$before" = "664" ]
 }
