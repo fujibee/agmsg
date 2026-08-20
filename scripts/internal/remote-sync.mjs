@@ -594,11 +594,37 @@ export function authorityFileFault(stats, { maxBytes, privateFile }) {
   // there -- and because it is the LAST thing consulted, no message above can
   // be about it. That ordering is the fix, not a detail of it.
   if (process.platform !== "win32" && (stats.mode & (privateFile ? 0o077 : 0o022)) !== 0) {
+    // The mode it HAS, not only the mode it may not have. An operator reading
+    // "must not be writable by group or others" cannot tell whether they are
+    // looking at 0664 or 0666 or a directory bit, and the two remedies differ.
+    // Printed the way `chmod` and `ls` speak, four digits, so it can be
+    // compared with what `stat` prints without arithmetic.
+    const mode = `0${(stats.mode & 0o7777).toString(8).padStart(3, "0")}`;
     return privateFile
-      ? "must not be readable or writable by group or others"
-      : "must not be writable by group or others";
+      ? `must not be readable or writable by group or others (it is ${mode})`
+      : `must not be writable by group or others (it is ${mode})`;
   }
   return null;
+}
+
+// The command that clears the fault above, or null when there is nothing to
+// type. Same conditions, same function pair, deliberately: the sentence and
+// the condition drifted apart once already (#781), and a remedy derived by
+// re-reading the SENTENCE would drift the same way the moment the wording
+// changes. This re-asks the stats.
+//
+// Only the permission fault has one. A symlink, a directory or an oversized
+// file are not fixed by a mode change, and offering `chmod` for them would send
+// someone to do the wrong thing confidently.
+//
+// `go-w` and `go-rwx` rather than `644` and `600`: the check is about the group
+// and other bits, so the remedy touches those and leaves the owner's alone. A
+// numeric mode would also silently strip a read bit the operator meant to keep.
+export function authorityFileRemedy(stats, { privateFile }) {
+  if (process.platform === "win32") return null;
+  if (stats.isSymbolicLink() || !stats.isFile()) return null;
+  if ((stats.mode & (privateFile ? 0o077 : 0o022)) === 0) return null;
+  return privateFile ? "chmod go-rwx" : "chmod go-w";
 }
 
 async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
@@ -607,8 +633,13 @@ async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
   if (fault) {
     // The path too: the previous message named a property without naming what
     // had it, on a machine that may hold several.
+    // The remedy last, so the sentence still reads as a diagnosis first. An
+    // operator who already knows what to do stops at the path; one who does not
+    // gets the line to paste, on the file that is actually wrong.
+    const remedy = authorityFileRemedy(before, { privateFile });
     throw new Error(
-      `${privateFile ? "remote credential" : "connected team binding"} ${fault}: ${path}`);
+      `${privateFile ? "remote credential" : "connected team binding"} ${fault}: ${path}` +
+      (remedy ? ` — fix it with: ${remedy} ${path}` : ""));
   }
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -1268,7 +1299,11 @@ function compareRetainedCheckpoint(config, retained) {
 async function readRetainedCheckpointFile(path) {
   const metadata = await lstat(path);
   const fault = authorityFileFault(metadata, { privateFile: true });
-  if (fault) throw new Error(`retained age checkpoint ${fault}: ${path}`);
+  if (fault) {
+    const remedy = authorityFileRemedy(metadata, { privateFile: true });
+    throw new Error(`retained age checkpoint ${fault}: ${path}` +
+      (remedy ? ` — fix it with: ${remedy} ${path}` : ""));
+  }
   const records = parseStrictJsonl(await readFile(path, "utf8"));
   if (records.length < 1 || records.length > 4096) {
     throw new Error("retained age checkpoint history is invalid");
