@@ -6,6 +6,8 @@ setup() {
   setup_test_env
   export TEST_PROJECT="$(mktemp -d)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
+  export TEST_MONITOR_PID=""
+  export TEST_TUI_PID_FILE=""
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
@@ -56,13 +58,22 @@ PY
       exit 0
     }
     trap record_server_term TERM
+    [ -z "${FAKE_SERVER_READY_FILE:-}" ] || printf '%s' "$$" > "$FAKE_SERVER_READY_FILE"
     wait "$child"
     ;;
   *)
+    record_tui_term() {
+      [ -z "${FAKE_TUI_TERM_LOG:-}" ] || printf 'tui TERM\n' > "$FAKE_TUI_TERM_LOG"
+      exit 143
+    }
+    trap record_tui_term TERM
+    [ -z "${FAKE_TUI_PID_FILE:-}" ] || printf '%s' "$$" > "$FAKE_TUI_PID_FILE"
     printf 'plain-codex' >> "$CALL_LOG"
     for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
     printf '\n' >> "$CALL_LOG"
+    [ -z "${FAKE_TUI_READY_FILE:-}" ] || printf '%s' "$$" > "$FAKE_TUI_READY_FILE"
     while [ -n "${FAKE_TUI_GATE:-}" ] && [ ! -e "$FAKE_TUI_GATE" ]; do sleep 0.1; done
+    [ -z "${FAKE_TUI_EXIT_MARKER:-}" ] || : > "$FAKE_TUI_EXIT_MARKER"
     exit "${FAKE_TUI_STATUS:-0}"
     ;;
 esac
@@ -77,6 +88,15 @@ teardown() {
   # process inside it is alive, so the rm below fails with "Directory not
   # empty" and the test reports a failure whose assertions all passed.
   local pf pid
+  if [ -n "${TEST_MONITOR_PID:-}" ]; then
+    kill "$TEST_MONITOR_PID" 2>/dev/null || true
+    wait "$TEST_MONITOR_PID" 2>/dev/null || true
+  fi
+  if [ -n "${TEST_TUI_PID_FILE:-}" ] && [ -s "$TEST_TUI_PID_FILE" ]; then
+    pid="$(cat "$TEST_TUI_PID_FILE" 2>/dev/null)"
+    kill "$pid" 2>/dev/null || true
+    wait_for_pid_exit "$pid" || true
+  fi
   for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
     [ -f "$pf" ] || continue
     pid="$(cat "$pf" 2>/dev/null)"
@@ -86,6 +106,21 @@ teardown() {
   done
   rm -rf "$TEST_PROJECT"
   teardown_test_env
+}
+
+_make_term_recording_launcher() {
+  local launcher="$1"
+  cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+record_launcher_term() {
+  printf 'launcher TERM\n' > "$FAKE_LAUNCHER_TERM_LOG"
+  exit 0
+}
+trap record_launcher_term TERM
+printf '%s' "$$" > "$FAKE_LAUNCHER_READY_FILE"
+while :; do sleep 0.1; done
+EOF
+  chmod +x "$launcher"
 }
 
 # --- fail-open (A) ---
@@ -188,24 +223,120 @@ teardown() {
   local term_log="$TEST_PROJECT/server-term.log"
   local launcher_term_log="$TEST_PROJECT/launcher-term.log"
   local launcher="$TEST_PROJECT/fake-launcher"
-  cat > "$launcher" <<'EOF'
-#!/usr/bin/env bash
-record_launcher_term() {
-  printf 'launcher TERM\n' > "$FAKE_LAUNCHER_TERM_LOG"
-  exit 0
-}
-trap record_launcher_term TERM
-while :; do sleep 0.1; done
-EOF
-  chmod +x "$launcher"
+  local gate="$TEST_PROJECT/release-tui"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  _make_term_recording_launcher "$launcher"
 
-  run env FAKE_TERM_LOG="$term_log" FAKE_LAUNCHER_TERM_LOG="$launcher_term_log" \
+  env FAKE_TERM_LOG="$term_log" FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_TERM_LOG="$launcher_term_log" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
     AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
-    --invocation-scope scope-term --codex-command codex --
-  [ "$status" -eq 0 ]
+    --invocation-scope scope-term --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  : > "$gate"
+  wait "$TEST_MONITOR_PID"
+  TEST_MONITOR_PID=""
+
   grep -qx 'server TERM' "$term_log"
   grep -qx 'launcher TERM' "$launcher_term_log"
+}
+
+@test "codex-monitor: scoped cleanup failure preserves TUI status and releases lease" {
+  local stubdir="$TEST_PROJECT/stub-bin"
+  local marker="$TEST_PROJECT/fail-cleanup-rm"
+  local real_rm key pidfile returned_status server_pid lock_owner
+  mkdir -p "$stubdir"
+  real_rm="$(command -v rm)"
+  cat > "$stubdir/rm" <<EOF
+#!/usr/bin/env bash
+if [ -e "\$FAKE_RM_FAIL_MARKER" ]; then
+  exit 74
+fi
+exec "$real_rm" "\$@"
+EOF
+  chmod +x "$stubdir/rm"
+
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd)" scope-cleanup-failure | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+  run env PATH="$stubdir:$PATH" FAKE_RM_FAIL_MARKER="$marker" \
+    FAKE_TUI_EXIT_MARKER="$marker" FAKE_TUI_STATUS=37 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-cleanup-failure --codex-command codex --
+  returned_status="$status"
+
+  wait_for_file "$pidfile"
+  server_pid="$(cat "$pidfile")"
+  wait_for_pid_exit "$server_pid"
+  lock_owner="$(. "$SCRIPTS/lib/storage.sh"; agmsg_runtime_lock_owner "codex-app-server:$key")"
+  if [ "$returned_status:$lock_owner" != "37:" ]; then
+    echo "cleanup observation: status=$returned_status lock_owner=${lock_owner:-<empty>}" >&2
+  fi
+  [ "$returned_status:$lock_owner" = "37:" ]
+}
+
+@test "codex-monitor: scoped direct TERM reaps TUI and returns signal status" {
+  skip_on_windows "uses POSIX direct-child signal semantics"
+
+  local gate="$TEST_PROJECT/hold-tui"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  local server_term="$TEST_PROJECT/server-term.log"
+  local launcher_term="$TEST_PROJECT/launcher-term.log"
+  local tui_term="$TEST_PROJECT/tui-term.log"
+  local launcher="$TEST_PROJECT/fake-launcher"
+  local key pidfile server_pid launcher_pid tui_pid monitor_status tui_gone lock_owner
+  _make_term_recording_launcher "$launcher"
+  TEST_TUI_PID_FILE="$TEST_PROJECT/tui.pid"
+
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd)" scope-direct-term | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+  env FAKE_TERM_LOG="$server_term" FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_TERM_LOG="$launcher_term" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
+    FAKE_TUI_PID_FILE="$TEST_TUI_PID_FILE" FAKE_TUI_TERM_LOG="$tui_term" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-direct-term --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  server_pid="$(cat "$pidfile")"
+  launcher_pid="$(cat "$launcher_ready")"
+  tui_pid="$(cat "$TEST_TUI_PID_FILE")"
+
+  kill -TERM "$TEST_MONITOR_PID"
+  if wait "$TEST_MONITOR_PID"; then monitor_status=0; else monitor_status=$?; fi
+  TEST_MONITOR_PID=""
+
+  tui_gone=1
+  if ! wait_for_pid_exit "$tui_pid"; then
+    tui_gone=0
+    kill "$tui_pid" 2>/dev/null || true
+    wait_for_pid_exit "$tui_pid" || true
+  fi
+  lock_owner="$(. "$SCRIPTS/lib/storage.sh"; agmsg_runtime_lock_owner "codex-app-server:$key")"
+
+  [ "$monitor_status" -eq 143 ]
+  if [ "$tui_gone" -ne 1 ]; then
+    echo "signal observation: status=$monitor_status tui_gone=$tui_gone" >&2
+  fi
+  [ "$tui_gone" -eq 1 ]
+  wait_for_pid_exit "$server_pid"
+  wait_for_pid_exit "$launcher_pid"
+  grep -qx 'tui TERM' "$tui_term"
+  grep -qx 'server TERM' "$server_term"
+  grep -qx 'launcher TERM' "$launcher_term"
+  [ "$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
+  [ -z "$lock_owner" ]
 }
 
 @test "codex-monitor: scoped fail-open exit preserves status and argv" {

@@ -151,6 +151,7 @@ PORT_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.port"
 VERSION_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.version"
 server_bg=""
 launcher_bg=""
+tui_bg=""
 SCOPED_LEASE_RESOURCE=""
 scoped_cleanup_done=0
 scoped_lease_held=0
@@ -167,7 +168,6 @@ scoped_job_is_running() {
 cleanup_scoped_invocation() {
   [ -n "${INVOCATION_SCOPE:-}" ] || return 0
   [ "$scoped_cleanup_done" -eq 0 ] || return 0
-  scoped_cleanup_done=1
 
   local child_pid recorded_server_pid
   for child_pid in "$server_bg" "$launcher_bg"; do
@@ -182,13 +182,24 @@ cleanup_scoped_invocation() {
 
   recorded_server_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
   if [ -n "$server_bg" ] && [ "$recorded_server_pid" = "$server_bg" ]; then
-    rm -f "$SERVER_LOG" "$SERVER_PID" "$PORT_FILE" "$VERSION_FILE"
+    rm -f "$SERVER_LOG" "$SERVER_PID" "$PORT_FILE" "$VERSION_FILE" 2>/dev/null || true
   fi
 
   if [ "$scoped_lease_held" -eq 1 ]; then
     scoped_lease_held=0
-    agmsg_runtime_lock_release "$SCOPED_LEASE_RESOURCE" "$$"
+    agmsg_runtime_lock_release "$SCOPED_LEASE_RESOURCE" "$$" || true
   fi
+  scoped_cleanup_done=1
+}
+
+terminate_scoped_invocation() {
+  local signal_status="$1"
+  if scoped_job_is_running "$tui_bg"; then
+    kill "$tui_bg" 2>/dev/null || true
+  fi
+  [ -z "$tui_bg" ] || wait "$tui_bg" 2>/dev/null || true
+  cleanup_scoped_invocation
+  exit "$signal_status"
 }
 
 CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
@@ -205,6 +216,9 @@ if [ -n "$INVOCATION_SCOPE" ]; then
   fi
   scoped_lease_held=1
   trap cleanup_scoped_invocation EXIT
+  # A direct TERM to the scoped supervisor is part of the lifecycle contract:
+  # stop/reap its captured TUI first, drain its other children, and return 143.
+  trap 'terminate_scoped_invocation 143' TERM
 fi
 
 mkdir -p "$RUN_DIR"
