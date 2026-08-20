@@ -14,6 +14,7 @@ import {
   activateKeyRotations,
   authorityFileFault,
   authorityFileRemedy,
+  shellQuote,
   describeChildExit,
   canonicalJson,
   consistentReadStateContext,
@@ -557,6 +558,71 @@ test("the permission fault carries the command that clears it, and nothing else 
         remedy !== null, fault !== null,
         `mode 0${mode.toString(8)} privateFile=${privateFile}: fault=${fault} remedy=${remedy}`);
     }
+  }
+});
+
+test("the remedy we print is a command that runs, on a path that fights back", async () => {
+  if (process.platform === "win32") return;
+
+  // A team name may contain a space and a single quote -- lib/validate.sh
+  // rejects only empty, `.`, `..`, `/`, `\\`, a leading `-`, and control
+  // characters -- and $HOME is outside our control entirely. So the assertion
+  // is not "the string looks quoted". It is: take the line we printed, hand it
+  // to a real shell, and see the right file change and nothing else.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-remedy-"));
+  try {
+    const dir = join(root, "a b", "it's", "teams", "x");
+    await mkdir(dir, { recursive: true });
+    const target = join(dir, "config.json");
+    const bystander = join(root, "bystander");
+    await writeFile(target, "{}\n");
+    await writeFile(bystander, "{}\n");
+    await chmod(target, 0o664);
+    await chmod(bystander, 0o664);
+
+    const before = await stat(target);
+    const fault = authorityFileFault(before, { maxBytes: 100, privateFile: false });
+    const remedy = authorityFileRemedy(before, { privateFile: false });
+    // The premise: this file is one the engine actually refuses. Without it the
+    // chmod below could be "fixing" something that was never wrong.
+    assert.ok(fault, "0664 must be a fault, or this test proves nothing");
+    assert.ok(remedy, "a fault with a mode remedy must offer one");
+
+    const command = `${remedy} ${shellQuote(target)}`;
+    const ran = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+    assert.equal(ran.status, 0, `printed command failed: ${ran.stderr}`);
+
+    const after = await stat(target);
+    // It changed...
+    assert.notEqual(after.mode & 0o7777, before.mode & 0o7777);
+    // ...into a mode the engine accepts, stated the way the engine states it.
+    assert.equal(after.mode & 0o022, 0);
+    assert.equal(authorityFileFault(after, { maxBytes: 100, privateFile: false }), null);
+    // ...and only it. An unquoted path would have split at the space and made
+    // this a command about several files, or a different one.
+    assert.equal((await stat(bystander)).mode & 0o7777, 0o664);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shellQuote survives what the validator lets through", () => {
+  if (process.platform === "win32") return;
+
+  // Round-trip through a real shell rather than comparing to an expected
+  // string: the question is what the pasting shell does with it, and an
+  // expected-string assertion would only re-state the implementation.
+  for (const value of [
+    "/plain/path",
+    "/with a space/config.json",
+    "/with'a'quote/config.json",
+    "/both it's here/config.json",
+    "/$(touch pwned)/config.json",
+    "/back\\slash/config.json",
+  ]) {
+    const out = spawnSync("sh", ["-c", `printf %s ${shellQuote(value)}`], { encoding: "utf8" });
+    assert.equal(out.status, 0, `shell rejected ${shellQuote(value)}`);
+    assert.equal(out.stdout, value, `did not round-trip: ${value}`);
   }
 });
 

@@ -1038,3 +1038,83 @@ CYG
   [ "$(( 8#$after & 8#0022 ))" -eq 0 ]
   grep -Fq "$cfg" <<<"$output"
 }
+
+# The engine refuses a symlink BEFORE it looks at the mode ("must not be a
+# symbolic link"), so a symlinked binding is not in the set this walk is for.
+# `[ -f ]` follows symlinks and so does `chmod`: the old shape would have
+# changed a file OUTSIDE the store and announced a repair that repaired nothing,
+# because the binding stays refused either way.
+@test "install --update: does not follow a symlinked binding to something outside the store (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" lnk alice claude-code /tmp/install-804-d
+
+  local cfg outside before after
+  cfg="$SK/teams/lnk/config.json"
+  outside="$FAKE_HOME/outside.json"
+
+  cp "$cfg" "$outside"
+  chmod 0664 "$outside"
+  rm -f "$cfg"
+  ln -s "$outside" "$cfg"
+
+  before="$(file_mode "$outside")"
+  [ "$before" = "664" ]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$outside")"
+  # The file the symlink pointed at is untouched...
+  [ "$after" = "664" ]
+  # ...and nothing was claimed about it.
+  refute grep -Fq "$cfg" <<<"$output"
+  refute grep -Fq "$outside" <<<"$output"
+}
+
+# lib/validate.sh rejects `.` and `..` and allows `.anything`, so a team whose
+# name starts with a dot is a legal team with a real binding. A `teams/*/` glob
+# does not match it -- silently, which is the whole failure mode of this issue
+# repeated one level up.
+@test "install --update: corrects a binding under a dot-leading team name (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" .dotteam alice claude-code /tmp/install-804-e
+
+  local cfg before after
+  cfg="$SK/teams/.dotteam/config.json"
+  [ -f "$cfg" ]
+
+  chmod 0664 "$cfg"
+  before="$(file_mode "$cfg")"
+  [ "$before" = "664" ]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$cfg")"
+  [ "$after" != "$before" ]
+  [ "$(( 8#$after & 8#0022 ))" -eq 0 ]
+}
+
+# The engine guards its mode check with `process.platform !== "win32"` and it is
+# the LAST thing it consults, so on Windows no binding is ever refused for its
+# mode. MSYS also reports modes the filesystem does not carry. Correcting there
+# would announce that the sync engine refuses a file the sync engine is happy
+# with -- on every update, on the one platform where that sentence cannot be
+# true.
+@test "install --update: does not touch or announce bindings on Windows (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" win alice claude-code /tmp/install-804-f
+
+  local cfg before after
+  cfg="$SK/teams/win/config.json"
+  chmod 0664 "$cfg"
+  before="$(file_mode "$cfg")"
+  [ "$before" = "664" ]
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$cfg")"
+  [ "$after" = "664" ]
+  refute grep -Fq "tightened" <<<"$output"
+}
