@@ -2146,6 +2146,13 @@ JSON
 printf '%s\n' "$*" >> "$AGMSG_TEST_LOG"
 EOF
   chmod +x "$fake"
+  # A no-key launch keeps the explicit URL ahead of the legacy project record.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/hash.sh"
+  local legacy_hash
+  legacy_hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.$legacy_hash.port"
 
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store" \
@@ -2153,7 +2160,8 @@ EOF
   AGMSG_CODEX_BRIDGE_CMD="$fake" \
   AGMSG_TEST_LOG="$log" \
   CODEX_THREAD_ID="thread-123" \
-    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+    env -u AGMSG_CODEX_APP_SERVER_KEY \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
 
   for _ in {1..20}; do
     [ -f "$log" ] && break
@@ -2192,10 +2200,10 @@ EOF
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
   AGMSG_CODEX_APP_SERVER_KEY=scoped-key \
+  AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:4444 \
   AGMSG_AGENT_PID="$foreign_pid" \
   CODEX_THREAD_ID=thread-scoped \
-    env -u AGMSG_CODEX_BRIDGE_APP_SERVER \
-      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
   kill "$foreign_pid" 2>/dev/null || true
   wait "$foreign_pid" 2>/dev/null || true
 
@@ -2203,6 +2211,7 @@ EOF
   request="$(cat "$request_file")"
   [ "$request" = $'codex\tthread-scoped\tws://127.0.0.1:2222' ]
   [[ "$request" != *'ws://127.0.0.1:1111'* ]]
+  [[ "$request" != *'ws://127.0.0.1:4444'* ]]
   [[ "$request" != *'unix:///tmp/foreign.sock'* ]]
 }
 

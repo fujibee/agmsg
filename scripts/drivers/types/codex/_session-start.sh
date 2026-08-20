@@ -123,27 +123,28 @@ agmsg_session_start() {
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
   [ -n "$PAIRS" ] || exit 0
-  app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
-  if [ -z "$app_server" ] && [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+  if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
     app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
-  fi
-  if [ -z "$app_server" ]; then
-    agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
-    if [ -n "$agent_pid" ]; then
-      agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
-      app_server=$(printf '%s\n' "$agent_cmd" \
-        | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
-        | head -1)
+  else
+    app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
+    if [ -z "$app_server" ]; then
+      agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
+      if [ -n "$agent_pid" ]; then
+        agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
+        app_server=$(printf '%s\n' "$agent_cmd" \
+          | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
+          | head -1)
+      fi
     fi
-  fi
-  if [ -z "$app_server" ]; then
-    app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
-  fi
-  if [ -z "$app_server" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    socket_path="$RUN_DIR/codex-app-server.$project_hash.sock"
-    if [ -S "$socket_path" ] || [ "${AGMSG_TEST_ASSUME_CODEX_SOCKET:-}" = "$socket_path" ]; then
-      app_server="unix://$socket_path"
+    if [ -z "$app_server" ]; then
+      app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+    fi
+    if [ -z "$app_server" ]; then
+      project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
+      socket_path="$RUN_DIR/codex-app-server.$project_hash.sock"
+      if [ -S "$socket_path" ] || [ "${AGMSG_TEST_ASSUME_CODEX_SOCKET:-}" = "$socket_path" ]; then
+        app_server="unix://$socket_path"
+      fi
     fi
   fi
   [ -n "$app_server" ] || exit 0

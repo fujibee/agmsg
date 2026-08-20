@@ -74,12 +74,13 @@ PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PRO
 
 mkdir -p "$RUN_DIR"
 
-# The app-server is shared by every Codex TUI in a project. Bind dispatcher and
-# role-child lifetime to that shared process rather than whichever TUI happened
-# to start first. Tests/older launchers without the sidecar retain parent-PID
-# fallback behavior.
+# Scoped launchers must bind to their exact server record; a missing/dead record
+# is the end of that scope, never permission to follow a project peer. Legacy
+# launchers retain the parent-PID fallback used before scoped servers existed.
 LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
+if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+  [ -n "$LIFETIME_PID" ] && _agmsg_pid_alive_local "$LIFETIME_PID" || exit 0
+elif [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
@@ -227,6 +228,32 @@ poll_sleep() {
   return 0
 }
 
+mark_runtime_lock_standby() {
+  local resource="$1"
+  [ -n "${AGMSG_TEST_LOCK_STANDBY_BARRIER:-}" ] || return 0
+  printf '%s' "$resource" > "$AGMSG_TEST_LOCK_STANDBY_BARRIER.$$"
+}
+
+acquire_runtime_lock_while_alive() {
+  local resource="$1" lifetime_pid="$2"
+  while _agmsg_pid_alive_local "$lifetime_pid"; do
+    if acquire_runtime_lock "$resource"; then
+      if _agmsg_pid_alive_local "$lifetime_pid"; then
+        poll_reset
+        return 0
+      fi
+      # The scope died inside acquisition. Drop only our CAS row; never signal
+      # the previous owner or any process from another scope.
+      agmsg_runtime_lock_release "$resource" "$$" || true
+      HELD_LOCK_RESOURCE=""
+      return 1
+    fi
+    mark_runtime_lock_standby "$resource"
+    poll_sleep
+  done
+  return 1
+}
+
 # Any change here can change the safe subscription set. Include the request
 # thread plus each role's recorded session/project, not merely registrations:
 # actas/resume rewrites a role record without changing identities.sh output.
@@ -261,11 +288,7 @@ if [ -z "$ROLE_PAIR" ]; then
   # disappear just because the first scope currently owns the CAS row. Retry
   # only while this launcher's exact app-server lifetime is alive; that lifetime
   # is the bound, so a dead scope neither polls forever nor signals its peer.
-  while _agmsg_pid_alive_local "$LIFETIME_PID"; do
-    acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" && break
-    poll_sleep
-  done
-  [ "$HELD_LOCK_RESOURCE" = "$DISPATCHER_LOCK_RESOURCE" ] || exit 0
+  acquire_runtime_lock_while_alive "$DISPATCHER_LOCK_RESOURCE" "$LIFETIME_PID" || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
@@ -304,7 +327,11 @@ fi
 # this lock every dispatcher generation left another full set of children behind.
 # The lock makes those re-spawns exit on arrival instead of accumulating.
 CHILD_LOCK_RESOURCE="codex-child:$PROJECT_HASH:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
-acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
+if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+  acquire_runtime_lock_while_alive "$CHILD_LOCK_RESOURCE" "$PARENT_PID" || exit 0
+else
+  acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
+fi
 
 # Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
 # already seen registered, so an empty list here is either the brief actas write

@@ -396,13 +396,43 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   } > "$fake"
   chmod +x "$fake"
 
-  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
-    AGMSG_CODEX_APP_SERVER_KEY=scoped-key AGMSG_NODE="$fake" \
+  ( unset CODEX_THREAD_ID
+    AGMSG_CODEX_APP_SERVER_KEY=scoped-key \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_NODE="$fake" \
       bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
 
   [ "$(recorded_uuid team alice)" = "thr-scoped" ]
   grep -q -- '--app-server ws://127.0.0.1:2222' "$log"
   ! grep -q -- 'ws://127.0.0.1:1111' "$log"
+  ! grep -q -- 'ws://127.0.0.1:3333' "$log"
+}
+
+@test "codex record: no scoped server key keeps explicit app-server URL precedence" {
+  local proj ids hash fake log
+  proj="$(mktemp -d)"
+  ids="$TEST_SKILL_DIR/loaded.txt"
+  fake="$TEST_SKILL_DIR/logging-node"
+  log="$TEST_SKILL_DIR/logging-node.args"
+  printf 'thr-legacy\n' > "$ids"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "%%s\\n" "$*" > %q\n' "$log"
+    printf 'cat %q\n' "$ids"
+  } > "$fake"
+  chmod +x "$fake"
+
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_APP_SERVER_KEY
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 AGMSG_NODE="$fake" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+
+  [ "$(recorded_uuid team alice)" = "thr-legacy" ]
+  grep -q -- '--app-server ws://127.0.0.1:3333' "$log"
+  ! grep -q -- 'ws://127.0.0.1:2222' "$log"
 }
 
 @test "codex record: no port file and no variable records nothing, it does not guess" {

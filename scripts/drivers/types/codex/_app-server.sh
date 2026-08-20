@@ -26,9 +26,9 @@
 
 # Echo the app-server URL for <project>, or nothing.
 #
-# The environment variable wins when present: it is the value monitor exported
-# for this very process, and preferring it keeps every context that already
-# worked on exactly the path it used before.
+# With no scoped key, the environment variable still wins: it is the value a
+# legacy monitor exported for this process. A scoped key identifies the exact
+# server instead, so its port record must win over any inherited generic URL.
 _agmsg_codex_app_server_record_key() {
   local project="$1"
   if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
@@ -41,7 +41,8 @@ _agmsg_codex_app_server_record_key() {
 _agmsg_codex_app_server_url() {
   local project="$1" record_key port_file port
   [ -n "$project" ] || return 0
-  if [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+  if [ -z "${AGMSG_CODEX_APP_SERVER_KEY:-}" ] \
+    && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
     printf '%s' "$AGMSG_CODEX_BRIDGE_APP_SERVER"
     return 0
   fi

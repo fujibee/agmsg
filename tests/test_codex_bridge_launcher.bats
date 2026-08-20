@@ -231,17 +231,35 @@ run_launcher() {
 }
 
 @test "launcher: standby dispatcher takes over after the first scoped server exits" {
-  # Keep the first dispatcher free of role children: this test isolates the
-  # project-scoped dispatcher handoff, then adds the role after scope B owns it.
-  bash "$SCRIPTS/leave.sh" team alice >/dev/null
-  local hash lock_resource owner i
-  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
-  lock_resource="codex-dispatcher:$hash"
+  # Hold A's bridge open after A's server dies. That keeps A's role child lock
+  # occupied while B takes the dispatcher and exercises the real handoff race.
+  export AGMSG_CODEX_BRIDGE_CMD="$SCRIPTS/drivers/types/codex/codex-bridge.js"
+  export AGMSG_TEST_RELEASE_A="$TEST_SKILL_DIR/release-a"
+  export AGMSG_TEST_RELEASE_B="$TEST_SKILL_DIR/release-b"
+  cat > "$AGMSG_CODEX_BRIDGE_CMD" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CAPTURE"
+case "$*" in
+  *ws://127.0.0.1:1111*) release="$AGMSG_TEST_RELEASE_A" ;;
+  *ws://127.0.0.1:2222*) release="$AGMSG_TEST_RELEASE_B" ;;
+  *) exit 1 ;;
+esac
+while [ ! -f "$release" ]; do sleep 0.1; done
+EOF
+  chmod +x "$AGMSG_CODEX_BRIDGE_CMD"
+  put_record team alice thread-alice "$PROJ" codex
 
-  sleep 12 3>&- & local parent_a=$!
-  sleep 12 3>&- & local parent_b=$!
-  sleep 12 3>&- & local lifetime_a=$!
-  sleep 12 3>&- & local lifetime_b=$!
+  local hash pair_hash dispatcher_resource child_resource owner i
+  local bridge_a_pid child_a_pid child_b_pid bridge_b_pid child_barrier candidate
+  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  pair_hash=$(printf '%s' $'team\talice' | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  dispatcher_resource="codex-dispatcher:$hash"
+  child_resource="codex-child:$hash:$pair_hash"
+
+  sleep 30 3>&- & local parent_a=$!
+  sleep 30 3>&- & local parent_b=$!
+  sleep 30 3>&- & local lifetime_a=$!
+  sleep 30 3>&- & local lifetime_b=$!
   printf '%s\n' "$lifetime_a" > "$RUN_DIR/codex-app-server.scope-a.pid"
   printf '%s\n' "$lifetime_b" > "$RUN_DIR/codex-app-server.scope-b.pid"
 
@@ -249,48 +267,128 @@ run_launcher() {
     bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1111" "$parent_a" >/dev/null 2>&1 3>&- &
   local launcher_a=$!
   owner=""
-  for i in {1..50}; do
+  for i in {1..80}; do
     owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
-      "SELECT owner_pid FROM locks WHERE resource='$lock_resource';" 2>/dev/null || true)"
+      "SELECT owner_pid FROM locks WHERE resource='$dispatcher_resource';" 2>/dev/null || true)"
     [ "$owner" = "$launcher_a" ] && break
     sleep 0.1
   done
   [ "$owner" = "$launcher_a" ]
+  for i in {1..80}; do
+    child_a_pid="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$child_resource';" 2>/dev/null || true)"
+    [ -n "$child_a_pid" ] && [ -f "$RUN_DIR/codex-bridge.team.alice.pid" ] && break
+    sleep 0.1
+  done
+  [ -n "$child_a_pid" ]
+  bridge_a_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  kill -0 "$child_a_pid"
+  kill -0 "$bridge_a_pid"
+  grep -q -- '--app-server ws://127.0.0.1:1111' "$CAPTURE"
 
+  local standby_barrier="$TEST_SKILL_DIR/standby-observed"
   AGMSG_CODEX_APP_SERVER_KEY=scope-b \
+  AGMSG_TEST_LOCK_STANDBY_BARRIER="$standby_barrier" \
     bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2222" "$parent_b" >/dev/null 2>&1 3>&- &
   local launcher_b=$!
-  sleep 0.5
-  kill -0 "$launcher_b"
-  [ ! -f "$CAPTURE" ]
+  for i in {1..80}; do
+    [ -f "$standby_barrier.$launcher_b" ] && break
+    sleep 0.1
+  done
+  [ "$(cat "$standby_barrier.$launcher_b" 2>/dev/null)" = "$dispatcher_resource" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$dispatcher_resource';")" = "$launcher_a" ]
 
   kill "$lifetime_a" 2>/dev/null || true
   wait "$lifetime_a" 2>/dev/null || true
   owner=""
-  for i in {1..80}; do
+  for i in {1..100}; do
     owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
-      "SELECT owner_pid FROM locks WHERE resource='$lock_resource';" 2>/dev/null || true)"
+      "SELECT owner_pid FROM locks WHERE resource='$dispatcher_resource';" 2>/dev/null || true)"
     [ "$owner" = "$launcher_b" ] && break
     sleep 0.1
   done
   [ "$owner" = "$launcher_b" ]
-
-  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
-  put_record team alice thread-scope-b "$PROJ" codex
-  for i in {1..80}; do
-    grep -q -- '--app-server ws://127.0.0.1:2222' "$CAPTURE" 2>/dev/null && break
+  # A's custom bridge is still blocked, so its role child still owns the child
+  # lock when B has already become dispatcher.
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$child_resource';")" = "$child_a_pid" ]
+  child_barrier=""
+  for i in {1..100}; do
+    for candidate in "$standby_barrier".*; do
+      [ -f "$candidate" ] || continue
+      if [ "$(cat "$candidate")" = "$child_resource" ]; then
+        child_barrier="$candidate"
+        break 2
+      fi
+    done
     sleep 0.1
   done
-  grep -q -- '--app-server ws://127.0.0.1:2222' "$CAPTURE"
-  ! grep -q -- 'ws://127.0.0.1:1111' "$CAPTURE"
-  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
+  [ -n "$child_barrier" ]
+  child_b_pid="${child_barrier##*.}"
+  kill -0 "$child_b_pid"
 
+  : > "$AGMSG_TEST_RELEASE_A"
+  for i in {1..120}; do
+    owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$child_resource';" 2>/dev/null || true)"
+    [ "$owner" = "$child_b_pid" ] && [ -f "$RUN_DIR/codex-bridge.team.alice.pid" ] && break
+    sleep 0.1
+  done
+  [ "$owner" = "$child_b_pid" ]
+  bridge_b_pid="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  [ "$bridge_b_pid" != "$bridge_a_pid" ]
+  refute kill -0 "$bridge_a_pid" 2>/dev/null
+  kill -0 "$bridge_b_pid"
+  grep -q -- '--app-server ws://127.0.0.1:2222' "$CAPTURE"
+  # Stability interval: one unchanged B bridge pid and one unchanged B child
+  # lock owner, not merely a historical capture line.
+  sleep 1
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.pid")" = "$bridge_b_pid" ]
+  kill -0 "$bridge_b_pid"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$child_resource';")" = "$child_b_pid" ]
+
+  : > "$AGMSG_TEST_RELEASE_B"
   kill "$lifetime_b" "$launcher_a" "$launcher_b" "$parent_a" "$parent_b" 2>/dev/null || true
   wait "$lifetime_b" 2>/dev/null || true
   wait "$launcher_a" 2>/dev/null || true
   wait "$launcher_b" 2>/dev/null || true
   wait "$parent_a" 2>/dev/null || true
   wait "$parent_b" 2>/dev/null || true
+}
+
+@test "launcher: exact scoped server lifetime rejects a missing pid record" {
+  sleep 5 3>&- & local parent=$!
+  AGMSG_CODEX_APP_SERVER_KEY=missing-scope \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2222" "$parent" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..30}; do
+    kill -0 "$launcher" 2>/dev/null || break
+    sleep 0.05
+  done
+  refute kill -0 "$launcher" 2>/dev/null
+  kill "$parent" 2>/dev/null || true
+  wait "$launcher" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+}
+
+@test "launcher: exact scoped server lifetime rejects a dead pid record" {
+  sleep 0.1 3>&- & local dead=$!
+  wait "$dead"
+  printf '%s\n' "$dead" > "$RUN_DIR/codex-app-server.dead-scope.pid"
+  sleep 5 3>&- & local parent=$!
+  AGMSG_CODEX_APP_SERVER_KEY=dead-scope \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2222" "$parent" >/dev/null 2>&1 3>&- &
+  local launcher=$! i
+  for i in {1..30}; do
+    kill -0 "$launcher" 2>/dev/null || break
+    sleep 0.05
+  done
+  refute kill -0 "$launcher" 2>/dev/null
+  kill "$parent" 2>/dev/null || true
+  wait "$launcher" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
 }
 
 @test "launcher: stale dispatcher reclamation remains singleton under contention" {
