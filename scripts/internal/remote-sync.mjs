@@ -599,7 +599,7 @@ export function authorityFileFault(stats, { maxBytes, privateFile }) {
     // looking at 0664 or 0666 or a directory bit, and the two remedies differ.
     // Printed the way `chmod` and `ls` speak, four digits, so it can be
     // compared with what `stat` prints without arithmetic.
-    const mode = `0${(stats.mode & 0o7777).toString(8).padStart(3, "0")}`;
+    const mode = (stats.mode & 0o7777).toString(8).padStart(4, "0");
     return privateFile
       ? `must not be readable or writable by group or others (it is ${mode})`
       : `must not be writable by group or others (it is ${mode})`;
