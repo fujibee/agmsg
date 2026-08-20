@@ -1013,3 +1013,28 @@ CYG
   # Nothing was announced about it either.
   refute grep -Fq "$cfg" <<<"$output"
 }
+
+# The condition is two tests, not one: `find -perm -MODE` means ALL of the named
+# bits, so a single `-go+w` would skip a file writable by only one of them. Each
+# half needs its own row, or deleting either one stays green. 0664 is the
+# reported shape; this is the other.
+@test "install --update: clears other-write on a binding left 0646 (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" oth alice claude-code /tmp/install-804-c
+
+  local cfg before after
+  cfg="$SK/teams/oth/config.json"
+  [ -f "$cfg" ]
+
+  chmod 0646 "$cfg"
+  before="$(file_mode "$cfg")"
+  [ "$before" = "646" ]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$cfg")"
+  [ "$after" != "$before" ]
+  [ "$(( 8#$after & 8#0022 ))" -eq 0 ]
+  grep -Fq "$cfg" <<<"$output"
+}
