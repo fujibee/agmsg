@@ -564,44 +564,62 @@ test("the permission fault carries the command that clears it, and nothing else 
 test("the remedy we print is a command that runs, on a path that fights back", async () => {
   if (process.platform === "win32") return;
 
+  // THE PRODUCTION ENTRY, not the pieces beside it. An earlier version of this
+  // test built the command itself out of `authorityFileRemedy` and
+  // `shellQuote` -- which proves those two work and says nothing about whether
+  // the sentence production emits uses either. Deleting the `shellQuote` call
+  // from both throw sites left it green. This drives `loadConfig`, takes the
+  // message it actually throws, and cuts the command out of that.
+  //
   // A team name may contain a space and a single quote -- lib/validate.sh
   // rejects only empty, `.`, `..`, `/`, `\\`, a leading `-`, and control
-  // characters -- and $HOME is outside our control entirely. So the assertion
-  // is not "the string looks quoted". It is: take the line we printed, hand it
-  // to a real shell, and see the right file change and nothing else.
+  // characters -- and the store sits under $HOME, which is outside our control
+  // entirely.
   const root = await mkdtemp(join(tmpdir(), "agmsg-remedy-"));
+  const previousConnection = process.env.AGMSG_SYNC_CONNECTION_DIR;
+  const previousSkill = process.env.SKILL_DIR;
   try {
-    const dir = join(root, "a b", "it's", "teams", "x");
+    const team = "a b's team";
+    const dir = join(root, "teams", team);
     await mkdir(dir, { recursive: true });
     const target = join(dir, "config.json");
     const bystander = join(root, "bystander");
-    await writeFile(target, "{}\n");
+    await writeFile(target, JSON.stringify({ local_team: team }));
     await writeFile(bystander, "{}\n");
     await chmod(target, 0o664);
     await chmod(bystander, 0o664);
 
-    const before = await stat(target);
-    const fault = authorityFileFault(before, { maxBytes: 100, privateFile: false });
-    const remedy = authorityFileRemedy(before, { privateFile: false });
-    // The premise: this file is one the engine actually refuses. Without it the
-    // chmod below could be "fixing" something that was never wrong.
-    assert.ok(fault, "0664 must be a fault, or this test proves nothing");
-    assert.ok(remedy, "a fault with a mode remedy must offer one");
+    process.env.AGMSG_SYNC_CONNECTION_DIR = root;
+    delete process.env.SKILL_DIR;
 
-    const command = `${remedy} ${shellQuote(target)}`;
+    // The premise: production refuses this file, and says so with a command.
+    // Without asserting it, a message that stopped offering one would leave the
+    // rest of this test skipping quietly.
+    let message = null;
+    await assert.rejects(() => loadConfig(team), (error) => {
+      message = error.message;
+      return true;
+    });
+    assert.match(message, /must not be writable by group or others \(it is 0664\)/u);
+    assert.ok(message.includes(" — fix it with: "), `no remedy offered: ${message}`);
+
+    const command = message.split(" — fix it with: ")[1];
     const ran = spawnSync("sh", ["-c", command], { encoding: "utf8" });
-    assert.equal(ran.status, 0, `printed command failed: ${ran.stderr}`);
+    assert.equal(ran.status, 0, `printed command failed: ${command}\n${ran.stderr}`);
 
     const after = await stat(target);
-    // It changed...
-    assert.notEqual(after.mode & 0o7777, before.mode & 0o7777);
-    // ...into a mode the engine accepts, stated the way the engine states it.
+    // It changed, into a mode the engine accepts, stated the way it states it.
+    assert.notEqual(after.mode & 0o7777, 0o664);
     assert.equal(after.mode & 0o022, 0);
     assert.equal(authorityFileFault(after, { maxBytes: 100, privateFile: false }), null);
-    // ...and only it. An unquoted path would have split at the space and made
-    // this a command about several files, or a different one.
+    // And only it. Unquoted, the command would have split at the space and been
+    // about a different file, or about several.
     assert.equal((await stat(bystander)).mode & 0o7777, 0o664);
   } finally {
+    if (previousConnection === undefined) delete process.env.AGMSG_SYNC_CONNECTION_DIR;
+    else process.env.AGMSG_SYNC_CONNECTION_DIR = previousConnection;
+    if (previousSkill === undefined) delete process.env.SKILL_DIR;
+    else process.env.SKILL_DIR = previousSkill;
     await rm(root, { recursive: true, force: true });
   }
 });
