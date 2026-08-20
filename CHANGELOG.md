@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-08-20
+
+### Fixed
+- Keep curl's stderr on the GET path, in the shape the POST side ended up with (#850) (#854)
+- Correct a binding an older release left writable, and say what to run if you do not upgrade (#902)
+- Keep curl's stderr, and hold the temporaries in one condemned directory (#850) (#903)
+- Pass the history and unread-marker SQL on stdin (#777) (#899)
+- Pull a team larger than a command line, and say what it is doing (#882) (#895)
+- Keep the binding a re-point replaces instead of destroying it (#884)
+- Pin count-invisible heavy test files apart, raise the shard timeout with real margin (#885)
+- Derive --update's type re-detection from the same list as TPL_TYPE (#846) (#880)
+- Take the basename of the whole ps comm path (#770) (#771)
+- Map grok-build to grok in the pid walk (#860)
+- Fold sentinel '-' into the empty session-id path (#857)
+
+### Documentation
+- Say that main takes squash commits only (#845)
+
 ## [1.2.1] - 2026-08-18
 
 ### Added
@@ -42,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A start that never began is a failed start, not a silent return (#810)
 
 ### Documentation
+- State the reason, not who gave it
 - A pushed head is not a shipped one
 - The header said builtins while calling three commands
 
@@ -445,10 +464,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve symlinks before trampoline compare; doctor checks node
 - Detect the macOS CLT python3 trampoline, not just PATH presence
 - Close the python3 dependency-tiering gap on the remote path
-- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation
-- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer
-- Fail closed on incompleteness; shrink v1 schema
-- Wire 'agmsg team list' into actual dispatch entry points
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
+- Fail closed on incompleteness; shrink v1 schema (co1 P2, mentor-cc ruling)
+- Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
 - Separate token input from E2EE prompts
@@ -483,15 +502,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read messages from the event log too, not just the legacy table
 - Assert against the event log, not the legacy messages table
 - Escape interpolated names in rename/rename-team SQL (#223, #87)
-- Jsonl compact keys reads by tuple, not a space-join (#221)
+- Jsonl compact keys reads by tuple, not a space-join (co1 #221)
 - Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
-- Jsonl mark aborts on a failed existing-reads scan (#207)
-- Jsonl driver must not swallow failures as ok (#207)
+- Jsonl mark aborts on a failed existing-reads scan (co1 #207 residual)
+- Jsonl driver must not swallow failures as ok (co1 #207 review)
 - Watch-once stale-wake token = unread-set digest, not a max id (#207)
-- Document --limit semantics + make storage_history agent truly optional (#206)
-- Export skips unknown event types; pin high-water with a tail-duplicate test (#205)
-- Describe is a metadata op; surface backend errors; chronological reads (#204)
-- Legacy read, pipefail framing, §1.4 control ops (#204)
+- Document --limit semantics + make storage_history agent truly optional (co1 #206 review)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (co1 #205 review)
+- Describe is a metadata op; surface backend errors; chronological reads (co1 re-review, #204)
+- Legacy read, pipefail framing, §1.4 control ops (co1 review, #204)
 
 ### Performance
 - Seal a bulk push page in parallel (#502)
@@ -519,8 +538,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close Stage 2 frontier edge cases
 - Define Stage 2 read-state synchronization
 - Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
-- Correct the ctrl:despawn cursor-advance comment
-- Clarify stdout framing, cursor token, watch tip (#203)
+- Correct the ctrl:despawn cursor-advance comment (co1 step-3 review)
+- Clarify stdout framing, cursor token, watch tip (co1 review, #203)
 - Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
 - Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
@@ -748,7 +767,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help
+- List hermes in the --agent-type help (co1 nit)
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -831,6 +850,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/fujibee/agmsg/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.6...v1.2.0
 [1.2.0-rc.6]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.5...v1.2.0-rc.6
 [1.2.0-rc.5]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.4...v1.2.0-rc.5
