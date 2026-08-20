@@ -288,7 +288,11 @@ if [ -z "$ROLE_PAIR" ]; then
   # disappear just because the first scope currently owns the CAS row. Retry
   # only while this launcher's exact app-server lifetime is alive; that lifetime
   # is the bound, so a dead scope neither polls forever nor signals its peer.
-  acquire_runtime_lock_while_alive "$DISPATCHER_LOCK_RESOURCE" "$LIFETIME_PID" || exit 0
+  if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+    acquire_runtime_lock_while_alive "$DISPATCHER_LOCK_RESOURCE" "$LIFETIME_PID" || exit 0
+  else
+    acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
+  fi
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do

@@ -230,6 +230,45 @@ run_launcher() {
   wait "$parent_b" 2>/dev/null || true
 }
 
+@test "launcher: a losing legacy dispatcher exits instead of standing by" {
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  local hash dispatcher_resource owner="" gone=0 i
+  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  dispatcher_resource="codex-dispatcher:$hash"
+  sleep 6 3>&- & local parent_a=$!
+  sleep 6 3>&- & local parent_b=$!
+
+  env -u AGMSG_CODEX_APP_SERVER_KEY \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_a" >/dev/null 2>&1 3>&- &
+  local launcher_a=$!
+  for i in {1..50}; do
+    owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$dispatcher_resource';" 2>/dev/null || true)"
+    [ "$owner" = "$launcher_a" ] && break
+    sleep 0.1
+  done
+  [ "$owner" = "$launcher_a" ]
+
+  env -u AGMSG_CODEX_APP_SERVER_KEY \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent_b" >/dev/null 2>&1 3>&- &
+  local launcher_b=$!
+  for i in {1..20}; do
+    jobs >/dev/null 2>&1 || true
+    if _pid_gone "$launcher_b"; then
+      gone=1
+      break
+    fi
+    sleep 0.05
+  done
+
+  kill "$launcher_a" "$launcher_b" "$parent_a" "$parent_b" 2>/dev/null || true
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+  wait "$parent_a" 2>/dev/null || true
+  wait "$parent_b" 2>/dev/null || true
+  [ "$gone" -eq 1 ]
+}
+
 @test "launcher: standby dispatcher takes over after the first scoped server exits" {
   # Hold A's bridge open after A's server dies. That keeps A's role child lock
   # occupied while B takes the dispatcher and exercises the real handoff race.
