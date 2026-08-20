@@ -641,6 +641,29 @@ export function authorityFileRemedy(stats, { privateFile }) {
   if ((stats.mode & (privateFile ? 0o077 : 0o022)) === 0) return null;
   return privateFile ? "chmod go-rwx" : "chmod go-w";
 }
+// One sentence, built in one place. `authorityFileFault` exists as a single
+// function because the wording and the condition drifted apart once (#781);
+// two call sites assembling the sentence around it is the same hazard one level
+// out. Measured: unquoting the path at only the checkpoint site left the whole
+// suite green, because nothing drove that site -- so the pin has to be on the
+// construction, not on each caller.
+//
+// The remedy goes last, so the sentence still reads as a diagnosis first. An
+// operator who already knows what to do stops at the path; one who does not
+// gets a line to paste, quoted, about the file that is actually wrong.
+export function authorityFileError(subject, path, stats, { maxBytes, privateFile }) {
+  // `maxBytes` is forwarded, not dropped. Omitting it made this return null for
+  // an oversized file whose caller had already decided there WAS a fault, and
+  // the caller then threw that null. The suite caught it; the lesson is that a
+  // wrapper around a predicate has to take every argument the predicate reads.
+  const fault = authorityFileFault(stats, { maxBytes, privateFile });
+  if (!fault) return null;
+  const remedy = authorityFileRemedy(stats, { privateFile });
+  return new Error(
+    `${subject} ${fault}: ${path}` +
+    (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
+}
+
 
 async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
   const before = await lstat(path);
@@ -648,13 +671,9 @@ async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
   if (fault) {
     // The path too: the previous message named a property without naming what
     // had it, on a machine that may hold several.
-    // The remedy last, so the sentence still reads as a diagnosis first. An
-    // operator who already knows what to do stops at the path; one who does not
-    // gets the line to paste, on the file that is actually wrong.
-    const remedy = authorityFileRemedy(before, { privateFile });
-    throw new Error(
-      `${privateFile ? "remote credential" : "connected team binding"} ${fault}: ${path}` +
-      (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
+    throw authorityFileError(
+      privateFile ? "remote credential" : "connected team binding",
+      path, before, { maxBytes, privateFile });
   }
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -1313,12 +1332,9 @@ function compareRetainedCheckpoint(config, retained) {
 
 async function readRetainedCheckpointFile(path) {
   const metadata = await lstat(path);
-  const fault = authorityFileFault(metadata, { privateFile: true });
-  if (fault) {
-    const remedy = authorityFileRemedy(metadata, { privateFile: true });
-    throw new Error(`retained age checkpoint ${fault}: ${path}` +
-      (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
-  }
+  const checkpointFault = authorityFileError(
+    "retained age checkpoint", path, metadata, { privateFile: true });
+  if (checkpointFault) throw checkpointFault;
   const records = parseStrictJsonl(await readFile(path, "utf8"));
   if (records.length < 1 || records.length > 4096) {
     throw new Error("retained age checkpoint history is invalid");
