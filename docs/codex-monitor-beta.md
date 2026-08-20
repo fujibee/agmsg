@@ -126,13 +126,13 @@ combines it with the canonical project path and records only the resulting key.
 Scoped launches always start a fresh app-server, so they pay startup cost and
 do not reuse the project server.
 
-The scoped monitor keeps its Codex TUI, app-server, and bridge launcher as
-captured children. When the TUI exits, it stops and waits for that scoped
-server/launcher/TUI launch tree before returning the TUI status. A direct
-`TERM` follows the same cleanup path and returns status `143`.
+The scoped monitor captures its Codex TUI, app-server, and bridge launcher.
+When the TUI exits, it stops and waits for those captured processes before
+returning the TUI status. A direct `TERM` follows the same cleanup path and
+returns status `143`.
 
-This is not proof that every remote or role descendant has independently
-exited. Those descendants naturally bind to the scoped app-server lifetime;
+This does not prove that any downstream remote or role descendants have
+independently exited. They naturally bind to the scoped app-server lifetime;
 the final caller still decides whether its own readiness condition is met.
 `SIGKILL` cannot run cleanup and can leave a stale lease. The next launch with
 that same scope fails closed unless it can prove the recorded owner is dead.

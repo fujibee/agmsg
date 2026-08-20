@@ -13,10 +13,10 @@ directory from that shared app-server, so closing one TUI does not provide an
 ownership boundary for its workers.  The orphan behavior is tracked in
 [#149](https://github.com/fujibee/agmsg/issues/149).
 
-Some callers launch Codex in a disposable Git worktree and must prove that all
-remote processes using that worktree have ended before removing it.  A project
-hash, process name, shared parent PID, or logical Codex thread ID cannot prove
-OS-process ownership when several sessions share one app-server.
+Some callers launch Codex in a disposable Git worktree and need a bounded
+lifecycle boundary before deciding whether the worktree is ready for removal.
+A project hash, process name, shared parent PID, or logical Codex thread ID
+cannot prove OS-process ownership when several sessions share one app-server.
 
 ## Decision
 
@@ -25,10 +25,10 @@ validated, combined with the canonical project path, and hashed before it is
 used as the app-server record key.  A scoped launch never reuses an existing
 app-server: the monitor acquires an exact scope lease, starts a fresh app-server
 as its child, runs the Codex TUI as a supervised foreground child, and on TUI
-exit stops and reaps its captured server, launcher, and TUI launch tree before
-returning the TUI status.  A direct `TERM` takes the same path and returns
-status 143.  A live duplicate scope fails closed.  Scope-less launches retain
-the existing project-shared app-server and `exec` behavior.
+exit stops and waits for its captured app-server, bridge-launcher, and TUI
+processes before returning the TUI status.  A direct `TERM` takes the same path
+and returns status 143.  A live duplicate scope fails closed.  Scope-less
+launches retain the existing project-shared app-server and `exec` behavior.
 
 Only app-server lifetime is invocation-scoped.  agmsg role seating, the bridge
 request, and dispatcher ownership remain project-scoped so concurrent sessions
@@ -53,14 +53,15 @@ token or falling back to another invocation's project server.
 
 ## Consequences
 
-- Positive: a scoped monitor has one exact server process tree that can be
-  drained without inspecting or signalling foreign project sessions.
+- Positive: a scoped monitor captures exact app-server, bridge-launcher, and
+  TUI processes that it can stop and wait for without inspecting or signalling
+  foreign project sessions.
 - Positive: fresh and resume launches use the same lifecycle contract, preserve
   the Codex exit status, and leave the existing no-scope behavior unchanged.
 - Positive: no daemon, external dependency, or second cleanup implementation is
   introduced.
 - Negative: scoped launches pay app-server startup cost on every invocation.
-- Negative: the monitor does not prove that every detached remote or role
+- Negative: the monitor does not prove that any downstream remote or role
   descendant has independently exited.  They naturally bind to the scoped
   app-server lifetime, while the final caller still decides readiness.
 - Negative: `SIGKILL` can leave a stale lease; the next same-scope launch fails
