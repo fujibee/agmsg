@@ -344,6 +344,42 @@ if [ "$UPDATE_ONLY" = true ]; then
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path grok-build)" > "$GROK_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
+  # A team config written by an older release can be group- or world-writable,
+  # and the sync engine refuses to read one that is (#804). Upgrading does not
+  # rewrite files that already exist, so without this the release we are asking
+  # people to install is the release that stops them: joined on v1.2.0-rc.5,
+  # upgraded as told, and now the binding they already had is rejected.
+  #
+  # Narrow on purpose. Only `teams/*/config.json`, only the group and other
+  # WRITE bits, and only files that actually carry them — the same condition
+  # the engine checks, so this cannot correct a file into a state the engine
+  # still refuses, and cannot touch one it would have accepted.
+  #
+  # `go-w` rather than a numeric mode: the owner's bits and any read access the
+  # operator deliberately granted are theirs, not ours to normalise.
+  #
+  # Said out loud, per file. A permission change the operator cannot see is
+  # indistinguishable from one that did not happen, and this one runs without
+  # being asked for.
+  agmsg_fixed_bindings=0
+  for agmsg_binding in "$SKILL_DIR"/teams/*/config.json; do
+    [ -f "$agmsg_binding" ] || continue
+    # `find -perm` rather than parsing `stat`, whose format flags differ between
+    # BSD and GNU — the portability trap this file has hit before. `-maxdepth`
+    # goes before the test: GNU find warns when it trails one. Two tests, not a
+    # combined `-go+w`, because `-perm -MODE` means ALL of the named bits, so
+    # the combined form would silently skip a file writable by only one of them.
+    if [ -n "$(find "$agmsg_binding" -maxdepth 0 -perm -g+w 2>/dev/null)" ] ||
+       [ -n "$(find "$agmsg_binding" -maxdepth 0 -perm -o+w 2>/dev/null)" ]; then
+      if chmod go-w "$agmsg_binding" 2>/dev/null; then
+        echo "  + tightened $agmsg_binding (was group- or world-writable; the sync engine refuses those)"
+        agmsg_fixed_bindings=$((agmsg_fixed_bindings + 1))
+      else
+        echo "  ! could not tighten $agmsg_binding — run: chmod go-w $agmsg_binding" >&2
+      fi
+    fi
+  done
+  unset agmsg_binding agmsg_fixed_bindings
   chmod +x "$SKILL_DIR/scripts/"*.sh
   chmod +x "$SKILL_DIR/scripts/drivers/types/codex/"*.sh 2>/dev/null || true
   # Refresh the Codex monitor shim (~/.agents/bin/codex) if it's ours. --update
