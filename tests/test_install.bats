@@ -951,3 +951,65 @@ CYG
   run cat "$SK/VERSION"
   [ "$output" = "$expected" ]
 }
+
+# #804, the upgrade half. test_binding_mode.bats covers the write side: join.sh
+# now writes 0600, so bindings created from here on are fine. These cover the
+# bindings that already exist. A machine that joined on v1.2.0-rc.5 has a 0664
+# binding on disk, and --update does not rewrite a file that is already there,
+# so without the store walk the upgrade we tell people to run leaves them exactly
+# as stuck as before -- having done what we asked.
+@test "install --update: clears group-write on a binding an older release left 0664 (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" upg alice claude-code /tmp/install-804-a
+
+  local cfg before after
+  cfg="$SK/teams/upg/config.json"
+  [ -f "$cfg" ]
+
+  # Put the file into the state the older release left, and prove it took --
+  # otherwise a chmod that silently did nothing would make the assertion below
+  # pass on a file that was never wrong.
+  chmod 0664 "$cfg"
+  before="$(file_mode "$cfg")"
+  [ "$before" = "664" ]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$cfg")"
+  # It changed at all...
+  [ "$after" != "$before" ]
+  # ...and it changed into a mode the readers accept, stated the way they state
+  # it. Both halves: "something happened" is not "the right thing happened".
+  [ "$(( 8#$after & 8#0022 ))" -eq 0 ]
+
+  # And it said so. A permission change nobody can see is indistinguishable from
+  # one that did not happen, and this one runs without being asked for.
+  # `grep`, not `[[ ]]`: a non-last `[[ ]]` cannot fail under errexit on bash
+  # 3.2, so this one works only for as long as it stays the last line.
+  grep -Fq "$cfg" <<<"$output"
+}
+
+@test "install --update: leaves a binding the readers already accept alone (#804)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  bash "$SK/scripts/join.sh" keep alice claude-code /tmp/install-804-b
+
+  local cfg before after
+  cfg="$SK/teams/keep/config.json"
+  [ -f "$cfg" ]
+
+  # 0600 is what join.sh writes. The point is not that 0600 survives but that
+  # the walk is a correction and not a normalisation: a blanket `chmod 0644`
+  # would pass the test above and quietly widen every binding on the machine.
+  chmod 0600 "$cfg"
+  before="$(file_mode "$cfg")"
+  [ "$before" = "600" ]
+
+  run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -eq 0 ]
+
+  after="$(file_mode "$cfg")"
+  [ "$after" = "600" ]
+  # Nothing was announced about it either.
+  refute grep -Fq "$cfg" <<<"$output"
+}
