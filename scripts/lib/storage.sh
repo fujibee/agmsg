@@ -225,6 +225,22 @@ _agmsg_escape_flag() {
   printf '%s' "$_AGMSG_ESCAPE_FLAG"
 }
 
+# Run the escape probe in THIS shell, before a pipeline starts.
+#
+# `agmsg_sqlite` memoises the probe so it costs one sqlite3 process per shell
+# rather than one per call (#462). The right-hand side of a pipeline is a
+# subshell: it inherits the memo, but a memo it sets there dies with it. So a
+# process whose FIRST database access is piped records nothing, and every piped
+# call after it probes again -- measured at two sqlite3 processes per call, and
+# it never converges.
+#
+# A REDIRECTION IS NOT A PIPE. `agmsg_sqlite db < file` runs in the current
+# shell and memoises normally; only `... | agmsg_sqlite ...` needs this. Call it
+# on the line before the pipeline, not inside it.
+agmsg_sqlite_warm() {
+  [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
+}
+
 agmsg_sqlite() {
   # Probe in THIS shell, not in a command substitution. `$(_agmsg_escape_flag)`
   # ran the function in a subshell, so the memo it set was discarded on exit and

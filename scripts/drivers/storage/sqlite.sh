@@ -57,7 +57,19 @@ _sqlite_data() {
 # reading a non-tty is still willing to treat a malformed line as an
 # interactive prompt, and the point of this path is that nobody is watching.
 _sqlite_data_stdin() {
+  # Outside the subshell on purpose: a probe run inside it would be discarded.
+  agmsg_sqlite_warm
   ( set -o pipefail; printf '%s\n' "$2" | agmsg_sqlite -batch "$(_sqlite_db "$1")" | tr -d '\r' )
+}
+
+# The same, for a statement whose output nobody reads. Takes a database PATH
+# rather than a team, because its callers are inside the driver and hold one.
+_sqlite_exec_stdin() {
+  agmsg_sqlite_warm
+  # -bail as at the two sites this replaced on main: the stdin form must stop
+  # at the first error so a busy call has written nothing of a transaction
+  # that never began, which is what lets the engine retry it.
+  printf '%s\n' "$2" | agmsg_sqlite -bail -batch "$1"
 }
 
 # IN (...) list of "team:agent" pairs.
@@ -276,8 +288,10 @@ storage_send() {
   # inserted the message a second time, leaving one row in the legacy table that
   # no event points at -- exactly the unlinked copy the correspondence exists to
   # prevent.
+  agmsg_sqlite_warm
   if ! printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1; then
     storage_init "$team" >/dev/null
+    agmsg_sqlite_warm
     printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || return 1
   fi
   printf '%s\n' "$id"
@@ -521,6 +535,7 @@ storage_import() {
       frm=$(j from); to=$(j to); body=$(j body)
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
+      agmsg_sqlite_warm
       printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at")" \
         | agmsg_sqlite -bail "$db" >/dev/null 2>&1
     elif [ "$t" = message_read ]; then

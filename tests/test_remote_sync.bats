@@ -1265,3 +1265,40 @@ _longest_argv() {
   prepare_push >/dev/null
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='sync_messages_server_seq';" | tr -d '\r')" -eq 1 ]
 }
+
+@test "storage: every piped agmsg_sqlite warms the escape probe first (#462)" {
+  # THE SET IS DERIVED, NOT LISTED. `agmsg_sqlite` memoises the escape probe so
+  # it costs one sqlite3 process per shell rather than one per call, and the
+  # right-hand side of a pipeline is a subshell: it inherits a memo but cannot
+  # leave one behind. A process whose first database access is piped therefore
+  # probes on every call, forever -- the cost #462 removed. A redirection
+  # (`agmsg_sqlite db < file`) runs in the current shell and is fine.
+  #
+  # Written as a scan rather than as one case per site because the sites move:
+  # three were added the day this was found, by a change that was reviewed and
+  # cleared without anyone noticing the shell rule underneath it.
+  local unwarmed="" file line n prev
+  while IFS=: read -r file n line; do
+    case "$file" in */lib/storage.sh) continue ;; esac
+    # The two lines above the pipeline: `agmsg_sqlite_warm`, or a helper whose
+    # own body warms.
+    prev="$(sed -n "$((n > 2 ? n - 2 : 1)),$((n))p" "$BATS_TEST_DIRNAME/../$file")"
+    case "$prev" in
+      *agmsg_sqlite_warm*) continue ;;
+    esac
+    unwarmed="$unwarmed$file:$n
+"
+  done < <(cd "$BATS_TEST_DIRNAME/.." && grep -rn '| agmsg_sqlite' scripts/)
+
+  # A statement inside a helper that warms is reached through the helper, so the
+  # scan looks two lines up rather than one.
+  [ -z "$unwarmed" ] || {
+    printf 'piped agmsg_sqlite with no warm above it:\n%s\n' "$unwarmed"
+    false
+  }
+
+  # The scan can see something: a positive control on the instrument itself.
+  local found
+  found="$(cd "$BATS_TEST_DIRNAME/.." && grep -rc '| agmsg_sqlite' scripts/ | awk -F: '{s+=$2} END {print s}')"
+  [ "$found" -ge 8 ]
+}

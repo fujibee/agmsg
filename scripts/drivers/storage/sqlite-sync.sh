@@ -62,6 +62,7 @@ _SQLITE_SYNC_COMMIT_BYTES=131072
 _sqlite_sync_commit_chunk() {
   local db="$1" sql="$2"
   [ -n "$sql" ] || return 0
+  agmsg_sqlite_warm
   printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1
 }
 
@@ -867,7 +868,7 @@ storage_sync_reconcile_push() {
 
   # Stdin, for the same reason as the pull outcomes (#882): `$values` gains an
   # entry per acked message and a full catch-up push carries a thousand.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_sync_acks(
       local_position INTEGER UNIQUE,wire_id TEXT UNIQUE,server_seq TEXT UNIQUE);
     INSERT INTO incoming_sync_acks VALUES $values;
@@ -939,7 +940,7 @@ storage_sync_reconcile_push() {
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null 2>&1 || return 12
+    COMMIT;" >/dev/null 2>&1 || return 12
 
   _sqlite_data "$team" "SELECT json_object('type','sync_reconcile_result','push_cursor',
     CAST(push_cursor AS TEXT)) FROM sync_bindings WHERE local_team='$tl'
@@ -1434,7 +1435,7 @@ EOF
 
   # Stdin, third of the same kind (#882): `$insert_members` carries one row per
   # roster member and `$insert_local_agents` one per local agent.
-  printf '%s\n' "BEGIN IMMEDIATE;
+  _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
     $insert_members
@@ -1529,7 +1530,7 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
-    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null || { _sqlite_sync_why; return 13; }
+    COMMIT;" >/dev/null || { _sqlite_sync_why; return 13; }
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
       'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm

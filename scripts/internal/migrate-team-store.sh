@@ -54,6 +54,7 @@ _drop_from_shared() {
     sql="$sql DELETE FROM $t WHERE team='$lit';"
   done
   sql="$sql COMMIT;"
+  agmsg_sqlite_warm
   printf '%s\n' "$sql" | agmsg_sqlite "$SHARED" >/dev/null
 }
 
@@ -178,6 +179,7 @@ _missing_from_dest() {
     # A destination that cannot be read, or lacks the table, makes the query
     # fail — which is reported as "not proven complete", never as "nothing is
     # missing". Being unable to check is not the same as having checked.
+    agmsg_sqlite_warm
     out="$(printf '%s\n' "ATTACH DATABASE '$dest_lit' AS dst; $sql" \
       | agmsg_sqlite "$SHARED" 2>/dev/null)" || { echo "$t"; return 0; }
     [ -z "$out" ] || { echo "$t"; return 0; }
@@ -340,6 +342,7 @@ fi
 copy="$copy
   COMMIT;"
 
+agmsg_sqlite_warm
 printf '%s\n' "ATTACH DATABASE '$src_lit' AS src;
 $copy" | agmsg_sqlite "$DEST" >/dev/null
 
