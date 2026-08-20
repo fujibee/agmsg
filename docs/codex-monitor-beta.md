@@ -13,9 +13,10 @@ approximates the same experience by launching Codex through an app-server bridge
 > enabling monitor takes effect only after you **restart Codex and send your
 > first message** — the SessionStart hook fires on the first turn, not the
 > moment Codex opens, so the bridge is absent until you interact once; an
-> already-running session stays unmonitored until you restart it (#151); the
-> bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149).
+> already-running session stays unmonitored until you restart it (#151). A
+> scope-less launch retains the shared app-server lifetime, so use the opt-in
+> invocation scope below when a disposable worktree needs a bounded lifecycle
+> (#149).
 
 ## Quick Start
 
@@ -109,6 +110,32 @@ codex logout
 
 The shim also passes through when the current project is not in Codex monitor
 mode.
+
+## Invocation-scoped lifetime (opt-in)
+
+The normal, scope-less monitor keeps its existing behavior: it reuses a live
+app-server for the project and `exec`s the Codex TUI. Use an invocation scope
+only when a caller needs a disposable-worktree lifecycle boundary:
+
+```bash
+codex-monitor.sh --project "$PWD" --invocation-scope "$opaque_scope" --codex-command codex -- -C "$target"
+```
+
+`$opaque_scope` is a unique, non-secret token for this invocation. The monitor
+combines it with the canonical project path and records only the resulting key.
+Scoped launches always start a fresh app-server, so they pay startup cost and
+do not reuse the project server.
+
+The scoped monitor keeps its Codex TUI, app-server, and bridge launcher as
+captured children. When the TUI exits, it stops and waits for that scoped
+server/launcher/TUI launch tree before returning the TUI status. A direct
+`TERM` follows the same cleanup path and returns status `143`.
+
+This is not proof that every remote or role descendant has independently
+exited. Those descendants naturally bind to the scoped app-server lifetime;
+the final caller still decides whether its own readiness condition is met.
+`SIGKILL` cannot run cleanup and can leave a stale lease. The next launch with
+that same scope fails closed unless it can prove the recorded owner is dead.
 
 ## Bridge Mechanics
 

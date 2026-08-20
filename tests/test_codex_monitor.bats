@@ -352,7 +352,7 @@ EOF
   [ "$status" -eq 37 ]
   grep -Eq '^plain-codex <resume> <--last> <-C>' "$CALL_LOG"
   refute grep -q -- '--remote' "$CALL_LOG"
-  [[ "$output" == *"Real-time agmsg delivery is OFF"* ]]
+  printf '%s\n' "$output" | grep -Fq 'Real-time agmsg delivery is OFF'
   [ "$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
 }
 

@@ -2195,7 +2195,7 @@ EOF
     [[ "$foreign_cmd" == *'unix:///tmp/foreign.sock'* ]] && break
     sleep 0.05
   done
-  [[ "$foreign_cmd" == *'unix:///tmp/foreign.sock'* ]]
+  printf '%s\n' "$foreign_cmd" | grep -Fq 'unix:///tmp/foreign.sock'
 
   AGMSG_CODEX_BRIDGE=1 \
   AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
@@ -2210,8 +2210,8 @@ EOF
   [ -f "$request_file" ]
   request="$(cat "$request_file")"
   [ "$request" = $'codex\tthread-scoped\tws://127.0.0.1:2222' ]
-  [[ "$request" != *'ws://127.0.0.1:1111'* ]]
-  [[ "$request" != *'ws://127.0.0.1:4444'* ]]
+  refute grep -Fq -- 'ws://127.0.0.1:1111' <<<"$request"
+  refute grep -Fq -- 'ws://127.0.0.1:4444' <<<"$request"
   [[ "$request" != *'unix:///tmp/foreign.sock'* ]]
 }
 

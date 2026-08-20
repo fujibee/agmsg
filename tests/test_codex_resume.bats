@@ -404,7 +404,7 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
 
   [ "$(recorded_uuid team alice)" = "thr-scoped" ]
   grep -q -- '--app-server ws://127.0.0.1:2222' "$log"
-  ! grep -q -- 'ws://127.0.0.1:1111' "$log"
+  refute grep -q -- 'ws://127.0.0.1:1111' "$log"
   ! grep -q -- 'ws://127.0.0.1:3333' "$log"
 }
 

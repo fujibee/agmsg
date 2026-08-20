@@ -354,10 +354,10 @@ cd "$PROJECT"
 if [ -n "$INVOCATION_SCOPE" ]; then
   case "$CODEX_COMMAND" in
     codex)
-      "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 &
+      "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 3>&- 4>&- &
       ;;
     resume)
-      "$REAL_CODEX" resume --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 &
+      "$REAL_CODEX" resume --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 3>&- 4>&- &
       ;;
   esac
   tui_bg=$!
