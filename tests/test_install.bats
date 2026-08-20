@@ -1121,14 +1121,25 @@ CYG
 
   local cfg before after
   cfg="$SK/teams/win/config.json"
-  chmod 0664 "$cfg"
+  chmod 0664 "$cfg" 2>/dev/null || true
   before="$(file_mode "$cfg")"
-  [ "$before" = "664" ]
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
   [ "$status" -eq 0 ]
 
-  after="$(file_mode "$cfg")"
-  [ "$after" = "664" ]
+  # Nothing announced, and nothing changed. Both hold on every platform.
   refute grep -Fq "tightened" <<<"$output"
+  after="$(file_mode "$cfg")"
+  [ "$after" = "$before" ]
+
+  # The rest only says something if the file was group- or other-writable to
+  # begin with, and on MSYS it cannot be: modes there are synthetic and
+  # `chmod 0664` does not take, which is how this row first went red on the
+  # Windows leg. Say where the boundary is instead of asserting through it --
+  # the guard itself is measured on POSIX, where AGMSG_FORCE_WINDOWS drives
+  # exactly the same branch with a mode that is real.
+  if [ "$(( 8#$before & 8#0022 ))" -eq 0 ]; then
+    skip "modes are synthetic here (chmod 0664 left it $before); the guard is measured on POSIX"
+  fi
+  [ "$before" = "664" ]
 }
