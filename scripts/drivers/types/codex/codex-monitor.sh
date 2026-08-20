@@ -42,11 +42,13 @@ SCOPE_SEEN=0
 
 usage() {
   cat <<EOF
-Usage: codex-monitor.sh [--project <path>] [--codex-command <codex|resume>] [-- <args...>]
+Usage: codex-monitor.sh [--project <path>] [--invocation-scope TOKEN] [--codex-command <codex|resume>] [-- <args...>]
 
-Starts/reuses an agmsg-managed Codex app-server on a loopback ws:// port,
-enables agmsg Codex bridge delivery for this project, then execs:
-  codex resume --remote ws://127.0.0.1:<port>
+Without --invocation-scope, starts/reuses the project's agmsg-managed Codex
+app-server, enables bridge delivery, then execs the selected Codex command.
+With --invocation-scope TOKEN, starts a dedicated app-server and supervises the
+selected Codex command instead of execing it.
+Scoped mode waits for its captured TUI, app-server, and bridge launcher processes.
 
 (--socket-path is accepted for compatibility but ignored: codex 0.141+ requires
 a ws:// transport for --remote. See #170.)
@@ -104,7 +106,14 @@ case "$CODEX_COMMAND" in
     ;;
 esac
 
-PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+
+# A no-scope monitor can be launched from a scoped app-server tool shell. Do not
+# let that outer server key/URL turn this launcher's children into scoped peers.
+# Explicit scoped mode keeps caller-provided state until it selects its own key.
+if [ -z "$INVOCATION_SCOPE" ]; then
+  unset AGMSG_CODEX_APP_SERVER_KEY AGMSG_CODEX_BRIDGE_APP_SERVER
+fi
 
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the

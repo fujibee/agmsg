@@ -32,6 +32,21 @@ case "${1:-}" in
       exit 2
     fi
     [ -z "${AGMSG_TEST_APP_SERVER_KEY_LOG:-}" ] || printf '%s' "${AGMSG_CODEX_APP_SERVER_KEY:-}" > "$AGMSG_TEST_APP_SERVER_KEY_LOG"
+    [ -z "${AGMSG_TEST_APP_SERVER_INHERITED_URL_LOG:-}" ] || printf '%s' "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" > "$AGMSG_TEST_APP_SERVER_INHERITED_URL_LOG"
+    if [ -n "${AGMSG_TEST_APP_SERVER_URL_LOG:-}" ]; then
+      (
+        SKILL_DIR="$TEST_SKILL_DIR"
+        source "$SKILL_DIR/scripts/lib/hash.sh"
+        source "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+        nested_url=""
+        for _probe in $(seq 1 100); do
+          nested_url="$(_agmsg_codex_app_server_url "$AGMSG_TEST_APP_SERVER_PROJECT")"
+          [ -n "$nested_url" ] && break
+          sleep 0.05
+        done
+        printf '%s' "$nested_url" > "$AGMSG_TEST_APP_SERVER_URL_LOG"
+      ) &
+    fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
     # cmdline check matches.
@@ -70,6 +85,7 @@ PY
     }
     trap record_tui_term TERM
     [ -z "${FAKE_TUI_PID_FILE:-}" ] || printf '%s' "$$" > "$FAKE_TUI_PID_FILE"
+    [ -z "${AGMSG_TEST_TUI_CWD_LOG:-}" ] || printf '%s\n' "$PWD" >> "$AGMSG_TEST_TUI_CWD_LOG"
     printf 'plain-codex' >> "$CALL_LOG"
     for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
     printf '\n' >> "$CALL_LOG"
@@ -184,7 +200,11 @@ EOF
 
 @test "codex-monitor: invocation scope is consumed before Codex argv" {
   local key_log="$TEST_PROJECT/app-server-key"
-  run env AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+  local inherited_url_log="$TEST_PROJECT/inherited-app-server-url"
+  run env AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" \
+    AGMSG_TEST_APP_SERVER_INHERITED_URL_LOG="$inherited_url_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
     bash "$TYPES/codex/codex-monitor.sh" \
     --project "$TEST_PROJECT" --invocation-scope scope-A --codex-command codex -- --foo
   [ "$status" -eq 0 ]
@@ -193,6 +213,7 @@ EOF
   local expected_key
   expected_key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd)" scope-A | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
   [ "$(cat "$key_log")" = "$expected_key" ]
+  [ "$(cat "$inherited_url_log")" = "ws://127.0.0.1:3333" ]
 }
 
 @test "codex-monitor: malformed and duplicate scopes fail before launch" {
@@ -207,6 +228,185 @@ EOF
     --codex-command codex --
   [ "$status" -eq 2 ]
   [ ! -e "$CALL_LOG" ]
+}
+
+@test "codex-monitor: help distinguishes legacy reuse from scoped supervision" {
+  run bash "$TYPES/codex/codex-monitor.sh" --help
+  [ "$status" -eq 0 ]
+  grep -Fq -- "--invocation-scope TOKEN" <<< "$output"
+  grep -Fq -- "Without --invocation-scope, starts/reuses" <<< "$output"
+  grep -Fq -- "then execs" <<< "$output"
+  grep -Fq -- "Scoped mode waits for its captured TUI, app-server, and bridge launcher processes." <<< "$output"
+}
+
+@test "codex-monitor: physical project aliases share scoped leases and one dispatcher" {
+  skip_on_windows "requires POSIX symlink and process semantics"
+
+  local physical="$TEST_PROJECT/physical-project"
+  local project_alias="$TEST_PROJECT/project-alias"
+  local gate_a="$TEST_PROJECT/release-a" gate_b="$TEST_PROJECT/release-b"
+  local cwd_log="$TEST_PROJECT/tui-cwds"
+  local project_hash key_a key_b pidfile_a pidfile_b first_pidfile first_pid
+  local second_pid_log dispatcher_log probe_pid probe_status second_pid dispatcher_rows i
+  mkdir -p "$physical"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  ln -s "$physical" "$project_alias"
+  physical="$(cd "$physical" && pwd -P)"
+  project_hash="$(printf '%s' "$physical" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  key_a="$(printf '%s\n%s' "$physical" scope-A | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  key_b="$(printf '%s\n%s' "$physical" scope-B | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile_a="$TEST_SKILL_DIR/run/codex-app-server.$key_a.pid"
+  pidfile_b="$TEST_SKILL_DIR/run/codex-app-server.$key_b.pid"
+
+  env FAKE_TUI_GATE="$gate_a" AGMSG_TEST_TUI_CWD_LOG="$cwd_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$project_alias" \
+    --invocation-scope scope-A --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+  first_pidfile=""
+  for i in $(seq 1 100); do
+    first_pidfile="$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*.pid' -type f | head -1)"
+    [ -n "$first_pidfile" ] && break
+    sleep 0.1
+  done
+  [ -n "$first_pidfile" ]
+  first_pid="$(cat "$first_pidfile")"
+
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$physical" \
+    --invocation-scope scope-A --codex-command codex --
+  if [ "$status" -eq 0 ]; then
+    echo "same physical project and scope launched twice through alias paths" >&2
+    false
+  fi
+  [ "$first_pidfile" = "$pidfile_a" ]
+  [ "$(cat "$pidfile_a")" = "$first_pid" ]
+
+  second_pid_log="$TEST_PROJECT/scope-b-pid"
+  dispatcher_log="$TEST_PROJECT/dispatcher-rows"
+  (
+    set -e
+    trap ': > "$gate_b"' EXIT
+    wait_for_file "$pidfile_b"
+    second_pid="$(cat "$pidfile_b")"
+    [ "$first_pid" != "$second_pid" ]
+    kill -0 "$first_pid"
+    kill -0 "$second_pid"
+    dispatcher_rows=""
+    for i in $(seq 1 100); do
+      dispatcher_rows="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+        "SELECT resource FROM locks WHERE resource LIKE 'codex-dispatcher:%' ORDER BY resource;" 2>/dev/null || true)"
+      [ -n "$dispatcher_rows" ] && break
+      sleep 0.1
+    done
+    printf '%s' "$second_pid" > "$second_pid_log"
+    printf '%s' "$dispatcher_rows" > "$dispatcher_log"
+  ) &
+  probe_pid=$!
+  run env FAKE_TUI_GATE="$gate_b" AGMSG_TEST_TUI_CWD_LOG="$cwd_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$physical" \
+    --invocation-scope scope-B --codex-command codex --
+  [ "$status" -eq 0 ]
+  if wait "$probe_pid"; then probe_status=0; else probe_status=$?; fi
+  [ "$probe_status" -eq 0 ]
+  second_pid="$(cat "$second_pid_log")"
+  dispatcher_rows="$(cat "$dispatcher_log")"
+  [ "$first_pid" != "$second_pid" ]
+  [ "$dispatcher_rows" = "codex-dispatcher:$project_hash" ]
+  grep -Fq "$physical" "$physical/.codex/hooks.json"
+  refute grep -Fq "$project_alias" "$physical/.codex/hooks.json"
+
+  for i in $(seq 1 100); do
+    [ "$(wc -l < "$cwd_log" 2>/dev/null | tr -d ' ')" -eq 2 ] && break
+    sleep 0.1
+  done
+  [ "$(wc -l < "$cwd_log" | tr -d ' ')" -eq 2 ]
+  [ "$(sort -u "$cwd_log")" = "$physical" ]
+
+  : > "$gate_a"
+  wait "$TEST_MONITOR_PID"
+  TEST_MONITOR_PID=""
+}
+
+@test "codex-monitor: no-scope server ignores inherited scoped routing" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local hash base key_log nested_url_log nested_url own_url
+  hash="$(printf '%s' "$(cd "$TEST_PROJECT" && pwd -P)" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  base="$TEST_SKILL_DIR/run/codex-app-server.$hash"
+  key_log="$TEST_PROJECT/app-server-key"
+  nested_url_log="$TEST_PROJECT/nested-app-server-url"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.outer-scope.port"
+
+  run env AGMSG_CODEX_APP_SERVER_KEY=outer-scope \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" \
+    AGMSG_TEST_APP_SERVER_URL_LOG="$nested_url_log" \
+    AGMSG_TEST_APP_SERVER_PROJECT="$TEST_PROJECT" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  wait_for_file "$nested_url_log"
+  [ -f "$base.pid" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-server.outer-scope.pid" ]
+  nested_url="$(cat "$nested_url_log")"
+  own_url="ws://127.0.0.1:$(cat "$base.port")"
+  if [ "$nested_url" != "$own_url" ]; then
+    echo "nested no-scope URL=$nested_url; own project URL=$own_url" >&2
+    false
+  fi
+  [ ! -s "$key_log" ]
+  grep -Fq "<--remote> <$own_url>" "$CALL_LOG"
+}
+
+@test "codex-monitor: no-scope duplicate dispatcher does not inherit scoped standby" {
+  skip_on_windows "uses POSIX process and lock-owner semantics"
+
+  local hash resource barrier gate owner sentinel_pid probe_log probe_pid probe_status
+  local barrier_count observed_owner
+  hash="$(printf '%s' "$(cd "$TEST_PROJECT" && pwd -P)" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  resource="codex-dispatcher:$hash"
+  barrier="$TEST_PROJECT/standby-observed"
+  gate="$TEST_PROJECT/release-tui"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  sleep 30 3>&- &
+  TEST_MONITOR_PID=$!
+  sentinel_pid="$TEST_MONITOR_PID"
+  owner="$(bash -c 'source "$1"; agmsg_runtime_lock_acquire "$2" "$3"' \
+    _ "$SCRIPTS/lib/storage.sh" "$resource" "$sentinel_pid")"
+  [ "$owner" = "$sentinel_pid" ]
+  printf '%s' "$sentinel_pid" > "$TEST_SKILL_DIR/run/codex-app-server.outer-scope.pid"
+
+  probe_log="$TEST_PROJECT/dispatcher-probe"
+  (
+    set -e
+    trap ': > "$gate"' EXIT
+    wait_for_file_contains "$CALL_LOG" plain-codex
+    sleep 1
+    barrier_count="$(find "$TEST_PROJECT" -maxdepth 1 -name 'standby-observed.*' -type f | wc -l | tr -d ' ')"
+    [ "$barrier_count" -eq 0 ]
+    observed_owner="$(bash -c 'source "$1"; agmsg_runtime_lock_owner "$2"' \
+      _ "$SCRIPTS/lib/storage.sh" "$resource")"
+    [ "$observed_owner" = "$sentinel_pid" ]
+    printf '%s\n%s\n' "$barrier_count" "$observed_owner" > "$probe_log"
+  ) &
+  probe_pid=$!
+  run env AGMSG_CODEX_APP_SERVER_KEY=outer-scope \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_TEST_LOCK_STANDBY_BARRIER="$barrier" FAKE_TUI_GATE="$gate" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  if wait "$probe_pid"; then probe_status=0; else probe_status=$?; fi
+  [ "$probe_status" -eq 0 ]
+  [ "$(sed -n '1p' "$probe_log")" -eq 0 ]
+  [ "$(sed -n '2p' "$probe_log")" = "$sentinel_pid" ]
+
+  kill "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  TEST_MONITOR_PID=""
 }
 
 @test "codex-monitor: scoped TUI exit preserves status and removes exact artifacts" {
