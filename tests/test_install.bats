@@ -1057,6 +1057,20 @@ CYG
   rm -f "$cfg"
   ln -s "$outside" "$cfg"
 
+  # A symlink's OWN mode decides whether a walk missing `-type f` would even
+  # select it, and that mode is not the same everywhere: Linux creates them
+  # 0777, macOS 0755. Without this the test passes on macOS for a reason that
+  # has nothing to do with the code -- the link is simply never selected -- and
+  # the platform where it does not hold is the platform CI mostly runs on.
+  # `chmod -h` sets the link itself on BSD; GNU chmod has no such flag and does
+  # not need one.
+  chmod -h go+w "$cfg" 2>/dev/null || true
+  local linkmode
+  linkmode="$(file_mode "$cfg")"
+  if [ "$(( 8#$linkmode & 8#0022 ))" -eq 0 ]; then
+    skip "symlinks here are $linkmode; a walk without -type f could not select one anyway"
+  fi
+
   before="$(file_mode "$outside")"
   [ "$before" = "664" ]
 
