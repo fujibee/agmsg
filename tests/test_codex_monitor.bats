@@ -28,6 +28,7 @@ case "${1:-}" in
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
     fi
+    [ -z "${AGMSG_TEST_APP_SERVER_KEY_LOG:-}" ] || printf '%s' "${AGMSG_CODEX_APP_SERVER_KEY:-}" > "$AGMSG_TEST_APP_SERVER_KEY_LOG"
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
     # cmdline check matches. The child exits when this parent is killed.
@@ -52,6 +53,7 @@ PY
     printf 'plain-codex' >> "$CALL_LOG"
     for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
     printf '\n' >> "$CALL_LOG"
+    while [ -n "${FAKE_TUI_GATE:-}" ] && [ ! -e "$FAKE_TUI_GATE" ]; do sleep 0.1; done
     ;;
 esac
 EOF
@@ -134,6 +136,98 @@ teardown() {
   [ "$status" -eq 0 ]
   # Same server reused (pid unchanged), not recreated.
   [ "$(cat "$pidf")" = "$first_pid" ]
+}
+
+@test "codex-monitor: invocation scope is consumed before Codex argv" {
+  local key_log="$TEST_PROJECT/app-server-key"
+  run env AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope scope-A --codex-command codex -- --foo
+  [ "$status" -eq 0 ]
+  grep -Eq 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9]+> <--foo>' "$CALL_LOG"
+  refute grep -q -- '--invocation-scope' "$CALL_LOG"
+  local expected_key
+  expected_key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd)" scope-A | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  [ "$(cat "$key_log")" = "$expected_key" ]
+}
+
+@test "codex-monitor: malformed and duplicate scopes fail before launch" {
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope
+  [ "$status" -eq 2 ]
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope bad/scope --codex-command codex --
+  [ "$status" -eq 2 ]
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope one --invocation-scope two \
+    --codex-command codex --
+  [ "$status" -eq 2 ]
+  [ ! -e "$CALL_LOG" ]
+}
+
+@test "codex-monitor: different invocation scopes use different live app-servers" {
+  skip_on_windows "spawns python socket listeners; flaky on the Windows runner"
+
+  local gate="$TEST_PROJECT/release-tuis"
+  env FAKE_TUI_GATE="$gate" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-A --codex-command codex -- &
+  local scope_a_monitor=$!
+
+  local i pidfiles
+  for i in $(seq 1 100); do
+    pidfiles=("$TEST_SKILL_DIR"/run/codex-app-server.*.pid)
+    [ -f "${pidfiles[0]}" ] && break
+    sleep 0.1
+  done
+  [ -f "${pidfiles[0]}" ]
+
+  env FAKE_TUI_GATE="$gate" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-B --codex-command codex -- &
+  local scope_b_monitor=$!
+
+  for i in $(seq 1 100); do
+    pidfiles=("$TEST_SKILL_DIR"/run/codex-app-server.*.pid)
+    [ "${#pidfiles[@]}" -eq 2 ] && break
+    sleep 0.1
+  done
+  [ "${#pidfiles[@]}" -eq 2 ]
+  local first_pid="$(cat "${pidfiles[0]}")" second_pid="$(cat "${pidfiles[1]}")"
+  [ "$first_pid" != "$second_pid" ]
+  kill -0 "$first_pid"
+  kill -0 "$second_pid"
+
+  : > "$gate"
+  wait "$scope_a_monitor"
+  wait "$scope_b_monitor"
+}
+
+@test "codex-monitor: same live invocation scope fails without changing its server" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local gate="$TEST_PROJECT/release-tui"
+  env FAKE_TUI_GATE="$gate" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-A --codex-command codex -- &
+  local first_monitor=$!
+
+  local i pidfiles
+  for i in $(seq 1 100); do
+    pidfiles=("$TEST_SKILL_DIR"/run/codex-app-server.*.pid)
+    [ -f "${pidfiles[0]}" ] && break
+    sleep 0.1
+  done
+  [ -f "${pidfiles[0]}" ]
+  local first_pid="$(cat "${pidfiles[0]}")"
+
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope scope-A --codex-command codex --
+  [ "$status" -ne 0 ]
+  [ "$(cat "${pidfiles[0]}")" = "$first_pid" ]
+
+  : > "$gate"
+  wait "$first_monitor"
 }
 
 # --- port discovery vs colorized banner (codex 0.144+) ---

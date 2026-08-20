@@ -29,12 +29,16 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # good one. Only the writer can make that state unobservable.
 # shellcheck source=../../../lib/registry-lock.sh
 source "$SCRIPT_DIR/../../../lib/registry-lock.sh"
+# shellcheck source=../../../lib/storage.sh
+source "$SCRIPT_DIR/../../../lib/storage.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
 CODEX_COMMAND="resume"
 CODEX_ARGS=()
 REAL_CODEX="${AGMSG_REAL_CODEX:-codex}"
+INVOCATION_SCOPE=""
+SCOPE_SEEN=0
 
 usage() {
   cat <<EOF
@@ -65,6 +69,19 @@ while [ "$#" -gt 0 ]; do
       ;;
     --codex-command)
       CODEX_COMMAND="${2:?--codex-command requires codex or resume}"
+      shift 2
+      ;;
+    --invocation-scope)
+      [ "$SCOPE_SEEN" -eq 0 ] || { echo "codex-monitor: --invocation-scope may be given once" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "codex-monitor: --invocation-scope requires a value" >&2; exit 2; }
+      INVOCATION_SCOPE="$2"
+      case "$INVOCATION_SCOPE" in
+        [A-Za-z0-9]* ) ;;
+        * ) exit 2 ;;
+      esac
+      case "$INVOCATION_SCOPE" in *[!A-Za-z0-9._-]* ) exit 2 ;; esac
+      [ "${#INVOCATION_SCOPE}" -le 128 ] || exit 2
+      SCOPE_SEEN=1
       shift 2
       ;;
     --)
@@ -110,14 +127,32 @@ exec_plain_codex() {
 }
 
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-SERVER_LOG="$RUN_DIR/codex-app-server.$PROJECT_HASH.log"
-SERVER_PID="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
-PORT_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.port"
+APP_SERVER_KEY="$PROJECT_HASH"
+if [ -n "$INVOCATION_SCOPE" ]; then
+  APP_SERVER_KEY="$(printf '%s\n%s' "$PROJECT" "$INVOCATION_SCOPE" | agmsg_sha1)"
+  export AGMSG_CODEX_APP_SERVER_KEY="$APP_SERVER_KEY"
+fi
+SERVER_LOG="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.log"
+SERVER_PID="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.pid"
+PORT_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.port"
 # Records the codex version that launched the reusable app-server. A TUI from a
 # newer/older codex can't speak to an app-server from a different build, so a
 # stale server left running across a codex upgrade must not be reused.
-VERSION_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.version"
+VERSION_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.version"
 CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
+
+if [ -n "$INVOCATION_SCOPE" ]; then
+  SCOPED_LEASE_RESOURCE="codex-app-server:$APP_SERVER_KEY"
+  lock_owner="$(agmsg_runtime_lock_acquire "$SCOPED_LEASE_RESOURCE" "$$" 2>/dev/null || true)"
+  if [ "$lock_owner" != "$$" ] && [ -n "$lock_owner" ] && ! _agmsg_pid_alive_local "$lock_owner"; then
+    lock_owner="$(agmsg_runtime_lock_acquire "$SCOPED_LEASE_RESOURCE" "$$" "$lock_owner" 2>/dev/null || true)"
+  fi
+  if [ "$lock_owner" != "$$" ]; then
+    echo "codex-monitor: invocation scope is already active" >&2
+    exit 1
+  fi
+  trap 'agmsg_runtime_lock_release "$SCOPED_LEASE_RESOURCE" "$$"' EXIT
+fi
 
 mkdir -p "$RUN_DIR"
 
@@ -129,7 +164,11 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 }
 
 PORT=""
-if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
+if [ -n "$INVOCATION_SCOPE" ]; then
+  # Scoped records identify a previous invocation, never a process this launch
+  # may reuse or signal. A later lifecycle task owns only its captured children.
+  rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE"
+elif [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   existing_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
   existing_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
   existing_version="$(cat "$VERSION_FILE" 2>/dev/null || true)"
