@@ -620,6 +620,21 @@ export function authorityFileFault(stats, { maxBytes, privateFile }) {
 // `go-w` and `go-rwx` rather than `644` and `600`: the check is about the group
 // and other bits, so the remedy touches those and leaves the owner's alone. A
 // numeric mode would also silently strip a read bit the operator meant to keep.
+// A path as ONE shell argument, for a command someone is expected to paste and
+// run. Same scheme as scripts/lib/shquote.sh: wrap in single quotes and replace
+// each embedded ' with '\'' -- close the quote, emit an escaped literal quote,
+// reopen it.
+//
+// Not cosmetic. A team name is validated only against empty / `.` / `..` / `/`
+// / `\` / a leading `-` / control characters (lib/validate.sh), so a space and
+// a single quote are both legal in one, and the store lives under $HOME, which
+// is outside our control entirely. An unquoted path turns the remedy we printed
+// into a command that operates on a DIFFERENT file, or on several -- the worst
+// possible outcome for a line whose whole job is "run this and you are fixed".
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 export function authorityFileRemedy(stats, { privateFile }) {
   if (process.platform === "win32") return null;
   if (stats.isSymbolicLink() || !stats.isFile()) return null;
@@ -639,7 +654,7 @@ async function readBoundedAuthorityFile(path, maxBytes, privateFile) {
     const remedy = authorityFileRemedy(before, { privateFile });
     throw new Error(
       `${privateFile ? "remote credential" : "connected team binding"} ${fault}: ${path}` +
-      (remedy ? ` — fix it with: ${remedy} ${path}` : ""));
+      (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
   }
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -1302,7 +1317,7 @@ async function readRetainedCheckpointFile(path) {
   if (fault) {
     const remedy = authorityFileRemedy(metadata, { privateFile: true });
     throw new Error(`retained age checkpoint ${fault}: ${path}` +
-      (remedy ? ` — fix it with: ${remedy} ${path}` : ""));
+      (remedy ? ` — fix it with: ${remedy} ${shellQuote(path)}` : ""));
   }
   const records = parseStrictJsonl(await readFile(path, "utf8"));
   if (records.length < 1 || records.length > 4096) {
