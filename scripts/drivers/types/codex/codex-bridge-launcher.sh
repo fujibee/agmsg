@@ -38,6 +38,8 @@ source "$SCRIPT_DIR/../../../lib/close-fds.sh"
 agmsg_close_inherited_fds
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
+# shellcheck source=_app-server.sh
+source "$SCRIPT_DIR/_app-server.sh"
 # The liveness helpers. Every lifetime and lock-owner check below goes through
 # one of them, chosen by where the pid was minted: _agmsg_pid_alive_local for
 # the ones this shell or codex-monitor.sh produced, _agmsg_pid_alive for the
@@ -49,7 +51,8 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
-SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
+SERVER_RECORD_KEY="$(_agmsg_codex_app_server_record_key "$PROJECT")"
+SERVER_PID_FILE="$RUN_DIR/codex-app-server.$SERVER_RECORD_KEY.pid"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -254,7 +257,15 @@ build_safety_state() {
 # The parent only dispatches. Every role receives an independent child launcher
 # and therefore an independent bridge bound to its own recorded thread.
 if [ -z "$ROLE_PAIR" ]; then
-  acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" || exit 0
+  # A second scoped server shares this project dispatcher, but it must not
+  # disappear just because the first scope currently owns the CAS row. Retry
+  # only while this launcher's exact app-server lifetime is alive; that lifetime
+  # is the bound, so a dead scope neither polls forever nor signals its peer.
+  while _agmsg_pid_alive_local "$LIFETIME_PID"; do
+    acquire_runtime_lock "$DISPATCHER_LOCK_RESOURCE" && break
+    poll_sleep
+  done
+  [ "$HELD_LOCK_RESOURCE" = "$DISPATCHER_LOCK_RESOURCE" ] || exit 0
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do

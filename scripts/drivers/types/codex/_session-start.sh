@@ -14,6 +14,9 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
+# shellcheck source=_app-server.sh
+source "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+
 # Newest-N rollout files under $sessions_dir, sorted by mtime descending.
 # `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
 # reported to intermittently return an empty/truncated list with no
@@ -121,6 +124,9 @@ agmsg_session_start() {
   PAIRS="$safe_pairs"
   [ -n "$PAIRS" ] || exit 0
   app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
+  if [ -z "$app_server" ] && [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+    app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+  fi
   if [ -z "$app_server" ]; then
     agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
     if [ -n "$agent_pid" ]; then
@@ -129,6 +135,9 @@ agmsg_session_start() {
         | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
         | head -1)
     fi
+  fi
+  if [ -z "$app_server" ]; then
+    app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
   fi
   if [ -z "$app_server" ]; then
     project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)

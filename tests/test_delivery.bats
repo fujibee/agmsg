@@ -2168,6 +2168,44 @@ EOF
   grep -q -- "--inline-inbox" "$log"
 }
 
+@test "session-start.sh for codex uses the scoped server key port in its request URL" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-scoped "$TEST_PROJECT" codex
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/hash.sh"
+  local hash request_file request
+  hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$hash"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.scoped-key.port"
+  bash -c 'sleep 10 & wait' codex --remote unix:///tmp/foreign.sock 3>&- &
+  local foreign_pid=$!
+  local foreign_cmd i
+  for i in {1..20}; do
+    foreign_cmd="$(ps -o args= -p "$foreign_pid" 2>/dev/null || true)"
+    [[ "$foreign_cmd" == *'unix:///tmp/foreign.sock'* ]] && break
+    sleep 0.05
+  done
+  [[ "$foreign_cmd" == *'unix:///tmp/foreign.sock'* ]]
+
+  AGMSG_CODEX_BRIDGE=1 \
+  AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  AGMSG_CODEX_APP_SERVER_KEY=scoped-key \
+  AGMSG_AGENT_PID="$foreign_pid" \
+  CODEX_THREAD_ID=thread-scoped \
+    env -u AGMSG_CODEX_BRIDGE_APP_SERVER \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+  kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+
+  [ -f "$request_file" ]
+  request="$(cat "$request_file")"
+  [ "$request" = $'codex\tthread-scoped\tws://127.0.0.1:2222' ]
+  [[ "$request" != *'ws://127.0.0.1:1111'* ]]
+  [[ "$request" != *'unix:///tmp/foreign.sock'* ]]
+}
+
 @test "session-start.sh for codex stays quiet without monitor launcher env" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"

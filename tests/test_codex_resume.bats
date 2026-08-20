@@ -377,6 +377,34 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
 }
 
+@test "codex record: scoped server key selects only the scoped port file" {
+  local proj ids hash fake log
+  proj="$(mktemp -d)"
+  ids="$TEST_SKILL_DIR/loaded.txt"
+  fake="$TEST_SKILL_DIR/logging-node"
+  log="$TEST_SKILL_DIR/logging-node.args"
+  printf 'thr-scoped\n' > "$ids"
+  # shellcheck disable=SC1091
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.scoped-key.port"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "%%s\\n" "$*" > %q\n' "$log"
+    printf 'cat %q\n' "$ids"
+  } > "$fake"
+  chmod +x "$fake"
+
+  ( unset CODEX_THREAD_ID AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_CODEX_APP_SERVER_KEY=scoped-key AGMSG_NODE="$fake" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+
+  [ "$(recorded_uuid team alice)" = "thr-scoped" ]
+  grep -q -- '--app-server ws://127.0.0.1:2222' "$log"
+  ! grep -q -- 'ws://127.0.0.1:1111' "$log"
+}
+
 @test "codex record: no port file and no variable records nothing, it does not guess" {
   # Fail closed. Without a way to ask, the answer is "could not ask" -- never
   # "asked and found nothing" -- so no weaker signal may seat a thread here.

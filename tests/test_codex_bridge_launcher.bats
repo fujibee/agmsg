@@ -230,6 +230,69 @@ run_launcher() {
   wait "$parent_b" 2>/dev/null || true
 }
 
+@test "launcher: standby dispatcher takes over after the first scoped server exits" {
+  # Keep the first dispatcher free of role children: this test isolates the
+  # project-scoped dispatcher handoff, then adds the role after scope B owns it.
+  bash "$SCRIPTS/leave.sh" team alice >/dev/null
+  local hash lock_resource owner i
+  hash=$(printf '%s' "$PROJ" | bash -c 'source "$1"; agmsg_sha1' _ "$SCRIPTS/lib/hash.sh")
+  lock_resource="codex-dispatcher:$hash"
+
+  sleep 12 3>&- & local parent_a=$!
+  sleep 12 3>&- & local parent_b=$!
+  sleep 12 3>&- & local lifetime_a=$!
+  sleep 12 3>&- & local lifetime_b=$!
+  printf '%s\n' "$lifetime_a" > "$RUN_DIR/codex-app-server.scope-a.pid"
+  printf '%s\n' "$lifetime_b" > "$RUN_DIR/codex-app-server.scope-b.pid"
+
+  AGMSG_CODEX_APP_SERVER_KEY=scope-a \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1111" "$parent_a" >/dev/null 2>&1 3>&- &
+  local launcher_a=$!
+  owner=""
+  for i in {1..50}; do
+    owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$lock_resource';" 2>/dev/null || true)"
+    [ "$owner" = "$launcher_a" ] && break
+    sleep 0.1
+  done
+  [ "$owner" = "$launcher_a" ]
+
+  AGMSG_CODEX_APP_SERVER_KEY=scope-b \
+    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:2222" "$parent_b" >/dev/null 2>&1 3>&- &
+  local launcher_b=$!
+  sleep 0.5
+  kill -0 "$launcher_b"
+  [ ! -f "$CAPTURE" ]
+
+  kill "$lifetime_a" 2>/dev/null || true
+  wait "$lifetime_a" 2>/dev/null || true
+  owner=""
+  for i in {1..80}; do
+    owner="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" \
+      "SELECT owner_pid FROM locks WHERE resource='$lock_resource';" 2>/dev/null || true)"
+    [ "$owner" = "$launcher_b" ] && break
+    sleep 0.1
+  done
+  [ "$owner" = "$launcher_b" ]
+
+  bash "$SCRIPTS/join.sh" team alice codex "$PROJ" >/dev/null
+  put_record team alice thread-scope-b "$PROJ" codex
+  for i in {1..80}; do
+    grep -q -- '--app-server ws://127.0.0.1:2222' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q -- '--app-server ws://127.0.0.1:2222' "$CAPTURE"
+  ! grep -q -- 'ws://127.0.0.1:1111' "$CAPTURE"
+  [ "$(wc -l < "$CAPTURE" | tr -d ' ')" -eq 1 ]
+
+  kill "$lifetime_b" "$launcher_a" "$launcher_b" "$parent_a" "$parent_b" 2>/dev/null || true
+  wait "$lifetime_b" 2>/dev/null || true
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+  wait "$parent_a" 2>/dev/null || true
+  wait "$parent_b" 2>/dev/null || true
+}
+
 @test "launcher: stale dispatcher reclamation remains singleton under contention" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=8
