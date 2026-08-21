@@ -4413,7 +4413,9 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   // A budget that is not a number is refused on the first call, before the
   // driver is even started. Read as NaN it would compare false against every
   // sum and retry forever -- the unbounded wait this whole thing exists to end.
-  for (const bad of ["oops", "-1", "1.5", "1e3", " 5"]) {
+  // The 400-digit one reads as Infinity, which no sum ever exceeds either; the
+  // 16-digit one is the first integer past Number.MAX_SAFE_INTEGER.
+  for (const bad of ["oops", "-1", "1.5", "1e3", " 5", "9".repeat(400), "9007199254740992"]) {
     process.env.AGMSG_SYNC_BUSY_RETRY_MS = bad;
     await writeFile(counter, "0");
     waits.length = 0;

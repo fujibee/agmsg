@@ -2021,11 +2021,14 @@ const STORAGE_BUSY_RETRY_BUDGET_MS = 300000;
 function storageBusyRetryBudgetMs() {
   const raw = process.env.AGMSG_SYNC_BUSY_RETRY_MS;
   if (raw === undefined || raw === "") return STORAGE_BUSY_RETRY_BUDGET_MS;
-  if (!/^(0|[1-9][0-9]*)$/u.test(raw)) {
+  // The shape AND the magnitude: a string of digits long enough reads as
+  // Infinity, which compares exactly like NaN does here -- never exceeded.
+  const value = Number(raw);
+  if (!/^(0|[1-9][0-9]*)$/u.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(
       `AGMSG_SYNC_BUSY_RETRY_MS must be a whole number of milliseconds, not ${JSON.stringify(raw)}`);
   }
-  return Number(raw);
+  return value;
 }
 
 export async function driver(operation, config, input, extra = [], dependencies = {}) {
