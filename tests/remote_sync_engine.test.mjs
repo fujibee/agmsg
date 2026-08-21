@@ -2092,28 +2092,34 @@ exit 7
   }
 });
 
-test("the storage driver that stops reading its input fails the call and is not left running",
+test("the storage driver that stops reading its input fails through its exit code, not the broken write",
   { timeout: 30_000 }, async (t) => {
-  // Unchanged behaviour, kept under its own test so that it stays unchanged.
+  // The storage driver keeps its pipe: after evaluatePull() its input is
+  // decrypted message content, on E2EE teams as much as plain ones, and a pipe
+  // is what keeps that off disk. So a large page can lose its reader when the
+  // driver exits before the whole page is written -- a busy `apply` waits out
+  // its timeout and exits 11 while the parent is still writing -- and the write
+  // comes back EPIPE (macOS: ENOTCONN or EPIPE, the errno set is not closed).
   //
-  // The storage driver takes no registry lock, so nothing about it needs the
-  // staged file the roster driver gets, and giving it one would cost it both an
-  // input that never touches disk -- after evaluatePull() these records are
-  // decrypted message content, on E2EE teams as much as plain ones -- and the
-  // bounded failure it has here. A driver handed a file is waited for; a driver
-  // that stops reading a pipe fails at once.
+  // That EPIPE is a symptom of the exit, not a verdict on the call. Concluding
+  // "stdin-write failed" on it, ahead of the exit, is what masked a retryable
+  // busy 11 as an unrecoverable error and ended #910's reprocess. So the call
+  // must report the CHILD'S EXIT CODE: here a plain non-zero (7), asserted to
+  // arrive as `driverExitCode` with no `driverFailurePhase` verdict in front of
+  // it -- which is exactly what lets `driver` see an 11 and retry it. The busy
+  // 11 -> retry path itself is covered by "driver() waits out a busy store".
   //
-  // So this is the original EPIPE test, scoped to the caller it was always
-  // about: the write loses its reader, the failure arrives on the stdin stream,
-  // and the driver does not survive the call. Flip `holdsRegistryLock` on for
-  // the storage driver and this test says so.
+  // The trade this makes explicit: a driver that stops reading AND never exits
+  // is no longer failed at once -- the call waits for its exit, the same trade
+  // the roster (staged) path already makes above. Bounding a driver that hangs
+  // without exiting is separate work, not done here; this driver exits.
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-epipe-"));
   const script = (pidFile, helperFile) => `#!/usr/bin/env bash
 echo $$ > ${JSON.stringify(pidFile)}
 sleep 300 &
 echo $! > ${JSON.stringify(helperFile)}
 exec 0<&-
-exec sleep 300
+exit 7
 `;
   const wide = "x".repeat(4096);
   const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
@@ -2123,14 +2129,58 @@ exec sleep 300
     ]);
 
   for (const { promise, childPid } of started) {
-    // On the marker the stdin handler sets, not on the errno: macOS answers
-    // ENOTCONN or EPIPE from the same event, and the set of spellings is not
-    // closed. The set of places that set this marker is -- there is one.
+    // The exit code won, and the EPIPE marker did not get in front of it. Both
+    // are asserted: a rejection still carrying `stdin-write` would mean the old
+    // premature verdict came back, and that marker is set in exactly one place,
+    // so it cannot be satisfied by accident.
+    await assert.rejects(() => promise,
+      (error) => error.driverFailurePhase === undefined &&
+        error.driverExitCode === 7 && /exit 7/u.test(String(error.message)));
+    // The call settles only after the driver has exited, so by this line it is
+    // already gone -- and it was NOT killed to get there.
+    assert.ok(gone(childPid), "the failed driver was left running");
+  }
+});
+
+test("the storage driver that stops reading AND never exits is still bounded and killed",
+  { timeout: 30_000 }, async (t) => {
+  // The other side of deferring to the exit code: a driver that loses the write
+  // AND does not exit must not hang the call forever. The pipe path keeps its
+  // SIGKILL bound for exactly this -- a timer past the busy timeout gives a real
+  // (busy) child every chance to exit on its own, and only a child that takes
+  // neither route is killed. Its failure carries the stdin-write marker, since
+  // that is the only thing this child ever told us.
+  //
+  // AGMSG_BUSY_TIMEOUT is set low so the grace (timeout + slack) is a few
+  // seconds, not the default ten: this is the one child the timer is allowed to
+  // wait for, and there is no reason to make the suite wait the whole default.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-hang-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+exec 0<&-
+exec sleep 300
+`;
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+  const previousBusy = process.env.AGMSG_BUSY_TIMEOUT;
+  process.env.AGMSG_BUSY_TIMEOUT = "500";
+  t.after(() => {
+    if (previousBusy === undefined) delete process.env.AGMSG_BUSY_TIMEOUT;
+    else process.env.AGMSG_BUSY_TIMEOUT = previousBusy;
+  });
+  const { started, gone } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+    ]);
+
+  for (const { promise, childPid } of started) {
+    // The bound fired: the marker is the child's only signal, and the driver was
+    // killed rather than waited for without end.
     await assert.rejects(() => promise,
       (error) => error.driverFailurePhase === "stdin-write");
-    // No poll and no grace period. The call settles only after the driver has
-    // exited, so by this line it is already gone.
-    assert.ok(gone(childPid), "the failed driver was left running");
+    assert.ok(gone(childPid), "the hung driver was left running past the bound");
   }
 });
 
