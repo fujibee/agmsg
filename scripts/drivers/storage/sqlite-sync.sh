@@ -788,6 +788,17 @@ storage_sync_reconcile_push() {
     # second would overwrite the first, `jq_ok` included, so a page could hide
     # anything in the tail of a line (#780).
     #
+    # `tostring` before `@sh` on every field, which is not decoration. `@sh` turns
+    # an ARRAY into a list of shell words, so `"local_position": ["1","reboot"]`
+    # expands to `pos='1' 'reboot'` -- a command-prefix assignment that runs
+    # `reboot`, leaves `pos` holding the PREVIOUS line's value, and still reaches
+    # `jq_ok=1` on the next line, so the line is accepted. Demonstrated, not
+    # reasoned about. `tostring` makes the same input `pos='["1","reboot"]'`,
+    # which the whitelist below refuses, and it leaves strings and numbers
+    # exactly as they were. `storage_sync_apply_pull` already does this on the
+    # fields it does not otherwise constrain; this read simply has to do it on
+    # all of them.
+    #
     # `@sh` is jq's shell-quoting filter, so every value arrives verbatim through
     # `eval` with nothing for this side to get wrong. `jq_ok` is emitted LAST: a
     # line jq cannot parse produces no assignments at all, so the sentinel stays 0
@@ -796,11 +807,11 @@ storage_sync_reconcile_push() {
     jq_ok=0
     eval "$(printf '%s\n' "$line" | jq -r -s '
       if length != 1 then error("one JSON value per line") else .[0] end
-      | "type=\(.type // "" | @sh)",
-      "pos=\(.local_position // "" | @sh)",
-      "wire=\(.id // "" | @sh)",
-      "seq=\(.server_seq // "" | @sh)",
-      "disposition=\(.disposition // "" | @sh)",
+      | "type=\(.type // "" | tostring | @sh)",
+      "pos=\(.local_position // "" | tostring | @sh)",
+      "wire=\(.id // "" | tostring | @sh)",
+      "seq=\(.server_seq // "" | tostring | @sh)",
+      "disposition=\(.disposition // "" | tostring | @sh)",
       "jq_ok=1"' 2>/dev/null)"
     [ "$jq_ok" = 1 ] || { _sqlite_sync_why; return 13; }
     [ "$type" = sync_push_ack ] || { _sqlite_sync_why; return 13; }

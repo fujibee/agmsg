@@ -564,6 +564,46 @@ printf_two_acks_through_reconcile() {
   printf '%s %s\n' "$1" "$2" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
 }
 
+# `@sh` turns an ARRAY into a list of shell WORDS, so an array-typed field does
+# not merely slip past the whitelist -- it changes what `eval` is handed.
+# `"local_position": ["1","<name>"]` expands to `pos='1' '<name>'`, which is a
+# command-prefix assignment: it RUNS `<name>`, leaves `pos` holding the previous
+# line's value, and still reaches `jq_ok=1`, so the line is accepted.
+#
+# Two assertions, because "refused" and "did not execute" are different claims
+# and only one of them is about the exit status.
+@test "sync contract: an array-typed ack field is refused and does not execute (#780)" {
+  _seed_legacy_history
+  prepare_push >/dev/null
+  local marker shim good
+  marker="$BATS_TEST_TMPDIR/executed"
+  shim="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\ntouch %s\n' "$marker" > "$shim/agmsg-exec-probe"
+  chmod +x "$shim/agmsg-exec-probe"
+
+  # The probe must be runnable, or "it did not run" proves nothing.
+  PATH="$shim:$PATH" agmsg-exec-probe
+  [ -f "$marker" ]
+  rm -f "$marker"
+
+  good='{"type":"sync_push_ack","local_position":"1","id":"00000000-0000-4000-8000-000000000000","server_seq":"1","disposition":"stored"}'
+  run _reconcile_array_position "$good"
+  [ "$status" -eq 13 ]
+  refute test -f "$marker"
+}
+
+_reconcile_array_position() {
+  local bad
+  bad='{"type":"sync_push_ack","local_position":["1","agmsg-exec-probe"],"id":"00000000-0000-4000-8000-000000000001","server_seq":"2","disposition":"stored"}'
+  # PATH is exported for the WHOLE function, not prefixed to `printf`. A prefix
+  # assignment would scope it to the left side of the pipe, while the `eval` that
+  # could run the probe is on the right -- so the "did not execute" assertion
+  # would hold because the probe was unreachable, not because nothing ran it.
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  printf '%s\n%s\n' "$1" "$bad" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
 # The sentinel, driven the only way that can fail. A single unparseable line is
 # caught anyway -- with no assignments the fields are empty and the position
 # whitelist refuses "" -- so the shape that separates a working sentinel from a
