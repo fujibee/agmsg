@@ -911,8 +911,21 @@ storage_sync_apply_pull() {
     # refused the embedded newline. Raised in review, and it was a real
     # regression -- the reason has to be explicit now that it is no longer a
     # side effect of how the fields were read.
-    # `tostring` before `@sh` on EVERY field, not only the ones that needed a
-    # string form. `@sh` emits one quoted word per element of an ARRAY, and a
+    # INVARIANT: every field passes through `tostring` before `@sh`. No
+    # exceptions, and the reason is not that these values are untidy.
+    #
+    # "This field is a string, so it does not need it" is the judgement that
+    # produced this defect, and it does not hold: THE SENDER CHOOSES THE TYPE.
+    # What arrives here is JSON off the wire from the sync server, so the type
+    # of any field is whatever that server put there -- our expectation of it is
+    # not a constraint on it. `tostring` is applied for what the value reaches,
+    # not for what it is: it is the last thing between a server-chosen value and
+    # `eval`, and every field reaches `eval`.
+    #
+    # Adding a field to this filter without `tostring` reopens the hole below,
+    # however plainly its name says "string".
+    #
+    # `@sh` emits one quoted word per element of an ARRAY, and a
     # line carrying several words is not an assignment to the shell -- it is an
     # assignment PREFIXED TO A COMMAND. Three things follow at once, and the
     # third is the reason this is not a cosmetic fix:
@@ -931,9 +944,9 @@ storage_sync_apply_pull() {
     # strings, numbers and booleans exactly as `jq -r` produced them -- so the
     # set of inputs this accepts does not change.
     #
-    # Four fields already had it. The other fourteen are the defect: it was
-    # applied where a non-string value was expected, rather than everywhere the
-    # result reaches `eval`.
+    # Four fields already had it -- chosen because a non-string value was
+    # EXPECTED there. That is the wrong axis, and the other fourteen are what it
+    # cost.
     jq_ok=0
     eval "$(printf '%s\n' "$line" | jq -r -s '
       if length != 1 then error("one JSON value per line") else .[0] end
