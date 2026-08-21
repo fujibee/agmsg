@@ -1022,15 +1022,25 @@ storage_sync_apply_pull() {
            then error("record \($n): field \($name) contains U+0000")
            else $v end) + "\u0000" )
   ' 2>"$jq_err")
-  _sqlite_sync_page_fail() {  # message -- shared cleanup for a framing/refusal failure
-    [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
-    printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
+  # ONE cleanup for EVERY failure after the stream opened: the file descriptor,
+  # both temp files, the globals the trap reads, and the trap itself. The bats
+  # suite calls this function directly in a long-lived shell, so a site that
+  # returns without coming through here leaks an fd and a temp file into that
+  # shell -- exactly what the first review of this change found at the sites
+  # that predate the stream and still only removed the SQL file.
+  _sqlite_sync_apply_fail() {  # [message]
+    if [ "$#" -gt 0 ]; then
+      [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
+      printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
+    fi
+    exec 3<&- 2>/dev/null || true
     rm -f "$sql_file" "$jq_err"
-    exec 3<&-
+    _AGMSG_SYNC_SQL_FILE=""; _AGMSG_SYNC_JQ_ERR=""
+    trap - EXIT INT TERM HUP
   }
   if ! IFS= read -r -d '' page_count <&3 || ! [[ "$page_count" =~ ^[0-9]+$ ]]; then
-    _sqlite_sync_page_fail "the page produced no readable record count"
-    trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+    _sqlite_sync_apply_fail "the page produced no readable record count"
+    _sqlite_sync_why; return 13
   fi
   record_index=0
   while [ "$record_index" -lt "$page_count" ]; do
@@ -1038,8 +1048,8 @@ storage_sync_apply_pull() {
     for field_name in type line_next_after seq wire received v cipher key_id blob \
                       status policy local_rev reason kind from to body at; do
       if ! IFS= read -r -d '' "$field_name" <&3; then
-        _sqlite_sync_page_fail "record $record_index ended mid-frame at field $field_name"
-        trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+        _sqlite_sync_apply_fail "record $record_index ended mid-frame at field $field_name"
+        _sqlite_sync_why; return 13
       fi
     done
     if [ "$type" = sync_pull_cursor ]; then
@@ -1047,15 +1057,15 @@ storage_sync_apply_pull() {
       # a next_after, so assigning the cursor directly would let a message
       # line after the cursor line blank it.
       final_cursor="$line_next_after"
-      case "$final_cursor" in ''|*[!0-9]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
+      case "$final_cursor" in ''|*[!0-9]*) _sqlite_sync_apply_fail; _sqlite_sync_why; return 13 ;; esac
       continue
     fi
-    [ "$type" = sync_pull_message ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+    [ "$type" = sync_pull_message ] || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
     [[ "$wire" =~ $_SQLITE_SYNC_WIRE_RE ]] \
-      || { rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13; }
+      || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
     outcome_ids="${outcome_ids}${outcome_ids:+,}'$wire'"
-    case "$seq:$v" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
-    case "$status" in importable|unsupported_cipher|pending_key|authentication_failed|malformed|policy_violation) ;; *) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
+    case "$seq:$v" in *[!0-9:]*) _sqlite_sync_apply_fail; _sqlite_sync_why; return 13 ;; esac
+    case "$status" in importable|unsupported_cipher|pending_key|authentication_failed|malformed|policy_violation) ;; *) _sqlite_sync_apply_fail; _sqlite_sync_why; return 13 ;; esac
     # Quoted ONCE PER MESSAGE, here, in the shell: each of these fields used
     # to go through `$(_sqlite_lit ...)` -- a printf|sed fork -- at every use
     # site in the SQL below, 32 forks per message and most of the 34 processes
@@ -1176,7 +1186,7 @@ storage_sync_apply_pull() {
           member_joined|member_left|member_renamed|key_rotated) ;;
           *)
             echo "agmsg: storage sync apply cannot acknowledge projection kind '$kind'" >&2
-            rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13 ;;
+            _sqlite_sync_apply_fail; _sqlite_sync_why; return 13 ;;
         esac
         # The roster driver has already durably applied this mutation. Storage
         # owns the quarantine and transport cursor, so it records the matching
@@ -1190,9 +1200,9 @@ storage_sync_apply_pull() {
       fi
       [ -n "$from" ] && [ -n "$to" ] && [ -n "$body" ] && [ -n "$at" ] || {
         echo "agmsg: storage sync apply received an importable message without its projection" >&2
-        rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13;
+        _sqlite_sync_apply_fail; _sqlite_sync_why; return 13;
       }
-      local_id=$(compat_uuid7) || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+      local_id=$(compat_uuid7) || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
       printf "%s\n" "
         INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
         SELECT 'message_sent','$local_id','$tl','$from_q',
@@ -1238,14 +1248,18 @@ storage_sync_apply_pull() {
               AND m.direction='pull');" >> "$sql_file"
     fi
   done
-  # The stream must end exactly where the count said: one more read must fail.
-  if IFS= read -r -d '' field_name <&3; then
-    _sqlite_sync_page_fail "the page carried bytes past its declared $page_count records"
-    trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+  # The stream must end exactly where the count said. One more read must fail
+  # AND deliver nothing: read -d '' returns non-zero at EOF while still
+  # filling the variable with any bytes that arrived before it, so surplus
+  # without a final NUL passes the status check alone (review finding).
+  field_name=""
+  if IFS= read -r -d '' field_name <&3 || [ -n "$field_name" ]; then
+    _sqlite_sync_apply_fail "the page carried bytes past its declared $page_count records"
+    _sqlite_sync_why; return 13
   fi
   exec 3<&-
   rm -f "$jq_err"; _AGMSG_SYNC_JQ_ERR=""
-  [ -n "$final_cursor" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  [ -n "$final_cursor" ] || { _sqlite_sync_apply_fail; _sqlite_sync_why; return 13; }
   printf "%s\n" "UPDATE sync_bindings SET transport_cursor='$final_cursor'
     WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
       AND protocol_version=$protocol AND driver_generation='$generation';
@@ -1259,7 +1273,7 @@ storage_sync_apply_pull() {
   # no copy, or a copy nothing points at (#689). Found in the local path while
   # building this and not carried across; a reviewer caught that.
   if ! agmsg_sqlite -bail "$db" < "$sql_file" >/dev/null 2>&1; then
-    rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+    _sqlite_sync_apply_fail; _sqlite_sync_why; return 13
   fi
   rm -f "$sql_file"
   trap - EXIT INT TERM HUP
