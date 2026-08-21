@@ -837,17 +837,31 @@ storage_sync_reconcile_push() {
      WHERE x.local_team='$tl' AND x.server_instance_id='$server'
        AND x.remote_team_id='$remote' AND x.protocol_version=$protocol
        AND x.driver_generation='$generation';
+    -- The cursor advances to the end of the CONTIGUOUS acknowledged run, which
+    -- is what it always did. What changed is how the run's end is found.
+    --
+    -- It used to ask, for each candidate e, whether any gap existed in
+    -- (push_cursor, e.seq]. That inner test named e.seq, so it was correlated:
+    -- one scan of the gap set per candidate, and the work grew with the SQUARE
+    -- of the number of candidates. On a first connect, where every message is a
+    -- candidate, that is the whole history squared (#912).
+    --
+    -- The gap set does not depend on e. Ask it once: the FIRST gap after the
+    -- cursor bounds every contiguous run that starts there, so the answer is
+    -- the largest candidate below it. Same answer, because a candidate below
+    -- the first gap has no gap beneath it by definition, and one at or above it
+    -- has that gap. Two independent aggregates instead of one correlated pair.
     UPDATE sync_bindings AS b SET push_cursor=COALESCE((
       SELECT MAX(e.seq) FROM events e
       WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
-        AND NOT EXISTS (
-          SELECT 1 FROM events gap LEFT JOIN sync_messages gm
+        AND e.seq < COALESCE((
+          SELECT MIN(gap.seq) FROM events gap LEFT JOIN sync_messages gm
             ON gm.local_team='$tl' AND gm.server_instance_id='$server'
            AND gm.remote_team_id='$remote' AND gm.protocol_version=$protocol
            AND gm.driver_generation='$generation' AND gm.local_position=gap.seq
           WHERE gap.type='message_sent' AND gap.team='$tl'
-            AND gap.seq>b.push_cursor AND gap.seq<=e.seq AND gm.server_seq IS NULL
-        )),b.push_cursor)
+            AND gap.seq>b.push_cursor AND gm.server_seq IS NULL
+        ),9223372036854775807)),b.push_cursor)
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
