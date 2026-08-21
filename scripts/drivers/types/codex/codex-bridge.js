@@ -443,9 +443,10 @@ class AppServerClient {
       this.pending.delete(message.id);
       if (message.error) {
         const rpcError = new Error(message.error.message || JSON.stringify(message.error));
-        // Carry the JSON-RPC error code through, not just its text: ensureThread
-        // distinguishes a deterministic "already has an active writer" (-32600)
-        // from a benign resume failure, and cannot without the code (#906).
+        // Carry the JSON-RPC error code through, not just its text. ensureThread
+        // decides on the message ("already has an active writer"), so the code is
+        // not what gates that today; it is kept for diagnostics and any future
+        // caller that wants the numeric reason without parsing the text (#906).
         if (typeof message.error.code === "number") rpcError.code = message.error.code;
         pending.reject(rpcError);
       } else {
@@ -790,9 +791,10 @@ class WebSocketAppServerClient {
       this.pending.delete(message.id);
       if (message.error) {
         const rpcError = new Error(message.error.message || JSON.stringify(message.error));
-        // Carry the JSON-RPC error code through, not just its text: ensureThread
-        // distinguishes a deterministic "already has an active writer" (-32600)
-        // from a benign resume failure, and cannot without the code (#906).
+        // Carry the JSON-RPC error code through, not just its text. ensureThread
+        // decides on the message ("already has an active writer"), so the code is
+        // not what gates that today; it is kept for diagnostics and any future
+        // caller that wants the numeric reason without parsing the text (#906).
         if (typeof message.error.code === "number") rpcError.code = message.error.code;
         pending.reject(rpcError);
       } else {
