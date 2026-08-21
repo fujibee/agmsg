@@ -564,6 +564,25 @@ printf_two_acks_through_reconcile() {
   printf '%s %s\n' "$1" "$2" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
 }
 
+# The sentinel, driven the only way that can fail. A single unparseable line is
+# caught anyway -- with no assignments the fields are empty and the position
+# whitelist refuses "" -- so the shape that separates a working sentinel from a
+# broken one is a GOOD line followed by a BAD one: without it the bad line
+# silently re-uses the good line's position, wire id and sequence, and is
+# counted a second time.
+@test "sync contract: an unparseable ack line does not inherit the previous line (#780)" {
+  _seed_legacy_history
+  prepare_push >/dev/null
+  local good
+  good='{"type":"sync_push_ack","local_position":"1","id":"00000000-0000-4000-8000-000000000000","server_seq":"1","disposition":"stored"}'
+  run _reconcile_good_then_garbage "$good"
+  [ "$status" -eq 13 ]
+}
+
+_reconcile_good_then_garbage() {
+  printf '%s\n{not json\n' "$1" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
 # The wire-id check stopped being a `grep -Eq '^[0-9a-f-]{36}$'` and became two
 # builtin `case` patterns. Same whitelist or not is the question, and `$wire`
 # goes straight into SQL, so it is asked with the shapes that separate the two:
