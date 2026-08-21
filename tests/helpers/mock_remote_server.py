@@ -143,7 +143,71 @@ elif PULL_MIXED:
     ]
 else:
     PULL_MESSAGES = BASE_PULL_MESSAGES
+# A history of any size, one wire-shaped message per JSONL line, as
+# tests/perf/gen-history.py writes it. It replaces the built-in fixtures so a
+# harness can hand this server 17,300 messages without a 17,300-line module.
+PULL_FILE = os.environ.get("MOCK_PULL_FILE", "")
+if PULL_FILE:
+    with open(PULL_FILE, encoding="utf-8") as handle:
+        PULL_MESSAGES = [json.loads(line) for line in handle if line.strip()]
 PUSHED_MESSAGES = []
+# Per team, because the sequence space is per team (server/spec/v1.md: "team
+# sequence", allocated inside the team row's lock). The flat list above stays
+# for /_test/pushed and for the pulled-team view, which predate this.
+PUSHED_BY_TEAM = {}
+
+
+def _log_for(team_id):
+    """The messages this server holds for `team_id`, in sequence order.
+
+    The pull fixture's team holds the served history plus what it pushed; a
+    team registered through /v1/connect holds only what it pushed -- and its
+    first push gets sequence 1, which is what its client's pull cursor expects.
+    Before this, every team saw one shared log and a connected team's first
+    pull failed contiguity (or capability coverage) against it.
+    """
+    own = PUSHED_BY_TEAM.get(team_id, [])
+    if team_id == PULL_TEAM_ID:
+        return PULL_MESSAGES + own
+    return own
+
+
+def _page(messages, query):
+    """One page of `messages`, the way the reference server pages.
+
+    Mirrors server/src/storage.ts getMessages (v1.2.2) so a client measured
+    against this fixture sees the pages it would see in production:
+      - `after` is required in the spec; an unparsable one reads as 0 here, as
+        this fixture always did.
+      - `limit` defaults to 100 and must be 1..1000 (server/src/protocol.ts
+        messagesQuerySchema); outside that the real server answers 400, and so
+        does this.
+      - the query is `LIMIT limit + 1`: `has_more` is whether a row past the
+        page existed, `next_after` is the last returned seq, or the supplied
+        `after` when the page is empty (server/spec/v1.md, GET /v1/messages).
+    Returns (status, body_fields).
+    """
+    after = 0
+    limit = 100
+    for pair in query.split("&"):
+        if pair.startswith("after="):
+            try:
+                after = int(pair[len("after="):])
+            except ValueError:
+                after = 0
+        elif pair.startswith("limit="):
+            raw = pair[len("limit="):]
+            if not raw.isdigit() or raw.startswith("0") or not 1 <= int(raw) <= 1000:
+                return 400, {"error": {"code": "invalid-request"}}
+            limit = int(raw)
+    rows = [m for m in messages if int(m["server_seq"]) > after][:limit + 1]
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    return 200, {
+        "messages": page,
+        "next_after": page[-1]["server_seq"] if page else str(after),
+        "has_more": has_more,
+    }
 
 
 class LoopbackHTTPServer(HTTPServer):
@@ -223,8 +287,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/capabilities":
             team_id = self.headers.get("Agmsg-Team-ID", "")
-            current_seq = (len(PULL_MESSAGES) + len(PUSHED_MESSAGES)
-                           if team_id == PULL_TEAM_ID else 0)
+            current_seq = len(_log_for(team_id))
             self._send_json(200, {
                 "protocol_version": 1,
                 "server_instance_id": CONNECT_SERVER_ID,
@@ -339,7 +402,12 @@ class Handler(BaseHTTPRequestHandler):
                     "min_available_seq": "0",
                     "cipher_profile": TEAM_CIPHER_PROFILE or None,
                     "members_revision": "0",
-                    "members": REGISTERED_TEAMS[team_id]["members"],
+                    # Canonical order, ascending member_id: the client refuses
+                    # a roster that is not ("members response is not
+                    # canonical"), and the order /v1/connect was sent is the
+                    # local config's key order, which is not that.
+                    "members": sorted(REGISTERED_TEAMS[team_id]["members"],
+                                      key=lambda m: m["member_id"]),
                 })
                 return
             self._send_json(200, {
@@ -353,19 +421,21 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if route == "/v1/messages":
-            after = 0
-            for pair in query.split("&"):
-                if pair.startswith("after="):
-                    after = int(pair[len("after="):])
-            page = [m for m in PULL_MESSAGES + PUSHED_MESSAGES
-                    if int(m["server_seq"]) > after]
+            # The team the caller is bound to, echoed back the way
+            # /v1/capabilities does: a CONNECTED team carries its own id, and
+            # the client checks every response against its binding. Answering
+            # the pull fixture's id here failed every connected team's first
+            # pull with "server/team binding mismatch".
+            team_id = self.headers.get("Agmsg-Team-ID", "") or PULL_TEAM_ID
+            status, page = _page(_log_for(team_id), query)
+            if status != 200:
+                self._send_json(status, page)
+                return
             self._send_json(200, {
                 "protocol_version": 1,
-                "server_instance_id": PULL_SERVER_ID,
-                "team_id": PULL_TEAM_ID,
-                "messages": page,
-                "next_after": page[-1]["server_seq"] if page else str(after),
-                "has_more": False,
+                "server_instance_id": CONNECT_SERVER_ID,
+                "team_id": team_id,
+                **page,
             })
             return
         # The pull side: a machine that has none of this asking for a team by
@@ -477,7 +547,7 @@ class Handler(BaseHTTPRequestHandler):
                 "team_name": "pulled-team",
                 "min_available_seq": "0",
                 "cipher_profile": TEAM_CIPHER_PROFILE or None,
-                "current_seq": str(len(PULL_MESSAGES) + len(PUSHED_MESSAGES)),
+                "current_seq": str(len(_log_for(PULL_TEAM_ID))),
                 "policy_revision": "0",
                 "accepted_envelope_versions": [1],
                 "write_allowed_ciphers": CONNECT_CIPHERS,
@@ -491,14 +561,10 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if route == "/v1/teams/%s/messages" % PULL_TEAM_ID:
-            after = 0
-            for pair in query.split("&"):
-                if pair.startswith("after="):
-                    try:
-                        after = int(pair[len("after="):])
-                    except ValueError:
-                        after = 0
-            page = [m for m in PULL_MESSAGES if int(m["server_seq"]) > after]
+            status, page = _page(PULL_MESSAGES, query)
+            if status != 200:
+                self._send_json(status, page)
+                return
             self._send_json(200, {
                 "protocol_version": 1,
                 "server_instance_id": PULL_SERVER_ID,
@@ -506,9 +572,7 @@ class Handler(BaseHTTPRequestHandler):
                 "team_name": "pulled-team",
                 "min_available_seq": "0",
                 "cipher_profile": TEAM_CIPHER_PROFILE or None,
-                "messages": page,
-                "next_after": page[-1]["server_seq"] if page else str(after),
-                "has_more": False,
+                **page,
             })
             return
         self._send_json(404, {"error": "not found"})
@@ -532,36 +596,69 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json(400, {"error": "bad json"})
                 return
+            team_id = self.headers.get("Agmsg-Team-ID", "")
+            own = PUSHED_BY_TEAM.setdefault(team_id, [])
             acks = []
             for message in messages:
+                # An id this server already holds answers with its ORIGINAL
+                # sequence as `duplicate` (server/spec/v1.md, POST
+                # /v1/messages step 2); only a new id allocates. Without this a
+                # retried batch would be stored twice and acked twice.
+                known = next((m for m in own if m["id"] == message.get("id")), None)
+                if known is not None:
+                    acks.append({"id": known["id"], "server_seq": known["server_seq"],
+                                 "disposition": "duplicate"})
+                    continue
                 stored = {
                     "id": message.get("id"),
-                    "server_seq": str(len(PULL_MESSAGES) + len(PUSHED_MESSAGES) + 1),
+                    "server_seq": str(len(_log_for(team_id)) + 1),
                     "server_received_at": "2026-01-03T00:00:00.000000Z",
                     "envelope": message.get("envelope"),
                 }
+                own.append(stored)
                 PUSHED_MESSAGES.append(stored)
                 acks.append({
                     "id": message.get("id"),
                     "server_seq": stored["server_seq"],
                     "disposition": "stored",
                 })
-            self._send_json(200, {"acks": acks})
+            # The binding fields the client checks on EVERY response
+            # (validateBinding in remote-sync.mjs): without them a push cycle
+            # ends in "server/team binding mismatch" after the server has
+            # already stored the batch. Same success shape as the spec's
+            # example response for this route.
+            self._send_json(200, {
+                "protocol_version": 1,
+                "server_instance_id": CONNECT_SERVER_ID,
+                "team_id": team_id,
+                "team_name": REGISTERED_TEAMS.get(team_id, {}).get(
+                    "team_name", "pulled-team"),
+                "min_available_seq": "0",
+                "policy_revision": "0",
+                "acks": acks,
+            })
             return
 
         if self.path == "/v1/read-state/sync":
-            current = str(len(PULL_MESSAGES) + len(PUSHED_MESSAGES))
+            # Per team, like the pull side: the binding the client checks is
+            # the caller's own, and the frontier stream must name exactly that
+            # team's members (readStateCycle fails on an omitted frontier), so
+            # a registered team answers from what /v1/connect was sent.
+            team_id = self.headers.get("Agmsg-Team-ID", "") or PULL_TEAM_ID
+            members = sorted(REGISTERED_TEAMS[team_id]["members"]
+                             if team_id in REGISTERED_TEAMS else PULL_MEMBERS,
+                             key=lambda m: m["member_id"])
             self._send_json(200, {
                 "protocol_version": 1,
-                "server_instance_id": PULL_SERVER_ID,
-                "team_id": PULL_TEAM_ID,
+                "server_instance_id": CONNECT_SERVER_ID,
+                "team_id": team_id,
                 "min_available_seq": "0",
                 "cipher_profile": TEAM_CIPHER_PROFILE or None,
-                "current_seq": current,
+                "current_seq": str(len(_log_for(team_id))),
                 "items": [
                     {"kind": "frontier", "member_id": member["member_id"],
                      "server_seq": "0"}
-                    for member in PULL_MEMBERS
+                    for member in members
                 ],
                 "next_page_after": None,
                 "has_more": False,
