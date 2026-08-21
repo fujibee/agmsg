@@ -48,6 +48,28 @@ prepare_push() {
   [ "$_SQLITE_SYNC_LIT" = "a''b''''c" ]
 }
 
+@test "sync contract: apply refuses a wire id that is not a canonical UUIDv4 (#908)" {
+  # The shape check moved from `printf | grep -Eq` to `[[ =~ ]]` with the
+  # pattern in a variable; the acceptance set must not move with it. One
+  # accepted id and the near-misses: wrong version nibble, wrong variant
+  # nibble, uppercase, too short, and empty.
+  local good='{"type":"sync_pull_message","server_seq":"1","id":"550e8400-e29b-41d4-a716-446655440000","server_received_at":"2026-07-20T13:00:00.000000Z","envelope":{"v":1,"cipher":"none","key_id":null,"blob":"e30="},"status":"malformed","policy_revision":"0","local_security_revision":"0","reason":"fixture"}'
+  local page cursor='{"type":"sync_pull_cursor","next_after":"1"}'
+  page=$(printf '%s\n%s\n' "$good" "$cursor")
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  local bad
+  for bad in \
+    "550e8400-e29b-51d4-a716-446655440000" \
+    "550e8400-e29b-41d4-c716-446655440000" \
+    "550E8400-E29B-41D4-A716-446655440000" \
+    "550e8400-e29b-41d4-a716-44665544000" \
+    ""; do
+    page=$(printf '%s\n%s\n' "${good/550e8400-e29b-41d4-a716-446655440000/$bad}" "$cursor")
+    run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page"
+    [ "$status" -eq 13 ]
+  done
+}
+
 @test "sync contract: prepare is re-entrant and byte-stable before reconcile" {
   storage_send demo alice bob "preserve these exact bytes" >/dev/null
   local first second

@@ -76,6 +76,13 @@ _sqlite_sync_commit_chunk() {
 # tests/test_remote_sync.bats holds this equal to _sqlite_lit byte for byte.
 _sqlite_sync_lit_into() { local q="'"; _SQLITE_SYNC_LIT="${1//$q/$q$q}"; }
 
+# The UUIDv4 wire-id shape, for [[ =~ ]]: held in a variable because that is
+# the one form every bash reads the same way -- an inline pattern with braces
+# is at the mercy of each version's quoting rules. Kept byte-identical to the
+# grep -E pattern it replaces on the per-message path (#908): checking a wire
+# id used to cost a printf and a grep per pulled message.
+_SQLITE_SYNC_WIRE_RE='^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+
 # Bulk form of _sqlite_sync_uuid4: one /dev/urandom read and builtin-only
 # formatting for `count` ids. A 1000-message catch-up page costs one fork here
 # instead of one per message.
@@ -1050,8 +1057,7 @@ storage_sync_apply_pull() {
       continue
     fi
     [ "$type" = sync_pull_message ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-    printf '%s\n' "$wire" | grep -Eq \
-      '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
+    [[ "$wire" =~ $_SQLITE_SYNC_WIRE_RE ]] \
       || { rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13; }
     outcome_ids="${outcome_ids}${outcome_ids:+,}'$wire'"
     case "$seq:$v" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
