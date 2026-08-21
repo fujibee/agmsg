@@ -543,6 +543,54 @@ _reconcile_one_ack() {
     | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
 }
 
+# The #780 guard, on the ACK path. The existing "two JSON values on one line"
+# test drives `sync_pull_message`, so the same guard on reconcile was carried by
+# nothing: a second value on the line would emit a second full set of
+# assignments, `jq_ok` included, and the last one would win.
+@test "sync contract: reconcile refuses two JSON values on one ack line (#780)" {
+  _seed_legacy_history
+  prepare_push >/dev/null
+  local one two
+  one='{"type":"sync_push_ack","local_position":"1","id":"00000000-0000-4000-8000-000000000000","server_seq":"1","disposition":"stored"}'
+  # Second value hides a different position on the same line.
+  two='{"type":"sync_push_ack","local_position":"2","id":"00000000-0000-4000-8000-000000000001","server_seq":"2","disposition":"stored"}'
+  # Drive it in THIS shell, for the reason _reconcile_one_ack documents: a 127
+  # from an undefined function would look like the rejection being asserted.
+  run printf_two_acks_through_reconcile "$one" "$two"
+  [ "$status" -eq 13 ]
+}
+
+printf_two_acks_through_reconcile() {
+  printf '%s %s\n' "$1" "$2" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
+# The wire-id check stopped being a `grep -Eq '^[0-9a-f-]{36}$'` and became two
+# builtin `case` patterns. Same whitelist or not is the question, and `$wire`
+# goes straight into SQL, so it is asked with the shapes that separate the two:
+# right length wrong charset, right charset wrong length, and an injection that
+# is neither.
+@test "sync contract: an ack wire id stays a whitelist after the grep was removed" {
+  _seed_legacy_history
+  prepare_push >/dev/null
+  local bad
+  for bad in \
+    "00000000-0000-4000-8000-00000000000" \
+    "00000000-0000-4000-8000-0000000000000" \
+    "00000000-0000-4000-8000-00000000000g" \
+    "00000000-0000-4000-8000-00000000000'" \
+    "'; DROP TABLE sync_messages; --" \
+    "" \
+    "00000000-0000-4000-8000-0000000000 0"; do
+    run _reconcile_one_ack_wire "$bad"
+    [ "$status" -eq 13 ]
+  done
+}
+
+_reconcile_one_ack_wire() {
+  printf '{"type":"sync_push_ack","local_position":"1","id":"%s","server_seq":"1","disposition":"stored"}\n' \
+    "$1" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
 @test "sync contract: an ack position stays a whitelist after allowing negatives" {
   # local_position is interpolated straight into SQL, so widening it to accept
   # projected (negative) positions must not widen it to anything else.

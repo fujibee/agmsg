@@ -774,15 +774,36 @@ storage_sync_reconcile_push() {
   local team="$1" server="$2" remote="$3" protocol="$4"
   _sqlite_sync_valid_binding "$server" "$remote" "$protocol" || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
-  local generation db tl line values="" pos wire seq disposition count=0
+  local generation db tl line values="" type pos wire seq disposition jq_ok count=0
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    [ "$(printf '%s\n' "$line" | jq -r '.type // empty')" = sync_push_ack ] || { _sqlite_sync_why; return 13; }
-    pos=$(printf '%s\n' "$line" | jq -r '.local_position // empty')
-    wire=$(printf '%s\n' "$line" | jq -r '.id // empty')
-    seq=$(printf '%s\n' "$line" | jq -r '.server_seq // empty')
-    disposition=$(printf '%s\n' "$line" | jq -r '.disposition // empty')
+    # One `jq` per line, not one per field -- the same read `storage_sync_apply_pull`
+    # already does (#780), for the same reason. Five field reads plus a `grep` cost
+    # six forks per acknowledgement, and a fork is 6.3 ms on the machine this was
+    # measured on, which is nearly all of the 37.8 ms an acknowledgement took.
+    #
+    # `-s` with a length check, because one LINE is not one JSON value to jq: two
+    # values on a line would otherwise each emit a full set of assignments and the
+    # second would overwrite the first, `jq_ok` included, so a page could hide
+    # anything in the tail of a line (#780).
+    #
+    # `@sh` is jq's shell-quoting filter, so every value arrives verbatim through
+    # `eval` with nothing for this side to get wrong. `jq_ok` is emitted LAST: a
+    # line jq cannot parse produces no assignments at all, so the sentinel stays 0
+    # and this fails closed rather than proceeding on stale values from the
+    # previous iteration.
+    jq_ok=0
+    eval "$(printf '%s\n' "$line" | jq -r -s '
+      if length != 1 then error("one JSON value per line") else .[0] end
+      | "type=\(.type // "" | @sh)",
+      "pos=\(.local_position // "" | @sh)",
+      "wire=\(.id // "" | @sh)",
+      "seq=\(.server_seq // "" | @sh)",
+      "disposition=\(.disposition // "" | @sh)",
+      "jq_ok=1"' 2>/dev/null)"
+    [ "$jq_ok" = 1 ] || { _sqlite_sync_why; return 13; }
+    [ "$type" = sync_push_ack ] || { _sqlite_sync_why; return 13; }
     # $pos and $seq are interpolated into SQL below, so these stay whitelists.
     # A local position may be negative (projected legacy history sits under the
     # live space); a server sequence is assigned by the server and never is.
@@ -797,7 +818,13 @@ storage_sync_reconcile_push() {
       '' | *[!0-9]*) _sqlite_sync_why; return 13 ;;
     esac
     case "$disposition" in stored|duplicate) ;; *) _sqlite_sync_why; return 13 ;; esac
-    printf '%s' "$wire" | grep -Eq '^[0-9a-f-]{36}$' || { _sqlite_sync_why; return 13; }
+    # The sixth fork, removed. `case` is a builtin and these two patterns are
+    # exactly `^[0-9a-f-]{36}$`: a length of 36, and not one character outside
+    # the class. Kept as a whitelist because `$wire` is interpolated into SQL.
+    # (`storage_sync_apply_pull` still greps, but its pattern is the strict
+    # UUIDv4 shape, which does not reduce to a glob this cleanly.)
+    case "${#wire}" in 36) ;; *) _sqlite_sync_why; return 13 ;; esac
+    case "$wire" in *[!0-9a-f-]*) _sqlite_sync_why; return 13 ;; esac
     values="${values}${values:+,}($pos,'$wire','$seq')"; count=$((count + 1))
   done
   [ "$count" -gt 0 ] || { _sqlite_sync_why; return 13; }
