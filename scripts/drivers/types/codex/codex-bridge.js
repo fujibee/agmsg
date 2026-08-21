@@ -442,7 +442,12 @@ class AppServerClient {
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        const rpcError = new Error(message.error.message || JSON.stringify(message.error));
+        // Carry the JSON-RPC error code through, not just its text: ensureThread
+        // distinguishes a deterministic "already has an active writer" (-32600)
+        // from a benign resume failure, and cannot without the code (#906).
+        if (typeof message.error.code === "number") rpcError.code = message.error.code;
+        pending.reject(rpcError);
       } else {
         pending.resolve(message.result);
       }
@@ -784,7 +789,12 @@ class WebSocketAppServerClient {
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+        const rpcError = new Error(message.error.message || JSON.stringify(message.error));
+        // Carry the JSON-RPC error code through, not just its text: ensureThread
+        // distinguishes a deterministic "already has an active writer" (-32600)
+        // from a benign resume failure, and cannot without the code (#906).
+        if (typeof message.error.code === "number") rpcError.code = message.error.code;
+        pending.reject(rpcError);
       } else {
         pending.resolve(message.result);
       }
@@ -1121,6 +1131,23 @@ class CodexBridge {
         // below is a distinct failure (a resume that succeeded but returned
         // the wrong thread) and should still die() as before, not be
         // silently swallowed by this fallback.
+        // Two failures reach this catch and they need opposite handling. The
+        // benign one below -- a Codex 0.142+ --remote session that never created
+        // a rollout -- is what it was written for: turn/start needs only the
+        // threadId, so the bridge stays alive idle.
+        //
+        // "already has an active writer" is the other, and it is deterministic:
+        // another writer -- a co-resident Codex Desktop, or a second bridge --
+        // owns this thread, and resume cannot succeed while that holds. A bridge
+        // that proceeds anyway still arms watchers and holds ~10 threads, so
+        // duplicates accumulate until a per-user pid limit is saturated (#906).
+        // Match the message, not the JSON-RPC code alone (-32600 is the generic
+        // "invalid request", carried here now for diagnostics): the message is
+        // the condition, and a rewording that kept the code would not be this.
+        // Exit non-zero so a bridge that cannot own its thread does not linger.
+        if (/already has an active writer/iu.test(err && err.message ? err.message : "")) {
+          die(`thread/resume failed: ${err.message}`);
+        }
         console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
         this.threadIdle = true;
         this.turnActive = false;

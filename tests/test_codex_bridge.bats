@@ -1891,4 +1891,105 @@ EOF
   arms="$(grep -c ' arm ' "$flog")"
   [ "$arms" -ge 1 ]
   [ "$arms" -le 20 ]
+@test "codex-bridge: a thread owned by another writer is fatal, not proceed-without-resume (#906)" {
+  run node -e 'const net = require("net"); const crypto = require("crypto"); if (!net || !crypto) process.exit(1);'
+  if [ "$status" -ne 0 ]; then
+    skip "node net/crypto modules are not available in this sandbox"
+  fi
+  run node -e 'const fs = require("fs"); const net = require("net"); const sock = process.argv[1]; try { fs.unlinkSync(sock); } catch (_) {} const server = net.createServer(); server.on("error", () => process.exit(2)); server.listen(sock, () => server.close(() => { try { fs.unlinkSync(sock); } catch (_) {} process.exit(0); }));' "$TEST_SKILL_DIR/probe2.sock"
+  if [ "$status" -ne 0 ]; then
+    skip "unix socket listen is not available in this sandbox"
+  fi
+
+  local fake="$TEST_SKILL_DIR/fake-writer-owned.js"
+  local sock="$TEST_SKILL_DIR/fake-writer-owned.sock"
+  local log="$TEST_SKILL_DIR/fake-writer-owned.log"
+  # A minimal WS app-server that answers thread/resume with the deterministic
+  # "already has an active writer" JSON-RPC error. process/spawn is deliberately
+  # NOT handled: a correct bridge dies before it ever arms a watcher.
+  cat >"$fake" <<'EOF'
+const crypto = require("crypto");
+const fs = require("fs");
+const net = require("net");
+const sock = process.argv[2];
+const log = process.argv[3];
+try { fs.unlinkSync(sock); } catch (_) {}
+function sendFrame(socket, value) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  let header;
+  if (payload.length < 126) { header = Buffer.from([0x81, payload.length]); }
+  else { header = Buffer.alloc(4); header[0] = 0x81; header[1] = 126; header.writeUInt16BE(payload.length, 2); }
+  socket.write(Buffer.concat([header, payload]));
+}
+function handleMessage(socket, message) {
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    sendFrame(socket, { jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/resume") {
+    sendFrame(socket, {
+      jsonrpc: "2.0",
+      id: message.id,
+      error: { code: -32600, message: `thread ${message.params.threadId} already has an active writer (code -32600)` },
+    });
+  }
+}
+function parseFrames(socket, state, chunk) {
+  state.buffer = Buffer.concat([state.buffer, chunk]);
+  while (state.buffer.length >= 2) {
+    const opcode = state.buffer[0] & 0x0f;
+    let length = state.buffer[1] & 0x7f;
+    let offset = 2;
+    if (length === 126) { if (state.buffer.length < offset + 2) return; length = state.buffer.readUInt16BE(offset); offset += 2; }
+    else if (length === 127) { if (state.buffer.length < offset + 8) return; length = state.buffer.readUInt32BE(offset + 4); offset += 8; }
+    const masked = (state.buffer[1] & 0x80) !== 0;
+    const maskOffset = offset;
+    if (masked) offset += 4;
+    if (state.buffer.length < offset + length) return;
+    let payload = state.buffer.slice(offset, offset + length);
+    if (masked) { const mask = state.buffer.slice(maskOffset, maskOffset + 4); payload = Buffer.from(payload.map((b, i) => b ^ mask[i % 4])); }
+    state.buffer = state.buffer.slice(offset + length);
+    if (opcode === 0x1) handleMessage(socket, JSON.parse(payload.toString("utf8")));
+  }
+}
+const server = net.createServer((socket) => {
+  const state = { buffer: Buffer.alloc(0), upgraded: false, header: Buffer.alloc(0) };
+  socket.on("data", (chunk) => {
+    if (!state.upgraded) {
+      state.header = Buffer.concat([state.header, chunk]);
+      const end = state.header.indexOf("\r\n\r\n");
+      if (end === -1) return;
+      const header = state.header.slice(0, end).toString("utf8");
+      const rest = state.header.slice(end + 4);
+      const key = (header.match(/Sec-WebSocket-Key: (.*)\r\n/i) || [])[1].trim();
+      const accept = crypto.createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+      socket.write(["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade", `Sec-WebSocket-Accept: ${accept}`, "", ""].join("\r\n"));
+      state.upgraded = true;
+      if (rest.length > 0) parseFrames(socket, state, rest);
+      return;
+    }
+    parseFrames(socket, state, chunk);
+  });
+  socket.on("close", () => server.close(() => process.exit(0)));
+});
+server.listen(sock);
+EOF
+
+  node "$fake" "$sock" "$log" 3>&- &
+  local server_pid="$!"
+  for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+
+  run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-owned-elsewhere \
+    --app-server "unix://$sock" --timeout 1 --interval 1 --max-wakes 1
+
+  kill "$server_pid" 2>/dev/null || true
+
+  # The bridge exits non-zero, says why, and NEVER armed a watcher: a bridge
+  # that cannot own its thread is exactly what accumulates in #906.
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "already has an active writer" ]]
+  [[ ! "$output" =~ "armed" ]]
+  [[ ! "$output" =~ "proceeding without resume" ]]
+  grep -q "thread/resume" "$log"
+  ! grep -q "process/spawn" "$log"
 }
