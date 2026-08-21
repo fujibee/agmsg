@@ -2013,12 +2013,27 @@ export const STORAGE_BUSY_EXIT = 11;
 const STORAGE_BUSY_WAIT_CAP_MS = 30000;
 const STORAGE_BUSY_RETRY_BUDGET_MS = 300000;
 
+// The knob, read like one. Anything that is not a whole number of milliseconds
+// is refused here, on the first driver call, rather than read as NaN: NaN
+// compares false against everything, and `waited + wait > NaN` would have
+// turned the budget into "retry forever" -- the opposite of what a budget is
+// for, and exactly the unbounded wait this code exists to avoid.
+function storageBusyRetryBudgetMs() {
+  const raw = process.env.AGMSG_SYNC_BUSY_RETRY_MS;
+  if (raw === undefined || raw === "") return STORAGE_BUSY_RETRY_BUDGET_MS;
+  if (!/^(0|[1-9][0-9]*)$/u.test(raw)) {
+    throw new Error(
+      `AGMSG_SYNC_BUSY_RETRY_MS must be a whole number of milliseconds, not ${JSON.stringify(raw)}`);
+  }
+  return Number(raw);
+}
+
 export async function driver(operation, config, input, extra = [], dependencies = {}) {
   const script = process.env.AGMSG_SYNC_DRIVER;
   if (!script) throw new Error("AGMSG_SYNC_DRIVER is not set");
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const eventCall = dependencies.eventCall ?? event;
-  const budgetMs = Number(process.env.AGMSG_SYNC_BUSY_RETRY_MS ?? STORAGE_BUSY_RETRY_BUDGET_MS);
+  const budgetMs = storageBusyRetryBudgetMs();
   const run = () => runDriver({
     args: [script, operation, config.local_team, config.server_instance_id,
       config.remote_team_id, String(config.protocol_version), ...extra],
