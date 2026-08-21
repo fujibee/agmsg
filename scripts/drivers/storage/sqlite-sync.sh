@@ -846,22 +846,39 @@ storage_sync_reconcile_push() {
     -- of the number of candidates. On a first connect, where every message is a
     -- candidate, that is the whole history squared (#912).
     --
-    -- The gap set does not depend on e. Ask it once: the FIRST gap after the
-    -- cursor bounds every contiguous run that starts there, so the answer is
-    -- the largest candidate below it. Same answer, because a candidate below
-    -- the first gap has no gap beneath it by definition, and one at or above it
-    -- has that gap. Two independent aggregates instead of one correlated pair.
+    -- The gap set does not depend on e. The FIRST gap after the cursor bounds
+    -- every contiguous run that starts there, so the answer is the largest
+    -- candidate below it. Same answer: a candidate below the first gap has no
+    -- gap beneath it, and one at or above it has that gap.
+    --
+    -- A TEMP TABLE rather than a subquery, for two reasons that both had to be
+    -- measured rather than assumed. Written inline as a derived table, SQLite
+    -- re-evaluated it per candidate and the quadratic came straight back (3.3 s
+    -- against 27 ms at 2,000 rows). Written twice as an uncorrelated scalar
+    -- subquery it is fast, but then the gap query exists in two places that can
+    -- drift apart. A temp table is built once because of how it is built, not
+    -- because a planner chose to.
+    --
+    -- No sentinel. An earlier revision bounded with 9223372036854775807 as
+    -- though it were infinity; it is the largest value events.seq can hold, so
+    -- a candidate sitting exactly there was accepted by the old query and
+    -- refused by the new one. `IS NULL OR <` says what was meant and has no
+    -- boundary to collide with.
+    CREATE TEMP TABLE sync_first_gap AS
+      SELECT MIN(gap.seq) AS seq FROM events gap LEFT JOIN sync_messages gm
+        ON gm.local_team='$tl' AND gm.server_instance_id='$server'
+       AND gm.remote_team_id='$remote' AND gm.protocol_version=$protocol
+       AND gm.driver_generation='$generation' AND gm.local_position=gap.seq
+      WHERE gap.type='message_sent' AND gap.team='$tl' AND gm.server_seq IS NULL
+        AND gap.seq>(SELECT push_cursor FROM sync_bindings
+                      WHERE local_team='$tl' AND server_instance_id='$server'
+                        AND remote_team_id='$remote' AND protocol_version=$protocol
+                        AND driver_generation='$generation');
     UPDATE sync_bindings AS b SET push_cursor=COALESCE((
       SELECT MAX(e.seq) FROM events e
       WHERE e.type='message_sent' AND e.team='$tl' AND e.seq>b.push_cursor
-        AND e.seq < COALESCE((
-          SELECT MIN(gap.seq) FROM events gap LEFT JOIN sync_messages gm
-            ON gm.local_team='$tl' AND gm.server_instance_id='$server'
-           AND gm.remote_team_id='$remote' AND gm.protocol_version=$protocol
-           AND gm.driver_generation='$generation' AND gm.local_position=gap.seq
-          WHERE gap.type='message_sent' AND gap.team='$tl'
-            AND gap.seq>b.push_cursor AND gm.server_seq IS NULL
-        ),9223372036854775807)),b.push_cursor)
+        AND ((SELECT seq FROM sync_first_gap) IS NULL
+             OR e.seq<(SELECT seq FROM sync_first_gap))),b.push_cursor)
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';

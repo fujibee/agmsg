@@ -108,6 +108,29 @@ prepare_push() {
 # first gap and the last gap are the same row -- so it cannot tell "stop at the
 # first gap" from "stop at the last one". Two gaps separate them, and that is
 # the whole correctness question for how the run's end is found.
+# An earlier revision bounded the candidate scan with 9223372036854775807 as
+# though it were infinity. It is the largest value `events.seq` can hold, so a
+# message sitting exactly there was accepted before and refused after -- a
+# changed acceptance set at one value, which a differential run over ordinary
+# fixtures never visits. The bound is now `IS NULL OR <`, which has no such
+# value; this pins that it stays that way.
+@test "sync contract: a message at the maximum seq still advances the cursor (#912)" {
+  local db candidates acks result max=9223372036854775807
+  storage_send demo alice bob one >/dev/null
+  db=$(agmsg_db_path demo)
+  # Move the second message to the top of the seq space. AUTOINCREMENT permits
+  # an explicit value, and this is the only one the old sentinel collided with.
+  storage_send demo alice bob two >/dev/null
+  sqlite3 "$db" "UPDATE events SET seq=$max WHERE body='two';"
+
+  candidates=$(prepare_push 5)
+  acks=$(printf '%s\n' "$candidates" | jq -c '
+    select(.type=="sync_push_candidate")
+    | {type:"sync_push_ack",local_position,id,server_seq:.local_position,disposition:"stored"}')
+  result=$(printf '%s\n' "$acks" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = "$max" ]
+}
+
 @test "sync contract: reconcile stops at the FIRST gap, not the last (#912)" {
   local i candidates acks result
   for i in one two three four five; do storage_send demo alice bob "$i" >/dev/null; done
