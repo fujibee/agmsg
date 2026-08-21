@@ -68,7 +68,13 @@ _sqlite_sync_commit_chunk() {
 # Builtin single-quote escaping, assigned into _SQLITE_SYNC_LIT in the CALLER's
 # shell. _sqlite_lit forks printf|sed per call, which the bulk loop calls three
 # times per message; a `$( )` wrapper here would fork just as surely.
-_sqlite_sync_lit_into() { _SQLITE_SYNC_LIT="${1//\'/\'\'}"; }
+#
+# The quote is held in a variable rather than written as \' in the pattern:
+# bash 3.2 (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so
+# `${1//\'/\'\'}` turns it's into it\'\'s there and into it''s on bash 4+. A
+# variable is read the same way by every bash, and the contract test in
+# tests/test_remote_sync.bats holds this equal to _sqlite_lit byte for byte.
+_sqlite_sync_lit_into() { local q="'"; _SQLITE_SYNC_LIT="${1//$q/$q$q}"; }
 
 # Bulk form of _sqlite_sync_uuid4: one /dev/urandom read and builtin-only
 # formatting for `count` ids. A 1000-message catch-up page costs one fork here
