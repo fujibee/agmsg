@@ -104,6 +104,32 @@ prepare_push() {
   [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = 3 ]
 }
 
+# The existing contiguous-prefix test has exactly ONE gap, and with one gap the
+# first gap and the last gap are the same row -- so it cannot tell "stop at the
+# first gap" from "stop at the last one". Two gaps separate them, and that is
+# the whole correctness question for how the run's end is found.
+@test "sync contract: reconcile stops at the FIRST gap, not the last (#912)" {
+  local i candidates acks result
+  for i in one two three four five; do storage_send demo alice bob "$i" >/dev/null; done
+  candidates=$(prepare_push 5)
+
+  # Acknowledge 2 and 4. Gaps at 1, 3 and 5.
+  acks=$(printf '%s\n' "$candidates" | jq -c '
+    select(.type=="sync_push_candidate" and ((.local_position|tonumber)==2 or (.local_position|tonumber)==4))
+    | {type:"sync_push_ack",local_position,id,server_seq:.local_position,disposition:"stored"}')
+  result=$(printf '%s\n' "$acks" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1)
+  # Nothing contiguous from the cursor: the first gap is position 1.
+  [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = 0 ]
+
+  # Fill position 1. The run is now 1..2 and stops at the gap at 3 -- bounding by
+  # the LAST gap instead would carry the cursor to 4, straight over that gap.
+  acks=$(printf '%s\n' "$candidates" | jq -c '
+    select(.type=="sync_push_candidate" and (.local_position|tonumber)==1)
+    | {type:"sync_push_ack",local_position,id,server_seq:"1",disposition:"stored"}')
+  result=$(printf '%s\n' "$acks" | storage_sync_reconcile_push demo "$SERVER_ID" "$TEAM_ID" 1)
+  [ "$(printf '%s\n' "$result" | jq -r '.push_cursor')" = 2 ]
+}
+
 @test "sync contract: pull reconciles echoes, imports wire IDs once, and keeps read state separate" {
   storage_send demo alice bob "outgoing" >/dev/null
   local prepared candidate ack envelope echo remote page result
