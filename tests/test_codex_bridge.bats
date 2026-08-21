@@ -1987,9 +1987,9 @@ EOF
   # The bridge exits non-zero, says why, and NEVER armed a watcher: a bridge
   # that cannot own its thread is exactly what accumulates in #906.
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "already has an active writer" ]]
-  [[ ! "$output" =~ "armed" ]]
-  [[ ! "$output" =~ "proceeding without resume" ]]
+  grep -q "already has an active writer" <<<"$output"
+  [ "$(grep -c "codex-bridge: armed" <<<"$output")" -eq 0 ]
+  [ "$(grep -c "proceeding without resume" <<<"$output")" -eq 0 ]
   grep -q "thread/resume" "$log"
   ! grep -q "process/spawn" "$log"
 }
