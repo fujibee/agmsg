@@ -48,6 +48,30 @@ prepare_push() {
   [ "$_SQLITE_SYNC_LIT" = "a''b''''c" ]
 }
 
+@test "sync contract: a field containing U+0000 is refused by name, not stored mangled (#940)" {
+  # The old pipeline reported success for a body holding U+0000 and stored
+  # DIFFERENT bytes (the NUL re-spelled by jq -r and the shell's own
+  # NUL-stripping on the way to the store). A value the store cannot hold
+  # verbatim is refused now, with the record and the field named, and the
+  # page commits nothing.
+  local nul_body page db
+  nul_body=$(jq -nc '"x" + ([0]|implode) + "y"')
+  page=$(jq -nc --argjson b "$nul_body" '
+    {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440040",
+     server_received_at:"2026-07-20T13:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:($b|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:$b,created_at:"2026-07-20T13:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 \
+    <<<"$(printf '%s\n%s\n' "$page" '{"type":"sync_pull_cursor","next_after":"1"}')"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 1: field projection.body contains U+0000'
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM messages;" | tr -d '\r')" -eq 0 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_quarantine;" | tr -d '\r')" -eq 0 ]
+}
+
 @test "sync contract: apply refuses a wire id that is not a canonical UUIDv4 (#908)" {
   # The shape check moved from `printf | grep -Eq` to `[[ =~ ]]` with the
   # pattern in a variable; the acceptance set must not move with it. One

@@ -952,102 +952,96 @@ storage_sync_apply_pull() {
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-sql.XXXXXX") || { _sqlite_sync_why; return 13; }
   _AGMSG_SYNC_SQL_FILE="$sql_file"
-  trap 'case "${_AGMSG_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-sql.*) rm -f "$_AGMSG_SYNC_SQL_FILE" ;; esac' EXIT INT TERM HUP
+  _AGMSG_SYNC_JQ_ERR=""
+  trap 'case "${_AGMSG_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-sql.*) rm -f "$_AGMSG_SYNC_SQL_FILE" ;; esac
+        case "${_AGMSG_SYNC_JQ_ERR:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-jq.*) rm -f "$_AGMSG_SYNC_JQ_ERR" ;; esac' EXIT INT TERM HUP
   printf '%s\n' 'BEGIN IMMEDIATE;' > "$sql_file"
 
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    # One `jq` per message, not one per field (#780). This read cost 18
-    # processes, and process creation -- not parsing -- is what a pull spends
-    # its time on; it is the whole cost on Windows, where a spawn is dear.
-    #
-    # `@sh` is jq's shell-quoting filter, so every value arrives verbatim,
-    # tabs and newlines and quotes included, with no delimiter convention for
-    # this side to get wrong. `jq_ok` is emitted last: a line jq cannot parse
-    # produces no output at all, and the eval then leaves it 0 rather than
-    # letting the previous message's fields stand in for this one's.
-    #
-    # `tostring` where the old code had no `// empty`: those fields print
-    # "null" when absent, and the arity and status checks below reject that.
-    # `// ""` would turn a missing envelope.v into an empty string, which
-    # passes the digits check.
-    #
-    # No test can tell those two apart, and that is not an oversight. An empty
-    # envelope_v reaches SQLite as `,,` and the batch dies of a syntax error,
-    # so the page is refused either way and the suite sees one exit status for
-    # two different rejections. The check is kept because a message refused by
-    # the check names what was wrong with it, and a message refused by a
-    # syntax error names a comma.
-    # `-s` with a length check, because one line is not one JSON value to jq.
-    # Given `{...} {...}` on a single line it parses BOTH and emits the whole
-    # assignment list twice; the eval runs both and the second silently
-    # overwrites the first, `jq_ok` included. A page could then hide anything
-    # it liked in front of a well-formed message.
-    #
-    # The per-field reads this replaced rejected that by accident: each
-    # substitution came back holding two lines, and the type and arity checks
-    # refused the embedded newline. Raised in review, and it was a real
-    # regression -- the reason has to be explicit now that it is no longer a
-    # side effect of how the fields were read.
-    # INVARIANT: every field passes through `tostring` before `@sh`. No
-    # exceptions, and the reason is not that these values are untidy.
-    #
-    # "This field is a string, so it does not need it" is the judgement that
-    # produced this defect, and it does not hold: THE SENDER CHOOSES THE TYPE.
-    # What arrives here is JSON off the wire from the sync server, so the type
-    # of any field is whatever that server put there -- our expectation of it is
-    # not a constraint on it. `tostring` is applied for what the value reaches,
-    # not for what it is: it is the last thing between a server-chosen value and
-    # `eval`, and every field reaches `eval`.
-    #
-    # Adding a field to this filter without `tostring` reopens the hole below,
-    # however plainly its name says "string".
-    #
-    # `@sh` emits one quoted word per element of an ARRAY, and a
-    # line carrying several words is not an assignment to the shell -- it is an
-    # assignment PREFIXED TO A COMMAND. Three things follow at once, and the
-    # third is the reason this is not a cosmetic fix:
-    #
-    #   the field is not assigned, so the variable keeps the PREVIOUS line's
-    #   value -- and several of these are interpolated into SQL below;
-    #
-    #   `jq_ok` is on a later line and is still reached, so the line is
-    #   ACCEPTED rather than refused;
-    #
-    #   the shell resolves and runs a word taken from the input.
-    #
-    # This input arrives from the sync server, so all three are server-chosen.
-    # `tostring` makes an array or object arrive as a single quoted value
-    # carrying its JSON text, which every whitelist below refuses, and leaves
-    # strings, numbers and booleans exactly as `jq -r` produced them -- so the
-    # set of inputs this accepts does not change.
-    #
-    # Four fields already had it -- chosen because a non-string value was
-    # EXPECTED there. That is the wrong axis, and the other fourteen are what it
-    # cost.
-    jq_ok=0
-    eval "$(printf '%s\n' "$line" | jq -r -s '
-      if length != 1 then error("one JSON value per line") else .[0] end
-      | "type=\(.type // "" | tostring | @sh)",
-      "line_next_after=\(.next_after // "" | tostring | @sh)",
-      "seq=\(.server_seq // "" | tostring | @sh)",
-      "wire=\(.id // "" | tostring | @sh)",
-      "received=\(.server_received_at // "" | tostring | @sh)",
-      "v=\(.envelope.v | tostring | @sh)",
-      "cipher=\(.envelope.cipher | tostring | @sh)",
-      "key_id=\(.envelope.key_id // "" | tostring | @sh)",
-      "blob=\(.envelope.blob | tostring | @sh)",
-      "status=\(.status | tostring | @sh)",
-      "policy=\(.policy_revision // "" | tostring | @sh)",
-      "local_rev=\(.local_security_revision // "" | tostring | @sh)",
-      "reason=\(.reason // "" | tostring | @sh)",
-      "kind=\(.projection.kind // "" | tostring | @sh)",
-      "from=\(.projection.from_agent // "" | tostring | @sh)",
-      "to=\(.projection.to_agent // "" | tostring | @sh)",
-      "body=\(.projection.body // "" | tostring | @sh)",
-      "at=\(.projection.created_at // "" | tostring | @sh)",
-      "jq_ok=1"' 2>/dev/null)"
-    [ "$jq_ok" = 1 ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  # ONE jq FOR THE WHOLE PAGE, AND NO eval AT ALL (#908 item 3, #940).
+  #
+  # Each message used to pay a printf and a jq, and the jq's output was a list
+  # of shell assignments fed to eval -- which is why every field had to travel
+  # through `tostring | @sh` (#930): the only thing standing between a
+  # server-chosen string and the shell was quoting discipline. Both costs go
+  # together. The page is parsed by a single jq that emits, after a leading
+  # record count, every record's eighteen fields as raw values separated by
+  # NUL bytes; the loop below reads them with `read -d ''` into plain
+  # variables. Nothing server-chosen is ever parsed as shell again -- the
+  # class #930 had to defend is gone, not guarded.
+  #
+  # The framing is sound because a NUL can never appear inside a value: jq
+  # refuses any record whose field contains U+0000, naming the record and the
+  # field (#940 -- the old pipeline silently stored such a body MANGLED, the
+  # NUL becoming other bytes on the way through `jq -r` and the shell's own
+  # NUL-stripping, and reported success; a value the store cannot hold
+  # verbatim is refused now, not rewritten).
+  #
+  # --raw-input keeps the old "one JSON value per line" refusal: each line is
+  # fromjson'd on its own, so a line smuggling two values fails exactly as it
+  # did when the per-line jq slurped it (the error names the line). `-s` holds
+  # the page in jq's memory once -- the same order of memory the old
+  # per-message `-s` peaked at for its largest message, page-wide, and a page
+  # is bounded at 1000 records.
+  local jq_err page_count record_index field_name
+  jq_err=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-jq.XXXXXX") || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  _AGMSG_SYNC_JQ_ERR="$jq_err"
+  exec 3< <(jq -j -R -s '
+    def fields: ["type","next_after","server_seq","id","server_received_at",
+                 "envelope.v","envelope.cipher","envelope.key_id","envelope.blob",
+                 "status","policy_revision","local_security_revision","reason",
+                 "projection.kind","projection.from_agent","projection.to_agent",
+                 "projection.body","projection.created_at"];
+    def pick($r; $name):
+      (if   $name == "type"                    then $r.type // ""
+       elif $name == "next_after"              then $r.next_after // ""
+       elif $name == "server_seq"              then $r.server_seq // ""
+       elif $name == "id"                      then $r.id // ""
+       elif $name == "server_received_at"      then $r.server_received_at // ""
+       elif $name == "envelope.v"              then $r.envelope.v
+       elif $name == "envelope.cipher"         then $r.envelope.cipher
+       elif $name == "envelope.key_id"         then $r.envelope.key_id // ""
+       elif $name == "envelope.blob"           then $r.envelope.blob
+       elif $name == "status"                  then $r.status
+       elif $name == "policy_revision"         then $r.policy_revision // ""
+       elif $name == "local_security_revision" then $r.local_security_revision // ""
+       elif $name == "reason"                  then $r.reason // ""
+       elif $name == "projection.kind"         then $r.projection.kind // ""
+       elif $name == "projection.from_agent"   then $r.projection.from_agent // ""
+       elif $name == "projection.to_agent"     then $r.projection.to_agent // ""
+       elif $name == "projection.body"         then $r.projection.body // ""
+       else                                         $r.projection.created_at // ""
+       end) | tostring;
+    [ split("\n")[] | select(length > 0) ] as $lines
+    | ($lines | length | tostring) + "\u0000"
+    , ( $lines | to_entries[]
+        | (.key + 1) as $n
+        | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
+        | fields[] as $name
+        | pick($r; $name) as $v
+        | (if ($v | contains("\u0000"))
+           then error("record \($n): field \($name) contains U+0000")
+           else $v end) + "\u0000" )
+  ' 2>"$jq_err")
+  _sqlite_sync_page_fail() {  # message -- shared cleanup for a framing/refusal failure
+    [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
+    printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
+    rm -f "$sql_file" "$jq_err"
+    exec 3<&-
+  }
+  if ! IFS= read -r -d '' page_count <&3 || ! [[ "$page_count" =~ ^[0-9]+$ ]]; then
+    _sqlite_sync_page_fail "the page produced no readable record count"
+    trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+  fi
+  record_index=0
+  while [ "$record_index" -lt "$page_count" ]; do
+    record_index=$((record_index + 1))
+    for field_name in type line_next_after seq wire received v cipher key_id blob \
+                      status policy local_rev reason kind from to body at; do
+      if ! IFS= read -r -d '' "$field_name" <&3; then
+        _sqlite_sync_page_fail "record $record_index ended mid-frame at field $field_name"
+        trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+      fi
+    done
     if [ "$type" = sync_pull_cursor ]; then
       # Held in its own variable and copied only here. Every line now carries
       # a next_after, so assigning the cursor directly would let a message
@@ -1244,6 +1238,13 @@ storage_sync_apply_pull() {
               AND m.direction='pull');" >> "$sql_file"
     fi
   done
+  # The stream must end exactly where the count said: one more read must fail.
+  if IFS= read -r -d '' field_name <&3; then
+    _sqlite_sync_page_fail "the page carried bytes past its declared $page_count records"
+    trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
+  fi
+  exec 3<&-
+  rm -f "$jq_err"; _AGMSG_SYNC_JQ_ERR=""
   [ -n "$final_cursor" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
   printf "%s\n" "UPDATE sync_bindings SET transport_cursor='$final_cursor'
     WHERE local_team='$tl' AND server_instance_id='$server' AND remote_team_id='$remote'
