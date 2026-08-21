@@ -308,9 +308,14 @@ prepare_push() {
   after=$(agmsg_sqlite "$(agmsg_db_path demo)" "SELECT total_changes();" | tr -d '\r')
   [ "$before" = "$after" ]
   other=018f3f7e-0000-7000-8000-000000000002
-  run storage_sync_resync_status demo "$SERVER_ID" "$other" 1 10
+  # --separate-stderr so the two halves can be asserted apart. "Fail closed" is
+  # about not emitting a status RECORD, and that is stdout; asserting the pair
+  # was silent also pinned "says nothing about why", which is the defect being
+  # fixed here. Both are checked, so neither can be lost by the other changing.
+  run --separate-stderr storage_sync_resync_status demo "$SERVER_ID" "$other" 1 10
   [ "$status" -ne 0 ]
   [ -z "$output" ]
+  grep -q 'storage_sync_resync_status failed at sqlite-sync\.sh:[0-9]' <<<"$stderr"
 }
 
 @test "sync contract: resync input rejects duplicate keys and later records" {
