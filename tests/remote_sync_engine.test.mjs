@@ -3852,6 +3852,69 @@ function ackAllFrom(counter) {
   });
 }
 
+test("push.posted marks the end of the POST, before the acks are written", async () => {
+  // push.ack and push.reconciled are both emitted after recordAcks, so a
+  // reader of the log saw the POST and the reconcile as one span between
+  // push.prepared and push.ack (#913). push.posted is the boundary: it carries
+  // the ack count, and it arrives after the last POST answered and before the
+  // reconcile driver is asked to write anything.
+  const candidates = Array.from({ length: 3 }, (_unused, index) =>
+    bulkyCandidate(index, 100));
+  const ack = ackAllFrom({ value: 0 });
+  const sequence = [];
+  const harness = pushHarness(candidates, (messages) => {
+    sequence.push(`POST ${messages.length}`);
+    return ack(messages);
+  });
+  await cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+    ...harness,
+    eventCall: async (name, payload) => {
+      if (name.startsWith("push.")) sequence.push(`${name} ${payload?.count ?? payload?.acks?.length ?? ""}`.trim());
+    },
+    driverCall: async (operation, driverConfig, input) => {
+      if (operation === "reconcile") {
+        sequence.push(`reconcile ${input.length}`);
+        return [{ type: "sync_reconcile_result", count: input.length }];
+      }
+      return harness.driverCall(operation, driverConfig, input);
+    },
+  });
+  assert.deepEqual(sequence, [
+    "push.prepared 3",
+    "POST 3",
+    "push.posted 3",
+    "reconcile 3",
+    "push.ack 3",
+    "push.reconciled",
+  ]);
+});
+
+test("push.posted cannot cost the durable write: an unwritable log still reconciles", async () => {
+  // The event sits between the acks and recordAcks. Emitted bare, a log
+  // failure there would throw before the write and the acks would be lost to
+  // this cycle; the next one would resend what the server already holds. So
+  // it goes through note(): the write happens, and the failure is the log's.
+  const candidates = Array.from({ length: 2 }, (_unused, index) =>
+    bulkyCandidate(index, 100));
+  const ack = ackAllFrom({ value: 0 });
+  const reconciled = [];
+  const harness = pushHarness(candidates, (messages) => ack(messages));
+  await cycle(config, { pushLimit: 100, pullLimit: 1000 }, {
+    ...harness,
+    eventCall: async (name) => {
+      if (name === "push.posted") throw new Error("event log is unwritable");
+    },
+    driverCall: async (operation, driverConfig, input) => {
+      if (operation === "reconcile") {
+        reconciled.push(...input.map((record) => record.id));
+        return [{ type: "sync_reconcile_result", count: input.length }];
+      }
+      return harness.driverCall(operation, driverConfig, input);
+    },
+  });
+  assert.deepEqual(reconciled, candidates.map((candidate) => candidate.id));
+});
+
 test("push splits a page by BYTES, not by message count", async () => {
   // The count limit was 1000, so a thousand small messages and a thousand large
   // ones were the same batch and only the second kind was ever refused. Twelve

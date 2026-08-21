@@ -3142,6 +3142,15 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
       }
       throw error;
     }
+    // The POST is over and every ack is in hand; the durable write has not
+    // started. This is the one boundary a reader of the log could not see:
+    // push.ack and push.reconciled are both emitted after recordAcks, so
+    // between push.prepared and push.ack sat the POST AND the reconcile with
+    // nothing to tell them apart (#913). Through note(), never bare: this event
+    // sits between the acks and the write that makes them durable, and a log
+    // that cannot be written must not cost that write -- the same reason the
+    // failing path above reports through note().
+    await note(eventCall, "push.posted", { count: posted.acks.length });
     await reportAcks(eventCall, await recordAcks(posted.acks));
   }
   // A full push page (and eligible) means at least a full page was available,

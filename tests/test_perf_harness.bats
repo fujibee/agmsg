@@ -122,6 +122,7 @@ EOF
 {"at":"2026-08-21T00:00:02.000Z","event":"harness.phase","phase":"engine"}
 {"at":"2026-08-21T00:00:02.100Z","event":"capabilities"}
 {"at":"2026-08-21T00:00:02.200Z","event":"push.prepared","count":2}
+{"at":"2026-08-21T00:00:02.250Z","event":"push.posted","count":2}
 {"at":"2026-08-21T00:00:02.300Z","event":"push.ack","acks":[{"id":"a","server_seq":"1","disposition":"stored"},{"id":"b","server_seq":"2","disposition":"stored"}]}
 {"at":"2026-08-21T00:00:02.301Z","event":"push.reconciled"}
 {"at":"2026-08-21T00:00:02.400Z","event":"pull.received","messages":[{"id":"a","server_seq":"1"},{"id":"b","server_seq":"2"}]}
@@ -141,10 +142,45 @@ EOF
     --messages 2 --roster 1 --page 1000 --out "$work/summary.json"
   [ "$status" -eq 2 ]
   printf '%s\n' "$output" | grep -q 'engine cycle 2: pull.received'
-  # And the stage the first cycle DID report is one stage, not a split whose
-  # second half is the log's own write latency.
-  [ "$(jq -r '.stages["engine.post+reconcile"].calls' "$work/summary.json")" -eq 1 ]
-  [ "$(jq -r '.stages | has("engine.reconcile")' "$work/summary.json")" = "false" ]
+  # And the first cycle's push is split at the POST boundary the engine reports:
+  # post = push.prepared -> push.posted, reconcile = push.posted -> push.ack.
+  [ "$(jq -r '.stages["engine.post"].calls' "$work/summary.json")" -eq 1 ]
+  [ "$(jq -r '.stages["engine.post"].seconds' "$work/summary.json")" = "0.05" ]
+  [ "$(jq -r '.stages["engine.reconcile"].seconds' "$work/summary.json")" = "0.05" ]
+}
+
+@test "report: an ack without the POST-completion event is unreported, not a zero-length POST" {
+  local work="$TEST_SKILL_DIR/work"
+  mkdir -p "$work"
+  cat > "$work/events.jsonl" <<'EOF'
+{"at":"2026-08-21T00:00:00.000Z","event":"harness.phase","phase":"seed"}
+{"at":"2026-08-21T00:00:00.100Z","event":"harness.seed","count":1,"seconds":0.01}
+{"at":"2026-08-21T00:00:01.000Z","event":"harness.phase","phase":"connect"}
+{"at":"2026-08-21T00:00:02.000Z","event":"harness.phase","phase":"engine"}
+{"at":"2026-08-21T00:00:02.100Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:02.200Z","event":"push.prepared","count":1}
+{"at":"2026-08-21T00:00:02.300Z","event":"push.ack","acks":[{"id":"a","server_seq":"1","disposition":"stored"}]}
+{"at":"2026-08-21T00:00:02.301Z","event":"push.reconciled"}
+{"at":"2026-08-21T00:00:02.400Z","event":"pull.received","messages":[{"id":"a","server_seq":"1"}]}
+{"at":"2026-08-21T00:00:02.900Z","event":"pull.applied"}
+{"at":"2026-08-21T00:00:08.000Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:08.100Z","event":"push.prepared","count":0}
+{"at":"2026-08-21T00:00:08.200Z","event":"pull.received","messages":[]}
+{"at":"2026-08-21T00:00:08.300Z","event":"pull.applied"}
+{"at":"2026-08-21T00:00:09.000Z","event":"harness.phase","phase":"once"}
+{"at":"2026-08-21T00:00:09.100Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:09.200Z","event":"push.prepared","count":0}
+{"at":"2026-08-21T00:00:09.300Z","event":"pull.received","messages":[]}
+{"at":"2026-08-21T00:00:09.400Z","event":"pull.applied"}
+{"at":"2026-08-21T00:00:10.000Z","event":"harness.phase","phase":"reprocess"}
+{"at":"2026-08-21T00:00:10.500Z","event":"reprocess.complete","count":0}
+{"at":"2026-08-21T00:00:11.000Z","event":"harness.phase","phase":"done"}
+EOF
+  run python3 "$PERF/report.py" summarize --work "$work" --scenario push \
+    --messages 1 --roster 1 --page 1000 --out "$work/summary.json"
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q 'engine cycle 1: push.posted'
+  [ "$(jq -r '.stages["engine.post"].calls' "$work/summary.json")" -eq 0 ]
 }
 
 @test "harness: join of a small history measures every stage on the shipped path" {
@@ -164,7 +200,8 @@ EOF
   [ "$(jq -r '.state.roster_agents' "$summary")" -eq 2 ]
   # Not-exercised stages say so instead of reporting a time.
   [ "$(jq -r '.stages["reprocess.total"].exercised' "$summary")" = "false" ]
-  [ "$(jq -r '.stages["once.post+reconcile"].exercised' "$summary")" = "false" ]
+  [ "$(jq -r '.stages["once.post"].exercised' "$summary")" = "false" ]
+  [ "$(jq -r '.stages["once.reconcile"].exercised' "$summary")" = "false" ]
   # Nothing was written into this test's own skill dir by the run: the harness
   # copied scripts/ under $out and pointed every path there.
   [ ! -d "$TEST_SKILL_DIR/teams/pulled-team" ]
