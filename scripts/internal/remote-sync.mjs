@@ -2008,35 +2008,25 @@ export const STORAGE_BUSY_EXIT = 11;
 // to outlast a real writer, not a polite one: the first prepare on a pulled
 // store held the lock for 63 s on the machine that filed #910 (155 s on a copy
 // of the same data), and that is the writer that killed the reprocess this
-// exists for. AGMSG_SYNC_BUSY_RETRY_MS overrides the budget, for tests and for
-// an operator who knows their store.
+// exists for. 5 minutes is that with margin for a slower disk.
+//
+// Constants, not an environment knob. The only reason to vary the budget was
+// that the right value is not settled -- #919 removes that first-prepare lock,
+// and the budget can come down then, here, in one place. A knob that accepts
+// an arbitrary string is a surface that has to be validated (not a number, not
+// finite, not safe) and each of those was a way back to "retry forever", the
+// one outcome a budget exists to rule out; the tests inject the sleep and do
+// not need a shorter budget. If an operator ever needs to tune this, that is
+// the moment to add the surface, with the reason.
 const STORAGE_BUSY_WAIT_CAP_MS = 30000;
 const STORAGE_BUSY_RETRY_BUDGET_MS = 300000;
-
-// The knob, read like one. Anything that is not a whole number of milliseconds
-// is refused here, on the first driver call, rather than read as NaN: NaN
-// compares false against everything, and `waited + wait > NaN` would have
-// turned the budget into "retry forever" -- the opposite of what a budget is
-// for, and exactly the unbounded wait this code exists to avoid.
-function storageBusyRetryBudgetMs() {
-  const raw = process.env.AGMSG_SYNC_BUSY_RETRY_MS;
-  if (raw === undefined || raw === "") return STORAGE_BUSY_RETRY_BUDGET_MS;
-  // The shape AND the magnitude: a string of digits long enough reads as
-  // Infinity, which compares exactly like NaN does here -- never exceeded.
-  const value = Number(raw);
-  if (!/^(0|[1-9][0-9]*)$/u.test(raw) || !Number.isSafeInteger(value)) {
-    throw new Error(
-      `AGMSG_SYNC_BUSY_RETRY_MS must be a whole number of milliseconds, not ${JSON.stringify(raw)}`);
-  }
-  return value;
-}
 
 export async function driver(operation, config, input, extra = [], dependencies = {}) {
   const script = process.env.AGMSG_SYNC_DRIVER;
   if (!script) throw new Error("AGMSG_SYNC_DRIVER is not set");
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const eventCall = dependencies.eventCall ?? event;
-  const budgetMs = storageBusyRetryBudgetMs();
+  const budgetMs = STORAGE_BUSY_RETRY_BUDGET_MS;
   const run = () => runDriver({
     args: [script, operation, config.local_team, config.server_instance_id,
       config.remote_team_id, String(config.protocol_version), ...extra],
@@ -2064,9 +2054,9 @@ export async function driver(operation, config, input, extra = [], dependencies 
       if (waitedMs + waitMs > budgetMs) {
         // The driver's own sentence stays in front; what is added is how long
         // this waited, so the operator can tell "held for minutes" from
-        // "held forever" and knows which knob this was.
+        // "held forever".
         error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
-          `(AGMSG_SYNC_BUSY_RETRY_MS=${budgetMs}) and it did not`;
+          `(the ${budgetMs / 1000} s budget) and it did not`;
         error.code = "storage-busy";
         error.retryable = true;
         throw error;

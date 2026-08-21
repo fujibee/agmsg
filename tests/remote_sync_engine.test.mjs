@@ -4349,12 +4349,9 @@ test("driver() waits out a busy store and retries; anything else is asked once",
   // exit is a decision and is not asked again.
   const root = await mkdtemp(join(tmpdir(), "agmsg-busy-"));
   const previousDriver = process.env.AGMSG_SYNC_DRIVER;
-  const previousBudget = process.env.AGMSG_SYNC_BUSY_RETRY_MS;
   t.after(async () => {
     if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
     else process.env.AGMSG_SYNC_DRIVER = previousDriver;
-    if (previousBudget === undefined) delete process.env.AGMSG_SYNC_BUSY_RETRY_MS;
-    else process.env.AGMSG_SYNC_BUSY_RETRY_MS = previousBudget;
     if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
     await rm(root, { recursive: true, force: true });
   });
@@ -4398,41 +4395,19 @@ test("driver() waits out a busy store and retries; anything else is asked once",
     [["driver.busy", "prepare", 1, 1000, 0], ["driver.busy", "prepare", 2, 2000, 1000]]);
 
   // Busy past the budget: the driver's own sentence comes back, marked
-  // retryable and named, with how long this waited and under which knob.
+  // retryable and named, with how long this waited. The budget is a constant
+  // (5 min) and the sleep is injected, so the whole ladder runs in no time:
+  // 1+2+4+8+16 s, then 30 s steps, and the 14th attempt would need 301 s.
   await useDriver("busy-always.sh", 1000);
-  process.env.AGMSG_SYNC_BUSY_RETRY_MS = "3500"; // 1 s + 2 s fit; the 4 s wait does not
   waits.length = 0;
   await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
     error.code === "storage-busy" && isRetryable(error) &&
     error.driverExitCode === STORAGE_BUSY_EXIT &&
     /storage sync prepare failed for team 't' \(exit 11\): agmsg: sqlite-sync: prepare: the store is busy/u.test(error.message) &&
-    /waited 3 s for the store to come free \(AGMSG_SYNC_BUSY_RETRY_MS=3500\) and it did not/u.test(error.message));
-  assert.deepEqual(waits, [1000, 2000]);
-  assert.equal(await readFile(counter, "utf8"), "3");
-
-  // A budget that is not a number is refused on the first call, before the
-  // driver is even started. Read as NaN it would compare false against every
-  // sum and retry forever -- the unbounded wait this whole thing exists to end.
-  // The 400-digit one reads as Infinity, which no sum ever exceeds either; the
-  // 16-digit one is the first integer past Number.MAX_SAFE_INTEGER.
-  for (const bad of ["oops", "-1", "1.5", "1e3", " 5", "9".repeat(400), "9007199254740992"]) {
-    process.env.AGMSG_SYNC_BUSY_RETRY_MS = bad;
-    await writeFile(counter, "0");
-    waits.length = 0;
-    await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
-      error.message === `AGMSG_SYNC_BUSY_RETRY_MS must be a whole number of milliseconds, not ${JSON.stringify(bad)}` &&
-      !isRetryable(error));
-    assert.equal(await readFile(counter, "utf8"), "0", `driver ran under ${JSON.stringify(bad)}`);
-    assert.deepEqual(waits, []);
-  }
-  // Zero is a budget too: the first busy is the last.
-  process.env.AGMSG_SYNC_BUSY_RETRY_MS = "0";
-  await writeFile(counter, "0");
-  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
-    error.code === "storage-busy" && /waited 0 s .*\(AGMSG_SYNC_BUSY_RETRY_MS=0\)/u.test(error.message));
-  assert.equal(await readFile(counter, "utf8"), "1");
-  assert.deepEqual(waits, []);
-  delete process.env.AGMSG_SYNC_BUSY_RETRY_MS;
+    /waited 271 s for the store to come free \(the 300 s budget\) and it did not/u.test(error.message));
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000, 16000, ...Array(8).fill(30000)]);
+  assert.equal(await readFile(counter, "utf8"), "14");
+  assert.equal(waits.reduce((sum, ms) => sum + ms, 0), 271000);
 
   // A failed check (13) is a decision: asked once, not retried, not retryable.
   await useDriver("refuses.sh", 1000, 13);
