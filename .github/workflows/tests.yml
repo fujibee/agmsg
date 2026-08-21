@@ -54,6 +54,18 @@ on:
 permissions:
   contents: read
 
+# A PR run whose head has moved is dead weight: its verdict can be used for
+# nothing, and it keeps holding the runner slots -- four macOS shards per run,
+# and the account runs at most five macOS jobs at once (measured 2026-08-21:
+# 35 runs that day, 140 macOS jobs, queue waits of 0-50 min, one PR's shard
+# waiting 50 min behind runs whose heads had already been replaced). So a new
+# run for the same PR cancels the one before it. A push to main is never
+# cancelled: its group is its own run id, and that run is what a release reads
+# (#848).
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
   # stay in lockstep; the stable summary job below verifies that they do.
