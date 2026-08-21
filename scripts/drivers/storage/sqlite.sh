@@ -128,6 +128,17 @@ storage_init() {
     );
     CREATE INDEX IF NOT EXISTS events_sent ON events(type, team, to_agent, seq);
     CREATE INDEX IF NOT EXISTS events_read ON events(type, team, agent, msg_id);
+    -- legacy_id is looked up by value from the other side: every reader that
+    -- unions the two tables asks NOT EXISTS(events.legacy_id = messages.id)
+    -- per legacy row, and the one-time push projection asks the same question
+    -- for every message in the team. Without this index each of those is a
+    -- full scan of events, so the cost is messages x events: on a 17,369-message
+    -- store with 28,568 events the projection ran 155 s inside one write
+    -- transaction (#919) -- holding the store's write lock for the whole of it,
+    -- which is what killed the unlock reprocess in #910 -- to insert nothing.
+    -- The ALTER above runs first on purpose, so an older store has the column
+    -- before this asks for the index on it.
+    CREATE INDEX IF NOT EXISTS events_legacy ON events(legacy_id);
     CREATE TABLE IF NOT EXISTS read_cursors (
       team TEXT NOT NULL,
       agent TEXT NOT NULL,

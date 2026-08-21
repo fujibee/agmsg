@@ -358,3 +358,25 @@ _use_per_team() {
     scripts bin server 2>/dev/null | grep -v ':[0-9]*: *#' | grep -v 'storage_init()' || true)"
   [ -z "$offenders" ] || { echo "$offenders"; false; }
 }
+
+@test "storage: events.legacy_id is indexed, on a new store and on one that predates the column (#919)" {
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  storage_init demo >/dev/null
+  local db
+  db=$(agmsg_db_path demo)
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name='events_legacy';" | tr -d '\r')" -eq 1 ]
+  # The lookup every reader makes per legacy row, and the projection makes per
+  # message, is a search now -- not a scan of events.
+  sqlite3 "$db" "EXPLAIN QUERY PLAN SELECT 1 FROM events e2 WHERE e2.legacy_id = 5;" | grep -q 'USING COVERING INDEX events_legacy\|USING INDEX events_legacy'
+  # A store created before legacy_id existed: init adds the column first (the
+  # ALTER that already ran for #689), then the index on it.
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/old"
+  mkdir -p "$AGMSG_STORAGE_PATH"
+  sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, id TEXT NOT NULL, team TEXT, from_agent TEXT, to_agent TEXT, body TEXT, msg_id TEXT, agent TEXT, at TEXT NOT NULL);"
+  storage_init demo >/dev/null
+  [ "$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "PRAGMA table_info(events);" | grep -c legacy_id)" -eq 1 ]
+  [ "$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='events_legacy';" | tr -d '\r')" -eq 1 ]
+}
