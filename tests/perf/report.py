@@ -378,19 +378,32 @@ def print_summary(summary):
         if key in summary:
             print(f"   {key}: " + ", ".join(f"{k}={v}" for k, v in summary[key].items()
                                           if not k.endswith("_series")))
+    # Drift is read between FULL pages / cycles only. A page carries a fixed
+    # cost (a bash + sqlite spawn or two) on top of its per-row cost, so the
+    # three-message tail page of a 2,003-message pull reads 500 ms/msg where
+    # the thousand-message pages read 275 -- and "drift x1.8" would then be the
+    # page size, not the store. Full = the largest page/cycle seen.
     pages = summary.get("bootstrap", {}).get("page_series") or []
     rated = [p for p in pages if p["ms_per_msg"] is not None]
-    if len(rated) >= 2:
-        print(f"   bootstrap.apply per page: first {rated[0]['ms_per_msg']:.1f} ms/msg, "
-              f"last {rated[-1]['ms_per_msg']:.1f} ms/msg over {len(rated)} pages"
-              f" (drift x{rated[-1]['ms_per_msg'] / max(rated[0]['ms_per_msg'], 0.01):.2f})")
+    full = [p for p in rated if p["messages"] == max(p["messages"] for p in rated)] if rated else []
+    if len(full) >= 2:
+        print(f"   bootstrap.apply per full page ({full[0]['messages']} msgs): "
+              f"first {full[0]['ms_per_msg']:.1f} ms/msg, last {full[-1]['ms_per_msg']:.1f} ms/msg "
+              f"over {len(full)} of {len(rated)} pages"
+              f" (drift x{full[-1]['ms_per_msg'] / max(full[0]['ms_per_msg'], 0.01):.2f})")
+    elif len(rated) >= 2:
+        print(f"   bootstrap.apply per page: {len(rated)} pages but only one full-size page; "
+              "no drift reading (a short page's fixed cost would masquerade as drift)")
     cycles = summary.get("engine", {}).get("cycle_series") or []
     rated = [c["apply"] for c in cycles if c.get("apply", {}).get("items")]
-    if len(rated) >= 2:
-        first = rated[0]["seconds"] * 1000 / rated[0]["items"]
-        last = rated[-1]["seconds"] * 1000 / rated[-1]["items"]
-        print(f"   engine.apply per cycle: first {first:.1f} ms/msg, last {last:.1f} ms/msg "
-              f"over {len(rated)} cycles (drift x{last / max(first, 0.01):.2f})")
+    full = [c for c in rated if c["items"] == max(c["items"] for c in rated)] if rated else []
+    if len(full) >= 2:
+        first = full[0]["seconds"] * 1000 / full[0]["items"]
+        last = full[-1]["seconds"] * 1000 / full[-1]["items"]
+        print(f"   engine.apply per full cycle ({full[0]['items']} msgs): first {first:.1f} ms/msg, "
+              f"last {last:.1f} ms/msg over {len(full)} of {len(rated)} cycles (drift x{last / max(first, 0.01):.2f})")
+    elif len(rated) >= 2:
+        print(f"   engine.apply per cycle: {len(rated)} cycles but only one full-size cycle; no drift reading")
     print(f"   phase wall: " + ", ".join(f"{k}={v}s" for k, v in summary["phase_wall_seconds"].items()))
     print(f"\n   {'stage':<24}{'seconds':>10}{'items':>8}{'calls':>7}{'ms/item':>10}  note")
     for name, stage in summary["stages"].items():
