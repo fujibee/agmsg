@@ -31,19 +31,28 @@ OUT=""
 KEEP=0
 TIMEOUT=0
 PROJECT=17300
+PRELOADED=0   # unlock only: plain messages served (and imported) before the sealed ones
 BODY_BYTES=120
 
 usage() {
   sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 options:
-  --scenario join|push   join: pull a team with history (default)
-                         push: connect a local team with history, drain the engine
+  --scenario join|push|unlock
+                         join:   pull a team with history (default)
+                         push:   connect a local team with history, drain the engine
+                         unlock: pull an age-v1 team without its key (every message
+                                 quarantined), then unlock with a handed bundle -- the
+                                 reprocess of N quarantined rows is what gets measured
+                                 (needs age and age-keygen on PATH)
   --sizes N,M,...        run each size, then compare (ratio table + conclusions)
   --messages N           one size (same as --sizes N)
   --roster R             member_joined events that lead the history (default 3)
   --body-bytes B         body size per synthetic message (default 120)
   --timeout SEC          push only: give up waiting for the engine to drain (default: wait)
+  --preloaded M          unlock only: serve M plain messages BEFORE the sealed ones, so the
+                         pull imports M into the store first and the unlock's reprocess then
+                         runs its N candidates against a store that already holds M (default 0)
   --project N            size the comparison projects to (default 17300)
   --out DIR              where runs go (default: a fresh mktemp -d)
   --keep                 leave the run directories in place (default with --out)
@@ -58,6 +67,7 @@ while [ $# -gt 0 ]; do
     --roster) ROSTER="${2:?}"; shift 2 ;;
     --body-bytes) BODY_BYTES="${2:?}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?}"; shift 2 ;;
+    --preloaded) PRELOADED="${2:?}"; shift 2 ;;
     --project) PROJECT="${2:?}"; shift 2 ;;
     --out) OUT="${2:?}"; KEEP=1; shift 2 ;;
     --keep) KEEP=1; shift ;;
@@ -65,13 +75,18 @@ while [ $# -gt 0 ]; do
     *) echo "join-harness: unknown option $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-case "$SCENARIO" in join|push) ;; *) echo "join-harness: --scenario must be join or push" >&2; exit 2 ;; esac
+case "$SCENARIO" in join|push|unlock) ;; *) echo "join-harness: --scenario must be join, push or unlock" >&2; exit 2 ;; esac
 if [ -n "$MESSAGES" ]; then SIZES="${SIZES:+$SIZES,}$MESSAGES"; fi
 [ -n "$SIZES" ] || { echo "join-harness: give --sizes N,M or --messages N" >&2; exit 2; }
 
 for tool in python3 node sqlite3 jq curl; do
   command -v "$tool" >/dev/null 2>&1 || { echo "join-harness: needs $tool on PATH" >&2; exit 2; }
 done
+if [ "$SCENARIO" = unlock ]; then
+  for tool in age age-keygen; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "join-harness: --scenario unlock needs $tool on PATH" >&2; exit 2; }
+  done
+fi
 
 if [ -z "$OUT" ]; then
   OUT="$(mktemp -d "${TMPDIR:-/tmp}/agmsg-perf.XXXXXX")"
@@ -157,10 +172,11 @@ run_command() {  # label, command...  -- stdout/stderr captured, non-zero is fat
   python3 -c 'import sys;print(f"join-harness:   {sys.argv[1]} took {float(sys.argv[3])-float(sys.argv[2]):.1f}s")' "$label" "$t0" "$t1"
 }
 
-start_mock() {  # history-file
-  MOCK_PULL_FILE="$1" MOCK_TEAM_CIPHER_PROFILE=none \
+start_mock() {  # history-file [pull-team-id] [cipher-profile]
+  : > "$WORK/server.port"
+  MOCK_PULL_FILE="$1" MOCK_PULL_TEAM_ID="${2:-}" MOCK_TEAM_CIPHER_PROFILE="${3:-none}" \
     python3 "$REPO/tests/helpers/mock_remote_server.py" 0 \
-    </dev/null > "$WORK/server.port" 2> "$WORK/server.log" 3>&- &
+    </dev/null > "$WORK/server.port" 2>> "$WORK/server.log" 3>&- &
   MOCK_PID=$!
   CHILD_PIDS+=("$MOCK_PID")
   local i
@@ -197,7 +213,8 @@ record_state() {  # team
 
 run_one() {
   local size="$1"
-  WORK="$OUT/$SCENARIO-$size"
+  WORK="$OUT/$SCENARIO-$size${PRELOADED:+-pre$PRELOADED}"
+  [ "$PRELOADED" -eq 0 ] && WORK="$OUT/$SCENARIO-$size"
   SKILL="$WORK/skill"
   EVENTS="$WORK/events.jsonl"
   # A previous run's directory is evidence, not clutter: refuse rather than
@@ -221,16 +238,21 @@ run_one() {
   : > "$EVENTS"
 
   echo "join-harness: == $SCENARIO, $size messages (+$ROSTER roster), page $PAGE -> $WORK"
-  python3 "$HERE/gen-history.py" --messages "$size" --roster "$ROSTER" \
-    --body-bytes "$BODY_BYTES" --out "$WORK/history.jsonl"
+  # unlock seals its history to a key that does not exist yet; it generates later.
+  if [ "$SCENARIO" != unlock ]; then
+    python3 "$HERE/gen-history.py" --messages "$size" --roster "$ROSTER" \
+      --body-bytes "$BODY_BYTES" --out "$WORK/history.jsonl"
+  fi
 
   case "$SCENARIO" in
     join) run_join "$size" ;;
     push) run_push "$size" ;;
+    unlock) run_unlock "$size" ;;
   esac
   mark done
   python3 "$HERE/report.py" summarize --work "$WORK" --scenario "$SCENARIO" \
-    --messages "$size" --roster "$ROSTER" --page "$PAGE" --out "$WORK/summary.json" || RUN_STATUS=$?
+    --messages "$size" --roster "$ROSTER" --page "$PAGE" --preloaded "$PRELOADED" \
+    --out "$WORK/summary.json" || RUN_STATUS=$?
 }
 
 run_join() {
@@ -376,6 +398,94 @@ PY
   wait_engine_asleep "$team" "$(now_iso)" 600 || true
   stop_engine "$team"
   [ "$drained" -eq 1 ] && echo "join-harness:   drained after ${elapsed}s"
+
+  mark once
+  run_command once bash "$SKILL/scripts/remote-sync.sh" once --team "$team"
+  mark reprocess
+  run_command reprocess bash "$SKILL/scripts/remote-sync.sh" reprocess --team "$team"
+  record_state "$team"
+}
+
+# The path #910's 4,100 unreadable rows took, end to end (#916): a second
+# private install ("machine A") holds the team's age key; the history is sealed
+# to that key through the product's own helper; machine B pulls it with no key
+# (every message quarantined, engine halted), then unlocks with the handed
+# bundle -- and `unlock` runs the reprocess that re-evaluates every quarantined
+# row. That reprocess, over N rows, is the stage nothing else here exercises.
+run_unlock() {
+  local team=perf size="$1"
+  local skill_a="$WORK/skill-a" cfg_a key_id recipient team_id digest
+  mkdir -p "$skill_a" "$WORK/home-a"
+  cp -R "$REPO/scripts/." "$skill_a/scripts/"
+  chmod +x "$skill_a/scripts/"*.sh "$skill_a/scripts/internal/"*.sh "$skill_a/scripts/drivers/storage/"*.sh 2>/dev/null || true
+  cfg_a="$skill_a/teams/$team/config.json"
+  # Machine A's commands run under A's own store, HOME and event log, in a
+  # subshell so none of it leaks into machine B's environment (run_one's).
+  a() {
+    ( export HOME="$WORK/home-a" AGMSG_STORAGE_PATH="$skill_a/db" AGMSG_SYNC_LOG_FILE="$WORK/events-a.jsonl"
+      unset SKILL_DIR AGMSG_SYNC_CONNECTION_DIR AGMSG_SYNC_TRUST_DIR 2>/dev/null || true
+      "$@" )
+  }
+  a bash "$skill_a/scripts/internal/init-db.sh" >/dev/null
+  a bash "$skill_a/scripts/join.sh" "$team" member-1 claude-code "$WORK/project" >/dev/null
+  a bash "$skill_a/scripts/join.sh" "$team" member-2 claude-code "$WORK/project" >/dev/null
+  start_mock ""
+  # connect --e2ee mints the key; disconnect stops the engine it started. Both
+  # are the product's own, and the key material is everything A is for.
+  a bash "$skill_a/scripts/remote.sh" connect --endpoint "$ENDPOINT" --e2ee "$team" > "$WORK/connect-a.out" 2> "$WORK/connect-a.err" \
+    || { echo "join-harness: machine A could not connect --e2ee; stderr:" >&2; tail -n 20 "$WORK/connect-a.err" >&2; exit 1; }
+  a bash "$skill_a/scripts/key.sh" show "$team" --snapshot --out "$WORK/snapshot.json" >/dev/null 2>&1 \
+    || { echo "join-harness: key.sh show --snapshot failed" >&2; exit 1; }
+  a bash "$skill_a/scripts/key.sh" handoff "$team" --out "$WORK/bundle.json" >/dev/null 2>&1 \
+    || { echo "join-harness: key.sh handoff failed" >&2; exit 1; }
+  a bash "$skill_a/scripts/remote.sh" disconnect "$team" >/dev/null 2>&1 || true
+  key_id="$(jq -r '.remote_key.current.key_id' "$cfg_a")"
+  recipient="$(jq -r '.remote_key.current.recipient' "$cfg_a")"
+  team_id="$(jq -r '.team_id' "$cfg_a")"
+  digest="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/snapshot.json")"
+  [ -n "$key_id" ] && [ "$key_id" != null ] && [ -n "$recipient" ] && [ "$recipient" != null ] \
+    || { echo "join-harness: machine A has no current key after connect --e2ee" >&2; exit 1; }
+  echo "join-harness:   machine A holds key $key_id for team $team_id"
+
+  # The history, sealed to A's key through the product's own seal-batch.
+  python3 "$HERE/gen-history.py" --messages "$size" --roster "$ROSTER" --body-bytes "$BODY_BYTES" \
+    --cipher age-v1 --cipher-helper "$skill_a/scripts/internal/sync-cipher.mjs" --node "$(command -v node)" \
+    --key-id "$key_id" --recipient "$recipient" --team-id "$team_id" --plain-before "$PRELOADED" \
+    --out "$WORK/history.jsonl"
+  # Served as A's team, declared age-v1: the pull side then has the team id and
+  # the declaration a real second machine would see.
+  kill "$MOCK_PID" 2>/dev/null || true
+  start_mock "$WORK/history.jsonl" "$team_id" age-v1
+
+  # Machine B (run_one's environment): pull without the key. Every message is
+  # quarantined (unsupported_cipher: age-v1 is not configured) and the engine
+  # is not started -- the state #910 reports.
+  mark pull
+  local rc=0 pull_started
+  pull_started="$(now_iso)"
+  set +e
+  bash "$SKILL/scripts/remote.sh" pull --endpoint "$ENDPOINT" --team-id "$team_id" "$team" \
+    2>&1 1> "$WORK/pull.out" | python3 "$HERE/report.py" ts > "$WORK/pull.stderr.ts"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    echo "join-harness: remote.sh pull failed (exit $rc); stderr:" >&2
+    tail -n 30 "$WORK/pull.stderr.ts" >&2
+    exit 1
+  fi
+  sed 's/^/join-harness:   pull: /' "$WORK/pull.out"
+  grep -q 'locked' "$WORK/pull.out" || { echo "join-harness: expected the pulled team to be locked (no key on machine B)" >&2; exit 1; }
+
+  # The unlock: confirms the handed authority, imports the identity, runs the
+  # reprocess over every quarantined row, then starts the engine. The reprocess
+  # is the measurement; the engine is stopped once it has finished a cycle.
+  mark unlock
+  local unlock_started
+  unlock_started="$(now_iso)"
+  run_command unlock bash "$SKILL/scripts/remote.sh" unlock "$team" --bundle "$WORK/bundle.json" --confirm-digest "$digest"
+  sed 's/^/join-harness:   unlock: /' "$WORK/unlock.out" | head -n 3
+  wait_engine_asleep "$team" "$unlock_started" 600 || true
+  stop_engine "$team"
 
   mark once
   run_command once bash "$SKILL/scripts/remote-sync.sh" once --team "$team"

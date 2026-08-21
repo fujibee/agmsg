@@ -207,3 +207,23 @@ EOF
   [ ! -d "$TEST_SKILL_DIR/teams/pulled-team" ]
   [ ! -f "$TEST_SKILL_DIR/run/remote-sync.pulled-team.pid" ]
 }
+
+@test "harness: unlock of a small sealed history measures the reprocess over every row" {
+  command -v age >/dev/null 2>&1 && command -v age-keygen >/dev/null 2>&1 ||
+    skip "age/age-keygen not installed"
+  local out="$TEST_SKILL_DIR/perf-out" summary
+  run bash "$PERF/join-harness.sh" --scenario unlock --messages 4 --roster 2 --out "$out"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'verdict: OK'
+  summary="$out/unlock-4/summary.json"
+  [ "$(jq -r '.ok' "$summary")" = "true" ]
+  # Every sealed message was quarantined by the pull and imported by the
+  # unlock's reprocess: the stage ran over N rows, so it is exercised.
+  [ "$(jq -r '.unlock.count' "$summary")" -eq 4 ]
+  [ "$(jq -r '.unlock.imported_count' "$summary")" -eq 4 ]
+  [ "$(jq -r '.stages["unlock.reprocess"].items' "$summary")" -eq 4 ]
+  [ "$(jq -r '.stages["unlock.reprocess"].exercised' "$summary")" = "true" ]
+  [ "$(jq -r '.state.messages_in_store' "$summary")" -eq 4 ]
+  [ "$(jq -r '[.state.sync_quarantine[] | select(.status=="imported") | .n] | add' "$summary")" -eq 4 ]
+}
+

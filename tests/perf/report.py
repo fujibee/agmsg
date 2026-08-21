@@ -64,6 +64,12 @@ EXPECTED = {
         "once": ["capabilities", "push.prepared", "pull.received", "pull.applied"],
         "reprocess": ["reprocess.complete"],
     },
+    "unlock": {
+        "pull": ["pull.bootstrap.snapshot", "pull.bootstrap.applied"],
+        "unlock": ["configured", "reprocess.complete"],
+        "once": ["capabilities", "push.prepared", "pull.received", "pull.applied"],
+        "reprocess": ["reprocess.complete"],
+    },
     "push": {
         "seed": ["harness.seed"],
         "engine": ["capabilities", "push.prepared", "push.posted", "push.ack", "push.reconciled",
@@ -236,17 +242,41 @@ def summarize(args):
             if name not in have:
                 missing.append(f"{phase}: {name}")
     errors = [e for e in events if e["event"] in ("cycle.error", "fatal", "cycle.refused")]
+    tolerated = []
+    if args.scenario == "unlock":
+        # `remote.sh unlock` runs `key.sh import`, whose _key_confirmed_epoch
+        # probes the LOCAL age snapshot chain with `remote-sync.sh
+        # export-age-snapshot ... >/dev/null 2>&1` and treats a non-zero exit
+        # as "no chain here yet" (scripts/key.sh, "Non-zero (and silent) when
+        # there is no chain to read"). On a machine that has never held the
+        # key -- machine B, by construction -- that probe fails with this exact
+        # message, and remote-sync.mjs main() still mirrors its `fatal` into
+        # AGMSG_SYNC_LOG_FILE even though the caller discarded both streams.
+        # It is the product's own tolerated probe, not a failed stage: it lands
+        # in the unlock phase before `configured`, and unlock went on to
+        # configure, reprocess and start the engine. Anything else stays an
+        # error.
+        window = next(((start, end) for name, start, end in windows if name == "unlock"), None)
+        configured_at = min((e["_t"] for e in phases.get("unlock", []) if e["event"] == "configured"),
+                            default=None)
+        if window and configured_at is not None:
+            probe = [e for e in errors if e["event"] == "fatal" and
+                     e.get("message") == "team does not have one canonical initial age epoch" and
+                     window[0] <= e["_t"] < configured_at]
+            tolerated = probe
+            errors = [e for e in errors if e not in probe]
 
     stages = {}
     summary = {
         "scenario": args.scenario, "messages": args.messages, "roster": args.roster,
+        "preloaded": args.preloaded,
         "page": args.page, "generated_at": now_iso(), "work": os.path.abspath(args.work),
         "phase_wall_seconds": {k: round(v, 3) for k, v in phase_wall.items()
                                if k != "done"},
     }
 
-    # --- bootstrap (join only) --------------------------------------------
-    if args.scenario == "join" and "pull" in phases:
+    # --- bootstrap (join and unlock) --------------------------------------
+    if args.scenario in ("join", "unlock") and "pull" in phases:
         pull = phases["pull"]
         applied = [e for e in pull if e["event"] == "pull.bootstrap.applied"]
         fetching, applying = load_stderr(os.path.join(args.work, "pull.stderr.ts"))
@@ -263,7 +293,7 @@ def summarize(args):
                 fetch.add(t_apply - t_fetch, count)
                 apply.add(done["_t"] - t_apply, count)
         total = sum(e.get("messages", 0) for e in applied)
-        expected_total = args.messages + args.roster
+        expected_total = args.messages + args.roster + args.preloaded
         if total != expected_total:
             missing.append(f"pull: bootstrap applied {total} messages, history holds {expected_total}")
         # Per page, in order: a stage that is linear between two SIZES can
@@ -326,6 +356,30 @@ def summarize(args):
         engine_stages["fetch+evaluate"].note = "GET /v1/messages + evaluate (JS); echo-back of own pushes"
         engine_stages["apply"].note = "driver apply of the echo-back page"
 
+    # --- the unlock's reprocess (unlock only) -----------------------------
+    if args.scenario == "unlock" and "unlock" in phases:
+        stage = stages["unlock.reprocess"] = Stage("unlock.reprocess", "candidate")
+        window = phases["unlock"]
+        configured = [e for e in window if e["event"] == "configured"]
+        complete = [e for e in window if e["event"] == "reprocess.complete"]
+        if configured and complete:
+            done = complete[0]
+            count = done.get("count", 0)
+            stage.add(done["_t"] - configured[0]["_t"], count)
+            summary["unlock"] = {k: done.get(k) for k in ("count", "imported_count", "blocking_remaining")}
+            summary["unlock"]["wall_seconds"] = round(phase_wall.get("unlock", 0), 3)
+            if count != args.messages:
+                missing.append(f"unlock: reprocess saw {count} candidates, the history holds {args.messages} sealed messages")
+            if done.get("imported_count") != count:
+                missing.append(f"unlock: reprocess imported {done.get('imported_count')} of {count} candidates "
+                               "(the key was handed, so every row should import)")
+            stage.note = ("remote-sync.sh reprocess as run by unlock: driver reprocess pages + "
+                          "age-v1 open (JS) + driver apply, incl. 2 HTTP reads; no per-page event, so "
+                          "the split between select / decrypt / apply is not available")
+        elif configured and not complete:
+            stage.exercised = False
+            stage.note = "reprocess never completed"
+
     # --- one explicit cycle -----------------------------------------------
     if "once" in phases:
         for name in ("prepare", "post", "reconcile", "fetch+evaluate", "apply"):
@@ -365,6 +419,9 @@ def summarize(args):
             summary["state"] = json.load(handle)
     summary["stages"] = {name: stage.as_dict() for name, stage in stages.items()}
     summary["errors"] = [{k: v for k, v in e.items() if not k.startswith("_")} for e in errors]
+    summary["tolerated"] = [{"event": e["event"], "message": e.get("message"), "at": e["at"],
+                             "why": "key.sh import's export-age-snapshot probe on a machine with no chain"}
+                            for e in tolerated]
     summary["missing"] = missing
     summary["ok"] = not missing and not errors
 
@@ -392,7 +449,7 @@ def fmt_seconds(value):
 def print_summary(summary):
     print(f"\n== {summary['scenario']}  messages={summary['messages']}  "
           f"roster={summary['roster']}  page={summary['page']}")
-    for key in ("bootstrap", "engine", "seed", "reprocess"):
+    for key in ("bootstrap", "engine", "seed", "unlock", "reprocess"):
         if key in summary:
             print(f"   {key}: " + ", ".join(f"{k}={v}" for k, v in summary[key].items()
                                           if not k.endswith("_series")))
@@ -527,10 +584,12 @@ def main():
     sub.add_parser("ts")
     s = sub.add_parser("summarize")
     s.add_argument("--work", required=True)
-    s.add_argument("--scenario", choices=("join", "push"), required=True)
+    s.add_argument("--scenario", choices=("join", "push", "unlock"), required=True)
     s.add_argument("--messages", type=int, required=True)
     s.add_argument("--roster", type=int, required=True)
     s.add_argument("--page", type=int, required=True)
+    s.add_argument("--preloaded", type=int, default=0,
+                   help="unlock: plain messages served before the sealed ones (imported by the pull)")
     s.add_argument("--out", required=True)
     c = sub.add_parser("compare")
     c.add_argument("summaries", nargs="+")
