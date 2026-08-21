@@ -1973,8 +1973,13 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
       const diagnostic = stderr.trim() ||
         "driver returned a non-zero exit without diagnostics; inspect that team's storage" +
           bindingNote(bindingPath);
-      fail(new Error(
-        `${label} ${operation} failed${subject} (${describeChildExit(code, signal)}): ${diagnostic}`));
+      const error = new Error(
+        `${label} ${operation} failed${subject} (${describeChildExit(code, signal)}): ${diagnostic}`);
+      // The raw status, for the one caller that acts on a specific value -- the
+      // storage adapter's "busy" exit, see `driver` -- without parsing its own
+      // sentence back out of the message.
+      error.driverExitCode = code;
+      fail(error);
     });
     child.on("close", () => {
       if (failure) { settle(failure, null); return; }
@@ -1992,10 +1997,29 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
   });
 }
 
-export async function driver(operation, config, input, extra = []) {
+// The storage adapter's exit status for "the store was busy" -- another writer
+// held it past the busy timeout (storage-sync-driver.sh says why it is 11). It
+// is the one driver failure that is about the moment rather than the input:
+// the same call succeeds once that writer is done. Every other non-zero exit
+// is a decision (a failed check, an unsupported operation) and asking again
+// does not change it, so nothing else is retried here.
+export const STORAGE_BUSY_EXIT = 11;
+// One wait is never longer than this; the budget is the total. The budget has
+// to outlast a real writer, not a polite one: the first prepare on a pulled
+// store held the lock for 63 s on the machine that filed #910 (155 s on a copy
+// of the same data), and that is the writer that killed the reprocess this
+// exists for. AGMSG_SYNC_BUSY_RETRY_MS overrides the budget, for tests and for
+// an operator who knows their store.
+const STORAGE_BUSY_WAIT_CAP_MS = 30000;
+const STORAGE_BUSY_RETRY_BUDGET_MS = 300000;
+
+export async function driver(operation, config, input, extra = [], dependencies = {}) {
   const script = process.env.AGMSG_SYNC_DRIVER;
   if (!script) throw new Error("AGMSG_SYNC_DRIVER is not set");
-  return runDriver({
+  const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const eventCall = dependencies.eventCall ?? event;
+  const budgetMs = Number(process.env.AGMSG_SYNC_BUSY_RETRY_MS ?? STORAGE_BUSY_RETRY_BUDGET_MS);
+  const run = () => runDriver({
     args: [script, operation, config.local_team, config.server_instance_id,
       config.remote_team_id, String(config.protocol_version), ...extra],
     label: "storage sync",
@@ -2006,6 +2030,34 @@ export async function driver(operation, config, input, extra = []) {
       parseStrictJsonl(stdout) : parseJsonl(stdout)),
     input,
   });
+  // Retrying is safe ONLY because a busy call wrote nothing: every operation
+  // that writes does so in one BEGIN IMMEDIATE transaction fed with -bail (or
+  // as an argv statement, where the CLI stops at the first error), so a lock
+  // lost at BEGIN leaves the store as it was, and the prepare's chunked
+  // reservations are re-entrant by contract. The adapter exits 11 only when the
+  // last statement was the busy one -- the operation returned at that point.
+  let waitedMs = 0;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (error?.driverExitCode !== STORAGE_BUSY_EXIT) throw error;
+      const waitMs = Math.min(STORAGE_BUSY_WAIT_CAP_MS, 1000 * 2 ** (attempt - 1));
+      if (waitedMs + waitMs > budgetMs) {
+        // The driver's own sentence stays in front; what is added is how long
+        // this waited, so the operator can tell "held for minutes" from
+        // "held forever" and knows which knob this was.
+        error.message += ` -- waited ${Math.round(waitedMs / 1000)} s for the store to come free ` +
+          `(AGMSG_SYNC_BUSY_RETRY_MS=${budgetMs}) and it did not`;
+        error.code = "storage-busy";
+        error.retryable = true;
+        throw error;
+      }
+      await eventCall("driver.busy", { operation, attempt, wait_ms: waitMs, waited_ms: waitedMs });
+      await sleepCall(waitMs);
+      waitedMs += waitMs;
+    }
+  }
 }
 
 // The roster file to hand the driver, when this process can work it out.

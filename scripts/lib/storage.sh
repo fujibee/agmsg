@@ -233,8 +233,52 @@ agmsg_sqlite() {
   # shell. Note it is once per SHELL, not once per machine: a call made from
   # inside a command substitution still probes in that subshell.
   [ -n "$_AGMSG_ESCAPE_PROBED" ] || _agmsg_escape_flag >/dev/null
+  if [ -n "${AGMSG_SQLITE_OUTCOME_FILE:-}" ]; then
+    _agmsg_sqlite_recording "$@"
+    return
+  fi
   # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
   sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+}
+
+# The same call, recording how it ended. With AGMSG_SQLITE_OUTCOME_FILE set,
+# every call overwrites that file with one word: `ok`; `busy` when the busy
+# timeout above ran out (sqlite3 said "database is locked"); `failed` for
+# anything else.
+#
+# Only the sync driver adapter sets it (scripts/internal/storage-sync-driver.sh),
+# and this is what it is for: the driver's functions return 13 for every failed
+# check with the statement's stderr discarded at the call site, so their caller
+# could not tell "the input was refused" from "another writer held the store past
+# the timeout". The second is the one failure that is a fact about the moment
+# rather than about the input -- the same call succeeds once that writer is done
+# -- and the adapter reports it as its own exit status so the engine can wait
+# and retry instead of giving up (#910). The word is the LAST call's outcome on
+# purpose: a check-failing function returns right after the statement that
+# failed, so "the operation failed and the last statement was busy" names it.
+#
+# stderr is captured to classify it and re-emitted unchanged, so a caller that
+# reads or silences it sees what it saw before; stdout is the data stream and
+# is not touched; the exit status is passed through. Written as an `if` so a
+# caller running under `set -e` is not exited by the assignment itself.
+_agmsg_sqlite_recording() {
+  local err rc
+  # shellcheck disable=SC2086  # same intentional split as above
+  if { err=$(sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>&1 >&3 3>&-); } 3>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  if [ "$rc" -eq 0 ]; then
+    printf 'ok\n' > "$AGMSG_SQLITE_OUTCOME_FILE"
+  else
+    case "$err" in
+      *"database is locked"*) printf 'busy\n' > "$AGMSG_SQLITE_OUTCOME_FILE" ;;
+      *) printf 'failed\n' > "$AGMSG_SQLITE_OUTCOME_FILE" ;;
+    esac
+  fi
+  return "$rc"
 }
 
 # Runtime ownership seam. This is the first run/-state-in-storage primitive for

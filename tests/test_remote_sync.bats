@@ -940,3 +940,35 @@ _longest_argv() {
   # cursor or a count moving by a few characters is not that.
   [ "$long" -lt "$((short + 200))" ]
 }
+
+@test "sync contract: a store another writer holds is busy (11), not a failed check (13)" {
+  # #910: an unlock's reprocess died on the page where an engine's first prepare
+  # held the store past the busy timeout, and the 13 it got read as "this page
+  # cannot be processed". The adapter tells the two apart -- and only the
+  # adapter: the driver function still returns 13 and still names the site, the
+  # adapter reads the last statement's outcome and exits 11 with its own line.
+  prepare_push >/dev/null
+  local db adapter holder
+  db=$(agmsg_db_path demo)
+  adapter="$SCRIPTS/internal/storage-sync-driver.sh"
+  # Another process holds the write lock for longer than the busy timeout.
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; sleep 3; printf 'COMMIT;\n' ) | sqlite3 "$db" >/dev/null &
+  holder=$!
+  sleep 0.5
+  export AGMSG_BUSY_TIMEOUT=200
+  run --separate-stderr bash "$adapter" reprocess demo "$SERVER_ID" "$TEAM_ID" 1 10
+  unset AGMSG_BUSY_TIMEOUT
+  wait "$holder"
+  [ "$status" -eq 11 ]
+  [ -z "$output" ]
+  grep -q 'failed at sqlite-sync\.sh:[0-9]' <<<"$stderr"
+  grep -q 'reprocess: the store is busy' <<<"$stderr"
+  # The same call once the writer is gone: the input was never the problem.
+  run --separate-stderr bash "$adapter" reprocess demo "$SERVER_ID" "$TEAM_ID" 1 10
+  [ "$status" -eq 0 ]
+  grep -q '"type":"sync_reprocess_page"' <<<"$output"
+  # A refused input still exits 13: the two are told apart, not merged.
+  run --separate-stderr bash "$adapter" reprocess demo "$SERVER_ID" "$TEAM_ID" 1 0
+  [ "$status" -eq 13 ]
+  grep -q 'failed at sqlite-sync\.sh:[0-9]' <<<"$stderr"
+}

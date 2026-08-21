@@ -48,10 +48,21 @@ _SQLITE_SYNC_COMMIT_BYTES=131072
 # up to max_blob_bytes, which is already larger than ARG_MAX once base64 and SQL
 # quoting are applied — so an argv statement could not hold even one such row,
 # and no group bound would have saved it.
+#
+# -bail on EVERY transaction this file feeds sqlite3 on stdin (here, reconcile,
+# read-prepare, read-apply; the page apply already had it). On stdin the CLI
+# runs on past a failed statement, so a BEGIN IMMEDIATE that loses the busy
+# timeout to another writer is followed by the body executing anyway — each
+# statement waiting its own timeout, and the ones that land after the other
+# writer lets go commit on their own, outside any transaction. A lock that frees
+# mid-script would apply the tail without the head. Statements handed over as an
+# argv string do not have this problem: there the CLI stops at the first error.
+# -bail makes the stdin form stop too, which is what lets the engine retry a busy
+# call: nothing of a transaction that never began has been written.
 _sqlite_sync_commit_chunk() {
   local db="$1" sql="$2"
   [ -n "$sql" ] || return 0
-  printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite "$db" >/dev/null 2>&1
+  printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | agmsg_sqlite -bail "$db" >/dev/null 2>&1
 }
 
 # Builtin single-quote escaping, assigned into _SQLITE_SYNC_LIT in the CALLER's
@@ -834,7 +845,7 @@ storage_sync_reconcile_push() {
     WHERE b.local_team='$tl' AND b.server_instance_id='$server'
       AND b.remote_team_id='$remote' AND b.protocol_version=$protocol
       AND b.driver_generation='$generation';
-    COMMIT;" | agmsg_sqlite -batch "$db" >/dev/null 2>&1 || return 12
+    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null 2>&1 || return 12
 
   _sqlite_data "$team" "SELECT json_object('type','sync_reconcile_result','push_cursor',
     CAST(push_cursor AS TEXT)) FROM sync_bindings WHERE local_team='$tl'
@@ -1353,7 +1364,7 @@ EOF
        AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
        AND rm.driver_generation='$generation' AND rm.active=1
        AND rm.name_mismatch=0;
-    COMMIT;" | agmsg_sqlite -batch "$db" >/dev/null || { _sqlite_sync_why; return 13; }
+    COMMIT;" | agmsg_sqlite -bail -batch "$db" >/dev/null || { _sqlite_sync_why; return 13; }
 
   _sqlite_data "$team" "SELECT json_object('type','sync_read_frontier','member_id',f.member_id,
       'server_seq',f.server_seq) FROM sync_read_prepared f JOIN sync_read_members rm
@@ -1576,7 +1587,7 @@ storage_sync_apply_read_state() {
           AND rm.driver_generation=x.driver_generation AND rm.agent=x.agent
           AND CAST(x.server_seq AS INTEGER)<=CAST(rm.remote_server_seq AS INTEGER));
     COMMIT;" >> "$sql_file"
-  if ! agmsg_sqlite "$db" < "$sql_file" >/dev/null 2>&1; then
+  if ! agmsg_sqlite -bail "$db" < "$sql_file" >/dev/null 2>&1; then
     rm -f "$sql_file"; trap - EXIT INT TERM HUP; _sqlite_sync_why; return 13
   fi
   rm -f "$sql_file"; trap - EXIT INT TERM HUP; _AGMSG_READ_SYNC_SQL_FILE=""

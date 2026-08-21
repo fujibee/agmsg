@@ -22,6 +22,7 @@ import {
   cycle,
   discardInputDirectory,
   driver,
+  STORAGE_BUSY_EXIT,
   exportAgeHandoff,
   exportAgeSnapshot,
   isRetryable,
@@ -4339,4 +4340,82 @@ test("pull bootstrap prints a server cursor only when it is a canonical sequence
   const good = await run("41");
   assert.match(good, /fetching messages after 41 /);
   assert.ok(!good.includes("an unreadable cursor"), "a real sequence is not replaced");
+});
+
+test("driver() waits out a busy store and retries; anything else is asked once", async (t) => {
+  // #910: the storage adapter exits STORAGE_BUSY_EXIT when another writer held
+  // the store past the busy timeout. That is a fact about the moment, so the
+  // call is repeated with a growing wait, within a budget; every other non-zero
+  // exit is a decision and is not asked again.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-busy-"));
+  const previousDriver = process.env.AGMSG_SYNC_DRIVER;
+  const previousBudget = process.env.AGMSG_SYNC_BUSY_RETRY_MS;
+  t.after(async () => {
+    if (previousDriver === undefined) delete process.env.AGMSG_SYNC_DRIVER;
+    else process.env.AGMSG_SYNC_DRIVER = previousDriver;
+    if (previousBudget === undefined) delete process.env.AGMSG_SYNC_BUSY_RETRY_MS;
+    else process.env.AGMSG_SYNC_BUSY_RETRY_MS = previousBudget;
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
+  const config = {
+    local_team: "t", server_instance_id: "018f3f7e-0000-7000-8000-000000000001",
+    remote_team_id: "018f3f7e-0000-7000-8000-000000000002", protocol_version: 1,
+  };
+  const counter = join(root, "calls");
+  // A driver that is busy for its first `busyFor` calls and answers after that.
+  const useDriver = async (name, busyFor, exitWith = STORAGE_BUSY_EXIT) => {
+    const script = join(root, name);
+    await writeFile(script, [
+      "#!/usr/bin/env bash",
+      "cat > /dev/null",
+      `n=$(( $(cat ${shellQuote(counter)} 2>/dev/null || echo 0) + 1 ))`,
+      `printf %s "$n" > ${shellQuote(counter)}`,
+      `if [ "$n" -le ${busyFor} ]; then`,
+      "  echo 'agmsg: sqlite-sync: prepare: the store is busy -- another writer held it' >&2",
+      `  exit ${exitWith}`,
+      "fi",
+      "printf '%s\\n' '{\"type\":\"sync_state\",\"transport_cursor\":\"0\"}'",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    await writeFile(counter, "0");
+    process.env.AGMSG_SYNC_DRIVER = script;
+  };
+  const waits = [];
+  const events = [];
+  const dependencies = {
+    sleepCall: async (ms) => { waits.push(ms); },
+    eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+  };
+
+  // Busy twice, then answered: two waits, doubling, and the answer comes back.
+  await useDriver("busy-twice.sh", 2);
+  const result = await driver("prepare", config, [], [], dependencies);
+  assert.deepEqual(result, [{ type: "sync_state", transport_cursor: "0" }]);
+  assert.equal(await readFile(counter, "utf8"), "3");
+  assert.deepEqual(waits, [1000, 2000]);
+  assert.deepEqual(events.map((e) => [e.name, e.operation, e.attempt, e.wait_ms, e.waited_ms]),
+    [["driver.busy", "prepare", 1, 1000, 0], ["driver.busy", "prepare", 2, 2000, 1000]]);
+
+  // Busy past the budget: the driver's own sentence comes back, marked
+  // retryable and named, with how long this waited and under which knob.
+  await useDriver("busy-always.sh", 1000);
+  process.env.AGMSG_SYNC_BUSY_RETRY_MS = "3500"; // 1 s + 2 s fit; the 4 s wait does not
+  waits.length = 0;
+  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+    error.code === "storage-busy" && isRetryable(error) &&
+    error.driverExitCode === STORAGE_BUSY_EXIT &&
+    /storage sync prepare failed for team 't' \(exit 11\): agmsg: sqlite-sync: prepare: the store is busy/u.test(error.message) &&
+    /waited 3 s for the store to come free \(AGMSG_SYNC_BUSY_RETRY_MS=3500\) and it did not/u.test(error.message));
+  assert.deepEqual(waits, [1000, 2000]);
+  assert.equal(await readFile(counter, "utf8"), "3");
+  delete process.env.AGMSG_SYNC_BUSY_RETRY_MS;
+
+  // A failed check (13) is a decision: asked once, not retried, not retryable.
+  await useDriver("refuses.sh", 1000, 13);
+  waits.length = 0;
+  await assert.rejects(() => driver("prepare", config, [], [], dependencies), (error) =>
+    error.driverExitCode === 13 && !isRetryable(error) && error.code === undefined);
+  assert.equal(await readFile(counter, "utf8"), "1");
+  assert.deepEqual(waits, []);
 });
