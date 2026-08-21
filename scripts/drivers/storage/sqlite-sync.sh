@@ -862,6 +862,8 @@ storage_sync_apply_pull() {
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
   local from to body at local_id q line_next_after jq_ok
+  local cipher_q blob_q key_id_q received_q policy_q local_rev_q reason_q
+  local from_q to_q body_q at_q
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
   _sqlite_sync_ensure_binding "$team" "$server" "$remote" "$protocol" "$generation" || { _sqlite_sync_why; return 13; }
   sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-sync-sql.XXXXXX") || { _sqlite_sync_why; return 13; }
@@ -941,14 +943,33 @@ storage_sync_apply_pull() {
     outcome_ids="${outcome_ids}${outcome_ids:+,}'$wire'"
     case "$seq:$v" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
     case "$status" in importable|unsupported_cipher|pending_key|authentication_failed|malformed|policy_violation) ;; *) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
-    q="'$(_sqlite_lit "$key_id")'"; [ -n "$key_id" ] || q=NULL
+    # Quoted ONCE PER MESSAGE, here, in the shell: each of these fields used
+    # to go through `$(_sqlite_lit ...)` -- a printf|sed fork -- at every use
+    # site in the SQL below, 32 forks per message and most of the 34 processes
+    # a pulled message cost (#908). _sqlite_sync_lit_into is the builtin form
+    # the bulk seal loop already uses; the escaping rule lives there, not here.
+    # Inside the per-message loop on purpose: every one of these changes with
+    # the message, and hoisting them to the page would carry the previous
+    # message's values into this one's rows.
+    _sqlite_sync_lit_into "$cipher"; cipher_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$blob"; blob_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$key_id"; key_id_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$received"; received_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$policy"; policy_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$local_rev"; local_rev_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$reason"; reason_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$from"; from_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$to"; to_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$body"; body_q="$_SQLITE_SYNC_LIT"
+    _sqlite_sync_lit_into "$at"; at_q="$_SQLITE_SYNC_LIT"
+    q="'$key_id_q'"; [ -n "$key_id" ] || q=NULL
     printf "%s\n" "
       INSERT OR IGNORE INTO sync_conflicts
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$(_sqlite_lit "$cipher")',$q,'$(_sqlite_lit "$blob")',
+             '$cipher_q',$q,'$blob_q',
              'server sequence maps to another wire id',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -964,48 +985,48 @@ storage_sync_apply_pull() {
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$(_sqlite_lit "$cipher")',$q,'$(_sqlite_lit "$blob")',
+             '$cipher_q',$q,'$blob_q',
              'wire id maps to another sequence or envelope',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
         WHERE qx.server_instance_id='$server' AND qx.remote_team_id='$remote'
           AND qx.protocol_version=$protocol AND qx.wire_id='$wire'
           AND (qx.server_seq<>'$seq' OR qx.envelope_v<>$v
-            OR qx.cipher<>'$(_sqlite_lit "$cipher")'
-            OR COALESCE(qx.key_id,'')<>'$(_sqlite_lit "$key_id")'
-            OR qx.blob<>'$(_sqlite_lit "$blob")'))
+            OR qx.cipher<>'$cipher_q'
+            OR COALESCE(qx.key_id,'')<>'$key_id_q'
+            OR qx.blob<>'$blob_q'))
          OR EXISTS(SELECT 1 FROM sync_messages mx
         WHERE mx.server_instance_id='$server' AND mx.remote_team_id='$remote'
           AND mx.protocol_version=$protocol AND mx.wire_id='$wire'
           AND (mx.server_seq IS NOT NULL AND mx.server_seq<>'$seq'
-            OR mx.envelope_v<>$v OR mx.cipher<>'$(_sqlite_lit "$cipher")'
-            OR COALESCE(mx.key_id,'')<>'$(_sqlite_lit "$key_id")'
-            OR mx.blob<>'$(_sqlite_lit "$blob")'));
+            OR mx.envelope_v<>$v OR mx.cipher<>'$cipher_q'
+            OR COALESCE(mx.key_id,'')<>'$key_id_q'
+            OR mx.blob<>'$blob_q'));
       INSERT OR IGNORE INTO sync_quarantine
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,server_received_at,envelope_v,
          cipher,key_id,blob,status,policy_revision,local_security_revision,reason)
       VALUES('$tl','$server','$remote',$protocol,'$generation','$seq','$wire',
-        '$(_sqlite_lit "$received")',$v,'$(_sqlite_lit "$cipher")',$q,
-        '$(_sqlite_lit "$blob")','$status','$(_sqlite_lit "$policy")',
-        '$(_sqlite_lit "$local_rev")','$(_sqlite_lit "$reason")');
+        '$received_q',$v,'$cipher_q',$q,
+        '$blob_q','$status','$policy_q',
+        '$local_rev_q','$reason_q');
       UPDATE sync_quarantine SET status='$status',
-          policy_revision='$(_sqlite_lit "$policy")',
-          local_security_revision='$(_sqlite_lit "$local_rev")',
-          reason='$(_sqlite_lit "$reason")'
+          policy_revision='$policy_q',
+          local_security_revision='$local_rev_q',
+          reason='$reason_q'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
          AND server_seq='$seq' AND envelope_v=$v
-         AND cipher='$(_sqlite_lit "$cipher")'
-         AND COALESCE(key_id,'')='$(_sqlite_lit "$key_id")'
-         AND blob='$(_sqlite_lit "$blob")'
+         AND cipher='$cipher_q'
+         AND COALESCE(key_id,'')='$key_id_q'
+         AND blob='$blob_q'
          AND status NOT IN ('corrupt_state','imported','reconciled');
       UPDATE sync_quarantine SET status='corrupt_state',reason='wire envelope mismatch'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
-         AND (server_seq<>'$seq' OR envelope_v<>$v OR cipher<>'$(_sqlite_lit "$cipher")'
-              OR COALESCE(key_id,'')<>'$(_sqlite_lit "$key_id")'
-              OR blob<>'$(_sqlite_lit "$blob")');
+         AND (server_seq<>'$seq' OR envelope_v<>$v OR cipher<>'$cipher_q'
+              OR COALESCE(key_id,'')<>'$key_id_q'
+              OR blob<>'$blob_q');
       UPDATE sync_quarantine SET status='corrupt_state',reason='binding sequence conflict'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
@@ -1017,15 +1038,15 @@ storage_sync_apply_pull() {
          AND protocol_version=$protocol AND wire_id='$wire' AND EXISTS(
            SELECT 1 FROM sync_messages m WHERE m.server_instance_id='$server'
              AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
-             AND m.wire_id='$wire' AND (m.envelope_v<>$v OR m.cipher<>'$(_sqlite_lit "$cipher")'
-               OR COALESCE(m.key_id,'')<>'$(_sqlite_lit "$key_id")'
-               OR m.blob<>'$(_sqlite_lit "$blob")'
+             AND m.wire_id='$wire' AND (m.envelope_v<>$v OR m.cipher<>'$cipher_q'
+               OR COALESCE(m.key_id,'')<>'$key_id_q'
+               OR m.blob<>'$blob_q'
                OR (m.server_seq IS NOT NULL AND m.server_seq<>'$seq')));
       UPDATE sync_messages SET server_seq='$seq' WHERE server_instance_id='$server'
         AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
-        AND envelope_v=$v AND cipher='$(_sqlite_lit "$cipher")'
-        AND COALESCE(key_id,'')='$(_sqlite_lit "$key_id")'
-        AND blob='$(_sqlite_lit "$blob")' AND (server_seq IS NULL OR server_seq='$seq')
+        AND envelope_v=$v AND cipher='$cipher_q'
+        AND COALESCE(key_id,'')='$key_id_q'
+        AND blob='$blob_q' AND (server_seq IS NULL OR server_seq='$seq')
         AND EXISTS(SELECT 1 FROM sync_quarantine qx
           WHERE qx.server_instance_id='$server' AND qx.remote_team_id='$remote'
             AND qx.protocol_version=$protocol AND qx.wire_id='$wire'
@@ -1061,8 +1082,8 @@ storage_sync_apply_pull() {
       local_id=$(compat_uuid7) || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
       printf "%s\n" "
         INSERT INTO events(type,id,team,from_agent,to_agent,body,at)
-        SELECT 'message_sent','$local_id','$tl','$(_sqlite_lit "$from")',
-               '$(_sqlite_lit "$to")','$(_sqlite_lit "$body")','$(_sqlite_lit "$at")'
+        SELECT 'message_sent','$local_id','$tl','$from_q',
+               '$to_q','$body_q','$at_q'
         WHERE NOT EXISTS(SELECT 1 FROM sync_messages m
           WHERE m.server_instance_id='$server' AND m.remote_team_id='$remote'
             AND m.protocol_version=$protocol AND m.wire_id='$wire')
@@ -1083,8 +1104,8 @@ storage_sync_apply_pull() {
         -- skipped there is no row with this id, so neither statement fires and
         -- last_insert_rowid() is never read.
         INSERT INTO messages(team,from_agent,to_agent,body,created_at)
-        SELECT '$tl','$(_sqlite_lit "$from")','$(_sqlite_lit "$to")',
-               '$(_sqlite_lit "$body")','$(_sqlite_lit "$at")'
+        SELECT '$tl','$from_q','$to_q',
+               '$body_q','$at_q'
          WHERE EXISTS(SELECT 1 FROM events e
                        WHERE e.id='$local_id' AND e.legacy_id IS NULL);
         UPDATE events SET legacy_id=last_insert_rowid()
@@ -1094,7 +1115,7 @@ storage_sync_apply_pull() {
            driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
            key_id,blob,server_seq,direction)
         SELECT '$tl','$server','$remote',$protocol,'$generation',seq,id,'$wire',$v,
-               '$(_sqlite_lit "$cipher")',$q,'$(_sqlite_lit "$blob")','$seq','pull'
+               '$cipher_q',$q,'$blob_q','$seq','pull'
           FROM events WHERE id='$local_id';
         UPDATE sync_quarantine SET status='imported' WHERE server_instance_id='$server'
           AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'

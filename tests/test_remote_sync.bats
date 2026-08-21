@@ -22,6 +22,32 @@ prepare_push() {
   printf '%s\n' "$PREPARE" | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 "${1:-100}"
 }
 
+@test "sync contract: the builtin quote and the forking quote agree on adversarial input (#908)" {
+  # storage_sync_apply_pull quotes its eleven per-message fields through
+  # _sqlite_sync_lit_into (a bash expansion) where it used to fork
+  # _sqlite_lit (printf|sed) at every use site. A speed change that alters
+  # one quoted byte corrupts rows, so the two are held equal here on the
+  # inputs that matter to SQL quoting: a quote alone, doubled, leading,
+  # trailing; a newline; a backslash, and one next to a quote; empty;
+  # sed's and printf's own metacharacters.
+  local input expected actual
+  while IFS= read -r -d '' input; do
+    expected="$(_sqlite_lit "$input")"
+    _sqlite_sync_lit_into "$input"
+    actual="$_SQLITE_SYNC_LIT"
+    [ "$actual" = "$expected" ] || {
+      printf 'quote mismatch for %q: builtin %q, helper %q\n' "$input" "$actual" "$expected" >&2
+      return 1
+    }
+  done < <(printf '%s\0' \
+    "plain" "it's" "two''quotes" "'leading" "trailing'" "'" "''" "" \
+    $'line one\nline two' $'tab\there' 'back\slash' "back\\'slash quote" \
+    '100% $HOME' 'and & ampersand' 'a/b' 'dots...')
+  # And the shape SQL needs: every single quote doubled, nothing else touched.
+  _sqlite_sync_lit_into "a'b''c"
+  [ "$_SQLITE_SYNC_LIT" = "a''b''''c" ]
+}
+
 @test "sync contract: prepare is re-entrant and byte-stable before reconcile" {
   storage_send demo alice bob "preserve these exact bytes" >/dev/null
   local first second
