@@ -1858,8 +1858,8 @@ EOF
   kill "$server_pid" 2>/dev/null || true
 
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "stopping after" ]]
-  [[ "$output" =~ "consecutive watch-once failure" ]]
+  grep -q "stopping after" <<<"$output"
+  grep -q "consecutive watch-once failure" <<<"$output"
 }
 
 @test "codex-bridge: a flood of distinct wakes is rate-limited, not a re-arm storm (#936)" {
