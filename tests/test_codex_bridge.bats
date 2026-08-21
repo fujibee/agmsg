@@ -1809,3 +1809,86 @@ EOF
   [[ "$output" =~ "started turn" ]]
   grep -q "turn/start" "$log"
 }
+
+# A WS app-server whose watch-once (process/spawn) exit codes are scripted by
+# $SCENARIO, so the bridge's re-arm accounting can be driven deterministically.
+# Shared by the two #936 tests below.
+_write_rearm_fake() {
+  cat >"$1" <<'EOF'
+const crypto = require("crypto"), fs = require("fs"), net = require("net");
+const [sock, logf] = process.argv.slice(2);
+const scenario = process.env.SCENARIO || "all124";
+try { fs.unlinkSync(sock); } catch (_) {}
+let arms = 0;
+function nextExit() {
+  if (scenario === "alt124_0") { const m = arms % 3; return m === 2 ? { code: 0, stdout: `status=pending count=1 max_id=${arms}\n` } : { code: 124, stdout: "" }; }
+  if (scenario === "flood0") return { code: 0, stdout: `status=pending count=1 max_id=${arms}\n` };
+  return { code: 124, stdout: "" };
+}
+function sendFrame(s, v) { const p = Buffer.from(JSON.stringify(v), "utf8"); let h; if (p.length < 126) h = Buffer.from([0x81, p.length]); else { h = Buffer.alloc(4); h[0]=0x81; h[1]=126; h.writeUInt16BE(p.length,2); } s.write(Buffer.concat([h, p])); }
+function handle(s, msg) {
+  if (msg.method === "initialize") return sendFrame(s, {jsonrpc:"2.0", id:msg.id, result:{}});
+  if (msg.method === "thread/resume") return sendFrame(s, {jsonrpc:"2.0", id:msg.id, result:{thread:{id:msg.params.threadId, status:{type:"idle"}}}});
+  if (msg.method === "turn/start") { sendFrame(s,{jsonrpc:"2.0",id:msg.id,result:{}}); setTimeout(()=>sendFrame(s,{jsonrpc:"2.0",method:"turn/completed",params:{threadId:msg.params.threadId,turn:{id:"t"}}}),5); return; }
+  if (msg.method === "process/spawn") { arms++; const { code, stdout } = nextExit(); fs.appendFileSync(logf, `${Date.now()} arm ${arms} exit ${code}\n`); sendFrame(s, {jsonrpc:"2.0", id:msg.id, result:{}}); setTimeout(()=>sendFrame(s,{jsonrpc:"2.0",method:"process/exited",params:{processHandle:msg.params.processHandle, exitCode:code, stdout, stderr:""}}), 5); return; }
+}
+function frames(s, st, chunk) { st.buffer = Buffer.concat([st.buffer, chunk]); while (st.buffer.length >= 2) { const op = st.buffer[0] & 0x0f; let len = st.buffer[1] & 0x7f; let off = 2; if (len === 126) { if (st.buffer.length < off+2) return; len = st.buffer.readUInt16BE(off); off+=2; } else if (len === 127) { if (st.buffer.length < off+8) return; len = st.buffer.readUInt32BE(off+4); off+=8; } const masked = (st.buffer[1] & 0x80) !== 0; const mo = off; if (masked) off += 4; if (st.buffer.length < off+len) return; let pl = st.buffer.slice(off, off+len); if (masked) { const mk = st.buffer.slice(mo, mo+4); pl = Buffer.from(pl.map((b,i)=>b^mk[i%4])); } st.buffer = st.buffer.slice(off+len); if (op === 0x1) handle(s, JSON.parse(pl.toString("utf8"))); } }
+const server = net.createServer((s) => { const st = { buffer: Buffer.alloc(0), upgraded: false, header: Buffer.alloc(0) }; s.on("data", (chunk) => { if (!st.upgraded) { st.header = Buffer.concat([st.header, chunk]); const end = st.header.indexOf("\r\n\r\n"); if (end === -1) return; const hdr = st.header.slice(0,end).toString("utf8"); const rest = st.header.slice(end+4); const key = (hdr.match(/Sec-WebSocket-Key: (.*)\r\n/i)||[])[1].trim(); const acc = crypto.createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64"); s.write(["HTTP/1.1 101 Switching Protocols","Upgrade: websocket","Connection: Upgrade",`Sec-WebSocket-Accept: ${acc}`,"",""].join("\r\n")); st.upgraded = true; if (rest.length) frames(s, st, rest); return; } frames(s, st, chunk); }); s.on("close", () => server.close(()=>process.exit(0))); });
+server.listen(sock);
+EOF
+}
+
+@test "codex-bridge: the failure cap reaches even when wakes interleave (#936)" {
+  run node -e 'const net=require("net"),crypto=require("crypto");if(!net||!crypto)process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node net/crypto not available"
+  run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe3.sock"
+  [ "$status" -eq 0 ] || skip "unix socket listen not available"
+
+  local fake="$TEST_SKILL_DIR/rearm-fake.js" sock="$TEST_SKILL_DIR/rearm.sock" flog="$TEST_SKILL_DIR/rearm.log"
+  _write_rearm_fake "$fake"; : > "$flog"
+  SCENARIO=alt124_0 node "$fake" "$sock" "$flog" 3>&- &
+  local server_pid="$!"
+  for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+
+  # fail, fail, wake, repeating: the old reset-to-0 held the counter below the
+  # limit forever. With the decay it climbs, so the bridge stops itself.
+  run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-x \
+    --app-server "unix://$sock" --timeout 1 --interval 1
+  kill "$server_pid" 2>/dev/null || true
+
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "stopping after" ]]
+  [[ "$output" =~ "consecutive watch-once failure" ]]
+}
+
+@test "codex-bridge: a flood of distinct wakes is rate-limited, not a re-arm storm (#936)" {
+  run node -e 'const net=require("net"),crypto=require("crypto");if(!net||!crypto)process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node net/crypto not available"
+  run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe4.sock"
+  [ "$status" -eq 0 ] || skip "unix socket listen not available"
+
+  local fake="$TEST_SKILL_DIR/rearm-fake2.js" sock="$TEST_SKILL_DIR/rearm2.sock" flog="$TEST_SKILL_DIR/rearm2.log"
+  _write_rearm_fake "$fake"; : > "$flog"
+  SCENARIO=flood0 node "$fake" "$sock" "$flog" 3>&- &
+  local server_pid="$!"
+  for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+
+  # Every watch-once returns a wake with a fresh max_id, so the stale-wake guard
+  # never fires and this would re-arm with no delay. Let it run ~6 s, then stop.
+  node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-x \
+    --app-server "unix://$sock" --timeout 1 --interval 1 >/dev/null 2>&1 3>&- &
+  local bpid="$!"
+  sleep 6
+  kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
+  kill "$server_pid" 2>/dev/null || true
+
+  # The 1 s floor caps this near one arm per second. Without it the same 6 s
+  # produced hundreds. Assert a generous ceiling so the test is not timing-flaky
+  # but still fails a regression to the unbounded loop.
+  local arms
+  arms="$(grep -c ' arm ' "$flog")"
+  [ "$arms" -ge 1 ]
+  [ "$arms" -le 20 ]
+}

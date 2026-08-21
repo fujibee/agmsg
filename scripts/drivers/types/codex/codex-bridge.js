@@ -19,6 +19,15 @@ const RUN_DIR = path.join(SKILL_DIR, "run");
 // context); honour the same overrides delivery.sh's windows_wrap uses.
 const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
 
+// A ceiling on how often watch-once may be re-armed, across every re-arm path
+// (a clean deadline, a wake and its turn, an idle transition). watch-once's own
+// deadline paces the healthy case at one arm per --timeout, so this is only ever
+// felt by a degenerate loop: a stream of DISTINCT wakes re-arms with no delay
+// otherwise -- 2094 arms in 56 s measured against the real bridge (#936) -- and
+// every arm forks watch-once's library sourcing, which is the fork pressure the
+// #906 incident saturated a per-user pid limit with. A rate, not a poll cadence.
+const MIN_ARM_INTERVAL_MS = 1000;
+
 function usage() {
   console.log(`Usage: codex-bridge.js --project <path> [--type codex] [--team <team>] [--name <agent>]
 
@@ -924,6 +933,7 @@ class CodexBridge {
     this.staleWakeCount = 0;
     this.watchFailureCount = 0;
     this.watchRearmTimer = null;
+    this.lastArmAt = 0;
     this.inlineInboxText = "";
     this.stopping = false;
     const key = identities.length === 1
@@ -1143,6 +1153,19 @@ class CodexBridge {
   async armWatch() {
     this.clearWatchRearmTimer();
     if (this.stopping || this.watchHandle) return;
+    // The rate ceiling, on the one path every re-arm goes through. If the last
+    // arm was too recent, defer this one to fill the interval rather than spawn
+    // now; the watchHandle guard above and clearWatchRearmTimer keep a single
+    // pending arm. Nothing is dropped -- a deferred arm still runs.
+    const wait = MIN_ARM_INTERVAL_MS - (Date.now() - this.lastArmAt);
+    if (wait > 0) {
+      this.watchRearmTimer = setTimeout(() => {
+        this.watchRearmTimer = null;
+        this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
+      }, wait);
+      return;
+    }
+    this.lastArmAt = Date.now();
     const handle = `agmsg-watch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.watchHandle = handle;
     const command = [
@@ -1179,7 +1202,15 @@ class CodexBridge {
     this.watchHandle = null;
 
     if (params.exitCode === 0) {
-      this.watchFailureCount = 0;
+      // Decay, not reset. A wake is progress, but a wake arriving amid failures
+      // does not prove the host recovered -- it proves one message moved. The
+      // old reset-to-0 let a fail/fail/wake churn hold the counter below the
+      // limit forever, so a bridge that never stopped delivering also never
+      // stopped failing (#936 (b)). Forgiving ONE failure per delivery lets a
+      // genuinely-recovered bridge (mostly wakes) fall to 0 while a churn still
+      // climbs to the cap. A clean deadline (exit 2 below) is the stronger
+      // signal -- a full timeout ran end to end -- and still resets outright.
+      this.watchFailureCount = Math.max(0, this.watchFailureCount - 1);
       const maxId = parseMaxId(params.stdout);
       if (this.isStaleWake(maxId)) {
         await this.shutdown();
