@@ -911,27 +911,50 @@ storage_sync_apply_pull() {
     # refused the embedded newline. Raised in review, and it was a real
     # regression -- the reason has to be explicit now that it is no longer a
     # side effect of how the fields were read.
+    # `tostring` before `@sh` on EVERY field, not only the ones that needed a
+    # string form. `@sh` emits one quoted word per element of an ARRAY, and a
+    # line carrying several words is not an assignment to the shell -- it is an
+    # assignment PREFIXED TO A COMMAND. Three things follow at once, and the
+    # third is the reason this is not a cosmetic fix:
+    #
+    #   the field is not assigned, so the variable keeps the PREVIOUS line's
+    #   value -- and several of these are interpolated into SQL below;
+    #
+    #   `jq_ok` is on a later line and is still reached, so the line is
+    #   ACCEPTED rather than refused;
+    #
+    #   the shell resolves and runs a word taken from the input.
+    #
+    # This input arrives from the sync server, so all three are server-chosen.
+    # `tostring` makes an array or object arrive as a single quoted value
+    # carrying its JSON text, which every whitelist below refuses, and leaves
+    # strings, numbers and booleans exactly as `jq -r` produced them -- so the
+    # set of inputs this accepts does not change.
+    #
+    # Four fields already had it. The other fourteen are the defect: it was
+    # applied where a non-string value was expected, rather than everywhere the
+    # result reaches `eval`.
     jq_ok=0
     eval "$(printf '%s\n' "$line" | jq -r -s '
       if length != 1 then error("one JSON value per line") else .[0] end
-      | "type=\(.type // "" | @sh)",
-      "line_next_after=\(.next_after // "" | @sh)",
-      "seq=\(.server_seq // "" | @sh)",
-      "wire=\(.id // "" | @sh)",
-      "received=\(.server_received_at // "" | @sh)",
+      | "type=\(.type // "" | tostring | @sh)",
+      "line_next_after=\(.next_after // "" | tostring | @sh)",
+      "seq=\(.server_seq // "" | tostring | @sh)",
+      "wire=\(.id // "" | tostring | @sh)",
+      "received=\(.server_received_at // "" | tostring | @sh)",
       "v=\(.envelope.v | tostring | @sh)",
       "cipher=\(.envelope.cipher | tostring | @sh)",
-      "key_id=\(.envelope.key_id // "" | @sh)",
+      "key_id=\(.envelope.key_id // "" | tostring | @sh)",
       "blob=\(.envelope.blob | tostring | @sh)",
       "status=\(.status | tostring | @sh)",
-      "policy=\(.policy_revision // "" | @sh)",
-      "local_rev=\(.local_security_revision // "" | @sh)",
-      "reason=\(.reason // "" | @sh)",
-      "kind=\(.projection.kind // "" | @sh)",
-      "from=\(.projection.from_agent // "" | @sh)",
-      "to=\(.projection.to_agent // "" | @sh)",
-      "body=\(.projection.body // "" | @sh)",
-      "at=\(.projection.created_at // "" | @sh)",
+      "policy=\(.policy_revision // "" | tostring | @sh)",
+      "local_rev=\(.local_security_revision // "" | tostring | @sh)",
+      "reason=\(.reason // "" | tostring | @sh)",
+      "kind=\(.projection.kind // "" | tostring | @sh)",
+      "from=\(.projection.from_agent // "" | tostring | @sh)",
+      "to=\(.projection.to_agent // "" | tostring | @sh)",
+      "body=\(.projection.body // "" | tostring | @sh)",
+      "at=\(.projection.created_at // "" | tostring | @sh)",
       "jq_ok=1"' 2>/dev/null)"
     [ "$jq_ok" = 1 ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
     if [ "$type" = sync_pull_cursor ]; then

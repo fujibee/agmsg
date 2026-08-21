@@ -791,6 +791,48 @@ second line	after a tab"
 # want of a cursor, so the bug is invisible. After it, the stale fields say
 # "sync_pull_cursor", the loop skips the line as if it had been one, and the
 # page COMMITS — an unparseable line accepted as a page terminator.
+# Every field of a pulled line reaches `eval` through `@sh`, and `@sh` emits one
+# quoted word per element of an ARRAY. A line of several words is an assignment
+# prefixed to a COMMAND, so an array-valued field both fails to assign -- leaving
+# the previous value in place -- and gets a word from the input resolved and run.
+# This input comes from the sync server.
+#
+# Two claims, asserted separately because they fail separately, and the more
+# severe one first: nothing from the line ran, and the page was refused.
+@test "sync contract: an array-valued pull field is refused and does not execute" {
+  local marker shim rc=0 bad
+  marker="$BATS_TEST_TMPDIR/executed"
+  shim="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\ntouch %s\n' "$marker" > "$shim/agmsg-exec-probe"
+  chmod +x "$shim/agmsg-exec-probe"
+
+  # The probe has to be runnable, or "it did not run" would hold because it was
+  # unreachable and this test would pass against any implementation.
+  PATH="$shim:$PATH" agmsg-exec-probe
+  [ -f "$marker" ]
+  rm -f "$marker"
+
+  bad=$(jq -nc '
+    {type:["sync_pull_message","agmsg-exec-probe"],server_seq:"4",
+     id:"550e8400-e29b-41d4-a716-4466554400d9",
+     server_received_at:"2026-07-20T13:00:04.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"array field",created_at:"2026-07-20T13:00:04.000000Z",
+        from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"array field",created_at:"2026-07-20T13:00:04.000000Z",
+                 from_agent:"carol",to_agent:"bob"}}')
+  # Exported, not prefixed: a prefix assignment would scope PATH to the left of
+  # the pipe, while the `eval` that could run the probe is on the right.
+  export PATH="$shim:$PATH"
+  printf '%s\n' "$bad" \
+    | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null 2>&1 || rc=$?
+
+  refute test -f "$marker"
+  [ "$rc" -ne 0 ]
+}
+
 @test "sync contract: an unparseable line fails the page, wherever it sits" {
   local remote db rc=0
   db=$(agmsg_db_path demo)
