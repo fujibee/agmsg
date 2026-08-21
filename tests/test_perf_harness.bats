@@ -227,3 +227,75 @@ EOF
   [ "$(jq -r '[.state.sync_quarantine[] | select(.status=="imported") | .n] | add' "$summary")" -eq 4 ]
 }
 
+# The one fatal the unlock report tolerates, and the ones it must not. Driven
+# from a synthetic log so the boundary is pinned where age is absent too; the
+# end-to-end unlock case above cannot run there.
+_unlock_log() {  # out-file, extra-lines...
+  local out="$1"; shift
+  {
+    echo '{"at":"2026-08-21T00:00:00.000Z","event":"harness.phase","phase":"pull"}'
+    echo '{"at":"2026-08-21T00:00:00.100Z","event":"pull.bootstrap.snapshot","team_id":"x"}'
+    echo '{"at":"2026-08-21T00:00:00.500Z","event":"pull.bootstrap.applied","messages":2}'
+    echo '{"at":"2026-08-21T00:00:01.000Z","event":"harness.phase","phase":"unlock"}'
+    printf '%s\n' "$@"
+    echo '{"at":"2026-08-21T00:00:02.000Z","event":"configured"}'
+    echo '{"at":"2026-08-21T00:00:03.000Z","event":"reprocess.complete","count":1,"imported_count":1,"blocking_remaining":false}'
+    echo '{"at":"2026-08-21T00:00:04.000Z","event":"harness.phase","phase":"once"}'
+    echo '{"at":"2026-08-21T00:00:04.100Z","event":"capabilities"}'
+    echo '{"at":"2026-08-21T00:00:04.200Z","event":"push.prepared","count":0}'
+    echo '{"at":"2026-08-21T00:00:04.300Z","event":"pull.received","messages":[]}'
+    echo '{"at":"2026-08-21T00:00:04.400Z","event":"pull.applied"}'
+    echo '{"at":"2026-08-21T00:00:05.000Z","event":"harness.phase","phase":"reprocess"}'
+    echo '{"at":"2026-08-21T00:00:05.500Z","event":"reprocess.complete","count":0}'
+    echo '{"at":"2026-08-21T00:00:06.000Z","event":"harness.phase","phase":"done"}'
+  } > "$out"
+  # The bootstrap's own progress lines, timestamped as report.py ts would: one
+  # fetching/applying pair per page, or the report says the page is unmeasured.
+  {
+    echo '2026-08-21T00:00:00.110Z agmsg: [0s] fetching messages after 0 (0 pulled so far)'
+    echo '2026-08-21T00:00:00.120Z agmsg: [0s] applying 2 messages'
+  } > "$(dirname "$out")/pull.stderr.ts"
+}
+PROBE='{"at":"2026-08-21T00:00:01.500Z","event":"fatal","message":"team does not have one canonical initial age epoch"}'
+
+_unlock_report() {  # work-dir -> status in $status, output in $output
+  run python3 "$PERF/report.py" summarize --work "$1" --scenario unlock \
+    --messages 1 --roster 1 --page 1000 --out "$1/summary.json"
+}
+
+@test "report: exactly one probe fatal before configured is tolerated and recorded" {
+  local work="$TEST_SKILL_DIR/work"; mkdir -p "$work"
+  _unlock_log "$work/events.jsonl" "$PROBE"
+  _unlock_report "$work"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.ok' "$work/summary.json")" = "true" ]
+  [ "$(jq -r '.tolerated | length' "$work/summary.json")" -eq 1 ]
+  [ "$(jq -r '.errors | length' "$work/summary.json")" -eq 0 ]
+  printf '%s\n' "$(jq -r '.tolerated[0].why' "$work/summary.json")" | grep -q 'export-age-snapshot probe'
+}
+
+@test "report: the same fatal twice, after configured, in another phase, or with another message stays an error" {
+  local work="$TEST_SKILL_DIR/work"; mkdir -p "$work"
+  # twice in the window: neither is trusted
+  _unlock_log "$work/events.jsonl" "$PROBE" "${PROBE/01.500/01.600}"
+  _unlock_report "$work"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.tolerated | length' "$work/summary.json")" -eq 0 ]
+  [ "$(jq -r '.errors | length' "$work/summary.json")" -eq 2 ]
+  # after configured
+  _unlock_log "$work/events.jsonl" "${PROBE/01.500/02.500}"
+  _unlock_report "$work"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.errors | length' "$work/summary.json")" -eq 1 ]
+  # in the pull phase
+  _unlock_log "$work/events.jsonl" "${PROBE/01.500/00.700}"
+  _unlock_report "$work"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.errors | length' "$work/summary.json")" -eq 1 ]
+  # another message in the window
+  _unlock_log "$work/events.jsonl" "${PROBE/team does not have one canonical initial age epoch/something else}"
+  _unlock_report "$work"
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.errors | length' "$work/summary.json")" -eq 1 ]
+  [ "$(jq -r '.tolerated | length' "$work/summary.json")" -eq 0 ]
+}

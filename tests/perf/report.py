@@ -263,8 +263,12 @@ def summarize(args):
             probe = [e for e in errors if e["event"] == "fatal" and
                      e.get("message") == "team does not have one canonical initial age epoch" and
                      window[0] <= e["_t"] < configured_at]
-            tolerated = probe
-            errors = [e for e in errors if e not in probe]
+            # Exactly one: key.sh import probes once. A second identical fatal
+            # in that window is not the probe, and fail-closed means it stays an
+            # error rather than riding along with the one that is.
+            if len(probe) == 1:
+                tolerated = probe
+                errors = [e for e in errors if e is not probe[0]]
 
     stages = {}
     summary = {
