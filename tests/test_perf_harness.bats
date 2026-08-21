@@ -109,6 +109,44 @@ EOF
   [ "$(jq -r '.stages["bootstrap.apply"].calls' "$work/summary.json")" -eq 0 ]
 }
 
+@test "report: an engine cycle with no pull page fails even when another cycle had one" {
+  local work="$TEST_SKILL_DIR/work"
+  mkdir -p "$work"
+  # Cycle 1 is complete; cycle 2 prepared nothing AND reported no pull page.
+  # The phase-level expected set is satisfied by cycle 1 alone, so only a
+  # per-cycle check catches cycle 2 -- every cycle pulls at least one page.
+  cat > "$work/events.jsonl" <<'EOF'
+{"at":"2026-08-21T00:00:00.000Z","event":"harness.phase","phase":"seed"}
+{"at":"2026-08-21T00:00:00.100Z","event":"harness.seed","count":2,"seconds":0.01}
+{"at":"2026-08-21T00:00:01.000Z","event":"harness.phase","phase":"connect"}
+{"at":"2026-08-21T00:00:02.000Z","event":"harness.phase","phase":"engine"}
+{"at":"2026-08-21T00:00:02.100Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:02.200Z","event":"push.prepared","count":2}
+{"at":"2026-08-21T00:00:02.300Z","event":"push.ack","acks":[{"id":"a","server_seq":"1","disposition":"stored"},{"id":"b","server_seq":"2","disposition":"stored"}]}
+{"at":"2026-08-21T00:00:02.301Z","event":"push.reconciled"}
+{"at":"2026-08-21T00:00:02.400Z","event":"pull.received","messages":[{"id":"a","server_seq":"1"},{"id":"b","server_seq":"2"}]}
+{"at":"2026-08-21T00:00:02.900Z","event":"pull.applied"}
+{"at":"2026-08-21T00:00:08.000Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:08.100Z","event":"push.prepared","count":0}
+{"at":"2026-08-21T00:00:09.000Z","event":"harness.phase","phase":"once"}
+{"at":"2026-08-21T00:00:09.100Z","event":"capabilities"}
+{"at":"2026-08-21T00:00:09.200Z","event":"push.prepared","count":0}
+{"at":"2026-08-21T00:00:09.300Z","event":"pull.received","messages":[]}
+{"at":"2026-08-21T00:00:09.400Z","event":"pull.applied"}
+{"at":"2026-08-21T00:00:10.000Z","event":"harness.phase","phase":"reprocess"}
+{"at":"2026-08-21T00:00:10.500Z","event":"reprocess.complete","count":0}
+{"at":"2026-08-21T00:00:11.000Z","event":"harness.phase","phase":"done"}
+EOF
+  run python3 "$PERF/report.py" summarize --work "$work" --scenario push \
+    --messages 2 --roster 1 --page 1000 --out "$work/summary.json"
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q 'engine cycle 2: pull.received'
+  # And the stage the first cycle DID report is one stage, not a split whose
+  # second half is the log's own write latency.
+  [ "$(jq -r '.stages["engine.post+reconcile"].calls' "$work/summary.json")" -eq 1 ]
+  [ "$(jq -r '.stages | has("engine.reconcile")' "$work/summary.json")" = "false" ]
+}
+
 @test "harness: join of a small history measures every stage on the shipped path" {
   local out="$TEST_SKILL_DIR/perf-out" summary
   run bash "$PERF/join-harness.sh" --messages 4 --roster 2 --out "$out"
@@ -126,7 +164,7 @@ EOF
   [ "$(jq -r '.state.roster_agents' "$summary")" -eq 2 ]
   # Not-exercised stages say so instead of reporting a time.
   [ "$(jq -r '.stages["reprocess.total"].exercised' "$summary")" = "false" ]
-  [ "$(jq -r '.stages["once.post"].exercised' "$summary")" = "false" ]
+  [ "$(jq -r '.stages["once.post+reconcile"].exercised' "$summary")" = "false" ]
   # Nothing was written into this test's own skill dir by the run: the harness
   # copied scripts/ under $out and pointed every path there.
   [ ! -d "$TEST_SKILL_DIR/teams/pulled-team" ]

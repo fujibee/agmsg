@@ -25,13 +25,12 @@ Every run prints a per-stage table and writes `summary.json`; with more than one
 | `bootstrap.fetch` | stderr `fetching messages after N` → `applying N messages` | `GET /v1/teams/<id>/messages`, one page |
 | `bootstrap.apply` | stderr `applying N messages` → `pull.bootstrap.applied` | evaluate (JS) + roster driver apply + storage driver apply |
 | `engine.prepare` / `once.prepare` | `capabilities` → `push.prepared` | storage driver prepare (roster prepare in parallel) |
-| `engine.post` / `once.post` | `push.prepared` → `push.ack` | `POST /v1/messages` until the acks are back |
-| `engine.reconcile` / `once.reconcile` | `push.ack` → `push.reconciled` | storage driver reconcile of the acks |
+| `engine.post+reconcile` / `once.post+reconcile` | `push.prepared` → `push.ack` | `POST /v1/messages` until the acks are back, **and** the storage driver reconcile of those acks — one stage, because the engine writes the acks through `reconcile` before it emits `push.ack` (`push.reconciled` follows in the same call). Splitting POST from reconcile needs an event at POST completion that the engine does not emit today. |
 | `engine.fetch+evaluate` / `once.fetch+evaluate` | previous event → `pull.received` | `GET /v1/messages` + evaluate (JS) |
 | `engine.apply` / `once.apply` | `pull.received` → `pull.applied` | storage driver apply |
 | `reprocess.total` | phase marker → `reprocess.complete` | driver reprocess pages + evaluate + apply (and two HTTP reads) |
 
-`push.prepared` → `push.ack` → `push.reconciled` are the three timings #913 asked for to split the 359 seconds of a push.
+#913 asked for `push.prepared` / POST complete / reconcile complete to split the 359 seconds of a push. This harness gives the first and the last; the middle one does not exist as an event, so POST and reconcile are reported together until it does.
 
 **A missing event fails the run; it is never a zero.** `report.py` declares the events each phase must contain (`EXPECTED`) and exits 2 naming any that did not arrive. A stage whose input was empty (nothing to push, no quarantined rows) is reported as `[not exercised]`, and the comparison says `NOT EXERCISED` rather than `fast`.
 
@@ -42,7 +41,7 @@ Every run prints a per-stage table and writes `summary.json`; with more than one
 | scenario | exercises | measured stages | does NOT exercise |
 |---|---|---|---|
 | `join` (default) | `remote.sh pull` of a team whose history lives on the server: bootstrap pages through the storage driver, then one explicit engine cycle and one explicit reprocess | `bootstrap.fetch`, `bootstrap.apply`; `once.*` (empty: fixed costs only); `reprocess.total` with 0 candidates | push, reconcile, reprocess of quarantined rows |
-| `push` | a local team seeded with N messages, `remote.sh connect`, the engine's catch-up cycles until a cycle prepares nothing: prepare → POST → reconcile, and the pull side bringing every pushed message straight back (the echo-back #908 observed) | `engine.prepare`, `engine.post`, `engine.reconcile`, `engine.fetch+evaluate`, `engine.apply` per cycle; then `once.*`, `reprocess.total` (0 candidates) | reprocess of quarantined rows |
+| `push` | a local team seeded with N messages, `remote.sh connect`, the engine's catch-up cycles until a cycle prepares nothing: prepare → POST → reconcile, and the pull side bringing every pushed message straight back (the echo-back #908 observed) | `engine.prepare`, `engine.post+reconcile`, `engine.fetch+evaluate`, `engine.apply` per cycle; then `once.*`, `reprocess.total` (0 candidates) | reprocess of quarantined rows; POST separately from reconcile |
 
 **Not covered: the encrypted path (#916).** #910's 4,100 `unsupported_cipher` rows and the reprocess that should have cleared them — quarantine → `unlock` → `reprocess` on `age-v1` envelopes — is not exercised by either scenario. Both run with `cipher: none`, so `reprocess.total` always reports 0 candidates and is marked not exercised. A run of this harness therefore reproduces the history-proportional apply and push costs of #910 (and the reconcile shape of #912), not the unreadable-after-four-hours end state. Adding an `age-v1` history needs the `age` binary and a sealing step (`scripts/internal/sync-cipher.mjs seal-batch`); that is #916.
 

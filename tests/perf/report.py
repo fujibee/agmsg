@@ -183,11 +183,27 @@ def measure_cycle(cycle, stages, missing, label):
         if not reconciled:
             missing.append(f"{label}: push.reconciled (push.prepared count={pushed})")
         if acks and reconciled:
-            stages["post"].add(acks[0]["_t"] - prepared["_t"], len(acks[0].get("acks", [])))
-            stages["reconcile"].add(reconciled[0]["_t"] - acks[0]["_t"], len(acks[0].get("acks", [])))
+            # ONE stage, not two. In cycle() the acks are written through the
+            # reconcile driver (recordAcks) BEFORE push.ack is emitted, and
+            # push.reconciled follows it within the same reportAcks call
+            # (remote-sync.mjs, the `posted`/`recordAcks`/`reportAcks` block).
+            # So push.prepared -> push.ack spans the POST *and* the reconcile,
+            # and push.ack -> push.reconciled is two consecutive writes to the
+            # log. Splitting them here would report the log's write latency as
+            # "reconcile" and call the sum "post". Splitting them for real needs
+            # an event at POST completion, which the engine does not emit.
+            stages["post+reconcile"].add(acks[0]["_t"] - prepared["_t"], len(acks[0].get("acks", [])))
             last = reconciled[0]
     received = by.get("pull.received", [])
     applied = by.get("pull.applied", [])
+    # Every cycle pulls at least one page -- the pull loop in cycle() always
+    # runs once -- so a cycle with no pull.received is a cycle whose pull side
+    # went unreported, not a quiet one. Checked per cycle: the phase-level
+    # EXPECTED set would be satisfied by any one cycle's pages and hide this.
+    if not received:
+        missing.append(f"{label}: pull.received (a cycle always pulls at least one page)")
+    if not applied:
+        missing.append(f"{label}: pull.applied (a cycle always pulls at least one page)")
     if len(received) != len(applied):
         missing.append(f"{label}: pull.received={len(received)} but pull.applied={len(applied)}")
     for page_received, page_applied in zip(received, applied):
@@ -268,7 +284,7 @@ def summarize(args):
         for name in ("connect", "engine"):
             window.extend(phases.get(name, []))
         window.sort(key=lambda e: e["_t"])
-        for name in ("prepare", "post", "reconcile", "fetch+evaluate", "apply"):
+        for name in ("prepare", "post+reconcile", "fetch+evaluate", "apply"):
             stages["engine." + name] = Stage("engine." + name, "msg")
         engine_stages = {k[len("engine."):]: v for k, v in stages.items() if k.startswith("engine.")}
         cycles = cycles_of(window)
@@ -303,14 +319,14 @@ def summarize(args):
         if seed:
             summary["seed"] = {"messages": seed[0].get("count"), "seconds": seed[0].get("seconds")}
         engine_stages["prepare"].note = "driver prepare (+ roster prepare in parallel), per cycle"
-        engine_stages["post"].note = "POST /v1/messages until acks, per cycle"
-        engine_stages["reconcile"].note = "driver reconcile of the acks, per cycle"
+        engine_stages["post+reconcile"].note = ("POST /v1/messages AND the driver reconcile of its acks, "
+                                                "per cycle (one stage: push.ack is emitted after both)")
         engine_stages["fetch+evaluate"].note = "GET /v1/messages + evaluate (JS); echo-back of own pushes"
         engine_stages["apply"].note = "driver apply of the echo-back page"
 
     # --- one explicit cycle -----------------------------------------------
     if "once" in phases:
-        for name in ("prepare", "post", "reconcile", "fetch+evaluate", "apply"):
+        for name in ("prepare", "post+reconcile", "fetch+evaluate", "apply"):
             stages["once." + name] = Stage("once." + name, "msg")
         once_stages = {k[len("once."):]: v for k, v in stages.items() if k.startswith("once.")}
         cycles = cycles_of(phases["once"])
@@ -318,10 +334,9 @@ def summarize(args):
             missing.append(f"once: expected exactly 1 capabilities event, saw {len(cycles)}")
         for cycle in cycles[:1]:
             measure_cycle(cycle, once_stages, missing, "once")
-        for name in ("post", "reconcile"):
-            if once_stages[name].calls == 0:
-                once_stages[name].exercised = False
-                once_stages[name].note = "nothing to push in this cycle: stage not exercised"
+        if once_stages["post+reconcile"].calls == 0:
+            once_stages["post+reconcile"].exercised = False
+            once_stages["post+reconcile"].note = "nothing to push in this cycle: stage not exercised"
 
     # --- reprocess ----------------------------------------------------------
     if "reprocess" in phases:

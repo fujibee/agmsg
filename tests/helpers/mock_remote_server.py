@@ -155,6 +155,11 @@ PUSHED_MESSAGES = []
 # sequence", allocated inside the team row's lock). The flat list above stays
 # for /_test/pushed and for the pulled-team view, which predate this.
 PUSHED_BY_TEAM = {}
+# id -> stored row, per team: the duplicate check on POST must not scan the
+# team's whole history for every new message, or the fixture adds an N^2 of
+# its own to the stage that times the POST (the real server looks ids up in
+# the database, server/src/storage.ts).
+PUSHED_INDEX = {}
 
 
 def _log_for(team_id):
@@ -598,13 +603,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             team_id = self.headers.get("Agmsg-Team-ID", "")
             own = PUSHED_BY_TEAM.setdefault(team_id, [])
+            index = PUSHED_INDEX.setdefault(team_id, {})
             acks = []
             for message in messages:
                 # An id this server already holds answers with its ORIGINAL
                 # sequence as `duplicate` (server/spec/v1.md, POST
                 # /v1/messages step 2); only a new id allocates. Without this a
                 # retried batch would be stored twice and acked twice.
-                known = next((m for m in own if m["id"] == message.get("id")), None)
+                known = index.get(message.get("id"))
                 if known is not None:
                     acks.append({"id": known["id"], "server_seq": known["server_seq"],
                                  "disposition": "duplicate"})
@@ -616,6 +622,7 @@ class Handler(BaseHTTPRequestHandler):
                     "envelope": message.get("envelope"),
                 }
                 own.append(stored)
+                index[stored["id"]] = stored
                 PUSHED_MESSAGES.append(stored)
                 acks.append({
                     "id": message.get("id"),
