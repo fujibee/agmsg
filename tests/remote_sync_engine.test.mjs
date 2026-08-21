@@ -23,6 +23,7 @@ import {
   discardInputDirectory,
   driver,
   STORAGE_BUSY_EXIT,
+  storageDriverExitGraceMs,
   exportAgeHandoff,
   exportAgeSnapshot,
   isRetryable,
@@ -2140,6 +2141,55 @@ exit 7
     // already gone -- and it was NOT killed to get there.
     assert.ok(gone(childPid), "the failed driver was left running");
   }
+});
+
+test("a clean exit after a broken write is not a truncated success", { timeout: 30_000 }, async (t) => {
+  // The order-independent half of the fix. A driver that reads a little of a
+  // large page and then exits 0 leaves the parent's write without a reader --
+  // EPIPE -- while the child's status is a success. The call must NOT report
+  // that as a synced page: the child never received the rest. Whichever of
+  // 'exit' (code 0) and the stdin error is seen first, the write error is what
+  // settles it. Without the close-handler's fail-closed check this rejects only
+  // when the exit is seen after the error, and passes as an empty success when
+  // the clean exit is seen first -- so this pins the case that used to slip.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-trunc-"));
+  const script = (pidFile, helperFile) => `#!/usr/bin/env bash
+echo $$ > ${JSON.stringify(pidFile)}
+sleep 300 &
+echo $! > ${JSON.stringify(helperFile)}
+head -c 50 >/dev/null
+exit 0
+`;
+  const wide = "x".repeat(4096);
+  const input = Array.from({ length: 512 }, (_, index) => ({ type: "probe", index, wide }));
+  const { started } = await withDriverEnvironment(t, root, script,
+    (mock, config) => [
+      () => driver("prepare", config, input, ["1"]),
+    ]);
+  for (const { promise } of started) {
+    await assert.rejects(() => promise,
+      (error) => error.driverFailurePhase === "stdin-write");
+  }
+});
+
+test("the storage driver exit grace is bounded above so a huge busy timeout cannot overflow the timer", () => {
+  // setTimeout clamps a delay past its 32-bit millisecond limit to 1 ms, which
+  // would kill a busy child almost at once -- so a safe integer past that limit
+  // must not pass through. The env carries the storage busy timeout; the grace
+  // is it plus slack, or the default when it is unusable.
+  const TIMER_MAX = 2 ** 31 - 1;
+  assert.equal(storageDriverExitGraceMs(undefined), 10000);           // default 5 s + slack
+  assert.equal(storageDriverExitGraceMs("500"), 5500);                // the test value used below
+  assert.equal(storageDriverExitGraceMs("5000"), 10000);              // default busy timeout
+  for (const unusable of ["oops", "-1", "1.5", "9007199254740991", String(TIMER_MAX)]) {
+    const grace = storageDriverExitGraceMs(unusable);
+    assert.equal(grace, 10000, `${unusable} did not fall back to the default`);
+    assert.ok(grace < TIMER_MAX, "grace must stay under the timer limit");
+  }
+  // The largest accepted busy timeout (one hour) is still well under the limit.
+  assert.equal(storageDriverExitGraceMs("3600000"), 3605000);
+  assert.ok(storageDriverExitGraceMs("3600000") < TIMER_MAX);
+  assert.equal(storageDriverExitGraceMs("3600001"), 10000);           // over the cap -> default
 });
 
 test("the storage driver that stops reading AND never exits is still bounded and killed",

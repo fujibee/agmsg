@@ -1836,6 +1836,26 @@ export function discardInputDirectory(directory, reason) {
   }
 }
 
+// How long to wait for a driver that has stopped reading its stdin to exit on
+// its own before the pipe path's bound (the SIGKILL in runDriver's `fail`) is
+// applied. Derived from the storage busy timeout, since the only exit worth
+// waiting for is a busy child's, which comes that timeout after it starts
+// waiting; a few seconds of teardown slack past it.
+//
+// Bounded on BOTH ends. Below: a value that is not a sane non-negative integer
+// -- NaN, negative, or a huge one -- falls to the 5 s default. Above: the busy
+// timeout is capped at an hour before the slack is added, so the result can
+// never approach setTimeout's 32-bit millisecond limit. Past that limit Node
+// clamps a delay to 1 ms and would kill a busy child almost at once -- the
+// opposite of a grace -- so `Number.isSafeInteger` alone (which admits values
+// far past the timer limit) is not enough; the cap is what closes that.
+export function storageDriverExitGraceMs(busyTimeoutEnv = process.env.AGMSG_BUSY_TIMEOUT) {
+  const busyTimeoutMs = Number(busyTimeoutEnv);
+  const usable = Number.isSafeInteger(busyTimeoutMs) &&
+    busyTimeoutMs >= 0 && busyTimeoutMs <= 3_600_000 ? busyTimeoutMs : 5000;
+  return usable + 5000;
+}
+
 function runDriver({ args, label, operation, parse, input, rosterFile, team, bindingPath,
   holdsRegistryLock = false }) {
   return new Promise((resolve, reject) => {
@@ -1973,21 +1993,22 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     // process cannot exit". Deferring to 'exit' must not drop that bound, so a
     // timer keeps it: if no exit arrives, `fail` runs and kills, as before.
     //
-    // Its length is not a tuning knob and not a wait the fast path ever feels.
-    // The only child worth waiting for is a busy one, and it exits the storage
-    // busy timeout (AGMSG_BUSY_TIMEOUT, default 5 s) after it starts waiting --
-    // so any bound past that timeout catches every exit that is coming, and all
-    // it delays is an already-broken child's failure. Timeout plus a few seconds
-    // of teardown slack, with a safe default when the env value is unusable.
+    // Its length (storageDriverExitGraceMs) is not a tuning knob and not a wait
+    // the fast path ever feels: the only child worth waiting for is a busy one,
+    // which exits the busy timeout after it starts waiting, so any bound past
+    // that timeout catches every exit that is coming and delays only an
+    // already-broken child's failure.
+    //
+    // `settled` first, so nothing here runs after the call has ended -- a stdin
+    // error can arrive after 'exit' has already settled a non-zero exit, and
+    // without this it would arm a fresh timer past the cleared one.
     child.stdin?.on("error", (error) => {
+      if (settled) return;
       error.driverFailurePhase = "stdin-write";
       lastStdinError = error;
       child.stdin.destroy();
       if (stdinExitTimer === null) {
-        const busyTimeoutMs = Number(process.env.AGMSG_BUSY_TIMEOUT);
-        const graceMs = (Number.isSafeInteger(busyTimeoutMs) && busyTimeoutMs >= 0
-          ? busyTimeoutMs : 5000) + 5000;
-        stdinExitTimer = setTimeout(() => fail(error), graceMs);
+        stdinExitTimer = setTimeout(() => fail(error), storageDriverExitGraceMs());
         stdinExitTimer.unref?.();
       }
     });
@@ -2023,6 +2044,13 @@ function runDriver({ args, label, operation, parse, input, rosterFile, team, bin
     });
     child.on("close", () => {
       if (failure) { settle(failure, null); return; }
+      // Order-independent with the exit above: whichever of them ran, a stdin
+      // write that lost its reader means the child cannot have received the
+      // whole page, so 'close' must not settle success on a truncated input --
+      // it fails closed on the recorded write error instead. The exit handler
+      // catches this when the exit is seen first; this catches the case where
+      // the write error was recorded only after a clean exit had returned.
+      if (lastStdinError) { settle(lastStdinError, null); return; }
       try {
         settle(null, parse(stdout));
       } catch (error) {
