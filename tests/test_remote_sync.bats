@@ -589,8 +589,10 @@ printf_two_acks_through_reconcile() {
 
   good='{"type":"sync_push_ack","local_position":"1","id":"00000000-0000-4000-8000-000000000000","server_seq":"1","disposition":"stored"}'
   run _reconcile_array_position "$good"
-  [ "$status" -eq 13 ]
+  # Execution first: it is the more severe of the two claims, and asserting the
+  # exit status ahead of it would stop the test before this ever ran.
   refute test -f "$marker"
+  [ "$status" -eq 13 ]
 }
 
 _reconcile_array_position() {
