@@ -1850,7 +1850,15 @@ export function discardInputDirectory(directory, reason) {
 // opposite of a grace -- so `Number.isSafeInteger` alone (which admits values
 // far past the timer limit) is not enough; the cap is what closes that.
 export function storageDriverExitGraceMs(busyTimeoutEnv = process.env.AGMSG_BUSY_TIMEOUT) {
-  const busyTimeoutMs = Number(busyTimeoutEnv);
+  // Empty is the 5 s default, exactly as the child reads it: storage.sh and the
+  // adapter use `${AGMSG_BUSY_TIMEOUT:-5000}`, where unset AND empty both mean
+  // 5000. Number("") is 0, not that default -- so an empty value taken literally
+  // would make the grace 5 s, equal to the child's busy timeout, and the SIGKILL
+  // would fire at the same moment a busy child exits 11, dropping it again. So
+  // normalise empty to the default before parsing, and keep this in step with
+  // the child's own default if that ever changes.
+  const raw = busyTimeoutEnv === undefined || busyTimeoutEnv === "" ? "5000" : busyTimeoutEnv;
+  const busyTimeoutMs = Number(raw);
   const usable = Number.isSafeInteger(busyTimeoutMs) &&
     busyTimeoutMs >= 0 && busyTimeoutMs <= 3_600_000 ? busyTimeoutMs : 5000;
   return usable + 5000;

@@ -2179,6 +2179,10 @@ test("the storage driver exit grace is bounded above so a huge busy timeout cann
   // is it plus slack, or the default when it is unusable.
   const TIMER_MAX = 2 ** 31 - 1;
   assert.equal(storageDriverExitGraceMs(undefined), 10000);           // default 5 s + slack
+  // Empty means the same 5 s default the child reads from ${...:-5000}, NOT
+  // Number("") === 0 -- otherwise the grace would equal the child's busy timeout
+  // and the kill would race a busy exit 11.
+  assert.equal(storageDriverExitGraceMs(""), 10000);
   assert.equal(storageDriverExitGraceMs("500"), 5500);                // the test value used below
   assert.equal(storageDriverExitGraceMs("5000"), 10000);              // default busy timeout
   for (const unusable of ["oops", "-1", "1.5", "9007199254740991", String(TIMER_MAX)]) {
