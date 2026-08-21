@@ -788,16 +788,18 @@ storage_sync_reconcile_push() {
     # second would overwrite the first, `jq_ok` included, so a page could hide
     # anything in the tail of a line (#780).
     #
-    # `tostring` before `@sh` on every field, which is not decoration. `@sh` turns
-    # an ARRAY into a list of shell words, so `"local_position": ["1","reboot"]`
-    # expands to `pos='1' 'reboot'` -- a command-prefix assignment that runs
-    # `reboot`, leaves `pos` holding the PREVIOUS line's value, and still reaches
-    # `jq_ok=1` on the next line, so the line is accepted. Demonstrated, not
-    # reasoned about. `tostring` makes the same input `pos='["1","reboot"]'`,
-    # which the whitelist below refuses, and it leaves strings and numbers
-    # exactly as they were. `storage_sync_apply_pull` already does this on the
-    # fields it does not otherwise constrain; this read simply has to do it on
-    # all of them.
+    # `tostring` before `@sh` on every field, which is not decoration. `@sh`
+    # emits one quoted word per element of an ARRAY, and a line carrying several
+    # words is not an assignment to the shell -- it is an assignment PREFIXED TO
+    # A COMMAND. Three things follow at once: the field is not assigned, so the
+    # variable keeps the PREVIOUS line's value, and `$pos` is interpolated into
+    # SQL below; `jq_ok` is on a later line and is still reached, so the line is
+    # ACCEPTED; and the shell resolves and runs a word taken from the input.
+    # This input arrives from the sync server, so all three are server-chosen.
+    #
+    # `tostring` makes an array or object arrive as a single quoted value
+    # carrying its JSON text, which the whitelist below refuses, and leaves
+    # strings and numbers exactly as they were.
     #
     # `@sh` is jq's shell-quoting filter, so every value arrives verbatim through
     # `eval` with nothing for this side to get wrong. `jq_ok` is emitted LAST: a
