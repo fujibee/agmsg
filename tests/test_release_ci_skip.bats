@@ -39,6 +39,39 @@ detect() {
   CHANGED="$1" GITHUB_OUTPUT=/dev/null bash "$script" 2>&1 | sed -n 's/^Result: //p'
 }
 
+# The dangerous direction, and the one the cases below cannot see.
+#
+# Those cases name the files that ride along, so they catch the arm getting
+# NARROWER. They cannot catch it getting WIDER: adding `scripts/foo.sh` to the
+# arm leaves every one of them green, because none of them happens to be about
+# `scripts/foo.sh`. Measured, not assumed -- an earlier version of this file had
+# exactly that hole and stayed green through the mutation.
+#
+# A widening is what actually hurts: it skips the suite for a file nobody
+# measured. So the arm's contents are pinned literally. Anything added has to be
+# added here too, which is where someone reads why the set is what it is.
+@test "release-ci: the release arm names these files and no others (#875)" {
+  local arm expected
+  arm=$(grep -oE '^ +VERSION\|[^)]*\) ;;' "$WORKFLOW" | sed 's/) ;;$//; s/^ *//' | tr '|' '\n' | sort)
+  expected=$(printf '%s\n' VERSION package.json .claude-plugin/plugin.json | sort)
+  # The premise: the grep found the arm at all. An empty match would make the
+  # comparison below a comparison of two things that are not there.
+  [ -n "$arm" ]
+  [ "$arm" = "$expected" ] || {
+    echo "the release arm in tests.yml is not what this test expects." >&2
+    echo "found:    $(printf '%s ' $arm)" >&2
+    echo "expected: $(printf '%s ' $expected)" >&2
+    echo "Widening it skips the bash suite for a file nobody has measured." >&2
+    echo "If the addition is right, measure that the suite does not read it," >&2
+    echo "record that measurement in the workflow comment, and update this test." >&2
+    false
+  }
+}
+
+# CHANGELOG.md is deliberately NOT in that arm -- it was already classified with
+# the other top-level prose before this change, and a release just happens to
+# touch it too. Its arm is not pinned here: it predates this work, and pinning
+# every safe arm in the file is a different change from adding one.
 @test "release-ci: the harness runs the real logic and can say either answer" {
   # Without this, every assertion below could be passing on an empty script.
   [[ "$(detect "$BUMP")" == *"docs_only=true"* ]]
