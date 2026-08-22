@@ -679,11 +679,10 @@ EOF
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
-  # Reset each tick: a mismatched-live bridge sets these to the pid it must kill
-  # AND that pid's start token at the moment we chose it, so the deferred kill can
-  # prove the pid is still that same process (below). Killed only once we commit to
-  # spawning the replacement.
-  need_kill=""; need_kill_token=""
+  # Reset each tick: a mismatched-live bridge (bound to a stale thread/app-server)
+  # sets this to its pid, purely as a flag that we must NOT spawn beside it. We do
+  # not kill it from here -- see the guard before the spawn below.
+  need_kill=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -711,9 +710,8 @@ EOF
       # the gates below would let a throttled or proof-less tick leave the binding
       # wiped and un-rewritten, so a later launcher has nothing to rebind from
       # (#350). Defer every teardown to the point we are actually committed to
-      # spawning the replacement.
+      # replacement -- and we do not kill it directly at all (below).
       need_kill="$bridge_pid"
-      need_kill_token="$(_start_token "$bridge_pid" 2>/dev/null || true)"
     fi
   fi
 
@@ -734,19 +732,22 @@ EOF
     continue
   fi
 
-  # Committed to spawning now: retire the old bridge (if any) and its stale
-  # records, immediately before writing the new ones, so the wipe and the rewrite
-  # are not separated by a gate that can bail out between them. The kill needs the
-  # same proof of IDENTITY as the reaper: the gates above may have taken seconds,
-  # in which the old pid could have exited and been reused, so kill ONLY when the
-  # pid's start token still reads and matches the one we stored when we chose it --
-  # unreadable or changed means a different (or gone) process, so do nothing.
-  if [ -n "$need_kill" ] && [ -n "$need_kill_token" ]; then
-    _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
-    if [ -n "$_nk_now" ] && [ "$_nk_now" = "$need_kill_token" ]; then
-      kill "$need_kill" 2>/dev/null || true
-    fi
+  # A mismatched-live bridge must be gone before we spawn its replacement, or we
+  # double-start a writer (#935). We do NOT kill it here: the pidfile holds a bare
+  # pid with no identity token, so a direct kill could land on a reused pid. The
+  # lease-based reaper above is the ONLY reuse-safe path that may signal it, and it
+  # kills same-identity leased bridges (and, when it cannot prove they exited,
+  # returns non-zero so we already bailed). If the pid is somehow STILL alive here
+  # -- the reaper spared a legacy bridge with no lease, or it is mid-shutdown --
+  # do nothing this tick: leave the binding intact and retry, rather than spawn
+  # beside it. A lease-less bridge that never dies simply lingers (orphan survival
+  # is acceptable; a wrong-kill or a double-start is not).
+  if [ -n "$need_kill" ] && _agmsg_pid_alive "$need_kill"; then
+    poll_sleep
+    continue
   fi
+  # Committed to spawning now: clear the stale records immediately before writing
+  # the new ones, so no gate can bail out between the wipe and the rewrite.
   rm -f "$pidfile" "$appserver_file" "$thread_file"
 
   nohup "${bridge_run[@]}" \
