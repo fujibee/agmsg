@@ -372,7 +372,30 @@ skip_if_root() {
 
   # Somebody else takes the lock and keeps it. Held with mkdir directly, the way
   # the library takes it, so no helper of ours has to survive the wait.
-  mkdir "$lock"
+  #
+  # Taken by RETRYING until it succeeds, not by assuming it is free (#934).
+  # `sync start` holds this team's lock across the launch and releases it only
+  # once the engine is running -- so at the moment the pidfile appears the lock
+  # is still the starter's, and a single `mkdir` here raced that release. It lost
+  # often enough to be the suite's most frequent failure, and it failed in setup,
+  # which reads as a broken fixture rather than as a race.
+  #
+  # Waiting for the lock to disappear first and then taking it would be the same
+  # race one step later. Retrying takes it the instant the starter drops it, and
+  # the window is wide: `cmd_sync_start` releases the lock and immediately enters
+  # its readiness wait -- 1600 turns at 0.01s, a floor of 16 seconds and longer
+  # in practice because each turn also spawns a status probe, a tail and an awk
+  # (remote.sh:2873-2886). That interval is exactly what this test needs to own,
+  # and the retry ceiling below (400 x 0.05s = 20s) is sized to reach into it.
+  local locked=0 t=0
+  while [ "$t" -lt 400 ]; do
+    if mkdir "$lock" 2>/dev/null; then locked=1; break; fi
+    t=$((t + 1)); sleep 0.05
+  done
+  [ "$locked" -eq 1 ] || {
+    echo "the starter never released the team lock, so this test could not take it" >&2
+    false
+  }
   printf '%s\n' "KEPT-CYCLE-STATE" > "$cycles"
 
   kill "$engine" 2>/dev/null || true
