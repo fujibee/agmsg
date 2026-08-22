@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
-import { appendFile, lstat, mkdir, open, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
 import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -3309,6 +3309,43 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // cadence: after any retryable failure the loop always backs off (exponential,
 // capped), so a machine that can't reach the server never hot-loops even while
 // catch-up would otherwise skip the wait.
+// The installation can be updated while an engine runs (#963). watch.sh
+// already detects that and stands down on its own; the engine used to find
+// out only by executing a half-written driver script -- and only when its
+// timing was unlucky enough to hit the write window (observed live: a
+// mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
+// syntax error instead of the update). Anything under scripts/ written after
+// the engine started means the code on disk is no longer the code in memory.
+//
+// The failure direction is deliberate: an OBSERVATION failure is not
+// evidence. A directory that cannot be read, an entry that cannot be
+// stat'ed, a tree that has vanished -- each is skipped, and only a
+// successfully read mtime newer than the engine's start proves an update.
+// watch.sh holds the same line (a missing stamp reads as "not changed", and
+// its find's errors are discarded); an engine must not stand down on proof
+// it failed to collect.
+export async function installUpdatedSince(rootDir, sinceMs, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { continue; } // unreadable: no evidence either way
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue; // links and specials are not install artifacts
+      let stats;
+      try { stats = await statCall(path); }
+      catch { continue; } // vanished or unreadable: no evidence
+      if (stats.mtimeMs > sinceMs) return path;
+    }
+  }
+  return null;
+}
+
 export async function runLoop(config, options, dependencies = {}) {
   const cycleCall = dependencies.cycleCall ?? cycle;
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -3319,6 +3356,9 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
+  const installUpdatedCall = dependencies.installUpdatedCall ?? installUpdatedSince;
+  const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const startedAtMs = dependencies.startedAtMs ?? Date.now();
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3332,6 +3372,28 @@ export async function runLoop(config, options, dependencies = {}) {
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
   for (;;) {
+    // Checked at the cycle boundary, BEFORE any driver can be spawned: past
+    // this point the loop executes scripts from disk, and executing updated
+    // scripts from an engine holding pre-update code is the mixed-version
+    // state watch.sh refuses by name (#963). Returning -- not throwing --
+    // makes this a stand-down, not a failure: main() finishes and the
+    // process exits 0. The pidfile is left for `status` to call stale; its
+    // stale line already names `remote.sh sync start <team>`.
+    let updatedPath = null;
+    try { updatedPath = await installUpdatedCall(scriptsRoot, startedAtMs); }
+    catch { updatedPath = null; } // an observation failure is not evidence (#963)
+    if (updatedPath !== null && updatedPath !== undefined) {
+      try {
+        await eventCall("stand-down", {
+          reason: "install-updated",
+          team: config.local_team,
+          changed_path: String(updatedPath),
+          message: "the agmsg installation was updated while this engine was running, so it is still executing the code from before the update. Standing down rather than appearing to work.",
+          restart: `remote.sh sync start ${config.local_team}`,
+        });
+      } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      return;
+    }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {

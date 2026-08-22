@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
-  writeFile } from "node:fs/promises";
+  utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,7 @@ import {
   isRetryable,
   initialAgeSnapshot,
   isRefusal,
+  installUpdatedSince,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3093,6 +3094,63 @@ test("configured native identity must belong to its epoch recipient manifest", a
 });
 
 // ---- adaptive sync catch-up (adaptive-sync-catchup design) ----
+
+test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
+  const events = [];
+  let cycles = 0;
+  // Resolves -- a stand-down is a deliberate return, not a thrown failure.
+  await runLoop(config, {}, {
+    installUpdatedCall: async () => "/skill/scripts/drivers/storage/sqlite-sync.sh",
+    cycleCall: async () => { cycles += 1; return {}; },
+    sleepCall: async () => {},
+    eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+  });
+  // Detected at the loop boundary: no driver was ever spawned.
+  assert.equal(cycles, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "stand-down");
+  assert.equal(events[0].reason, "install-updated");
+  assert.equal(events[0].changed_path, "/skill/scripts/drivers/storage/sqlite-sync.sh");
+  // The message names the update, not a parse error, and the restart names the team.
+  assert.match(events[0].message, /installation was updated/u);
+  assert.equal(events[0].restart, "remote.sh sync start demo");
+});
+
+test("runLoop: a failure to OBSERVE the install is not evidence -- the engine keeps running (#963)", async () => {
+  let cycles = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    installUpdatedCall: async () => { throw new Error("EACCES: scripts unreadable"); },
+    cycleCall: async () => {
+      cycles += 1;
+      if (cycles >= 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return {};
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // The check threw on every iteration and the loop cycled anyway.
+  assert.equal(cycles, 2);
+});
+
+test("installUpdatedSince: only a successfully read newer mtime is proof; pre-existing trees and missing roots are not (#963)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    await writeFile(join(root, "internal", "old.sh"), "echo old\n");
+    const start = Date.now() + 5000; // everything on disk predates the engine
+    assert.equal(await installUpdatedSince(root, start), null);
+    // A file written after the engine started is positive proof, found by path.
+    await writeFile(join(root, "internal", "rewritten.sh"), "echo new\n");
+    const utime = new Date(start + 5000);
+    await utimes(join(root, "internal", "rewritten.sh"), utime, utime);
+    assert.equal(await installUpdatedSince(root, start), join(root, "internal", "rewritten.sh"));
+    // A root that cannot be read at all yields no evidence, not a stand-down.
+    assert.equal(await installUpdatedSince(join(root, "no-such-dir"), 0), null);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
 
 test("runLoop: push saturation drives catch-up (no wait), a drained cycle returns to the steady interval", async () => {
   const sleeps = [];
