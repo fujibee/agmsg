@@ -511,7 +511,10 @@ wait_for_child_count() {
 # --- #937: reap a same-(project,role) orphan via its per-PID identity lease ---
 
 _count_role_bridges() { # <project> <name>
-  ps -Ao pid=,args= 2>/dev/null | grep -F "codex-bridge.js" | grep -F -- "--project $1 " | grep -F "$2" | grep -c . | tr -d ' '
+  # Match the role name at a word boundary, not as a substring: "alice" must not
+  # also count "alice2" (the survive tests turn on exactly that distinction), so a
+  # trailing digit/letter excludes it. Names here are plain [a-z0-9] test tokens.
+  ps -Ao pid=,args= 2>/dev/null | grep -F "codex-bridge.js" | grep -F -- "--project $1 " | grep -E "$2([^0-9A-Za-z]|\$)" | grep -c . | tr -d ' '
 }
 # Poll until this project's role-bridge count settles at <want>, then echo it --
 # a fixed sleep before a point-in-time count races the reap-and-respawn.
