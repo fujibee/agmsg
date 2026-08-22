@@ -492,7 +492,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the python3 dependency-tiering gap on the remote path
 - Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
 - Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
-- Fail closed on incompleteness; shrink v1 schema (co1 P2, mentor-cc ruling)
+- Fail closed on incompleteness; shrink v1 schema
 - Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
