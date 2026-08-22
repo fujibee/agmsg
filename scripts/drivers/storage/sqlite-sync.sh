@@ -1751,7 +1751,13 @@ storage_sync_apply_read_state() {
     _sqlite_sync_why; return 13
   fi
   rm -f "$jq_err"; _AGMSG_READ_SYNC_JQ_ERR=""
-  [ -n "$floor" ] && [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  # Through the same cleanup as every other failure site, for the reason the
+  # pull path already routes its structurally identical tail check that way
+  # (the final_cursor check): reached here the fd is closed and both temp files
+  # are gone, but the trap and the global the trap reads are still set, and the
+  # bats suite calls this function directly in a long-lived shell (review
+  # finding).
+  [ -n "$floor" ] && [ -n "$current" ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
   printf "%s\n" "
     UPDATE sync_read_members SET
       min_available_seq=CAST(MAX(CAST(min_available_seq AS INTEGER),$floor) AS TEXT),
