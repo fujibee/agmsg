@@ -679,6 +679,9 @@ EOF
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
+  # Reset each tick: a mismatched-live bridge sets this to the pid it must kill,
+  # but only once we commit to spawning its replacement (see below).
+  need_kill=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -701,10 +704,13 @@ EOF
         poll_sleep
         continue
       fi
-      kill "$bridge_pid" 2>/dev/null || true
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
-    else
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
+      # A mismatched live bridge must be retired and rebound -- but NOT here.
+      # Tearing down (kill + wiping the recorded pidfile/app-server/thread) before
+      # the gates below would let a throttled or proof-less tick leave the binding
+      # wiped and un-rewritten, so a later launcher has nothing to rebind from
+      # (#350). Defer every teardown to the point we are actually committed to
+      # spawning the replacement.
+      need_kill="$bridge_pid"
     fi
   fi
 
@@ -714,6 +720,8 @@ EOF
   # In a set +e subshell: these two do a lot of probing whose non-zero results
   # (no such process, an empty match, a lock already held) are normal, and the
   # launcher runs under set -euo pipefail where a bare non-zero would exit it.
+  # Either returning non-zero means "not this tick" -- and because no teardown has
+  # run yet, the existing binding is left intact for the next tick / a rebind.
   if ! ( set +e; _spawn_rate_ok ); then
     poll_sleep
     continue
@@ -722,6 +730,12 @@ EOF
     poll_sleep
     continue
   fi
+
+  # Committed to spawning now: retire the old bridge (if any) and its stale
+  # records, immediately before writing the new ones, so the wipe and the rewrite
+  # are not separated by a gate that can bail out between them.
+  if [ -n "$need_kill" ]; then kill "$need_kill" 2>/dev/null || true; fi
+  rm -f "$pidfile" "$appserver_file" "$thread_file"
 
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
