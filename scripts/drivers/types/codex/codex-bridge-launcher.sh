@@ -680,9 +680,9 @@ EOF
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
   # Reset each tick: a mismatched-live bridge (bound to a stale thread/app-server)
-  # sets this to its pid, purely as a flag that we must NOT spawn beside it. We do
-  # not kill it from here -- see the guard before the spawn below.
-  need_kill=""
+  # sets these to its pid and the start token it had at that moment. We never kill
+  # it from here; the token is how the guard before the spawn proves it is gone.
+  need_kill=""; need_kill_token=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -712,6 +712,7 @@ EOF
       # (#350). Defer every teardown to the point we are actually committed to
       # replacement -- and we do not kill it directly at all (below).
       need_kill="$bridge_pid"
+      need_kill_token="$(_start_token "$bridge_pid" 2>/dev/null || true)"
     fi
   fi
 
@@ -732,19 +733,25 @@ EOF
     continue
   fi
 
-  # A mismatched-live bridge must be gone before we spawn its replacement, or we
-  # double-start a writer (#935). We do NOT kill it here: the pidfile holds a bare
-  # pid with no identity token, so a direct kill could land on a reused pid. The
-  # lease-based reaper above is the ONLY reuse-safe path that may signal it, and it
-  # kills same-identity leased bridges (and, when it cannot prove they exited,
-  # returns non-zero so we already bailed). If the pid is somehow STILL alive here
-  # -- the reaper spared a legacy bridge with no lease, or it is mid-shutdown --
-  # do nothing this tick: leave the binding intact and retry, rather than spawn
-  # beside it. A lease-less bridge that never dies simply lingers (orphan survival
-  # is acceptable; a wrong-kill or a double-start is not).
-  if [ -n "$need_kill" ] && _agmsg_pid_alive "$need_kill"; then
-    poll_sleep
-    continue
+  # A mismatched-live bridge must be proven GONE before we spawn its replacement,
+  # or we double-start a writer that still holds the thread through async shutdown
+  # (#935). We do NOT kill it from here (the pidfile is a bare pid with no identity,
+  # so any direct kill could hit a reused pid; the lease-based reaper above is the
+  # only reuse-safe path that may signal it). And we do NOT ask _agmsg_pid_alive to
+  # "confirm" it is gone: a false from that helper can be a transient ps failure
+  # (#954), and a failed observation is not proof (see THE RULE above). The one
+  # positive proof we accept is the start token we stashed at detection now reading
+  # a DIFFERENT process -- the old pid has been reused, so the old writer is gone.
+  # A token that still matches (alive), or cannot be read (unproven), keeps the
+  # binding and retries; a normal exit is picked up next tick by the dead-pid path
+  # at the top of the loop. A lease-less bridge that never dies simply lingers
+  # (orphan survival is acceptable; a wrong-kill or a double-start is not).
+  if [ -n "$need_kill" ]; then
+    _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
+    if [ -z "$need_kill_token" ] || [ -z "$_nk_now" ] || [ "$_nk_now" = "$need_kill_token" ]; then
+      poll_sleep
+      continue
+    fi
   fi
   # Committed to spawning now: clear the stale records immediately before writing
   # the new ones, so no gate can bail out between the wipe and the rewrite.
