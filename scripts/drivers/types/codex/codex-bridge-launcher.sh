@@ -501,12 +501,17 @@ _reap_orphan_bridges() {
 "
   done
   [ -n "$killed" ] || return 0
-  # Wait for each to exit. A pid whose start token changed is a DIFFERENT process
-  # -- the one we killed is already gone -- so it is not waited on.
+  # Wait for each to exit, using the start token AS the liveness check -- never a
+  # bare kill -0. A dead pid yields no start token (no /proc entry, no ps row), so
+  # `_start_token` succeeding IS proof the pid is still live, and its value being
+  # unchanged IS proof it is still the SAME process: liveness and identity from one
+  # observation, with no window between them for a recycled pid to slip through
+  # (and no kill -0 EPERM blind spot). A token that stops reading, or changes, ends
+  # the wait -- the process we killed is gone (or already replaced).
   while IFS="$TAB" read -r pid lstartsrc lstart; do
     [ -n "$pid" ] || continue
     waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$(_start_token "$pid")" = "$lstartsrc	$lstart" ]; do
+    while cur="$(_start_token "$pid")" && [ "$cur" = "$lstartsrc	$lstart" ]; do
       if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
       sleep 0.1; waited=$((waited + 1))
     done
