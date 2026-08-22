@@ -3314,17 +3314,59 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // out only by executing a half-written driver script -- and only when its
 // timing was unlucky enough to hit the write window (observed live: a
 // mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
-// syntax error instead of the update). Anything under scripts/ written after
-// the engine started means the code on disk is no longer the code in memory.
+// syntax error instead of the update).
 //
-// The failure direction is deliberate: an OBSERVATION failure is not
-// evidence. A directory that cannot be read, an entry that cannot be
-// stat'ed, a tree that has vanished -- each is skipped, and only a
-// successfully read mtime newer than the engine's start proves an update.
-// watch.sh holds the same line (a missing stamp reads as "not changed", and
-// its find's errors are discarded); an engine must not stand down on proof
-// it failed to collect.
-export async function installUpdatedSince(rootDir, sinceMs, dependencies = {}) {
+// Proof of an update is a DIFFERENCE against a baseline taken at engine
+// start, not an mtime ordering. Comparing mtimes against the engine's own
+// start clock looked equivalent and is not: a file that already carried a
+// future mtime when the engine started (clock skew, an archive that
+// preserved timestamps, a clock stepped backwards) would read as "written
+// after start" forever, and stand down every engine at its first cycle --
+// including one already running the new code. A reviewer supplied that
+// counterexample. Against a baseline, a pre-existing mtime -- future or not
+// -- is simply what the file looked like at start, and only a file that
+// appeared or whose mtime CHANGED afterwards is evidence. (This also
+// catches an update that preserves OLDER mtimes, which an ordering test
+// would miss.)
+//
+// The failure direction is deliberate, in both phases: an OBSERVATION
+// failure is not evidence.
+//   - Baseline phase: one unreadable directory or one failed stat and the
+//     whole detector is disabled (null), not partially armed. A partial
+//     baseline would recreate the false positive: a pre-existing file that
+//     was unreadable at start and readable later would look newly added.
+//     Disabled means exactly today's behavior.
+//   - Check phase: an entry that cannot be read is skipped; only a
+//     successfully stat'ed file that is absent from the baseline or whose
+//     mtime differs from it proves an update. A file DELETED by an update
+//     is deliberately not proof on its own -- deletion of the only copy of
+//     a fact is the defect class this repo keeps meeting, and a rewrite
+//     always accompanies a real update anyway; missing it degrades to
+//     today's behavior.
+export async function collectInstallBaseline(rootDir, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const baseline = new Map();
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { return null; } // incomplete observation: the detector stays OFF
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue; // links and specials are not install artifacts
+      let stats;
+      try { stats = await statCall(path); }
+      catch { return null; } // incomplete observation: the detector stays OFF
+      baseline.set(path, stats.mtimeMs);
+    }
+  }
+  return baseline;
+}
+
+export async function installChangedAgainst(rootDir, baseline, dependencies = {}) {
   const readdirCall = dependencies.readdirCall ?? readdir;
   const statCall = dependencies.statCall ?? stat;
   const pending = [rootDir];
@@ -3332,15 +3374,16 @@ export async function installUpdatedSince(rootDir, sinceMs, dependencies = {}) {
     const dir = pending.pop();
     let entries;
     try { entries = await readdirCall(dir, { withFileTypes: true }); }
-    catch { continue; } // unreadable: no evidence either way
+    catch { continue; } // unreadable now: no evidence either way
     for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) { pending.push(path); continue; }
-      if (!entry.isFile()) continue; // links and specials are not install artifacts
+      if (!entry.isFile()) continue;
       let stats;
       try { stats = await statCall(path); }
       catch { continue; } // vanished or unreadable: no evidence
-      if (stats.mtimeMs > sinceMs) return path;
+      const known = baseline.get(path);
+      if (known === undefined || known !== stats.mtimeMs) return path;
     }
   }
   return null;
@@ -3356,9 +3399,9 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
-  const installUpdatedCall = dependencies.installUpdatedCall ?? installUpdatedSince;
+  const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
+  const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
   const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const startedAtMs = dependencies.startedAtMs ?? Date.now();
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3368,6 +3411,14 @@ export async function runLoop(config, options, dependencies = {}) {
   const LARGE_LIMIT = 1000;
   const BASE_BACKOFF_MS = 1000;
   const MAX_BACKOFF_MS = 60000;
+
+  // Taken once, before the loop: the reference the update check diffs
+  // against. null means the tree could not be observed COMPLETELY, and an
+  // incomplete baseline must disarm the whole detector rather than arm part
+  // of it (see collectInstallBaseline).
+  let installBaseline = null;
+  try { installBaseline = await collectInstallBaselineCall(scriptsRoot); }
+  catch { installBaseline = null; } // an observation failure is not evidence (#963)
 
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
@@ -3380,8 +3431,10 @@ export async function runLoop(config, options, dependencies = {}) {
     // process exits 0. The pidfile is left for `status` to call stale; its
     // stale line already names `remote.sh sync start <team>`.
     let updatedPath = null;
-    try { updatedPath = await installUpdatedCall(scriptsRoot, startedAtMs); }
-    catch { updatedPath = null; } // an observation failure is not evidence (#963)
+    if (installBaseline !== null) {
+      try { updatedPath = await installChangedCall(scriptsRoot, installBaseline); }
+      catch { updatedPath = null; } // an observation failure is not evidence (#963)
+    }
     if (updatedPath !== null && updatedPath !== undefined) {
       try {
         await eventCall("stand-down", {

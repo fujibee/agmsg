@@ -29,7 +29,8 @@ import {
   isRetryable,
   initialAgeSnapshot,
   isRefusal,
-  installUpdatedSince,
+  collectInstallBaseline,
+  installChangedAgainst,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3100,7 +3101,8 @@ test("runLoop: an install update stands the engine down before any cycle, naming
   let cycles = 0;
   // Resolves -- a stand-down is a deliberate return, not a thrown failure.
   await runLoop(config, {}, {
-    installUpdatedCall: async () => "/skill/scripts/drivers/storage/sqlite-sync.sh",
+    collectInstallBaselineCall: async () => new Map([["/skill/scripts/a.sh", 111]]),
+    installChangedCall: async () => "/skill/scripts/drivers/storage/sqlite-sync.sh",
     cycleCall: async () => { cycles += 1; return {}; },
     sleepCall: async () => {},
     eventCall: async (name, fields) => { events.push({ name, ...fields }); },
@@ -3119,7 +3121,8 @@ test("runLoop: an install update stands the engine down before any cycle, naming
 test("runLoop: a failure to OBSERVE the install is not evidence -- the engine keeps running (#963)", async () => {
   let cycles = 0;
   await assert.rejects(() => runLoop(config, {}, {
-    installUpdatedCall: async () => { throw new Error("EACCES: scripts unreadable"); },
+    collectInstallBaselineCall: async () => new Map(),
+    installChangedCall: async () => { throw new Error("EACCES: scripts unreadable"); },
     cycleCall: async () => {
       cycles += 1;
       if (cycles >= 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3133,20 +3136,64 @@ test("runLoop: a failure to OBSERVE the install is not evidence -- the engine ke
   assert.equal(cycles, 2);
 });
 
-test("installUpdatedSince: only a successfully read newer mtime is proof; pre-existing trees and missing roots are not (#963)", async () => {
+test("runLoop: an incomplete baseline disarms the detector entirely -- the check never runs (#963)", async () => {
+  let cycles = 0;
+  let checks = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // one unreadable entry at start
+    installChangedCall: async () => { checks += 1; return "/would-be-proof"; },
+    cycleCall: async () => {
+      cycles += 1;
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // Partially armed detectors recreate the false positive; disarmed means today's behavior.
+  assert.equal(checks, 0);
+  assert.equal(cycles, 1);
+});
+
+test("install baseline: a pre-existing FUTURE mtime is what the tree looked like, not an update (#963)", async () => {
+  // The reviewer's counterexample against comparing mtimes to the engine's
+  // start clock: a file that already carried a future mtime at start (clock
+  // skew, an archive with preserved timestamps) must not stand every fresh
+  // engine down. Against the baseline it is simply unchanged.
   const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
   try {
     await mkdir(join(root, "internal"), { recursive: true });
+    const future = new Date(Date.now() + 3600_000);
+    await writeFile(join(root, "internal", "from-the-future.sh"), "echo hi\n");
+    await utimes(join(root, "internal", "from-the-future.sh"), future, future);
+    const baseline = await collectInstallBaseline(root);
+    assert.ok(baseline instanceof Map);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    // A REWRITE that preserves an older mtime is still a change against the
+    // baseline (an ordering test would miss this direction entirely).
+    const past = new Date(Date.now() - 3600_000);
+    await utimes(join(root, "internal", "from-the-future.sh"), past, past);
+    assert.equal(await installChangedAgainst(root, baseline),
+      join(root, "internal", "from-the-future.sh"));
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: a file appearing after start is proof; missing roots observe nothing (#963)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963b-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
     await writeFile(join(root, "internal", "old.sh"), "echo old\n");
-    const start = Date.now() + 5000; // everything on disk predates the engine
-    assert.equal(await installUpdatedSince(root, start), null);
-    // A file written after the engine started is positive proof, found by path.
-    await writeFile(join(root, "internal", "rewritten.sh"), "echo new\n");
-    const utime = new Date(start + 5000);
-    await utimes(join(root, "internal", "rewritten.sh"), utime, utime);
-    assert.equal(await installUpdatedSince(root, start), join(root, "internal", "rewritten.sh"));
-    // A root that cannot be read at all yields no evidence, not a stand-down.
-    assert.equal(await installUpdatedSince(join(root, "no-such-dir"), 0), null);
+    const baseline = await collectInstallBaseline(root);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    await writeFile(join(root, "internal", "added-by-update.sh"), "echo new\n");
+    assert.equal(await installChangedAgainst(root, baseline),
+      join(root, "internal", "added-by-update.sh"));
+    // A root that cannot be read at baseline time disables the detector (null)...
+    assert.equal(await collectInstallBaseline(join(root, "no-such-dir")), null);
+    // ...and one that cannot be read at check time yields no evidence.
+    assert.equal(await installChangedAgainst(join(root, "no-such-dir"), baseline), null);
   } finally {
     await rm(root, { recursive: true });
   }
