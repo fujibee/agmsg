@@ -676,3 +676,21 @@ _fake_alice_lease() { # sets FAKE_PID once its lease file exists
   kill -0 "$victim"
   kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
 }
+
+@test "launcher: a lease whose start token no longer matches the live pid is not killed (#937)" {
+  # The reuse guard: if the process now at that pid started at a different time
+  # than the lease records (a recycled pid, an unrelated bridge), killing it would
+  # be a wrong-kill. The token must PROVE the live process is the leased one, or
+  # nothing happens. Same identity as the launcher, so only the token spares it.
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  # Rewrite start= to a value that cannot equal the live process's actual token
+  # (its src stays valid so the lease still parses; only the token is wrong).
+  awk '{ if ($0 ~ /^start=/) print "start=1"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}

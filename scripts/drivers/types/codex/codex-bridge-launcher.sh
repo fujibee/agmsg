@@ -519,86 +519,45 @@ EOF
 # A ceiling on bridge spawns for this identity: at most _SPAWN_MAX in _SPAWN_WINDOW
 # seconds. The reap converges duplicates to one, but a bridge that cannot stay up
 # (a launcher dying before it records the pidfile) would reap-and-respawn every
-# tick; this bounds that churn. The read-modify-write runs under a per-identity
-# lock (project + pair-set, not role alone) so concurrent launchers cannot each
-# read the same count and overshoot.
+# tick; this bounds that churn.
+#
+# Reservations are self-expiring marker FILES, not a shared lock. A lock has to be
+# reclaimed when its holder dies, and every read->decide->reclaim scheme races
+# (an owner check cannot be made atomic with the unlink -- ABA). So instead each
+# spawn creates its own uniquely named marker carrying its timestamp IN THE NAME;
+# the count is just how many unexpired markers exist. Nothing is ever reclaimed:
+# a crashed launcher's marker simply ages out of the window and any later pass
+# prunes it. Reserve-then-count means a concurrent pair both count each other and
+# both back off, so the cap is never exceeded (it may briefly under-count, which
+# for a coarse throttle is the safe direction).
 _SPAWN_WINDOW=30
 _SPAWN_MAX=5
 _spawn_rate_ok() {
-  local stamps="$RUN_DIR/codex-bridge-rate.$IDENTITY_HASH.spawns"
-  local lock="$stamps.lock"
-  local myhost mytok owner ownhost ownpid ownrest tmp acquired=0 tries=0
-  local now cutoff kept="" t n
-  myhost="$(hostname 2>/dev/null)"
-  [ -n "$myhost" ] || return 1
-  # Our own identity as the lock owner: host, pid, and lossless-where-possible
-  # start token. $$ is the launcher (subshells do not change it), the process a
-  # reclaimer must prove is gone. If we cannot even name ourselves, fail closed.
-  mytok="$(_start_token "$$")" || return 1
-  tmp="$stamps.mine.$$"
-  printf '%s	%s	%s
-' "$myhost" "$$" "$mytok" > "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
-  # ln() is an atomic exclusive create: it fails if $lock already exists, and the
-  # inode already holds the owner line, so a reader never sees an empty lock (the
-  # gap an mkdir-then-write leaves). Exactly one launcher links it.
-  while :; do
-    if ln "$tmp" "$lock" 2>/dev/null; then acquired=1; break; fi
-    tries=$((tries + 1))
-    if [ "$tries" -ge 50 ]; then
-      # Reclaim ONLY a lock whose owner we can prove is gone, and only on our own
-      # host. Read host<TAB>pid<TAB>src<TAB>token; a foreign host, a malformed or
-      # empty owner, or an owner still alive with the SAME start token (a mere
-      # stall -- SIGSTOP, scheduler, NFS -- is not death) all THROTTLE. A pid that
-      # is gone, or recycled (start token changed), is reclaimable.
-      owner="$(cat "$lock" 2>/dev/null)"
-      [ -n "$owner" ] || { rm -f "$tmp" 2>/dev/null || true; return 1; }
-      IFS="$TAB" read -r ownhost ownpid ownrest <<EOF
-$owner
-EOF
-      [ "$ownhost" = "$myhost" ] || { rm -f "$tmp" 2>/dev/null || true; return 1; }
-      case "$ownpid" in ''|*[!0-9]*) rm -f "$tmp" 2>/dev/null || true; return 1 ;; esac
-      if kill -0 "$ownpid" 2>/dev/null && [ "$(_start_token "$ownpid" 2>/dev/null)" = "$ownrest" ]; then
-        rm -f "$tmp" 2>/dev/null || true; return 1
-      fi
-      rm -f "$lock" 2>/dev/null || true
-      tries=0
-      continue
-    fi
-    sleep 0.02
-  done
-  rm -f "$tmp" 2>/dev/null || true
-  [ "$acquired" = 1 ] || return 1
-  # --- critical section: we hold $lock; only we mutate $stamps and release it ---
+  local prefix="codex-bridge-rate.$IDENTITY_HASH."
+  local now cutoff mine f base ts n=0
   now="$(date +%s)"
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
   cutoff=$((now - _SPAWN_WINDOW))
-  if [ -f "$stamps" ]; then
-    while IFS= read -r t; do
-      case "$t" in ''|*[!0-9]*) continue ;; esac
-      if [ "$t" -ge "$cutoff" ]; then kept="$kept$t
-"; fi
-    done < "$stamps"
-  fi
-  n=0
-  if [ -n "$kept" ]; then n=$(printf '%s' "$kept" | grep -c .); fi
-  if [ "$n" -ge "$_SPAWN_MAX" ]; then
-    rm -f "$lock" 2>/dev/null || true
+  # Reserve: create MY marker with an exclusive (noclobber) create so two
+  # launchers never share one name. The timestamp lives in the name, so the file
+  # is empty and there is no create-then-write window for a counter to misread.
+  mine="$RUN_DIR/${prefix}${now}.$$.${RANDOM}${RANDOM}"
+  ( set -o noclobber; : > "$mine" ) 2>/dev/null || return 1
+  # Count unexpired markers (mine included), pruning ones that have aged out. The
+  # timestamp is read from the NAME, never the contents.
+  for f in "$RUN_DIR/$prefix"*; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    ts="${base#"$prefix"}"; ts="${ts%%.*}"
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    if [ "$ts" -lt "$cutoff" ]; then rm -f "$f" 2>/dev/null || true; continue; fi
+    n=$((n + 1))
+  done
+  # Over the cap: roll back my reservation and throttle.
+  if [ "$n" -gt "$_SPAWN_MAX" ]; then
+    rm -f "$mine" 2>/dev/null || true
     return 1
   fi
-  # Reserve atomically: write the new stamp set to a temp and rename it over the
-  # file. A partial/failed write must NOT count as a reservation, so on any write
-  # or rename failure we release the lock and fail closed (return 1) instead of
-  # spawning unreserved; rename also keeps a crash mid-write from truncating the
-  # existing stamps to nothing.
-  if ! printf '%s%s
-' "$kept" "$now" > "$stamps.tmp.$$"; then
-    rm -f "$stamps.tmp.$$" "$lock" 2>/dev/null || true
-    return 1
-  fi
-  if ! mv "$stamps.tmp.$$" "$stamps"; then
-    rm -f "$stamps.tmp.$$" "$lock" 2>/dev/null || true
-    return 1
-  fi
-  rm -f "$lock" 2>/dev/null || true
   return 0
 }
 pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
