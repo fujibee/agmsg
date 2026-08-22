@@ -32,6 +32,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   sync:
@@ -66,4 +67,26 @@ jobs:
           if [ "$missing" -ne 0 ]; then
             echo "::error::main is still ${missing} commit(s) behind upstream after sync"
             exit 1
+          fi
+
+      # ★メール通知に依存しない検知経路。
+      # 初版はこれが無く、2026-08-18〜08-22 の5日連続失敗が誰にも届かなかった
+      # （joelmitz の primary は大学アドレスで、Actions の失敗通知が実質機能
+      # していなかった）。fork は Issue が既定で無効なため 2026-08-22 に有効化した。
+      # 同題の open issue があればコメント追記に留め、毎日 issue が増えないようにする。
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          title="Sync fork with upstream failed"
+          body="The scheduled fork sync failed. Run: ${run_url}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title ${title}" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           fi
