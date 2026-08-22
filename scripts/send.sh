@@ -45,9 +45,9 @@ if [ "$FORCE" -ne 1 ]; then
       echo "Error: team '$TEAM' has no registered agents — cannot send as $role '$name' (use --force to bypass)." >&2
       return 1
     fi
-    local cfg_sql name_sql found roster
+    local cfg_sql name_sql found roster q="'"
     cfg_sql=$(agmsg_sql_readfile_path "$TEAM_CONFIG")
-    name_sql=$(printf '%s' "$name" | sed "s/'/''/g")
+    name_sql=${name//$q/$q$q}
     found=$(agmsg_sqlite_mem "
       WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
       cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)

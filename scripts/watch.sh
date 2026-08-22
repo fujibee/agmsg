@@ -692,6 +692,11 @@ while true; do
     [ -n "$READ_CURSOR" ] || READ_CURSOR=0
     OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null || true)"
     if [ -n "$OUT" ]; then
+    # The quote is held in a variable, never written as \' in the pattern: bash 3.2
+    # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
+    # doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
+    # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
+    _AGMSG_SQ="'"
     _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
     ROWS="$(agmsg_sqlite ':memory:' "
       SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||
@@ -702,7 +707,7 @@ while true; do
              COALESCE(json_extract(value,'\$.to'),'') || char(31) ||
              replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||
              COALESCE(json_extract(value,'\$.cursor'),'')
-      FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+      FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
     " 2>/dev/null || true)"
 
     FINAL_CURSOR=""

@@ -37,6 +37,11 @@ if [ -z "$HIST_JSONL" ]; then
 fi
 
 # Parse to "from \x1f to \x1f body \x1f at \x1f id" rows (no jq; cf. lib/hooks-json.sh).
+# The quote is held in a variable, never written as \' in the pattern: bash 3.2
+# (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
+# doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
+# _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
+_AGMSG_SQ="'"
 _arr="[$(printf '%s' "$HIST_JSONL" | paste -sd, -)]"
 # #777: same argv-length exposure on the display path. Capping --limit does not bound this
 # one either, because a single long body can carry it past the ceiling on its own.
@@ -49,7 +54,7 @@ trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
   printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
   printf "%s\n" "       json_extract(value,'\$.id')"
   printf "FROM json_each('"
-  printf '%s' "$_arr" | sed "s/'/''/g"
+  printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
   printf "');\n"
 } > "$_agmsg_rows_sql"
 ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_rows_sql")
@@ -88,7 +93,7 @@ while IFS= read -r r; do
   trap 'rm -f "$_agmsg_unread_sql"' EXIT HUP INT TERM
   {
     printf "SELECT json_extract(value,'\$.id') FROM json_each('"
-    printf '%s' "$uarr" | sed "s/'/''/g"
+    printf '%s' "${uarr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
     printf "');\n"
   } > "$_agmsg_unread_sql"
   ids=$(agmsg_sqlite ':memory:' < "$_agmsg_unread_sql")

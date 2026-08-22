@@ -42,13 +42,18 @@ fi
 
 # JSONL -> JSON array -> "from \x1f body \x1f at \x1f id" rows (newlines/tabs in
 # the body escaped so each message stays one display line).
+# The quote is held in a variable, never written as \' in the pattern: bash 3.2
+# (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
+# doubles a quote into \'\' there while producing '' on bash 4+. Same shape as
+# _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
+_AGMSG_SQ="'"
 _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
 ROWS=$(agmsg_sqlite ':memory:' "
   SELECT json_extract(value,'\$.from') || char(31) ||
          replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
          json_extract(value,'\$.at') || char(31) ||
          json_extract(value,'\$.id')
-  FROM json_each('$(printf '%s' "$_arr" | sed "s/'/''/g")');
+  FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
 ")
 
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
