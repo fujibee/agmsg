@@ -506,20 +506,24 @@ _reap_orphan_bridges() {
   # positive proof, and on any observation failure we do NOTHING -- the timeout
   # bounds the wait, a failed read is never re-read as state:
   #   kill  only with proof of IDENTITY  -- the start token READ and MATCHED (above)
-  #   spawn only with proof of EXIT      -- the pid proven ABSENT, or its token read
-  #                                         and now naming a DIFFERENT process (below)
-  # Wait for each killed pid to exit. Proof of exit is EITHER _agmsg_pid_alive_local
-  # returning absent (the sanctioned helper -- EPERM-aware, ps-cross-checked, erring
-  # to "alive" on any ambiguity, so a false return is real absence not a transient
-  # miss; it is also the one liveness path allowed to touch kill -0) OR a start token
-  # that reads and DIFFERS (a replacement). A token we merely could not read proves
-  # nothing -- keep waiting. No proof of exit within the budget: return 1 and do NOT
-  # spawn, so a bridge still holding the thread as writer is never double-started (#935).
+  #   spawn only with proof of EXIT      -- the killed pid's token READ and now names
+  #                                         a DIFFERENT process (a replacement, below)
+  # Wait for each killed pid to exit. The ONLY positive proof of exit we can trust
+  # here is a start token that reads and DIFFERS: the pid now hosts another process,
+  # so the one we killed is gone. Everything else keeps waiting -- a token that reads
+  # UNCHANGED (still alive), and, deliberately, a token we could NOT read (which
+  # proves nothing: /proc or ps can fail transiently). We do NOT consult
+  # _agmsg_pid_alive_local: its false is not a trustworthy absence proof -- a
+  # transient ps failure there returns "gone" (missing pipefail, #954), the exact
+  # observation-as-state trap this loop exists to avoid. So a normal exit falls
+  # through to the timeout and returns 1: we do NOT spawn this pass, so a bridge
+  # still holding the thread as writer is never double-started (#935). The cost is
+  # not a stall but one cycle -- the next pass no longer sees the exited pid in
+  # pgrep and spawns then.
   while IFS="$TAB" read -r pid lstartsrc lstart; do
     [ -n "$pid" ] || continue
     waited=0
     while :; do
-      _agmsg_pid_alive_local "$pid" || break
       cur="$(_start_token "$pid")"
       if [ -n "$cur" ] && [ "$cur" != "$lstartsrc	$lstart" ]; then break; fi
       if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
