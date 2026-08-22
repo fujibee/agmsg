@@ -3237,6 +3237,7 @@ test("runLoop: push saturation drives catch-up (no wait), a drained cycle return
   const saturationScript = [true, true, false]; // two catch-up cycles, then drained
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (i >= saturationScript.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3261,6 +3262,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
   const sleeps = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) return { pushSaturated: true }; // enter catch-up (would otherwise skip the wait)
@@ -3278,6 +3280,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
 test("runLoop: an explicit --limit caps both push and pull page sizes, even in catch-up", async () => {
   const limitsSeen = [];
   await assert.rejects(() => runLoop(config, { limit: 50 }, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (limitsSeen.length === 1) return { pushSaturated: true }; // would jump to 1000 without a ceiling
@@ -3304,6 +3307,7 @@ test("runLoop: an explicit --limit caps both push and pull page sizes, even in c
 const cycleErrorFor = async (error) => {
   const logged = [];
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { throw error; },
     sleepCall: async () => {},
     isRetryableCall: () => false, // one iteration, then out
@@ -3319,6 +3323,7 @@ const cycleRecordRun = async (script) => {
   const recorded = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       const step = script[i++];
       if (step === undefined) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3351,6 +3356,7 @@ test("runLoop: bookkeeping that throws does not take down a working cycle", asyn
   // claiming a success that did not.
   let cycles = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       cycles += 1;
       if (cycles > 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -4457,6 +4463,7 @@ test("runLoop: a refusal is recorded and does NOT leave the loop", async () => {
   // reached, and a fixture without one would let the assertion pass on null.
   const refusedConfig = { ...config, endpoint: "https://sync.example.test" };
   await assert.rejects(() => runLoop(refusedConfig, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i <= 2) { const refused = new Error("HTTP 402 payment_required"); refused.status = 402; refused.code = "payment_required"; throw refused; }
@@ -4493,6 +4500,7 @@ test("runLoop: a successful cycle clears a refusal that is no longer true", asyn
   const cleared = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) { const refused = new Error("refused"); refused.status = 402; throw refused; }
@@ -4516,6 +4524,7 @@ test("runLoop: a non-retryable error that is NOT a refusal still ends the loop",
   // config into an engine that spins forever saying nothing useful — exiting
   // is right for that, and the refusal case is the exception, not the rule.
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { const bad = new Error("config is unreadable"); throw bad; },
     isRetryableCall: () => false,
     isRefusalCall: () => false,
@@ -4565,12 +4574,20 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   }
 
   // stdout: exactly the result, still parseable as one JSON line.
-  const stdoutLines = out.join("").split("\n").filter((line) => line !== "");
-  // On mismatch, show WHAT landed: a count alone cannot say whose line leaked
-  // into the patched window (this failed on CI only, and the log showed 2!==1
-  // with no way to tell what the second line was).
-  assert.equal(stdoutLines.length, 1, `stdout carried: ${JSON.stringify(stdoutLines)}`);
-  assert.equal(JSON.parse(stdoutLines[0]).type, "pull_bootstrap_result");
+  // Judged by CONTENT, not by a raw line count. Under `node --test` the test
+  // runner itself transports its results over this same stdout, and its
+  // serialized test:complete frame for the PREVIOUS test can flush into the
+  // patched window on a slow machine -- observed on CI as a 2!==1 count with
+  // the second "line" being the runner's frame, which no real consumer of
+  // pullBootstrap ever sees (in production this code does not run under the
+  // test runner). What this case actually protects: exactly one result line
+  // lands on stdout, and no progress line does.
+  const stdoutText = out.join("");
+  const resultLines = stdoutText.split("\n").filter((line) =>
+    line.startsWith('{"type":"pull_bootstrap_result"'));
+  assert.equal(resultLines.length, 1, `stdout carried: ${JSON.stringify(out)}`);
+  assert.equal(JSON.parse(resultLines[0]).type, "pull_bootstrap_result");
+  assert.ok(!stdoutText.includes("agmsg: ["), "a progress line leaked onto stdout");
 
   // stderr: the operator can see it start, and can see it move. Both halves are
   // named, because when this stops moving the line it stopped on says whether
