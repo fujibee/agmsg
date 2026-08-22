@@ -259,6 +259,22 @@ gone_pid() {
   [ -e "$marker" ] || { echo "cleanup fired on a canary-less snapshot (UNKNOWN leaked to cleanup)"; false; }
 }
 
+@test "pid_alive: a ps that lists the canary but EXITS NON-ZERO is a truncated snapshot -> UNKNOWN, not death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The last leak: ps prints part of the snapshot -- even our own $$ -- and THEN
+  # fails. The target's line may simply never have been reached, so its absence
+  # from a truncated listing is not proof. A non-zero exit must read as UNKNOWN
+  # regardless of what partial output was captured. (This is also why an "ps -Ao"
+  # a platform does not support fails safe rather than lying "gone".)
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  ps() { printf '%s S\n' "$$"; return 1; }   # canary printed, then ps fails
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a non-zero ps exit was read as proof of death despite partial output"; false; }
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on a failed (truncated) ps snapshot"; false; }
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {

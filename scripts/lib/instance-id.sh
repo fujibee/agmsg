@@ -110,7 +110,7 @@ _agmsg_pid_valid() {
 # The EPERM reading and the ps cross-check are the same as _agmsg_pid_alive's --
 # a pid we minted is still a pid a sandbox may refuse to let us signal (#505).
 _agmsg_pid_alive_local() {
-  local pid="$1" err stat probe canary tstat _p _s _rest
+  local pid="$1" err stat probe rc canary tstat _p _s _rest
   # The POSIX ceiling, explicitly, whatever the host. _agmsg_pid_valid widens to
   # the DWORD range when MSYSTEM is set, which is right for a number tasklist
   # will be asked about and wrong for one kill(1) will parse: past INT32_MAX kill
@@ -146,6 +146,7 @@ _agmsg_pid_alive_local() {
   #     positive proof the target is gone => dead.
   #   - target present, zombie     => gone too.
   probe="$(ps -Ao pid=,stat= 2>/dev/null)"
+  rc=$?
   canary=0; tstat=""
   while read -r _p _s _rest; do
     if [ "$_p" = "$$" ]; then canary=1; fi
@@ -153,9 +154,18 @@ _agmsg_pid_alive_local() {
   done <<PROBE
 $probe
 PROBE
-  [ "$canary" = 1 ] || return 0          # no usable snapshot -> assume alive (#954)
-  [ -n "$tstat" ] || return 1            # snapshot lists us but not the target -> proven gone
-  case "$tstat" in Z*) return 1 ;; esac  # zombie: exited, not yet reaped
+  if [ -n "$tstat" ]; then
+    case "$tstat" in Z*) return 1 ;; esac  # zombie: exited, not yet reaped
+    return 0                                # target present -> alive (seeing it is proof enough)
+  fi
+  # Target not listed. Trust "absent" ONLY when ps COMPLETED the snapshot (exit 0)
+  # AND that snapshot included our own $$. A non-zero exit means the listing was
+  # truncated -- ps can print part of it (even our own line) and then fail -- and a
+  # pid that would have come later proves nothing; canary presence shows only that
+  # WE were listed, never that the listing FINISHED. Anything short of a complete,
+  # self-including snapshot is UNKNOWN -> assume alive (#954), which also fails safe
+  # where "ps -Ao" is unsupported (it exits non-zero rather than lying "gone").
+  if [ "$rc" -eq 0 ] && [ "$canary" = 1 ]; then return 1; fi
   return 0
 }
 
