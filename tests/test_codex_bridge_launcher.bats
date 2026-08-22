@@ -56,10 +56,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 _lease="$RUN_DIR/codex-bridge-lease.$$"
-{ printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\n' \
+# Start token exactly as codex-bridge-launcher.sh _start_token computes it: /proc
+# field 22 where available, else a trimmed `ps -o lstart=`.
+if [ -r "/proc/$$/stat" ]; then
+  _s="$(cat "/proc/$$/stat")"; _r="${_s##*)}"; read -ra _a <<< "$_r"
+  _start="${_a[19]}"; _ssrc=proc
+else
+  _start="$(ps -o lstart= -p $$)"
+  _start="${_start#"${_start%%[![:space:]]*}"}"; _start="${_start%"${_start##*[![:space:]]}"}"
+  _ssrc=ps
+fi
+{ printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=%s\n' \
     "$(printf '%s' "$_proj" | agmsg_sha1)" \
     "$(printf '%s' "$(printf '%s\n' "${_parr[@]}" | LC_ALL=C sort)" | agmsg_sha1)" \
-    "$(hostname)" "$$" "$(ps -o lstart= -p $$)" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
+    "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
 trap 'rm -f "$_lease"' EXIT
 [ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
 exit 0
@@ -603,4 +613,62 @@ _spawn_fake() { # <project> <pair...>
   sleep 3
   kill -0 "$legacy"
   kill "$legacy" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$legacy" 2>/dev/null || true
+}
+
+# --- #937 finding (4): the lease is the reaper's authority, so a broken one is a
+# new failure surface. Every malformed/partial/foreign lease must fail CLOSED
+# (no kill), asserted by a same-(project,alice) fake surviving the reaper. Each
+# starts from the valid lease the mock published, then corrupts that one file. ---
+_fake_alice_lease() { # sets FAKE_PID once its lease file exists
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice"
+  local j; for j in {1..50}; do [ -f "$RUN_DIR/codex-bridge-lease.$FAKE_PID" ] && break; sleep 0.1; done
+}
+
+@test "launcher: a truncated lease (missing fields) is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  head -3 "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a foreign host is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  awk '{ if ($0 ~ /^host=/) print "host=some-other-host.invalid"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with an unknown extra key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'rogue=1\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a duplicated key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'pid=99999\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
 }

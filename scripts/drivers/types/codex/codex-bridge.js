@@ -960,6 +960,7 @@ class CodexBridge {
     // so no raw project/role value with a separator can be misread.
     this.leasefile = path.join(RUN_DIR, `codex-bridge-lease.${process.pid}`);
     this.leaseStart = "";
+    this.leaseStartSrc = "";
   }
 
   async run() {
@@ -1075,28 +1076,59 @@ class CodexBridge {
   // can make one identity read as another (the whole class of bugs argv parsing
   // hit). host and the process start time are what let the reaper reject a
   // recycled pid or another machine before it kills anything.
+  // This process's start token, at the best precision the platform offers and by
+  // the SAME method _reap_orphan_bridges (codex-bridge-launcher.sh) recomputes it
+  // for a live pid, so the two agree:
+  //   Linux -> /proc/<pid>/stat field 22 (starttime in clock ticks): lossless, so
+  //            a recycled pid is always distinguishable from the one we leased.
+  //   else  -> `ps -o lstart=` (second precision): a pid reused within the SAME
+  //            second is the documented residual on such platforms; no external
+  //            observer can do better there (etime/mtime are second-grained too),
+  //            and the only victim would be a same-(project,pair) bridge in the
+  //            sub-ms window before it overwrites this pid's lease, self-corrected
+  //            by the launcher respawning it.
+  startToken() {
+    try {
+      const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
+      const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+      const ticks = after[19];
+      if (/^\d+$/.test(ticks || "")) return { src: "proc", token: ticks };
+    } catch (_) { /* no /proc (macOS/BSD) or unreadable */ }
+    const ps = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8" });
+    const token = (ps.status === 0 ? (ps.stdout || "") : "").trim();
+    return { src: "ps", token };
+  }
+
   writeLease() {
-    const start = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8" });
-    this.leaseStart = (start.stdout || "").trim();
+    const { src, token } = this.startToken();
+    // Fail CLOSED at the source. A bridge that cannot publish a well-formed,
+    // enumerable lease must not go on to arm its network/thread -- that is exactly
+    // the authority-less orphan #906 is about. Each failure below throws, and run()
+    // publishes the lease before client.start(), so the throw aborts startup rather
+    // than leaving a live-but-unreapable bridge.
+    if (!token) throw new Error("cannot determine process start token for identity lease");
+    const host = os.hostname();
+    if (!host) throw new Error("cannot determine hostname for identity lease");
     const projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
     const pairsHash = crypto.createHash("sha1")
       .update(this.identities.map((pair) => `${pair.team}\t${pair.name}`).sort().join("\n"))
       .digest("hex");
+    this.leaseStart = token;
+    this.leaseStartSrc = src;
     const body = [
       "v=1",
       `project=${projectHash}`,
       `pairs=${pairsHash}`,
-      `host=${os.hostname()}`,
+      `host=${host}`,
       `pid=${process.pid}`,
-      `start=${this.leaseStart}`,
+      `start=${token}`,
+      `startsrc=${src}`,
     ].join("\n") + "\n";
     const tmp = `${this.leasefile}.tmp`;
-    try {
-      fs.writeFileSync(tmp, body, { mode: 0o600 });
-      fs.renameSync(tmp, this.leasefile);
-    } catch (error) {
-      console.error(`codex-bridge: could not publish identity lease: ${error.message}`);
-    }
+    // writeFileSync / renameSync throw on failure -> fatal, by design (see above).
+    // rename is atomic, so a reader never sees a half-written lease.
+    fs.writeFileSync(tmp, body, { mode: 0o600 });
+    fs.renameSync(tmp, this.leasefile);
   }
 
   // Remove only OUR lease: read it back and unlink only when both the pid and the
