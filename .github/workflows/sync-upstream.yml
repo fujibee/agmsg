@@ -1,0 +1,65 @@
+name: Sync fork with upstream
+
+# joelmitz/agmsg の main を fujibee/agmsg（正本）へ追従させる。
+#
+# ★実装は git ではなく GitHub の fork-sync API（POST /repos/{repo}/merge-upstream）
+# を呼ぶ。理由は下の2つの失敗を実測したため（2026-08-22）。
+#
+# 失敗1: `git merge --ff-only upstream/main`
+#   このワークフローを追加した commit 自身が main を diverge させるため、
+#   ff-only は初回から一度も成功しなかった。2026-08-18〜08-22 の scheduled 実行が
+#   全て exit 128 で失敗し、その間 main は upstream から 47 commits 遅れた。
+#   初版のコメントは「If main ever diverges ... fails loudly」と予告していたが、
+#   自分自身がその divergence になることを勘定に入れていなかった。
+#
+# 失敗2: `git merge` + `git push`（ff-only をやめた版）
+#   merge は通ったが push が拒否された:
+#     ! [remote rejected] main -> main (refusing to allow a GitHub App to
+#       create or update workflow `.github/workflows/tests.yml`
+#       without `workflows` permission)
+#   upstream の差分に workflow ファイルが含まれると、既定の GITHUB_TOKEN では
+#   push できない。PAT を secret に置けば回避できるが、fork-sync API なら
+#   PAT 無しで同期できる（サーバ側の fork 同期であり app の push ではない）。
+#
+# fork-sync API は fast-forward できなければ merge commit を作る。競合して
+# 同期できない場合は merge_type=none となり、このワークフローは失敗する
+# （強制上書きは一切しない）。
+
+on:
+  schedule:
+    - cron: '17 3 * * *'  # 毎日 03:17 UTC（12:17 JST）。他の定時ジョブと秒をずらすため17分
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync main from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          out="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+                   -f branch=main)"
+          echo "$out"
+
+          merge_type="$(printf '%s' "$out" | jq -r '.merge_type // "unknown"')"
+          echo "merge_type=${merge_type}"
+
+          # fast-forward / merge は成功。none は同期できていないので失敗させる。
+          case "$merge_type" in
+            fast-forward|merge) ;;
+            *) echo "::error::fork sync did not apply (merge_type=${merge_type})" ; exit 1 ;;
+          esac
+
+      - name: Report divergence from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/compare/main...fujibee:agmsg:main" \
+            --jq '"behind_by=\(.behind_by) ahead_by=\(.ahead_by)"'
