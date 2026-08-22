@@ -171,6 +171,27 @@ jobs:
               scripts/remote*.sh|scripts/internal/*|scripts/drivers/storage/*|scripts/lib/*|tests/*sync*.*|server/test/sync-client.integration.test.ts|.github/workflows/tests.yml) docs_only=false; sync_changed=true; contracts_needed=true ;;
               llms.txt|llms-full.txt) ;;
               README.md|CHANGELOG.md|CONTRIBUTING.md|PRIVACY.md|ARCHITECTURE.md|RELEASING.md|LICENSE) ;;
+              # The version bump, which is the entire diff of a release PR
+              # (#875). A release runs the full matrix a third time here, for a
+              # branch cut from main that adds only these, and the third run
+              # costs 42 minutes.
+              #
+              # Safe because nothing in the suite READS them, which was measured
+              # rather than read off a grep: with all four set to a nonsense
+              # version, test_cut_release / test_install / test_release_dist_tag
+              # / test_bump_app_version / test_codex_monitor stayed green across
+              # 91 tests, and a control (exit 42 appended to scripts/version.sh)
+              # reddened two of them, so that green was an observation and not a
+              # suite that failed to run. The five files that MENTION VERSION
+              # all write their own into a throwaway fixture; a grep hit is not
+              # a read.
+              #
+              # This list is not maintained by hand. `cut-release.sh` declares
+              # the set it commits in its own FILES variable, and
+              # tests/test_release_ci_skip.bats fails if the two disagree — so
+              # adding a file there without adding it here is caught, rather
+              # than silently skipping the suite for a file nobody measured.
+              VERSION|package.json|.claude-plugin/plugin.json) ;;
               # NOTE: SKILL.md is intentionally not here — the suite tests it.
               *) docs_only=false; contracts_needed=true ;;
             esac
