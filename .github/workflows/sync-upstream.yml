@@ -37,29 +37,33 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # merge_type は "none" が2通りの意味を持つ（実測 2026-08-22）:
+      #   - 競合等で同期できなかった
+      #   - 既に最新（message: "This branch is not behind the upstream ...")
+      # 戻り値で成否を判定すると後者を失敗と誤判定するため、ここでは同期を
+      # 試みるだけにして、成否は次の step で **実際の同期状態**を見て決める。
       - name: Sync main from upstream
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-
+          set -uo pipefail
           out="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
-                   -f branch=main)"
+                   -f branch=main 2>&1 || true)"
           echo "$out"
 
-          merge_type="$(printf '%s' "$out" | jq -r '.merge_type // "unknown"')"
-          echo "merge_type=${merge_type}"
-
-          # fast-forward / merge は成功。none は同期できていないので失敗させる。
-          case "$merge_type" in
-            fast-forward|merge) ;;
-            *) echo "::error::fork sync did not apply (merge_type=${merge_type})" ; exit 1 ;;
-          esac
-
-      - name: Report divergence from upstream
+      # ★成否の正本。upstream に対して取りこぼしが 0 なら同期できている。
+      # compare/{base}...{head} の ahead_by は head(=upstream) が base(=main) より
+      # 何コミット先行しているか、すなわち **こちらが取りこぼしている数**。
+      - name: Verify main is in sync with upstream
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/compare/main...fujibee:agmsg:main" \
-            --jq '"behind_by=\(.behind_by) ahead_by=\(.ahead_by)"'
+          cmp="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...fujibee:agmsg:main")"
+          missing="$(printf '%s' "$cmp" | jq -r '.ahead_by')"
+          local_only="$(printf '%s' "$cmp" | jq -r '.behind_by')"
+          echo "missing_from_upstream=${missing} fork_local_commits=${local_only}"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::main is still ${missing} commit(s) behind upstream after sync"
+            exit 1
+          fi
