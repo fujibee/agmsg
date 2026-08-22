@@ -374,11 +374,19 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   bridge_pair_values+=("$candidate_team"$'\t'"$candidate_name")
 done <<< "$ids"
 # This launcher's identity, hashed the same way the bridge hashes its lease
-# (scripts/drivers/types/codex/codex-bridge.js writeLease): SHA-1 of the sorted
-# "team<TAB>name" set joined by newlines. PROJECT_HASH (above) is the project
-# half. Comparing hashes -- never raw values -- is what keeps a separator inside
-# a path or role from being misread as identity (#943).
-BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s\n' "${bridge_pair_values[@]}" | LC_ALL=C sort)" | agmsg_sha1)"
+# (scripts/drivers/types/codex/codex-bridge.js writeLease): SHA-1 of the ASCII-
+# sorted per-pair SHA-1 hashes, joined by newlines. Hashing each pair FIRST means
+# the set order is decided by sorting hex (pure ASCII), so a byte sort here and a
+# code-unit sort in JS agree even for non-ASCII team/name -- the locale/Unicode
+# sort-order gap a raw-value sort would leave. PROJECT_HASH (above) is the project
+# half. Comparing hashes -- never raw values -- is what keeps a separator inside a
+# path or role from being misread as identity (#943).
+_pair_hashes=""
+for _pv in "${bridge_pair_values[@]}"; do
+  _pair_hashes="$_pair_hashes$(printf '%s' "$_pv" | agmsg_sha1)
+"
+done
+BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s' "$_pair_hashes" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
 
 
 # This launcher's full identity as one key: sha1 of the project hash and the
@@ -511,44 +519,56 @@ EOF
 # A ceiling on bridge spawns for this identity: at most _SPAWN_MAX in _SPAWN_WINDOW
 # seconds. The reap converges duplicates to one, but a bridge that cannot stay up
 # (a launcher dying before it records the pidfile) would reap-and-respawn every
-# tick; this bounds that churn. The read-modify-write is under a per-identity
-# mkdir lock (project + pair-set, not role alone) so concurrent launchers cannot
-# each read the same count and overshoot.
+# tick; this bounds that churn. The read-modify-write runs under a per-identity
+# lock (project + pair-set, not role alone) so concurrent launchers cannot each
+# read the same count and overshoot.
 _SPAWN_WINDOW=30
 _SPAWN_MAX=5
-# A lock a crashed launcher left behind is reclaimed only once it is this old. The
-# critical section is a sub-second read-modify-write, so a much older lock is dead;
-# the window is wide enough that a live holder is never reclaimed out from under.
-_SPAWN_LOCK_STALE=30
 _spawn_rate_ok() {
   local stamps="$RUN_DIR/codex-bridge-rate.$IDENTITY_HASH.spawns"
   local lock="$stamps.lock"
-  local now cutoff kept="" t n tries=0 age m
-  # mkdir is atomic: exactly one launcher holds the lock. If we cannot take it,
-  # another launcher for THIS identity is reserving right now -- the concurrent
-  # spawn we exist to bound -- so we THROTTLE (return 1, do not spawn) rather than
-  # proceed lock-free and let both overshoot. The only exception is a lock left by
-  # a crash, reclaimed once provably stale.
-  while ! mkdir "$lock" 2>/dev/null; do
+  local myhost mytok owner ownhost ownpid ownrest tmp acquired=0 tries=0
+  local now cutoff kept="" t n
+  myhost="$(hostname 2>/dev/null)"
+  [ -n "$myhost" ] || return 1
+  # Our own identity as the lock owner: host, pid, and lossless-where-possible
+  # start token. $$ is the launcher (subshells do not change it), the process a
+  # reclaimer must prove is gone. If we cannot even name ourselves, fail closed.
+  mytok="$(_start_token "$$")" || return 1
+  tmp="$stamps.mine.$$"
+  printf '%s	%s	%s
+' "$myhost" "$$" "$mytok" > "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  # ln() is an atomic exclusive create: it fails if $lock already exists, and the
+  # inode already holds the owner line, so a reader never sees an empty lock (the
+  # gap an mkdir-then-write leaves). Exactly one launcher links it.
+  while :; do
+    if ln "$tmp" "$lock" 2>/dev/null; then acquired=1; break; fi
     tries=$((tries + 1))
     if [ "$tries" -ge 50 ]; then
-      # GNU (-c) first: on BSD/macOS `stat -c` exits non-zero and falls through
-      # to `-f`; ordered the other way, Linux `stat -f %m` can exit 0 with garbage
-      # and the real mtime is never read, so a crashed lock is never reclaimed.
-      m="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)"
-      now="$(date +%s)"
-      case "$m" in ''|*[!0-9]*) return 1 ;; esac
-      age=$((now - m))
-      if [ "$age" -ge "$_SPAWN_LOCK_STALE" ]; then
-        rmdir "$lock" 2>/dev/null || true
-        tries=0
-        continue
+      # Reclaim ONLY a lock whose owner we can prove is gone, and only on our own
+      # host. Read host<TAB>pid<TAB>src<TAB>token; a foreign host, a malformed or
+      # empty owner, or an owner still alive with the SAME start token (a mere
+      # stall -- SIGSTOP, scheduler, NFS -- is not death) all THROTTLE. A pid that
+      # is gone, or recycled (start token changed), is reclaimable.
+      owner="$(cat "$lock" 2>/dev/null)"
+      [ -n "$owner" ] || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+      IFS="$TAB" read -r ownhost ownpid ownrest <<EOF
+$owner
+EOF
+      [ "$ownhost" = "$myhost" ] || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+      case "$ownpid" in ''|*[!0-9]*) rm -f "$tmp" 2>/dev/null || true; return 1 ;; esac
+      if kill -0 "$ownpid" 2>/dev/null && [ "$(_start_token "$ownpid" 2>/dev/null)" = "$ownrest" ]; then
+        rm -f "$tmp" 2>/dev/null || true; return 1
       fi
-      return 1
+      rm -f "$lock" 2>/dev/null || true
+      tries=0
+      continue
     fi
     sleep 0.02
   done
-  # --- critical section (we own the lock; only we mutate stamps and rmdir) ---
+  rm -f "$tmp" 2>/dev/null || true
+  [ "$acquired" = 1 ] || return 1
+  # --- critical section: we hold $lock; only we mutate $stamps and release it ---
   now="$(date +%s)"
   cutoff=$((now - _SPAWN_WINDOW))
   if [ -f "$stamps" ]; then
@@ -561,11 +581,24 @@ _spawn_rate_ok() {
   n=0
   if [ -n "$kept" ]; then n=$(printf '%s' "$kept" | grep -c .); fi
   if [ "$n" -ge "$_SPAWN_MAX" ]; then
-    rmdir "$lock" 2>/dev/null || true
+    rm -f "$lock" 2>/dev/null || true
     return 1
   fi
-  printf '%s%s\n' "$kept" "$now" > "$stamps"
-  rmdir "$lock" 2>/dev/null || true
+  # Reserve atomically: write the new stamp set to a temp and rename it over the
+  # file. A partial/failed write must NOT count as a reservation, so on any write
+  # or rename failure we release the lock and fail closed (return 1) instead of
+  # spawning unreserved; rename also keeps a crash mid-write from truncating the
+  # existing stamps to nothing.
+  if ! printf '%s%s
+' "$kept" "$now" > "$stamps.tmp.$$"; then
+    rm -f "$stamps.tmp.$$" "$lock" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv "$stamps.tmp.$$" "$stamps"; then
+    rm -f "$stamps.tmp.$$" "$lock" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$lock" 2>/dev/null || true
   return 0
 }
 pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"

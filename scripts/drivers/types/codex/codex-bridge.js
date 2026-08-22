@@ -1110,8 +1110,17 @@ class CodexBridge {
     const host = os.hostname();
     if (!host) throw new Error("cannot determine hostname for identity lease");
     const projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
+    // Canonicalize the pair SET before hashing: hash each "team\tname" pair, then
+    // sort the hex hashes (pure ASCII, so a byte sort in the launcher and a JS
+    // code-unit sort here agree even for non-ASCII names) and hash the joined
+    // list. codex-bridge-launcher.sh computes BRIDGE_PAIRS_HASH identically.
     const pairsHash = crypto.createHash("sha1")
-      .update(this.identities.map((pair) => `${pair.team}\t${pair.name}`).sort().join("\n"))
+      .update(
+        this.identities
+          .map((pair) => crypto.createHash("sha1").update(`${pair.team}\t${pair.name}`).digest("hex"))
+          .sort()
+          .join("\n"),
+      )
       .digest("hex");
     this.leaseStart = token;
     this.leaseStartSrc = src;

@@ -66,9 +66,13 @@ else
   _start="${_start#"${_start%%[![:space:]]*}"}"; _start="${_start%"${_start##*[![:space:]]}"}"
   _ssrc=ps
 fi
+_ph=""
+for _pv in "${_parr[@]}"; do _ph="$_ph$(printf '%s' "$_pv" | agmsg_sha1)
+"; done
+_pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
 { printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=%s\n' \
     "$(printf '%s' "$_proj" | agmsg_sha1)" \
-    "$(printf '%s' "$(printf '%s\n' "${_parr[@]}" | LC_ALL=C sort)" | agmsg_sha1)" \
+    "$_pairs_hash" \
     "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
 trap 'rm -f "$_lease"' EXIT
 [ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
