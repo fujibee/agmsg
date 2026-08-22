@@ -243,6 +243,22 @@ gone_pid() {
   [ "$status" -ne 0 ] || { echo "an answered ps that omits the target did not read dead"; false; }
 }
 
+@test "pid_alive: a snapshot with output but WITHOUT the canary is UNKNOWN, not death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The subtle leak: ps returns SOME lines but not our own $$ (a partial or garbage
+  # snapshot, or a failure that still printed something). Without the canary the
+  # observation is untrusted, so a genuinely-gone pid must STILL read alive -- a
+  # non-empty result is not itself proof the snapshot was complete. No retry count
+  # or partial output may turn this into a death verdict, and cleanup stays put.
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  ps() { printf '999999 R\n'; }   # a line, but never $$ and never the target
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a canary-less snapshot was read as proof of death"; false; }
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on a canary-less snapshot (UNKNOWN leaked to cleanup)"; false; }
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {

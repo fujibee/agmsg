@@ -110,7 +110,7 @@ _agmsg_pid_valid() {
 # The EPERM reading and the ps cross-check are the same as _agmsg_pid_alive's --
 # a pid we minted is still a pid a sandbox may refuse to let us signal (#505).
 _agmsg_pid_alive_local() {
-  local pid="$1" err stat probe canary tstat _p _s _rest i
+  local pid="$1" err stat probe canary tstat _p _s _rest
   # The POSIX ceiling, explicitly, whatever the host. _agmsg_pid_valid widens to
   # the DWORD range when MSYSTEM is set, which is right for a number tasklist
   # will be asked about and wrong for one kill(1) will parse: past INT32_MAX kill
@@ -132,48 +132,31 @@ _agmsg_pid_alive_local() {
   # kill(2) says gone. ps does not depend on signalling permission at all, so
   # requiring it to agree is what keeps a sandbox from turning "cannot signal"
   # into "not running" (#505). But an EMPTY ps result is NOT proof of death: a
-  # transient ps failure produces the same empty output as a truly-absent pid, and
-  # reading that as "gone" is #954 -- callers delete files, release locks, and
-  # respawn on this false. Distinguish "proof of absence" from "absence of proof"
-  # by mixing a known-live pid into the SAME observation: our own $$. Query the
-  # target AND $$ together; $$ is alive by definition, so:
-  #   - $$ absent from the output  => ps did not answer at all (could not exec,
-  #     resource blip, sandbox) => UNKNOWN => assume alive, exactly as the EPERM
-  #     branch above does. A failed observation is not proof of absence.
-  #   - $$ present, target absent  => ps answered and did not list the target
-  #     => POSITIVE proof the target is gone => dead.
+  # transient ps failure and a truly-absent pid both produce nothing, and reading
+  # that as "gone" is #954 -- callers delete files, release locks, and respawn on
+  # it. Distinguish "proof of absence" from "absence of proof" by co-observing a
+  # known-live pid -- our own $$ -- in the SAME observation. Take a FULL snapshot
+  # (no -p filter, so the target pid is never handed to ps and cannot poison the
+  # query, e.g. macOS "process id too large"), parsed with builtins so only ps is
+  # external and a stripped PATH cannot itself become the failed observation:
+  #   - $$ absent from the snapshot => ps produced nothing usable => UNKNOWN =>
+  #     assume alive, exactly as the EPERM branch above. A failed observation is
+  #     not proof of absence.
+  #   - $$ present, target absent  => ps listed us and did not list the target =>
+  #     positive proof the target is gone => dead.
   #   - target present, zombie     => gone too.
-  # Parsed with builtins (no awk/grep) so a stripped PATH cannot itself become the
-  # failed observation -- only ps is external here.
-  # One retry: a transient ps failure does not repeat, but a target pid ps rejects
-  # outright (e.g. "process id too large") poisons every query it appears in.
-  for i in 1 2; do
-    probe="$(ps -o pid=,stat= -p "$pid,$$" 2>/dev/null)"
-    canary=0; tstat=""
-    while read -r _p _s _rest; do
-      if [ "$_p" = "$$" ]; then canary=1; fi
-      if [ "$_p" = "$pid" ]; then tstat="${_s:-?}"; fi
-    done <<PROBE
+  probe="$(ps -Ao pid=,stat= 2>/dev/null)"
+  canary=0; tstat=""
+  while read -r _p _s _rest; do
+    if [ "$_p" = "$$" ]; then canary=1; fi
+    if [ "$_p" = "$pid" ]; then tstat="${_s:-?}"; fi
+  done <<PROBE
 $probe
 PROBE
-    if [ "$canary" = 1 ]; then
-      [ -n "$tstat" ] || return 1            # ps answered (listed us), target absent -> proven gone
-      case "$tstat" in Z*) return 1 ;; esac  # zombie: exited, not yet reaped
-      return 0                                # target present -> alive
-    fi
-  done
-  # Two queries in a row could not even list our own $$. Either ps cannot run at
-  # all, or the TARGET pid is out of ps's acceptable range and poisons any query
-  # it appears in -- and no live process ever has such a pid. Ask for ONLY $$:
-  probe="$(ps -o pid= -p "$$" 2>/dev/null)"
-  canary=0
-  while read -r _p _rest; do
-    if [ "$_p" = "$$" ]; then canary=1; fi
-  done <<PROBE2
-$probe
-PROBE2
-  if [ "$canary" = 1 ]; then return 1; fi  # ps works; only the target poisons -> gone
-  return 0                                  # ps cannot observe at all -> assume alive (#954)
+  [ "$canary" = 1 ] || return 0          # no usable snapshot -> assume alive (#954)
+  [ -n "$tstat" ] || return 1            # snapshot lists us but not the target -> proven gone
+  case "$tstat" in Z*) return 1 ;; esac  # zombie: exited, not yet reaped
+  return 0
 }
 
 # Liveness for a pid that came from OUTSIDE these shells -- reached by walking
