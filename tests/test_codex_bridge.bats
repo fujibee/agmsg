@@ -1891,6 +1891,7 @@ EOF
   arms="$(grep -c ' arm ' "$flog")"
   [ "$arms" -ge 1 ]
   [ "$arms" -le 20 ]
+}
 @test "codex-bridge: a thread owned by another writer is fatal, not proceed-without-resume (#906)" {
   run node -e 'const net = require("net"); const crypto = require("crypto"); if (!net || !crypto) process.exit(1);'
   if [ "$status" -ne 0 ]; then
