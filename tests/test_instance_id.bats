@@ -275,6 +275,24 @@ gone_pid() {
   [ -e "$marker" ] || { echo "cleanup fired on a failed (truncated) ps snapshot"; false; }
 }
 
+@test "pid_alive: a failing ps under set -e does not terminate a non-conditional caller (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # The leaf helper's contract must not depend on caller syntax. Called as a bare
+  # statement under errexit, a ps that fails must not kill the shell before the
+  # UNKNOWN -> alive verdict: the observation failure has to surface as "alive",
+  # never as caller termination.
+  run bash -c '
+    set -e
+    source "'"$SKILL_DIR"'/scripts/lib/instance-id.sh"
+    ps() { return 1; }
+    kill() { echo "bash: kill: - No such process" >&2; return 1; }
+    _agmsg_pid_alive_local 99999999
+    echo REACHED-alive
+  '
+  [ "$status" -eq 0 ] || { echo "the caller shell died on a failing ps under set -e"; false; }
+  printf '%s\n' "$output" | grep -q REACHED-alive || { echo "did not continue past the helper call"; false; }
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {

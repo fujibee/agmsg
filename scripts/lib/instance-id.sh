@@ -145,8 +145,14 @@ _agmsg_pid_alive_local() {
   #   - $$ present, target absent  => ps listed us and did not list the target =>
   #     positive proof the target is gone => dead.
   #   - target present, zombie     => gone too.
-  probe="$(ps -Ao pid=,stat= 2>/dev/null)"
-  rc=$?
+  # `|| rc=$?` keeps the assignment out of set -e's reach: a command-substitution
+  # assignment returns the substituted command's exit status as its OWN, so under
+  # errexit in a caller that did NOT invoke us as a condition, a non-zero ps would
+  # terminate the shell right here -- leaking a failed observation to caller death
+  # instead of the UNKNOWN => alive verdict below. The leaf helper's contract must
+  # not depend on how the caller spelled the call.
+  rc=0
+  probe="$(ps -Ao pid=,stat= 2>/dev/null)" || rc=$?
   canary=0; tstat=""
   while read -r _p _s _rest; do
     if [ "$_p" = "$$" ]; then canary=1; fi
