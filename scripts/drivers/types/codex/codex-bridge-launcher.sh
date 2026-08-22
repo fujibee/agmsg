@@ -679,9 +679,11 @@ EOF
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
-  # Reset each tick: a mismatched-live bridge sets this to the pid it must kill,
-  # but only once we commit to spawning its replacement (see below).
-  need_kill=""
+  # Reset each tick: a mismatched-live bridge sets these to the pid it must kill
+  # AND that pid's start token at the moment we chose it, so the deferred kill can
+  # prove the pid is still that same process (below). Killed only once we commit to
+  # spawning the replacement.
+  need_kill=""; need_kill_token=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -711,6 +713,7 @@ EOF
       # (#350). Defer every teardown to the point we are actually committed to
       # spawning the replacement.
       need_kill="$bridge_pid"
+      need_kill_token="$(_start_token "$bridge_pid" 2>/dev/null || true)"
     fi
   fi
 
@@ -733,8 +736,17 @@ EOF
 
   # Committed to spawning now: retire the old bridge (if any) and its stale
   # records, immediately before writing the new ones, so the wipe and the rewrite
-  # are not separated by a gate that can bail out between them.
-  if [ -n "$need_kill" ]; then kill "$need_kill" 2>/dev/null || true; fi
+  # are not separated by a gate that can bail out between them. The kill needs the
+  # same proof of IDENTITY as the reaper: the gates above may have taken seconds,
+  # in which the old pid could have exited and been reused, so kill ONLY when the
+  # pid's start token still reads and matches the one we stored when we chose it --
+  # unreadable or changed means a different (or gone) process, so do nothing.
+  if [ -n "$need_kill" ] && [ -n "$need_kill_token" ]; then
+    _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
+    if [ -n "$_nk_now" ] && [ "$_nk_now" = "$need_kill_token" ]; then
+      kill "$need_kill" 2>/dev/null || true
+    fi
+  fi
   rm -f "$pidfile" "$appserver_file" "$thread_file"
 
   nohup "${bridge_run[@]}" \
