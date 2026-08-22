@@ -368,9 +368,120 @@ else
   bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
 fi
 bridge_pairs=()
+bridge_pair_values=()
 while IFS="$TAB" read -r candidate_team candidate_name; do
   bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+  bridge_pair_values+=("$candidate_team"$'\t'"$candidate_name")
 done <<< "$ids"
+# This launcher's identity, hashed the same way the bridge hashes its lease
+# (scripts/drivers/types/codex/codex-bridge.js writeLease): SHA-1 of the sorted
+# "team<TAB>name" set joined by newlines. PROJECT_HASH (above) is the project
+# half. Comparing hashes -- never raw values -- is what keeps a separator inside
+# a path or role from being misread as identity (#943).
+BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s\n' "${bridge_pair_values[@]}" | LC_ALL=C sort)" | agmsg_sha1)"
+
+# How long to wait for a reaped bridge to exit before treating it as stuck. The
+# real bridge shuts down async on SIGTERM and holds its thread as writer until it
+# does, so this outlasts an ordinary shutdown.
+_REAP_WAIT_TICKS=50
+
+# Reap every live bridge that is EXACTLY this (project, pair-set), identified by
+# the per-PID lease it published (codex-bridge-lease.<pid>) -- not by
+# reconstructing argv from ps, which is a lossy representation that misread
+# identity five different ways. ps is used only to enumerate live pids and to
+# read each one's start time. Every doubt fails CLOSED (no kill): a missing lease
+# (a legacy bridge), a malformed or partial one, a different or absent host, a
+# start time that no longer matches. Non-Windows only (the pid is only killable
+# in this shell's pid namespace; Windows is the #458 mismatch) and a no-op with
+# no process lister.
+_reap_orphan_bridges() {
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; esac
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local myhost pid lease k v lv lproj lpairs lhost lpid lstart st killed="" waited
+  myhost="$(hostname 2>/dev/null)"
+  [ -n "$myhost" ] || return 0
+  for pid in $(pgrep -f 'codex-bridge\.js' 2>/dev/null); do
+    lease="$RUN_DIR/codex-bridge-lease.$pid"
+    echo "PID $pid lease=$lease exists=$([ -f "$lease" ] && echo Y || echo N) myproj=$PROJECT_HASH mypairs=$BRIDGE_PAIRS_HASH" >> /tmp/lease.log
+    [ -f "$lease" ] || continue
+    lv=""; lproj=""; lpairs=""; lhost=""; lpid=""; lstart=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        v) lv="$v" ;; project) lproj="$v" ;; pairs) lpairs="$v" ;;
+        host) lhost="$v" ;; pid) lpid="$v" ;; start) lstart="$v" ;;
+      esac
+    done < "$lease"
+    [ "$lv" = 1 ] || continue
+    [ -n "$lproj" ] && [ -n "$lpairs" ] && [ -n "$lhost" ] && [ -n "$lpid" ] && [ -n "$lstart" ] || continue
+    [ "$lpid" = "$pid" ] || continue
+    [ "$lhost" = "$myhost" ] || continue
+    [ "$lproj" = "$PROJECT_HASH" ] || continue
+    echo "  read lv=$lv lproj=$lproj lpairs=$lpairs lhost=$lhost lpid=$lpid mismatch=proj$([ "$lproj" = "$PROJECT_HASH" ]&&echo =||echo X)pairs$([ "$lpairs" = "$BRIDGE_PAIRS_HASH" ]&&echo =||echo X)host$([ "$lhost" = "$myhost" ]&&echo =||echo X)" >> /tmp/lease.log
+    [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || continue
+    # Reuse guard: the LIVE pid's actual start time must still equal the lease's.
+    # A recycled pid (a new, unrelated process on the old number) has a different
+    # start time, so it is spared.
+    st="$(ps -o lstart= -p "$pid" 2>/dev/null)"
+    [ "$st" = "$lstart" ] || continue
+    kill "$pid" 2>/dev/null || true
+    killed="$killed$pid	$lstart
+"
+  done
+  [ -n "$killed" ] || return 0
+  # Wait for each to exit. A pid whose start time changed is a DIFFERENT process
+  # -- the one we killed is already gone -- so it is not waited on.
+  while IFS="$TAB" read -r pid lstart; do
+    [ -n "$pid" ] || continue
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$(ps -o lstart= -p "$pid" 2>/dev/null)" = "$lstart" ]; do
+      if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
+      sleep 0.1; waited=$((waited + 1))
+    done
+  done <<EOF
+$killed
+EOF
+  return 0
+}
+
+# A ceiling on bridge spawns for this role: at most _SPAWN_MAX in _SPAWN_WINDOW
+# seconds. The reap converges duplicates to one, but a bridge that cannot stay up
+# (a launcher dying before it records the pidfile) would reap-and-respawn every
+# tick; this bounds that churn. The read-modify-write is under an mkdir-atomic
+# lock so concurrent launchers cannot each read the same count and overshoot.
+_SPAWN_WINDOW=30
+_SPAWN_MAX=5
+_spawn_rate_ok() {
+  local stamps="$RUN_DIR/codex-bridge.$bridge_key.spawns"
+  local lock="$stamps.lock"
+  local now cutoff kept="" t n rc=0 tries=0
+  # Per-key lock: a same-key launcher must not read-modify-write the stamp file
+  # in the same instant. mkdir is atomic, so exactly one creator wins the lock;
+  # a stuck holder is bounded by the 50-try (~1s) ceiling, after which we throttle
+  # by proceeding lock-free rather than blocking a spawn forever.
+  while ! mkdir "$lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 50 ]; then break; fi
+    sleep 0.02
+  done
+  now="$(date +%s)"
+  cutoff=$((now - _SPAWN_WINDOW))
+  if [ -f "$stamps" ]; then
+    while IFS= read -r t; do
+      case "$t" in ''|*[!0-9]*) continue ;; esac
+      if [ "$t" -ge "$cutoff" ]; then kept="$kept$t
+"; fi
+    done < "$stamps"
+  fi
+  n=0
+  if [ -n "$kept" ]; then n=$(printf '%s' "$kept" | grep -c .); fi
+  if [ "$n" -ge "$_SPAWN_MAX" ]; then
+    rc=1
+  else
+    printf '%s%s\n' "$kept" "$now" > "$stamps"
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
+}
 pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
 log="$RUN_DIR/codex-bridge.$bridge_key.log"
 # Records the app-server URL the live bridge was launched against, so a later
@@ -498,6 +609,21 @@ EOF
     else
       rm -f "$pidfile" "$appserver_file" "$thread_file"
     fi
+  fi
+
+  # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
+  # any orphan for this exact (project, role) so exactly one bridge remains. If a
+  # reaped bridge will not exit, do not spawn beside it this tick.
+  # In a set +e subshell: these two do a lot of probing whose non-zero results
+  # (no such process, an empty match, a lock already held) are normal, and the
+  # launcher runs under set -euo pipefail where a bare non-zero would exit it.
+  if ! ( set +e; _spawn_rate_ok ); then
+    poll_sleep
+    continue
+  fi
+  if ! ( set +e; _reap_orphan_bridges ); then
+    poll_sleep
+    continue
   fi
 
   nohup "${bridge_run[@]}" \

@@ -5,6 +5,7 @@ const { spawn, spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
+const os = require("os");
 const path = require("path");
 const readline = require("readline");
 
@@ -953,6 +954,12 @@ class CodexBridge {
       : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${key}.pid`);
     this.metafile = path.join(RUN_DIR, `codex-bridge.${key}.meta`);
+    // A per-PID identity lease the launcher reaper reads to tell an orphan of THIS
+    // (project, role) from any other bridge, without reconstructing argv from ps
+    // (#943). Keyed by pid so duplicates are each enumerable; content is hashes,
+    // so no raw project/role value with a separator can be misread.
+    this.leasefile = path.join(RUN_DIR, `codex-bridge-lease.${process.pid}`);
+    this.leaseStart = "";
   }
 
   async run() {
@@ -1057,6 +1064,54 @@ class CodexBridge {
         `type=${this.opts.type}`,
       ].join("\n") + "\n",
     );
+    this.writeLease();
+  }
+
+  // The reaper's authority. It is published atomically (temp + rename) so a
+  // reader never sees a half-written file, and BEFORE any thread/network work,
+  // so a bridge is reapable the instant it exists. project and pairs are stored
+  // as SHA-1 hashes -- the launcher hashes its own PROJECT and sorted pair set
+  // the same way and compares hex, so no separator inside a project path or role
+  // can make one identity read as another (the whole class of bugs argv parsing
+  // hit). host and the process start time are what let the reaper reject a
+  // recycled pid or another machine before it kills anything.
+  writeLease() {
+    const start = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8" });
+    this.leaseStart = (start.stdout || "").trim();
+    const projectHash = crypto.createHash("sha1").update(this.opts.project).digest("hex");
+    const pairsHash = crypto.createHash("sha1")
+      .update(this.identities.map((pair) => `${pair.team}\t${pair.name}`).sort().join("\n"))
+      .digest("hex");
+    const body = [
+      "v=1",
+      `project=${projectHash}`,
+      `pairs=${pairsHash}`,
+      `host=${os.hostname()}`,
+      `pid=${process.pid}`,
+      `start=${this.leaseStart}`,
+    ].join("\n") + "\n";
+    const tmp = `${this.leasefile}.tmp`;
+    try {
+      fs.writeFileSync(tmp, body, { mode: 0o600 });
+      fs.renameSync(tmp, this.leasefile);
+    } catch (error) {
+      console.error(`codex-bridge: could not publish identity lease: ${error.message}`);
+    }
+  }
+
+  // Remove only OUR lease: read it back and unlink only when both the pid and the
+  // start token still name this process, so a lease a recycled pid's new owner
+  // may have written to the same path is never deleted from under it.
+  cleanupLease() {
+    try {
+      if (!fs.existsSync(this.leasefile)) return;
+      const text = fs.readFileSync(this.leasefile, "utf8");
+      const pid = (text.match(/^pid=(.*)$/mu) || [])[1];
+      const start = (text.match(/^start=(.*)$/mu) || [])[1];
+      if (pid === String(process.pid) && start === this.leaseStart) {
+        fs.unlinkSync(this.leasefile);
+      }
+    } catch (_) { /* best effort */ }
   }
 
   installSignals() {
@@ -1068,6 +1123,7 @@ class CodexBridge {
     process.on("exit", () => {
       this.client.stop();
       this.cleanupMeta();
+      this.cleanupLease();
     });
   }
 
