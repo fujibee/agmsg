@@ -380,3 +380,21 @@ _use_per_team() {
   [ "$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "PRAGMA table_info(events);" | grep -c legacy_id)" -eq 1 ]
   [ "$(sqlite3 "$AGMSG_STORAGE_PATH/messages.db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='events_legacy';" | tr -d '\r')" -eq 1 ]
 }
+
+@test "storage: events.id is indexed, on a new store and on one that predates the index (#910)" {
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  storage_init demo >/dev/null
+  local db
+  db=$(agmsg_db_path demo)
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='events' AND name='events_id';" | tr -d '\r')" -eq 1 ]
+  # The lookup the sync import makes per imported message (FROM events
+  # WHERE id=...) is a search now -- not a scan of every message body.
+  sqlite3 "$db" "EXPLAIN QUERY PLAN SELECT seq FROM events WHERE id = 'x';" | grep -q 'USING COVERING INDEX events_id\|USING INDEX events_id'
+  # A store from before this index existed picks it up on the next init.
+  sqlite3 "$db" "DROP INDEX events_id;"
+  storage_init demo >/dev/null
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='events_id';" | tr -d '\r')" -eq 1 ]
+}

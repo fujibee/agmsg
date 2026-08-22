@@ -1244,3 +1244,24 @@ _longest_argv() {
   [ "$status" -eq 13 ]
   grep -q 'failed at sqlite-sync\.sh:[0-9]' <<<"$stderr"
 }
+
+@test "sync schema: the conflict guard's server_seq lookup on sync_messages is a search, not a scan (#910)" {
+  # The apply conflict guard asks whether a server_seq already maps to a
+  # different wire id. sync_messages' UNIQUE serves wire_id lookups only, so
+  # this came in by server_seq as a walk of every row of the binding, once
+  # per imported message -- 68.6 ms per message on a 21,471-row store, and
+  # the reason import time grew with the store. Schema setup now carries the
+  # index, on new stores and on any store the next sync call touches.
+  prepare_push >/dev/null
+  local db
+  db=$(agmsg_db_path demo)
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='sync_messages' AND name='sync_messages_server_seq';" | tr -d '\r')" -eq 1 ]
+  sqlite3 "$db" "EXPLAIN QUERY PLAN SELECT 1 FROM sync_messages mx
+    WHERE mx.server_instance_id='s' AND mx.remote_team_id='r'
+      AND mx.protocol_version=1 AND mx.server_seq='7' AND mx.wire_id<>'w';" |
+    grep -q 'USING INDEX sync_messages_server_seq\|USING COVERING INDEX sync_messages_server_seq'
+  # A store whose sync schema predates the index picks it up on the next call.
+  sqlite3 "$db" "DROP INDEX sync_messages_server_seq;"
+  prepare_push >/dev/null
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='sync_messages_server_seq';" | tr -d '\r')" -eq 1 ]
+}

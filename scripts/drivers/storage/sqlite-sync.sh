@@ -250,6 +250,16 @@ _sqlite_sync_schema() {
                   protocol_version,driver_generation,local_position),
       UNIQUE(server_instance_id,remote_team_id,protocol_version,wire_id)
     );
+    -- The one lookup on this table that the UNIQUE above cannot serve: the
+    -- apply conflict guard asks whether a server_seq is already mapped to a
+    -- DIFFERENT wire id, so it comes in by (binding, server_seq). Without
+    -- this index that guard walked every row of the binding and fetched each
+    -- one (rows carry the wire blob), once per imported message: 68.6 ms per
+    -- message on a 21,471-row store, 73 percent of the import batch, and the
+    -- reason import time grew with the store (#910). sync_quarantine already
+    -- has the equivalent path as its second UNIQUE constraint.
+    CREATE INDEX IF NOT EXISTS sync_messages_server_seq
+      ON sync_messages(server_instance_id,remote_team_id,protocol_version,server_seq);
     CREATE TABLE IF NOT EXISTS sync_quarantine (
       local_team TEXT NOT NULL,
       server_instance_id TEXT NOT NULL,
