@@ -501,17 +501,27 @@ _reap_orphan_bridges() {
 "
   done
   [ -n "$killed" ] || return 0
-  # Wait for each to exit, using the start token AS the liveness check -- never a
-  # bare kill -0. A dead pid yields no start token (no /proc entry, no ps row), so
-  # `_start_token` succeeding IS proof the pid is still live, and its value being
-  # unchanged IS proof it is still the SAME process: liveness and identity from one
-  # observation, with no window between them for a recycled pid to slip through
-  # (and no kill -0 EPERM blind spot). A token that stops reading, or changes, ends
-  # the wait -- the process we killed is gone (or already replaced).
+  # THE RULE for every check here (add a new one? read this first): a failed
+  # observation is proof of NOTHING. Killing and spawning each need their OWN
+  # positive proof, and on any observation failure we do NOTHING -- the timeout
+  # bounds the wait, a failed read is never re-read as state:
+  #   kill  only with proof of IDENTITY  -- the start token READ and MATCHED (above)
+  #   spawn only with proof of EXIT      -- the pid proven ABSENT, or its token read
+  #                                         and now naming a DIFFERENT process (below)
+  # Wait for each killed pid to exit. Proof of exit is EITHER _agmsg_pid_alive_local
+  # returning absent (the sanctioned helper -- EPERM-aware, ps-cross-checked, erring
+  # to "alive" on any ambiguity, so a false return is real absence not a transient
+  # miss; it is also the one liveness path allowed to touch kill -0) OR a start token
+  # that reads and DIFFERS (a replacement). A token we merely could not read proves
+  # nothing -- keep waiting. No proof of exit within the budget: return 1 and do NOT
+  # spawn, so a bridge still holding the thread as writer is never double-started (#935).
   while IFS="$TAB" read -r pid lstartsrc lstart; do
     [ -n "$pid" ] || continue
     waited=0
-    while cur="$(_start_token "$pid")" && [ "$cur" = "$lstartsrc	$lstart" ]; do
+    while :; do
+      _agmsg_pid_alive_local "$pid" || break
+      cur="$(_start_token "$pid")"
+      if [ -n "$cur" ] && [ "$cur" != "$lstartsrc	$lstart" ]; then break; fi
       if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
       sleep 0.1; waited=$((waited + 1))
     done
