@@ -4566,7 +4566,10 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
 
   // stdout: exactly the result, still parseable as one JSON line.
   const stdoutLines = out.join("").split("\n").filter((line) => line !== "");
-  assert.equal(stdoutLines.length, 1);
+  // On mismatch, show WHAT landed: a count alone cannot say whose line leaked
+  // into the patched window (this failed on CI only, and the log showed 2!==1
+  // with no way to tell what the second line was).
+  assert.equal(stdoutLines.length, 1, `stdout carried: ${JSON.stringify(stdoutLines)}`);
   assert.equal(JSON.parse(stdoutLines[0]).type, "pull_bootstrap_result");
 
   // stderr: the operator can see it start, and can see it move. Both halves are
