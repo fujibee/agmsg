@@ -199,6 +199,50 @@ gone_pid() {
   _agmsg_pid_alive 42
 }
 
+# --- #954: the ps cross-check must tell "proof of absence" from "absence of
+# proof". Both halves are asserted with the SAME genuinely-dead pid, so a result
+# of "alive" can ONLY be the canary suppressing the death verdict, never the pid
+# being live -- exactly the distinction the bug erased. ---
+
+@test "pid_alive: a truly-gone pid is PROVEN dead when ps answers, and cleanup fires (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # A pid this shell minted and reaped: kill(2) returns a real ESRCH, real ps
+  # lists our own $$ but not the gone pid -> positive proof of absence.
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -ne 0 ] || { echo "a gone pid with a working ps read alive"; false; }
+  # The cleanup-side contract: `... || rm -f` DOES delete for a proven-gone pid.
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ ! -e "$marker" ] || { echo "cleanup did not fire on a proven-dead pid"; false; }
+}
+
+@test "pid_alive: a truly-gone pid reads ALIVE when ps cannot answer -- a failed observation is not proof, and cleanup is suppressed (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  sh -c 'exit 0' & local gone=$!; wait "$gone" 2>/dev/null
+  # ps cannot answer: it emits nothing and fails. The canary ($$) is absent from
+  # the output, so the helper cannot see even itself -> observation failed. The
+  # pid is genuinely gone, so "alive" here is UNAMBIGUOUSLY the canary firing.
+  ps() { return 1; }
+  run _agmsg_pid_alive_local "$gone"
+  [ "$status" -eq 0 ] || { echo "a failed ps was read as proof of death (the #954 bug)"; false; }
+  # The cleanup-side contract: `... || rm -f` does NOT delete when we could not
+  # observe. The file a live process might still own is left intact.
+  local marker="$RUN_DIR/marker.$gone"; : > "$marker"
+  _agmsg_pid_alive_local "$gone" || rm -f "$marker"
+  [ -e "$marker" ] || { echo "cleanup fired on an UNKNOWN observation (UNKNOWN leaked to the cleanup side)"; false; }
+}
+
+@test "pid_alive: ps that omits the target but still lists the canary is proof of death (#954)" {
+  skip_on_windows "POSIX kill path; Windows uses tasklist (#134)"
+  # ps answers (lists $$, proving it ran) but does not list the target -> the
+  # target is provably gone even though ps was reachable.
+  kill() { echo "bash: kill: - No such process" >&2; return 1; }
+  ps() { printf '%s S\n' "$$"; }   # only the canary, never the queried target
+  run _agmsg_pid_alive_local 424242
+  [ "$status" -ne 0 ] || { echo "an answered ps that omits the target did not read dead"; false; }
+}
+
 # --- agmsg_normalize_instance_id ---
 
 @test "normalize: a composite token passes through unchanged (idempotent)" {
