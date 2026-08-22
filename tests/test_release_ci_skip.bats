@@ -74,12 +74,17 @@ detect() {
 # every safe arm in the file is a different change from adding one.
 @test "release-ci: the harness runs the real logic and can say either answer" {
   # Without this, every assertion below could be passing on an empty script.
-  [[ "$(detect "$BUMP")" == *"docs_only=true"* ]]
-  [[ "$(detect 'scripts/lib/storage.sh')" == *"docs_only=false"* ]]
+  # `grep -q`, never `[[ ]]`. A non-last `[[ ]]` cannot fail under errexit on
+  # bash 3.2, and "last" is a property of where a line happens to sit, not of
+  # what it asserts -- one appended line below would silently disarm it. CI's
+  # enforced-assertions check caught exactly that here, in the PR whose subject
+  # is a checker that could not see the direction that hurts.
+  grep -q 'docs_only=true' <<<"$(detect "$BUMP")"
+  grep -q 'docs_only=false' <<<"$(detect 'scripts/lib/storage.sh')"
 }
 
 @test "release-ci: the version bump alone takes the light path (#875)" {
-  [[ "$(detect "$BUMP")" == *"docs_only=true"* ]]
+  grep -q 'docs_only=true' <<<"$(detect "$BUMP")"
 }
 
 # A SUBSET is on the light path too, and that is not incidental. cut-release.sh
@@ -90,7 +95,7 @@ detect() {
 # effect nobody chose.
 @test "release-ci: a prerelease bump without CHANGELOG.md still takes the light path (#875)" {
   local prerelease=$'VERSION\npackage.json\n.claude-plugin/plugin.json'
-  [[ "$(detect "$prerelease")" == *"docs_only=true"* ]]
+  grep -q 'docs_only=true' <<<"$(detect "$prerelease")"
 }
 
 @test "release-ci: anything riding along with the bump forces the full matrix (#875)" {
