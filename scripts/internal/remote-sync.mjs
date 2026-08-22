@@ -3316,36 +3316,39 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
 // syntax error instead of the update).
 //
-// Proof of an update is a DIFFERENCE against a baseline taken at engine
-// start, not an mtime ordering. Comparing mtimes against the engine's own
-// start clock looked equivalent and is not: a file that already carried a
-// future mtime when the engine started (clock skew, an archive that
-// preserved timestamps, a clock stepped backwards) would read as "written
-// after start" forever, and stand down every engine at its first cycle --
-// including one already running the new code. A reviewer supplied that
-// counterexample. Against a baseline, a pre-existing mtime -- future or not
-// -- is simply what the file looked like at start, and only a file that
-// appeared or whose mtime CHANGED afterwards is evidence. (This also
-// catches an update that preserves OLDER mtimes, which an ordering test
-// would miss.)
+// What is proof here went through review twice, and both cuts were the same
+// disease: an observable standing in for the fact. "mtime newer than the
+// engine's start clock" stands down every engine under a pre-existing
+// future mtime (clock skew, an archive with preserved timestamps).
+// "mtime changed against a baseline" stands down on a touch, a
+// metadata-only correction, a same-content re-copy -- the code in memory
+// and on disk still identical, and a stood-down sync engine does not come
+// back by itself. The fact that matters is CONTENT: the engine must stand
+// down exactly when the bytes on disk are no longer the bytes it started
+// from. So the baseline holds a content digest per file; a path or mtime
+// difference merely nominates a file for re-reading, and only a digest
+// that actually differs -- or a path that did not exist at start, a new
+// install artifact -- is proof. A benign mtime change is remembered so the
+// file is not re-read every cycle; content is the identity, the mtime is
+// only a cheap change hint.
 //
 // The failure direction is deliberate, in both phases: an OBSERVATION
 // failure is not evidence.
-//   - Baseline phase: one unreadable directory or one failed stat and the
-//     whole detector is disabled (null), not partially armed. A partial
-//     baseline would recreate the false positive: a pre-existing file that
-//     was unreadable at start and readable later would look newly added.
-//     Disabled means exactly today's behavior.
-//   - Check phase: an entry that cannot be read is skipped; only a
-//     successfully stat'ed file that is absent from the baseline or whose
-//     mtime differs from it proves an update. A file DELETED by an update
-//     is deliberately not proof on its own -- deletion of the only copy of
-//     a fact is the defect class this repo keeps meeting, and a rewrite
-//     always accompanies a real update anyway; missing it degrades to
-//     today's behavior.
+//   - Baseline phase: one unreadable directory, one failed stat, one
+//     unreadable file and the whole detector is disabled (null), not
+//     partially armed. A partial baseline would recreate the false
+//     positive: a pre-existing file unreadable at start and readable later
+//     would look newly added. Disabled means exactly today's behavior.
+//   - Check phase: an entry that cannot be listed, stat'ed, or read is
+//     skipped and proves nothing. A rewrite that lands different bytes
+//     under the exact baseline mtime defeats the hint and is never
+//     re-read -- a miss, and a miss degrades to today's behavior, which
+//     is the safe side. A file DELETED by an update is deliberately not
+//     proof on its own; a real update always rewrites something.
 export async function collectInstallBaseline(rootDir, dependencies = {}) {
   const readdirCall = dependencies.readdirCall ?? readdir;
   const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
   const baseline = new Map();
   const pending = [rootDir];
   while (pending.length > 0) {
@@ -3357,10 +3360,15 @@ export async function collectInstallBaseline(rootDir, dependencies = {}) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) { pending.push(path); continue; }
       if (!entry.isFile()) continue; // links and specials are not install artifacts
-      let stats;
-      try { stats = await statCall(path); }
-      catch { return null; } // incomplete observation: the detector stays OFF
-      baseline.set(path, stats.mtimeMs);
+      let stats, bytes;
+      try {
+        stats = await statCall(path);
+        bytes = await readFileCall(path);
+      } catch { return null; } // incomplete observation: the detector stays OFF
+      baseline.set(path, {
+        mtimeMs: stats.mtimeMs,
+        digest: createHash("sha256").update(bytes).digest("hex"),
+      });
     }
   }
   return baseline;
@@ -3369,6 +3377,7 @@ export async function collectInstallBaseline(rootDir, dependencies = {}) {
 export async function installChangedAgainst(rootDir, baseline, dependencies = {}) {
   const readdirCall = dependencies.readdirCall ?? readdir;
   const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
   const pending = [rootDir];
   while (pending.length > 0) {
     const dir = pending.pop();
@@ -3383,7 +3392,13 @@ export async function installChangedAgainst(rootDir, baseline, dependencies = {}
       try { stats = await statCall(path); }
       catch { continue; } // vanished or unreadable: no evidence
       const known = baseline.get(path);
-      if (known === undefined || known !== stats.mtimeMs) return path;
+      if (known === undefined) return path; // did not exist at start: a new install artifact
+      if (stats.mtimeMs === known.mtimeMs) continue; // no hint of change
+      let digest;
+      try { digest = createHash("sha256").update(await readFileCall(path)).digest("hex"); }
+      catch { continue; } // could not re-read: no evidence
+      if (digest !== known.digest) return path; // the bytes actually changed
+      known.mtimeMs = stats.mtimeMs; // benign touch: remember it, content is the identity
     }
   }
   return null;

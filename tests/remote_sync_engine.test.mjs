@@ -3156,10 +3156,10 @@ test("runLoop: an incomplete baseline disarms the detector entirely -- the check
 });
 
 test("install baseline: a pre-existing FUTURE mtime is what the tree looked like, not an update (#963)", async () => {
-  // The reviewer's counterexample against comparing mtimes to the engine's
-  // start clock: a file that already carried a future mtime at start (clock
-  // skew, an archive with preserved timestamps) must not stand every fresh
-  // engine down. Against the baseline it is simply unchanged.
+  // The first review counterexample against comparing mtimes to the
+  // engine's start clock: a file that already carried a future mtime at
+  // start (clock skew, an archive with preserved timestamps) must not
+  // stand every fresh engine down. Against the baseline it is unchanged.
   const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
   try {
     await mkdir(join(root, "internal"), { recursive: true });
@@ -3169,12 +3169,37 @@ test("install baseline: a pre-existing FUTURE mtime is what the tree looked like
     const baseline = await collectInstallBaseline(root);
     assert.ok(baseline instanceof Map);
     assert.equal(await installChangedAgainst(root, baseline), null);
-    // A REWRITE that preserves an older mtime is still a change against the
-    // baseline (an ordering test would miss this direction entirely).
-    const past = new Date(Date.now() - 3600_000);
-    await utimes(join(root, "internal", "from-the-future.sh"), past, past);
-    assert.equal(await installChangedAgainst(root, baseline),
-      join(root, "internal", "from-the-future.sh"));
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: an mtime change with UNCHANGED content is a touch, not an update (#963)", async () => {
+  // The second review counterexample: mtime change does not prove content
+  // change, and a false stand-down is a stopped sync engine. A touch, a
+  // metadata-only correction, a same-content re-copy must all keep the
+  // engine running; only different bytes are proof.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963t-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    const file = join(root, "internal", "driver.sh");
+    await writeFile(file, "echo stable\n");
+    const baseline = await collectInstallBaseline(root);
+    // touch: same bytes, new mtime
+    const later = new Date(Date.now() + 60_000);
+    await utimes(file, later, later);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    // The benign touch is remembered: the next sweep takes the cheap path
+    // and does not re-read the file.
+    let reads = 0;
+    const countingRead = async (path) => { reads += 1; return readFile(path); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: countingRead }), null);
+    assert.equal(reads, 0);
+    // A rewrite with DIFFERENT bytes (and a new mtime) is proof.
+    const evenLater = new Date(Date.now() + 120_000);
+    await writeFile(file, "echo rewritten\n");
+    await utimes(file, evenLater, evenLater);
+    assert.equal(await installChangedAgainst(root, baseline), file);
   } finally {
     await rm(root, { recursive: true });
   }
@@ -3194,6 +3219,13 @@ test("install baseline: a file appearing after start is proof; missing roots obs
     assert.equal(await collectInstallBaseline(join(root, "no-such-dir")), null);
     // ...and one that cannot be read at check time yields no evidence.
     assert.equal(await installChangedAgainst(join(root, "no-such-dir"), baseline), null);
+    // A file whose bytes cannot be re-read after an mtime change proves nothing.
+    await unlink(join(root, "internal", "added-by-update.sh")); // clear the standing proof first
+    const target = join(root, "internal", "old.sh");
+    const later = new Date(Date.now() + 60_000);
+    await utimes(target, later, later);
+    const failingRead = async () => { throw new Error("EACCES"); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: failingRead }), null);
   } finally {
     await rm(root, { recursive: true });
   }
