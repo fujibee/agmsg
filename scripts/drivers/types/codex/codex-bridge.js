@@ -1087,27 +1087,16 @@ class CodexBridge {
   //            and the only victim would be a same-(project,pair) bridge in the
   //            sub-ms window before it overwrites this pid's lease, self-corrected
   //            by the launcher respawning it.
-  //   win32 -> Process.StartTime.Ticks, read through PowerShell. Windows has NO
-  //            /proc, and the only `ps` likely to be on PATH there is MSYS's,
-  //            which rejects -o outright ("ps: unknown option -- o") rather than
-  //            degrading -- so BOTH POSIX sources above yield an empty token and
-  //            writeLease() throws, which is why the bridge could never start on
-  //            Windows at all.
-  //            ★ONE source, deliberately, not a preference list. WMIC's
-  //            CreationDate is ~2x cheaper and was the obvious first pick, but it
-  //            is deprecated and already absent from Windows 11 installs that
-  //            have dropped the Feature-on-Demand. A per-side "WMIC, else
-  //            PowerShell" order would then let THIS writer and _start_token
-  //            (codex-bridge-launcher.sh) resolve DIFFERENT sources for the SAME
-  //            process whenever only one of the two can reach wmic.exe -- their
-  //            tokens differ by FORMAT, so the reaper would read a live bridge's
-  //            lease as some other process's and never collect the orphan it
-  //            exists to collect. Ticks is the one value both sides can always
-  //            agree on, so the speed is not worth the divergence.
-  //            Falling back from powershell.exe to pwsh is safe for the same
-  //            reason it is safe here and nowhere else: both return the SAME
-  //            Ticks for a given pid (measured), so the src label names the
-  //            format, not the executable that produced it.
+  //   win32 -> Process.StartTime.Ticks, read through PowerShell. Windows has no
+  //            /proc, and MSYS's `ps` rejects -o outright, so both POSIX sources
+  //            yield an empty token and no lease can be published at all.
+  //            ONE source, not a preference list: WMIC is deprecated and already
+  //            absent from some Windows 11 installs, and letting each side choose
+  //            between WMIC and PowerShell independently would let this writer and
+  //            _start_token (codex-bridge-launcher.sh) record differently-
+  //            FORMATTED tokens for the same process. powershell.exe and pwsh
+  //            return identical Ticks, so falling back between those two binaries
+  //            is safe: the src label names the format, not the executable.
   startToken() {
     if (process.platform === "win32") {
       for (const bin of ["powershell.exe", "pwsh"]) {

@@ -407,26 +407,20 @@ _REAP_WAIT_TICKS=50
 #            recycled pid is always distinguishable from the one we leased.
 #   else  -> `ps -o lstart=` (second precision). Echoes "<src><TAB><token>";
 #            returns non-zero (indeterminable) so the caller fails closed.
-#   win32 -> Process.StartTime.Ticks via PowerShell -- the SAME single source
+#   win32 -> Process.StartTime.Ticks via PowerShell -- the same single source
 #            codex-bridge.js startToken() writes, so both sides always agree.
-#            WMIC's CreationDate is cheaper but deprecated (already gone from some
-#            Windows 11 installs); a "WMIC, else PowerShell" order on each side
-#            independently would let the two resolve DIFFERENT sources for the
-#            same process whenever only one of them can reach wmic.exe, and their
-#            differently-FORMATTED tokens would make the reaper read a live
-#            bridge's lease as another process's. powershell.exe and pwsh return
-#            identical Ticks (measured), so falling back between those two
+#            WMIC is deprecated and already absent from some Windows 11 installs;
+#            a per-side "WMIC, else PowerShell" order would let the two record
+#            differently-FORMATTED tokens for the same process. powershell.exe
+#            and pwsh return identical Ticks, so falling back between those two
 #            binaries introduces no such divergence.
 #
-# ★The Windows branch is taken INSTEAD of the /proc branch, not merely before it.
-# MSYS/Cygwin do expose a working /proc (field 22 and all), but it is keyed by the
-# emulation layer's OWN pid space, while a lease records the Windows pid that
-# codex-bridge.js sees as process.pid -- the two are unrelated numbers for the
-# same process (measured on MINGW64: MSYS pid 3065729 vs winpid 1456). Letting
-# /proc win here would silently return the start time of whatever UNRELATED MSYS
-# process happens to sit at that number, and the reaper would then compare a
-# well-formed token against the wrong process: exactly the recycled-pid confusion
-# the token exists to prevent, only harder to notice because nothing errors.
+# The Windows branch is taken INSTEAD of the /proc branch, not merely before it:
+# MSYS/Cygwin do expose a working /proc, but it is keyed by the emulation layer's
+# own pid space while a lease records the Windows pid codex-bridge.js sees as
+# process.pid. Letting /proc win would return the start time of whatever
+# unrelated MSYS process sits at that number -- the recycled-pid confusion this
+# token exists to prevent, with nothing to signal it.
 _agmsg_is_windows() {
   case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
     MINGW*|MSYS*|CYGWIN*) return 0 ;;
