@@ -149,6 +149,61 @@ prepare_push() {
   [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_quarantine;" | tr -d '\r')" -eq 0 ]
 }
 
+@test "sync contract: U+0000 in an identity field fails the page, not just the record (identifier poisoning, review finding)" {
+  # A record's own id/wire is never stripped and quarantined: a corrupt id
+  # or server_seq cannot be trusted to name itself, let alone anything else.
+  # The concrete danger this guards against: id/wire is the WHERE key every
+  # UPDATE in this function uses. If it were stripped instead of refused, a
+  # value like "<good-uuid>" + U+0000 would strip down to an existing wire
+  # id that belongs to a DIFFERENT, legitimate record already imported --
+  # and this record's corrupt_state UPDATE would land on that unrelated row
+  # instead of failing to identify anything. Proven both ways: the page
+  # fails outright, AND the prior legitimate record it could have collided
+  # with is untouched.
+  local prior_wire='550e8400-e29b-41d4-a716-446655440060'
+  local prior page db
+  prior=$(jq -nc --arg id "$prior_wire" '
+    {type:"sync_pull_message",server_seq:"1",id:$id,
+     server_received_at:"2026-07-20T13:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"legitimate prior message",created_at:"2026-07-20T13:00:00.000000Z",
+        from_agent:"alice",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"legitimate prior message",created_at:"2026-07-20T13:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n' "$prior" '{"type":"sync_pull_cursor","next_after":"1"}')
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+
+  # Now a second page: one record whose id is the SAME UUID with a trailing
+  # U+0000 appended -- the exact string that, if stripped rather than
+  # refused, becomes $prior_wire.
+  local poisoned_id
+  poisoned_id=$(jq -nc --arg u "$prior_wire" '$u + ([0]|implode)')
+  local poisoned
+  poisoned=$(jq -nc --argjson id "$poisoned_id" '
+    {type:"sync_pull_message",server_seq:"2",id:$id,
+     server_received_at:"2026-07-20T13:00:01.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"attacker record",created_at:"2026-07-20T13:00:01.000000Z",
+        from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"attacker record",created_at:"2026-07-20T13:00:01.000000Z",
+                 from_agent:"carol",to_agent:"bob"}}')
+  local page2
+  page2=$(printf '%s\n%s\n' "$poisoned" '{"type":"sync_pull_cursor","next_after":"2"}')
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page2"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 1: field id contains U+0000'
+  # The prior, legitimate record is untouched -- not quarantined, not
+  # overwritten, still imported under its real wire id.
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+  [ "$(storage_history demo | jq -s '[.[]|select(.body=="legitimate prior message")]|length')" -eq 1 ]
+}
+
 @test "sync contract: apply refuses a wire id that is not a canonical UUIDv4 (#908)" {
   # The shape check moved from `printf | grep -Eq` to `[[ =~ ]]` with the
   # pattern in a variable; the acceptance set must not move with it. One
