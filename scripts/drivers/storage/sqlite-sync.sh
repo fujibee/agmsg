@@ -1001,6 +1001,18 @@ storage_sync_apply_pull() {
                  "status","policy_revision","local_security_revision","reason",
                  "projection.kind","projection.from_agent","projection.to_agent",
                  "projection.body","projection.created_at"];
+    # Only these four are payload: never used to look up or update a DIFFERENT
+    # row (id/wire and server_seq are; so is type/status, indirectly, via the
+    # whitelist and the fixed-literal case match). A record whose id, server
+    # seq, or any other non-payload field carries U+0000 cannot be safely
+    # named after stripping -- a trailing byte on an otherwise-valid UUID
+    # would strip down to the real wire_id of a DIFFERENT record, and the
+    # quarantine UPDATE for this record would land on that unrelated row
+    # instead (found in review: identifier poisoning, not merely a lost
+    # U+0000 guard on this one record). Those fields keep the page-wide
+    # error() unchanged.
+    def is_payload_field($name): (["projection.from_agent","projection.to_agent",
+      "projection.body","projection.created_at"] | index($name)) != null;
     def pick($r; $name):
       (if   $name == "type"                    then $r.type // ""
        elif $name == "next_after"              then $r.next_after // ""
@@ -1026,10 +1038,16 @@ storage_sync_apply_pull() {
     , ( $lines | to_entries[]
         | (.key + 1) as $n
         | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
-        | ([ fields[] | pick($r; .) ]) as $vals
-        | (if ($vals | map(contains("\u0000")) | any) then "1" else "0" end) as $flag
-        | ($flag + "\u0000")
-        , ( $vals[] | gsub("\u0000"; "") | . + "\u0000" ) )
+        | ( [ fields[] as $name
+              | pick($r; $name) as $v
+              | if is_payload_field($name) then $v
+                elif ($v | contains("\u0000"))
+                then error("record \($n): field \($name) contains U+0000")
+                else $v end
+              | {name: $name, v: .} ] ) as $entries
+        | ( $entries | map(select(is_payload_field(.name)) | .v | contains("\u0000")) | any ) as $flag_bool
+        | ( (if $flag_bool then "1" else "0" end) + "\u0000" )
+        , ( $entries[] | (if is_payload_field(.name) then (.v | gsub("\u0000"; "")) else .v end) + "\u0000" ) )
   ' 2>"$jq_err")
   # ONE cleanup for EVERY failure after the stream opened: the file descriptor,
   # both temp files, the globals the trap reads, and the trap itself. The bats
