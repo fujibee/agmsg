@@ -955,7 +955,7 @@ storage_sync_apply_pull() {
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
-  local from to body at local_id q line_next_after jq_ok
+  local from to body at local_id q line_next_after jq_ok nul_flag
   local cipher_q blob_q key_id_q received_q policy_q local_rev_q reason_q
   local from_q to_q body_q at_q
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
@@ -1026,11 +1026,10 @@ storage_sync_apply_pull() {
     , ( $lines | to_entries[]
         | (.key + 1) as $n
         | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
-        | fields[] as $name
-        | pick($r; $name) as $v
-        | (if ($v | contains("\u0000"))
-           then error("record \($n): field \($name) contains U+0000")
-           else $v end) + "\u0000" )
+        | ([ fields[] | pick($r; .) ]) as $vals
+        | (if ($vals | map(contains("\u0000")) | any) then "1" else "0" end) as $flag
+        | ($flag + "\u0000")
+        , ( $vals[] | gsub("\u0000"; "") | . + "\u0000" ) )
   ' 2>"$jq_err")
   # ONE cleanup for EVERY failure after the stream opened: the file descriptor,
   # both temp files, the globals the trap reads, and the trap itself. The bats
@@ -1055,6 +1054,15 @@ storage_sync_apply_pull() {
   record_index=0
   while [ "$record_index" -lt "$page_count" ]; do
     record_index=$((record_index + 1))
+    # #940 per-record: one extra frame ahead of the eighteen, naming whether
+    # ANY of this record's fields held U+0000. jq has already stripped the
+    # byte from every value below regardless of the flag (a no-op when it was
+    # never there), so the framing can never break on it again -- the flag is
+    # read, and branched on, before any of those values are trusted.
+    if ! IFS= read -r -d '' nul_flag <&3; then
+      _sqlite_sync_apply_fail "record $record_index ended mid-frame at the NUL flag"
+      _sqlite_sync_why; return 13
+    fi
     for field_name in type line_next_after seq wire received v cipher key_id blob \
                       status policy local_rev reason kind from to body at; do
       if ! IFS= read -r -d '' "$field_name" <&3; then
@@ -1189,6 +1197,30 @@ storage_sync_apply_pull() {
         AND status='importable' AND EXISTS(SELECT 1 FROM sync_messages m
           WHERE m.server_instance_id='$server' AND m.remote_team_id='$remote'
             AND m.protocol_version=$protocol AND m.wire_id='$wire' AND m.server_seq='$seq');" >> "$sql_file"
+
+    if [ "$nul_flag" = 1 ]; then
+      # #940: quarantine this one record instead of losing the whole page to
+      # it. This is the fourth corrupt_state reason (three already exist for
+      # envelope/sequence/mapping mismatches, above) -- no new machinery, just
+      # a new WHERE this record's wire_id can land in. The row already exists
+      # from the INSERT a few statements up, so this only ever overrides its
+      # status; it never creates one. Appended last for this record, so it is
+      # the final word on the row no matter what the earlier UPDATEs above set
+      # -- and it lands in the same transaction, ahead of any later record's
+      # SQL, so the "importable" branch below never sees a status this record
+      # was supposed to be denied.
+      printf "%s\n" "
+        UPDATE sync_quarantine SET status='corrupt_state',reason='body contains U+0000'
+         WHERE server_instance_id='$server' AND remote_team_id='$remote'
+           AND protocol_version=$protocol AND wire_id='$wire';" >> "$sql_file"
+      # Skip the importable-message path below outright, rather than relying
+      # on its NOT EXISTS(...corrupt_state) guard: jq has already stripped
+      # U+0000 from $body/$from/$to for every value in this record, and if a
+      # value WAS nothing but that one byte, the emptied field would trip the
+      # "-n" checks below and fail the whole page (return 13) -- exactly the
+      # failure this change exists to stop happening for one bad record.
+      continue
+    fi
 
     if [ "$status" = importable ]; then
       if [ -n "$kind" ]; then
