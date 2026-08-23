@@ -143,6 +143,15 @@ storage_init() {
     -- The ALTER above runs first on purpose, so an older store has the column
     -- before this asks for the index on it.
     CREATE INDEX IF NOT EXISTS events_legacy ON events(legacy_id);
+    -- id is the value every cross-reference to an event carries, but the
+    -- table's key is seq, so a lookup by id is otherwise a full scan of a
+    -- table that holds every message body. The sync import pays that scan
+    -- once per imported message (the sync_messages projection selects
+    -- FROM events WHERE id=...), which made the import batch grow with the
+    -- store: 24.6 ms per message on a 21,471-event store, against ~0 with
+    -- this index (#910's remaining reprocess drift, measured statement by
+    -- statement on a captured import batch).
+    CREATE INDEX IF NOT EXISTS events_id ON events(id);
     CREATE TABLE IF NOT EXISTS read_cursors (
       team TEXT NOT NULL,
       agent TEXT NOT NULL,

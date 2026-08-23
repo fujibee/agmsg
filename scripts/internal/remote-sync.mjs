@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
-import { appendFile, lstat, mkdir, open, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
 import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -3309,6 +3309,101 @@ export async function cycle(config, { pushLimit, pullLimit }, dependencies = {})
 // cadence: after any retryable failure the loop always backs off (exponential,
 // capped), so a machine that can't reach the server never hot-loops even while
 // catch-up would otherwise skip the wait.
+// The installation can be updated while an engine runs (#963). watch.sh
+// already detects that and stands down on its own; the engine used to find
+// out only by executing a half-written driver script -- and only when its
+// timing was unlucky enough to hit the write window (observed live: a
+// mid-rewrite storage-sync-driver.sh failed to parse, and the fatal named a
+// syntax error instead of the update).
+//
+// What is proof here went through review twice, and both cuts were the same
+// disease: an observable standing in for the fact. "mtime newer than the
+// engine's start clock" stands down every engine under a pre-existing
+// future mtime (clock skew, an archive with preserved timestamps).
+// "mtime changed against a baseline" stands down on a touch, a
+// metadata-only correction, a same-content re-copy -- the code in memory
+// and on disk still identical, and a stood-down sync engine does not come
+// back by itself. The fact that matters is CONTENT: the engine must stand
+// down exactly when the bytes on disk are no longer the bytes it started
+// from. So the baseline holds a content digest per file; a path or mtime
+// difference merely nominates a file for re-reading, and only a digest
+// that actually differs -- or a path that did not exist at start, a new
+// install artifact -- is proof. A benign mtime change is remembered so the
+// file is not re-read every cycle; content is the identity, the mtime is
+// only a cheap change hint.
+//
+// The failure direction is deliberate, in both phases: an OBSERVATION
+// failure is not evidence.
+//   - Baseline phase: one unreadable directory, one failed stat, one
+//     unreadable file and the whole detector is disabled (null), not
+//     partially armed. A partial baseline would recreate the false
+//     positive: a pre-existing file unreadable at start and readable later
+//     would look newly added. Disabled means exactly today's behavior.
+//   - Check phase: an entry that cannot be listed, stat'ed, or read is
+//     skipped and proves nothing. A rewrite that lands different bytes
+//     under the exact baseline mtime defeats the hint and is never
+//     re-read -- a miss, and a miss degrades to today's behavior, which
+//     is the safe side. A file DELETED by an update is deliberately not
+//     proof on its own; a real update always rewrites something.
+export async function collectInstallBaseline(rootDir, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const baseline = new Map();
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { return null; } // incomplete observation: the detector stays OFF
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue; // links and specials are not install artifacts
+      let stats, bytes;
+      try {
+        stats = await statCall(path);
+        bytes = await readFileCall(path);
+      } catch { return null; } // incomplete observation: the detector stays OFF
+      baseline.set(path, {
+        mtimeMs: stats.mtimeMs,
+        digest: createHash("sha256").update(bytes).digest("hex"),
+      });
+    }
+  }
+  return baseline;
+}
+
+export async function installChangedAgainst(rootDir, baseline, dependencies = {}) {
+  const readdirCall = dependencies.readdirCall ?? readdir;
+  const statCall = dependencies.statCall ?? stat;
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try { entries = await readdirCall(dir, { withFileTypes: true }); }
+    catch { continue; } // unreadable now: no evidence either way
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { pending.push(path); continue; }
+      if (!entry.isFile()) continue;
+      let stats;
+      try { stats = await statCall(path); }
+      catch { continue; } // vanished or unreadable: no evidence
+      const known = baseline.get(path);
+      if (known === undefined) return path; // did not exist at start: a new install artifact
+      if (stats.mtimeMs === known.mtimeMs) continue; // no hint of change
+      let digest;
+      try { digest = createHash("sha256").update(await readFileCall(path)).digest("hex"); }
+      catch { continue; } // could not re-read: no evidence
+      if (digest !== known.digest) return path; // the bytes actually changed
+      known.mtimeMs = stats.mtimeMs; // benign touch: remember it, content is the identity
+    }
+  }
+  return null;
+}
+
 export async function runLoop(config, options, dependencies = {}) {
   const cycleCall = dependencies.cycleCall ?? cycle;
   const sleepCall = dependencies.sleepCall ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -3319,6 +3414,9 @@ export async function runLoop(config, options, dependencies = {}) {
   const recordRefusalCall = dependencies.recordRefusalCall ?? recordRefusal;
   const isRefusalCall = dependencies.isRefusalCall ?? isRefusal;
   const nowCall = dependencies.nowCall ?? (() => new Date().toISOString());
+  const collectInstallBaselineCall = dependencies.collectInstallBaselineCall ?? collectInstallBaseline;
+  const installChangedCall = dependencies.installChangedCall ?? installChangedAgainst;
+  const scriptsRoot = dependencies.scriptsRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
   // An explicit --limit is a ceiling for BOTH push and pull (request size /
   // memory / slow-link timeout); only the default lets the loop go large.
@@ -3329,9 +3427,41 @@ export async function runLoop(config, options, dependencies = {}) {
   const BASE_BACKOFF_MS = 1000;
   const MAX_BACKOFF_MS = 60000;
 
+  // Taken once, before the loop: the reference the update check diffs
+  // against. null means the tree could not be observed COMPLETELY, and an
+  // incomplete baseline must disarm the whole detector rather than arm part
+  // of it (see collectInstallBaseline).
+  let installBaseline = null;
+  try { installBaseline = await collectInstallBaselineCall(scriptsRoot); }
+  catch { installBaseline = null; } // an observation failure is not evidence (#963)
+
   let catchUp = false; // start steady; the first cycle reveals any backlog
   let consecutiveFailures = 0;
   for (;;) {
+    // Checked at the cycle boundary, BEFORE any driver can be spawned: past
+    // this point the loop executes scripts from disk, and executing updated
+    // scripts from an engine holding pre-update code is the mixed-version
+    // state watch.sh refuses by name (#963). Returning -- not throwing --
+    // makes this a stand-down, not a failure: main() finishes and the
+    // process exits 0. The pidfile is left for `status` to call stale; its
+    // stale line already names `remote.sh sync start <team>`.
+    let updatedPath = null;
+    if (installBaseline !== null) {
+      try { updatedPath = await installChangedCall(scriptsRoot, installBaseline); }
+      catch { updatedPath = null; } // an observation failure is not evidence (#963)
+    }
+    if (updatedPath !== null && updatedPath !== undefined) {
+      try {
+        await eventCall("stand-down", {
+          reason: "install-updated",
+          team: config.local_team,
+          changed_path: String(updatedPath),
+          message: "the agmsg installation was updated while this engine was running, so it is still executing the code from before the update. Standing down rather than appearing to work.",
+          restart: `remote.sh sync start ${config.local_team}`,
+        });
+      } catch { /* logging is best-effort; the stand-down does not depend on it */ }
+      return;
+    }
     const pushLimit = ceiling ?? (catchUp ? LARGE_LIMIT : STEADY_PUSH_LIMIT);
     const pullLimit = ceiling ?? LARGE_LIMIT;
     try {

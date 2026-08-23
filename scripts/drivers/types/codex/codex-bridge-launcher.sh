@@ -368,9 +368,217 @@ else
   bridge_key="$(printf '%s' "$ids" | agmsg_sha1)"
 fi
 bridge_pairs=()
+bridge_pair_values=()
 while IFS="$TAB" read -r candidate_team candidate_name; do
   bridge_pairs+=(--pair "$candidate_team"$'\t'"$candidate_name")
+  bridge_pair_values+=("$candidate_team"$'\t'"$candidate_name")
 done <<< "$ids"
+# This launcher's identity, hashed the same way the bridge hashes its lease
+# (scripts/drivers/types/codex/codex-bridge.js writeLease): SHA-1 of the ASCII-
+# sorted per-pair SHA-1 hashes, joined by newlines. Hashing each pair FIRST means
+# the set order is decided by sorting hex (pure ASCII), so a byte sort here and a
+# code-unit sort in JS agree even for non-ASCII team/name -- the locale/Unicode
+# sort-order gap a raw-value sort would leave. PROJECT_HASH (above) is the project
+# half. Comparing hashes -- never raw values -- is what keeps a separator inside a
+# path or role from being misread as identity (#943).
+_pair_hashes=""
+for _pv in "${bridge_pair_values[@]}"; do
+  _pair_hashes="$_pair_hashes$(printf '%s' "$_pv" | agmsg_sha1)
+"
+done
+BRIDGE_PAIRS_HASH="$(printf '%s' "$(printf '%s' "$_pair_hashes" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
+
+
+# This launcher's full identity as one key: sha1 of the project hash and the
+# pair-set hash together. Everywhere identity is used -- the reap match AND the
+# spawn-rate reservation below -- keys on BOTH halves, so nothing is scoped by
+# role alone (project-blind keying is the bug class that produced #721 and the
+# earlier .meta collision).
+IDENTITY_HASH="$(printf '%s\n%s' "$PROJECT_HASH" "$BRIDGE_PAIRS_HASH" | agmsg_sha1)"
+
+# How long to wait for a reaped bridge to exit before treating it as stuck. The
+# real bridge shuts down async on SIGTERM and holds its thread as writer until it
+# does, so this outlasts an ordinary shutdown.
+_REAP_WAIT_TICKS=50
+
+# A process's start token, at the best precision the platform offers and by the
+# SAME method codex-bridge.js writeLease() records for itself, so the two agree:
+#   Linux -> /proc/<pid>/stat field 22 (starttime in clock ticks): lossless, so a
+#            recycled pid is always distinguishable from the one we leased.
+#   else  -> `ps -o lstart=` (second precision). Echoes "<src><TAB><token>";
+#            returns non-zero (indeterminable) so the caller fails closed.
+_start_token() {
+  local pid="$1" s r tok
+  local -a a
+  if [ -r "/proc/$pid/stat" ]; then
+    s="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    r="${s##*)}"
+    read -ra a <<< "$r"
+    tok="${a[19]:-}"
+    case "$tok" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc\t%s' "$tok"
+    return 0
+  fi
+  tok="$(ps -o lstart= -p "$pid" 2>/dev/null)"
+  # Trim leading/trailing whitespace only (ps pads); Node's .trim() on the writer
+  # side does the same, and both leave the internal single/double spaces intact,
+  # so the two strings compare equal.
+  tok="${tok#"${tok%%[![:space:]]*}"}"
+  tok="${tok%"${tok##*[![:space:]]}"}"
+  [ -n "$tok" ] || return 1
+  printf 'ps\t%s' "$tok"
+  return 0
+}
+
+# Parse a lease under an EXACT v=1 schema and fail closed on anything else. Sets
+# lproj/lpairs/lhost/lpid/lstart/lstartsrc and returns 0 only when the file is
+# precisely the seven expected keys, each once, no unknown or duplicate or extra
+# line, hashes 40-hex, pid numeric, startsrc proc|ps. A malformed, truncated, or
+# tampered lease returns non-zero, so the reaper never kills on a doubtful one.
+_read_lease() {
+  local file="$1" line k v nlines=0 lv=""
+  local sv=0 sproj=0 spairs=0 shost=0 spid=0 sstart=0 ssrc=0
+  lproj=""; lpairs=""; lhost=""; lpid=""; lstart=""; lstartsrc=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    nlines=$((nlines + 1))
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      v)        sv=$((sv + 1)); lv="$v" ;;
+      project)  sproj=$((sproj + 1)); lproj="$v" ;;
+      pairs)    spairs=$((spairs + 1)); lpairs="$v" ;;
+      host)     shost=$((shost + 1)); lhost="$v" ;;
+      pid)      spid=$((spid + 1)); lpid="$v" ;;
+      start)    sstart=$((sstart + 1)); lstart="$v" ;;
+      startsrc) ssrc=$((ssrc + 1)); lstartsrc="$v" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  [ "$nlines" -eq 7 ] || return 1
+  [ "$sv$sproj$spairs$shost$spid$sstart$ssrc" = "1111111" ] || return 1
+  [ "$lv" = "1" ] || return 1
+  case "$lproj" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lproj}" -eq 40 ] || return 1
+  case "$lpairs" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lpairs}" -eq 40 ] || return 1
+  case "$lpid" in *[!0-9]*|"") return 1 ;; esac
+  case "$lstartsrc" in proc|ps) ;; *) return 1 ;; esac
+  [ -n "$lhost" ] || return 1
+  [ -n "$lstart" ] || return 1
+  if [ "$lstartsrc" = proc ]; then case "$lstart" in *[!0-9]*|"") return 1 ;; esac; fi
+  return 0
+}
+
+# Reap every live bridge that is EXACTLY this (project, pair-set), identified by
+# the per-PID lease it published (codex-bridge-lease.<pid>) -- not by
+# reconstructing argv from ps, which is a lossy representation that misread
+# identity five different ways. ps is used ONLY to enumerate live pids and to
+# read each one's start token. Every doubt fails CLOSED (no kill): a missing lease
+# (a legacy bridge), a malformed or partial one, a different or absent host, a
+# hash that is not ours, a start token that no longer matches. Non-Windows only
+# (the pid is only killable in this shell's pid namespace; Windows is the #458
+# mismatch) and a no-op with no process lister.
+_reap_orphan_bridges() {
+  case "${MSYSTEM:-}" in MINGW*|MSYS*|CLANGARM*) return 0 ;; esac
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local myhost pid lease cur killed="" waited
+  local lproj lpairs lhost lpid lstart lstartsrc
+  myhost="$(hostname 2>/dev/null)"
+  [ -n "$myhost" ] || return 0
+  for pid in $(pgrep -f 'codex-bridge\.js' 2>/dev/null); do
+    lease="$RUN_DIR/codex-bridge-lease.$pid"
+    [ -f "$lease" ] || continue
+    _read_lease "$lease" || continue
+    [ "$lpid" = "$pid" ] || continue
+    [ "$lhost" = "$myhost" ] || continue
+    [ "$lproj" = "$PROJECT_HASH" ] || continue
+    [ "$lpairs" = "$BRIDGE_PAIRS_HASH" ] || continue
+    # Reuse guard: the LIVE pid's actual start token (same source) must still equal
+    # the lease's. A recycled pid has a different token (lossless on Linux), so it
+    # is spared.
+    cur="$(_start_token "$pid")" || continue
+    [ "$cur" = "$lstartsrc	$lstart" ] || continue
+    kill "$pid" 2>/dev/null || true
+    killed="$killed$pid	$lstartsrc	$lstart
+"
+  done
+  [ -n "$killed" ] || return 0
+  # THE RULE for every check here (add a new one? read this first): a failed
+  # observation is proof of NOTHING. Killing and spawning each need their OWN
+  # positive proof, and on any observation failure we do NOTHING -- the timeout
+  # bounds the wait, a failed read is never re-read as state:
+  #   kill  only with proof of IDENTITY  -- the start token READ and MATCHED (above)
+  #   spawn only with proof of EXIT      -- the killed pid's token READ and now names
+  #                                         a DIFFERENT process (a replacement, below)
+  # Wait for each killed pid to exit. The ONLY positive proof of exit we can trust
+  # here is a start token that reads and DIFFERS: the pid now hosts another process,
+  # so the one we killed is gone. Everything else keeps waiting -- a token that reads
+  # UNCHANGED (still alive), and, deliberately, a token we could NOT read (which
+  # proves nothing: /proc or ps can fail transiently). We do NOT consult
+  # _agmsg_pid_alive_local: its false is not a trustworthy absence proof -- a
+  # transient ps failure there returns "gone" (missing pipefail, #954), the exact
+  # observation-as-state trap this loop exists to avoid. So a normal exit falls
+  # through to the timeout and returns 1: we do NOT spawn this pass, so a bridge
+  # still holding the thread as writer is never double-started (#935). The cost is
+  # not a stall but one cycle -- the next pass no longer sees the exited pid in
+  # pgrep and spawns then.
+  while IFS="$TAB" read -r pid lstartsrc lstart; do
+    [ -n "$pid" ] || continue
+    waited=0
+    while :; do
+      cur="$(_start_token "$pid")"
+      if [ -n "$cur" ] && [ "$cur" != "$lstartsrc	$lstart" ]; then break; fi
+      if [ "$waited" -ge "$_REAP_WAIT_TICKS" ]; then return 1; fi
+      sleep 0.1; waited=$((waited + 1))
+    done
+  done <<EOF
+$killed
+EOF
+  return 0
+}
+
+# A ceiling on bridge spawns for this identity: at most _SPAWN_MAX in _SPAWN_WINDOW
+# seconds. The reap converges duplicates to one, but a bridge that cannot stay up
+# (a launcher dying before it records the pidfile) would reap-and-respawn every
+# tick; this bounds that churn.
+#
+# Reservations are self-expiring marker FILES, not a shared lock. A lock has to be
+# reclaimed when its holder dies, and every read->decide->reclaim scheme races
+# (an owner check cannot be made atomic with the unlink -- ABA). So instead each
+# spawn creates its own uniquely named marker carrying its timestamp IN THE NAME;
+# the count is just how many unexpired markers exist. Nothing is ever reclaimed:
+# a crashed launcher's marker simply ages out of the window and any later pass
+# prunes it. Reserve-then-count means a concurrent pair both count each other and
+# both back off, so the cap is never exceeded (it may briefly under-count, which
+# for a coarse throttle is the safe direction).
+_SPAWN_WINDOW=30
+_SPAWN_MAX=5
+_spawn_rate_ok() {
+  local prefix="codex-bridge-rate.$IDENTITY_HASH."
+  local now cutoff mine f base ts n=0
+  now="$(date +%s)"
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  cutoff=$((now - _SPAWN_WINDOW))
+  # Reserve: create MY marker with an exclusive (noclobber) create so two
+  # launchers never share one name. The timestamp lives in the name, so the file
+  # is empty and there is no create-then-write window for a counter to misread.
+  mine="$RUN_DIR/${prefix}${now}.$$.${RANDOM}${RANDOM}"
+  ( set -o noclobber; : > "$mine" ) 2>/dev/null || return 1
+  # Count unexpired markers (mine included), pruning ones that have aged out. The
+  # timestamp is read from the NAME, never the contents.
+  for f in "$RUN_DIR/$prefix"*; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    ts="${base#"$prefix"}"; ts="${ts%%.*}"
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    if [ "$ts" -lt "$cutoff" ]; then rm -f "$f" 2>/dev/null || true; continue; fi
+    n=$((n + 1))
+  done
+  # Over the cap: roll back my reservation and throttle.
+  if [ "$n" -gt "$_SPAWN_MAX" ]; then
+    rm -f "$mine" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
 pidfile="$RUN_DIR/codex-bridge.$bridge_key.pid"
 log="$RUN_DIR/codex-bridge.$bridge_key.log"
 # Records the app-server URL the live bridge was launched against, so a later
@@ -471,6 +679,10 @@ EOF
 
   # The role-session record is the sole thread authority (#150 phase 2/#350).
 
+  # Reset each tick: a mismatched-live bridge (bound to a stale thread/app-server)
+  # sets these to its pid and the start token it had at that moment. We never kill
+  # it from here; the token is how the guard before the spawn proves it is gone.
+  need_kill=""; need_kill_token=""
   if [ -f "$pidfile" ]; then
     bridge_pid=""
     IFS= read -r bridge_pid < "$pidfile" 2>/dev/null || true
@@ -493,12 +705,57 @@ EOF
         poll_sleep
         continue
       fi
-      kill "$bridge_pid" 2>/dev/null || true
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
-    else
-      rm -f "$pidfile" "$appserver_file" "$thread_file"
+      # A mismatched live bridge must be retired and rebound -- but NOT here.
+      # Tearing down (kill + wiping the recorded pidfile/app-server/thread) before
+      # the gates below would let a throttled or proof-less tick leave the binding
+      # wiped and un-rewritten, so a later launcher has nothing to rebind from
+      # (#350). Defer every teardown to the point we are actually committed to
+      # replacement -- and we do not kill it directly at all (below).
+      need_kill="$bridge_pid"
+      need_kill_token="$(_start_token "$bridge_pid" 2>/dev/null || true)"
     fi
   fi
+
+  # Bound the spawn rate first (a rate-limited tick changes nothing), then reap
+  # any orphan for this exact (project, role) so exactly one bridge remains. If a
+  # reaped bridge will not exit, do not spawn beside it this tick.
+  # In a set +e subshell: these two do a lot of probing whose non-zero results
+  # (no such process, an empty match, a lock already held) are normal, and the
+  # launcher runs under set -euo pipefail where a bare non-zero would exit it.
+  # Either returning non-zero means "not this tick" -- and because no teardown has
+  # run yet, the existing binding is left intact for the next tick / a rebind.
+  if ! ( set +e; _spawn_rate_ok ); then
+    poll_sleep
+    continue
+  fi
+  if ! ( set +e; _reap_orphan_bridges ); then
+    poll_sleep
+    continue
+  fi
+
+  # A mismatched-live bridge must be proven GONE before we spawn its replacement,
+  # or we double-start a writer that still holds the thread through async shutdown
+  # (#935). We do NOT kill it from here (the pidfile is a bare pid with no identity,
+  # so any direct kill could hit a reused pid; the lease-based reaper above is the
+  # only reuse-safe path that may signal it). And we do NOT ask _agmsg_pid_alive to
+  # "confirm" it is gone: a false from that helper can be a transient ps failure
+  # (#954), and a failed observation is not proof (see THE RULE above). The one
+  # positive proof we accept is the start token we stashed at detection now reading
+  # a DIFFERENT process -- the old pid has been reused, so the old writer is gone.
+  # A token that still matches (alive), or cannot be read (unproven), keeps the
+  # binding and retries; a normal exit is picked up next tick by the dead-pid path
+  # at the top of the loop. A lease-less bridge that never dies simply lingers
+  # (orphan survival is acceptable; a wrong-kill or a double-start is not).
+  if [ -n "$need_kill" ]; then
+    _nk_now="$(_start_token "$need_kill" 2>/dev/null || true)"
+    if [ -z "$need_kill_token" ] || [ -z "$_nk_now" ] || [ "$_nk_now" = "$need_kill_token" ]; then
+      poll_sleep
+      continue
+    fi
+  fi
+  # Committed to spawning now: clear the stale records immediately before writing
+  # the new ones, so no gate can bail out between the wipe and the rewrite.
+  rm -f "$pidfile" "$appserver_file" "$thread_file"
 
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \

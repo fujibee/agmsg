@@ -40,10 +40,42 @@ setup() {
   # Node binary codex-bridge-launcher.sh resolves this file through; pointing
   # it at bash makes bash the interpreter for this file regardless of its .js
   # name, so the launcher's default (no-custom-wrapper) path runs unmodified.
-  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<EOF
+  # Mock bridge: records argv AND publishes the same per-PID identity lease the
+  # real bridge does (so the reaper, which reads leases, can find/spare it). All
+  # of $CAPTURE / $SCRIPTS / $RUN_DIR come from the environment it inherits.
+  cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$CAPTURE"
-[ -z "\${MOCK_BRIDGE_SLEEP:-}" ] || sleep "\$MOCK_BRIDGE_SLEEP"
+printf '%s\n' "$*" >> "$CAPTURE"
+source "$SCRIPTS/lib/hash.sh" 2>/dev/null || true
+_proj=""; _parr=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project) _proj="$2"; shift 2 ;;
+    --pair) _parr+=("$2"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+_lease="$RUN_DIR/codex-bridge-lease.$$"
+# Start token exactly as codex-bridge-launcher.sh _start_token computes it: /proc
+# field 22 where available, else a trimmed `ps -o lstart=`.
+if [ -r "/proc/$$/stat" ]; then
+  _s="$(cat "/proc/$$/stat")"; _r="${_s##*)}"; read -ra _a <<< "$_r"
+  _start="${_a[19]}"; _ssrc=proc
+else
+  _start="$(ps -o lstart= -p $$)"
+  _start="${_start#"${_start%%[![:space:]]*}"}"; _start="${_start%"${_start##*[![:space:]]}"}"
+  _ssrc=ps
+fi
+_ph=""
+for _pv in "${_parr[@]}"; do _ph="$_ph$(printf '%s' "$_pv" | agmsg_sha1)
+"; done
+_pairs_hash="$(printf '%s' "$(printf '%s' "$_ph" | LC_ALL=C sort | sed '/^$/d')" | agmsg_sha1)"
+{ printf 'v=1\nproject=%s\npairs=%s\nhost=%s\npid=%s\nstart=%s\nstartsrc=%s\n' \
+    "$(printf '%s' "$_proj" | agmsg_sha1)" \
+    "$_pairs_hash" \
+    "$(hostname)" "$$" "$_start" "$_ssrc" ; } > "$_lease.tmp" && mv "$_lease.tmp" "$_lease"
+trap 'rm -f "$_lease"' EXIT
+[ -z "${MOCK_BRIDGE_SLEEP:-}" ] || sleep "$MOCK_BRIDGE_SLEEP"
 exit 0
 EOF
   chmod +x "$SCRIPTS/drivers/types/codex/codex-bridge.js"
@@ -474,4 +506,194 @@ wait_for_child_count() {
 
   [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
   grep -q -- '--thread thread-win' "$CAPTURE"
+}
+
+# --- #937: reap a same-(project,role) orphan via its per-PID identity lease ---
+
+_count_role_bridges() { # <project> <name>
+  # Match the role name at a word boundary, not as a substring: "alice" must not
+  # also count "alice2" (the survive tests turn on exactly that distinction), so a
+  # trailing digit/letter excludes it. Names here are plain [a-z0-9] test tokens.
+  ps -Ao pid=,args= 2>/dev/null | grep -F "codex-bridge.js" | grep -F -- "--project $1 " | grep -E "$2([^0-9A-Za-z]|\$)" | grep -c . | tr -d ' '
+}
+# Poll until this project's role-bridge count settles at <want>, then echo it --
+# a fixed sleep before a point-in-time count races the reap-and-respawn.
+_wait_role_count() { # <project> <name> <want>
+  local i
+  for i in {1..100}; do
+    [ "$(_count_role_bridges "$1" "$2")" -eq "$3" ] && break
+    sleep 0.1
+  done
+  _count_role_bridges "$1" "$2"
+}
+# Run the mock bridge directly for a given (project, pairs) so it publishes a
+# lease of that identity and stays alive. Sets FAKE_PID (NOT via $(...) -- a
+# background job in command substitution is killed when that subshell exits).
+_spawn_fake() { # <project> <pair...>
+  local proj="$1"; shift
+  local args=(--project "$proj") pv
+  for pv in "$@"; do args+=(--pair "$pv"); done
+  MOCK_BRIDGE_SLEEP=25 bash "$SCRIPTS/drivers/types/codex/codex-bridge.js" "${args[@]}" 3>&- &
+  FAKE_PID=$!
+}
+
+@test "launcher: reaps a same-(project,role) orphan the pidfile lost, converging to one (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  [ "$(_count_role_bridges "$PROJ" alice)" -eq 1 ]
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true
+}
+
+@test "launcher: a reap for one role leaves a same-project OTHER role alive (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}bob"; local bob=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$bob"
+  kill "$bob" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$bob" 2>/dev/null || true
+}
+
+@test "launcher: a reap for one project leaves the SAME role in another project alive (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$other"
+  kill "$other" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+}
+
+@test "launcher: a reap for role 'alice' does not sweep the prefix-colliding 'alice2' (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice2"; local alice2=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill -0 "$alice2"
+  kill "$alice2" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$alice2" 2>/dev/null || true
+}
+
+@test "launcher: an alice reaper does not kill a bridge that also serves bob (pair superset) (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice" "team${tab}bob"; local both=$FAKE_PID
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR"/codex-bridge.*.pid
+  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  # Its pair set is {alice,bob}, not {alice}: set inequality spares it.
+  kill -0 "$both"
+  kill "$both" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$both" 2>/dev/null || true
+}
+
+@test "launcher: a live bridge with no lease (legacy) is left alone, not killed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  # A same-(project,role) process that never published a lease -- an older bridge
+  # build. Fail-open: no lease, no kill. Spawn it, then remove its lease.
+  _spawn_fake "$PROJ" "team${tab}alice"; local legacy=$FAKE_PID
+  local j; for j in {1..50}; do [ -f "$RUN_DIR/codex-bridge-lease.$legacy" ] && break; sleep 0.1; done
+  rm -f "$RUN_DIR/codex-bridge-lease.$legacy"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$legacy"
+  kill "$legacy" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$legacy" 2>/dev/null || true
+}
+
+# --- #937 finding (4): the lease is the reaper's authority, so a broken one is a
+# new failure surface. Every malformed/partial/foreign lease must fail CLOSED
+# (no kill), asserted by a same-(project,alice) fake surviving the reaper. Each
+# starts from the valid lease the mock published, then corrupts that one file. ---
+_fake_alice_lease() { # sets FAKE_PID once its lease file exists
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice"
+  local j; for j in {1..50}; do [ -f "$RUN_DIR/codex-bridge-lease.$FAKE_PID" ] && break; sleep 0.1; done
+}
+
+@test "launcher: a truncated lease (missing fields) is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  head -3 "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a foreign host is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  awk '{ if ($0 ~ /^host=/) print "host=some-other-host.invalid"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with an unknown extra key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'rogue=1\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease with a duplicated key is not killed, fail-closed (#937)" {
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  { cat "$lease"; printf 'pid=99999\n'; } > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+}
+
+@test "launcher: a lease whose start token no longer matches the live pid is not killed (#937)" {
+  # The reuse guard: if the process now at that pid started at a different time
+  # than the lease records (a recycled pid, an unrelated bridge), killing it would
+  # be a wrong-kill. The token must PROVE the live process is the leased one, or
+  # nothing happens. Same identity as the launcher, so only the token spares it.
+  put_record team alice thread-alice "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  _fake_alice_lease; local victim=$FAKE_PID lease="$RUN_DIR/codex-bridge-lease.$FAKE_PID"
+  # Rewrite start= to a value that cannot equal the live process's actual token
+  # (its src stays valid so the lease still parses; only the token is wrong).
+  awk '{ if ($0 ~ /^start=/) print "start=1"; else print }' "$lease" > "$lease.x"; mv "$lease.x" "$lease"
+  sleep 22 3>&- & local parent=$!
+  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
+  sleep 3
+  kill -0 "$victim"
+  kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
 }

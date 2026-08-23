@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-08-22
+
+### Added
+- Emit push.posted when the POST is over, before the acks are written (#918)
+
+### Fixed
+- Name the sync engine in the update warning, not just watch.sh (#964)
+- Reap a same-(project,role) orphan before spawning (#906 link 2) (#943)
+- Preserve exact identity pairs in check-inbox (#721)
+- Exit when another writer owns the thread (#906 link 1) (#935)
+- Make the failure cap reach and bound the re-arm rate (#906 link 3) (#941)
+- Retry a busy apply that races EPIPE, keeping the hung-driver bound (#931)
+- A pulled field that is an array must not become shell words (#930)
+- Report a busy store as busy, not as a failed check, and wait for it (#920)
+- Say which check returned 13 (#911)
+
+### Performance
+- Index the two lookups that made import scale with the store (#956)
+- Quote SQL literals with a bash expansion, not a fork (#948)
+- A release PR is a version bump, not a third full matrix (#945)
+- Parse a pull page with one jq, framed by NUL, with no eval (#908, #940) (#942)
+- Check a pulled wire id without a process (#939)
+- Find the first gap once, not once per candidate (#932)
+- One jq per acknowledgement, not six forks (#927)
+- Quote each pulled message's fields once, not at 42 fork sites (#908) (#925)
+- Index events.legacy_id, looked up by value everywhere (#926)
+
 ## [1.2.2] - 2026-08-20
 
 ### Fixed
@@ -60,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A start that never began is a failed start, not a silent return (#810)
 
 ### Documentation
+- State the reason, not who gave it
 - A pushed head is not a shipped one
 - The header said builtins while calling three commands
 
@@ -463,10 +491,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve symlinks before trampoline compare; doctor checks node
 - Detect the macOS CLT python3 trampoline, not just PATH presence
 - Close the python3 dependency-tiering gap on the remote path
-- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation
-- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
 - Fail closed on incompleteness; shrink v1 schema
-- Wire 'agmsg team list' into actual dispatch entry points
+- Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
 - Separate token input from E2EE prompts
@@ -501,15 +529,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read messages from the event log too, not just the legacy table
 - Assert against the event log, not the legacy messages table
 - Escape interpolated names in rename/rename-team SQL (#223, #87)
-- Jsonl compact keys reads by tuple, not a space-join (#221)
+- Jsonl compact keys reads by tuple, not a space-join (co1 #221)
 - Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
-- Jsonl mark aborts on a failed existing-reads scan (#207)
-- Jsonl driver must not swallow failures as ok (#207)
+- Jsonl mark aborts on a failed existing-reads scan (co1 #207 residual)
+- Jsonl driver must not swallow failures as ok (co1 #207 review)
 - Watch-once stale-wake token = unread-set digest, not a max id (#207)
-- Document --limit semantics + make storage_history agent truly optional (#206)
-- Export skips unknown event types; pin high-water with a tail-duplicate test (#205)
-- Describe is a metadata op; surface backend errors; chronological reads (#204)
-- Legacy read, pipefail framing, §1.4 control ops (#204)
+- Document --limit semantics + make storage_history agent truly optional (co1 #206 review)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (co1 #205 review)
+- Describe is a metadata op; surface backend errors; chronological reads (co1 re-review, #204)
+- Legacy read, pipefail framing, §1.4 control ops (co1 review, #204)
 
 ### Performance
 - Seal a bulk push page in parallel (#502)
@@ -537,8 +565,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close Stage 2 frontier edge cases
 - Define Stage 2 read-state synchronization
 - Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
-- Correct the ctrl:despawn cursor-advance comment
-- Clarify stdout framing, cursor token, watch tip (#203)
+- Correct the ctrl:despawn cursor-advance comment (co1 step-3 review)
+- Clarify stdout framing, cursor token, watch tip (co1 review, #203)
 - Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
 - Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
@@ -766,7 +794,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help
+- List hermes in the --agent-type help (co1 nit)
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -849,6 +877,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/fujibee/agmsg/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.6...v1.2.0
 [1.2.0-rc.6]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.5...v1.2.0-rc.6
 [1.2.0-rc.5]: https://github.com/fujibee/agmsg/compare/v1.2.0-rc.4...v1.2.0-rc.5

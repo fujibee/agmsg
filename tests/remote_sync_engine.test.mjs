@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
-  writeFile } from "node:fs/promises";
+  utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,8 @@ import {
   isRetryable,
   initialAgeSnapshot,
   isRefusal,
+  collectInstallBaseline,
+  installChangedAgainst,
   runLoop,
   loadConfig,
   nextLocalAgeSnapshot,
@@ -3094,12 +3096,148 @@ test("configured native identity must belong to its epoch recipient manifest", a
 
 // ---- adaptive sync catch-up (adaptive-sync-catchup design) ----
 
+test("runLoop: an install update stands the engine down before any cycle, naming the update and the restart (#963)", async () => {
+  const events = [];
+  let cycles = 0;
+  // Resolves -- a stand-down is a deliberate return, not a thrown failure.
+  await runLoop(config, {}, {
+    collectInstallBaselineCall: async () => new Map([["/skill/scripts/a.sh", 111]]),
+    installChangedCall: async () => "/skill/scripts/drivers/storage/sqlite-sync.sh",
+    cycleCall: async () => { cycles += 1; return {}; },
+    sleepCall: async () => {},
+    eventCall: async (name, fields) => { events.push({ name, ...fields }); },
+  });
+  // Detected at the loop boundary: no driver was ever spawned.
+  assert.equal(cycles, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "stand-down");
+  assert.equal(events[0].reason, "install-updated");
+  assert.equal(events[0].changed_path, "/skill/scripts/drivers/storage/sqlite-sync.sh");
+  // The message names the update, not a parse error, and the restart names the team.
+  assert.match(events[0].message, /installation was updated/u);
+  assert.equal(events[0].restart, "remote.sh sync start demo");
+});
+
+test("runLoop: a failure to OBSERVE the install is not evidence -- the engine keeps running (#963)", async () => {
+  let cycles = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => new Map(),
+    installChangedCall: async () => { throw new Error("EACCES: scripts unreadable"); },
+    cycleCall: async () => {
+      cycles += 1;
+      if (cycles >= 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
+      return {};
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // The check threw on every iteration and the loop cycled anyway.
+  assert.equal(cycles, 2);
+});
+
+test("runLoop: an incomplete baseline disarms the detector entirely -- the check never runs (#963)", async () => {
+  let cycles = 0;
+  let checks = 0;
+  await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // one unreadable entry at start
+    installChangedCall: async () => { checks += 1; return "/would-be-proof"; },
+    cycleCall: async () => {
+      cycles += 1;
+      const stop = new Error("stop"); stop.retryable = false; throw stop;
+    },
+    sleepCall: async () => {},
+    isRetryableCall: () => false,
+    eventCall: async () => {},
+  }), /stop/);
+  // Partially armed detectors recreate the false positive; disarmed means today's behavior.
+  assert.equal(checks, 0);
+  assert.equal(cycles, 1);
+});
+
+test("install baseline: a pre-existing FUTURE mtime is what the tree looked like, not an update (#963)", async () => {
+  // The first review counterexample against comparing mtimes to the
+  // engine's start clock: a file that already carried a future mtime at
+  // start (clock skew, an archive with preserved timestamps) must not
+  // stand every fresh engine down. Against the baseline it is unchanged.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    const future = new Date(Date.now() + 3600_000);
+    await writeFile(join(root, "internal", "from-the-future.sh"), "echo hi\n");
+    await utimes(join(root, "internal", "from-the-future.sh"), future, future);
+    const baseline = await collectInstallBaseline(root);
+    assert.ok(baseline instanceof Map);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: an mtime change with UNCHANGED content is a touch, not an update (#963)", async () => {
+  // The second review counterexample: mtime change does not prove content
+  // change, and a false stand-down is a stopped sync engine. A touch, a
+  // metadata-only correction, a same-content re-copy must all keep the
+  // engine running; only different bytes are proof.
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963t-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    const file = join(root, "internal", "driver.sh");
+    await writeFile(file, "echo stable\n");
+    const baseline = await collectInstallBaseline(root);
+    // touch: same bytes, new mtime
+    const later = new Date(Date.now() + 60_000);
+    await utimes(file, later, later);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    // The benign touch is remembered: the next sweep takes the cheap path
+    // and does not re-read the file.
+    let reads = 0;
+    const countingRead = async (path) => { reads += 1; return readFile(path); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: countingRead }), null);
+    assert.equal(reads, 0);
+    // A rewrite with DIFFERENT bytes (and a new mtime) is proof.
+    const evenLater = new Date(Date.now() + 120_000);
+    await writeFile(file, "echo rewritten\n");
+    await utimes(file, evenLater, evenLater);
+    assert.equal(await installChangedAgainst(root, baseline), file);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("install baseline: a file appearing after start is proof; missing roots observe nothing (#963)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-963b-"));
+  try {
+    await mkdir(join(root, "internal"), { recursive: true });
+    await writeFile(join(root, "internal", "old.sh"), "echo old\n");
+    const baseline = await collectInstallBaseline(root);
+    assert.equal(await installChangedAgainst(root, baseline), null);
+    await writeFile(join(root, "internal", "added-by-update.sh"), "echo new\n");
+    assert.equal(await installChangedAgainst(root, baseline),
+      join(root, "internal", "added-by-update.sh"));
+    // A root that cannot be read at baseline time disables the detector (null)...
+    assert.equal(await collectInstallBaseline(join(root, "no-such-dir")), null);
+    // ...and one that cannot be read at check time yields no evidence.
+    assert.equal(await installChangedAgainst(join(root, "no-such-dir"), baseline), null);
+    // A file whose bytes cannot be re-read after an mtime change proves nothing.
+    await unlink(join(root, "internal", "added-by-update.sh")); // clear the standing proof first
+    const target = join(root, "internal", "old.sh");
+    const later = new Date(Date.now() + 60_000);
+    await utimes(target, later, later);
+    const failingRead = async () => { throw new Error("EACCES"); };
+    assert.equal(await installChangedAgainst(root, baseline, { readFileCall: failingRead }), null);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
 test("runLoop: push saturation drives catch-up (no wait), a drained cycle returns to the steady interval", async () => {
   const sleeps = [];
   const limitsSeen = [];
   const saturationScript = [true, true, false]; // two catch-up cycles, then drained
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (i >= saturationScript.length) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3124,6 +3262,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
   const sleeps = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) return { pushSaturated: true }; // enter catch-up (would otherwise skip the wait)
@@ -3141,6 +3280,7 @@ test("runLoop: a retryable failure always backs off exponentially, even after en
 test("runLoop: an explicit --limit caps both push and pull page sizes, even in catch-up", async () => {
   const limitsSeen = [];
   await assert.rejects(() => runLoop(config, { limit: 50 }, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async (_config, limits) => {
       limitsSeen.push(limits);
       if (limitsSeen.length === 1) return { pushSaturated: true }; // would jump to 1000 without a ceiling
@@ -3167,6 +3307,7 @@ test("runLoop: an explicit --limit caps both push and pull page sizes, even in c
 const cycleErrorFor = async (error) => {
   const logged = [];
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { throw error; },
     sleepCall: async () => {},
     isRetryableCall: () => false, // one iteration, then out
@@ -3182,6 +3323,7 @@ const cycleRecordRun = async (script) => {
   const recorded = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       const step = script[i++];
       if (step === undefined) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -3214,6 +3356,7 @@ test("runLoop: bookkeeping that throws does not take down a working cycle", asyn
   // claiming a success that did not.
   let cycles = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       cycles += 1;
       if (cycles > 2) { const stop = new Error("stop"); stop.retryable = false; throw stop; }
@@ -4320,6 +4463,7 @@ test("runLoop: a refusal is recorded and does NOT leave the loop", async () => {
   // reached, and a fixture without one would let the assertion pass on null.
   const refusedConfig = { ...config, endpoint: "https://sync.example.test" };
   await assert.rejects(() => runLoop(refusedConfig, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i <= 2) { const refused = new Error("HTTP 402 payment_required"); refused.status = 402; refused.code = "payment_required"; throw refused; }
@@ -4356,6 +4500,7 @@ test("runLoop: a successful cycle clears a refusal that is no longer true", asyn
   const cleared = [];
   let i = 0;
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => {
       i += 1;
       if (i === 1) { const refused = new Error("refused"); refused.status = 402; throw refused; }
@@ -4379,6 +4524,7 @@ test("runLoop: a non-retryable error that is NOT a refusal still ends the loop",
   // config into an engine that spins forever saying nothing useful — exiting
   // is right for that, and the refusal case is the exception, not the rule.
   await assert.rejects(() => runLoop(config, {}, {
+    collectInstallBaselineCall: async () => null, // not under test; skip the real scripts walk
     cycleCall: async () => { const bad = new Error("config is unreadable"); throw bad; },
     isRetryableCall: () => false,
     isRefusalCall: () => false,
@@ -4428,9 +4574,20 @@ test("pull bootstrap reports progress on stderr and leaves stdout as the result 
   }
 
   // stdout: exactly the result, still parseable as one JSON line.
-  const stdoutLines = out.join("").split("\n").filter((line) => line !== "");
-  assert.equal(stdoutLines.length, 1);
-  assert.equal(JSON.parse(stdoutLines[0]).type, "pull_bootstrap_result");
+  // Judged by CONTENT, not by a raw line count. Under `node --test` the test
+  // runner itself transports its results over this same stdout, and its
+  // serialized test:complete frame for the PREVIOUS test can flush into the
+  // patched window on a slow machine -- observed on CI as a 2!==1 count with
+  // the second "line" being the runner's frame, which no real consumer of
+  // pullBootstrap ever sees (in production this code does not run under the
+  // test runner). What this case actually protects: exactly one result line
+  // lands on stdout, and no progress line does.
+  const stdoutText = out.join("");
+  const resultLines = stdoutText.split("\n").filter((line) =>
+    line.startsWith('{"type":"pull_bootstrap_result"'));
+  assert.equal(resultLines.length, 1, `stdout carried: ${JSON.stringify(out)}`);
+  assert.equal(JSON.parse(resultLines[0]).type, "pull_bootstrap_result");
+  assert.ok(!stdoutText.includes("agmsg: ["), "a progress line leaked onto stdout");
 
   // stderr: the operator can see it start, and can see it move. Both halves are
   // named, because when this stops moving the line it stopped on says whether
