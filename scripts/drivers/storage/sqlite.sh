@@ -247,7 +247,14 @@ _sqlite_message_sent_sql() {
   local team="$1" from="$2" to="$3" body="$4" id="$5" at="$6"
   local tl fl ol bl il al
   tl="$(_sqlite_lit "$team")"; fl="$(_sqlite_lit "$from")"; ol="$(_sqlite_lit "$to")"
-  bl="$(_sqlite_lit "$body")"; il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
+  # The body is the one value here that can end in a newline, and a command
+  # substitution eats every trailing newline it is given. `_sqlite_lit` emits
+  # the right bytes -- they are lost on the way back. The `printf x` sentinel
+  # holds them, and is stripped again immediately. The other five values are
+  # team and agent names, a UUID and a timestamp: all validated, none able to
+  # end in a newline, so they do not need it.
+  bl="$(_sqlite_lit "$body"; printf x)"; bl="${bl%x}"
+  il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
   printf '%s\n' "
     BEGIN IMMEDIATE;
     INSERT INTO messages (team,from_agent,to_agent,body,created_at)
