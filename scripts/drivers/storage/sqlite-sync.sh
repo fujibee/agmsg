@@ -1076,7 +1076,11 @@ storage_sync_apply_pull() {
       [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
       printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
     fi
-    exec 3<&- 2>/dev/null || true
+    # A brace group, because `exec` with no command word applies its
+    # redirections to the shell itself and they outlive the statement: the
+    # bare form sent every later stderr write in this shell to /dev/null,
+    # starting with `_sqlite_sync_why` (#911).
+    { exec 3<&-; } 2>/dev/null || true
     rm -f "$sql_file" "$jq_err"
     _AGMSG_SYNC_SQL_FILE=""; _AGMSG_SYNC_JQ_ERR=""
     trap - EXIT INT TERM HUP
