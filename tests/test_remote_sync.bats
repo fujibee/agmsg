@@ -22,6 +22,21 @@ prepare_push() {
   printf '%s\n' "$PREPARE" | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 "${1:-100}"
 }
 
+# `_sqlite_sync_apply_fail` closes fd 3 with `exec 3<&- 2>/dev/null`. `exec` with
+# no command word runs nothing -- it applies its redirections to the shell
+# itself, and they outlive the statement. So every later write to stderr in that
+# shell went to /dev/null, and the first thing written after it is
+# `_sqlite_sync_why`: the line #911 exists to print. The two messages emitted
+# *before* the close still arrived, so the output looked almost right.
+@test "sync contract: a failed apply still names the check that returned 13 (#911)" {
+  local rc=0
+  printf 'not json at all\n' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 \
+      >/dev/null 2>"$BATS_TEST_TMPDIR/apply.err" || rc=$?
+  [ "$rc" -eq 13 ]
+  grep -q 'storage_sync_apply_pull failed at' "$BATS_TEST_TMPDIR/apply.err"
+}
+
 @test "sync contract: the builtin quote and the forking quote agree on adversarial input (#908)" {
   # storage_sync_apply_pull quotes its eleven per-message fields through
   # _sqlite_sync_lit_into (a bash expansion) where it used to fork
