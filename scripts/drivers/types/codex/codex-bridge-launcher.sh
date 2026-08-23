@@ -407,9 +407,50 @@ _REAP_WAIT_TICKS=50
 #            recycled pid is always distinguishable from the one we leased.
 #   else  -> `ps -o lstart=` (second precision). Echoes "<src><TAB><token>";
 #            returns non-zero (indeterminable) so the caller fails closed.
+#   win32 -> Process.StartTime.Ticks via PowerShell -- the SAME single source
+#            codex-bridge.js startToken() writes, so both sides always agree.
+#            WMIC's CreationDate is cheaper but deprecated (already gone from some
+#            Windows 11 installs); a "WMIC, else PowerShell" order on each side
+#            independently would let the two resolve DIFFERENT sources for the
+#            same process whenever only one of them can reach wmic.exe, and their
+#            differently-FORMATTED tokens would make the reaper read a live
+#            bridge's lease as another process's. powershell.exe and pwsh return
+#            identical Ticks (measured), so falling back between those two
+#            binaries introduces no such divergence.
+#
+# ★The Windows branch is taken INSTEAD of the /proc branch, not merely before it.
+# MSYS/Cygwin do expose a working /proc (field 22 and all), but it is keyed by the
+# emulation layer's OWN pid space, while a lease records the Windows pid that
+# codex-bridge.js sees as process.pid -- the two are unrelated numbers for the
+# same process (measured on MINGW64: MSYS pid 3065729 vs winpid 1456). Letting
+# /proc win here would silently return the start time of whatever UNRELATED MSYS
+# process happens to sit at that number, and the reaper would then compare a
+# well-formed token against the wrong process: exactly the recycled-pid confusion
+# the token exists to prevent, only harder to notice because nothing errors.
+_agmsg_is_windows() {
+  case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _start_token() {
-  local pid="$1" s r tok
+  local pid="$1" s r tok bin
   local -a a
+  if _agmsg_is_windows; then
+    for bin in powershell.exe pwsh; do
+      # `tr -d '\r'` because PowerShell writes CRLF and Node's .trim() on the
+      # writer side strips it there, so both end up with the bare digits.
+      tok="$("$bin" -NoProfile -NonInteractive -Command \
+        "(Get-Process -Id $pid).StartTime.Ticks" 2>/dev/null | tr -d '\r' | head -n 1)"
+      tok="${tok#"${tok%%[![:space:]]*}"}"
+      tok="${tok%"${tok##*[![:space:]]}"}"
+      case "$tok" in ''|*[!0-9]*) continue ;; esac
+      printf 'pwsh\t%s' "$tok"
+      return 0
+    done
+    return 1
+  fi
   if [ -r "/proc/$pid/stat" ]; then
     s="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
     r="${s##*)}"
@@ -433,7 +474,7 @@ _start_token() {
 # Parse a lease under an EXACT v=1 schema and fail closed on anything else. Sets
 # lproj/lpairs/lhost/lpid/lstart/lstartsrc and returns 0 only when the file is
 # precisely the seven expected keys, each once, no unknown or duplicate or extra
-# line, hashes 40-hex, pid numeric, startsrc proc|ps. A malformed, truncated, or
+# line, hashes 40-hex, pid numeric, startsrc proc|ps|pwsh. A malformed, truncated, or
 # tampered lease returns non-zero, so the reaper never kills on a doubtful one.
 _read_lease() {
   local file="$1" line k v nlines=0 lv=""
@@ -460,10 +501,16 @@ _read_lease() {
   case "$lproj" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lproj}" -eq 40 ] || return 1
   case "$lpairs" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#lpairs}" -eq 40 ] || return 1
   case "$lpid" in *[!0-9]*|"") return 1 ;; esac
-  case "$lstartsrc" in proc|ps) ;; *) return 1 ;; esac
+  case "$lstartsrc" in proc|ps|pwsh) ;; *) return 1 ;; esac
   [ -n "$lhost" ] || return 1
   [ -n "$lstart" ] || return 1
-  if [ "$lstartsrc" = proc ]; then case "$lstart" in *[!0-9]*|"") return 1 ;; esac; fi
+  # proc's starttime ticks and .NET's StartTime.Ticks are both bare integers, so
+  # a lease carrying anything else under either label fails closed here. ps stays
+  # exempt: its lstart is a human date string whose punctuation varies by
+  # platform, and writer and reader only ever compare it byte for byte.
+  case "$lstartsrc" in
+    proc|pwsh) case "$lstart" in *[!0-9]*|"") return 1 ;; esac ;;
+  esac
   return 0
 }
 

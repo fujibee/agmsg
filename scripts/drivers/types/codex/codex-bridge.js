@@ -1087,7 +1087,45 @@ class CodexBridge {
   //            and the only victim would be a same-(project,pair) bridge in the
   //            sub-ms window before it overwrites this pid's lease, self-corrected
   //            by the launcher respawning it.
+  //   win32 -> Process.StartTime.Ticks, read through PowerShell. Windows has NO
+  //            /proc, and the only `ps` likely to be on PATH there is MSYS's,
+  //            which rejects -o outright ("ps: unknown option -- o") rather than
+  //            degrading -- so BOTH POSIX sources above yield an empty token and
+  //            writeLease() throws, which is why the bridge could never start on
+  //            Windows at all.
+  //            ★ONE source, deliberately, not a preference list. WMIC's
+  //            CreationDate is ~2x cheaper and was the obvious first pick, but it
+  //            is deprecated and already absent from Windows 11 installs that
+  //            have dropped the Feature-on-Demand. A per-side "WMIC, else
+  //            PowerShell" order would then let THIS writer and _start_token
+  //            (codex-bridge-launcher.sh) resolve DIFFERENT sources for the SAME
+  //            process whenever only one of the two can reach wmic.exe -- their
+  //            tokens differ by FORMAT, so the reaper would read a live bridge's
+  //            lease as some other process's and never collect the orphan it
+  //            exists to collect. Ticks is the one value both sides can always
+  //            agree on, so the speed is not worth the divergence.
+  //            Falling back from powershell.exe to pwsh is safe for the same
+  //            reason it is safe here and nowhere else: both return the SAME
+  //            Ticks for a given pid (measured), so the src label names the
+  //            format, not the executable that produced it.
   startToken() {
+    if (process.platform === "win32") {
+      for (const bin of ["powershell.exe", "pwsh"]) {
+        const r = spawnSync(
+          bin,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${process.pid}).StartTime.Ticks`,
+          ],
+          { encoding: "utf8" },
+        );
+        const ticks = (r.status === 0 ? (r.stdout || "") : "").trim();
+        if (/^\d+$/.test(ticks)) return { src: "pwsh", token: ticks };
+      }
+      return { src: "pwsh", token: "" };
+    }
     try {
       const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
       const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
