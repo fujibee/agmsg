@@ -1043,7 +1043,7 @@ storage_sync_apply_pull() {
       [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
       printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
     fi
-    exec 3<&- 2>/dev/null || true
+    { exec 3<&-; } 2>/dev/null || true
     rm -f "$sql_file" "$jq_err"
     _AGMSG_SYNC_SQL_FILE=""; _AGMSG_SYNC_JQ_ERR=""
     trap - EXIT INT TERM HUP
