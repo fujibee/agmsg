@@ -974,17 +974,33 @@ storage_sync_apply_pull() {
   # through `tostring | @sh` (#930): the only thing standing between a
   # server-chosen string and the shell was quoting discipline. Both costs go
   # together. The page is parsed by a single jq that emits, after a leading
-  # record count, every record's eighteen fields as raw values separated by
-  # NUL bytes; the loop below reads them with `read -d ''` into plain
-  # variables. Nothing server-chosen is ever parsed as shell again -- the
-  # class #930 had to defend is gone, not guarded.
+  # record count, one quarantine-flag frame followed by every record's
+  # eighteen fields as raw values, all separated by NUL bytes; the loop below
+  # reads them with `read -d ''` into plain variables. Nothing server-chosen
+  # is ever parsed as shell again -- the class #930 had to defend is gone,
+  # not guarded.
   #
-  # The framing is sound because a NUL can never appear inside a value: jq
-  # refuses any record whose field contains U+0000, naming the record and the
-  # field (#940 -- the old pipeline silently stored such a body MANGLED, the
-  # NUL becoming other bytes on the way through `jq -r` and the shell's own
-  # NUL-stripping, and reported success; a value the store cannot hold
-  # verbatim is refused now, not rewritten).
+  # The framing is sound because a NUL can never appear inside a value jq
+  # emits: fourteen fields (type, next_after, server_seq, id,
+  # server_received_at, envelope.*, status, policy_revision,
+  # local_security_revision, reason, projection.kind) still refuse the whole
+  # record's page outright if they hold one, naming the record and the field
+  # -- these are the fields every UPDATE in this function uses to find a
+  # SPECIFIC existing row, so a corrupt one cannot be trusted to name itself,
+  # let alone be stripped and reused as if clean (identifier poisoning: a
+  # DIFFERENT record's real id, with U+0000 appended, would strip down to
+  # that record's own wire id and land this record's outcome on it instead).
+  # The remaining four -- projection.from_agent/to_agent/body/created_at,
+  # never used to look up or update a different row -- have U+0000 stripped
+  # unconditionally instead, with the leading flag frame naming whether any
+  # of the four held it; the shell routes a flagged record to per-record
+  # quarantine rather than losing the whole page to it (#940's own
+  # regression: one bad body made a team impossible to ever pull again). The
+  # old pipeline silently stored a NUL-holding body MANGLED -- the byte
+  # becoming other bytes on the way through `jq -r` and the shell's own
+  # NUL-stripping -- and reported success; this neither rewrites nor loses
+  # it: the value the store cannot hold verbatim is named and quarantined,
+  # not silently kept.
   #
   # --raw-input keeps the old "one JSON value per line" refusal: each line is
   # fromjson'd on its own, so a line smuggling two values fails exactly as it
