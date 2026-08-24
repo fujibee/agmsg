@@ -94,6 +94,20 @@ case "$1" in
     exit 1
     ;;
   *)
+    # A positional body that starts with '--' but isn't a mode this script
+    # recognizes (e.g. a misspelled --body-fiel, or a future flag typo) used
+    # to be stored literally as the message — silently accepting whatever the
+    # caller typed instead of failing loudly on the likely mistake. Fail
+    # closed instead: require the explicit '--' separator (or --body-file)
+    # for any body that looks like an option. A body that legitimately IS an
+    # option-like string still works via `-- <body>`, same as the recognized
+    # flags above.
+    case "$1" in
+      --*)
+        echo "option-like body: use -- separator or --body-file" >&2
+        exit 1
+        ;;
+    esac
     BODY="$1"
     shift
     ;;
@@ -148,6 +162,23 @@ if [ "$MODE" = "stdin" ]; then
     exit 1
   fi
 elif [ "$MODE" = "file" ]; then
+  # Require an absolute, non-symlink regular file. A relative path resolves
+  # against whatever directory the caller happened to be in when send.sh ran
+  # — silently reading the wrong file if that ever changes — and a symlink
+  # lets the file's *content* change between validation and read without the
+  # path itself changing, plus can point somewhere the caller did not intend.
+  # Both fail closed instead of being followed.
+  case "$BODY_FILE" in
+    /*) ;;
+    *)
+      echo "Error: --body-file '$BODY_FILE' must be an absolute path." >&2
+      exit 1
+      ;;
+  esac
+  if [ -L "$BODY_FILE" ]; then
+    echo "Error: --body-file '$BODY_FILE' is a symlink; pass the real file's absolute path." >&2
+    exit 1
+  fi
   if [ ! -f "$BODY_FILE" ]; then
     echo "Error: --body-file '$BODY_FILE' does not exist or is not a regular file." >&2
     exit 1

@@ -239,6 +239,21 @@ teardown() {
   [[ "$output" =~ "Sent to bob" ]]
 }
 
+@test "send: rejects an option-like positional body without a '--' separator" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-fiel
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "option-like body: use -- separator or --body-file"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: an option-like body still sends verbatim after the '--' separator" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --body-fiel
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+}
+
 @test "send: --stdin composes with --force" {
   run bash -c "printf 'hi' | bash \"\$1\" brandnewteam ghost nobody --stdin --force" _ "$SCRIPTS/send.sh"
   [ "$status" -eq 0 ]
@@ -295,6 +310,37 @@ teardown() {
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
+}
+
+@test "send: rejects a relative --body-file path" {
+  printf 'x' > "$TEST_SKILL_DIR/rel-body.txt"
+  run bash -c "cd \"\$1\" && bash \"\$2\" testteam alice bob --body-file rel-body.txt" _ "$TEST_SKILL_DIR" "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "must be an absolute path"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects a --body-file that is a symlink, even to a valid readable file" {
+  local target="$TEST_SKILL_DIR/real-body.txt"
+  local link="$TEST_SKILL_DIR/link-body.txt"
+  printf 'x' > "$target"
+  ln -s "$target" "$link"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$link"
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "is a symlink"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: accepts an absolute, non-symlink --body-file" {
+  local f="$TEST_SKILL_DIR/abs-body.txt"
+  printf 'hello' > "$f"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
 }
 
 @test "send: rejects empty stdin with a clear error, not an empty message" {
