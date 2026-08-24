@@ -224,8 +224,24 @@ fake_session() {
 
   bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
 
-  # Several poll cycles at the 1s interval set above.
-  sleep 4
+  # Wait for the watcher to SAY it noticed, not for a duration to pass (#828).
+  # `sleep 4` here assumed four poll cycles at the 1s interval; under load the
+  # watcher can complete none of them in four seconds, and the assertions below
+  # then read a watcher that has not looked yet as one that consumed nothing.
+  # The stderr line is the same observable the last assertion in this test
+  # already relies on, so waiting for it costs nothing and cannot pass early.
+  for i in $(seq 1 200); do
+    grep -q "sid-new" "$BATS_TEST_TMPDIR/old.err" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q "sid-new" "$BATS_TEST_TMPDIR/old.err"
+
+  # And for it to be gone, rather than assuming saying so was the same as
+  # having exited.
+  for i in $(seq 1 200); do
+    kill -0 "$old" 2>/dev/null || break
+    sleep 0.1
+  done
   kill "$newpid" 2>/dev/null || true
 
   # It must not have taken a message addressed to a role it no longer owns.
