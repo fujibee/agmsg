@@ -64,11 +64,12 @@ _sqlite_data_stdin() {
 
 # The same, for a statement whose output nobody reads. Takes a database PATH
 # rather than a team, because its callers are inside the driver and hold one.
+# -bail as at the two driver sites this replaced: the stdin form must stop at
+# the first error so a busy call has written nothing of a transaction that
+# never began, which is what lets the engine retry it. The warm call sits on
+# the line above the pipe, where the #462 scan looks for it.
 _sqlite_exec_stdin() {
   agmsg_sqlite_warm
-  # -bail as at the two sites this replaced on main: the stdin form must stop
-  # at the first error so a busy call has written nothing of a transaction
-  # that never began, which is what lets the engine retry it.
   printf '%s\n' "$2" | agmsg_sqlite -bail -batch "$1"
 }
 
