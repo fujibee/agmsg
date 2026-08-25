@@ -127,9 +127,26 @@ while true; do
       u="$(storage_list_unread "$_team" "$_agent" 2>/dev/null || true)"
       [ -n "$u" ] || continue
       uarr="[$(printf '%s' "$u" | paste -sd, -)]"
-      ids="$(agmsg_sqlite ':memory:' "
-        SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');
-      " 2>/dev/null || true)"
+      # #777: this pair's unread backlog grows with every message sent to it,
+      # so interpolating it into ONE argv element eventually exceeds the OS's
+      # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller
+      # still on Windows/macOS) and `agmsg_sqlite` fails with "Argument list
+      # too long" -- every single poll, since the backlog that triggered it
+      # never shrinks on its own (this script never marks anything read; see
+      # the file header). Pass the statement on stdin instead, mirroring
+      # drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
+      # history.sh/inbox.sh: printf is a bash builtin, so writing a large
+      # value to a temp file never execs and can hit neither that ceiling nor
+      # argv's at all. `|| continue` on mktemp failure matches the existing
+      # per-pair `continue` a few lines above: one pair's storage error must
+      # not end the whole subscription's poll.
+      _agmsg_wo_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-watchonce-ids.XXXXXX" 2>/dev/null) || continue
+      trap 'rm -f "$_agmsg_wo_sql"' EXIT HUP INT TERM
+      printf "%s\n" "SELECT json_extract(value,'\$.id') FROM json_each('$(printf '%s' "$uarr" | sed "s/'/''/g")');" \
+        > "$_agmsg_wo_sql"
+      ids="$(agmsg_sqlite ':memory:' < "$_agmsg_wo_sql" 2>/dev/null || true)"
+      rm -f "$_agmsg_wo_sql"
+      trap - EXIT HUP INT TERM
       [ -n "$ids" ] || continue
       count=$(( count + $(printf '%s\n' "$ids" | grep -c .) ))
       all_ids="$all_ids$ids"$'\n'

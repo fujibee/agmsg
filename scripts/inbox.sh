@@ -48,13 +48,29 @@ fi
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
 _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
-ROWS=$(agmsg_sqlite ':memory:' "
-  SELECT json_extract(value,'\$.from') || char(31) ||
-         replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
-         json_extract(value,'\$.at') || char(31) ||
-         json_extract(value,'\$.id')
-  FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
-")
+# #777: an agent's unread backlog grows with every message sent to it, so
+# interpolating it into ONE argv element eventually exceeds the OS's
+# per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller still on
+# Windows/macOS) and `agmsg_sqlite` fails with "Argument list too long" --
+# every single call, since the backlog that triggered it never shrinks on
+# its own. Pass the statement on stdin instead, mirroring
+# drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
+# history.sh: printf is a bash builtin, so writing a large value to a temp
+# file never execs and can hit neither that ceiling nor argv's at all.
+_agmsg_inbox_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
+trap 'rm -f "$_agmsg_inbox_sql"' EXIT HUP INT TERM
+{
+  printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
+  printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
+  printf "%s\n" "       json_extract(value,'\$.id')"
+  printf "FROM json_each('"
+  printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
+  printf "');\n"
+} > "$_agmsg_inbox_sql"
+ROWS=$(agmsg_sqlite ':memory:' < "$_agmsg_inbox_sql")
+rm -f "$_agmsg_inbox_sql"
+trap - EXIT HUP INT TERM
 
 COUNT=$(printf '%s\n' "$ROWS" | wc -l | tr -d ' ')
 echo "$COUNT new message(s):"
