@@ -1409,17 +1409,33 @@ storage_sync_prepare_read_state() {
   # past it has had ten thousand joins, leaves or renames, which is a signal
   # to look at the design, not a size to wave through. Over the bound is
   # refused (13), which leaves the frontier where it was -- the safe side.
-  # Shape and size in jq; the DOMAIN through _sqlite_sync_sequence, the same
-  # bound this function already holds current_seq to a hundred lines above.
-  # Shape alone let 9223372036854775808..9999999999999999999 through (review
-  # finding), and an INTEGER PRIMARY KEY temp table then fails the whole
-  # read-prepare transaction with a datatype mismatch -- no 13, no reason.
+  # Shape and size in jq, then the DOMAIN per entry through
+  # _sqlite_sync_sequence -- the same bound (9223372036854775807) this
+  # function already holds current_seq to, a hundred lines above. Two review
+  # findings shaped this:
+  #   - Shape alone let 9223372036854775808..9999999999999999999 through. The
+  #     temp table's INTEGER PRIMARY KEY (a rowid alias) refuses such a value
+  #     outright, so the whole read-prepare transaction died with a datatype
+  #     mismatch -- neither a 13 nor "no evidence", a way of failing the
+  #     contract does not name. Hence the domain check.
+  #   - The shape test is anchored \A..\z, not ^..$: in jq's regex engine $
+  #     also matches before one trailing newline, so "1\n" passed as a
+  #     sequence; the per-entry loop below then read "1", skipped the empty
+  #     line, and the SQL got (1\n), which SQLite accepts as 1 -- a malformed
+  #     entry exempting a real sequence, the one direction this must never
+  #     take. With absolute anchors no accepted entry can carry a newline, so
+  #     the line-framed loop sees exactly the entries jq accepted.
   # Pure bash per entry, no fork; at most 10,000 entries.
-  [ "$(printf '%s\n' "$context" | jq -r '
-    select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
-      (.roster_seqs|length)<=10000 and all(.roster_seqs[]; type=="string"))) | "ok"' \
-      2>/dev/null)" = ok ] || {
-    echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 strings (#968)" >&2
+  # The jq program lives in a variable: bash 3.2 misparses the backslashes of
+  # \A and \z when they sit in a quoted string inside $( ), and the check
+  # then fails closed for every list (macOS CI, and the same 3.2 divergence
+  # #928 met with a quote). The same reason _SQLITE_SYNC_WIRE_RE is a variable.
+  local roster_seqs_jq
+  roster_seqs_jq='select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
+      (.roster_seqs|length)<=10000 and all(.roster_seqs[];
+        (type=="string") and test("\\A(0|[1-9][0-9]{0,18})\\z")))) | "ok"'
+  [ "$(printf '%s\n' "$context" | jq -r "$roster_seqs_jq" 2>/dev/null)" = ok ] || {
+    echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 canonical sequences (#968)" >&2
     _sqlite_sync_why; return 13
   }
   local roster_seq

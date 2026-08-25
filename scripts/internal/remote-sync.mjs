@@ -2879,10 +2879,12 @@ export async function rosterSequencesFor(config, dependencies = {}) {
         record.server_instance_id !== config.server_instance_id ||
         record.remote_team_id !== config.remote_team_id) continue;
     // The sequence DOMAIN, through the one validator the rest of this file
-    // uses -- shape alone let 9223372036854775808..9999999999999999999
-    // through (review finding), and SQLite stores those as REAL rather than
-    // refusing them. A record outside the domain is corrupt evidence, treated
-    // like a torn line: named, and the whole list withheld.
+    // uses. Shape alone let 9223372036854775808..9999999999999999999 through
+    // (review finding); on the driver side the temp table's INTEGER PRIMARY
+    // KEY refuses such a value outright, so the whole read-prepare
+    // transaction died with a datatype mismatch -- neither a 13 nor "no
+    // evidence" (measured in review). A record outside the domain is corrupt
+    // evidence, treated like a torn line: named, and the whole list withheld.
     try { sequence(record.server_seq, "roster journal server_seq"); }
     catch (error) {
       try {

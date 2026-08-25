@@ -1466,7 +1466,7 @@ _968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact"
   # refusal by its own message (the #911 line number would differ as well).
   run _968_prepare 10004 "$(jq -nc '[range(1;10002) | tostring]')"
   [ "$status" -eq 13 ]
-  [[ "$output" == *"roster_seqs is not a list of at most 10000"* ]]
+  printf '%s\n' "$output" | grep -Fq "roster_seqs is not a list of at most 10000"
   # And nothing moved: the frontier recorded by the accepted call is still
   # the one on disk, not a partially trusted one.
   db=$(agmsg_db_path demo)
@@ -1475,15 +1475,41 @@ _968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact"
 
 @test "read-state: a roster sequence is validated against the sequence DOMAIN, not just its shape (#968)" {
   # 9223372036854775808 through 9999999999999999999 are canonical-looking
-  # 19-digit decimals past MAX_SEQUENCE; SQLite stores them as REAL instead of
-  # refusing (review finding). MAX itself is a legal sequence.
+  # 19-digit decimals past MAX_SEQUENCE. Handed to the INTEGER PRIMARY KEY
+  # temp table they are refused with a datatype mismatch that takes the whole
+  # read-prepare transaction down -- no 13, no reason (measured in review).
+  # MAX itself is a legal sequence.
   _968_apply_messages 1 2
   local prepared
   prepared=$(_968_prepare 2 '["9223372036854775807"]')
   [ "$(_968_frontier "$prepared")" = 2 ]
   run _968_prepare 2 '["9223372036854775808"]'
   [ "$status" -eq 13 ]
-  [[ "$output" == *"not a canonical sequence"* ]]
+  printf '%s\n' "$output" | grep -Fq "not a canonical sequence"
   run _968_prepare 2 '["9999999999999999999"]'
   [ "$status" -eq 13 ]
+}
+
+@test "read-state: a roster entry with a trailing newline is refused at the shape check, and the frontier does not move (#968)" {
+  # jq's regex engine lets $ match before one trailing newline, so an entry
+  # of "1\n" passed a ^..$ shape test; the line-framed per-entry loop then
+  # validated "1" and the SQL received (1\n), which SQLite accepts as 1 -- a
+  # malformed entry exempting a real sequence (review finding, measured).
+  # The shape test is anchored \A..\z now. Each control proves the frontier
+  # did not move, because the danger here is advancing, not failing.
+  _968_apply_messages 3 4
+  local prepared db
+  prepared=$(_968_prepare 4 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 4 ]
+  db=$(agmsg_db_path demo)
+  run _968_prepare 4 "$(jq -nc '["1\n","2"]')"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -Fq "canonical sequences"
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
+  run _968_prepare 4 "$(jq -nc '["1\n2"]')"
+  [ "$status" -eq 13 ]
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
+  run _968_prepare 4 '[""]'
+  [ "$status" -eq 13 ]
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 4 ]
 }
