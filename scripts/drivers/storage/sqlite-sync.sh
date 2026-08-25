@@ -1399,7 +1399,10 @@ storage_sync_prepare_read_state() {
       ((.local_agents|unique|length)==(.local_agents|length)) and all(.local_agents[];
         (type=="string") and length>0) and
       (.members|length)<=1000 and all(.members[];
-        ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0)) | "ok"' \
+        ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0) and
+      ((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
+        (.roster_seqs|length)<=1000000 and all(.roster_seqs[];
+          (type=="string") and test("^(0|[1-9][0-9]{0,18})$"))))) | "ok"' \
       2>/dev/null)" = ok ] || { _sqlite_sync_why; return 13; }
   floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
   current=$(printf '%s\n' "$context" | jq -r '.current_seq')
@@ -1429,6 +1432,22 @@ EOF
   if [ "$count" -gt 0 ]; then
     insert_members="INSERT INTO incoming_read_members VALUES $values;"
   fi
+  # Sequences the engine knows to be roster mutations (#968). They occupy
+  # server sequence numbers but are, by design, not messages: the engine routes
+  # them to the roster driver, so they never gain a sync_messages mapping and
+  # (on the engine pull path) never enter sync_quarantine at all. Without this
+  # list the contiguity check below reads every one of them as a hole and pins
+  # the frontier at the first -- which is seq 1, the founding member_joined, on
+  # every team ever created. Validated above as decimal strings, so they are
+  # emitted as integers here without further quoting. Absent list => empty
+  # table => today's behavior (a frontier that cannot advance), never a
+  # frontier advanced on evidence that was not supplied.
+  local insert_roster_seqs="" roster_values
+  roster_values=$(printf '%s\n' "$context" |
+    jq -r '[.roster_seqs // [] | .[] | "(" + . + ")"] | join(",")')
+  if [ -n "$roster_values" ]; then
+    insert_roster_seqs="INSERT OR IGNORE INTO roster_read_seqs VALUES $roster_values;"
+  fi
   if [ -n "$local_values" ]; then
     insert_local_agents="INSERT INTO local_read_agents VALUES $local_values;"
   fi
@@ -1438,8 +1457,10 @@ EOF
   _sqlite_exec_stdin "$db" "BEGIN IMMEDIATE;
     CREATE TEMP TABLE incoming_read_members(member_id TEXT UNIQUE,agent TEXT UNIQUE);
     CREATE TEMP TABLE local_read_agents(agent TEXT PRIMARY KEY);
+    CREATE TEMP TABLE roster_read_seqs(server_seq INTEGER PRIMARY KEY);
     $insert_members
     $insert_local_agents
+    $insert_roster_seqs
     UPDATE sync_read_members SET active=0 WHERE local_team='$tl'
       AND server_instance_id='$server' AND remote_team_id='$remote'
       AND protocol_version=$protocol AND driver_generation='$generation';
@@ -1485,32 +1506,57 @@ EOF
     INSERT INTO sync_read_prepared
       (local_team,server_instance_id,remote_team_id,protocol_version,
        driver_generation,member_id,server_seq)
-    WITH ordered AS (
+    WITH held AS (
+      -- The sequence space this client is expected to hold (#968): every
+      -- message in quarantine, plus every sequence the roster driver applied
+      -- as a roster mutation. A roster sequence that also has a quarantine row
+      -- (the bootstrap path quarantines them) is one row here, flagged roster.
+      SELECT q.local_team,q.server_instance_id,q.remote_team_id,q.protocol_version,
+             q.driver_generation,CAST(q.server_seq AS INTEGER) AS seq,q.status,q.wire_id,
+             EXISTS(SELECT 1 FROM roster_read_seqs r
+                     WHERE r.server_seq=CAST(q.server_seq AS INTEGER)) AS roster
+        FROM sync_quarantine q
+       WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+         AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+         AND q.driver_generation='$generation'
+      UNION ALL
+      SELECT '$tl','$server','$remote',$protocol,'$generation',r.server_seq,'imported',NULL,1
+        FROM roster_read_seqs r
+       WHERE NOT EXISTS(SELECT 1 FROM sync_quarantine q
+                         WHERE q.local_team='$tl' AND q.server_instance_id='$server'
+                           AND q.remote_team_id='$remote' AND q.protocol_version=$protocol
+                           AND q.driver_generation='$generation'
+                           AND CAST(q.server_seq AS INTEGER)=r.server_seq)
+    ), ordered AS (
       SELECT rm.member_id,rm.agent,CAST(rm.remote_server_seq AS INTEGER) AS base,
              CAST(b.transport_cursor AS INTEGER) AS tip,
-             CAST(q.server_seq AS INTEGER) AS seq,q.status,m.local_position,e.to_agent,
-             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY CAST(q.server_seq AS INTEGER)) AS rn
+             h.seq,h.status,h.roster,m.local_position,e.to_agent,
+             ROW_NUMBER() OVER(PARTITION BY rm.member_id ORDER BY h.seq) AS rn
         FROM sync_read_members rm JOIN sync_bindings b
           ON b.local_team=rm.local_team AND b.server_instance_id=rm.server_instance_id
          AND b.remote_team_id=rm.remote_team_id AND b.protocol_version=rm.protocol_version
          AND b.driver_generation=rm.driver_generation
-        LEFT JOIN sync_quarantine q ON q.local_team=rm.local_team
-         AND q.server_instance_id=rm.server_instance_id AND q.remote_team_id=rm.remote_team_id
-         AND q.protocol_version=rm.protocol_version AND q.driver_generation=rm.driver_generation
-         AND CAST(q.server_seq AS INTEGER)>CAST(rm.remote_server_seq AS INTEGER)
-         AND CAST(q.server_seq AS INTEGER)<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
+        LEFT JOIN held h ON h.local_team=rm.local_team
+         AND h.server_instance_id=rm.server_instance_id AND h.remote_team_id=rm.remote_team_id
+         AND h.protocol_version=rm.protocol_version AND h.driver_generation=rm.driver_generation
+         AND h.seq>CAST(rm.remote_server_seq AS INTEGER)
+         AND h.seq<=MIN(CAST(b.transport_cursor AS INTEGER),$current)
         LEFT JOIN sync_messages m ON m.server_instance_id=rm.server_instance_id
          AND m.remote_team_id=rm.remote_team_id AND m.protocol_version=rm.protocol_version
-         AND m.wire_id=q.wire_id
+         AND m.wire_id=h.wire_id
         LEFT JOIN events e ON e.seq=m.local_position
        WHERE rm.local_team='$tl' AND rm.server_instance_id='$server'
          AND rm.remote_team_id='$remote' AND rm.protocol_version=$protocol
          AND rm.driver_generation='$generation' AND rm.active=1
          AND rm.name_mismatch=0
     ), bad AS (
+      -- A roster sequence is accounted for by being a roster sequence: it has
+      -- no message mapping and never will. Everything else keeps the strict
+      -- reading -- a message sequence with no mapping, or missing from the
+      -- space entirely, is still a hole, so a lost message still pins.
       SELECT member_id,MIN(base+rn) AS seq FROM ordered
        WHERE seq IS NULL OR seq<>base+rn OR status NOT IN ('imported','reconciled')
-          OR local_position IS NULL
+          OR (local_position IS NULL AND roster=0)
           OR (to_agent=agent AND local_position>COALESCE((SELECT local_position
                 FROM read_cursors c WHERE c.team='$tl' AND c.agent=ordered.agent),0)
               AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'

@@ -5,7 +5,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink,
   utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readNativeAgeIdentity } from "../scripts/internal/sync-cipher.mjs";
@@ -38,6 +38,7 @@ import {
   pullBootstrap,
   parseStrictJsonl,
   readStateCycle,
+  rosterSequencesFor,
   readStateUpdateBatches,
   reprocessCycle,
   request,
@@ -1383,6 +1384,60 @@ test("Stage-1-only driver skips the optional Stage-2 network path", async () => 
   assert.deepEqual(events, [["read-state.skipped", {
     reason: "driver-capability-not-advertised",
   }]]);
+});
+
+test("roster sequences: the journal's roster_synced records for this binding, and nothing on a missing or torn journal (#968)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agmsg-968-journal-"));
+  try {
+    const rosterFile = join(root, "teams", "demo", "config.json");
+    await mkdir(dirname(rosterFile), { recursive: true });
+    // No journal yet: no evidence, no sequences.
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), []);
+    const other = "018f3f7e-0000-7000-8000-00000000ffff";
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "member_joined", id: "m1", name: "alice" }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "2", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      // another binding's record is not this binding's evidence
+      JSON.stringify({ type: "roster_synced", mutation_id: "mx", server_seq: "7", wire_id: "wx",
+        server_instance_id: other, remote_team_id: config.remote_team_id }),
+      // a non-canonical sequence is not evidence either
+      JSON.stringify({ type: "roster_synced", mutation_id: "my", server_seq: "007", wire_id: "wy",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      // duplicate of seq 2 collapses
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1b", server_seq: "2", wire_id: "w1b",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), ["1", "2"]);
+    // A torn journal (a line that is not JSON) yields nothing: a frontier is
+    // never advanced on evidence that could not be read whole.
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      '{"type":"roster_synced","mutation_id":"m1","server_seq":"2","wire_id":"w1",' +
+      `"server_instance_id":"${config.server_instance_id}","remote_team_id":"${config.remote_team_id}"}\n{"type":"roster_syn`);
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), []);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("Stage-2 read-prepare carries the roster sequences into the context (#968)", async () => {
+  const events = [];
+  const harness = readStateHarness(threeMembers, ["masa-claude"], events);
+  let contextSeen = null;
+  const innerDriver = harness.driverCall;
+  await readStateCycle(config, 100, {
+    ...harness,
+    driverCall: async (operation, cfg, input) => {
+      if (operation === "read-prepare") contextSeen = input[0];
+      return innerDriver(operation, cfg, input);
+    },
+    rosterSequencesCall: async () => ["1", "2"],
+  });
+  assert.ok(contextSeen, "read-prepare was called");
+  assert.equal(contextSeen.type, "sync_read_context");
+  assert.deepEqual(contextSeen.roster_seqs, ["1", "2"]);
 });
 
 test("Stage-2 isolates a limit offender and continues read-only synchronization", async () => {

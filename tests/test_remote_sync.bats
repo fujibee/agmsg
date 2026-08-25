@@ -1341,3 +1341,114 @@ _462_piped_sites_under() {
   # And ONLY that site: the mutant differs from the tree in one place.
   [ "$(printf '%s\n' "$unwarmed" | grep -c .)" -eq 1 ]
 }
+
+# ---- #968: roster sequences and the read frontier ----
+
+_968_apply_messages() {
+  # Apply messages to bob at the given server sequences and mark them all read.
+  local page="" i=0 seq last
+  for seq in "$@"; do
+    i=$((i+1))
+    page="${page}$(jq -nc --arg s "$seq" --arg n "$i" '
+      {type:"sync_pull_message",server_seq:$s,
+       id:("550e8400-e29b-41d4-a716-4466554409"+(if ($n|length)==1 then "0"+$n else $n end)),
+       server_received_at:"2026-07-21T06:00:00.000000Z",
+       envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+       policy_revision:"0",local_security_revision:"0",
+       projection:{body:("msg "+$n),created_at:"2026-07-21T06:00:00.000000Z",
+                   from_agent:"alice",to_agent:"bob"}}')
+"
+  done
+  last="${!#}"
+  page="${page}{\"type\":\"sync_pull_cursor\",\"next_after\":\"$last\"}"
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  local id
+  for id in $(storage_history demo | jq -r 'select(.to=="bob")|.id'); do
+    storage_read_cursor_consume demo bob "$(storage_watch_tip demo:bob)" "$id" >/dev/null
+  done
+}
+
+_968_prepare() {
+  # $1 = current_seq, $2 = roster_seqs as a JSON array, or the word none.
+  local roster="$2" context
+  context=$(jq -nc --arg cur "$1" --arg roster "$roster" '
+    {type:"sync_read_context",min_available_seq:"0",current_seq:$cur,local_agents:["bob"],
+     members:[{member_id:"018f3f7e-0000-7000-8000-000000000010",name:"bob"}]}
+    + (if $roster=="none" then {} else {roster_seqs:($roster|fromjson)} end)')
+  printf '%s\n' "$context" | storage_sync_prepare_read_state demo "$SERVER_ID" "$TEAM_ID" 1
+}
+
+_968_frontier() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_frontier")|.server_seq'; }
+_968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact")|.wire_id' | grep -c . || true; }
+
+@test "read-state: a frontier advances across roster sequences the engine names, and stays pinned when it does not (#968)" {
+  # The reported shape: seq 1 and 2 were member_joined (never messages), the
+  # messages start at 3. Everything is imported and read.
+  _968_apply_messages 3 4 5 6
+  local prepared
+  prepared=$(_968_prepare 6 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 6 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  # Without the roster list the check has no evidence for seq 1 and 2, and a
+  # frontier is never advanced on evidence that was not supplied: this is the
+  # pre-#968 behavior, pinned at 0 with every read message shipped as an
+  # exception. Kept as the documented fail-safe direction.
+  prepared=$(_968_prepare 6 none)
+  [ "$(_968_frontier "$prepared")" = 0 ]
+  [ "$(_968_exact_count "$prepared")" -eq 4 ]
+}
+
+@test "read-state: a lost MESSAGE still pins the frontier; the roster list exempts only its own sequences (#968)" {
+  # Seq 4 is a message that never arrived. The roster list says 1 and 2 only.
+  _968_apply_messages 3 5 6
+  local prepared
+  prepared=$(_968_prepare 6 '["1","2"]')
+  [ "$(_968_frontier "$prepared")" = 3 ]
+  # The two read messages past the hole travel as exact exceptions, as before.
+  [ "$(_968_exact_count "$prepared")" -eq 2 ]
+  # The one way this check goes green while something is wrong, named: a
+  # roster list that claims a sequence which was really a message. The journal
+  # is written from the same records the server labelled as roster mutations,
+  # so this needs the label to be wrong first; it is recorded here as the
+  # residual, not hidden.
+  prepared=$(_968_prepare 6 '["1","2","4"]')
+  [ "$(_968_frontier "$prepared")" = 6 ]
+}
+
+@test "read-state: a roster row that IS in quarantine (bootstrap path) is exempt only when the roster list names it (#968)" {
+  # The bootstrap path quarantines roster records and marks them imported
+  # without a message mapping. Imported-and-unmapped is NOT by itself the
+  # exemption: only the roster list is, so a message row that somehow lost its
+  # mapping still reads as a hole.
+  local wire=550e8400-e29b-41d4-a716-446655440921 roster
+  roster=$(jq -nc --arg id "$wire" '
+    {type:"sync_pull_message",server_seq:"1",id:$id,
+     server_received_at:"2026-07-21T05:59:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:"e30="},status:"importable",
+     policy_revision:"0",local_security_revision:"0",
+     projection:{kind:"member_joined",mutation_id:"019fb4bb-7948-7520-8c16-ab64753e2012",
+       member_id:"019fb4bb-7948-7ce9-8e4f-61229dc726cf",name:"dana",occurred_at:"2026-07-21T05:59:00.000000Z"}}')
+  printf '%s\n%s\n' "$roster" '{"type":"sync_pull_cursor","next_after":"1"}' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  local db
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT status FROM sync_quarantine WHERE wire_id='$wire';" | tr -d '\r')" = imported ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_messages WHERE wire_id='$wire';" | tr -d '\r')" -eq 0 ]
+  _968_apply_messages 2 3
+  local prepared
+  prepared=$(_968_prepare 3 '["1"]')
+  [ "$(_968_frontier "$prepared")" = 3 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  prepared=$(_968_prepare 3 '[]')
+  [ "$(_968_frontier "$prepared")" = 0 ]
+}
+
+@test "read-state: a malformed roster list is refused, not partially trusted (#968)" {
+  _968_apply_messages 1 2
+  run _968_prepare 2 '["1","x"]'
+  [ "$status" -eq 13 ]
+  run _968_prepare 2 '[1]'
+  [ "$status" -eq 13 ]
+  run _968_prepare 2 '"1"'
+  [ "$status" -eq 13 ]
+}

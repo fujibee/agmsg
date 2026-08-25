@@ -2820,11 +2820,46 @@ export async function configure(args) {
     remote_team_id: config.remote_team_id });
 }
 
+// The server sequences this client holds as ROSTER mutations rather than as
+// messages (#968). The roster driver journals one `roster_synced` record per
+// applied mutation -- on the engine pull path and on the bootstrap path alike,
+// and since the same commit that put roster mutations on the transport -- so
+// the journal is the complete list of sequences that will never have a
+// message mapping. The read-state frontier check needs that list: without it
+// every roster sequence reads as a hole, and the first hole is seq 1 (the
+// founding member_joined) on every team.
+//
+// Failure direction: a journal that cannot be read, or a line that cannot be
+// parsed, yields NO sequences, which leaves the frontier check exactly as it
+// was -- pinned. A frontier is never advanced on evidence that was not read.
+export async function rosterSequencesFor(config, dependencies = {}) {
+  const readFileCall = dependencies.readFileCall ?? readFile;
+  const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
+  if (!rosterFile) return [];
+  let text;
+  try { text = await readFileCall(join(dirname(rosterFile), "roster.jsonl"), "utf8"); }
+  catch { return []; }
+  const sequences = new Set();
+  for (const line of text.split(/\r?\n/u)) {
+    if (!line) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { return []; } // a torn journal is no evidence
+    if (record?.type === "roster_synced" &&
+        record.server_instance_id === config.server_instance_id &&
+        record.remote_team_id === config.remote_team_id &&
+        typeof record.server_seq === "string" && /^(0|[1-9][0-9]{0,18})$/u.test(record.server_seq)) {
+      sequences.add(record.server_seq);
+    }
+  }
+  return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
+}
+
 export async function readStateCycle(config, limit, dependencies = {}) {
   const driverCall = dependencies.driverCall ?? driver;
   const requestCall = dependencies.requestCall ?? request;
   const eventCall = dependencies.eventCall ?? event;
   const localAgentsCall = dependencies.localAgentsCall ?? localAgentRoster;
+  const rosterSequencesCall = dependencies.rosterSequencesCall ?? rosterSequencesFor;
   const driverCapabilities = await driverCall("capabilities", config, []);
   if (!stage2ReadStateSupported(driverCapabilities)) {
     await eventCall("read-state.skipped", { reason: "driver-capability-not-advertised" });
@@ -2865,9 +2900,10 @@ export async function readStateCycle(config, limit, dependencies = {}) {
       missing: unmaterialised,
     });
   }
+  const rosterSeqs = await rosterSequencesCall(config, dependencies);
   const prepared = await driverCall("read-prepare", config, [{ type: "sync_read_context",
     min_available_seq: capabilities.min_available_seq, current_seq: capabilities.current_seq,
-    members, local_agents: localAgents }]);
+    members, local_agents: localAgents, roster_seqs: rosterSeqs }]);
   const batches = readStateUpdateBatches(members, prepared);
   const pageLimit = Math.min(limit, 1000);
   let page;
