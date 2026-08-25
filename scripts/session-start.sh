@@ -321,7 +321,7 @@ fi
 # seat still cannot be established the fallback is fail-CLOSED, not the generic
 # unfiltered watcher (which would consume other seats' unread) -- see the two
 # blocks below.
-ROLE_NAME=""; ROLE_TEAM=""
+ROLE_NAME=""; ROLE_TEAM=""; ROLE_BASIS=""
 _bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID" 2>/dev/null || printf '%s' "$SESSION_ID")"
 _rec="$(agmsg_role_session_lookup_by_sid "$_bare_sid" 2>/dev/null || true)"
 if [ -n "$_rec" ]; then
@@ -331,7 +331,7 @@ if [ -n "$_rec" ]; then
   # (team, agent) is actually one of this project's registered pairs.
   if [ -n "$_r_agent" ] && [ -n "$_r_team" ] \
      && printf '%s\n' "$PAIRS" | grep -Fxq "$(printf '%s\t%s' "$_r_team" "$_r_agent")"; then
-    ROLE_NAME="$_r_agent"; ROLE_TEAM="$_r_team"
+    ROLE_NAME="$_r_agent"; ROLE_TEAM="$_r_team"; ROLE_BASIS=record
   fi
 fi
 
@@ -362,7 +362,7 @@ if [ -z "$ROLE_NAME" ]; then
 $PAIRS
 EOF
   if [ "$_narrow_n" -eq 1 ]; then
-    ROLE_NAME="$_narrow_agent"; ROLE_TEAM="$_narrow_team"
+    ROLE_NAME="$_narrow_agent"; ROLE_TEAM="$_narrow_team"; ROLE_BASIS=actas
   fi
 fi
 
@@ -373,10 +373,20 @@ WATCH="$SKILL_DIR/scripts/watch.sh"
 # safely for shell re-execution (#188). A resumed role adds the 4th <agent> arg.
 if [ -n "$ROLE_NAME" ]; then
   WATCH_COMMAND="$(printf '%q %q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE" "$ROLE_NAME")"
+  # State the seat's basis honestly: the reader launches a watcher on the strength
+  # of this sentence, so a recorded seat and an inferred one must not read alike
+  # (#982/#993). The record path has an explicit role-session record; the narrowing
+  # path has only the actas lock this sid still owns — say which, and why it stands
+  # in for the record, so the reader can weigh "what if the lock is stale?".
+  if [ "$ROLE_BASIS" = record ]; then
+    SEAT_CLAIM="this session was recorded as that role's seat"
+  else
+    SEAT_CLAIM="no role record was found for this session, but it still owns that role's actas exclusivity lock — claimed by this seat and carried across the resume — which is taken to stand in for the record (so if that lock were stale, this seating would be too)"
+  fi
   cat <<EOF
-AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`): this
-session was recorded as that role's seat, so invoke the Monitor tool now with the
-following parameters, before any other action in this session.
+AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
+$SEAT_CLAIM, so invoke the Monitor tool now with the following parameters, before
+any other action in this session.
 
   command: $WATCH_COMMAND
   description: agmsg inbox stream (acting as $ROLE_NAME)

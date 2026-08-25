@@ -61,6 +61,16 @@ _seed_actas_lock() {
   echo "$sid" > "$RUN_DIR/actas.${team}__${agent}.session"
 }
 
+# Write a role-session record into the isolated skill dir's run/ (as actas-claim
+# would), so the record path — not narrowing — seats the session.
+_seed_role_record() {
+  local team="$1" agent="$2" sid="$3" proj="$4" type="${5:-claude-code}"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c '
+    source "$1/lib/role-session.sh"
+    agmsg_role_session_record "$2" "$3" "$4" "$5" "$6"
+  ' _ "$SCRIPTS" "$team" "$agent" "$sid" "$proj" "$type"
+}
+
 _run_session_start() {
   env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/session-start.sh" claude-code "$PROJ" <<< "{\"session_id\":\"$1\"}"
 }
@@ -116,10 +126,26 @@ _run_session_start() {
   [ "$status" -eq 0 ]
   grep -qF "resumed role" <<<"$output"
   grep -qF "acting as bob" <<<"$output"
+  # #993: the narrowing path must state its basis honestly — the actas lock it
+  # holds, not a record it does not have. The reader launches a watcher on the
+  # strength of this sentence, so the inferred seat must not read as a recorded one.
+  grep -qF "actas exclusivity lock" <<<"$output"
+  refute grep -qF "was recorded as that role's seat" <<<"$output"
   local cmd; cmd="$(_directive_command "$output")"
   eval "set -- $cmd"
   [ "$#" -eq 5 ]
   [ "$5" = "bob" ]
+}
+
+@test "resume, role-session record present: says recorded, not the actas-lock basis" {
+  # The other half of the #993 distinction: a real record must read as recorded,
+  # so the two bases stay distinguishable to the reader.
+  _seed_role_record team alice "sid-alice" "$PROJ" claude-code
+  run _run_session_start "sid-alice"
+  [ "$status" -eq 0 ]
+  grep -qF "acting as alice" <<<"$output"
+  grep -qF "was recorded as that role's seat" <<<"$output"
+  refute grep -qF "no role record was found" <<<"$output"
 }
 
 @test "resume, narrowed to bob: the emitted watcher consumes bob's mail only, not alice's" {
