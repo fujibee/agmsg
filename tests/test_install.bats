@@ -563,6 +563,45 @@ PY
   fi
 }
 
+@test "install: a symlinked Codex config.toml keeps its link and the edit lands on the target (#747, writable_roots exists)" {
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/dotfiles"
+  # The reporter's exact shape: writable_roots already present with an entry, and
+  # config.toml is a symlink into a dotfiles repo (stow/chezmoi/manual).
+  cat > "$FAKE_HOME/dotfiles/config.toml" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/existing/path"]
+EOF
+  ln -s "$FAKE_HOME/dotfiles/config.toml" "$FAKE_HOME/.codex/config.toml"
+  [ -L "$FAKE_HOME/.codex/config.toml" ] || skip "filesystem did not create a real symlink here"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  # The link survives: `mv` would have replaced it with a plain file (#747).
+  [ -L "$FAKE_HOME/.codex/config.toml" ]
+  # The edit reached the link's target, not a detached copy at the link path.
+  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/teams" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+  # The pre-existing entry is kept.
+  grep -q "/some/existing/path" "$FAKE_HOME/dotfiles/config.toml"
+}
+
+@test "install: a symlinked Codex config.toml keeps its link when only the section exists (#747, second branch)" {
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/dotfiles"
+  # Section present, no writable_roots — the other mv-based branch.
+  cat > "$FAKE_HOME/dotfiles/config.toml" <<'EOF'
+[sandbox_workspace_write]
+EOF
+  ln -s "$FAKE_HOME/dotfiles/config.toml" "$FAKE_HOME/.codex/config.toml"
+  [ -L "$FAKE_HOME/.codex/config.toml" ] || skip "filesystem did not create a real symlink here"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  [ -L "$FAKE_HOME/.codex/config.toml" ]
+  grep -q "$SK/db" "$FAKE_HOME/dotfiles/config.toml"
+  grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
+}
+
 
 # --- hermes Agent skill (~/.hermes/skills/<name>/SKILL.md) ---
 

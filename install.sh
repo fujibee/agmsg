@@ -105,6 +105,16 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # the SKILL.md the installer itself had written with the wrong flavor.
 AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
 
+# Overwrite <dest> with the contents of <src>, then remove <src>. Unlike `mv`,
+# a redirect follows <dest> when it is a symlink and writes the link's target,
+# so a `~/.codex/config.toml` managed as a symlink (stow/chezmoi/manual dotfiles)
+# keeps its link and receives the edit — `mv` would replace the link with a plain
+# file and drop the edit on a detached copy (#747). Not atomic, which is fine for
+# a few-KB config written once at install time.
+write_through_symlink() {
+  cat "$1" > "$2" && rm -f "$1"
+}
+
 configure_codex_sandbox() {
   # --- Configure Codex sandbox (if Codex is installed) ---
   # The Codex bridge writes pidfiles/sockets/request files under the
@@ -158,13 +168,13 @@ configure_codex_sandbox() {
         done=1
       }
       { print }
-    ' "$code_config" > "$code_config.tmp" && mv "$code_config.tmp" "$code_config"
+    ' "$code_config" > "$code_config.tmp" && write_through_symlink "$code_config.tmp" "$code_config"
   elif grep -q '^\[sandbox_workspace_write\]' "$code_config" 2>/dev/null; then
     # Section exists but no writable_roots
     awk -v entries="$entries" '
       { print }
       /^\[sandbox_workspace_write\]/ { print "writable_roots = [" entries "]" }
-    ' "$code_config" > "$code_config.tmp" && mv "$code_config.tmp" "$code_config"
+    ' "$code_config" > "$code_config.tmp" && write_through_symlink "$code_config.tmp" "$code_config"
   else
     # No section at all
     printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
