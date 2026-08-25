@@ -78,8 +78,8 @@ teardown() {
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --cmd agmsg --update
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Updating agmsg..." ]]
-  [[ ! "$output" =~ "Updating agmsg.backup-keep" ]]
+  printf '%s\n' "$output" | grep -Fq "Updating agmsg..."
+  refute grep -Fq "Updating agmsg.backup-keep" <<<"$output"
   [ ! -f "$FAKE_HOME/.agents/agmsg.ps1" ]
   [ ! -f "$FAKE_HOME/.agents/agmsg.backup-keep.ps1" ]
   grep -q "backup sentinel" "$backup/SKILL.md"
@@ -96,9 +96,9 @@ teardown() {
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "Several agmsg installs found" ]]
-  [[ "$output" =~ "agmsg" ]]
-  [[ "$output" =~ "agmsg-second" ]]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
+  printf '%s\n' "$output" | grep -Fq "agmsg"
+  printf '%s\n' "$output" | grep -Fq "agmsg-second"
   # Neither install was touched -- this is a refusal, not a guess.
   grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
   grep -q "agmsg-second sentinel" "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
@@ -124,9 +124,9 @@ teardown() {
 
   run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "Several agmsg installs found" ]]
-  [[ "$output" =~ "agmsg" ]]
-  [[ "$output" =~ "agmsg.bak-20260731" ]]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
+  printf '%s\n' "$output" | grep -Fq "agmsg"
+  printf '%s\n' "$output" | grep -Fq "agmsg.bak-20260731"
   grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
   grep -q "leftover sentinel" "$leftover/SKILL.md"
 }
@@ -760,14 +760,18 @@ PY
 
 @test "install: bare --update (no --cmd) does NOT force-steal a Codex shim owned by a different install (#553)" {
   # Unlike --update --cmd <name>, a bare --update resolves its target by
-  # scanning for an existing install rather than the caller naming one --- and
-  # on this base (#599's fail-closed fix, PR #659, is not yet merged here),
-  # that resolution does not even fail closed when more than one install is
-  # present. Forcing the shim reclaim unconditionally for bare --update would
-  # let whichever install a glob happens to land on steal the shim from
-  # another one the caller never named at all (review finding). This pins
-  # that a shim already owned by a DIFFERENT install survives a bare --update
-  # of the install that does NOT own it.
+  # scanning for an existing install rather than the caller naming one.
+  # Forcing the shim reclaim unconditionally for bare --update would let
+  # whichever install the scan landed on steal the shim from another one the
+  # caller never named at all (review finding). This pins that a shim already
+  # owned by a DIFFERENT install survives a bare --update.
+  #
+  # Since #599 (PR #659) the scan fails closed when more than one install is
+  # present, so with two installs a bare --update now refuses before it
+  # touches anything -- which is the strongest form of "does not steal": the
+  # refusal is asserted, and the shim's owner line is asserted unchanged
+  # across it. The single-install case, where a bare --update does proceed,
+  # is the next test.
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
   HOME="$FAKE_HOME" bash "$SK/scripts/drivers/types/codex/codex-shim-install.sh" install >/dev/null
   local shim="$FAKE_HOME/.agents/bin/codex"
@@ -777,13 +781,9 @@ PY
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-dfr --agent-type codex >/dev/null
   grep -q "/skills/agmsg/" "$shim"  # still the first install's, per the earlier tests
 
-  # Bare --update, no --cmd: this base's ambiguous-candidate handling means
-  # which of the two real installs it lands on isn't the point of this test
-  # (that's #599 / #659's concern) -- what matters here is that whichever one
-  # it is, it must not walk away with a shim it was never explicitly told to
-  # claim.
   run env HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq "Several agmsg installs found"
   local after; after="$(grep AGMSG_CODEX_SHIM_SCRIPT_DIR "$shim")"
   [ "$before" = "$after" ]
 }
