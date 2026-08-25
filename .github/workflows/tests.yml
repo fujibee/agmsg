@@ -330,12 +330,33 @@ jobs:
 
       - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          # TEMPORARY (probe/954-branch-trace). Makes _agmsg_pid_alive_local
+          # record which branch produced each verdict. Writes to a file and
+          # never to this step's stdout, for the same reason the hang sampler
+          # does: the helper has 61 call sites, some capturing stderr and some
+          # asserting on it, so an instrument on that channel would be measuring
+          # itself.
+          AGMSG_PIDALIVE_TRACE: ${{ runner.temp }}/pidalive-trace.tsv
         run: |
           set +e
           xargs bats --print-output-on-failure < shard-files.txt
           status=$?
           : > "$RUNNER_TEMP/bats-done"
           exit $status
+
+      # always(), because a GREEN shard's distribution is the control. Reading
+      # only the red ones cannot tell "it entered that branch and therefore
+      # failed" from "it enters that branch every time".
+      - name: Upload liveness branch trace
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pidalive-trace-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/pidalive-trace.tsv
+          if-no-files-found: ignore
+          retention-days: 3
 
       # always() so this also runs when the job is cancelled at its cap, which
       # is the only case that matters here.
