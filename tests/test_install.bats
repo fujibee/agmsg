@@ -85,6 +85,52 @@ teardown() {
   grep -q "backup sentinel" "$backup/SKILL.md"
 }
 
+@test "install: --update with no --cmd refuses to guess between two real installs (#599)" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  # Distinct per-install sentinels, not just each install's VERSION (which is
+  # the same source-derived string for both and would not distinguish "one of
+  # them got silently updated" from "neither did" -- co2 review, #659).
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Several agmsg installs found" ]]
+  [[ "$output" =~ "agmsg" ]]
+  [[ "$output" =~ "agmsg-second" ]]
+  # Neither install was touched -- this is a refusal, not a guess.
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "agmsg-second sentinel" "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
+}
+
+@test "install: --update with no --cmd treats a leftover backup-shaped directory as another candidate, not a silent exclusion (#599)" {
+  # No code in this repo creates a ".bak-"-named directory -- that name is a
+  # human backup convention, not something install.sh generates. A pattern
+  # narrow enough to exclude it is therefore also narrow enough to still
+  # exclude nothing on a real machine, while remaining broad enough to
+  # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
+  # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
+  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # not special-case names at all. A directory that still carries the .agmsg
+  # marker is just another candidate, and more than one candidate is exactly
+  # the ambiguity this fix already refuses to guess through.
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local leftover="$FAKE_HOME/.agents/skills/agmsg.bak-20260731"
+  mkdir -p "$leftover/scripts" "$leftover/templates" "$leftover/db" "$leftover/agents"
+  touch "$leftover/.agmsg"
+  echo "leftover sentinel" > "$leftover/SKILL.md"
+  echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+
+  run env HOME="$FAKE_HOME" AGMSG_FORCE_WINDOWS=1 bash "$REPO_ROOT/install.sh" --update
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Several agmsg installs found" ]]
+  [[ "$output" =~ "agmsg" ]]
+  [[ "$output" =~ "agmsg.bak-20260731" ]]
+  grep -q "agmsg sentinel" "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
+  grep -q "leftover sentinel" "$leftover/SKILL.md"
+}
+
 @test "install: Claude Code command file gates actas/drop's fresh Monitor on delivery mode (#280)" {
   # actas/drop used to invoke a fresh Monitor unconditionally, ignoring
   # mode=off/turn (#280) — this is prompt-instruction text, not executable

@@ -265,8 +265,22 @@ if [ "$UPDATE_ONLY" = true ]; then
   # exactly that, not "we ended up with some skill name one way or another").
   CMD_WAS_EXPLICIT=false
   [ -n "$CMD_NAME" ] && CMD_WAS_EXPLICIT=true
-  # Find existing install. If --cmd was passed, update exactly that skill;
-  # otherwise preserve the historical "first installed agmsg skill" behavior.
+  # Find existing install. If --cmd was passed, update exactly that skill.
+  # Otherwise, scan for installs and require exactly one: a glob expands in
+  # collation order, not installation order, and nothing records which
+  # install came first, so guessing from a list of more than one is a
+  # silent coin flip on which install (and the shared ~/.agents/bin/codex
+  # shim it refreshes) gets updated (#599). A single install is unaffected
+  # -- this is the common case and it still "just works".
+  #
+  # No name-based exclusion for backup-shaped directories: --cmd has no
+  # reserved-name validation, so any pattern that would catch a real backup
+  # (e.g. "agmsg.bak-20260731") can equally match a legitimately chosen
+  # install name (e.g. "agmsg.bak-tool") -- there is no substring that is
+  # guaranteed to mean "not a real install" (co2 review, #659). A leftover
+  # backup directory that still carries the .agmsg marker is therefore just
+  # another candidate: it makes the set ambiguous, and ambiguous is exactly
+  # what this fix already refuses to guess through, below.
   if [ -n "$CMD_NAME" ]; then
     SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
     if [ ! -f "$SKILL_DIR/.agmsg" ]; then
@@ -274,13 +288,23 @@ if [ "$UPDATE_ONLY" = true ]; then
       exit 1
     fi
   else
-    SKILL_DIR=""
+    candidates=()
     for d in "$AGENTS_DIR"/skills/*/; do
-      if [ -f "${d}.agmsg" ]; then
-        SKILL_DIR="${d%/}"
-        break
-      fi
+      d="${d%/}"
+      [ -f "$d/.agmsg" ] && candidates+=("$d")
     done
+    case "${#candidates[@]}" in
+      0) SKILL_DIR="" ;;
+      1) SKILL_DIR="${candidates[0]}" ;;
+      *)
+        echo "  ! Several agmsg installs found:" >&2
+        for d in "${candidates[@]}"; do
+          echo "      $(basename "$d")" >&2
+        done
+        echo "  ! --update with no --cmd cannot tell which one you mean. Pass --cmd <name> to pick one." >&2
+        exit 1
+        ;;
+    esac
   fi
   if [ -z "$SKILL_DIR" ]; then
     echo "  ! Not installed. Run ./install.sh first." >&2
