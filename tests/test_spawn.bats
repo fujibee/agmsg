@@ -144,6 +144,8 @@ assert_boot_reaches_cleanup() {
   boot="$(cat "$CAPTURE")"
   run grep -F "_agmsg_cli=$HOME/.local/bin/agmsg-test-win-bare" "$boot"
   [ "$status" -eq 0 ]
+  run grep -F "agmsg-test-win-bare.exe" "$boot"
+  [ "$status" -ne 0 ]
 }
 
 @test "spawn: Windows fallback executes exe before cmd and bat" {
@@ -167,6 +169,30 @@ assert_boot_reaches_cleanup() {
   run grep -F "agmsg-test-win-exe.bat" "$boot"
   [ "$status" -ne 0 ]
   assert_boot_reaches_cleanup "$boot"
+}
+
+@test "spawn: Windows fallback resolves npm shims from APPDATA" {
+  add_spawnable_type winnpm agmsg-test-win-npm
+  force_windows_fallback_rules
+  export APPDATA="$TEST_SKILL_DIR/appdata"
+  if ! command -v cygpath >/dev/null 2>&1; then
+    cat > "$STUB_BIN/cygpath" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-u" ] || exit 2
+printf '%s\n' "$2"
+EOF
+    chmod +x "$STUB_BIN/cygpath"
+  fi
+  mkdir -p "$APPDATA/npm"
+  printf '@echo off\r\n' > "$APPDATA/npm/agmsg-test-win-npm.cmd"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" APPDATA="$APPDATA" \
+    bash "$SCRIPTS/spawn.sh" winnpm alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "agmsg-test-win-npm.cmd" "$boot"
+  [ "$status" -eq 0 ]
 }
 
 @test "spawn: Windows fallback selects and executes cmd before bat" {

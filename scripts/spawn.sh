@@ -211,20 +211,22 @@ CLI_FALLBACK_PATH=""
 # script still checks its own (often richer login-shell) PATH first, preserving
 # wrappers, functions, and shims such as agmsg's optional Codex monitor shim.
 resolve_cli_fallback() {
-  local name="$1" platform dir candidate extension
-  local -a extensions=("")
+  local name="$1" platform dir candidate extension appdata_dir
+  local -a extensions=("") fallback_dirs=()
   platform="$(uname -s)"
+  [ -n "${HOME:-}" ] && fallback_dirs+=("$HOME/.local/bin")
   case "$platform" in
-    MINGW*|MSYS*|CYGWIN*) extensions=("" ".exe" ".cmd" ".bat") ;;
+    MINGW*|MSYS*|CYGWIN*)
+      extensions=("" ".exe" ".cmd" ".bat")
+      if [ -n "${APPDATA:-}" ]; then
+        appdata_dir="$(cygpath -u "$APPDATA" 2>/dev/null || true)"
+        [ -n "$appdata_dir" ] && fallback_dirs+=("$appdata_dir/npm")
+      fi
+      ;;
   esac
+  fallback_dirs+=(/opt/homebrew/bin /usr/local/bin /usr/bin /bin)
 
-  for dir in \
-    "${HOME:-}/.local/bin" \
-    /opt/homebrew/bin \
-    /usr/local/bin \
-    /usr/bin \
-    /bin; do
-    [ -n "$dir" ] || continue
+  for dir in "${fallback_dirs[@]}"; do
     for extension in "${extensions[@]}"; do
       candidate="$dir/$name$extension"
       case "$extension" in
@@ -246,7 +248,7 @@ if [ -n "$CLI_BIN" ]; then
   if ! command -v "$CLI_BIN_EXE" >/dev/null 2>&1; then
     CLI_FALLBACK_PATH="$(resolve_cli_fallback "$CLI_BIN_EXE" 2>/dev/null || true)"
     [ -n "$CLI_FALLBACK_PATH" ] \
-      || die "'$CLI_BIN_EXE' not found on PATH or in fallback locations (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, /usr/bin, /bin) — install the ${AGENT_TYPE} CLI first"
+      || die "'$CLI_BIN_EXE' not found on PATH or in fallback locations (~/.local/bin, Windows APPDATA/npm, /opt/homebrew/bin, /usr/local/bin, /usr/bin, /bin) — install the ${AGENT_TYPE} CLI first"
   fi
 elif [ -z "$SPAWN_LAUNCHER" ]; then
   die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
