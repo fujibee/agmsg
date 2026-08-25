@@ -510,22 +510,56 @@ wait_for_child_count() {
 
 # --- #937: reap a same-(project,role) orphan via its per-PID identity lease ---
 
-_count_role_bridges() { # <project> <name>
-  # Match the role name at a word boundary, not as a substring: "alice" must not
-  # also count "alice2" (the survive tests turn on exactly that distinction), so a
-  # trailing digit/letter excludes it. Names here are plain [a-z0-9] test tokens.
-  ps -Ao pid=,args= 2>/dev/null | grep -F "codex-bridge.js" | grep -F -- "--project $1 " | grep -E "$2([^0-9A-Za-z]|\$)" | grep -c . | tr -d ' '
+# Bridges whose pair set is EXACTLY {<name>}: one `--pair`, and that pair naming
+# <name>. Distinct from a plain argv match on <name> -- the form these tests used
+# until #984 -- which counts any process with <name> anywhere in its argv,
+# including a bridge that serves <name> alongside others.
+#
+# That distinction is the one this file's superset test already turns on: a
+# bridge for {alice,bob} is not a bridge for {alice}. An argv match cannot see
+# it, so it cannot be used to wait for "the launcher has spawned its alice" in a
+# test that has itself just spawned an {alice,bob} bridge -- the gate opens on
+# the test's own fixture, before the launcher has done anything (#937).
+#
+# Counted with `grep`, not by splitting fields: a pair value is `team<TAB>name`,
+# and awk splits on tabs as well as spaces whatever `-F` says about the input,
+# so `$(i+1)` after `--pair` is only `team`. Measured that way first and it
+# counted 0 for a bridge that plainly had one alice pair.
+_count_exact_role_bridges() { # <project> <name>
+  ps -Ao pid=,args= 2>/dev/null \
+    | grep -F "codex-bridge.js" \
+    | grep -F -- "--project $1 " \
+    | while IFS= read -r line; do
+        # Exactly one --pair, and its value's NAME half is <name>. A pair is
+        # `team<TAB>name`, and the separator has two renderings to allow for:
+        # `ps` writes the tab as the four characters \011 -- three of them
+        # digits, so a single-character [^0-9A-Za-z] separator class matches
+        # nothing at all and the counter answers 0 to everything (#984).
+        [ "$(printf '%s' "$line" | grep -o -- '--pair' | grep -c .)" -eq 1 ] || continue
+        printf '%s' "$line" | grep -Eq -- "--pair [^ ]*(\\\\011|[^0-9A-Za-z])$2([^0-9A-Za-z]|\$)" || continue
+        printf '.\n'
+      done | grep -c . | tr -d ' '
 }
-# Poll until this project's role-bridge count settles at <want>, then echo it --
-# a fixed sleep before a point-in-time count races the reap-and-respawn.
-_wait_role_count() { # <project> <name> <want>
-  local i
+
+# Poll until the exact-{<name>} count settles at <want>, then echo THE VALUE THAT
+# SATISFIED THE WAIT.
+#
+# The form these tests used until #984 re-counted after its loop, so what it
+# returned was a second, later observation. Between the two, the reaper kills the
+# orphan and the launcher respawns, and the count passes through 2 and through 0
+# -- so the caller was handed a number that nothing had ever waited for. That is
+# the half of #984 needing no superset fixture, and it is why all five call sites
+# could fail, not only the superset one.
+_wait_exact_role_count() { # <project> <name> <want>
+  local i seen
   for i in {1..100}; do
-    [ "$(_count_role_bridges "$1" "$2")" -eq "$3" ] && break
+    seen="$(_count_exact_role_bridges "$1" "$2")"
+    [ "$seen" = "$3" ] && { printf '%s' "$seen"; return 0; }
     sleep 0.1
   done
-  _count_role_bridges "$1" "$2"
+  printf '%s' "$seen"
 }
+
 # Run the mock bridge directly for a given (project, pairs) so it publishes a
 # lease of that identity and stays alive. Sets FAKE_PID (NOT via $(...) -- a
 # background job in command substitution is killed when that subshell exits).
@@ -537,15 +571,45 @@ _spawn_fake() { # <project> <pair...>
   FAKE_PID=$!
 }
 
+@test "launcher: the exact-role counter reads a pair set, not an argv substring (#984)" {
+  export MOCK_BRIDGE_SLEEP=25
+  local tab; tab=$(printf '\t')
+  _spawn_fake "$PROJ" "team${tab}alice" "team${tab}bob";      local both=$FAKE_PID
+  _spawn_fake "$PROJ" "team${tab}alice2";                     local two=$FAKE_PID
+  _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
+  # Positive control FIRST. Without it, the zeroes below are also what a counter
+  # that answers 0 to everything produces -- including one whose pattern never
+  # matches the separator `ps` renders between a pair's team and its name (it is
+  # a tab, and `ps` writes it as the four characters \011, three of them digits).
+  [ "$(_wait_exact_role_count "$PROJ" alice2 1)" -eq 1 ]
+  # None of the three is a bridge whose pair set is {alice} in THIS project:
+  # {alice,bob} is a superset, {alice2} collides only by prefix, and the third
+  # is another project's.
+  [ "$(_count_exact_role_bridges "$PROJ" alice)" -eq 0 ]
+  # ... and {alice,bob} is not {bob} either -- the rule is set equality, not
+  # "serves this role". Asked through the waiter, with a `want` of 1 it will
+  # never reach: this is the one assertion here that goes red if the waiter is
+  # ever rewritten to return its `want` instead of what it saw. Every other
+  # check in this file passes under that rewrite, which is the shape of the
+  # defect being fixed (#984). It costs the waiter's full 10s by design.
+  [ "$(_wait_exact_role_count "$PROJ" bob 1)" -eq 0 ]
+  # One that IS {alice} counts, with the other three still running.
+  _spawn_fake "$PROJ" "team${tab}alice"; local solo=$FAKE_PID
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+  kill "$both" "$two" "$other" "$solo" 2>/dev/null || true
+  wait "$both" 2>/dev/null || true; wait "$two" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true; wait "$solo" 2>/dev/null || true
+}
+
 @test "launcher: reaps a same-(project,role) orphan the pidfile lost, converging to one (#937)" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=25
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
-  [ "$(_count_role_bridges "$PROJ" alice)" -eq 1 ]
+  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  [ "$(_count_exact_role_bridges "$PROJ" alice)" -eq 1 ]
   rm -f "$RUN_DIR"/codex-bridge.*.pid
-  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true
 }
 
@@ -556,9 +620,9 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$PROJ" "team${tab}bob"; local bob=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
   rm -f "$RUN_DIR"/codex-bridge.*.pid
-  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$bob"
   kill "$bob" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$bob" 2>/dev/null || true
 }
@@ -570,9 +634,9 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
   rm -f "$RUN_DIR"/codex-bridge.*.pid
-  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$other"
   kill "$other" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$other" 2>/dev/null || true
 }
@@ -584,9 +648,9 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$PROJ" "team${tab}alice2"; local alice2=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
   rm -f "$RUN_DIR"/codex-bridge.*.pid
-  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$alice2"
   kill "$alice2" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$alice2" 2>/dev/null || true
 }
@@ -598,9 +662,16 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$PROJ" "team${tab}alice" "team${tab}bob"; local both=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  # `both` carries `--pair team<TAB>alice`, so an argv match answers 1 for it
+  # before the launcher has spawned anything: this is the one site where the
+  # gate opened on the test's own fixture. The exact counter requires a pair set
+  # of {alice}, the same set inequality the `kill -0 "$both"` below relies on.
+  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
   rm -f "$RUN_DIR"/codex-bridge.*.pid
-  [ "$(_wait_role_count "$PROJ" alice 1)" -eq 1 ]
+  # ONE exact-{alice} bridge: the launcher's. `both` is not counted here -- the
+  # `kill -0` below is what says it survived. The two assertions carry different
+  # halves of this test's claim.
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   # Its pair set is {alice,bob}, not {alice}: set inequality spares it.
   kill -0 "$both"
   kill "$both" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$both" 2>/dev/null || true
