@@ -109,8 +109,23 @@ _agmsg_pid_valid() {
 #
 # The EPERM reading and the ps cross-check are the same as _agmsg_pid_alive's --
 # a pid we minted is still a pid a sandbox may refuse to let us signal (#505).
+# TEMPORARY (probe/954-branch-trace, never to be merged). Records which branch
+# of _agmsg_pid_alive_local produced the verdict, so a CI run can say what it
+# did instead of us guessing from the outside.
+#
+# Appends to a file rather than writing stderr: this helper has 61 call sites,
+# some of which capture stderr and some of whose tests assert on it. A probe
+# that changes what callers see would be measuring itself.
+#
+# Off unless AGMSG_PIDALIVE_TRACE is set, so the probe cannot alter a normal run.
+_agmsg_pidalive_trace() {
+  [ -n "${AGMSG_PIDALIVE_TRACE:-}" ] || return 0
+  printf '%s\t%s\t%s\n' "${BATS_TEST_NAME:-<no-test>}" "$1" "$2" \
+    >> "$AGMSG_PIDALIVE_TRACE" 2>/dev/null || true
+}
+
 _agmsg_pid_alive_local() {
-  local pid="$1" err stat
+  local pid="$1" err stat probe rc canary tstat _p _s _rest
   # The POSIX ceiling, explicitly, whatever the host. _agmsg_pid_valid widens to
   # the DWORD range when MSYSTEM is set, which is right for a number tasklist
   # will be asked about and wrong for one kill(1) will parse: past INT32_MAX kill
@@ -131,10 +146,50 @@ _agmsg_pid_alive_local() {
   esac
   # kill(2) says gone. ps does not depend on signalling permission at all, so
   # requiring it to agree is what keeps a sandbox from turning "cannot signal"
-  # into "not running".
-  stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
-  [ -n "$stat" ] || return 1
-  case "$stat" in Z*) return 1 ;; esac   # exited, just not reaped yet
+  # into "not running" (#505). But an EMPTY ps result is NOT proof of death: a
+  # transient ps failure and a truly-absent pid both produce nothing, and reading
+  # that as "gone" is #954 -- callers delete files, release locks, and respawn on
+  # it. Distinguish "proof of absence" from "absence of proof" by co-observing a
+  # known-live pid -- our own $$ -- in the SAME observation. Take a FULL snapshot
+  # (no -p filter, so the target pid is never handed to ps and cannot poison the
+  # query, e.g. macOS "process id too large"), parsed with builtins so only ps is
+  # external and a stripped PATH cannot itself become the failed observation:
+  #   - $$ absent from the snapshot => ps produced nothing usable => UNKNOWN =>
+  #     assume alive, exactly as the EPERM branch above. A failed observation is
+  #     not proof of absence.
+  #   - $$ present, target absent  => ps listed us and did not list the target =>
+  #     positive proof the target is gone => dead.
+  #   - target present, zombie     => gone too.
+  # `|| rc=$?` keeps the assignment out of set -e's reach: a command-substitution
+  # assignment returns the substituted command's exit status as its OWN, so under
+  # errexit in a caller that did NOT invoke us as a condition, a non-zero ps would
+  # terminate the shell right here -- leaking a failed observation to caller death
+  # instead of the UNKNOWN => alive verdict below. The leaf helper's contract must
+  # not depend on how the caller spelled the call.
+  rc=0
+  probe="$(ps -Ao pid=,stat= 2>/dev/null)" || rc=$?
+  canary=0; tstat=""
+  while read -r _p _s _rest; do
+    if [ "$_p" = "$$" ]; then canary=1; fi
+    if [ "$_p" = "$pid" ]; then tstat="${_s:-?}"; fi
+  done <<PROBE
+$probe
+PROBE
+  if [ -n "$tstat" ]; then
+    case "$tstat" in Z*) _agmsg_pidalive_trace ps-zombie "$pid"; return 1 ;; esac
+    _agmsg_pidalive_trace ps-present "$pid"; return 0
+  fi
+  # Target not listed. Trust "absent" ONLY when ps COMPLETED the snapshot (exit 0)
+  # AND that snapshot included our own $$. A non-zero exit means the listing was
+  # truncated -- ps can print part of it (even our own line) and then fail -- and a
+  # pid that would have come later proves nothing; canary presence shows only that
+  # WE were listed, never that the listing FINISHED. Anything short of a complete,
+  # self-including snapshot is UNKNOWN -> assume alive (#954), which also fails safe
+  # where "ps -Ao" is unsupported (it exits non-zero rather than lying "gone").
+  if [ "$rc" -eq 0 ] && [ "$canary" = 1 ]; then
+    _agmsg_pidalive_trace ps-absent-canary-seen "$pid"; return 1
+  fi
+  _agmsg_pidalive_trace UNKNOWN-assumed-alive "rc=$rc canary=$canary pid=$pid"
   return 0
 }
 
