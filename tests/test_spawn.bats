@@ -21,6 +21,10 @@ printf '%s\n' "\$*" >> "$CAPTURE"
 EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
+  command -v sqlite3 >/dev/null 2>&1 || {
+    echo "test_spawn requires sqlite3" >&2
+    return 1
+  }
   export SQLITE_BIN_DIR
   SQLITE_BIN_DIR="$(dirname "$(command -v sqlite3)")"
 
@@ -126,6 +130,17 @@ assert_boot_reaches_cleanup() {
 
   run bash "$SCRIPTS/identities.sh" "$PROJ" missingfallback
   [[ "$output" != *"reviewer"* ]]
+}
+
+@test "spawn: unset HOME skips the local-bin fallback probe" {
+  add_spawnable_type nohome agmsg-test-guaranteed-missing-cli
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env -u HOME PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" nohome foo --project "$PROJ"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "fallback locations" ]]
+  [[ "$output" != *"unbound variable"* ]]
 }
 
 @test "spawn: Windows fallback prefers the bare executable" {
