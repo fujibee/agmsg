@@ -297,16 +297,66 @@ agmsg_sqlite() {
 # failed, so "the operation failed and the last statement was busy" names it.
 #
 # stderr is captured to classify it and re-emitted unchanged, so a caller that
-# reads or silences it sees what it saw before; stdout is the data stream and
-# is not touched; the exit status is passed through. Written as an `if` so a
-# caller running under `set -e` is not exited by the assignment itself.
+# reads or silences it sees what it saw before; stdout is the data stream, now
+# passed through the same trailing-CR normalization as agmsg_sqlite()'s own
+# non-recording path above (Windows' sqlite3.exe row-separator \r\n; see that
+# comment for the full writeup -- this path bypasses it entirely via the early
+# `return` above, so it needs its own copy of the fix, not a call into it: this
+# function's stdout/stderr routing exists for a different purpose, classifying
+# ok/busy/failed for the sync driver adapter, and folding the two together
+# would tangle two independent concerns). The exit status is still passed
+# through, unaffected either way.
+#
+# The original fd-3 passthrough trick (sqlite3's own fd 1 repointed at
+# whatever fd 1 was outside this function, with no process in between) cannot
+# survive inserting `sed`: stdout now goes through an actual pipe, so a temp
+# file replaces the `err=$(...)` capture for stderr, and the exit status comes
+# from `${PIPESTATUS[0]}` (sqlite3's, not sed's) rather than the substitution's
+# own `$?`. Stderr is still read back whole and re-emitted verbatim afterward,
+# so a caller that reads or silences it sees the same bytes as before.
+#
+# The pipeline is wrapped in an `if`, same as the original, and for the same
+# reason: this is a plain function call, not a subshell, so it runs in the
+# CALLING script's own shell -- and several callers set both `-e` and
+# `-o pipefail`. A command tested by `if` is exempt from `set -e` on a
+# non-zero exit (POSIX), so the pipeline cannot abort the caller here
+# regardless of its pipefail setting.
+#
+# `${PIPESTATUS[0]}` (sqlite3's exit status, not sed's) is read in BOTH
+# branches, not once after the `if` -- and specifically not guarded with
+# `|| true` the way the CRLF fix above is, because `|| true` is not safe
+# here. `PIPESTATUS` is overwritten by the NEXT command this shell
+# executes, of any kind, including a trivial one: `pipeline || true` runs
+# `true` whenever the pipeline's own exit status is non-zero, and reading
+# `${PIPESTATUS[0]}` after that reads back `true`'s status (0), not
+# sqlite3's. The CRLF fix's own `|| true` above is fine BECAUSE that call
+# site never reads PIPESTATUS at all. This one silently turned every
+# failure here into rc=0 whenever pipefail was already active in the
+# caller -- and only there: storage-sync-driver.sh sets `-o pipefail`
+# itself, so a plain `bash -c` probe without it stayed green while the
+# real busy-timeout contract test (test_remote_sync.bats, "a store
+# another writer holds is busy") got 0 where it expected 11. Reading
+# PIPESTATUS inside the `if`'s own branches, before anything else runs,
+# is what keeps it correct either way.
 _agmsg_sqlite_recording() {
-  local err rc
+  local err rc errfile
+  # A mktemp failure degrades stderr capture to /dev/null rather than failing
+  # the operation outright: worse diagnostics (an unclassifiable error reads
+  # as "failed", never as "busy"), not worse correctness, and the same
+  # "environment problem, not a bad input" class of failure the busy/failed
+  # distinction exists to tell apart from an ordinary refusal.
+  errfile=$(mktemp "${TMPDIR:-/tmp}/agmsg-sqlite-recording-err.XXXXXX" 2>/dev/null) || errfile=/dev/null
   # shellcheck disable=SC2086  # same intentional split as above
-  if { err=$(sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>&1 >&3 3>&-); } 3>&1; then
-    rc=0
+  if sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" 2>"$errfile" | sed $'s/\r$//'; then
+    rc=${PIPESTATUS[0]}
   else
-    rc=$?
+    rc=${PIPESTATUS[0]}
+  fi
+  if [ "$errfile" = /dev/null ]; then
+    err=""
+  else
+    err="$(cat "$errfile" 2>/dev/null)"
+    rm -f "$errfile"
   fi
   [ -z "$err" ] || printf '%s\n' "$err" >&2
   if [ "$rc" -eq 0 ]; then
