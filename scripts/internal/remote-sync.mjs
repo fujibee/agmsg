@@ -2832,24 +2832,66 @@ export async function configure(args) {
 // Failure direction: a journal that cannot be read, or a line that cannot be
 // parsed, yields NO sequences, which leaves the frontier check exactly as it
 // was -- pinned. A frontier is never advanced on evidence that was not read.
+// And it SAYS so: a pinned frontier is also what #968 looked like before this
+// change, so a silent fallback here would be indistinguishable from the bug it
+// fixes. The event names the file and, for a torn journal, the line. A journal
+// that does not exist yet is not an anomaly (a team has no roster before its
+// first pull) and is the one case that stays quiet.
+//
+// The whole journal is read on every read-state cycle. It holds one record
+// per roster mutation the team ever applied (30 on a 21,505-message team),
+// so it grows with membership events, not with traffic; the storage driver
+// bounds the list it will accept at 10,000 and refuses beyond that. Cutting
+// it at the members' read floor would need that floor here, and it lives in
+// storage (sync_read_members.remote_server_seq) -- a new driver op, if the
+// list ever grows enough to matter.
 export async function rosterSequencesFor(config, dependencies = {}) {
   const readFileCall = dependencies.readFileCall ?? readFile;
+  const eventCall = dependencies.eventCall ?? event;
   const rosterFile = dependencies.rosterFile ?? rosterFileFor(config.local_team);
   if (!rosterFile) return [];
+  const journalPath = join(dirname(rosterFile), "roster.jsonl");
   let text;
-  try { text = await readFileCall(join(dirname(rosterFile), "roster.jsonl"), "utf8"); }
-  catch { return []; }
+  try { text = await readFileCall(journalPath, "utf8"); }
+  catch (error) {
+    if (error?.code !== "ENOENT") {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          reason: error?.code ?? error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+    }
+    return [];
+  }
   const sequences = new Set();
-  for (const line of text.split(/\r?\n/u)) {
+  const lines = text.split(/\r?\n/u);
+  for (const [index, line] of lines.entries()) {
     if (!line) continue;
     let record;
-    try { record = JSON.parse(line); } catch { return []; } // a torn journal is no evidence
-    if (record?.type === "roster_synced" &&
-        record.server_instance_id === config.server_instance_id &&
-        record.remote_team_id === config.remote_team_id &&
-        typeof record.server_seq === "string" && /^(0|[1-9][0-9]{0,18})$/u.test(record.server_seq)) {
-      sequences.add(record.server_seq);
+    try { record = JSON.parse(line); }
+    catch (error) { // a torn journal is no evidence -- and is named, with its line
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
     }
+    if (record?.type !== "roster_synced" ||
+        record.server_instance_id !== config.server_instance_id ||
+        record.remote_team_id !== config.remote_team_id) continue;
+    // The sequence DOMAIN, through the one validator the rest of this file
+    // uses -- shape alone let 9223372036854775808..9999999999999999999
+    // through (review finding), and SQLite stores those as REAL rather than
+    // refusing them. A record outside the domain is corrupt evidence, treated
+    // like a torn line: named, and the whole list withheld.
+    try { sequence(record.server_seq, "roster journal server_seq"); }
+    catch (error) {
+      try {
+        await eventCall("read-state.roster-journal-unreadable", { path: journalPath,
+          line: index + 1, reason: error?.message ?? String(error) });
+      } catch { /* logging is best-effort */ }
+      return [];
+    }
+    sequences.add(record.server_seq);
   }
   return [...sequences].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : 1);
 }

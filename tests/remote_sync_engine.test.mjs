@@ -1403,20 +1403,64 @@ test("roster sequences: the journal's roster_synced records for this binding, an
       // another binding's record is not this binding's evidence
       JSON.stringify({ type: "roster_synced", mutation_id: "mx", server_seq: "7", wire_id: "wx",
         server_instance_id: other, remote_team_id: config.remote_team_id }),
-      // a non-canonical sequence is not evidence either
-      JSON.stringify({ type: "roster_synced", mutation_id: "my", server_seq: "007", wire_id: "wy",
-        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
       // duplicate of seq 2 collapses
       JSON.stringify({ type: "roster_synced", mutation_id: "m1b", server_seq: "2", wire_id: "w1b",
         server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
     ].join("\n"));
     assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), ["1", "2"]);
     // A torn journal (a line that is not JSON) yields nothing: a frontier is
-    // never advanced on evidence that could not be read whole.
+    // never advanced on evidence that could not be read whole. And it is
+    // NAMED, with the line, because a pinned frontier is also what #968
+    // looked like -- a silent fallback would be indistinguishable from the bug.
+    const events = [];
+    const eventCall = async (name, fields) => { events.push({ name, ...fields }); };
     await writeFile(join(root, "teams", "demo", "roster.jsonl"),
       '{"type":"roster_synced","mutation_id":"m1","server_seq":"2","wire_id":"w1",' +
       `"server_instance_id":"${config.server_instance_id}","remote_team_id":"${config.remote_team_id}"}\n{"type":"roster_syn`);
-    assert.deepEqual(await rosterSequencesFor(config, { rosterFile }), []);
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].name, "read-state.roster-journal-unreadable");
+    assert.equal(events[0].line, 2);
+    assert.match(events[0].path, /roster\.jsonl$/u);
+    // A non-canonical sequence ("007") is corrupt evidence: the whole list is
+    // withheld and the line named, not the one record skipped -- a journal
+    // with one bad record is not a journal to take sequences from.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"), [
+      JSON.stringify({ type: "roster_synced", mutation_id: "m0", server_seq: "1", wire_id: "w0",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+      JSON.stringify({ type: "roster_synced", mutation_id: "my", server_seq: "007", wire_id: "wy",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }),
+    ].join("\n"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 2);
+    // A sequence outside the domain is corrupt evidence, treated the same way
+    // (review finding: shape alone let 2^63..10^19-1 through).
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775808", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].line, 1);
+    assert.match(events[0].reason, /not a canonical sequence/u);
+    // MAX itself is a legal sequence.
+    events.length = 0;
+    await writeFile(join(root, "teams", "demo", "roster.jsonl"),
+      JSON.stringify({ type: "roster_synced", mutation_id: "m1", server_seq: "9223372036854775807", wire_id: "w1",
+        server_instance_id: config.server_instance_id, remote_team_id: config.remote_team_id }));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), ["9223372036854775807"]);
+    assert.equal(events.length, 0);
+    // No journal at all is not an anomaly (no roster before the first pull): quiet.
+    await rm(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 0);
+    // An unreadable journal (a directory in its place) IS named.
+    await mkdir(join(root, "teams", "demo", "roster.jsonl"));
+    assert.deepEqual(await rosterSequencesFor(config, { rosterFile, eventCall }), []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reason, "EISDIR");
   } finally {
     await rm(root, { recursive: true });
   }

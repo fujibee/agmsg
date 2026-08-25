@@ -1399,11 +1399,39 @@ storage_sync_prepare_read_state() {
       ((.local_agents|unique|length)==(.local_agents|length)) and all(.local_agents[];
         (type=="string") and length>0) and
       (.members|length)<=1000 and all(.members[];
-        ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0) and
-      ((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
-        (.roster_seqs|length)<=1000000 and all(.roster_seqs[];
-          (type=="string") and test("^(0|[1-9][0-9]{0,18})$"))))) | "ok"' \
+        ((.member_id|type)=="string") and ((.name|type)=="string") and (.name|length)>0)) | "ok"' \
       2>/dev/null)" = ok ] || { _sqlite_sync_why; return 13; }
+  # ...and the roster list on its own line, so a refusal here is told apart
+  # from the eight context checks above by the line number _sqlite_sync_why
+  # prints (#911) -- and says what it is in words as well. The bound is the
+  # size the contract test actually passes through this path (10,000): the
+  # list is one entry per roster mutation the team ever applied, so a team
+  # past it has had ten thousand joins, leaves or renames, which is a signal
+  # to look at the design, not a size to wave through. Over the bound is
+  # refused (13), which leaves the frontier where it was -- the safe side.
+  # Shape and size in jq; the DOMAIN through _sqlite_sync_sequence, the same
+  # bound this function already holds current_seq to a hundred lines above.
+  # Shape alone let 9223372036854775808..9999999999999999999 through (review
+  # finding), and an INTEGER PRIMARY KEY temp table then fails the whole
+  # read-prepare transaction with a datatype mismatch -- no 13, no reason.
+  # Pure bash per entry, no fork; at most 10,000 entries.
+  [ "$(printf '%s\n' "$context" | jq -r '
+    select((.roster_seqs|type)=="null" or ((.roster_seqs|type)=="array" and
+      (.roster_seqs|length)<=10000 and all(.roster_seqs[]; type=="string"))) | "ok"' \
+      2>/dev/null)" = ok ] || {
+    echo "agmsg: sqlite-sync: roster_seqs is not a list of at most 10000 strings (#968)" >&2
+    _sqlite_sync_why; return 13
+  }
+  local roster_seq
+  while IFS= read -r roster_seq; do
+    [ -n "$roster_seq" ] || continue
+    _sqlite_sync_sequence "$roster_seq" || {
+      echo "agmsg: sqlite-sync: roster_seqs carries '$roster_seq', which is not a canonical sequence (#968)" >&2
+      _sqlite_sync_why; return 13
+    }
+  done <<EOF
+$(printf '%s\n' "$context" | jq -r '.roster_seqs // [] | .[]')
+EOF
   floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
   current=$(printf '%s\n' "$context" | jq -r '.current_seq')
   case "$floor:$current" in *[!0-9:]*) _sqlite_sync_why; return 13 ;; esac

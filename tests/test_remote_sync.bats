@@ -1452,3 +1452,38 @@ _968_exact_count() { printf '%s\n' "$1" | jq -r 'select(.type=="sync_read_exact"
   run _968_prepare 2 '"1"'
   [ "$status" -eq 13 ]
 }
+
+@test "read-state: the roster list bound is swept on both sides -- 10,000 pass and advance the frontier, 10,001 are refused and it does not move (#968)" {
+  # Messages sit past ten thousand roster sequences; all are read.
+  _968_apply_messages 10001 10002 10003 10004
+  local ten_k prepared db
+  ten_k=$(jq -nc '[range(1;10001) | tostring]')
+  prepared=$(_968_prepare 10004 "$ten_k")
+  # Passing is not the claim -- the frontier landing on the right value is.
+  [ "$(_968_frontier "$prepared")" = 10004 ]
+  [ "$(_968_exact_count "$prepared")" -eq 0 ]
+  # One past the bound: refused, and told apart from every other context
+  # refusal by its own message (the #911 line number would differ as well).
+  run _968_prepare 10004 "$(jq -nc '[range(1;10002) | tostring]')"
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"roster_seqs is not a list of at most 10000"* ]]
+  # And nothing moved: the frontier recorded by the accepted call is still
+  # the one on disk, not a partially trusted one.
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" "SELECT server_seq FROM sync_read_prepared;" | tr -d '\r')" = 10004 ]
+}
+
+@test "read-state: a roster sequence is validated against the sequence DOMAIN, not just its shape (#968)" {
+  # 9223372036854775808 through 9999999999999999999 are canonical-looking
+  # 19-digit decimals past MAX_SEQUENCE; SQLite stores them as REAL instead of
+  # refusing (review finding). MAX itself is a legal sequence.
+  _968_apply_messages 1 2
+  local prepared
+  prepared=$(_968_prepare 2 '["9223372036854775807"]')
+  [ "$(_968_frontier "$prepared")" = 2 ]
+  run _968_prepare 2 '["9223372036854775808"]'
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"not a canonical sequence"* ]]
+  run _968_prepare 2 '["9999999999999999999"]'
+  [ "$status" -eq 13 ]
+}
