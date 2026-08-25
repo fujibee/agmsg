@@ -126,7 +126,7 @@ assert_boot_reaches_cleanup() {
   run env PATH="$STUB_BIN:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" missingfallback reviewer --project "$PROJ"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "fallback locations" ]]
+  printf '%s\n' "$output" | grep -q "fallback locations"
 
   run bash "$SCRIPTS/identities.sh" "$PROJ" missingfallback
   [[ "$output" != *"reviewer"* ]]
@@ -139,7 +139,7 @@ assert_boot_reaches_cleanup() {
   run env -u HOME PATH="$STUB_BIN:/usr/bin:/bin" \
     bash "$SCRIPTS/spawn.sh" nohome foo --project "$PROJ"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "fallback locations" ]]
+  printf '%s\n' "$output" | grep -q "fallback locations"
   [[ "$output" != *"unbound variable"* ]]
 }
 
