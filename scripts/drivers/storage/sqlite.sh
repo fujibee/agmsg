@@ -319,9 +319,36 @@ storage_read_cursor_consume() {
                     WHERE e.type='message_sent' AND e.team='$tl'
                       AND e.id='$(_sqlite_lit "$id")' AND e.legacy_id IS NOT NULL);"
   done
-  agmsg_sqlite "$db" "BEGIN IMMEDIATE;
-    $sql
-    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
+  # #777 ("Not measured" section): $sql gains one INSERT/UPDATE block per
+  # delivered id, and the whole "BEGIN IMMEDIATE; ...; COMMIT;" statement
+  # used to be handed to `agmsg_sqlite` as ONE argv element. Measured on
+  # Windows: 97 ids built a 38,897-byte statement and CreateProcess refused
+  # it outright (that ceiling is 32,767 characters -- well under Linux's own
+  # MAX_ARG_STRLEN=131,072 bytes) -- and the failure was masked further,
+  # surfacing only as this function's ordinary runtime_error/13 return, never
+  # as a visible "Argument list too long". Same fix as history.sh /
+  # inbox.sh / check-inbox.sh / watch.sh / watch-once.sh, and
+  # drivers/storage/sqlite-sync.sh's own #882 fix: write the statement to a
+  # temp file with printf (a bash builtin, so it never execs) and feed
+  # `agmsg_sqlite` the statement on stdin instead.
+  #
+  # No trap here, on purpose: this is a SHARED LIBRARY FUNCTION, called every
+  # poll from watch.sh's long-lived loop, which installs its own permanent
+  # `trap cleanup EXIT` / `trap 'exit 0' INT TERM HUP` once near the top of
+  # that process. A trap set and then cleared in here (bash traps do not
+  # stack) would replace watch.sh's for the rest of its life the first time
+  # this function ever ran -- the exact mistake this same #777 pass caught
+  # and avoided in watch.sh's own ROWS-fetch fix a few lines above this one
+  # in the call chain. The temp file is removed explicitly on every path
+  # instead; the one path that leaks it (a signal landing mid-call) is left
+  # for the OS's own temp-directory cleanup, same trade-off already accepted
+  # there.
+  local sql_file
+  sql_file=$(mktemp "${TMPDIR:-/tmp}/agmsg-cursor-consume.XXXXXX" 2>/dev/null) || { echo runtime_error; return 13; }
+  {
+    printf '%s\n' "BEGIN IMMEDIATE;"
+    printf '%s\n' "$sql"
+    printf '%s\n' "    INSERT OR IGNORE INTO read_cursors(team,agent,local_position)
       VALUES('$tl','$al',0);
     UPDATE read_cursors SET local_position=MAX(local_position,COALESCE((
       SELECT MIN(e.seq)-1 FROM events e
@@ -331,8 +358,14 @@ storage_read_cursor_consume() {
          AND NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
            AND r.team=e.team AND r.agent='$al' AND r.msg_id=e.id)
     ),MIN($target,$(_sqlite_highwater))))
-    WHERE team='$tl' AND agent='$al';
-    COMMIT;" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+    WHERE team='$tl' AND agent='$al';"
+    printf '%s\n' "COMMIT;"
+  } > "$sql_file"
+  if ! agmsg_sqlite "$db" < "$sql_file" >/dev/null 2>&1; then
+    rm -f "$sql_file"
+    echo runtime_error; return 13
+  fi
+  rm -f "$sql_file"
   echo ok
 }
 
