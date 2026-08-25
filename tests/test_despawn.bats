@@ -92,19 +92,13 @@ _control_row_exists_for_alice() {
   # broad (non-actas) watcher that later scans this project's inbox must not
   # see it resurface as a "new" message (2026-07-19 review finding).
   _control_row_exists_for_alice
-  # LEFT AS `!` ON PURPOSE, and it is the one exception in this change.
-  #
-  # Converting it to `refute` enforces the assertion -- and enforced, it fails
-  # under load: green run alone three times, green with this file alone, red in
-  # a ten-file sweep. So the condition it checks (the ctrl:despawn row is
-  # already marked read at this point) is not reliably true when the machine is
-  # busy. That is a timing weakness the silence has been covering, not
-  # something this change introduced, and fixing it is a different job (#715,
-  # which carries the reproduction).
-  #
-  # Enforcing it here would trade a hidden weakness for an unstable CI, which
-  # is a worse deal than leaving one assertion visibly listed in the baseline.
-  ! _is_unread_for_alice "ctrl:despawn"
+  # `refute`, not a bare `!` (#715). `! cmd` is exempt from errexit on every bash,
+  # so `! _is_unread_for_alice ...` reported ok even when the row WAS unread — the
+  # assertion was written but watched nothing (#670). `refute` makes it fail when
+  # the row lingers unread. The separate, load-dependent flake this then exposes
+  # (the row not yet read right after despawn returns, under load) is NOT fixed
+  # here; it stays open as #715.
+  refute _is_unread_for_alice "ctrl:despawn"
 
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
