@@ -602,6 +602,28 @@ EOF
   grep -q "$SK/run" "$FAKE_HOME/dotfiles/config.toml"
 }
 
+@test "install: an ordinary Codex config.toml is replaced atomically, not truncated in place (#747 control)" {
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/config.toml" <<'EOF'
+[sandbox_workspace_write]
+writable_roots = ["/some/existing/path"]
+EOF
+  # The reverse of the symlink tests, guarding the ordinary-file arm so the atomic
+  # mv cannot be dropped again unseen (#747). An atomic `mv` gives the destination
+  # a NEW inode (the temp file's); a truncate-then-write (`cat >`, the symlink arm)
+  # keeps the old inode. So an unchanged inode here would mean the ordinary path
+  # silently became non-atomic.
+  local ino_before; ino_before="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+
+  [ ! -L "$FAKE_HOME/.codex/config.toml" ]
+  grep -q "$SK/db" "$FAKE_HOME/.codex/config.toml"
+  grep -q "/some/existing/path" "$FAKE_HOME/.codex/config.toml"
+  local ino_after; ino_after="$(ls -i "$FAKE_HOME/.codex/config.toml" | awk '{print $1}')"
+  [ "$ino_after" != "$ino_before" ]
+}
+
 
 # --- hermes Agent skill (~/.hermes/skills/<name>/SKILL.md) ---
 

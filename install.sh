@@ -105,14 +105,24 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # the SKILL.md the installer itself had written with the wrong flavor.
 AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
 
-# Overwrite <dest> with the contents of <src>, then remove <src>. Unlike `mv`,
-# a redirect follows <dest> when it is a symlink and writes the link's target,
-# so a `~/.codex/config.toml` managed as a symlink (stow/chezmoi/manual dotfiles)
-# keeps its link and receives the edit — `mv` would replace the link with a plain
-# file and drop the edit on a detached copy (#747). Not atomic, which is fine for
-# a few-KB config written once at install time.
-write_through_symlink() {
-  cat "$1" > "$2" && rm -f "$1"
+# Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
+# <dest>, so the fix's scope matches the defect's (#747):
+#   - regular <dest>: `mv` — an atomic rename, so an interrupted install leaves
+#     either the whole old config or the whole new one, never a torn file. This
+#     is the common path and must stay atomic.
+#   - symlinked <dest>: write THROUGH the link (a redirect follows it) so a
+#     config.toml managed as a symlink (stow/chezmoi/manual dotfiles) keeps its
+#     link and its target receives the edit. `mv` would replace the link with a
+#     plain file and strand the edit on a detached copy — the actual #747 bug.
+#     This arm is non-atomic (there is no atomic write-through-a-link with plain
+#     POSIX tools), but the exposure is confined to symlink users, whose target
+#     is typically a version-controlled dotfile.
+move_into_place() {
+  if [ -L "$2" ]; then
+    cat "$1" > "$2" && rm -f "$1"
+  else
+    mv "$1" "$2"
+  fi
 }
 
 configure_codex_sandbox() {
@@ -168,13 +178,13 @@ configure_codex_sandbox() {
         done=1
       }
       { print }
-    ' "$code_config" > "$code_config.tmp" && write_through_symlink "$code_config.tmp" "$code_config"
+    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
   elif grep -q '^\[sandbox_workspace_write\]' "$code_config" 2>/dev/null; then
     # Section exists but no writable_roots
     awk -v entries="$entries" '
       { print }
       /^\[sandbox_workspace_write\]/ { print "writable_roots = [" entries "]" }
-    ' "$code_config" > "$code_config.tmp" && write_through_symlink "$code_config.tmp" "$code_config"
+    ' "$code_config" > "$code_config.tmp" && move_into_place "$code_config.tmp" "$code_config"
   else
     # No section at all
     printf '\n[sandbox_workspace_write]\nwritable_roots = [%s]\n' "$entries" >> "$code_config"
