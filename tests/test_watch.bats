@@ -831,6 +831,53 @@ _record_handover_events() {
   done
 }
 
+# --- argv-length regression (#777) --------------------------------------
+#
+# watch.sh used to embed the whole page of `storage_watch_after` rows into
+# ONE argv element for `sqlite3 ':memory:' "<embedded SQL>"`, and its failure
+# was swallowed by a trailing `2>/dev/null || true` -- so ROWS silently
+# became empty, FINAL_CURSOR never got set, and the read cursor never
+# advanced. The same backlog would then fail identically on every following
+# poll: not a one-off skip, a stall.
+#
+# 100 messages of ~2000 bytes each is about 200,000 bytes of body alone,
+# well past Linux's MAX_ARG_STRLEN (131,072 bytes; smaller still on
+# Windows/macOS). Sent BEFORE the watcher starts, so its very first poll has
+# to scan and embed the entire backlog in one statement -- the shape the bug
+# needed, rather than many small pages that would each stay under the
+# ceiling on their own.
+@test "watch: a backlog large enough to exceed the OS argv ceiling still delivers and advances the cursor (#777)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  local sid="sess-argv-backlog"
+  local out="$TEST_SKILL_DIR/argv-backlog.log"
+
+  bulk_send_direct team bob alice 100 2000 WBIG
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  _wait_for_file_contains "$out" "WBIG-99-" || { kill "$w" 2>/dev/null || true; false; }
+
+  # Cursor advancement is a SEPARATE step that runs after every row in this
+  # poll has already been printed (storage_read_cursor_consume, embedding all
+  # 100 delivered ids in its own statement) -- killing the watcher the instant
+  # the last line lands, the way the plain burst test (#245) does, races that
+  # step under this much data. Poll for it instead, same as "watch: restart
+  # delivers messages that arrived while the watcher was down" above.
+  local i cursor
+  for i in $(seq 1 100); do
+    cursor=$(_read_cursor team alice 2>/dev/null || echo 0)
+    [ "${cursor:-0}" -gt 0 ] && break
+    sleep 0.1
+  done
+  kill "$w" 2>/dev/null || true
+  wait "$w" 2>/dev/null || true
+
+  grep -q "WBIG-0-" "$out"
+  grep -q "WBIG-99-" "$out"
+  # Not stuck: the store-owned cursor moved past where it started (0).
+  [ "${cursor:-0}" -gt 0 ]
+}
+
 @test "watch: empty session_id gets a generated fallback instead of a Usage error (#236)" {
   local out="$BATS_TEST_TMPDIR/empty-sid.out"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "" "$PROJ" claude-code alice >"$out" 2>&1 3>&- 4>&- &

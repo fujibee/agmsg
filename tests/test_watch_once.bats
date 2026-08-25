@@ -105,6 +105,27 @@ _assert_startup_was_delayed() {
   [[ "$output" =~ "hello pending" ]]
 }
 
+# --- argv-length regression (#777) --------------------------------------
+#
+# This pair's unread ids used to be embedded into ONE argv element for
+# `sqlite3 ':memory:' "<embedded SQL>"`, with the failure swallowed by a
+# trailing `2>/dev/null || true` -- so `ids` silently became empty and the
+# `[ -n "$ids" ] || continue` a few lines later skipped the whole team every
+# single poll, never marking anything read (this script never does) and
+# never reporting it pending either.
+#
+# 100 messages of ~2000 bytes each is about 200,000 bytes of body alone,
+# well past Linux's MAX_ARG_STRLEN (131,072 bytes; smaller still on
+# Windows/macOS).
+@test "watch-once: a backlog large enough to exceed the OS argv ceiling still reports pending (#777)" {
+  bulk_send_direct team bob alice 100 2000 WOBIG
+
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 2 --interval 1
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "status=pending" ]]
+  [[ "$output" =~ "count=100" ]]
+}
+
 @test "watch-once: ignores messages already read by inbox.sh" {
   bash "$SCRIPTS/send.sh" team bob alice "read already" >/dev/null
   bash "$SCRIPTS/inbox.sh" team alice >/dev/null
