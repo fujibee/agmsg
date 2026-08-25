@@ -1266,6 +1266,34 @@ _longest_argv() {
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='sync_messages_server_seq';" | tr -d '\r')" -eq 1 ]
 }
 
+# Piped `agmsg_sqlite` sites under <root>/scripts with no warm within the two
+# lines above the pipe, one "file:line" per line. Comment lines are not sites:
+# the rule is about processes, and a comment starts none. A whole file is never
+# excluded -- a real pipeline added to any file must be seen (review finding on
+# #904: the earlier file-level skip would have hidden one).
+_462_unwarmed_under() {
+  local root="$1" file n line stripped prev
+  while IFS=: read -r file n line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    case "$stripped" in \#*) continue ;; esac
+    prev="$(sed -n "$((n > 2 ? n - 2 : 1)),$((n))p" "$root/$file")"
+    case "$prev" in *agmsg_sqlite_warm*) continue ;; esac
+    printf '%s:%s\n' "$file" "$n"
+  done < <(cd "$root" && grep -rn '| agmsg_sqlite' scripts/)
+}
+
+# Executable (non-comment) piped sites under <root>/scripts: the population
+# the scan judges, counted the same way the scan reads them.
+_462_piped_sites_under() {
+  local root="$1" file n line stripped count=0
+  while IFS=: read -r file n line; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    case "$stripped" in \#*) continue ;; esac
+    count=$((count + 1))
+  done < <(cd "$root" && grep -rn '| agmsg_sqlite' scripts/)
+  printf '%s\n' "$count"
+}
+
 @test "storage: every piped agmsg_sqlite warms the escape probe first (#462)" {
   # THE SET IS DERIVED, NOT LISTED. `agmsg_sqlite` memoises the escape probe so
   # it costs one sqlite3 process per shell rather than one per call, and the
@@ -1276,29 +1304,40 @@ _longest_argv() {
   #
   # Written as a scan rather than as one case per site because the sites move:
   # three were added the day this was found, by a change that was reviewed and
-  # cleared without anyone noticing the shell rule underneath it.
-  local unwarmed="" file line n prev
-  while IFS=: read -r file n line; do
-    case "$file" in */lib/storage.sh) continue ;; esac
-    # The two lines above the pipeline: `agmsg_sqlite_warm`, or a helper whose
-    # own body warms.
-    prev="$(sed -n "$((n > 2 ? n - 2 : 1)),$((n))p" "$BATS_TEST_DIRNAME/../$file")"
-    case "$prev" in
-      *agmsg_sqlite_warm*) continue ;;
-    esac
-    unwarmed="$unwarmed$file:$n
-"
-  done < <(cd "$BATS_TEST_DIRNAME/.." && grep -rn '| agmsg_sqlite' scripts/)
-
-  # A statement inside a helper that warms is reached through the helper, so the
-  # scan looks two lines up rather than one.
+  # cleared without anyone noticing the shell rule underneath it. A statement
+  # inside a helper that warms is reached through the helper, so the scan looks
+  # two lines up rather than one.
+  local root unwarmed
+  root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  unwarmed="$(_462_unwarmed_under "$root")"
   [ -z "$unwarmed" ] || {
     printf 'piped agmsg_sqlite with no warm above it:\n%s\n' "$unwarmed"
     false
   }
+  # The scan can see something: a positive control on the instrument itself,
+  # counting only executable sites (a comment mentioning the pipe is not one).
+  [ "$(_462_piped_sites_under "$root")" -ge 8 ]
+}
 
-  # The scan can see something: a positive control on the instrument itself.
-  local found
-  found="$(cd "$BATS_TEST_DIRNAME/.." && grep -rc '| agmsg_sqlite' scripts/ | awk -F: '{s+=$2} END {print s}')"
-  [ "$found" -ge 8 ]
+@test "storage: the #462 scan goes red when a helper loses its warm (mutation control)" {
+  # A guard that stays green under the break it exists for is not a guard.
+  # Copy the tree, delete the warm from the stdin helper -- the central path
+  # every driver batch goes through -- and the scan must name that pipe.
+  local root copy target
+  root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  copy="$BATS_TEST_TMPDIR/scan-mutant"
+  mkdir -p "$copy"
+  cp -R "$root/scripts" "$copy/scripts"
+  target="$copy/scripts/drivers/storage/sqlite.sh"
+  grep -q 'agmsg_sqlite_warm' "$target"
+  # Remove exactly the warm line inside _sqlite_exec_stdin.
+  awk 'BEGIN{inside=0} /^_sqlite_exec_stdin\(\) \{/{inside=1} inside && /agmsg_sqlite_warm/{inside=0; next} /^}/{inside=0} {print}' "$target" > "$target.mutant"
+  mv "$target.mutant" "$target"
+  # The mutation took: one fewer warm in the file.
+  [ "$(grep -c 'agmsg_sqlite_warm' "$target")" -eq "$(( $(grep -c 'agmsg_sqlite_warm' "$root/scripts/drivers/storage/sqlite.sh") - 1 ))" ]
+  local unwarmed
+  unwarmed="$(_462_unwarmed_under "$copy")"
+  printf '%s\n' "$unwarmed" | grep -q '^scripts/drivers/storage/sqlite.sh:[0-9][0-9]*$'
+  # And ONLY that site: the mutant differs from the tree in one place.
+  [ "$(printf '%s\n' "$unwarmed" | grep -c .)" -eq 1 ]
 }
