@@ -237,8 +237,47 @@ agmsg_sqlite() {
     _agmsg_sqlite_recording "$@"
     return
   fi
-  # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+  # Windows' sqlite3.exe (measured: 3.53.4) ends each row of a multi-row
+  # result with \r\n, not \n -- confirmed by piping a three-row SELECT
+  # through `od -c` on real Windows hardware. This is independent of the
+  # `-escape` probe above (#102/#143: that is sqlite3 >= 3.50's own caret-
+  # notation rendering, fixed by `-escape off`, and reproduces on Linux too
+  # -- this CRLF ending does not reproduce here). HYPOTHESIS (unverified):
+  # the Windows C runtime's stdio text-mode translation rewrites sqlite3's
+  # own LF terminators to CRLF on the way out; what is actually confirmed is
+  # only the \r\n on the wire, not this mechanism.
+  #
+  # `ROWS=$(agmsg_sqlite ...)` strips only the trailing newline of the WHOLE
+  # captured output (bash command substitution), so every row but the last
+  # keeps a \r stuck to its final field -- typically an id, since every
+  # multi-field row built by this codebase's callers puts id/cursor/at last
+  # and body earlier (never in scope for this fix, but worth naming: it is
+  # why this hazard has not already shown up as corrupted message bodies).
+  # `IFS=$'\x1f' read` does not split on \r, so that \r rides along into
+  # the field value. Reported and measured on real Windows hardware: a
+  # 100-message backlog lost 99 of 100 mark-as-read updates in one
+  # inbox.sh run, because storage_mark_read_batch's ids no longer matched
+  # any real msg_id.
+  #
+  # The fix normalizes ONLY a \r immediately before the line-ending \n --
+  # not every \r in the stream. `tr -d '\r'` (used by _sqlite_data /
+  # _sqlite_data_stdin in drivers/storage/sqlite.sh, wrapping calls to THIS
+  # function) would also be correct for THIS symptom, but it deletes every
+  # \r anywhere in the output, including one that is a message body's own
+  # content (char(13) is not replaced the way char(10) already is in every
+  # row-building SELECT in this codebase) -- so it is not used here. `sed`'s
+  # `$` anchor matches only end-of-line, so a \r elsewhere in a row
+  # (mid-body) is left untouched.
+  #
+  # Wrapped in a subshell with its own `set -o pipefail` so the pipeline's
+  # status is sqlite3's, not sed's, without changing pipefail for the
+  # calling script (same shape as _sqlite_data / _sqlite_data_stdin in
+  # drivers/storage/sqlite.sh).
+  (
+    set -o pipefail
+    # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
+    sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'
+  )
 }
 
 # The same call, recording how it ended. With AGMSG_SQLITE_OUTCOME_FILE set,
