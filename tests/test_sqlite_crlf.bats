@@ -99,7 +99,7 @@ EOF
   PATH="$stub:$PATH"
   run bash "$SCRIPTS/inbox.sh" crlfteam alice
   [ "$status" -eq 0 ]
-  [[ "$output" == *"20 new message(s):"* ]]
+  grep -qF -- "20 new message(s):" <<< "$output"
   for n in $(seq 1 20); do
     [[ "$output" == *"CRLF-$n"* ]]
   done

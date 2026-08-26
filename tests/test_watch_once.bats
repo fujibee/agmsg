@@ -122,7 +122,7 @@ _assert_startup_was_delayed() {
 
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --timeout 2 --interval 1
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "status=pending" ]]
+  grep -qF -- "status=pending" <<< "$output"
   [[ "$output" =~ "count=100" ]]
 }
 
