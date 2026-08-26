@@ -294,9 +294,9 @@ delivered_to_operator() {
 
   run bash "$SCRIPTS/inbox.sh" testteam alice
   [ "$status" -eq 0 ]
-  [[ "$output" == *"100 new message(s):"* ]]
-  [[ "$output" == *"BIG-0-"* ]]
-  [[ "$output" == *"BIG-99-"* ]]
+  grep -qF -- "100 new message(s):" <<< "$output"
+  grep -qF -- "BIG-0-" <<< "$output"
+  grep -qF -- "BIG-99-" <<< "$output"
   [ "$(unread_count alice)" -eq 0 ]
 }
 
@@ -312,7 +312,7 @@ delivered_to_operator() {
   # already does, keeps this test pinned on the script under test.
   run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code /tmp/project-a"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"CIBIG-0-"* ]]
-  [[ "$output" == *"CIBIG-99-"* ]]
+  grep -qF -- "CIBIG-0-" <<< "$output"
+  grep -qF -- "CIBIG-99-" <<< "$output"
   [ "$(unread_count alice)" -eq 0 ]
 }
