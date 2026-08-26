@@ -255,13 +255,30 @@ for team in "${TEAM_LIST[@]}"; do
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
     _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
-    agmsg_sqlite ':memory:' "
-      SELECT json_extract(value,'\$.from') || char(31) ||
-             replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||
-             json_extract(value,'\$.at') || char(31) ||
-             json_extract(value,'\$.id')
-      FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
-    "
+    # #777: this team's unread backlog grows with every message sent to it, so
+    # interpolating it into ONE argv element eventually exceeds the OS's
+    # per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller still
+    # on Windows/macOS) and `agmsg_sqlite` fails with "Argument list too
+    # long" -- every single poll, since the backlog that triggered it never
+    # shrinks on its own. Pass the statement on stdin instead, mirroring
+    # drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
+    # history.sh/inbox.sh: printf is a bash builtin, so writing a large value
+    # to a temp file never execs and can hit neither that ceiling nor argv's
+    # at all. The temp file is scoped to THIS subshell -- its EXIT trap fires
+    # when the subshell itself exits (success, `exit 98`/`exit 13` above, or a
+    # signal), never touching the outer script's own traps.
+    _agmsg_ci_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-checkinbox-rows.XXXXXX") || exit 13
+    trap 'rm -f "$_agmsg_ci_sql"' EXIT HUP INT TERM
+    {
+      printf "%s\n" "SELECT json_extract(value,'\$.from') || char(31) ||"
+      printf "%s\n" "       replace(replace(json_extract(value,'\$.body'), char(10), '\n'), char(9), '\t') || char(31) ||"
+      printf "%s\n" "       json_extract(value,'\$.at') || char(31) ||"
+      printf "%s\n" "       json_extract(value,'\$.id')"
+      printf "FROM json_each('"
+      printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
+      printf "');\n"
+    } > "$_agmsg_ci_sql"
+    agmsg_sqlite ':memory:' < "$_agmsg_ci_sql"
   )
   _rc=$?
   set -e

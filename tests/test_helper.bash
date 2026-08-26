@@ -314,3 +314,31 @@ spawn_decoy_with_cmdline() {
   bash "$decoy" "$path" 3>&- &
   DECOY_PID=$!
 }
+
+# Sends <count> messages of ~<bodylen> bytes each from <from> to <to> on
+# <team>, via storage_send directly rather than send.sh's own CLI (#777
+# argv-length regressions in inbox.sh/check-inbox.sh/watch.sh/watch-once.sh).
+#
+# A plain bash FUNCTION CALL, not a subprocess: `storage_send "$team" ...
+# "$body"` hands the body to sqlite3 through the same escaped-argv path
+# production code uses for a single INSERT (which is not itself in scope --
+# no test here builds a body anywhere near that ceiling), but building the
+# backlog this way never has to exec anything with the WHOLE backlog as one
+# argument, which is exactly the shape production code used to get wrong
+# on read. Bodies are tagged "$label-$i-<pad>" so a caller can assert both
+# ends of the run (index 0 and count-1) are actually present in what the
+# script under test displayed, not just that its exit status was 0.
+bulk_send_direct() {
+  local team="$1" from="$2" to="$3" count="$4" bodylen="$5" label="$6" \
+    i=0 pad
+  pad="$(head -c "$bodylen" /dev/zero | tr '\0' 'x')"
+  (
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/storage.sh"
+    agmsg_storage_load
+    while [ "$i" -lt "$count" ]; do
+      storage_send "$team" "$from" "$to" "${label}-${i}-${pad}" >/dev/null
+      i=$((i + 1))
+    done
+  )
+}

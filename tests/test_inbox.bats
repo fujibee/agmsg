@@ -277,3 +277,42 @@ delivered_to_operator() {
   # The late message was not silently marked read by the first run
   [ "$(unread_count alice)" -eq 1 ]
 }
+
+# --- argv-length regression (#777) ---------------------------------------
+#
+# Both inbox.sh and check-inbox.sh used to embed the whole unread backlog into
+# ONE argv element for `sqlite3 ':memory:' "<embedded SQL>"`. 100 messages of
+# ~2000 bytes each is about 200,000 bytes of body alone, well past Linux's
+# MAX_ARG_STRLEN (131,072 bytes -- measured directly in this same suite's
+# environment, and documented in scripts/history.sh; the ceiling is smaller
+# still on Windows: 32,767 characters). Before the fix this failed every
+# single run with "Argument list too long" -- the backlog that triggered it
+# never shrinks on its own, so it never recovered.
+
+@test "inbox: a backlog large enough to exceed the OS argv ceiling still displays and marks read (#777)" {
+  bulk_send_direct testteam bob alice 100 2000 BIG
+
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  [ "$status" -eq 0 ]
+  grep -qF -- "100 new message(s):" <<< "$output"
+  grep -qF -- "BIG-0-" <<< "$output"
+  grep -qF -- "BIG-99-" <<< "$output"
+  [ "$(unread_count alice)" -eq 0 ]
+}
+
+@test "check-inbox: a backlog large enough to exceed the OS argv ceiling still delivers and marks read (#777)" {
+  bulk_send_direct testteam bob alice 100 2000 CIBIG
+
+  # Not delivered_to_operator() here: that helper embeds the WHOLE payload
+  # into its own single-shot json_valid('$esc') probe (an sqlite3 argv
+  # element again, just on the test side), so a body this size would trip
+  # the identical #777 ceiling one layer up and fail for a reason that has
+  # nothing to do with check-inbox.sh. Reading raw stdout directly, the way
+  # "multiple identities poll only the first agent's exact team rows" above
+  # already does, keeps this test pinned on the script under test.
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code /tmp/project-a"
+  [ "$status" -eq 0 ]
+  grep -qF -- "CIBIG-0-" <<< "$output"
+  grep -qF -- "CIBIG-99-" <<< "$output"
+  [ "$(unread_count alice)" -eq 0 ]
+}
