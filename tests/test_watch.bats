@@ -150,12 +150,35 @@ _wait_for_missing() {
   return 1
 }
 
+# Waits up to ten seconds for <needle> to appear in <file>. On timeout it says
+# what it saw, because a bare failure cannot be classified (#1000): whether
+# the file was missing, empty, or holding OTHER lines tells "the watcher never
+# delivered" from "it delivered something else", and an optional <pid> tells
+# "the watcher was still running" from "it had already exited". Three PRs on
+# one night each had this fail once on a different platform, and none of the
+# three logs could answer either question.
 _wait_for_file_contains() {
-  local file="$1" needle="$2" i
+  local file="$1" needle="$2" pid="${3:-}" i
   for i in $(seq 1 100); do
     [ -f "$file" ] && grep -q "$needle" "$file" && return 0
     sleep 0.1
   done
+  echo "_wait_for_file_contains: '$needle' did not appear in $file within 10s" >&2
+  if [ ! -f "$file" ]; then
+    echo "  file: missing" >&2
+  elif [ ! -s "$file" ]; then
+    echo "  file: present, empty" >&2
+  else
+    echo "  file: present, $(wc -l < "$file" | tr -d ' ') line(s):" >&2
+    sed 's/^/    | /' "$file" >&2
+  fi
+  if [ -n "$pid" ]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  watcher $pid: still running" >&2
+    else
+      echo "  watcher $pid: exited" >&2
+    fi
+  fi
   return 1
 }
 
@@ -234,7 +257,7 @@ _wait_for_file_contains() {
   [ -f "$pf" ]
 
   bash "$SCRIPTS/send.sh" team bob alice "M1-delivered" >/dev/null
-  _wait_for_file_contains "$out" "M1-delivered"
+  _wait_for_file_contains "$out" "M1-delivered" "$w"
   local first_cursor="$(_read_cursor team alice)"
 
   # Owning session dies (reap it so kill -0 reports gone, not a zombie), then a
