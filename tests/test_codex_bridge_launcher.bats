@@ -560,6 +560,27 @@ _wait_exact_role_count() { # <project> <name> <want>
   printf '%s' "$seen"
 }
 
+# The gate the five reap tests open before they make an orphan: the launcher
+# must actually have ONE bridge for exactly {<name>} first.
+#
+# It has to be load-bearing, and a `for ... && break` loop is not. Exhausting
+# such a loop and breaking out of it are indistinguishable from the next line,
+# so a test whose launcher never spawned would go on to `rm -f` pidfiles that do
+# not exist, wait, and then be satisfied by a bridge the launcher started DURING
+# that wait -- green, having created no orphan and reaped none. The test would
+# pass without exercising #937 at all, and nothing would say so (#984).
+#
+# Same rule as the team-lock gate in test_remote_engine_start_refusal.bats: when
+# a precondition cannot be established, say which count was actually reached and
+# fail, rather than continuing into an assertion that no longer means what it
+# says.
+_require_launcher_bridge() { # <project> <name>
+  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1)"
+  [ "$seen" = 1 ] && return 0
+  echo "the launcher never reached one {$2} bridge (saw $seen), so this test could not create the orphan it is about" >&2
+  return 1
+}
+
 # Run the mock bridge directly for a given (project, pairs) so it publishes a
 # lease of that identity and stays alive. Sets FAKE_PID (NOT via $(...) -- a
 # background job in command substitution is killed when that subshell exits).
@@ -601,13 +622,32 @@ _spawn_fake() { # <project> <pair...>
   wait "$other" 2>/dev/null || true; wait "$solo" 2>/dev/null || true
 }
 
+@test "launcher: an unreachable gate fails the test instead of continuing (#984)" {
+  # No launcher is started here at all, so the gate's condition can never be
+  # reached. It has to END the test.
+  #
+  # This is the control for the five reap tests: each calls the gate bare, so an
+  # unreachable precondition fails them -- but ONLY if the gate returns non-zero
+  # on exhaustion. The `for ... && break` gate it replaces returned nothing at
+  # all: reaching the count and running out of tries left the same state behind,
+  # and the test carried on to delete pidfiles that did not exist and assert
+  # against a bridge started during the wait. Green, with #937 never exercised.
+  #
+  # Costs the waiter's full sweep by design -- an exhausted gate is what is
+  # being measured, so it cannot be short-circuited.
+  run _require_launcher_bridge "$PROJ" alice
+  [ "$status" -ne 0 ]
+  # And it must say WHICH count it reached: an exhausted gate that fails with a
+  # bare non-zero tells the next reader nothing about why.
+  printf '%s' "$output" | grep -q 'never reached one {alice} bridge (saw 0)'
+}
+
 @test "launcher: reaps a same-(project,role) orphan the pidfile lost, converging to one (#937)" {
   put_record team alice thread-alice "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=25
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
-  [ "$(_count_exact_role_bridges "$PROJ" alice)" -eq 1 ]
+  _require_launcher_bridge "$PROJ" alice
   rm -f "$RUN_DIR"/codex-bridge.*.pid
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true
@@ -620,7 +660,7 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$PROJ" "team${tab}bob"; local bob=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  _require_launcher_bridge "$PROJ" alice
   rm -f "$RUN_DIR"/codex-bridge.*.pid
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$bob"
@@ -634,7 +674,7 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$TEST_SKILL_DIR/other-proj" "team${tab}alice"; local other=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  _require_launcher_bridge "$PROJ" alice
   rm -f "$RUN_DIR"/codex-bridge.*.pid
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$other"
@@ -648,7 +688,7 @@ _spawn_fake() { # <project> <pair...>
   _spawn_fake "$PROJ" "team${tab}alice2"; local alice2=$FAKE_PID
   sleep 22 3>&- & local parent=$!
   bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- & local disp=$!
-  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  _require_launcher_bridge "$PROJ" alice
   rm -f "$RUN_DIR"/codex-bridge.*.pid
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
   kill -0 "$alice2"
@@ -666,7 +706,7 @@ _spawn_fake() { # <project> <pair...>
   # before the launcher has spawned anything: this is the one site where the
   # gate opened on the test's own fixture. The exact counter requires a pair set
   # of {alice}, the same set inequality the `kill -0 "$both"` below relies on.
-  local i; for i in {1..80}; do [ "$(_count_exact_role_bridges "$PROJ" alice)" -ge 1 ] && break; sleep 0.1; done
+  _require_launcher_bridge "$PROJ" alice
   rm -f "$RUN_DIR"/codex-bridge.*.pid
   # ONE exact-{alice} bridge: the launcher's. `both` is not counted here -- the
   # `kill -0` below is what says it survived. The two assertions carry different
