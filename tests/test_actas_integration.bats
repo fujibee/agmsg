@@ -187,7 +187,7 @@ fake_session() {
   wait "$wpid" 2>/dev/null || true
 }
 
-# --- watch.sh releasing a pair it no longer owns (#683) ---
+# --- watch.sh releasing a pair it no longer owns (#983) ---
 
 # The subscription set and the lock check both happen once, before the polling
 # loop (watch.sh 159-211 vs the loop at 274). So a watcher that is already
@@ -200,7 +200,7 @@ fake_session() {
 # stdout is still an open pipe to a live session -- so the id is appended to
 # DELIVERED_IDS and the message is marked read. Nothing surfaces it. That is the
 # reported symptom: consumed, marked read, and never delivered.
-@test "watch: a pair claimed by another session is released, not consumed (#683)" {
+@test "watch: a pair claimed by another session is released, not consumed (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
   fake_register T bob
@@ -262,7 +262,7 @@ fake_session() {
 # must cost it that role and nothing else. Exiting here would take down a whole
 # session's delivery because one member ran `actas` somewhere -- a worse failure
 # than the one being fixed.
-@test "watch: a broad watcher drops only the claimed pair and keeps serving the rest (#683)" {
+@test "watch: a broad watcher drops only the claimed pair and keeps serving the rest (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
   fake_register T bob
@@ -304,7 +304,7 @@ fake_session() {
 # reads free again. Permanence would be the worse behaviour -- the role is still
 # registered to this project, so nobody would deliver for it until the session
 # restarted -- so this pins the return rather than the drop.
-@test "watch: a broad watcher takes a pair back once nobody holds it (#683)" {
+@test "watch: a broad watcher takes a pair back once nobody holds it (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
   fake_register T carol
@@ -367,7 +367,7 @@ fake_session() {
 # still-held one is announced a second time. The lock, not this list, decides
 # delivery -- so the assertion is on the log, which is the only thing the
 # bookkeeping controls.
-@test "watch: releasing one held pair does not forget another whose name it matches (#683)" {
+@test "watch: releasing one held pair does not forget another whose name it matches (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register 't.m' alice
   fake_register 'txm' alice

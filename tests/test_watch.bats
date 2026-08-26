@@ -639,7 +639,7 @@ _record_handover_events() {
   refute grep -n 'kill "\$prev_pid"' "$watch_sh"
 }
 
-@test "watch: a second unfiltered watcher says it is sharing, and a lone one does not (#683)" {
+@test "watch: a second unfiltered watcher says it is sharing, and a lone one does not" {
   # Two watchers with no active name subscribe to the same unclaimed pairs. The
   # read cursor is one per (team, agent), so whoever polls first takes the row
   # and the other never sees it — and `inbox.sh` then truthfully says "no new
@@ -707,7 +707,7 @@ _record_handover_events() {
   _stop_watcher "$first_pid"
 }
 
-@test "watch: a filtered watcher is never mistaken for unfiltered while starting (#683)" {
+@test "watch: a filtered watcher is never mistaken for unfiltered while starting" {
   # A reader that finds a live pid with no filter file SKIPS it: it cannot tell
   # the role or the project. If the pidfile were published first, every filtered
   # watcher would sit in exactly that state for the length of its startup
@@ -738,7 +738,7 @@ _record_handover_events() {
   _stop_watcher "$named_pid"
 }
 
-@test "watch: a watcher does not delete filter metadata it did not write (#683)" {
+@test "watch: a watcher does not delete filter metadata it did not write" {
   # The replacement path signals the previous watcher for this session id and
   # does not wait for it, so a successor writes its filter file while the
   # pidfile still names the predecessor. Deciding the filter's fate by the

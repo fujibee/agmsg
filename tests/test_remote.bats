@@ -167,7 +167,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   sqlite_mem "SELECT coalesce(json_extract(CAST(readfile('$escaped') AS TEXT), '\$.remote_binding.$2'), '');"
 }
 
-@test "connect: a POST that committed but lost its response recovers on retry (#143)" {
+@test "connect: a POST that committed but lost its response recovers on retry" {
   # Arm the cut: the next /v1/connect registers the team and answers nothing.
   run curl -sS "$ENDPOINT/_test/drop-next-connect"
   [ "$status" -eq 0 ]
@@ -187,7 +187,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam remote_team_name)" = "testteam" ]
 }
 
-@test "connect: refuses to re-anchor a binding to a different server instance (#143)" {
+@test "connect: refuses to re-anchor a binding to a different server instance" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
   local anchored
@@ -219,7 +219,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam server_instance_id)" != "$anchored" ]
 }
 
-@test "connect: a repeat run cannot restate the registered cipher profile (#143)" {
+@test "connect: a repeat run cannot restate the registered cipher profile" {
   # Declaring age-v1 means minting a key, so this one needs age. The refusal
   # itself does not -- the quoting it prints is covered without age in
   # test_shquote.bats, at the function that owns it.
@@ -496,7 +496,7 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   [ "$(_binding_field testteam endpoint)" = "$ENDPOINT" ]
 }
 
-@test "connect: the printed recovery command is shell-safe for a hostile team name (#143)" {
+@test "connect: the printed recovery command is shell-safe for a hostile team name" {
   # This asserts the CALL SITE, not the helper. tests/test_shquote.bats pins
   # what agmsg_shq does; nothing there stops remote.sh from going back to a
   # bare '$team', and the case that would catch it needs age and so never runs
@@ -570,14 +570,14 @@ _capability_endpoint() {
   printf '%s' "$ENDPOINT/t/$CAPABILITY_SECRET"
 }
 
-@test "redaction: adoption success does not print the capability (#143)" {
+@test "redaction: adoption success does not print the capability" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   assert_no_capability "adopting that registration" \
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: an unreadable capabilities response does not print it (#143)" {
+@test "redaction: an unreadable capabilities response does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/fail-next?route=capabilities" >/dev/null
@@ -585,7 +585,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: an unreadable roster response does not print it (#143)" {
+@test "redaction: an unreadable roster response does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/fail-next?route=members" >/dev/null
@@ -593,7 +593,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a server-instance mismatch does not print it (#143)" {
+@test "redaction: a server-instance mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS "$ENDPOINT/_test/rotate-server-id" >/dev/null
@@ -601,7 +601,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a team-name mismatch does not print it (#143)" {
+@test "redaction: a team-name mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS --get --data-urlencode "from=testteam" --data-urlencode "to=someone-elses" \
@@ -610,7 +610,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a roster mismatch does not print it (#143)" {
+@test "redaction: a roster mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   local cfg="$TEST_SKILL_DIR/teams/testteam/config.json" updated
@@ -620,7 +620,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: a cipher-profile mismatch does not print it (#143)" {
+@test "redaction: a cipher-profile mismatch does not print it" {
   local cap; cap="$(_capability_endpoint)"
   bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
   curl -sS --get --data-urlencode "team_name=testteam" --data-urlencode "profile=age-v1" \
@@ -629,7 +629,7 @@ _capability_endpoint() {
     bash "$SCRIPTS/remote.sh" connect --endpoint "$cap" testteam
 }
 
-@test "redaction: the helper drops path, query, fragment and userinfo (#143)" {
+@test "redaction: the helper drops path, query, fragment and userinfo" {
   # The one source-level claim kept: it is about the helper's own behaviour,
   # not about who remembers to call it.
   eval "$(sed -n '/^_remote_endpoint_display() {/,/^}/p' "$SCRIPTS/remote.sh")"
@@ -640,7 +640,7 @@ _capability_endpoint() {
   [ "$(_remote_endpoint_display 'https://host/a@b/c')" = "https://host" ]
 }
 
-@test "connect: refuses to adopt a registration whose roster is not this team's (#143)" {
+@test "connect: refuses to adopt a registration whose roster is not this team's" {
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
   [ "$status" -eq 0 ]
 
@@ -1712,7 +1712,7 @@ _deny_engine_pidfile() {
   [[ "$output" == *"already has history"* ]]
 }
 
-@test "remote pull: refuses a team whose history is in the LEGACY table (#147)" {
+@test "remote pull: refuses a team whose history is in the LEGACY table" {
   # The shape the old guard could not see. It counted the event log only, so a
   # store whose history lives in the legacy `messages` table read as empty --
   # and this is the one case the guard exists to refuse. Asking the driver
@@ -1954,7 +1954,7 @@ PY_BIND
   [ "$(sqlite_mem "SELECT json_extract(CAST(readfile('$(rf "$cfg")') AS TEXT), '\$.remote_binding.cipher_profile');")" = "age-v1" ]
 }
 
-@test "remote pull: a declared-sealed EMPTY team without the key does not start its engine (#147)" {
+@test "remote pull: a declared-sealed EMPTY team without the key does not start its engine" {
   # The hole the envelope count left. Zero sealed envelopes arrive, so a
   # count-based gate never asks about the key at all and starts the engine --
   # on a machine that cannot read a word of what this team is about to
@@ -1972,7 +1972,7 @@ PY_BIND
   [ ! -f "$TEST_SKILL_DIR/run/remote-sync.encrypted.pid" ]
 }
 
-@test "remote pull: a declared-sealed EMPTY team WITH the key starts its engine (#147)" {
+@test "remote pull: a declared-sealed EMPTY team WITH the key starts its engine" {
   skip_if_no_age
   # The other side of the same gate: same declaration, same zero envelopes,
   # and the key present. Without this case a version that simply never starts
@@ -2008,7 +2008,7 @@ PY_BIND
   [[ "$output" != *"local but locked"* ]]
 }
 
-@test "remote pull: an unreadable local history stops the pull, loudly (#147)" {
+@test "remote pull: an unreadable local history stops the pull, loudly" {
   # An unknown history is not an empty one. Rounding it down is how the
   # non-fast-forward guard stops guarding -- the single case it exists to
   # refuse would sail through it. And the old code did worse than round: the
@@ -2092,7 +2092,7 @@ PY_BIND
   [ "$after" = "$before" ]
 }
 
-@test "pull decision: the engine follows the key, not the ciphertext (#147)" {
+@test "pull decision: the engine follows the key, not the ciphertext" {
   skip_if_no_age
   # The predicate on its own. The pull fixture cannot produce a team that is
   # both freshly pulled AND already keyed -- that state is created by a caller
@@ -2756,7 +2756,7 @@ assert_lookup_rejected() {
   assert_lookup_rejected root_name
 }
 
-@test "remote pull: the unlock line it prints can actually be run (#147)" {
+@test "remote pull: the unlock line it prints can actually be run" {
   # Typed, not read. A remedy line is only worth printing if a shell can run
   # it: this takes the line out of the output, fills the placeholders, and
   # requires the failure to be about the BUNDLE -- never "command not found"
