@@ -332,7 +332,6 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 ```bash
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --stdin [--force]
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --body-file <path> [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -344,17 +343,15 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 
 `send.sh` takes `<team> <from> <to>`, then the message, then an optional trailing `--force`. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
-Give the message via `--stdin` or `--body-file <path>`. Both read the body verbatim from a file descriptor, so it never passes through your shell and never becomes an argv entry. Pick a heredoc delimiter the body cannot contain on a line by itself — a body with a bare `AGMSG_BODY` line would end the heredoc early and the rest would run as shell commands. When you cannot rule that out, use `--body-file`.
+Give the message via `--stdin`. It reads the body verbatim from a file descriptor, so it never passes through your shell and never becomes an argv entry. Pick a heredoc delimiter the body cannot contain on a line by itself — a body with a bare `AGMSG_BODY` line would end the heredoc early and the rest would run as shell commands.
 
 ```bash
 ~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --stdin <<'AGMSG_BODY'
 whatever you write here arrives byte-for-byte — backticks, $(...), quotes and all
 AGMSG_BODY
-
-~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --body-file ./message.txt
 ```
 
-The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--`, `--stdin`, `--body-file`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin` — and for a body of `--`, that is `-- --`.
+The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--`, `--stdin`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin` — and for a body of `--`, that is `-- --`.
 
 ## FAQ / Design notes
 

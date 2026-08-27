@@ -67,21 +67,19 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/inbox.sh <team> <agent_id>
 
 # Send a message (from/to must already be registered in <team>; add --force to bypass).
-# Pass the body via --stdin or --body-file. Both read it verbatim from a file
-# descriptor, so it never goes through a shell and never becomes an argv entry.
-# Pick a delimiter the body cannot contain on a line by itself — a body with a
-# bare AGMSG_BODY line would end the heredoc early and the rest would run as
-# shell commands. When you cannot rule that out, use --body-file.
+# Pass the body via --stdin. It reads it verbatim from a file descriptor, so it
+# never goes through a shell and never becomes an argv entry. Pick a delimiter
+# the body cannot contain on a line by itself — a body with a bare AGMSG_BODY
+# line would end the heredoc early and the rest would run as shell commands.
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> --stdin [--force] <<'AGMSG_BODY'
 message body goes here, verbatim — backticks, $(...), quotes all pass through untouched
 AGMSG_BODY
-~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> --body-file /path/to/body.txt [--force]
 
 # DEPRECATED — do NOT use for a message you compose yourself (#378). A positional
 # message goes through YOUR shell before agmsg ever sees it, so backticks or
 # $(...) in the body can be evaluated there, and on Windows a long body is
 # silently truncated at 8186 bytes. It still works, for callers that predate the
-# flags above; new sends use --stdin or --body-file.
+# flag above; new sends use --stdin.
 ~/.agents/skills/agmsg/scripts/send.sh <team> <from_agent> <to_agent> "<message>" [--force]
 
 # A body that IS `--` or one of the flag names still works — put `--` before it.

@@ -203,7 +203,7 @@ _sqlite_message_sent_sql() {
   tl="$(_sqlite_lit "$team")"; fl="$(_sqlite_lit "$from")"; ol="$(_sqlite_lit "$to")"
   # #378: command substitution eats ALL trailing newlines of what it captures.
   # team/from/to/id/at can never end in one (validate.sh / generated values),
-  # but body legitimately can — --stdin/--body-file read it verbatim. Append a
+  # but body legitimately can — --stdin reads it verbatim. Append a
   # non-newline sentinel before escaping so the trailing newline(s) sit mid-
   # capture, then strip the sentinel — the jsonl driver already preserves them
   # (jq --arg), so without this the two drivers disagree about the same send.

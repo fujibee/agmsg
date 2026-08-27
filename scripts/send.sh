@@ -2,7 +2,6 @@
 set -euo pipefail
 
 # Usage: send.sh <team> <from> <to> --stdin [--force]
-#    or: send.sh <team> <from> <to> --body-file <path> [--force]
 #    or: send.sh <team> <from> <to> <message> [--force]   (deprecated)
 #
 # #378: a message body passed positionally goes through the SENDER's shell
@@ -10,27 +9,27 @@ set -euo pipefail
 # body can execute, and backticks can be silently evaluated/emptied. On
 # Windows/MSYS a positional body is additionally routed through MSYS's
 # argv-conversion path (build_argv -> globify), which truncates silently at
-# exactly 8186 bytes (fixed MAXPATHLEN 8192 buffer in glob.cc). --stdin and
-# --body-file read the body verbatim from a file descriptor instead of
-# argv, so a body sent that way meets neither hazard — no shell
-# re-interpretation, no argv size limit.
+# exactly 8186 bytes (fixed MAXPATHLEN 8192 buffer in glob.cc). --stdin reads
+# the body verbatim from a file descriptor instead of argv, so a body sent
+# that way meets neither hazard — no shell re-interpretation, no argv size
+# limit.
 #
-# That makes --stdin/--body-file the canonical way to send; it does not
-# remove the hazard, because the positional form still exists and still
-# carries both. The positional form is DEPRECATED: it keeps working for now,
-# but a body composed by an agent must not use it. Retiring it is a later,
-# breaking stage of #378 — this stage only moves every first-party example
-# onto the safe path.
+# That makes --stdin the canonical way to send; it does not remove the
+# hazard, because the positional form still exists and still carries both.
+# The positional form is DEPRECATED: it keeps working for now, but a body
+# composed by an agent must not use it. Retiring it is a later, breaking
+# stage of #378 — this stage only moves every first-party example onto the
+# safe path.
 #
-# Four literal bodies DO break here, and `--` is their migration syntax:
-# `--`, `--stdin` and `--body-file` are now consumed as a terminator or a
-# mode selector, and `--force` is now rejected outright (it used to arrive as
-# the body, because only argument 5 was checked for the flag). Send any of
-# them as `send.sh <team> <from> <to> -- <body>` — including `-- --`. Every
-# other positional body is unaffected.
+# Three literal bodies DO break here, and `--` is their migration syntax:
+# `--` and `--stdin` are now consumed as a terminator or a mode selector, and
+# `--force` is now rejected outright (it used to arrive as the body, because
+# only argument 5 was checked for the flag). Send any of them — or any other
+# body that happens to start with `--` — as
+# `send.sh <team> <from> <to> -- <body>` — including `-- --`. Every other
+# positional body is unaffected.
 
 USAGE="Usage: send.sh <team> <from> <to> --stdin [--force]
-   or: send.sh <team> <from> <to> --body-file <path> [--force]
    or: send.sh <team> <from> <to> <message> [--force]   (deprecated, see #378)"
 
 TEAM="${1:?$USAGE}"
@@ -40,21 +39,20 @@ shift 3
 
 MODE="positional"
 BODY=""
-BODY_FILE=""
 FORCE=0
 
 if [ $# -eq 0 ]; then
-  echo "Error: missing message body. Provide it positionally, via --stdin, or via --body-file <path>." >&2
+  echo "Error: missing message body. Provide it positionally or via --stdin." >&2
   exit 1
 fi
 
 case "$1" in
   --)
     # Option terminator: everything after it is the body, verbatim. Without
-    # this, adding --stdin/--body-file silently broke a body that happens to
-    # BE the literal string "--stdin" (or "--body-file"/"--force"), which was
-    # a perfectly valid positional body before this change. `--` is the
-    # standard escape hatch and keeps that case working.
+    # this, adding --stdin silently broke a body that happens to BE the
+    # literal string "--stdin" (or "--force"), which was a perfectly valid
+    # positional body before this change. `--` is the standard escape hatch
+    # and keeps that case working.
     shift
     if [ $# -eq 0 ]; then
       echo "Error: missing message body after '--'." >&2
@@ -67,44 +65,22 @@ case "$1" in
     MODE="stdin"
     shift
     ;;
-  --body-file)
-    shift
-    if [ $# -eq 0 ]; then
-      echo "Error: --body-file requires a path argument." >&2
-      exit 1
-    fi
-    # A leading '-' means the "path" is actually another flag that got
-    # swallowed here (e.g. `--body-file --stdin`, `--body-file --force`)
-    # instead of tripping the ambiguity check below. Reject it the same way
-    # validate.sh rejects a team/agent name starting with '-' — it would be
-    # parsed as an option by downstream tools. A real file named like that
-    # still works via an explicit './-foo' or absolute path.
-    case "$1" in
-      -*)
-        echo "Error: --body-file's argument '$1' looks like a flag, not a path. To use a file whose name starts with '-', pass './$1' or an absolute path." >&2
-        exit 1
-        ;;
-    esac
-    MODE="file"
-    BODY_FILE="$1"
-    shift
-    ;;
   --force)
-    echo "Error: missing message body before --force. Provide it positionally, via --stdin, or via --body-file <path>." >&2
+    echo "Error: missing message body before --force. Provide it positionally or via --stdin." >&2
     exit 1
     ;;
   *)
     # A positional body that starts with '--' but isn't a mode this script
-    # recognizes (e.g. a misspelled --body-fiel, or a future flag typo) used
+    # recognizes (e.g. a misspelled --stdinn, or a future flag typo) used
     # to be stored literally as the message — silently accepting whatever the
     # caller typed instead of failing loudly on the likely mistake. Fail
-    # closed instead: require the explicit '--' separator (or --body-file)
-    # for any body that looks like an option. A body that legitimately IS an
-    # option-like string still works via `-- <body>`, same as the recognized
-    # flags above.
+    # closed instead: require the explicit '--' separator for any body that
+    # looks like an option. A body that legitimately IS an option-like
+    # string still works via `-- <body>`, same as the recognized flags
+    # above.
     case "$1" in
       --*)
-        echo "option-like body: use -- separator or --body-file" >&2
+        echo "option-like body: use -- separator" >&2
         exit 1
         ;;
     esac
@@ -114,9 +90,9 @@ case "$1" in
 esac
 
 # Reject combining two input modes instead of silently picking one — e.g. a
-# positional body followed by --stdin, or --stdin followed by --body-file.
-if [ "${1:-}" = "--stdin" ] || [ "${1:-}" = "--body-file" ]; then
-  echo "Error: the message body was already given (positional argument, --stdin, or --body-file) — cannot also pass $1. Provide the body exactly one way." >&2
+# positional body followed by --stdin.
+if [ "${1:-}" = "--stdin" ]; then
+  echo "Error: the message body was already given (positional argument or --stdin) — cannot also pass $1. Provide the body exactly one way." >&2
   exit 1
 fi
 
@@ -137,10 +113,9 @@ fi
 
 # Read the body verbatim (no word-splitting, no glob expansion). `IFS= read
 # -r -d ''` slurps to EOF without stripping leading or trailing
-# whitespace/newlines — deliberately: whatever bytes are on stdin or in the
-# file land in the message exactly as given, including any trailing
-# newline(s). If you don't want a trailing newline in the sent message,
-# don't put one in the input.
+# whitespace/newlines — deliberately: whatever bytes are on stdin land in the
+# message exactly as given, including any trailing newline(s). If you don't
+# want a trailing newline in the sent message, don't put one in the input.
 #
 # The exit status is load-bearing, so it is checked rather than discarded:
 # `read` exits 0 only when it actually found its -d delimiter — which here
@@ -159,40 +134,6 @@ if [ "$MODE" = "stdin" ]; then
   fi
   if [ -z "$BODY" ]; then
     echo "Error: --stdin was given but no data was read from standard input." >&2
-    exit 1
-  fi
-elif [ "$MODE" = "file" ]; then
-  # Require an absolute, non-symlink regular file. A relative path resolves
-  # against whatever directory the caller happened to be in when send.sh ran
-  # — silently reading the wrong file if that ever changes — and a symlink
-  # lets the file's *content* change between validation and read without the
-  # path itself changing, plus can point somewhere the caller did not intend.
-  # Both fail closed instead of being followed.
-  case "$BODY_FILE" in
-    /*) ;;
-    *)
-      echo "Error: --body-file '$BODY_FILE' must be an absolute path." >&2
-      exit 1
-      ;;
-  esac
-  if [ -L "$BODY_FILE" ]; then
-    echo "Error: --body-file '$BODY_FILE' is a symlink; pass the real file's absolute path." >&2
-    exit 1
-  fi
-  if [ ! -f "$BODY_FILE" ]; then
-    echo "Error: --body-file '$BODY_FILE' does not exist or is not a regular file." >&2
-    exit 1
-  fi
-  if [ ! -r "$BODY_FILE" ]; then
-    echo "Error: --body-file '$BODY_FILE' is not readable." >&2
-    exit 1
-  fi
-  if IFS= read -r -d '' BODY < "$BODY_FILE"; then
-    echo "Error: --body-file '$BODY_FILE' contains a NUL byte; a message body must be text, and everything from that byte on would be lost. Nothing was sent." >&2
-    exit 1
-  fi
-  if [ -z "$BODY" ]; then
-    echo "Error: --body-file '$BODY_FILE' is empty." >&2
     exit 1
   fi
 fi

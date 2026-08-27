@@ -124,7 +124,7 @@ it once:
    truncated at 8186 bytes (#378). The positional form still works but is
    deprecated. Pick a delimiter your body cannot contain on a line by
    itself — a body with a bare AGMSG_BODY line would end the heredoc early and
-   the rest would run as shell commands. If unsure, use --body-file.
+   the rest would run as shell commands.
 
 \`\`\`bash
 $SKILL_DIR/scripts/send.sh <team> <your-agent-name> <to_agent> --stdin <<'AGMSG_BODY'

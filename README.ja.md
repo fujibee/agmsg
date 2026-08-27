@@ -318,7 +318,6 @@ $agmsg
 
 ```bash
 ~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --stdin [--force]
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --body-file <path> [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -330,17 +329,15 @@ $agmsg
 
 `send.sh` は `<team> <from> <to>` に続けてメッセージを取り、末尾に任意で `--force` を取る。`from`・`to` はどちらも `<team>` に事前登録済みである必要があり、未登録の名前は(登録済み一覧を添えて)エラーになる — 意図的な事前登録前送信をしたい場合のみ `--force` でこのチェックを迂回できる。
 
-メッセージは `--stdin` または `--body-file <path>` で渡す。どちらもファイルディスクリプタから本文をそのまま読むため、本文がシェルを通ることも argv に載ることもない。ヒアドキュメントの区切り子は、本文中に単独行として現れ得ないものを選ぶこと — 本文に `AGMSG_BODY` だけの行があるとそこでヒアドキュメントが終わり、残りがシェルコマンドとして実行されてしまう。それを排除できない場合は `--body-file` を使う:
+メッセージは `--stdin` で渡す。ファイルディスクリプタから本文をそのまま読むため、本文がシェルを通ることも argv に載ることもない。ヒアドキュメントの区切り子は、本文中に単独行として現れ得ないものを選ぶこと — 本文に `AGMSG_BODY` だけの行があるとそこでヒアドキュメントが終わり、残りがシェルコマンドとして実行されてしまう。
 
 ```bash
 ~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --stdin <<'AGMSG_BODY'
 ここに書いた内容はバイト単位でそのまま届く — バッククォートも $(...) もクォートもそのまま
 AGMSG_BODY
-
-~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --body-file ./message.txt
 ```
 
-従来の位置引数形式 — `send.sh <team> <from> <to> "<message>"` — も引き続き動作するが、**非推奨**である(#378)。このメッセージは agmsg が受け取る前にシェルが解釈するため、本文中のバッククォートや `$(...)` がそこで評価されうる。さらに Windows では MSYS の argv 変換によって長い本文が 8186 バイトで無言のうちに切り詰められる。**エージェントが組み立てたメッセージでは使ってはならない**。本文がちょうど `--`・`--stdin`・`--body-file`・`--force` そのものである場合は、直前に `--` を置くこと: `send.sh <team> <from> <to> -- --stdin`（本文が `--` なら `-- --`）
+従来の位置引数形式 — `send.sh <team> <from> <to> "<message>"` — も引き続き動作するが、**非推奨**である(#378)。このメッセージは agmsg が受け取る前にシェルが解釈するため、本文中のバッククォートや `$(...)` がそこで評価されうる。さらに Windows では MSYS の argv 変換によって長い本文が 8186 バイトで無言のうちに切り詰められる。**エージェントが組み立てたメッセージでは使ってはならない**。本文がちょうど `--`・`--stdin`・`--force` そのものである場合は、直前に `--` を置くこと: `send.sh <team> <from> <to> -- --stdin`（本文が `--` なら `-- --`）
 
 ## FAQ / 設計メモ
 

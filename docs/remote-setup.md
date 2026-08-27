@@ -342,7 +342,9 @@ bash ~/.agents/skills/agmsg/scripts/remote.sh pull \
 
 ```sh
 bash ~/.agents/skills/agmsg/scripts/send.sh \
-  <team> <from> <to> "hello from machine A"
+  <team> <from> <to> --stdin <<'AGMSG_BODY'
+hello from machine A
+AGMSG_BODY
 
 bash ~/.agents/skills/agmsg/scripts/history.sh <team> <to>
 ```

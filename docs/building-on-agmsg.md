@@ -58,7 +58,7 @@ flows use:
 
 | Action | Script |
 |---|---|
-| Send a message | `scripts/send.sh <team> <from> <to> --stdin` (body on stdin) or `--body-file <path>` |
+| Send a message | `scripts/send.sh <team> <from> <to> --stdin` (body on stdin) |
 | Join a team / register an agent | `scripts/join.sh <team> <name> <type> <project>` |
 | Rename an agent | `scripts/rename.sh <team> <old> <new>` |
 | Remove an agent from a team | `scripts/leave.sh <team> <name>` |

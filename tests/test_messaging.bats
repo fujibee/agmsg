@@ -108,17 +108,17 @@ teardown() {
   [[ "$output" =~ "Sent to bob" ]]
 }
 
-# --- send.sh: --stdin / --body-file (#378) ---
+# --- send.sh: --stdin (#378) ---
 #
 # A positional body goes through the sender's shell (backticks / $(...) can
 # execute or vanish) and, on Windows, through MSYS's argv-conversion path
-# (silent truncation at 8186 bytes). A body sent via --stdin/--body-file
-# meets neither, because it never touches argv. The positional form remains
-# available (deprecated) and still carries both hazards.
+# (silent truncation at 8186 bytes). A body sent via --stdin meets neither,
+# because it never touches argv. The positional form remains available
+# (deprecated) and still carries both hazards.
 
 @test "send: -- keeps a body that is literally --stdin working (backwards compat)" {
-  # Before --stdin/--body-file existed, "--stdin" was just an ordinary body.
-  # Adding the flags must not silently reinterpret it.
+  # Before --stdin existed, "--stdin" was just an ordinary body. Adding the
+  # flag must not silently reinterpret it.
   run bash "$SCRIPTS/send.sh" testteam alice bob -- --stdin
   [ "$status" -eq 0 ]
   local stored
@@ -162,9 +162,9 @@ teardown() {
   [ "$n" -eq 0 ]
 }
 
-# `--` itself was a valid positional body before the flags existed (only
+# `--` itself was a valid positional body before the flag existed (only
 # argument 5 was inspected, so argument 4 was taken verbatim). It is now
-# consumed as the terminator, which is the fourth and least obvious of the
+# consumed as the terminator, which is the third and least obvious of the
 # literal bodies this change breaks — `-- --` is its migration form.
 @test "send: -- keeps a body that is literally -- working (backwards compat)" {
   run bash "$SCRIPTS/send.sh" testteam alice bob -- --
@@ -190,32 +190,6 @@ teardown() {
   [ "$stored" = "$body" ]
 }
 
-@test "send: --body-file delivers a body containing backticks and \$(...) byte-identical" {
-  local body='price is `echo hi` and $(whoami) literally'
-  local f="$TEST_SKILL_DIR/body.txt"
-  printf '%s' "$body" > "$f"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
-  [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF -- "Sent to bob"
-  local stored
-  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
-  [ "$stored" = "$body" ]
-}
-
-@test "send: --body-file delivers a body larger than 8192 chars complete (MSYS argv-truncation class, #378)" {
-  local f="$TEST_SKILL_DIR/big.txt"
-  # 9000 'a' characters — larger than MSYS's fixed 8192-byte glob.cc buffer
-  # (truncation point reported at 8186). Written directly to a file, so this
-  # never goes through argv regardless of platform.
-  printf 'a%.0s' $(seq 1 9000) > "$f"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
-  [ "$status" -eq 0 ]
-  printf '%s' "$output" | grep -qF -- "Sent to bob"
-  local len
-  len=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT length(body) FROM messages WHERE to_agent='bob';")
-  [ "$len" -eq 9000 ]
-}
-
 @test "send: --stdin preserves an explicit trailing newline byte-for-byte" {
   # A plain `stored=$(sqlite3 ... SELECT body ...)` capture would strip ALL
   # trailing newlines via command substitution on the assertion side too,
@@ -233,7 +207,7 @@ teardown() {
   [ "$body_len" -eq 12 ]
 }
 
-@test "send: positional body still works unchanged alongside the new flags" {
+@test "send: positional body still works unchanged alongside the new flag" {
   run bash "$SCRIPTS/send.sh" testteam alice bob "hello"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Sent to bob" ]]
@@ -242,7 +216,7 @@ teardown() {
 @test "send: rejects an option-like positional body without a '--' separator" {
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-fiel
   [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "option-like body: use -- separator or --body-file"
+  printf '%s' "$output" | grep -qF -- "option-like body: use -- separator"
   local n
   n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
   [ "$n" -eq 0 ]
@@ -269,80 +243,6 @@ teardown() {
   [ "$n" -eq 0 ]
 }
 
-@test "send: rejects --stdin combined with --body-file instead of silently picking one" {
-  local f="$TEST_SKILL_DIR/body.txt"
-  printf 'x' > "$f"
-  run bash -c "printf 'y' | bash \"\$1\" testteam alice bob --stdin --body-file \"\$2\"" _ "$SCRIPTS/send.sh" "$f"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "was already given" ]]
-}
-
-@test "send: rejects --body-file without a path argument" {
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "requires a path argument" ]]
-}
-
-@test "send: rejects --body-file followed by another flag instead of swallowing it as the path" {
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --stdin
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "looks like a flag"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file --force
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "looks like a flag" ]]
-}
-
-@test "send: rejects a missing --body-file target with a clear error, not an empty message" {
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$TEST_SKILL_DIR/does-not-exist.txt"
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "does not exist"
-  local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
-  [ "$n" -eq 0 ]
-}
-
-@test "send: rejects an empty --body-file with a clear error, not an empty message" {
-  local f="$TEST_SKILL_DIR/empty.txt"
-  : > "$f"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "is empty"
-  local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
-  [ "$n" -eq 0 ]
-}
-
-@test "send: rejects a relative --body-file path" {
-  printf 'x' > "$TEST_SKILL_DIR/rel-body.txt"
-  run bash -c "cd \"\$1\" && bash \"\$2\" testteam alice bob --body-file rel-body.txt" _ "$TEST_SKILL_DIR" "$SCRIPTS/send.sh"
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "must be an absolute path"
-  local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
-  [ "$n" -eq 0 ]
-}
-
-@test "send: rejects a --body-file that is a symlink, even to a valid readable file" {
-  local target="$TEST_SKILL_DIR/real-body.txt"
-  local link="$TEST_SKILL_DIR/link-body.txt"
-  printf 'x' > "$target"
-  ln -s "$target" "$link"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$link"
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "is a symlink"
-  local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
-  [ "$n" -eq 0 ]
-}
-
-@test "send: accepts an absolute, non-symlink --body-file" {
-  local f="$TEST_SKILL_DIR/abs-body.txt"
-  printf 'hello' > "$f"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
-  [ "$status" -eq 0 ]
-  [[ "$output" =~ "Sent to bob" ]]
-}
-
 @test "send: rejects empty stdin with a clear error, not an empty message" {
   run bash -c "printf '' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
   [ "$status" -ne 0 ]
@@ -360,17 +260,6 @@ teardown() {
 # either — a test written that way would silently exercise NUL-free input.
 @test "send: rejects --stdin input containing a NUL byte instead of truncating it" {
   run bash -c "printf 'before\000after' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
-  [ "$status" -ne 0 ]
-  printf '%s' "$output" | grep -qF -- "NUL byte"
-  local n
-  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
-  [ "$n" -eq 0 ]
-}
-
-@test "send: rejects a --body-file containing a NUL byte instead of truncating it" {
-  local f="$TEST_SKILL_DIR/nul.bin"
-  printf 'before\000after' > "$f"
-  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$f"
   [ "$status" -ne 0 ]
   printf '%s' "$output" | grep -qF -- "NUL byte"
   local n
