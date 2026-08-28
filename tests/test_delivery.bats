@@ -1751,6 +1751,76 @@ JSON
   [ -z "$cw" ]
 }
 
+# --- #1003: codex mid-turn PostToolUse hook install/strip/status wiring ---
+
+@test "delivery set turn (codex): installs a PostToolUse entry alongside Stop, carrying the event arg (#1003)" {
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local hf="$TEST_PROJECT/.codex/hooks.json"
+  [ -f "$hf" ]
+  local n
+  n=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse'));")
+  [ "$n" = "1" ]
+  # The command runs check-inbox with the PostToolUse event as a 3rd arg, so the
+  # script emits that event's shape — not a copy that would silently use Stop's.
+  local cmd
+  cmd=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].hooks[0].command');")
+  grep -q 'check-inbox.sh' <<<"$cmd"
+  grep -q 'PostToolUse' <<<"$cmd"
+  # matcher empty = all tools.
+  local m
+  m=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].matcher');")
+  [ -z "$m" ]
+  # Stop is still installed alongside it.
+  local s
+  s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$hf")'), '\$.hooks.Stop'));")
+  [ "$s" = "1" ]
+}
+
+@test "delivery set turn (codex): the PostToolUse entry carries commandWindows too (#1003)" {
+  skip_on_windows "commandWindows not written on native Windows (#182)"
+  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local cw
+  cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+  grep -q 'check-inbox.sh' <<<"$cw"
+  grep -q 'PostToolUse' <<<"$cw"
+}
+
+@test "delivery set off (codex): strips the PostToolUse entry with Stop (#1003)" {
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+@test "delivery set monitor (codex): installs NO PostToolUse entry (#1003)" {
+  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+@test "delivery set turn (claude-code): installs NO PostToolUse entry — no manifest datum (#1003)" {
+  run bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.claude/settings.local.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+}
+
+@test "delivery status (codex turn): reports the PostToolUse entry count next to Stop (#1003)" {
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'Stop entries:' <<<"$output"
+  grep -q 'PostToolUse entries:  1' <<<"$output"
+}
+
 # --- Hook JSON escaping: build entries via json_object, not by hand (#134) ---
 #
 # The pre-fix code hand-assembled the entry JSON and only escaped the codex

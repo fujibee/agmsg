@@ -19,11 +19,27 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"  # agmsg_agent_pid, for instance-id 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
 
+# Which hook event fired. The Stop entry runs `check-inbox.sh <type> <project>`
+# (EVENT defaults to Stop); the mid-turn PostToolUse entry (#1003) appends the
+# event as a 3rd arg so this script emits the shape that event's runtime accepts,
+# without branching on the type name.
+EVENT="${3:-Stop}"
+
 # Some Stop-hook runtimes (codex, copilot) want an explicit JSON status object
 # even when there is nothing to deliver; others (claude-code) stay silent. This
 # is the type's manifest `stop_output=` (data), not a hardcoded type list.
 STOP_OUTPUT="$(agmsg_type_get "$TYPE" stop_output 2>/dev/null || true)"
+# The wire shape for a PostToolUse payload, from the type manifest (#1003) — the
+# same data-driven approach as stop_output. Measured on codex-cli 0.149.1:
+# hookSpecificOutput. An unknown/unset value emits nothing rather than a guess.
+POSTTOOL_OUTPUT="$(agmsg_type_get "$TYPE" posttooluse_output 2>/dev/null || true)"
+
+# Status (nothing-to-deliver / cooldown) output. For PostToolUse this stays
+# SILENT: codex 0.149.1 treats malformed post-tool-use JSON as a failure, and an
+# empty additionalContext on every tool call would be pure noise — so a no-op
+# turn emits no bytes, which every runtime reads as "hook did nothing".
 emit_status_json() {
+  [ "$EVENT" = "PostToolUse" ] && return 0
   [ "$STOP_OUTPUT" = "json" ] || return 0
   printf '{\n  "continue": true,\n  "systemMessage": "%s"\n}\n' "$1"
 }
@@ -329,12 +345,27 @@ if [ -n "$OUTPUT" ]; then
   fi
   # Escape for JSON: backslash, double-quote, newlines, tabs (macOS/Linux compatible)
   ESCAPED=$(printf '%s' "$OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{if(NR>1) printf "\\n"; printf "%s",$0}')
-  cat <<ENDJSON
+  if [ "$EVENT" = "PostToolUse" ]; then
+    # Mid-turn delivery (#1003). The shape is data, from the manifest — not a
+    # type-name branch. codex-cli 0.149.1 requires a hookSpecificOutput object
+    # (hookEventName=PostToolUse, body in additionalContext) and rejects anything
+    # else as "invalid post-tool-use JSON output"; an unknown/unset shape emits
+    # nothing rather than a malformed guess. Reaching the model with this is the
+    # unverified part (see PR): this is the shape the 0.149.1 parser accepts.
+    case "$POSTTOOL_OUTPUT" in
+      hookSpecificOutput)
+        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$ESCAPED"
+        ;;
+      *) : ;;
+    esac
+  else
+    cat <<ENDJSON
 {
   "decision": "block",
   "reason": "$ESCAPED"
 }
 ENDJSON
+  fi
   # Exit 0 even when the poll failed part-way: this is the delivering path, and
   # a non-zero status here throws the delivery away.
   exit 0

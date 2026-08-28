@@ -113,6 +113,13 @@ agmsg_delivery_apply_default() {
   local ww
   ww=$(agmsg_type_get "$type" hook_windows_wrap 2>/dev/null || true)
 
+  # Mid-turn delivery (#1003): a type whose manifest carries a posttooluse_output
+  # datum also gets a PostToolUse hook running check-inbox between tool calls, not
+  # only at Stop. The datum's PRESENCE is the gate (kept type-agnostic here — no
+  # `if type = codex`); its value is the wire shape check-inbox emits, read there.
+  local pt_output
+  pt_output=$(agmsg_type_get "$type" posttooluse_output 2>/dev/null || true)
+
   # Work on a temp copy so a partially-modified file never replaces the
   # original until the whole chain succeeds.
   local tmp_state
@@ -127,6 +134,10 @@ agmsg_delivery_apply_default() {
   strip_agmsg_event_file "$tmp_state" "SessionStart"
   strip_agmsg_event_file "$tmp_state" "SessionEnd"
   strip_agmsg_event_file "$tmp_state" "Stop"
+  # Always strip PostToolUse too (#1003), so `off`/`monitor`/a mode change removes
+  # the mid-turn entry alongside Stop. Unconditional: a type that never installed
+  # one has nothing to remove.
+  strip_agmsg_event_file "$tmp_state" "PostToolUse"
 
   # 2) Re-add what this mode wants.
   #
@@ -148,6 +159,12 @@ agmsg_delivery_apply_default() {
     turn)
       local cmd="$(_agmsg_shq "$SKILL_DIR/scripts/check-inbox.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
       add_event_entry_file "$tmp_state" "Stop" "$cmd" "$ww"
+      # Same inbox check, fired after every tool call (#1003). The trailing event
+      # arg tells check-inbox.sh which wire shape to emit; matcher is empty (all
+      # tools) via add_event_entry_file. The 60s cooldown bounds the cost.
+      if [ -n "$pt_output" ]; then
+        add_event_entry_file "$tmp_state" "PostToolUse" "$cmd $(_agmsg_shq "PostToolUse")" "$ww"
+      fi
       ;;
     both)
       local ss="$(_agmsg_shq "$SKILL_DIR/scripts/session-start.sh") $(_agmsg_shq "$type") $(_agmsg_shq "$project")"
@@ -156,6 +173,9 @@ agmsg_delivery_apply_default() {
       add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$ww"
       add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$ww"
       add_event_entry_file "$tmp_state" "Stop"         "$st" "$ww"
+      if [ -n "$pt_output" ]; then
+        add_event_entry_file "$tmp_state" "PostToolUse" "$st $(_agmsg_shq "PostToolUse")" "$ww"
+      fi
       ;;
     off)
       : # already stripped
@@ -287,6 +307,11 @@ agmsg_delivery_status_default() {
     count=$(agmsg_sqlite_mem "SELECT json_array_length(json_extract(readfile('$sql_hf'), '\$.hooks.Stop'));" 2>/dev/null || echo 0)
     case "$count" in ''|*[!0-9]*) count=0 ;; esac
     echo "  Stop entries:         $count"
+    # The mid-turn PostToolUse entry (#1003) sits next to Stop in turn/both for
+    # types whose manifest opts in; show its count so an operator can see it.
+    count=$(agmsg_sqlite_mem "SELECT json_array_length(json_extract(readfile('$sql_hf'), '\$.hooks.PostToolUse'));" 2>/dev/null || echo 0)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    echo "  PostToolUse entries:  $count"
   fi
 }
 agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
