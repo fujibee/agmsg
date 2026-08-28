@@ -2041,11 +2041,69 @@ _remote_sync_engine_stop() {
   rm -f "$(_remote_sync_engine_cycle_stamp "$team")" 2>/dev/null || true
 }
 
+# Return the systemd user-unit state as "state<TAB>pid".
+#
+# A unit that is not installed is not a systemd-managed team here, so callers
+# retain the pidfile behavior. An existing unit is different: an active unit
+# whose MainPID cannot be authenticated is UNKNOWN and must not be shadowed by
+# a new unmanaged engine. The command can be replaced in tests; no host
+# systemd query is needed there.
+_remote_systemd_engine_status() {
+  local team="$1" unit show load active sub pid command systemctl_bin
+  unit="agmsg-remote-sync-$team.service"
+  systemctl_bin="${AGMSG_SYSTEMCTL:-systemctl}"
+  command -v "$systemctl_bin" >/dev/null 2>&1 || { printf 'unavailable\t\n'; return; }
+  show="$($systemctl_bin --user show "$unit" -p LoadState -p ActiveState -p SubState -p MainPID 2>/dev/null)" || {
+    printf 'absent\t\n'
+    return
+  }
+  load="$(printf '%s\n' "$show" | sed -n 's/^LoadState=//p')"
+  active="$(printf '%s\n' "$show" | sed -n 's/^ActiveState=//p')"
+  sub="$(printf '%s\n' "$show" | sed -n 's/^SubState=//p')"
+  pid="$(printf '%s\n' "$show" | sed -n 's/^MainPID=//p')"
+  [ "$load" = "not-found" ] && { printf 'absent\t\n'; return; }
+  case "$active:$sub" in
+    active:running)
+      if _agmsg_pid_valid "$pid" && _agmsg_pid_alive_local "$pid"; then
+        command="$(compat_get_cmdline "$pid" 2>/dev/null || true)"
+        if agmsg_cmdline_names_path "$command" "$SCRIPT_DIR/internal/remote-sync.mjs" &&
+           case "$command" in *" run --team $team") true ;; *) false ;; esac; then
+          printf 'running\t%s\n' "$pid"
+        else
+          printf 'unknown\t%s\n' "$pid"
+        fi
+      else
+        printf 'unknown\t%s\n' "$pid"
+      fi
+      ;;
+    active:starting|active:reloading|active:auto-restart|activating:*|deactivating:*)
+      printf 'starting\t%s\n' "$pid"
+      ;;
+    inactive:*|failed:*)
+      printf 'inactive\t%s\n' "$pid"
+      ;;
+    *)
+      printf 'unknown\t%s\n' "$pid"
+      ;;
+  esac
+}
+
 # Print "<state>\t<pid>", where pid is empty when no valid pid is available.
 # A live PID is not enough: PID reuse can make an unrelated process pass
 # kill -0, so running requires the exact engine script/team suffix in argv.
 _remote_sync_engine_status() {
-  local team="$1" pidfile pid command expected
+  local team="$1" pidfile pid command expected systemd_state systemd_pid
+  REMOTE_SYNC_ENGINE_SUPERVISOR=""
+  REMOTE_SYNC_ENGINE_SUPERVISOR_PID=""
+  IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
+  case "$systemd_state" in
+    running|starting|inactive|unknown)
+      REMOTE_SYNC_ENGINE_SUPERVISOR="systemd"
+      REMOTE_SYNC_ENGINE_SUPERVISOR_PID="$systemd_pid"
+      printf '%s\t%s\n' "$systemd_state" "$systemd_pid"
+      return
+      ;;
+  esac
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   if [ ! -f "$pidfile" ]; then
     printf 'stopped\t\n'
@@ -2489,6 +2547,12 @@ _remote_status_one() {
   case "$engine_state" in
     running)
       echo "$team	connected (engine running, pid $engine_pid) since $connected_at" ;;
+    starting)
+      echo "$team	connected (engine starting under systemd, pid $engine_pid; do not run sync start) since $connected_at" ;;
+    inactive)
+      echo "$team	connected (engine inactive under systemd; run: systemctl --user restart agmsg-remote-sync-$team.service) since $connected_at" ;;
+    unknown)
+      echo "$team	connected (engine state unknown under systemd; do not run sync start; inspect systemctl --user status agmsg-remote-sync-$team.service) since $connected_at" ;;
     stopped)
       echo "$team	connected (engine stopped — run: bash $(agmsg_shq "$SKILL_DIR/scripts/remote.sh") sync start $(agmsg_shq "$team")) since $connected_at" ;;
     stale)
@@ -2818,11 +2882,18 @@ cmd_sync_start() {
   fi
 
   IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team")
-  if [ "$engine_state" = "running" ]; then
-    echo "Sync engine already running (pid $engine_pid)."
-    agmsg_lock_release
-    return
-  fi
+  case "$engine_state" in
+    running)
+      echo "Sync engine already running (pid $engine_pid)."
+      agmsg_lock_release
+      return
+      ;;
+    starting|inactive|unknown)
+      echo "agmsg: systemd owns team '$team' in state '$engine_state'; inspect or restart the user unit instead of sync start" >&2
+      agmsg_lock_release
+      return 1
+      ;;
+  esac
 
   logfile="$CONNECTION_ROOT/run/remote-sync.$team.log"
   [ -f "$logfile" ] && log_offset=$(( $(wc -c < "$logfile" | tr -d ' ') + 1 ))
