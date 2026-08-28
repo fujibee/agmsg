@@ -326,3 +326,27 @@ _codex_proj() {
   grep -q 'at stop' <<<"$output"
   refute grep -q 'hookSpecificOutput' <<<"$output"
 }
+
+@test "check-inbox codex PostToolUse is additive: displays without consuming, and does not gate Stop (#1003)" {
+  # The #677/#1004 intersection control. PostToolUse is the UNVERIFIED path
+  # (model receipt unobserved); it must neither consume read state nor suppress
+  # the verified Stop path via the shared cooldown marker.
+  local p; p=$(_codex_proj)
+  bash "$SCRIPTS/send.sh" ctm bob alice "additive"
+  [ "$(pair_unread_count ctm alice)" -eq 1 ]
+
+  # PostToolUse displays it ...
+  run bash -c 'printf "{}" | "$1" codex "$2" PostToolUse' _ "$SCRIPTS/check-inbox.sh" "$p"
+  [ "$status" -eq 0 ]
+  grep -q 'additive' <<<"$output"
+  # ... but does NOT consume it: an unverified path must not mark read.
+  [ "$(pair_unread_count ctm alice)" -eq 1 ]
+
+  # Stop, immediately and with no time advance, must STILL deliver and consume it.
+  # If PostToolUse shared Stop's cooldown marker, this Stop would exit at the gate
+  # and deliver nothing — the unverified path silencing the verified one.
+  run bash -c 'printf "{}" | "$1" codex "$2"' _ "$SCRIPTS/check-inbox.sh" "$p"
+  [ "$status" -eq 0 ]
+  grep -q 'additive' <<<"$output"
+  [ "$(pair_unread_count ctm alice)" -eq 0 ]
+}

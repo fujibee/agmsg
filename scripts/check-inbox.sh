@@ -158,7 +158,19 @@ fi
 # lives in the skill's run dir — independent of AGMSG_STORAGE_PATH. Keeping it
 # out of the store means an overridden/sandboxed store still gets delivery even
 # when the default db dir doesn't exist.
-MARKER="$SKILL_DIR/run/.lastcheck-$AGENT"
+#
+# PostToolUse (#1003) uses a SEPARATE marker so the two events' cooldowns do not
+# bind. This event is the UNVERIFIED path (model receipt of its output is not
+# observed), and it must not be able to suppress the verified Stop path: if they
+# shared one marker, a PostToolUse poll would record the cooldown and the very
+# next Stop would exit at the gate without delivering. Its own marker bounds the
+# per-tool-call cost to one read/minute without touching Stop's. (This one value
+# was answering two questions — the same shape reviews keep flagging.)
+if [ "$EVENT" = "PostToolUse" ]; then
+  MARKER="$SKILL_DIR/run/.lastcheck-$AGENT.posttooluse"
+else
+  MARKER="$SKILL_DIR/run/.lastcheck-$AGENT"
+fi
 
 if [ -f "$MARKER" ]; then
   last=$(compat_file_mtime "$MARKER")
@@ -312,7 +324,16 @@ for team in "${TEAM_LIST[@]}"; do
   # legacy row (§2.4). Only the ids collected from the rows actually displayed
   # above — never a blanket match — so a message that arrives after the SELECT
   # can never be marked read unseen.
-  if [ "${#IDS[@]}" -gt 0 ]; then
+  #
+  # PostToolUse (#1003) does NOT mark read: read state is consumed only by a path
+  # whose delivery is verified, and this event's model receipt is not observed.
+  # "displayed" here means "formatted", not "received" — so consuming here would
+  # be exactly "consumed and never shown", which this file already names below as
+  # worse than the failure the status reports. Mid-turn delivery is therefore
+  # ADDITIVE: it may show a message earlier, but Stop still fetches, shows, and
+  # consumes it as before. A duplicate display is harmless; an invisible loss is
+  # not.
+  if [ "$EVENT" != "PostToolUse" ] && [ "${#IDS[@]}" -gt 0 ]; then
     storage_mark_read_batch "$team" "$AGENT" "${IDS[@]}" >/dev/null 2>&1 || true
   fi
 done

@@ -1752,9 +1752,15 @@ JSON
 }
 
 # --- #1003: codex mid-turn PostToolUse hook install/strip/status wiring ---
+#
+# The install is version-gated (#1003 review): the entry goes in only when the
+# codex CLI is confirmed >= posttooluse_min_cli, fail-closed otherwise, so
+# whether a pre-PostToolUse CLI mishandles the entry never has to be known. These
+# pin AGMSG_CODEX_VERSION so the outcome does not depend on whether a codex binary
+# happens to be on the runner's PATH (CI has none).
 
 @test "delivery set turn (codex): installs a PostToolUse entry alongside Stop, carrying the event arg (#1003)" {
-  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local hf="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hf" ]
@@ -1779,7 +1785,7 @@ JSON
 
 @test "delivery set turn (codex): the PostToolUse entry carries commandWindows too (#1003)" {
   skip_on_windows "commandWindows not written on native Windows (#182)"
-  run bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local cw
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse[0].hooks[0].commandWindows');")
@@ -1789,7 +1795,7 @@ JSON
 }
 
 @test "delivery set off (codex): strips the PostToolUse entry with Stop (#1003)" {
-  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
@@ -1797,8 +1803,48 @@ JSON
   [ "${n:-0}" = "0" ]
 }
 
+# --- version gate, fail-closed (#1003 review): install ONLY for a confirmed CLI ---
+
+@test "delivery set turn (codex): a CLI below the floor gets NO PostToolUse, and says why (#1003)" {
+  run env AGMSG_CODEX_VERSION=0.148.0 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  # Not silent: the operator is told mid-turn delivery was not installed (#1001 shape).
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+  # Stop is still installed — the safe existing path is unaffected.
+  local s
+  s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.Stop'));")
+  [ "$s" = "1" ]
+}
+
+@test "delivery set turn (codex): an unparseable CLI version gets NO PostToolUse, fail-closed (#1003)" {
+  run env AGMSG_CODEX_VERSION="banana" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+}
+
+@test "delivery set turn (codex): a CLI whose --version fails gets NO PostToolUse, fail-closed (#1003)" {
+  # No override; a fake codex on PATH that fails --version stands in for both an
+  # unreadable version and an absent CLI (command -v / probe failure).
+  local fake="$TEST_SKILL_DIR/fakebin"
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nexit 1\n' > "$fake/codex"
+  chmod +x "$fake/codex"
+  run env -u AGMSG_CODEX_VERSION PATH="$fake:$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "0" ]
+  grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
+}
+
 @test "delivery set monitor (codex): installs NO PostToolUse entry (#1003)" {
-  run bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
   n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
@@ -1814,7 +1860,7 @@ JSON
 }
 
 @test "delivery status (codex turn): reports the PostToolUse entry count next to Stop (#1003)" {
-  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   grep -q 'Stop entries:' <<<"$output"
