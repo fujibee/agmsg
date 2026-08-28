@@ -151,12 +151,14 @@ agmsg_delivery_apply_default() {
   # only at Stop. The datum's PRESENCE opts the type in (kept type-agnostic here —
   # no `if type = codex`); its value is the wire shape check-inbox emits.
   #
-  # But opt-in is not enough to INSTALL: whether a CLI that predates the
-  # PostToolUse event ignores the entry harmlessly is unmeasured, and an entry a
-  # startup/hooks-review parser rejects would break turn delivery before
-  # check-inbox runs. So a second datum, posttooluse_min_cli, gates on the
-  # detected CLI version, FAIL-CLOSED: the entry is installed only when the CLI is
-  # confirmed at or above it. Older, or a version we cannot read, gets Stop only.
+  # But opt-in is not enough to INSTALL: the entry is meaningless to a CLI that
+  # cannot execute PostToolUse, and — the concern that first motivated the gate —
+  # an older parser that rejected it at startup/hooks-review would break turn
+  # delivery before check-inbox runs. So a second datum, posttooluse_min_cli,
+  # gates on the detected CLI version, FAIL-CLOSED: the entry is installed only
+  # when the CLI is confirmed at or above it. Older, or a version we cannot read,
+  # gets Stop only. (That older-parser concern was later measured — see the next
+  # paragraph — so this stays as defense-in-depth, not the sole protection.)
   #
   # What this gate does and does NOT do (#1003 review): it narrows the POPULATION
   # of projects that get the entry WRITTEN to those where a supporting CLI was
