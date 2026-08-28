@@ -1754,13 +1754,28 @@ JSON
 # --- #1003: codex mid-turn PostToolUse hook install/strip/status wiring ---
 #
 # The install is version-gated (#1003 review): the entry goes in only when the
-# codex CLI is confirmed >= posttooluse_min_cli, fail-closed otherwise, so
-# whether a pre-PostToolUse CLI mishandles the entry never has to be known. These
-# pin AGMSG_CODEX_VERSION so the outcome does not depend on whether a codex binary
-# happens to be on the runner's PATH (CI has none).
+# codex CLI is confirmed at or above posttooluse_min_cli, fail-closed otherwise.
+# The version is READ from the CLI, never asserted, so these place a fake `codex`
+# on PATH (both the pass and the fail cases) rather than depending on whether a
+# real codex is installed (CI has none). The gate narrows WHO gets the entry
+# written; it does not establish that an older CLI ignores a persisted entry.
+
+# A fake `codex` whose `--version` prints $1 (empty $1 => it exits non-zero).
+# Echoes a dir to PREPEND to PATH.
+_fake_codex_path() {
+  local dir="$TEST_SKILL_DIR/fakebin"
+  mkdir -p "$dir"
+  if [ -z "${1:-}" ]; then
+    printf '#!/bin/sh\nexit 1\n' > "$dir/codex"
+  else
+    printf '#!/bin/sh\necho "%s"\n' "$1" > "$dir/codex"
+  fi
+  chmod +x "$dir/codex"
+  printf '%s' "$dir"
+}
 
 @test "delivery set turn (codex): installs a PostToolUse entry alongside Stop, carrying the event arg (#1003)" {
-  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  run env PATH="$(_fake_codex_path 'codex-cli 0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local hf="$TEST_PROJECT/.codex/hooks.json"
   [ -f "$hf" ]
@@ -1773,11 +1788,9 @@ JSON
   cmd=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].hooks[0].command');")
   grep -q 'check-inbox.sh' <<<"$cmd"
   grep -q 'PostToolUse' <<<"$cmd"
-  # matcher empty = all tools.
   local m
   m=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hf")'), '\$.hooks.PostToolUse[0].matcher');")
   [ -z "$m" ]
-  # Stop is still installed alongside it.
   local s
   s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$hf")'), '\$.hooks.Stop'));")
   [ "$s" = "1" ]
@@ -1785,7 +1798,7 @@ JSON
 
 @test "delivery set turn (codex): the PostToolUse entry carries commandWindows too (#1003)" {
   skip_on_windows "commandWindows not written on native Windows (#182)"
-  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local cw
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse[0].hooks[0].commandWindows');")
@@ -1795,7 +1808,7 @@ JSON
 }
 
 @test "delivery set off (codex): strips the PostToolUse entry with Stop (#1003)" {
-  env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" set off codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
@@ -1803,24 +1816,39 @@ JSON
   [ "${n:-0}" = "0" ]
 }
 
-# --- version gate, fail-closed (#1003 review): install ONLY for a confirmed CLI ---
+# --- version gate: install only at/above the EXACT measured floor, fail-closed ---
+# Boundary controls on both sides: exact floor, floor-minus-one, and a MAX.
 
-@test "delivery set turn (codex): a CLI below the floor gets NO PostToolUse, and says why (#1003)" {
-  run env AGMSG_CODEX_VERSION=0.148.0 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+@test "delivery set turn (codex): the exact measured floor 0.149.1 installs (#1003)" {
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "1" ]
+}
+
+@test "delivery set turn (codex): floor-minus-one 0.149.0 does NOT install — patch is significant (#1003)" {
+  run env PATH="$(_fake_codex_path '0.149.0'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
   n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
   [ "${n:-0}" = "0" ]
-  # Not silent: the operator is told mid-turn delivery was not installed (#1001 shape).
   grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
-  # Stop is still installed — the safe existing path is unaffected.
   local s
   s=$(sqlite_mem "SELECT json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.Stop'));")
   [ "$s" = "1" ]
 }
 
-@test "delivery set turn (codex): an unparseable CLI version gets NO PostToolUse, fail-closed (#1003)" {
-  run env AGMSG_CODEX_VERSION="banana" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+@test "delivery set turn (codex): a far-newer version installs (MAX side) (#1003)" {
+  run env PATH="$(_fake_codex_path '9.9.9'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  local n
+  n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
+  [ "${n:-0}" = "1" ]
+}
+
+@test "delivery set turn (codex): an unparseable CLI version does NOT install, fail-closed (#1003)" {
+  run env PATH="$(_fake_codex_path 'banana'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
   n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
@@ -1828,14 +1856,8 @@ JSON
   grep -q 'mid-turn delivery (PostToolUse) not installed' <<<"$output"
 }
 
-@test "delivery set turn (codex): a CLI whose --version fails gets NO PostToolUse, fail-closed (#1003)" {
-  # No override; a fake codex on PATH that fails --version stands in for both an
-  # unreadable version and an absent CLI (command -v / probe failure).
-  local fake="$TEST_SKILL_DIR/fakebin"
-  mkdir -p "$fake"
-  printf '#!/bin/sh\nexit 1\n' > "$fake/codex"
-  chmod +x "$fake/codex"
-  run env -u AGMSG_CODEX_VERSION PATH="$fake:$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
+@test "delivery set turn (codex): a CLI whose --version fails does NOT install, fail-closed (#1003)" {
+  run env PATH="$(_fake_codex_path ''):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
   n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
@@ -1844,7 +1866,7 @@ JSON
 }
 
 @test "delivery set monitor (codex): installs NO PostToolUse entry (#1003)" {
-  run env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
+  run env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   local n
   n=$(sqlite_mem "SELECT coalesce(json_array_length(json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.PostToolUse')), 0);" 2>/dev/null || echo 0)
@@ -1860,7 +1882,7 @@ JSON
 }
 
 @test "delivery status (codex turn): reports the PostToolUse entry count next to Stop (#1003)" {
-  env AGMSG_CODEX_VERSION=0.149.1 bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  env PATH="$(_fake_codex_path '0.149.1'):$PATH" bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status codex "$TEST_PROJECT"
   [ "$status" -eq 0 ]
   grep -q 'Stop entries:' <<<"$output"
