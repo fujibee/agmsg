@@ -955,7 +955,7 @@ storage_sync_apply_pull() {
   _sqlite_sync_schema "$team" || return $?
   local generation db tl sql_file line type final_cursor="" corrupt=0 outcome_ids=""
   local seq wire received v cipher key_id blob status policy local_rev reason kind
-  local from to body at local_id q line_next_after jq_ok
+  local from to body at local_id q line_next_after jq_ok nul_flag
   local cipher_q blob_q key_id_q received_q policy_q local_rev_q reason_q
   local from_q to_q body_q at_q
   generation=$(_sqlite_sync_generation "$team"); db="$(_sqlite_db "$team")"; tl="$(_sqlite_lit "$team")"
@@ -974,17 +974,33 @@ storage_sync_apply_pull() {
   # through `tostring | @sh` (#930): the only thing standing between a
   # server-chosen string and the shell was quoting discipline. Both costs go
   # together. The page is parsed by a single jq that emits, after a leading
-  # record count, every record's eighteen fields as raw values separated by
-  # NUL bytes; the loop below reads them with `read -d ''` into plain
-  # variables. Nothing server-chosen is ever parsed as shell again -- the
-  # class #930 had to defend is gone, not guarded.
+  # record count, one quarantine-flag frame followed by every record's
+  # eighteen fields as raw values, all separated by NUL bytes; the loop below
+  # reads them with `read -d ''` into plain variables. Nothing server-chosen
+  # is ever parsed as shell again -- the class #930 had to defend is gone,
+  # not guarded.
   #
-  # The framing is sound because a NUL can never appear inside a value: jq
-  # refuses any record whose field contains U+0000, naming the record and the
-  # field (#940 -- the old pipeline silently stored such a body MANGLED, the
-  # NUL becoming other bytes on the way through `jq -r` and the shell's own
-  # NUL-stripping, and reported success; a value the store cannot hold
-  # verbatim is refused now, not rewritten).
+  # The framing is sound because a NUL can never appear inside a value jq
+  # emits: fourteen fields (type, next_after, server_seq, id,
+  # server_received_at, envelope.*, status, policy_revision,
+  # local_security_revision, reason, projection.kind) still refuse the whole
+  # record's page outright if they hold one, naming the record and the field
+  # -- these are the fields every UPDATE in this function uses to find a
+  # SPECIFIC existing row, so a corrupt one cannot be trusted to name itself,
+  # let alone be stripped and reused as if clean (identifier poisoning: a
+  # DIFFERENT record's real id, with U+0000 appended, would strip down to
+  # that record's own wire id and land this record's outcome on it instead).
+  # The remaining four -- projection.from_agent/to_agent/body/created_at,
+  # never used to look up or update a different row -- have U+0000 stripped
+  # unconditionally instead, with the leading flag frame naming whether any
+  # of the four held it; the shell routes a flagged record to per-record
+  # quarantine rather than losing the whole page to it (#940's own
+  # regression: one bad body made a team impossible to ever pull again). The
+  # old pipeline silently stored a NUL-holding body MANGLED -- the byte
+  # becoming other bytes on the way through `jq -r` and the shell's own
+  # NUL-stripping -- and reported success; this neither rewrites nor loses
+  # it: the value the store cannot hold verbatim is named and quarantined,
+  # not silently kept.
   #
   # --raw-input keeps the old "one JSON value per line" refusal: each line is
   # fromjson'd on its own, so a line smuggling two values fails exactly as it
@@ -1001,6 +1017,18 @@ storage_sync_apply_pull() {
                  "status","policy_revision","local_security_revision","reason",
                  "projection.kind","projection.from_agent","projection.to_agent",
                  "projection.body","projection.created_at"];
+    # Only these four are payload: never used to look up or update a DIFFERENT
+    # row (id/wire and server_seq are; so is type/status, indirectly, via the
+    # whitelist and the fixed-literal case match). A record whose id, server
+    # seq, or any other non-payload field carries U+0000 cannot be safely
+    # named after stripping -- a trailing byte on an otherwise-valid UUID
+    # would strip down to the real wire_id of a DIFFERENT record, and the
+    # quarantine UPDATE for this record would land on that unrelated row
+    # instead (found in review: identifier poisoning, not merely a lost
+    # U+0000 guard on this one record). Those fields keep the page-wide
+    # error() unchanged.
+    def is_payload_field($name): (["projection.from_agent","projection.to_agent",
+      "projection.body","projection.created_at"] | index($name)) != null;
     def pick($r; $name):
       (if   $name == "type"                    then $r.type // ""
        elif $name == "next_after"              then $r.next_after // ""
@@ -1026,11 +1054,16 @@ storage_sync_apply_pull() {
     , ( $lines | to_entries[]
         | (.key + 1) as $n
         | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
-        | fields[] as $name
-        | pick($r; $name) as $v
-        | (if ($v | contains("\u0000"))
-           then error("record \($n): field \($name) contains U+0000")
-           else $v end) + "\u0000" )
+        | ( [ fields[] as $name
+              | pick($r; $name) as $v
+              | if is_payload_field($name) then $v
+                elif ($v | contains("\u0000"))
+                then error("record \($n): field \($name) contains U+0000")
+                else $v end
+              | {name: $name, v: .} ] ) as $entries
+        | ( $entries | map(select(is_payload_field(.name)) | .v | contains("\u0000")) | any ) as $flag_bool
+        | ( (if $flag_bool then "1" else "0" end) + "\u0000" )
+        , ( $entries[] | (if is_payload_field(.name) then (.v | gsub("\u0000"; "")) else .v end) + "\u0000" ) )
   ' 2>"$jq_err")
   # ONE cleanup for EVERY failure after the stream opened: the file descriptor,
   # both temp files, the globals the trap reads, and the trap itself. The bats
@@ -1043,6 +1076,10 @@ storage_sync_apply_pull() {
       [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
       printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
     fi
+    # A brace group, because `exec` with no command word applies its
+    # redirections to the shell itself and they outlive the statement: the
+    # bare form sent every later stderr write in this shell to /dev/null,
+    # starting with `_sqlite_sync_why` (#911).
     { exec 3<&-; } 2>/dev/null || true
     rm -f "$sql_file" "$jq_err"
     _AGMSG_SYNC_SQL_FILE=""; _AGMSG_SYNC_JQ_ERR=""
@@ -1055,6 +1092,15 @@ storage_sync_apply_pull() {
   record_index=0
   while [ "$record_index" -lt "$page_count" ]; do
     record_index=$((record_index + 1))
+    # #940 per-record: one extra frame ahead of the eighteen, naming whether
+    # ANY of this record's fields held U+0000. jq has already stripped the
+    # byte from every value below regardless of the flag (a no-op when it was
+    # never there), so the framing can never break on it again -- the flag is
+    # read, and branched on, before any of those values are trusted.
+    if ! IFS= read -r -d '' nul_flag <&3; then
+      _sqlite_sync_apply_fail "record $record_index ended mid-frame at the NUL flag"
+      _sqlite_sync_why; return 13
+    fi
     for field_name in type line_next_after seq wire received v cipher key_id blob \
                       status policy local_rev reason kind from to body at; do
       if ! IFS= read -r -d '' "$field_name" <&3; then
@@ -1189,6 +1235,30 @@ storage_sync_apply_pull() {
         AND status='importable' AND EXISTS(SELECT 1 FROM sync_messages m
           WHERE m.server_instance_id='$server' AND m.remote_team_id='$remote'
             AND m.protocol_version=$protocol AND m.wire_id='$wire' AND m.server_seq='$seq');" >> "$sql_file"
+
+    if [ "$nul_flag" = 1 ]; then
+      # #940: quarantine this one record instead of losing the whole page to
+      # it. This is the fourth corrupt_state reason (three already exist for
+      # envelope/sequence/mapping mismatches, above) -- no new machinery, just
+      # a new WHERE this record's wire_id can land in. The row already exists
+      # from the INSERT a few statements up, so this only ever overrides its
+      # status; it never creates one. Appended last for this record, so it is
+      # the final word on the row no matter what the earlier UPDATEs above set
+      # -- and it lands in the same transaction, ahead of any later record's
+      # SQL, so the "importable" branch below never sees a status this record
+      # was supposed to be denied.
+      printf "%s\n" "
+        UPDATE sync_quarantine SET status='corrupt_state',reason='body contains U+0000'
+         WHERE server_instance_id='$server' AND remote_team_id='$remote'
+           AND protocol_version=$protocol AND wire_id='$wire';" >> "$sql_file"
+      # Skip the importable-message path below outright, rather than relying
+      # on its NOT EXISTS(...corrupt_state) guard: jq has already stripped
+      # U+0000 from $body/$from/$to for every value in this record, and if a
+      # value WAS nothing but that one byte, the emptied field would trip the
+      # "-n" checks below and fail the whole page (return 13) -- exactly the
+      # failure this change exists to stop happening for one bad record.
+      continue
+    fi
 
     if [ "$status" = importable ]; then
       if [ -n "$kind" ]; then
@@ -1626,29 +1696,87 @@ storage_sync_apply_read_state() {
   _AGMSG_READ_SYNC_SQL_FILE="$sql_file"
   trap 'case "${_AGMSG_READ_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-read-sync-sql.*) rm -f "$_AGMSG_READ_SYNC_SQL_FILE" ;; esac' EXIT INT TERM HUP
   printf '%s\n' 'BEGIN IMMEDIATE; CREATE TEMP TABLE sync_read_assert(ok INTEGER CHECK(ok=1));' > "$sql_file"
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    type=$(printf '%s\n' "$line" | jq -r '.type // empty')
+  # ONE jq for the whole page, NUL-framed, instead of five processes per record
+  # (3x jq + 2x grep). This mirrors what the pull path and the ack path already
+  # do (#908 / #927 / #939 / #940); read-apply is the one path that work did not
+  # reach. Measured before this change: 44.4 ms/record on Linux and 0.53-0.66
+  # s/record on Git Bash under Windows -- 116 s and 24-25 min for a 2,600-record
+  # page. Upstream report: #969.
+  #
+  # The record shapes are unchanged and so are the checks: the type allowlist,
+  # the UUIDv7 member id, the UUIDv4 wire id, the digits-only sequences, and
+  # exit 13 on anything unexpected. The UUID patterns below are byte-identical
+  # to the grep -E patterns they replace; only the matcher changed, from a
+  # forked grep to bash's own =~ (the substitution upstream made on the pull
+  # path in #939).
+  local jq_err rs_count rs_index field_name
+  jq_err=$(mktemp "${TMPDIR:-/tmp}/agmsg-read-sync-jq.XXXXXX") || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  _AGMSG_READ_SYNC_JQ_ERR="$jq_err"
+  exec 4< <(jq -j -R -s '
+    def fields: ["type","min_available_seq","current_seq","member_id","server_seq","wire_id"];
+    def pick($r; $name):
+      (if   $name == "type"              then $r.type // ""
+       elif $name == "min_available_seq" then $r.min_available_seq // ""
+       elif $name == "current_seq"       then $r.current_seq // ""
+       elif $name == "member_id"         then $r.member_id // ""
+       elif $name == "server_seq"        then $r.server_seq // ""
+       else $r.wire_id // "" end) as $v
+      | (if ($v|type) == "string" then $v else ($v|tostring) end);
+    [ split("\n")[] | select(length > 0) ] as $lines
+    | ($lines | length | tostring) + "\u0000"
+    , ( $lines | to_entries[]
+        | (.key + 1) as $n
+        | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
+        | fields[] as $name
+        | pick($r; $name) as $v
+        | (if ($v | contains("\u0000"))
+           then error("record \($n): field \($name) contains U+0000")
+           else $v end) + "\u0000" )
+  ' 2>"$jq_err")
+  # ONE cleanup for every failure after the stream opened -- fd, both temp
+  # files, the globals the trap reads, and the trap itself. Mirrors
+  # _sqlite_sync_apply_fail on the pull path, for the same reason: this
+  # function is called directly from the bats suite in a long-lived shell.
+  _sqlite_read_apply_fail() {  # [message]
+    if [ "$#" -gt 0 ]; then
+      [ -s "$jq_err" ] && sed 's/^/agmsg: sqlite-sync: /' "$jq_err" >&2
+      printf 'agmsg: sqlite-sync: %s\n' "$1" >&2
+    fi
+    { exec 4<&-; } 2>/dev/null || true
+    rm -f "$sql_file" "$jq_err"
+    _AGMSG_READ_SYNC_SQL_FILE=""; _AGMSG_READ_SYNC_JQ_ERR=""
+    trap - EXIT INT TERM HUP
+  }
+  if ! IFS= read -r -d '' rs_count <&4 || ! [[ "$rs_count" =~ ^[0-9]+$ ]]; then
+    _sqlite_read_apply_fail "the read-state page produced no readable record count"
+    _sqlite_sync_why; return 13
+  fi
+  rs_index=0
+  while [ "$rs_index" -lt "$rs_count" ]; do
+    rs_index=$((rs_index + 1))
+    for field_name in type rs_floor rs_current member seq wire; do
+      if ! IFS= read -r -d '' "$field_name" <&4; then
+        _sqlite_read_apply_fail "record $rs_index ended mid-frame at field $field_name"
+        _sqlite_sync_why; return 13
+      fi
+    done
     case "$type" in
       sync_read_snapshot)
-        [ -z "$floor" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq // empty')
-        current=$(printf '%s\n' "$line" | jq -r '.current_seq // empty')
-        case "$floor:$current" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
+        [ -z "$floor" ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
+        floor="$rs_floor"
+        current="$rs_current"
+        case "$floor:$current" in *[!0-9:]*) _sqlite_read_apply_fail; _sqlite_sync_why; return 13 ;; esac
         [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
           [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || {
-            rm -f "$sql_file"; _sqlite_sync_why; return 13;
+            _sqlite_read_apply_fail; _sqlite_sync_why; return 13;
           }
         ;;
       sync_read_frontier)
-        [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        seq=$(printf '%s\n' "$line" | jq -r '.server_seq // empty')
-        case "$seq" in ''|*[!0-9]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
-        printf '%s\n' "$member" | grep -Eq \
-          '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
-          || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        [ "$(_sqlite_sync_decimal_le "$seq" "$current")" = 1 ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+        [ -n "$current" ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
+        case "$seq" in ''|*[!0-9]*) _sqlite_read_apply_fail; _sqlite_sync_why; return 13 ;; esac
+        [[ "$member" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
+        [ "$(_sqlite_sync_decimal_le "$seq" "$current")" = 1 ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
         printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
           SELECT 1 FROM sync_read_members WHERE local_team='$tl'
             AND server_instance_id='$server' AND remote_team_id='$remote'
@@ -1661,15 +1789,11 @@ storage_sync_apply_read_state() {
             AND member_id='$member' AND active=1;" >> "$sql_file"
         ;;
       sync_read_exact)
-        [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        member=$(printf '%s\n' "$line" | jq -r '.member_id // empty')
-        wire=$(printf '%s\n' "$line" | jq -r '.wire_id // empty')
-        printf '%s\n' "$member" | grep -Eq \
-          '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
-          || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        printf '%s\n' "$wire" | grep -Eq \
-          '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
-          || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+        [ -n "$current" ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
+        [[ "$member" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
+        [[ "$wire" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
         printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
           SELECT 1 FROM sync_read_members WHERE local_team='$tl'
             AND server_instance_id='$server' AND remote_team_id='$remote'
@@ -1684,10 +1808,26 @@ storage_sync_apply_read_state() {
              AND rm.protocol_version=$protocol AND rm.driver_generation='$generation'
              AND rm.member_id='$member' AND rm.active=1);" >> "$sql_file"
         ;;
-      *) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;;
+      *) _sqlite_read_apply_fail; _sqlite_sync_why; return 13 ;;
     esac
   done
-  [ -n "$floor" ] && [ -n "$current" ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+  if IFS= read -r -d '' field_name <&4 || [ -n "$field_name" ]; then
+    _sqlite_read_apply_fail "the read-state page carried bytes after its last record"
+    _sqlite_sync_why; return 13
+  fi
+  { exec 4<&-; } 2>/dev/null || true
+  if [ -s "$jq_err" ]; then
+    _sqlite_read_apply_fail "the read-state page could not be parsed"
+    _sqlite_sync_why; return 13
+  fi
+  rm -f "$jq_err"; _AGMSG_READ_SYNC_JQ_ERR=""
+  # Through the same cleanup as every other failure site, for the reason the
+  # pull path already routes its structurally identical tail check that way
+  # (the final_cursor check): reached here the fd is closed and both temp files
+  # are gone, but the trap and the global the trap reads are still set, and the
+  # bats suite calls this function directly in a long-lived shell (review
+  # finding).
+  [ -n "$floor" ] && [ -n "$current" ] || { _sqlite_read_apply_fail; _sqlite_sync_why; return 13; }
   printf "%s\n" "
     UPDATE sync_read_members SET
       min_available_seq=CAST(MAX(CAST(min_available_seq AS INTEGER),$floor) AS TEXT),

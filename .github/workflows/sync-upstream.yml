@@ -1,0 +1,92 @@
+name: Sync fork with upstream
+
+# joelmitz/agmsg の main を fujibee/agmsg（正本）へ追従させる。
+#
+# ★実装は git ではなく GitHub の fork-sync API（POST /repos/{repo}/merge-upstream）
+# を呼ぶ。理由は下の2つの失敗を実測したため（2026-08-22）。
+#
+# 失敗1: `git merge --ff-only upstream/main`
+#   このワークフローを追加した commit 自身が main を diverge させるため、
+#   ff-only は初回から一度も成功しなかった。2026-08-18〜08-22 の scheduled 実行が
+#   全て exit 128 で失敗し、その間 main は upstream から 47 commits 遅れた。
+#   初版のコメントは「If main ever diverges ... fails loudly」と予告していたが、
+#   自分自身がその divergence になることを勘定に入れていなかった。
+#
+# 失敗2: `git merge` + `git push`（ff-only をやめた版）
+#   merge は通ったが push が拒否された:
+#     ! [remote rejected] main -> main (refusing to allow a GitHub App to
+#       create or update workflow `.github/workflows/tests.yml`
+#       without `workflows` permission)
+#   upstream の差分に workflow ファイルが含まれると、既定の GITHUB_TOKEN では
+#   push できない。PAT を secret に置けば回避できるが、fork-sync API なら
+#   PAT 無しで同期できる（サーバ側の fork 同期であり app の push ではない）。
+#
+# fork-sync API は fast-forward できなければ merge commit を作る。競合して
+# 同期できない場合は merge_type=none となり、このワークフローは失敗する
+# （強制上書きは一切しない）。
+
+on:
+  schedule:
+    - cron: '17 3 * * *'  # 毎日 03:17 UTC（12:17 JST）。他の定時ジョブと秒をずらすため17分
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # merge_type は "none" が2通りの意味を持つ（実測 2026-08-22）:
+      #   - 競合等で同期できなかった
+      #   - 既に最新（message: "This branch is not behind the upstream ...")
+      # 戻り値で成否を判定すると後者を失敗と誤判定するため、ここでは同期を
+      # 試みるだけにして、成否は次の step で **実際の同期状態**を見て決める。
+      - name: Sync main from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out="$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+                   -f branch=main 2>&1 || true)"
+          echo "$out"
+
+      # ★成否の正本。upstream に対して取りこぼしが 0 なら同期できている。
+      # compare/{base}...{head} の ahead_by は head(=upstream) が base(=main) より
+      # 何コミット先行しているか、すなわち **こちらが取りこぼしている数**。
+      - name: Verify main is in sync with upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cmp="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...fujibee:agmsg:main")"
+          missing="$(printf '%s' "$cmp" | jq -r '.ahead_by')"
+          local_only="$(printf '%s' "$cmp" | jq -r '.behind_by')"
+          echo "missing_from_upstream=${missing} fork_local_commits=${local_only}"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::main is still ${missing} commit(s) behind upstream after sync"
+            exit 1
+          fi
+
+      # ★メール通知に依存しない検知経路。
+      # 初版はこれが無く、2026-08-18〜08-22 の5日連続失敗が誰にも届かなかった
+      # （joelmitz の primary は大学アドレスで、Actions の失敗通知が実質機能
+      # していなかった）。fork は Issue が既定で無効なため 2026-08-22 に有効化した。
+      # 同題の open issue があればコメント追記に留め、毎日 issue が増えないようにする。
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          title="Sync fork with upstream failed"
+          body="The scheduled fork sync failed. Run: ${run_url}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title ${title}" --json number --jq '.[0].number // empty' || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

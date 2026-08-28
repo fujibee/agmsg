@@ -2,14 +2,41 @@
 set -euo pipefail
 
 # Usage: send.sh <team> <from> <to> <message> [--force]
+#        send.sh <team> <from> <to> --stdin [--force]
 
 TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
-BODY="${4:?Missing message body}"
 FORCE=0
-if [ "${5:-}" = "--force" ]; then
-  FORCE=1
+if [ "${4:-}" = "--stdin" ]; then
+  if [ -t 0 ]; then
+    printf 'agmsg: send: --stdin requires a non-tty stdin\n' >&2
+    exit 1
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg-send-body.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT INT TERM HUP
+  cat > "$tmp"
+  if [ "$(wc -c < "$tmp")" -ne "$(tr -d '\000' < "$tmp" | wc -c)" ]; then
+    printf 'agmsg: send: the message body contains U+0000\n' >&2
+    exit 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    printf 'agmsg: send: Missing message body\n' >&2
+    exit 1
+  fi
+  BODY="$(cat "$tmp"; printf x)"
+  BODY="${BODY%x}"
+  if [ "${5:-}" = "--force" ]; then
+    FORCE=1
+  elif [ "$#" -ge 5 ]; then
+    printf 'agmsg: send: unexpected argument after --stdin: %s\n' "$5" >&2
+    exit 1
+  fi
+else
+  BODY="${4:?Missing message body}"
+  if [ "${5:-}" = "--force" ]; then
+    FORCE=1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
