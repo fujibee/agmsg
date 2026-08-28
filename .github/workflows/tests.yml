@@ -204,7 +204,14 @@ jobs:
           echo "contracts_needed=$contracts_needed" >> "$GITHUB_OUTPUT"
 
   bats-shard:
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)
+    # The docs-only skip below reports this check green without running the
+    # suite -- correctly, so the required aggregate can be satisfied -- but a
+    # green that measured nothing must not read like one that ran 24 files
+    # (#798). The name says which it was. Only the shard checks change name;
+    # the required contexts are `bats` (the aggregate) and the Windows install
+    # leg, and neither is renamed, so branch protection sees exactly what it
+    # saw. `needs` is one of the contexts a job name may read.
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -244,7 +251,9 @@ jobs:
 
       - name: Docs-only change — skipping suite
         if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+        run: |
+          echo "Diff is documentation-only; skipping the bats suite and reporting green to satisfy the required check."
+          echo "::notice title=bats shard skipped::docs-only diff — this shard ran 0 test files; its green satisfies the required check and measures nothing (#798)"
 
       - name: Compute this shard's test files
         if: needs.changes.outputs.docs_only != 'true'
@@ -421,7 +430,15 @@ jobs:
 
       - name: Docs-only change — no shard manifests to verify
         if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Diff is documentation-only; shard manifests are not expected."
+        # Same conclusion as a full pass -- this is the required context and a
+        # docs-only PR must stay mergeable -- but the run says which green it
+        # is, where a person reads it: the checks tab (annotation) and the run
+        # summary. `gh pr checks` still prints `bats pass`; the shard lines
+        # beside it now carry "docs-only, suite skipped" (#798).
+        run: |
+          echo "Diff is documentation-only; shard manifests are not expected."
+          echo "::notice title=bats::docs-only diff — the bats suite did not run on any shard; this green satisfies the required check and measures nothing (#798)"
+          printf '%s\n' "## bats: docs-only, suite skipped" "" "The diff was documentation-only, so no shard ran the bats suite. This green satisfies the required check; it is not evidence that the suite passes (#798)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download shard manifests
         if: needs.changes.outputs.docs_only != 'true'
@@ -443,6 +460,10 @@ jobs:
               status=1
             fi
           done
+          # The other green, named the same way (#798): how many files the
+          # shards ran, so a full pass and a skip never read alike.
+          count="$(printf '%s\n' "$expected" | grep -c .)"
+          printf '%s\n' "## bats: suite ran" "" "The shards ran $count test files on ubuntu-latest and macos-latest and every shard passed." >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
   # The age-v1 vectors are shared normative fixtures. Exercise them with the
