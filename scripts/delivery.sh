@@ -160,11 +160,14 @@ agmsg_delivery_apply_default() {
   #
   # What this gate does and does NOT do (#1003 review): it narrows the POPULATION
   # of projects that get the entry WRITTEN to those where a supporting CLI was
-  # seen at install time. It does NOT establish that an older CLI ignores the
-  # entry harmlessly — hooks.json persists after this exits, and a later
-  # downgrade, a different codex binary, or another environment can read the same
-  # file without the gate running again. The harmless-ignore invariant is still
-  # unmeasured; this only shrinks who is exposed to it, it does not remove it.
+  # seen at install time. It does NOT by itself govern how an OLDER CLI handles a
+  # persisted entry later — hooks.json outlives this call, and a downgrade or a
+  # different codex binary can read the same file without the gate running again.
+  # That handling was measured separately: codex 0.116.0 (pre-PostToolUse) reads a
+  # PostToolUse-carrying hooks.json and silently ignores the unknown key, no
+  # startup/parse error, positive-control confirmed — the Hooks Review screen was
+  # not directly reached (inferred harmless). So the gate is defense-in-depth on
+  # top of that measurement, not the sole protection against an unknown.
   local pt_output pt_min pt_cli pt_install=0
   pt_output=$(agmsg_type_get "$type" posttooluse_output 2>/dev/null || true)
   if [ -n "$pt_output" ]; then
