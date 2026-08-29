@@ -169,14 +169,28 @@ _wait_for_file_contains() {
   elif [ ! -s "$file" ]; then
     echo "  file: present, empty" >&2
   else
-    echo "  file: present, $(wc -l < "$file" | tr -d ' ') line(s):" >&2
+    # Bytes and terminator, not `wc -l`: that counts newlines, so a partial
+    # line the writer had not finished would be invisible -- "0 lines" could
+    # not tell "wrote nothing" from "mid-write" (review finding). The byte
+    # count and the last byte answer that.
+    local bytes terminated="ends with a newline"
+    bytes="$(wc -c < "$file" | tr -d ' ')"
+    [ -n "$(tail -c 1 "$file")" ] && terminated="last line is UNTERMINATED (a write may be in progress)"
+    echo "  file: present, $bytes byte(s), $terminated:" >&2
     sed 's/^/    | /' "$file" >&2
+    # An unterminated final line leaves the stream mid-line; close it so the
+    # next diagnostic line does not run on.
+    [ -n "$(tail -c 1 "$file")" ] && echo >&2
   fi
   if [ -n "$pid" ]; then
+    # `kill -0` failing is NOT proof the process exited: it also fails on
+    # EPERM and on an observation error. The diagnostic says only what was
+    # observed (review finding -- the #996 shape: absence claimed from a
+    # failed presence check).
     if kill -0 "$pid" 2>/dev/null; then
-      echo "  watcher $pid: still running" >&2
+      echo "  watcher $pid: running (kill -0 succeeded)" >&2
     else
-      echo "  watcher $pid: exited" >&2
+      echo "  watcher $pid: kill -0 could not confirm it running (exited, or not observable)" >&2
     fi
   fi
   return 1
