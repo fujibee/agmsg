@@ -142,9 +142,21 @@ storage_init() {
     agmsg_sqlite "$db" "ALTER TABLE events ADD COLUMN legacy_id INTEGER;" \
       >/dev/null 2>&1 || true
   fi
-  # journal_mode cannot run inside a transaction, so it stays outside the
-  # one below; its failure surfaces through the transaction that follows.
-  agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" >/dev/null 2>&1 || true
+  # journal_mode cannot run inside a transaction, so it stays outside the one
+  # below -- and its RESULT is checked, not assumed. The pragma answers with
+  # the mode now in effect; anything but "wal" (a transient writer making it
+  # BUSY, a filesystem refusing the side files) must stop here, because the
+  # stamp below would otherwise record a non-WAL store as current and the
+  # fast path would never retry the switch -- reads would queue behind
+  # writers for the full busy timeout again, with a stamp saying all is well
+  # (review finding). Only a store that is actually in WAL proceeds to the
+  # schema transaction and can be stamped.
+  local journal_mode
+  journal_mode="$(agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" 2>/dev/null | tr -d '[:space:]')" || journal_mode=""
+  if [ "$journal_mode" != wal ]; then
+    echo runtime_error
+    return 13
+  fi
   # One transaction, stopped at the first error (-bail), with the revision
   # stamp as its LAST statement: either every schema statement landed and the
   # store says so, or none of it is visible and the store still says the old

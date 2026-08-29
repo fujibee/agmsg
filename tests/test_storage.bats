@@ -501,3 +501,41 @@ _use_per_team() {
   grep -Fq "the message store is busy" <<<"$stderr"
   grep -Fq "waited 200ms" <<<"$stderr"
 }
+
+@test "storage: init stamps only a store that is really in WAL -- a busy journal switch stops before the stamp (#1001)" {
+  # The fast path's whole premise is WAL serving reads beside a writer. If
+  # the journal-mode switch alone lost to a transient writer while the schema
+  # transaction then succeeded, a rollback-journal store would be stamped
+  # current and the fast path would never retry the switch -- minute-long
+  # waits would return with a stamp saying all is well (review finding). So
+  # init checks what the pragma ANSWERS and refuses to proceed on anything
+  # but "wal".
+  source "$SCRIPTS/lib/storage.sh"
+  export AGMSG_STORAGE_PATH="$BATS_TEST_TMPDIR/store"
+  export AGMSG_STORAGE_DRIVER=sqlite
+  agmsg_storage_load
+  mkdir -p "$AGMSG_STORAGE_PATH"
+  local db; db=$(agmsg_db_path demo)
+  # A rollback-journal store, not yet initialized.
+  sqlite3 "$db" "PRAGMA journal_mode=DELETE; CREATE TABLE seedmark(x);" >/dev/null
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 0 ]
+  # A writer holds the store: the journal switch comes back busy, and init
+  # must stop THERE -- old stamp, old journal mode, an error worth seeing.
+  ( printf 'BEGIN IMMEDIATE;\nSELECT 1;\n'; sleep 3; printf 'COMMIT;\n' ) | sqlite3 "$db" >/dev/null &
+  local holder=$!
+  sleep 0.5
+  export AGMSG_BUSY_TIMEOUT=200
+  run storage_init demo
+  unset AGMSG_BUSY_TIMEOUT
+  [ "$status" -eq 13 ]
+  [ "$output" = runtime_error ]
+  wait "$holder"
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 0 ]
+  [ "$(sqlite3 "$db" "PRAGMA journal_mode;" | tr -d ' \r')" = delete ]
+  # The writer gone, the same init switches to WAL, initializes, and stamps.
+  run storage_init demo
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ "$(sqlite3 "$db" "PRAGMA journal_mode;" | tr -d ' \r')" = wal ]
+  [ "$(sqlite3 "$db" "PRAGMA user_version;" | tr -d ' \r')" = 1 ]
+}
