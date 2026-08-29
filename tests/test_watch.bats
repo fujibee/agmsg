@@ -166,21 +166,33 @@ _wait_for_file_contains() {
   echo "_wait_for_file_contains: '$needle' did not appear in $file within 10s" >&2
   if [ ! -f "$file" ]; then
     echo "  file: missing" >&2
-  elif [ ! -s "$file" ]; then
-    echo "  file: present, empty" >&2
   else
-    # Bytes and terminator, not `wc -l`: that counts newlines, so a partial
-    # line the writer had not finished would be invisible -- "0 lines" could
-    # not tell "wrote nothing" from "mid-write" (review finding). The byte
-    # count and the last byte answer that.
-    local bytes terminated="ends with a newline"
-    bytes="$(wc -c < "$file" | tr -d ' ')"
-    [ -n "$(tail -c 1 "$file")" ] && terminated="last line is UNTERMINATED (a write may be in progress)"
-    echo "  file: present, $bytes byte(s), $terminated:" >&2
-    sed 's/^/    | /' "$file" >&2
-    # An unterminated final line leaves the stream mid-line; close it so the
-    # next diagnostic line does not run on.
-    [ -n "$(tail -c 1 "$file")" ] && echo >&2
+    # ONE observation, reported consistently: the writer is alive, so reading
+    # the live file once per fact (bytes, terminator, content) can interleave
+    # with an append and describe a state that never existed (review finding).
+    # Everything below is computed from a single snapshot copy; the snapshot
+    # is what the dump describes, and it says so.
+    local snap bytes terminated="ends with a newline"
+    snap="$(mktemp "${TMPDIR:-/tmp}/agmsg-wait-dump.XXXXXX")" || snap=""
+    if [ -z "$snap" ] || ! cp "$file" "$snap" 2>/dev/null; then
+      echo "  file: present, but could not be snapshotted for a consistent dump" >&2
+      [ -n "$snap" ] && rm -f "$snap"
+    elif [ ! -s "$snap" ]; then
+      echo "  file: present, empty (at snapshot time)" >&2
+      rm -f "$snap"
+    else
+      # Bytes and terminator, not `wc -l`: that counts newlines, so a partial
+      # line the writer had not finished would be invisible -- "0 lines"
+      # could not tell "wrote nothing" from "mid-write" (review finding).
+      bytes="$(wc -c < "$snap" | tr -d ' ')"
+      [ -n "$(tail -c 1 "$snap")" ] && terminated="last line is UNTERMINATED (a write may be in progress)"
+      echo "  file: snapshot at timeout, $bytes byte(s), $terminated:" >&2
+      sed 's/^/    | /' "$snap" >&2
+      # An unterminated final line leaves the stream mid-line; close it so
+      # the next diagnostic line does not run on.
+      [ -n "$(tail -c 1 "$snap")" ] && echo >&2
+      rm -f "$snap"
+    fi
   fi
   if [ -n "$pid" ]; then
     # `kill -0` failing is NOT proof the process exited: it also fails on
