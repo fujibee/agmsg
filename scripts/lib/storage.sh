@@ -254,7 +254,18 @@ agmsg_sqlite() {
     return
   fi
   # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
-  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@"
+  local _agmsg_sqlite_rc=0
+  sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" || _agmsg_sqlite_rc=$?
+  # SQLITE_BUSY after the full timeout used to pass in silence: the caller saw
+  # a non-zero it often swallowed, and the operator saw a command that hung
+  # for the timeout and said nothing (#1001 -- two people diagnosed two
+  # different commands as broken). One line on stderr turns "hung" into
+  # "waited and gave up", names the likely writer, and costs nothing when
+  # there is no contention.
+  if [ "$_agmsg_sqlite_rc" -eq 5 ]; then
+    echo "agmsg: the message store is busy: this call waited ${AGMSG_BUSY_TIMEOUT:-5000}ms behind another writer (a sync engine cycle may be running) and gave up (#1001)" >&2
+  fi
+  return "$_agmsg_sqlite_rc"
 }
 
 # The same call, recording how it ended. With AGMSG_SQLITE_OUTCOME_FILE set,

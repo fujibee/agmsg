@@ -591,7 +591,12 @@ prepare_push() {
 # failure mode is silent (zero candidates, no error), so it is pinned here.
 _seed_legacy_history() {
   local db; db=$(agmsg_db_path demo)
+  # An old store also predates the schema-revision stamp (#1001): reset it,
+  # or the simulated pre-cursor store would fast-path around the adoption
+  # this seeder exists to exercise. No product path deletes the marker; only
+  # this simulation does.
   agmsg_sqlite "$db" "
+    PRAGMA user_version=0;
     DELETE FROM storage_metadata WHERE key='read_cursor_v1';
     INSERT INTO messages(team,from_agent,to_agent,body,created_at) VALUES
       ('demo','alice','bob','legacy one','2026-01-01T00:00:00Z'),

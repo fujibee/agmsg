@@ -108,9 +108,31 @@ storage_describe() {
 # "no messages yet" without lazily initializing a store in a storeless project.)
 storage_store_exists() { [ -f "$(_sqlite_db "$1")" ]; }
 
+# Bumped whenever the init batch below changes shape: it is what lets a store
+# that already carries revision N skip the batch entirely (#1001). The number
+# is stamped INSIDE the same transaction as the schema statements, so a store
+# can never hold the new number over an old schema.
+_AGMSG_STORAGE_SCHEMA_REV=1
+
 storage_init() {
   local db; db="$(_sqlite_db "$1")"
   mkdir -p "$(dirname "$db")" 2>/dev/null || true
+  # Fast path (#1001): a store already at the current schema revision needs
+  # nothing from this function -- and the check is a READ, which WAL serves
+  # even while another process holds the write lock. Without this, every
+  # storage call re-ran the write batch below, and under a busy sync engine
+  # each of those waited the full busy timeout and then failed with
+  # SQLITE_BUSY, silently: 21 sqlite3 calls per inbox.sh, measured 106 s of
+  # nothing but this. A failed read falls through to the full init -- an
+  # observation failure must not skip the schema.
+  if [ -f "$db" ]; then
+    local schema_rev
+    schema_rev="$(agmsg_sqlite "$db" "PRAGMA user_version;" 2>/dev/null | tr -d '[:space:]')" || schema_rev=""
+    if [ "$schema_rev" = "$_AGMSG_STORAGE_SCHEMA_REV" ]; then
+      echo ok
+      return 0
+    fi
+  fi
   # CREATE TABLE IF NOT EXISTS does nothing to a store that already has the
   # table, so an existing events table never gains legacy_id from the schema
   # below. SQLite has no ADD COLUMN IF NOT EXISTS, and a failing statement
@@ -120,8 +142,16 @@ storage_init() {
     agmsg_sqlite "$db" "ALTER TABLE events ADD COLUMN legacy_id INTEGER;" \
       >/dev/null 2>&1 || true
   fi
-  agmsg_sqlite "$db" "
-    PRAGMA journal_mode=WAL;
+  # journal_mode cannot run inside a transaction, so it stays outside the
+  # one below; its failure surfaces through the transaction that follows.
+  agmsg_sqlite "$db" "PRAGMA journal_mode=WAL;" >/dev/null 2>&1 || true
+  # One transaction, stopped at the first error (-bail), with the revision
+  # stamp as its LAST statement: either every schema statement landed and the
+  # store says so, or none of it is visible and the store still says the old
+  # revision. A crash or failure in the middle cannot leave a new stamp over
+  # an old schema, which is the one way the fast path above could lie.
+  agmsg_sqlite -bail "$db" "
+    BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS events (
       seq        INTEGER PRIMARY KEY AUTOINCREMENT,
       type       TEXT NOT NULL,
@@ -218,6 +248,8 @@ storage_init() {
         read_cursors.local_position,excluded.local_position);
     INSERT OR IGNORE INTO storage_metadata(key,value)
       VALUES('read_cursor_v1','1');
+    PRAGMA user_version=${_AGMSG_STORAGE_SCHEMA_REV};
+    COMMIT;
   " >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
 }

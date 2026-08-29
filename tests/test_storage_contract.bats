@@ -121,7 +121,10 @@ _cursor_of() { printf '%s\n' "$1" | sed -n 's/.*"type":"cursor","cursor":"\([^"]
     local store_dir; store_dir="$(dirname "$(agmsg_db_path agsuite)")"
     rm -f "$store_dir/.read-cursor-v1" "$store_dir/read-cursors.tsv"
   else
+    # A pre-cursor-era store also predates the schema-revision stamp (#1001);
+    # without resetting it the next init would fast-path past the adoption.
     agmsg_sqlite "$(agmsg_db_path agsuite)" "
+      PRAGMA user_version=0;
       DELETE FROM storage_metadata WHERE key='read_cursor_v1';
       DELETE FROM read_cursors;" >/dev/null
   fi
