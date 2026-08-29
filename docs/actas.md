@@ -68,3 +68,5 @@ On Codex, `$agmsg actas <name>` is **send-side only** for this session. Codex sl
 The receive side isn't actually narrowed either: `check-inbox.sh` resolves identity through `whoami.sh` (which picks the first registered agent) and has no view of the agent's in-session actas role, so Codex keeps polling whichever pair it would have without actas. The check-inbox lock filter only skips pairs *another* session owns.
 
 Treat Codex actas as a from-line override until a Codex session-id story exists. Claude Code's `/agmsg actas` does claim the lock symmetrically and is the path that exercises the full exclusivity model.
+
+<!-- Observation draft for #798: a docs-only diff, opened to read the shard check names on a real docs-only run. Close without merging. -->
