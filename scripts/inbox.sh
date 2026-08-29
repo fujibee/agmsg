@@ -84,7 +84,12 @@ fi
 # without mutating the legacy row (§2.4). Only the ids collected from the
 # rows actually displayed above — never a blanket match — so a message that
 # arrives after the SELECT above can never be marked read unseen. Non-fatal —
-# may fail in sandboxed environments.
+# may fail in sandboxed environments or lose to a concurrent writer — but a
+# failure is reported on stderr, because the messages above were displayed and
+# will now be shown again as unread (#1011). The exit status stays 0: the
+# inbox did deliver, and the rows are still there.
 if [ "${#IDS[@]}" -gt 0 ]; then
-  storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1 || true
+  if ! storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1; then
+    echo "agmsg: failed to mark ${#IDS[@]} displayed message(s) read; they remain unread and will be shown again (#1011)" >&2
+  fi
 fi
