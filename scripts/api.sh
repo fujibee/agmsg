@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# api.sh — a read-only, JSON-emitting entry point for non-bash consumers
+# api.sh — a JSON-emitting entry point for non-bash consumers
 # (a GUI client, a bot in another language — anything that wants agmsg data
 # without shelling out to sqlite3 directly). An ordinary core script, same
 # standing as send.sh/history.sh/inbox.sh — NOT part of the storage-driver
@@ -12,9 +12,9 @@ set -euo pipefail
 # resource's query below is meant to become `storage_history`
 # (driver-agnostic), unchanged on the outside — see the JSONL shape note there.
 #
-# Shaped like a REST contract on purpose — verb + resource words — so
-# growing past read-only later (a `post teams <team> messages` == send,
-# say) is a new verb branch, not a redesign. v1 only implements `get`.
+# Shaped like a REST contract on purpose — verb + resource words. Lifecycle
+# writes take a typed JSON object on stdin and go through the public storage
+# facade; callers never need the SQLite path or a private schema.
 #
 # kubectl-style rather than gh-api-style: fixed resource nouns as separate
 # positional args, not a "/teams/<team>/messages" path string. gh api's raw
@@ -27,13 +27,18 @@ set -euo pipefail
 #   api.sh get teams
 #   api.sh get teams <team> members
 #   api.sh get teams <team> messages [--agent <name>] [--limit N] [--before-id <id>]
+#   api.sh get teams <team> capabilities
+#   api.sh get teams <team> lifecycle [filters]
+#   api.sh post teams <team> messages       # typed JSON on stdin
+#   api.sh post teams <team> fetch          # typed JSON on stdin
+#   api.sh post teams <team> acknowledgements # typed JSON on stdin
+#   api.sh post teams <team> work-events    # typed JSON on stdin
+#   api.sh post teams <team> outbox-claims|outbox-completions|outbox-retries
 #
-# Output is always JSONL — one JSON object per line, UTF-8, no
-# pretty-printing — for every resource, including `teams` (a uniform
-# contract beats a special case a non-bash consumer has to remember).
-# Nothing is written; this is read-only. Every id (message ids included) is
-# a JSON string, never a bare number — ids are opaque per the driver
-# interface spec, and today's sqlite integer ids are no exception.
+# Record output is JSONL — one JSON object per line, UTF-8, no pretty-printing.
+# Outbox completion/retry are control operations and print `ok`. Every id
+# (message ids included) is a JSON string, never a bare number — ids are opaque
+# per the driver interface spec, and today's sqlite integer ids are no exception.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
@@ -210,6 +215,129 @@ get_messages() {
   "
 }
 
+get_lifecycle() {
+  local team="$1"
+  shift
+  storage_lifecycle_history "$team" "$@"
+}
+
+get_active() {
+  local team="$1"
+  shift
+  storage_lifecycle_active "$team" "$@"
+}
+
+# Read and validate one typed request without putting the whole JSON document
+# in a SQL command. readfile() also preserves multiline message bodies exactly.
+_api_request_open() {
+  API_REQUEST_FILE="$(mktemp "${TMPDIR:-/tmp}/agmsg-api.XXXXXX")"
+  trap '_api_request_close' EXIT HUP INT TERM
+  cat >"$API_REQUEST_FILE"
+  local path_sql
+  path_sql="$(agmsg_sql_readfile_path "$API_REQUEST_FILE")"
+  if [ "$(agmsg_sqlite_mem "SELECT json_valid(CAST(readfile('$path_sql') AS TEXT)) AND json_type(CAST(readfile('$path_sql') AS TEXT))='object';")" != 1 ]; then
+    echo "agmsg: invalid_request: expected one JSON object on stdin" >&2
+    return 2
+  fi
+}
+
+_api_request_close() {
+  [ -z "${API_REQUEST_FILE:-}" ] || rm -f "$API_REQUEST_FILE"
+  API_REQUEST_FILE=""
+}
+
+_api_request_field() {
+  local key="$1" required="${2:-required}" path_sql value
+  path_sql="$(agmsg_sql_readfile_path "$API_REQUEST_FILE")"
+  value="$(agmsg_sqlite_mem "SELECT COALESCE(json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key'),'');")"
+  if [ "$required" = required ] && [ -z "$value" ]; then
+    echo "agmsg: invalid_request: missing '$key'" >&2
+    return 2
+  fi
+  printf '%s' "$value"
+}
+
+post_messages() {
+  local team="$1" from to kind operation_key wake_target body
+  _api_request_open || return
+  from="$(_api_request_field from)" || return
+  to="$(_api_request_field to)" || return
+  kind="$(_api_request_field kind)" || return
+  operation_key="$(_api_request_field operation_key)" || return
+  wake_target="$(_api_request_field wake_target)" || return
+  body="$(_api_request_field body)" || return
+  agmsg_validate_agent_name "$from" || return
+  agmsg_validate_agent_name "$to" || return
+  storage_operation_send "$team" "$from" "$to" "$kind" "$operation_key" "$wake_target" "$body"
+}
+
+post_fetch() {
+  local team="$1" agent consumer lease_seconds
+  _api_request_open || return
+  agent="$(_api_request_field agent)" || return
+  consumer="$(_api_request_field consumer)" || return
+  lease_seconds="$(_api_request_field lease_seconds)" || return
+  agmsg_validate_agent_name "$agent" || return
+  case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
+  [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
+  storage_operation_fetch "$team" "$agent" "$consumer" "$lease_seconds"
+}
+
+post_acknowledgements() {
+  local team="$1" agent message_id operation_key consumer result cleanup_target reason
+  _api_request_open || return
+  agent="$(_api_request_field agent)" || return
+  message_id="$(_api_request_field message_id)" || return
+  operation_key="$(_api_request_field operation_key)" || return
+  consumer="$(_api_request_field consumer)" || return
+  result="$(_api_request_field result)" || return
+  cleanup_target="$(_api_request_field cleanup_target)" || return
+  reason="$(_api_request_field reason optional)" || return
+  agmsg_validate_agent_name "$agent" || return
+  storage_operation_ack "$team" "$agent" "$message_id" "$operation_key" "$consumer" "$result" "$cleanup_target" "$reason"
+}
+
+post_work_events() {
+  local team="$1" work_key operation_key actor state result reason
+  _api_request_open || return
+  work_key="$(_api_request_field work_key)" || return
+  operation_key="$(_api_request_field operation_key)" || return
+  actor="$(_api_request_field actor)" || return
+  state="$(_api_request_field state)" || return
+  result="$(_api_request_field result optional)" || return
+  reason="$(_api_request_field reason optional)" || return
+  storage_work_event "$team" "$work_key" "$operation_key" "$actor" "$state" "$result" "$reason"
+}
+
+post_outbox_claims() {
+  local team="$1" owner lease_seconds
+  _api_request_open || return
+  owner="$(_api_request_field owner)" || return
+  lease_seconds="$(_api_request_field lease_seconds)" || return
+  case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
+  [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
+  storage_outbox_claim "$team" "$owner" "$lease_seconds"
+}
+
+post_outbox_completions() {
+  local team="$1" outbox_id owner
+  _api_request_open || return
+  outbox_id="$(_api_request_field outbox_id)" || return
+  owner="$(_api_request_field owner)" || return
+  storage_outbox_complete "$team" "$outbox_id" "$owner"
+}
+
+post_outbox_retries() {
+  local team="$1" outbox_id owner delay_seconds error
+  _api_request_open || return
+  outbox_id="$(_api_request_field outbox_id)" || return
+  owner="$(_api_request_field owner)" || return
+  delay_seconds="$(_api_request_field delay_seconds)" || return
+  error="$(_api_request_field error optional)" || return
+  case "$delay_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: delay_seconds must be a non-negative integer" >&2; return 2 ;; esac
+  storage_outbox_retry "$team" "$outbox_id" "$owner" "$delay_seconds" "$error"
+}
+
 route_get() {
   local resource="${1:?Usage: api.sh get teams [<team> store|members|messages ...]}"
   shift
@@ -223,12 +351,15 @@ route_get() {
       # Validate before the value is used by the members filesystem path.
       agmsg_validate_team_name "$team" || exit 1
       shift
-      local sub="${1:?Usage: api.sh get teams <team> members|messages ...}"
+      local sub="${1:?Usage: api.sh get teams <team> store|members|messages|capabilities|lifecycle|active ...}"
       shift
       case "$sub" in
         members) get_members "$team" ;;
         messages) get_messages "$team" "$@" ;;
         store) get_store "$team" ;;
+        capabilities) storage_capabilities "$team" ;;
+        lifecycle) get_lifecycle "$team" "$@" ;;
+        active) get_active "$team" "$@" ;;
         *) echo "Unknown resource: teams $team $sub" >&2; exit 1 ;;
       esac
       ;;
@@ -236,10 +367,33 @@ route_get() {
   esac
 }
 
+route_post() {
+  local resource="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  shift
+  [ "$resource" = teams ] || { echo "Unknown resource: $resource" >&2; exit 1; }
+  local team="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  agmsg_validate_team_name "$team" || exit 1
+  shift
+  local sub="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  shift
+  [ $# -eq 0 ] || { echo "Unknown option: $1" >&2; exit 1; }
+  case "$sub" in
+    messages) post_messages "$team" ;;
+    fetch) post_fetch "$team" ;;
+    acknowledgements) post_acknowledgements "$team" ;;
+    work-events) post_work_events "$team" ;;
+    outbox-claims) post_outbox_claims "$team" ;;
+    outbox-completions) post_outbox_completions "$team" ;;
+    outbox-retries) post_outbox_retries "$team" ;;
+    *) echo "Unknown resource: teams $team $sub" >&2; exit 1 ;;
+  esac
+}
+
 case "$VERB" in
   get) route_get "$@" ;;
+  post) route_post "$@" ;;
   *)
-    echo "Unknown verb: $VERB (only 'get' is implemented — read-only for now)" >&2
+    echo "Unknown verb: $VERB" >&2
     exit 1
     ;;
 esac

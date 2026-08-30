@@ -170,7 +170,7 @@ json_valid_line() {
 # --- routing / error paths ---
 
 @test "api: unknown verb fails" {
-  run bash "$SCRIPTS/api.sh" post teams
+  run bash "$SCRIPTS/api.sh" delete teams
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Unknown verb" ]]
 }

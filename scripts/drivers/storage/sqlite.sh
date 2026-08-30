@@ -100,7 +100,7 @@ storage_describe() {
   # store was asked about. This is not a second way to reach the store.
   printf 'name=sqlite\n'
   printf 'backend=SQLite (WAL) event log + legacy messages table\n'
-  printf 'capabilities=stage1-sync,stage1-resync,stage2-read-state\n'
+  printf 'capabilities=stage1-sync,stage1-resync,stage2-read-state,lifecycle-v1\n'
   [ -z "${1-}" ] || printf 'db=%s\n' "$(_sqlite_db "$1")"
 }
 
@@ -112,7 +112,7 @@ storage_store_exists() { [ -f "$(_sqlite_db "$1")" ]; }
 # that already carries revision N skip the batch entirely (#1001). The number
 # is stamped INSIDE the same transaction as the schema statements, so a store
 # can never hold the new number over an old schema.
-_AGMSG_STORAGE_SCHEMA_REV=1
+_AGMSG_STORAGE_SCHEMA_REV=2
 
 storage_init() {
   local db; db="$(_sqlite_db "$1")"
@@ -217,6 +217,71 @@ storage_init() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS lifecycle_messages (
+      team          TEXT NOT NULL,
+      sender        TEXT NOT NULL,
+      operation_key TEXT NOT NULL,
+      message_id    TEXT NOT NULL UNIQUE,
+      recipient     TEXT NOT NULL,
+      kind          TEXT NOT NULL CHECK(kind IN ('info','action','terminal')),
+      wake_target   TEXT NOT NULL,
+      created_at    TEXT NOT NULL,
+      PRIMARY KEY(team,sender,operation_key)
+    );
+    CREATE INDEX IF NOT EXISTS lifecycle_messages_recipient
+      ON lifecycle_messages(team,recipient,created_at,message_id);
+    CREATE TABLE IF NOT EXISTS lifecycle_events (
+      seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+      id            TEXT NOT NULL UNIQUE,
+      type          TEXT NOT NULL,
+      team          TEXT NOT NULL,
+      operation_key TEXT NOT NULL,
+      message_id    TEXT,
+      actor         TEXT,
+      result        TEXT,
+      reason        TEXT,
+      target        TEXT,
+      work_key      TEXT,
+      state         TEXT,
+      at            TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_delivery_once
+      ON lifecycle_events(type,message_id) WHERE type='delivery_receipt';
+    CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_ack_once
+      ON lifecycle_events(type,message_id) WHERE type='application_ack';
+    CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_work_operation_once
+      ON lifecycle_events(team,operation_key) WHERE type='work_event';
+    CREATE INDEX IF NOT EXISTS lifecycle_events_operation
+      ON lifecycle_events(team,operation_key,seq);
+    CREATE TABLE IF NOT EXISTS lifecycle_processing_leases (
+      message_id       TEXT PRIMARY KEY,
+      consumer         TEXT NOT NULL,
+      expires_at       INTEGER NOT NULL,
+      attempt          INTEGER NOT NULL CHECK(attempt > 0),
+      read_receipt_id  TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS lifecycle_outbox (
+      seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+      id               TEXT NOT NULL UNIQUE,
+      team             TEXT NOT NULL,
+      operation_key    TEXT NOT NULL,
+      kind             TEXT NOT NULL CHECK(kind IN ('wake','cleanup','launch')),
+      target           TEXT NOT NULL,
+      message_id       TEXT,
+      status           TEXT NOT NULL DEFAULT 'pending'
+                         CHECK(status IN ('pending','leased','done')),
+      available_at     INTEGER NOT NULL,
+      lease_owner      TEXT,
+      lease_expires_at INTEGER,
+      attempt          INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+      last_error       TEXT,
+      created_at       TEXT NOT NULL,
+      updated_at       TEXT NOT NULL,
+      UNIQUE(team,operation_key,kind,target)
+    );
+    CREATE INDEX IF NOT EXISTS lifecycle_outbox_ready
+      ON lifecycle_outbox(status,available_at,lease_expires_at,seq);
     -- Legacy store (read-only here). Created so the UNION queries always parse
     -- even on a brand-new install with no pre-event-log data.
     CREATE TABLE IF NOT EXISTS messages (
@@ -340,6 +405,425 @@ storage_send() {
     printf '%s\n' "$insert" | agmsg_sqlite -bail "$db" >/dev/null 2>&1 || return 1
   fi
   printf '%s\n' "$id"
+}
+
+# --- optional lifecycle-v1 extension ---------------------------------------
+
+storage_capabilities() {
+  printf '%s\n' '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"sqlite","capabilities":{"operation_key":"supported","delivery_receipt":"supported","read_receipt":"supported","application_ack":"supported","work_event":"supported","outbox":"supported","history_query":"supported"}}'
+}
+
+_sqlite_lifecycle_kind_valid() {
+  case "$1" in info|action|terminal) return 0 ;; *) return 1 ;; esac
+}
+
+_sqlite_lifecycle_result_valid() {
+  case "$1" in applied|rejected|failed) return 0 ;; *) return 1 ;; esac
+}
+
+_sqlite_lifecycle_work_state_valid() {
+  case "$1" in registered|running|blocked|terminal|closed|attention|error) return 0 ;; *) return 1 ;; esac
+}
+
+storage_work_event() {
+  local team="$1" work_key="$2" operation_key="$3" actor="$4" state="$5"
+  local result="${6-}" reason="${7-}"
+  if [ -z "$work_key" ] || [ -z "$operation_key" ] || [ -z "$actor" ] || ! _sqlite_lifecycle_work_state_valid "$state"; then
+    echo "agmsg: invalid work event" >&2
+    return 13
+  fi
+  storage_init "$team" >/dev/null || return 13
+  local event_id at output
+  event_id="$(compat_uuid7)"; at="$(_sqlite_now)"
+  output="$(_sqlite_data_stdin "$team" "
+    BEGIN IMMEDIATE;
+    INSERT OR IGNORE INTO lifecycle_events
+      (id,type,team,operation_key,actor,result,reason,work_key,state,at)
+    VALUES
+      ('$(_sqlite_lit "$event_id")','work_event','$(_sqlite_lit "$team")',
+       '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$actor")',
+       '$(_sqlite_lit "$result")','$(_sqlite_lit "$reason")',
+       '$(_sqlite_lit "$work_key")','$(_sqlite_lit "$state")','$(_sqlite_lit "$at")');
+    COMMIT;
+    SELECT json_object('type','work_event','id',id,'team',team,
+      'operation_key',operation_key,'work_key',work_key,'actor',actor,
+      'state',state,'result',result,'reason',reason,'at',at)
+      FROM lifecycle_events
+     WHERE type='work_event' AND team='$(_sqlite_lit "$team")'
+       AND operation_key='$(_sqlite_lit "$operation_key")'
+       AND work_key='$(_sqlite_lit "$work_key")' AND actor='$(_sqlite_lit "$actor")'
+       AND state='$(_sqlite_lit "$state")' AND COALESCE(result,'')='$(_sqlite_lit "$result")'
+       AND COALESCE(reason,'')='$(_sqlite_lit "$reason")';")" || return 13
+  if [ -z "$output" ]; then
+    echo "agmsg: operation_key_conflict" >&2
+    return 13
+  fi
+  printf '%s\n' "$output"
+}
+
+storage_operation_send() {
+  local team="$1" sender="$2" recipient="$3" kind="$4" operation_key="$5"
+  local wake_target="$6" body="$7"
+  if ! _sqlite_lifecycle_kind_valid "$kind" || [ -z "$operation_key" ] || [ -z "$wake_target" ]; then
+    echo "agmsg: invalid lifecycle send request" >&2
+    return 13
+  fi
+  storage_init "$team" >/dev/null || return 13
+
+  local message_id receipt_id outbox_id at sql output
+  message_id="$(compat_uuid7)"; receipt_id="$(compat_uuid7)"; outbox_id="$(compat_uuid7)"
+  at="$(_sqlite_now)"
+  sql="
+    BEGIN IMMEDIATE;
+    CREATE TEMP TABLE lifecycle_new(inserted INTEGER NOT NULL);
+    INSERT OR IGNORE INTO lifecycle_messages
+      (team,sender,operation_key,message_id,recipient,kind,wake_target,created_at)
+    VALUES
+      ('$(_sqlite_lit "$team")','$(_sqlite_lit "$sender")','$(_sqlite_lit "$operation_key")',
+       '$(_sqlite_lit "$message_id")','$(_sqlite_lit "$recipient")','$(_sqlite_lit "$kind")',
+       '$(_sqlite_lit "$wake_target")','$(_sqlite_lit "$at")');
+    INSERT INTO lifecycle_new VALUES(changes());
+    INSERT INTO messages(team,from_agent,to_agent,body,created_at)
+      SELECT '$(_sqlite_lit "$team")','$(_sqlite_lit "$sender")',
+             '$(_sqlite_lit "$recipient")','$(_sqlite_lit "$body")','$(_sqlite_lit "$at")'
+       WHERE (SELECT inserted FROM lifecycle_new)=1;
+    INSERT INTO events(type,id,team,from_agent,to_agent,body,at,legacy_id)
+      SELECT 'message_sent','$(_sqlite_lit "$message_id")','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$sender")','$(_sqlite_lit "$recipient")',
+             '$(_sqlite_lit "$body")','$(_sqlite_lit "$at")',last_insert_rowid()
+       WHERE (SELECT inserted FROM lifecycle_new)=1;
+    INSERT INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,at)
+      SELECT '$(_sqlite_lit "$receipt_id")','delivery_receipt','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$message_id")',
+             '$(_sqlite_lit "$recipient")','$(_sqlite_lit "$at")'
+       WHERE (SELECT inserted FROM lifecycle_new)=1;
+    INSERT INTO lifecycle_outbox
+      (id,team,operation_key,kind,target,message_id,status,available_at,created_at,updated_at)
+      SELECT '$(_sqlite_lit "$outbox_id")','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$operation_key")','wake','$(_sqlite_lit "$wake_target")',
+             '$(_sqlite_lit "$message_id")','pending',CAST(strftime('%s','now') AS INTEGER),
+             '$(_sqlite_lit "$at")','$(_sqlite_lit "$at")'
+       WHERE (SELECT inserted FROM lifecycle_new)=1;
+    INSERT INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,result,at)
+      SELECT '$(_sqlite_lit "$outbox_id")','outbox_pending','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$message_id")',
+             '$(_sqlite_lit "$wake_target")','wake','$(_sqlite_lit "$at")'
+       WHERE (SELECT inserted FROM lifecycle_new)=1;
+    DROP TABLE lifecycle_new;
+    COMMIT;
+    SELECT json_object(
+      'type','message_sent','id',lm.message_id,'team',lm.team,'from',lm.sender,
+      'to',lm.recipient,'kind',lm.kind,'operation_key',lm.operation_key,
+      'body',e.body,'at',lm.created_at,'delivery_receipt_id',lr.id)
+    FROM lifecycle_messages lm
+    JOIN events e ON e.type='message_sent' AND e.id=lm.message_id
+    JOIN lifecycle_events lr ON lr.type='delivery_receipt' AND lr.message_id=lm.message_id
+    WHERE lm.team='$(_sqlite_lit "$team")' AND lm.sender='$(_sqlite_lit "$sender")'
+      AND lm.operation_key='$(_sqlite_lit "$operation_key")'
+      AND lm.recipient='$(_sqlite_lit "$recipient")' AND lm.kind='$(_sqlite_lit "$kind")'
+      AND lm.wake_target='$(_sqlite_lit "$wake_target")' AND e.body='$(_sqlite_lit "$body")';"
+  output="$(_sqlite_data_stdin "$team" "$sql")" || return 13
+  if [ -z "$output" ]; then
+    echo "agmsg: operation_key_conflict" >&2
+    return 13
+  fi
+  printf '%s\n' "$output"
+}
+
+storage_operation_fetch() {
+  local team="$1" recipient="$2" consumer="$3" lease_seconds="$4"
+  case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid lifecycle lease" >&2; return 13 ;; esac
+  [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid lifecycle lease" >&2; return 13; }
+  storage_init "$team" >/dev/null || return 13
+
+  local receipt_id read_event_id at sql output
+  receipt_id="$(compat_uuid7)"; read_event_id="$(compat_uuid7)"; at="$(_sqlite_now)"
+  sql="
+    BEGIN IMMEDIATE;
+    DELETE FROM lifecycle_processing_leases
+      WHERE expires_at<=CAST(strftime('%s','now') AS INTEGER)
+        AND message_id IN (SELECT message_id FROM lifecycle_messages
+          WHERE team='$(_sqlite_lit "$team")' AND recipient='$(_sqlite_lit "$recipient")');
+    CREATE TEMP TABLE lifecycle_chosen AS
+      SELECT lm.message_id,lm.operation_key,lm.kind,lm.sender,lm.recipient,lm.created_at,e.body,
+             1+(SELECT COUNT(*) FROM lifecycle_events rr
+                 WHERE rr.type='read_receipt' AND rr.message_id=lm.message_id) AS attempt
+        FROM lifecycle_messages lm
+        JOIN events e ON e.type='message_sent' AND e.id=lm.message_id
+       WHERE lm.team='$(_sqlite_lit "$team")' AND lm.recipient='$(_sqlite_lit "$recipient")'
+         AND (lm.kind!='info' OR NOT EXISTS(SELECT 1 FROM lifecycle_events ir
+               WHERE ir.type='read_receipt' AND ir.message_id=lm.message_id))
+         AND NOT EXISTS(SELECT 1 FROM lifecycle_events a
+                         WHERE a.type='application_ack' AND a.message_id=lm.message_id)
+         AND NOT EXISTS(SELECT 1 FROM lifecycle_processing_leases p
+                         WHERE p.message_id=lm.message_id)
+       ORDER BY lm.created_at,lm.message_id LIMIT 1;
+    INSERT INTO lifecycle_processing_leases
+      (message_id,consumer,expires_at,attempt,read_receipt_id,updated_at)
+      SELECT message_id,'$(_sqlite_lit "$consumer")',
+             CAST(strftime('%s','now') AS INTEGER)+$lease_seconds,attempt,
+             '$(_sqlite_lit "$receipt_id")','$(_sqlite_lit "$at")'
+        FROM lifecycle_chosen WHERE kind IN ('action','terminal');
+    INSERT INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,result,at)
+      SELECT '$(_sqlite_lit "$receipt_id")','read_receipt','$(_sqlite_lit "$team")',
+             operation_key,message_id,'$(_sqlite_lit "$consumer")',kind,'$(_sqlite_lit "$at")'
+        FROM lifecycle_chosen;
+    INSERT INTO events(type,id,team,agent,msg_id,at)
+      SELECT 'message_read','$(_sqlite_lit "$read_event_id")','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$recipient")',message_id,'$(_sqlite_lit "$at")'
+        FROM lifecycle_chosen
+       WHERE NOT EXISTS(SELECT 1 FROM events r WHERE r.type='message_read'
+                         AND r.team='$(_sqlite_lit "$team")'
+                         AND r.agent='$(_sqlite_lit "$recipient")'
+                         AND r.msg_id=lifecycle_chosen.message_id);
+    UPDATE messages SET read_at='$(_sqlite_lit "$at")'
+     WHERE read_at IS NULL AND id IN (
+       SELECT e.legacy_id FROM events e JOIN lifecycle_chosen c ON c.message_id=e.id
+        WHERE e.type='message_sent' AND e.legacy_id IS NOT NULL);
+    UPDATE lifecycle_outbox SET status='done',lease_owner=NULL,lease_expires_at=NULL,
+      updated_at='$(_sqlite_lit "$at")'
+      WHERE kind='wake' AND message_id IN (SELECT message_id FROM lifecycle_chosen);
+    SELECT json_object(
+      'type','message_sent','id',c.message_id,'team','$(_sqlite_lit "$team")',
+      'from',c.sender,'to',c.recipient,'kind',c.kind,'operation_key',c.operation_key,
+      'body',c.body,'at',c.created_at,'read_receipt_id','$(_sqlite_lit "$receipt_id")',
+      'attempt',c.attempt,'lease_expires_at',
+      CASE WHEN c.kind IN ('action','terminal')
+           THEN CAST(strftime('%s','now') AS INTEGER)+$lease_seconds ELSE NULL END)
+      FROM lifecycle_chosen c;
+    DROP TABLE lifecycle_chosen;
+    COMMIT;"
+  output="$(_sqlite_data_stdin "$team" "$sql")" || return 13
+  [ -z "$output" ] || printf '%s\n' "$output"
+}
+
+storage_operation_ack() {
+  local team="$1" recipient="$2" message_id="$3" operation_key="$4"
+  local consumer="$5" result="$6" cleanup_target="$7" reason="${8-}"
+  if ! _sqlite_lifecycle_result_valid "$result" || [ -z "$cleanup_target" ]; then
+    echo "agmsg: invalid lifecycle acknowledgement" >&2
+    return 13
+  fi
+  storage_init "$team" >/dev/null || return 13
+
+  local ack_id outbox_id at sql output
+  ack_id="$(compat_uuid7)"; outbox_id="$(compat_uuid7)"; at="$(_sqlite_now)"
+  sql="
+    BEGIN IMMEDIATE;
+    CREATE TEMP TABLE lifecycle_ack_allowed AS
+      SELECT lm.message_id FROM lifecycle_messages lm
+       WHERE lm.team='$(_sqlite_lit "$team")' AND lm.recipient='$(_sqlite_lit "$recipient")'
+         AND lm.message_id='$(_sqlite_lit "$message_id")'
+         AND lm.operation_key='$(_sqlite_lit "$operation_key")'
+         AND (EXISTS(SELECT 1 FROM lifecycle_events a
+                      WHERE a.type='application_ack' AND a.message_id=lm.message_id
+                        AND a.actor='$(_sqlite_lit "$consumer")'
+                        AND a.result='$(_sqlite_lit "$result")'
+                        AND COALESCE(a.reason,'')='$(_sqlite_lit "$reason")'
+                        AND a.target='$(_sqlite_lit "$cleanup_target")')
+              OR EXISTS(SELECT 1 FROM lifecycle_processing_leases p
+                         WHERE p.message_id=lm.message_id AND p.consumer='$(_sqlite_lit "$consumer")'));
+    INSERT OR IGNORE INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,result,reason,target,at)
+      SELECT '$(_sqlite_lit "$ack_id")','application_ack','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$message_id")',
+             '$(_sqlite_lit "$consumer")','$(_sqlite_lit "$result")',
+             '$(_sqlite_lit "$reason")','$(_sqlite_lit "$cleanup_target")','$(_sqlite_lit "$at")'
+        FROM lifecycle_ack_allowed;
+    INSERT OR IGNORE INTO lifecycle_outbox
+      (id,team,operation_key,kind,target,message_id,status,available_at,created_at,updated_at)
+      SELECT '$(_sqlite_lit "$outbox_id")','$(_sqlite_lit "$team")',
+             '$(_sqlite_lit "$operation_key")','cleanup','$(_sqlite_lit "$cleanup_target")',
+             '$(_sqlite_lit "$message_id")','pending',CAST(strftime('%s','now') AS INTEGER),
+             '$(_sqlite_lit "$at")','$(_sqlite_lit "$at")'
+        FROM lifecycle_ack_allowed;
+    INSERT OR IGNORE INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,result,at)
+      SELECT o.id,'outbox_pending',o.team,o.operation_key,o.message_id,o.target,o.kind,o.created_at
+        FROM lifecycle_outbox o JOIN lifecycle_ack_allowed a ON a.message_id=o.message_id
+       WHERE o.kind='cleanup';
+    DELETE FROM lifecycle_processing_leases
+      WHERE message_id IN (SELECT message_id FROM lifecycle_ack_allowed)
+        AND consumer='$(_sqlite_lit "$consumer")';
+    DROP TABLE lifecycle_ack_allowed;
+    COMMIT;
+    SELECT json_object('type','application_ack','id',id,'team',team,
+      'operation_key',operation_key,'message_id',message_id,'consumer',actor,
+      'result',result,'reason',reason,'at',at)
+      FROM lifecycle_events
+     WHERE type='application_ack' AND team='$(_sqlite_lit "$team")'
+       AND message_id='$(_sqlite_lit "$message_id")'
+       AND operation_key='$(_sqlite_lit "$operation_key")'
+       AND actor='$(_sqlite_lit "$consumer")' AND result='$(_sqlite_lit "$result")'
+       AND COALESCE(reason,'')='$(_sqlite_lit "$reason")'
+       AND target='$(_sqlite_lit "$cleanup_target")';"
+  output="$(_sqlite_data_stdin "$team" "$sql")" || return 13
+  if [ -z "$output" ]; then
+    echo "agmsg: acknowledgement_conflict" >&2
+    return 13
+  fi
+  printf '%s\n' "$output"
+}
+
+storage_outbox_claim() {
+  local team="$1" owner="$2" lease_seconds="$3"
+  case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid outbox lease" >&2; return 13 ;; esac
+  [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid outbox lease" >&2; return 13; }
+  storage_init "$team" >/dev/null || return 13
+  local at output; at="$(_sqlite_now)"
+  output="$(_sqlite_data_stdin "$team" "
+    BEGIN IMMEDIATE;
+    CREATE TEMP TABLE processing_expired AS
+      SELECT p.message_id,p.attempt FROM lifecycle_processing_leases p
+      JOIN lifecycle_messages lm ON lm.message_id=p.message_id
+      WHERE lm.team='$(_sqlite_lit "$team")'
+        AND p.expires_at<=CAST(strftime('%s','now') AS INTEGER);
+    UPDATE lifecycle_outbox SET status='pending',
+      available_at=CAST(strftime('%s','now') AS INTEGER)+(
+        SELECT CASE
+          WHEN p.attempt<=1 THEN 5 WHEN p.attempt=2 THEN 10
+          WHEN p.attempt=3 THEN 20 WHEN p.attempt=4 THEN 40
+          WHEN p.attempt=5 THEN 80 ELSE 300 END
+        FROM processing_expired p WHERE p.message_id=lifecycle_outbox.message_id),
+      lease_owner=NULL,lease_expires_at=NULL,updated_at='$(_sqlite_lit "$at")'
+      WHERE team='$(_sqlite_lit "$team")' AND kind='wake'
+        AND message_id IN (SELECT message_id FROM processing_expired);
+    INSERT OR IGNORE INTO lifecycle_events
+      (id,type,team,operation_key,message_id,actor,result,reason,at)
+      SELECT o.id || ':processing-expired:' || p.attempt,'outbox_pending',o.team,
+             o.operation_key,o.message_id,o.target,'wake','processing_lease_expired',
+             '$(_sqlite_lit "$at")'
+        FROM lifecycle_outbox o JOIN processing_expired p ON p.message_id=o.message_id
+       WHERE o.team='$(_sqlite_lit "$team")' AND o.kind='wake';
+    DELETE FROM lifecycle_processing_leases
+      WHERE message_id IN (SELECT message_id FROM processing_expired);
+    CREATE TEMP TABLE outbox_chosen AS
+      SELECT id FROM lifecycle_outbox
+       WHERE team='$(_sqlite_lit "$team")' AND available_at<=CAST(strftime('%s','now') AS INTEGER)
+         AND (status='pending' OR (status='leased' AND lease_expires_at<=CAST(strftime('%s','now') AS INTEGER)))
+       ORDER BY seq LIMIT 1;
+    UPDATE lifecycle_outbox SET status='leased',lease_owner='$(_sqlite_lit "$owner")',
+      lease_expires_at=CAST(strftime('%s','now') AS INTEGER)+$lease_seconds,
+      attempt=attempt+1,updated_at='$(_sqlite_lit "$at")'
+      WHERE id IN (SELECT id FROM outbox_chosen);
+    SELECT json_object('type','outbox','id',id,'team',team,'operation_key',operation_key,
+      'kind',kind,'target',target,'message_id',message_id,'status',status,
+      'lease_owner',lease_owner,'lease_expires_at',lease_expires_at,'attempt',attempt)
+      FROM lifecycle_outbox WHERE id IN (SELECT id FROM outbox_chosen);
+    DROP TABLE processing_expired;
+    DROP TABLE outbox_chosen;
+    COMMIT;")" || return 13
+  [ -z "$output" ] || printf '%s\n' "$output"
+}
+
+storage_outbox_complete() {
+  local team="$1" outbox_id="$2" owner="$3" at output event_id
+  storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
+  at="$(_sqlite_now)"
+  event_id="$(compat_uuid7)"
+  output="$(agmsg_sqlite "$(_sqlite_db "$team")" "BEGIN IMMEDIATE;
+    UPDATE lifecycle_outbox SET
+      status=CASE WHEN kind='wake' THEN 'pending' ELSE 'done' END,
+      available_at=CASE WHEN kind='wake' THEN CAST(strftime('%s','now') AS INTEGER)+300 ELSE available_at END,
+      lease_owner=NULL,lease_expires_at=NULL,
+      updated_at='$(_sqlite_lit "$at")'
+      WHERE team='$(_sqlite_lit "$team")' AND id='$(_sqlite_lit "$outbox_id")'
+        AND status='leased' AND lease_owner='$(_sqlite_lit "$owner")';
+    INSERT INTO lifecycle_events(id,type,team,operation_key,message_id,actor,result,at)
+      SELECT '$(_sqlite_lit "$event_id")','outbox_sent',team,operation_key,message_id,
+             '$(_sqlite_lit "$owner")',kind,'$(_sqlite_lit "$at")'
+        FROM lifecycle_outbox WHERE changes()=1 AND team='$(_sqlite_lit "$team")'
+          AND id='$(_sqlite_lit "$outbox_id")';
+    SELECT CASE WHEN changes()=1 THEN 'ok' ELSE 'runtime_error' END;
+    COMMIT;" | tr -d '\r')" || { echo runtime_error; return 13; }
+  printf '%s\n' "$output"
+  [ "$output" = ok ] || return 13
+}
+
+storage_outbox_retry() {
+  local team="$1" outbox_id="$2" owner="$3" delay="$4" error="${5-}" at output
+  case "$delay" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
+  storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
+  at="$(_sqlite_now)"
+  output="$(agmsg_sqlite "$(_sqlite_db "$team")" "BEGIN IMMEDIATE;
+    UPDATE lifecycle_outbox SET status='pending',available_at=CAST(strftime('%s','now') AS INTEGER)+$delay,
+      lease_owner=NULL,lease_expires_at=NULL,last_error='$(_sqlite_lit "$error")',
+      updated_at='$(_sqlite_lit "$at")'
+      WHERE team='$(_sqlite_lit "$team")' AND id='$(_sqlite_lit "$outbox_id")'
+        AND status='leased' AND lease_owner='$(_sqlite_lit "$owner")';
+    SELECT CASE WHEN changes()=1 THEN 'ok' ELSE 'runtime_error' END;
+    COMMIT;" | tr -d '\r')" || { echo runtime_error; return 13; }
+  printf '%s\n' "$output"
+  [ "$output" = ok ] || return 13
+}
+
+storage_lifecycle_history() {
+  local team="$1" operation_key=""; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in --operation-key) operation_key="$2"; shift 2 ;; *) echo "agmsg: unknown lifecycle history option" >&2; return 13 ;; esac
+  done
+  storage_init "$team" >/dev/null || return 13
+  local filter=""; [ -z "$operation_key" ] || filter=" AND operation_key='$(_sqlite_lit "$operation_key")'"
+  _sqlite_data "$team" "
+    SELECT record FROM (
+      SELECT lm.created_at AS at,0 AS source,0 AS ord,
+        json_object('type','message_sent','id',lm.message_id,'team',lm.team,
+          'from',lm.sender,'to',lm.recipient,'kind',lm.kind,
+          'operation_key',lm.operation_key,'body',e.body,'at',lm.created_at) AS record
+        FROM lifecycle_messages lm JOIN events e ON e.id=lm.message_id
+       WHERE lm.team='$(_sqlite_lit "$team")' ${filter/operation_key/lm.operation_key}
+      UNION ALL
+      SELECT le.at,1,le.seq,
+        json_object('type',le.type,'id',le.id,'team',le.team,
+          'operation_key',le.operation_key,'message_id',le.message_id,
+          'actor',le.actor,'result',le.result,'reason',le.reason,'target',le.target,
+          'work_key',le.work_key,'state',le.state,'at',le.at)
+        FROM lifecycle_events le
+       WHERE le.team='$(_sqlite_lit "$team")' ${filter/operation_key/le.operation_key}
+    ) ORDER BY at,source,ord;"
+}
+
+storage_lifecycle_active() {
+  local team="$1" recipient="${2-}"
+  storage_init "$team" >/dev/null || return 13
+  local recipient_filter=""; [ -z "$recipient" ] || recipient_filter=" AND lm.recipient='$(_sqlite_lit "$recipient")'"
+  _sqlite_data "$team" "
+    SELECT record FROM (
+      SELECT lm.created_at AS at,lm.message_id AS sort_id,
+        json_object('type','lifecycle_active','id',lm.message_id,'team',lm.team,
+          'operation_key',lm.operation_key,'kind',lm.kind,'recipient',lm.recipient,
+          'state',CASE
+            WHEN a.result IN ('rejected','failed') THEN 'attention'
+            WHEN a.result='applied' THEN 'cleanup_pending'
+            WHEN p.message_id IS NOT NULL THEN 'processing'
+            ELSE 'pending' END) AS record
+      FROM lifecycle_messages lm
+      LEFT JOIN lifecycle_processing_leases p ON p.message_id=lm.message_id
+      LEFT JOIN lifecycle_events a ON a.type='application_ack' AND a.message_id=lm.message_id
+      WHERE lm.team='$(_sqlite_lit "$team")' $recipient_filter
+        AND ((lm.kind='info' AND NOT EXISTS(
+               SELECT 1 FROM lifecycle_events r
+                WHERE r.type='read_receipt' AND r.message_id=lm.message_id))
+          OR (lm.kind IN ('action','terminal') AND (
+               a.id IS NULL OR a.result IN ('rejected','failed')
+               OR (a.result='applied' AND NOT EXISTS(
+                    SELECT 1 FROM lifecycle_outbox o
+                     WHERE o.message_id=lm.message_id AND o.kind='cleanup' AND o.status='done')))))
+      UNION ALL
+      SELECT le.at,le.id,
+        json_object('type','work_active','id',le.id,'team',le.team,
+          'operation_key',le.operation_key,'work_key',le.work_key,
+          'actor',le.actor,'state',le.state,'result',le.result,'reason',le.reason)
+      FROM lifecycle_events le
+      WHERE le.type='work_event' AND le.team='$(_sqlite_lit "$team")'
+        AND le.state!='closed'
+        AND NOT EXISTS(SELECT 1 FROM lifecycle_events newer
+          WHERE newer.type='work_event' AND newer.team=le.team
+            AND newer.work_key=le.work_key AND newer.seq>le.seq)
+    ) ORDER BY at,sort_id;"
 }
 
 # storage_read_cursor_get <team> <agent> — opaque local read frontier.
@@ -552,6 +1036,7 @@ storage_export() {
   # (not just a CASE) keeps unknown-type rows out entirely, so they never surface
   # as a NULL → blank line on stdout, matching list_unread/history/watch_after.
   _sqlite_data "$team" "
+    BEGIN;
     SELECT CASE type
       WHEN 'message_sent' THEN json_object('type','message_sent','id',id,'team',team,
              'from',from_agent,'to',to_agent,'body',body,'at',at)
@@ -561,6 +1046,30 @@ storage_export() {
     FROM events
     WHERE type IN ('message_sent','message_read')
     ORDER BY seq ASC;
+    SELECT json_object('type','lifecycle_message','team',team,'sender',sender,
+      'operation_key',operation_key,'message_id',message_id,'recipient',recipient,
+      'kind',kind,'wake_target',wake_target,'created_at',created_at)
+      FROM lifecycle_messages WHERE team='$(_sqlite_lit "$team")'
+      ORDER BY created_at,message_id;
+    SELECT json_object('type','lifecycle_event','id',id,'event_type',type,
+      'team',team,'operation_key',operation_key,'message_id',message_id,
+      'actor',actor,'result',result,'reason',reason,'target',target,
+      'work_key',work_key,'state',state,'at',at)
+      FROM lifecycle_events WHERE team='$(_sqlite_lit "$team")' ORDER BY seq;
+    SELECT json_object('type','lifecycle_outbox','id',id,'team',team,
+      'operation_key',operation_key,'kind',kind,'target',target,
+      'message_id',message_id,'status',status,'available_at',available_at,
+      'lease_owner',lease_owner,'lease_expires_at',lease_expires_at,
+      'attempt',attempt,'last_error',last_error,'created_at',created_at,
+      'updated_at',updated_at)
+      FROM lifecycle_outbox WHERE team='$(_sqlite_lit "$team")' ORDER BY seq;
+    SELECT json_object('type','lifecycle_processing_lease','message_id',p.message_id,
+      'consumer',p.consumer,'expires_at',p.expires_at,'attempt',p.attempt,
+      'read_receipt_id',p.read_receipt_id,'updated_at',p.updated_at)
+      FROM lifecycle_processing_leases p JOIN lifecycle_messages lm
+        ON lm.message_id=p.message_id
+      WHERE lm.team='$(_sqlite_lit "$team")' ORDER BY p.message_id;
+    COMMIT;
   " > "$file"
 }
 
@@ -571,7 +1080,10 @@ storage_import() {
   local selector="$1" file="$2" db; db="$(_sqlite_db "$selector")"
   [ -f "$file" ] || return 1
   storage_init "$selector" >/dev/null
-  local line t id team frm to body msg_id agent at
+  local line t id team frm to body msg_id agent at operation_key sender recipient kind
+  local wake_target created_at event_type actor result reason target work_key state
+  local status available_at lease_owner lease_expires_at attempt last_error updated_at
+  local consumer expires_at read_receipt_id
   j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | tr -d '\r'; }
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -594,6 +1106,54 @@ storage_import() {
                       WHERE e.type='message_sent' AND e.team='$(_sqlite_lit "$team")'
                         AND e.id='$(_sqlite_lit "$msg_id")' AND e.legacy_id IS NOT NULL);" \
         >/dev/null 2>&1
+    elif [ "$t" = lifecycle_message ]; then
+      sender=$(j sender); operation_key=$(j operation_key); msg_id=$(j message_id)
+      recipient=$(j recipient); kind=$(j kind); wake_target=$(j wake_target); created_at=$(j created_at)
+      agmsg_sqlite "$db" "INSERT OR IGNORE INTO lifecycle_messages
+        (team,sender,operation_key,message_id,recipient,kind,wake_target,created_at)
+        VALUES ('$(_sqlite_lit "$team")','$(_sqlite_lit "$sender")',
+          '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$msg_id")',
+          '$(_sqlite_lit "$recipient")','$(_sqlite_lit "$kind")',
+          '$(_sqlite_lit "$wake_target")','$(_sqlite_lit "$created_at")');" >/dev/null 2>&1 \
+        || { echo "agmsg: lifecycle import failed" >&2; return 13; }
+    elif [ "$t" = lifecycle_event ]; then
+      event_type=$(j event_type); operation_key=$(j operation_key); msg_id=$(j message_id)
+      actor=$(j actor); result=$(j result); reason=$(j reason); target=$(j target)
+      work_key=$(j work_key); state=$(j state)
+      agmsg_sqlite "$db" "INSERT OR IGNORE INTO lifecycle_events
+        (id,type,team,operation_key,message_id,actor,result,reason,target,work_key,state,at)
+        VALUES ('$(_sqlite_lit "$id")','$(_sqlite_lit "$event_type")',
+          '$(_sqlite_lit "$team")','$(_sqlite_lit "$operation_key")',
+          NULLIF('$(_sqlite_lit "$msg_id")',''),NULLIF('$(_sqlite_lit "$actor")',''),
+          NULLIF('$(_sqlite_lit "$result")',''),NULLIF('$(_sqlite_lit "$reason")',''),
+          NULLIF('$(_sqlite_lit "$target")',''),NULLIF('$(_sqlite_lit "$work_key")',''),
+          NULLIF('$(_sqlite_lit "$state")',''),'$(_sqlite_lit "$at")');" >/dev/null 2>&1 \
+        || { echo "agmsg: lifecycle import failed" >&2; return 13; }
+    elif [ "$t" = lifecycle_outbox ]; then
+      operation_key=$(j operation_key); kind=$(j kind); target=$(j target); msg_id=$(j message_id)
+      status=$(j status); available_at=$(j available_at); lease_owner=$(j lease_owner)
+      lease_expires_at=$(j lease_expires_at); attempt=$(j attempt); last_error=$(j last_error)
+      created_at=$(j created_at); updated_at=$(j updated_at)
+      agmsg_sqlite "$db" "INSERT OR IGNORE INTO lifecycle_outbox
+        (id,team,operation_key,kind,target,message_id,status,available_at,
+         lease_owner,lease_expires_at,attempt,last_error,created_at,updated_at)
+        VALUES ('$(_sqlite_lit "$id")','$(_sqlite_lit "$team")',
+          '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$kind")',
+          '$(_sqlite_lit "$target")',NULLIF('$(_sqlite_lit "$msg_id")',''),
+          '$(_sqlite_lit "$status")','$(_sqlite_lit "$available_at")',
+          NULLIF('$(_sqlite_lit "$lease_owner")',''),NULLIF('$(_sqlite_lit "$lease_expires_at")',''),
+          '$(_sqlite_lit "$attempt")',NULLIF('$(_sqlite_lit "$last_error")',''),
+          '$(_sqlite_lit "$created_at")','$(_sqlite_lit "$updated_at")');" >/dev/null 2>&1 \
+        || { echo "agmsg: lifecycle import failed" >&2; return 13; }
+    elif [ "$t" = lifecycle_processing_lease ]; then
+      msg_id=$(j message_id); consumer=$(j consumer); expires_at=$(j expires_at)
+      attempt=$(j attempt); read_receipt_id=$(j read_receipt_id); updated_at=$(j updated_at)
+      agmsg_sqlite "$db" "INSERT OR IGNORE INTO lifecycle_processing_leases
+        (message_id,consumer,expires_at,attempt,read_receipt_id,updated_at)
+        VALUES ('$(_sqlite_lit "$msg_id")','$(_sqlite_lit "$consumer")',
+          '$(_sqlite_lit "$expires_at")','$(_sqlite_lit "$attempt")',
+          '$(_sqlite_lit "$read_receipt_id")','$(_sqlite_lit "$updated_at")');" >/dev/null 2>&1 \
+        || { echo "agmsg: lifecycle import failed" >&2; return 13; }
     fi
   done < "$file"
 }

@@ -147,6 +147,25 @@ storage_describe() {
   if _jsonl_sync_available; then printf 'capabilities=stage1-sync\n'; fi
 }
 
+storage_capabilities() {
+  printf '%s\n' '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"jsonl","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","application_ack":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}'
+}
+
+_jsonl_lifecycle_unsupported() {
+  echo "agmsg: unsupported_capability lifecycle-v1 for jsonl" >&2
+  return 13
+}
+
+storage_operation_send() { _jsonl_lifecycle_unsupported; }
+storage_operation_fetch() { _jsonl_lifecycle_unsupported; }
+storage_operation_ack() { _jsonl_lifecycle_unsupported; }
+storage_work_event() { _jsonl_lifecycle_unsupported; }
+storage_outbox_claim() { _jsonl_lifecycle_unsupported; }
+storage_outbox_complete() { _jsonl_lifecycle_unsupported; }
+storage_outbox_retry() { _jsonl_lifecycle_unsupported; }
+storage_lifecycle_history() { _jsonl_lifecycle_unsupported; }
+storage_lifecycle_active() { _jsonl_lifecycle_unsupported; }
+
 storage_init() {
   _JSONL_TEAM="$1"
   _jsonl_init_file

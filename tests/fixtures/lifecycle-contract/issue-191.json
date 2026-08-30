@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/cattyneo/.agents/issues/191",
+  "baseline": "660f67b60e74517299e3703a1f71672915db745e",
+  "old_verifier": "bats --print-output-on-failure tests/test_storage_contract.bats tests/test_messaging.bats tests/test_inbox.bats tests/test_api.bats tests/test_watch.bats",
+  "old_verifier_observation": "passes while the public storage surface has no operation-key, receipt, outbox, or lifecycle-history capability",
+  "break": "a driver can appear ready even though a caller cannot prove one logical send, fetch, acknowledgement, or replayable wake",
+  "oracle": "the public capability result is explicit and the same operation key converges on one message with durable transport, read, acknowledgement, and outbox history"
+}
