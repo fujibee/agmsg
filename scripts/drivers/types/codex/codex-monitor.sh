@@ -29,20 +29,26 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # good one. Only the writer can make that state unobservable.
 # shellcheck source=../../../lib/registry-lock.sh
 source "$SCRIPT_DIR/../../../lib/registry-lock.sh"
+# shellcheck source=../../../lib/storage.sh
+source "$SCRIPT_DIR/../../../lib/storage.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
 CODEX_COMMAND="resume"
 CODEX_ARGS=()
 REAL_CODEX="${AGMSG_REAL_CODEX:-codex}"
+INVOCATION_SCOPE=""
+SCOPE_SEEN=0
 
 usage() {
   cat <<EOF
-Usage: codex-monitor.sh [--project <path>] [--codex-command <codex|resume>] [-- <args...>]
+Usage: codex-monitor.sh [--project <path>] [--invocation-scope TOKEN] [--codex-command <codex|resume>] [-- <args...>]
 
-Starts/reuses an agmsg-managed Codex app-server on a loopback ws:// port,
-enables agmsg Codex bridge delivery for this project, then execs:
-  codex resume --remote ws://127.0.0.1:<port>
+Without --invocation-scope, starts/reuses the project's agmsg-managed Codex
+app-server, enables bridge delivery, then execs the selected Codex command.
+With --invocation-scope TOKEN, starts a dedicated app-server and supervises the
+selected Codex command instead of execing it.
+Scoped mode waits for its captured TUI, app-server, and bridge launcher processes.
 
 (--socket-path is accepted for compatibility but ignored: codex 0.141+ requires
 a ws:// transport for --remote. See #170.)
@@ -67,6 +73,19 @@ while [ "$#" -gt 0 ]; do
       CODEX_COMMAND="${2:?--codex-command requires codex or resume}"
       shift 2
       ;;
+    --invocation-scope)
+      [ "$SCOPE_SEEN" -eq 0 ] || { echo "codex-monitor: --invocation-scope may be given once" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "codex-monitor: --invocation-scope requires a value" >&2; exit 2; }
+      INVOCATION_SCOPE="$2"
+      case "$INVOCATION_SCOPE" in
+        [A-Za-z0-9]*) ;;
+        *) exit 2 ;;
+      esac
+      case "$INVOCATION_SCOPE" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
+      [ "${#INVOCATION_SCOPE}" -le 128 ] || exit 2
+      SCOPE_SEEN=1
+      shift 2
+      ;;
     --)
       shift
       CODEX_ARGS=("$@")
@@ -87,7 +106,13 @@ case "$CODEX_COMMAND" in
     ;;
 esac
 
-PROJECT="$(cd "$PROJECT" && pwd)"
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+
+# A no-scope monitor can be launched from a scoped app-server tool shell. Do not
+# let that outer server key/URL turn this launcher's children into scoped peers.
+if [ -z "$INVOCATION_SCOPE" ]; then
+  unset AGMSG_CODEX_APP_SERVER_KEY AGMSG_CODEX_BRIDGE_APP_SERVER
+fi
 
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the
@@ -103,6 +128,16 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 exec_plain_codex() {
   echo "agmsg: Codex monitor bridge unavailable - launching plain Codex. Real-time agmsg delivery is OFF this session (messages still queue; check your inbox manually). Likely cause: the Codex app-server interface changed in 0.142+. Fix in progress." >&2
   cd "$PROJECT" 2>/dev/null || true
+  if [ -n "$INVOCATION_SCOPE" ]; then
+    case "$CODEX_COMMAND" in
+      codex)  "$REAL_CODEX" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 & ;;
+      resume) "$REAL_CODEX" resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 & ;;
+    esac
+    tui_bg=$!
+    if wait "$tui_bg"; then codex_status=0; else codex_status=$?; fi
+    cleanup_scoped_invocation
+    exit "$codex_status"
+  fi
   case "$CODEX_COMMAND" in
     codex)  exec "$REAL_CODEX" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
     resume) exec "$REAL_CODEX" resume ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} ;;
@@ -110,14 +145,87 @@ exec_plain_codex() {
 }
 
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-SERVER_LOG="$RUN_DIR/codex-app-server.$PROJECT_HASH.log"
-SERVER_PID="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
-PORT_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.port"
+APP_SERVER_KEY="$PROJECT_HASH"
+if [ -n "$INVOCATION_SCOPE" ]; then
+  APP_SERVER_KEY="$(printf '%s\n%s' "$PROJECT" "$INVOCATION_SCOPE" | agmsg_sha1)"
+  export AGMSG_CODEX_APP_SERVER_KEY="$APP_SERVER_KEY"
+fi
+SERVER_LOG="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.log"
+SERVER_PID="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.pid"
+PORT_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.port"
 # Records the codex version that launched the reusable app-server. A TUI from a
 # newer/older codex can't speak to an app-server from a different build, so a
 # stale server left running across a codex upgrade must not be reused.
-VERSION_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.version"
+VERSION_FILE="$RUN_DIR/codex-app-server.$APP_SERVER_KEY.version"
+SCOPED_REQUEST_FILE="$RUN_DIR/codex-bridge-request.$APP_SERVER_KEY"
+server_bg=""
+launcher_bg=""
+tui_bg=""
+SCOPED_LEASE_RESOURCE=""
+scoped_cleanup_done=0
+scoped_lease_held=0
+
+scoped_job_is_running() {
+  local child_pid="$1" job_pid
+  [ -n "$child_pid" ] || return 1
+  for job_pid in $(jobs -pr); do
+    [ "$job_pid" = "$child_pid" ] && return 0
+  done
+  return 1
+}
+
+cleanup_scoped_invocation() {
+  [ -n "${INVOCATION_SCOPE:-}" ] || return 0
+  [ "$scoped_cleanup_done" -eq 0 ] || return 0
+
+  local child_pid recorded_server_pid
+  for child_pid in "$server_bg" "$launcher_bg"; do
+    scoped_job_is_running "$child_pid" && kill "$child_pid" 2>/dev/null || true
+  done
+  for child_pid in "$server_bg" "$launcher_bg"; do
+    [ -n "$child_pid" ] || continue
+    wait "$child_pid" 2>/dev/null || true
+  done
+
+  recorded_server_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
+  if [ -n "$server_bg" ] && [ "$recorded_server_pid" = "$server_bg" ]; then
+    rm -f "$SERVER_LOG" "$SERVER_PID" "$PORT_FILE" "$VERSION_FILE" 2>/dev/null || true
+  fi
+  rm -f "$SCOPED_REQUEST_FILE" 2>/dev/null || true
+
+  if [ "$scoped_lease_held" -eq 1 ]; then
+    scoped_lease_held=0
+    agmsg_runtime_lock_release "$SCOPED_LEASE_RESOURCE" "$$" || true
+  fi
+  scoped_cleanup_done=1
+}
+
+terminate_scoped_invocation() {
+  local signal_status="$1"
+  if scoped_job_is_running "$tui_bg"; then
+    kill "$tui_bg" 2>/dev/null || true
+  fi
+  [ -z "$tui_bg" ] || wait "$tui_bg" 2>/dev/null || true
+  cleanup_scoped_invocation
+  exit "$signal_status"
+}
+
 CODEX_VERSION="$("$REAL_CODEX" --version 2>/dev/null || true)"
+
+if [ -n "$INVOCATION_SCOPE" ]; then
+  SCOPED_LEASE_RESOURCE="codex-app-server:$APP_SERVER_KEY"
+  lock_owner="$(agmsg_runtime_lock_acquire "$SCOPED_LEASE_RESOURCE" "$$" 2>/dev/null || true)"
+  if [ "$lock_owner" != "$$" ] && [ -n "$lock_owner" ] && ! _agmsg_pid_alive_local "$lock_owner"; then
+    lock_owner="$(agmsg_runtime_lock_acquire "$SCOPED_LEASE_RESOURCE" "$$" "$lock_owner" 2>/dev/null || true)"
+  fi
+  if [ "$lock_owner" != "$$" ]; then
+    echo "codex-monitor: invocation scope is already active" >&2
+    exit 1
+  fi
+  scoped_lease_held=1
+  trap cleanup_scoped_invocation EXIT
+  trap 'terminate_scoped_invocation 143' TERM
+fi
 
 mkdir -p "$RUN_DIR"
 
@@ -129,7 +237,11 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
 }
 
 PORT=""
-if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
+if [ -n "$INVOCATION_SCOPE" ]; then
+  # Scoped records identify a previous invocation, never a process this launch
+  # may reuse or signal. This launch owns only its captured children.
+  rm -f "$PORT_FILE" "$SERVER_PID" "$VERSION_FILE" "$SCOPED_REQUEST_FILE"
+elif [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   existing_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
   existing_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
   existing_version="$(cat "$VERSION_FILE" 2>/dev/null || true)"
@@ -211,8 +323,10 @@ if [ -z "$PORT" ]; then
   if [ -z "$PORT" ]; then
     echo "codex-monitor: app-server did not report a listening port; starting codex without the agmsg bridge" >&2
     echo "codex-monitor: see $SERVER_LOG" >&2
-    kill "$server_bg" 2>/dev/null || true
-    rm -f "$SERVER_PID" "$VERSION_FILE"
+    if [ -z "$INVOCATION_SCOPE" ]; then
+      kill "$server_bg" 2>/dev/null || true
+      rm -f "$SERVER_PID" "$VERSION_FILE"
+    fi
     exec_plain_codex
   fi
   agmsg_write_atomic "$PORT_FILE" "$PORT"
@@ -235,13 +349,28 @@ export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
 
 launcher_cmd="${AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:-$SCRIPT_DIR/codex-bridge-launcher.sh}"
-# Same guard: the launcher is detached on purpose and outlives this script, so
-# an inherited fd 3 would outlive the test file that started it.
+# Same guard: the launcher outlives an unscoped monitor, so an inherited fd 3
+# would outlive the test file that started it.
 "$launcher_cmd" codex "$PROJECT" "$SOCKET_URL" "$$" >/dev/null 2>&1 3>&- 4>&- &
+launcher_bg="$!"
 
 cd "$PROJECT"
 # Guard the array expansion: under bash 3.2 + `set -u`, "${CODEX_ARGS[@]}" on an
 # empty array errors with "unbound variable" (a no-arg `codex`/`codex resume`).
+if [ -n "$INVOCATION_SCOPE" ]; then
+  case "$CODEX_COMMAND" in
+    codex)
+      "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 3>&- 4>&- &
+      ;;
+    resume)
+      "$REAL_CODEX" resume --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} <&0 3>&- 4>&- &
+      ;;
+  esac
+  tui_bg=$!
+  if wait "$tui_bg"; then codex_status=0; else codex_status=$?; fi
+  cleanup_scoped_invocation
+  exit "$codex_status"
+fi
 case "$CODEX_COMMAND" in
   codex)
     exec "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
