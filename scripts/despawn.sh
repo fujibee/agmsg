@@ -29,6 +29,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/terminal-registry.sh"  # kill via the terminal driver
 
 die() { echo "despawn: $*" >&2; exit 1; }
 
@@ -50,25 +52,22 @@ case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be a whole number of seconds
 
 SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 
-# Kill the recorded tmux target. ids are self-describing: %N pane, @N window.
+# Kill the recorded placement through the terminal-driver registry. The record
+# ref is <terminal>:<id>, or a pre-axis form (a bare %N/@N tmux id, or herdr:<id>)
+# — agmsg_terminal_ref_terminal/_id resolve both. Load that terminal's driver and
+# let terminal_despawn kill the pane/window. Best-effort: despawn never fails on
+# this (a member's pane may already be gone), matching the pre-axis behavior.
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
   local id _proj _type
   IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
   [ -n "$id" ] || return 1
-  case "$id" in
-    herdr:*)
-      command -v herdr >/dev/null 2>&1 && herdr pane close "${id#herdr:}" 2>/dev/null || true
-      ;;
-    *)
-      if command -v tmux >/dev/null 2>&1; then
-        case "$id" in
-          %*) tmux kill-pane   -t "$id" 2>/dev/null || true ;;
-          @*) tmux kill-window -t "$id" 2>/dev/null || true ;;
-        esac
-      fi
-      ;;
-  esac
+  local _term _bare
+  _term="$(agmsg_terminal_ref_terminal "$id")"
+  _bare="$(agmsg_terminal_ref_id "$id")"
+  if agmsg_terminal_load "$_term" 2>/dev/null; then
+    terminal_despawn "$_bare" >/dev/null 2>&1 || true
+  fi
   printf '%s\t%s\t%s' "$id" "$_proj" "$_type"   # echo back for the caller
 }
 
