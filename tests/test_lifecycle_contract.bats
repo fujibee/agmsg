@@ -59,6 +59,26 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='op-concurrent' AND kind='wake';")" -eq 1 ]
 }
 
+@test "lifecycle contract: operation keys are sender-scoped through wake and cleanup outbox rows" {
+  local first second first_id second_id
+  first="$(storage_operation_send agsuite alice bob action op-shared-senders wake:bob "alice applies")"
+  second="$(storage_operation_send agsuite carol bob action op-shared-senders wake:bob "carol applies")"
+  first_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$first" | sed "s/'/''/g")','$.id');")"
+  second_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$second" | sed "s/'/''/g")','$.id');")"
+
+  [ "$first_id" != "$second_id" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_messages WHERE operation_key='op-shared-senders';")" -eq 2 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='op-shared-senders' AND kind='wake';")" -eq 2 ]
+
+  storage_operation_fetch agsuite bob consumer-alice 900 >/dev/null
+  storage_operation_ack agsuite bob "$first_id" op-shared-senders consumer-alice applied cleanup:bob done >/dev/null
+  storage_operation_fetch agsuite bob consumer-carol 900 >/dev/null
+  storage_operation_ack agsuite bob "$second_id" op-shared-senders consumer-carol applied cleanup:bob done >/dev/null
+
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE operation_key='op-shared-senders' AND type='application_ack';")" -eq 2 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='op-shared-senders' AND kind='cleanup';")" -eq 2 ]
+}
+
 @test "lifecycle contract: reusing an operation key for different content fails visibly" {
   storage_operation_send agsuite alice bob action op-conflict wake:bob "first" >/dev/null
   run --separate-stderr storage_operation_send agsuite alice bob action op-conflict wake:bob "different"
@@ -471,6 +491,27 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
 }
 
+@test "lifecycle contract: malformed and incomplete JSONL imports fail before committing state" {
+  local db="$TEST_SKILL_DIR/db/messages.db" malformed="$BATS_TEST_TMPDIR/malformed.jsonl"
+  local nonobject="$BATS_TEST_TMPDIR/nonobject.jsonl" incomplete="$BATS_TEST_TMPDIR/incomplete.jsonl"
+  printf '%s\n' '{malformed' >"$malformed"
+  printf '%s\n' '[]' >"$nonobject"
+  printf '%s\n' '{"type":"lifecycle_message","team":"agsuite","operation_key":"op-incomplete","message_id":"m-incomplete","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' >"$incomplete"
+
+  local candidate
+  for candidate in "$malformed" "$nonobject" "$incomplete"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    storage_init agsuite >/dev/null
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'invalid JSON record'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events;")" -eq 0 ]
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events;")" -eq 0 ]
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
+  done
+}
+
 @test "lifecycle contract: fetch observes processing expiry before redelivery" {
   storage_operation_send agsuite alice bob action op-fetch-expiry wake:bob "retry" >/dev/null
   storage_operation_fetch agsuite bob first-consumer 900 >/dev/null
@@ -485,6 +526,18 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$status" -eq 0 ]
   contains "$output" '"reason":"processing_lease_expired"'
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE operation_key='op-fetch-expiry' AND kind='wake';")" = done ]
+}
+
+@test "lifecycle contract: active projection treats an expired processing lease as pending" {
+  storage_operation_send agsuite alice bob action op-active-expired wake:bob retry >/dev/null
+  storage_operation_fetch agsuite bob expired-consumer 900 >/dev/null
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "UPDATE lifecycle_processing_leases SET expires_at=0;"
+
+  run storage_lifecycle_active agsuite bob
+  [ "$status" -eq 0 ]
+  contains "$output" '"operation_key":"op-active-expired"'
+  contains "$output" '"state":"pending"'
+  not_contains "$output" '"state":"processing"'
 }
 
 @test "lifecycle contract: notifier failure is visible through public history and active queries" {
@@ -610,4 +663,19 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   run --separate-stderr storage_outbox_claim agsuite $'notifier\nname' 30
   [ "$status" -eq 13 ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE operation_key='op-control-token';")" = pending ]
+}
+
+@test "lifecycle API and storage reject Unicode C1 control characters in tokens" {
+  local sent message_id
+  sent="$(storage_operation_send agsuite alice bob action op-c1-control wake:bob body)"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"agent":"bob","consumer":"api\u0085consumer","lease_seconds":30}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite fetch'
+  [ "$status" -eq 2 ]
+  contains "$stderr" 'control characters'
+
+  run --separate-stderr storage_operation_fetch agsuite bob $'direct\u0085consumer' 30
+  [ "$status" -eq 13 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_processing_leases WHERE message_id='$message_id';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE type='read_receipt' AND message_id='$message_id';")" -eq 0 ]
 }

@@ -267,7 +267,7 @@ _api_request_field() {
     echo "agmsg: invalid_request: field '$key' contains U+0000" >&2
     return 2
   fi
-  if [ "$semantic" = token ] && [ "$(agmsg_sqlite_mem "WITH RECURSIVE input(value) AS (SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key')), positions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM positions,input WHERE n<length(input.value)) SELECT EXISTS(SELECT 1 FROM input,positions WHERE unicode(substr(input.value,n,1)) BETWEEN 1 AND 31 OR unicode(substr(input.value,n,1))=127);")" = 1 ]; then
+  if [ "$semantic" = token ] && [ "$(agmsg_sqlite_mem "WITH RECURSIVE input(value) AS (SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key')), positions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM positions,input WHERE n<length(input.value)) SELECT EXISTS(SELECT 1 FROM input,positions WHERE unicode(substr(input.value,n,1)) BETWEEN 1 AND 31 OR unicode(substr(input.value,n,1)) BETWEEN 127 AND 159);")" = 1 ]; then
     echo "agmsg: invalid_request: field '$key' contains control characters" >&2
     return 2
   fi

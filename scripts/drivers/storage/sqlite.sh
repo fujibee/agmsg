@@ -294,9 +294,14 @@ storage_init() {
       attempt          INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
       last_error       TEXT,
       created_at       TEXT NOT NULL,
-      updated_at       TEXT NOT NULL,
-      UNIQUE(team,operation_key,kind,target)
+      updated_at       TEXT NOT NULL
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_outbox_message_once
+      ON lifecycle_outbox(team,operation_key,kind,target,message_id)
+      WHERE message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_outbox_work_once
+      ON lifecycle_outbox(team,operation_key,kind,target)
+      WHERE message_id IS NULL;
     CREATE INDEX IF NOT EXISTS lifecycle_outbox_ready
       ON lifecycle_outbox(status,available_at,lease_expires_at,seq);
     -- Legacy store (read-only here). Created so the UNION queries always parse
@@ -457,10 +462,18 @@ _sqlite_lifecycle_work_state_valid() {
 }
 
 _sqlite_lifecycle_token_valid() {
-  local without_controls
+  local without_controls unicode_controls
   [ -n "$1" ] || return 1
   without_controls="$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')"
-  [ "$without_controls" = "$1" ]
+  [ "$without_controls" = "$1" ] || return 1
+  unicode_controls="$(sqlite3 :memory: "
+    WITH RECURSIVE input(value) AS (SELECT $(_sqlite_text_expr "$1")),
+      positions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM positions,input WHERE n<length(input.value))
+    SELECT EXISTS(
+      SELECT 1 FROM input,positions
+       WHERE unicode(substr(input.value,n,1)) BETWEEN 1 AND 31
+          OR unicode(substr(input.value,n,1)) BETWEEN 127 AND 159);" 2>/dev/null)" || return 1
+  [ "$unicode_controls" = 0 ]
 }
 
 storage_work_register() {
@@ -956,6 +969,7 @@ storage_lifecycle_active() {
             ELSE 'pending' END) AS record
       FROM lifecycle_messages lm
       LEFT JOIN lifecycle_processing_leases p ON p.message_id=lm.message_id
+        AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)
       LEFT JOIN lifecycle_events a ON a.type='application_ack' AND a.message_id=lm.message_id
       WHERE lm.team='$(_sqlite_lit "$team")' $recipient_filter
         AND ((lm.kind='info' AND NOT EXISTS(
@@ -1240,6 +1254,32 @@ storage_export() {
   " > "$file"
 }
 
+_sqlite_import_required_fields_valid() {
+  local line="$1" type="$2" predicate
+  case "$type" in
+    message_sent)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.id')='text' AND json_type(record,'\$.team')='text' AND json_type(record,'\$.from')='text' AND json_type(record,'\$.to')='text' AND json_type(record,'\$.body')='text' AND json_type(record,'\$.at')='text'"
+      ;;
+    message_read)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.id')='text' AND json_type(record,'\$.team')='text' AND json_type(record,'\$.agent')='text' AND json_type(record,'\$.msg_id')='text' AND json_type(record,'\$.at')='text'"
+      ;;
+    lifecycle_message)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.team')='text' AND json_type(record,'\$.sender')='text' AND json_type(record,'\$.operation_key')='text' AND json_type(record,'\$.message_id')='text' AND json_type(record,'\$.recipient')='text' AND json_type(record,'\$.kind')='text' AND json_type(record,'\$.wake_target')='text' AND json_type(record,'\$.created_at')='text'"
+      ;;
+    lifecycle_event)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.id')='text' AND json_type(record,'\$.event_type')='text' AND json_type(record,'\$.team')='text' AND json_type(record,'\$.operation_key')='text' AND json_type(record,'\$.at')='text'"
+      ;;
+    lifecycle_outbox)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.id')='text' AND json_type(record,'\$.team')='text' AND json_type(record,'\$.operation_key')='text' AND json_type(record,'\$.kind')='text' AND json_type(record,'\$.target')='text' AND json_type(record,'\$.status')='text' AND json_type(record,'\$.available_at')='integer' AND json_type(record,'\$.attempt')='integer' AND json_type(record,'\$.created_at')='text' AND json_type(record,'\$.updated_at')='text'"
+      ;;
+    lifecycle_processing_lease)
+      predicate="json_type(record,'\$.type')='text' AND json_type(record,'\$.message_id')='text' AND json_type(record,'\$.consumer')='text' AND json_type(record,'\$.expires_at')='integer' AND json_type(record,'\$.attempt')='integer' AND json_type(record,'\$.read_receipt_id')='text' AND json_type(record,'\$.updated_at')='text'"
+      ;;
+    *) return 0 ;;
+  esac
+  [ "$(sqlite3 :memory: "WITH input(record) AS (SELECT '$(_sqlite_lit "$line")') SELECT $predicate FROM input;" 2>/dev/null)" = 1 ]
+}
+
 storage_import() {
   # `selector`, not `team`: the loop below reuses `team` for the team named by
   # each imported RECORD, which is a different thing from the store being
@@ -1249,14 +1289,24 @@ storage_import() {
   storage_init "$selector" >/dev/null || return 13
   sql_file="$(mktemp "${TMPDIR:-/tmp}/agmsg-import.XXXXXX")" || return 13
   printf '%s\n' 'BEGIN IMMEDIATE;' > "$sql_file"
-  local line t id team frm to body_hex body_expr msg_id agent at operation_key sender recipient kind
+  local line t id team frm to body_hex body_expr msg_id agent at operation_key sender recipient kind record_type
   local wake_target created_at event_type actor result reason target work_key state generation origin stall_deadline
   local status available_at lease_owner lease_expires_at attempt last_error updated_at
   local consumer expires_at read_receipt_id
   j() { sqlite3 :memory: "SELECT COALESCE(json_extract('$(_sqlite_lit "$line")','\$.$1'),'')" 2>/dev/null | tr -d '\r'; }
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    t=$(j type); id=$(j id); team=$(j team); at=$(j at)
+    record_type="$(sqlite3 :memory: "WITH input(record) AS (SELECT '$(_sqlite_lit "$line")')
+      SELECT CASE WHEN json_valid(record) THEN
+        CASE WHEN json_type(record)='object' AND json_type(record,'\$.type')='text'
+          THEN json_extract(record,'\$.type') ELSE '__agmsg_invalid__' END
+        ELSE '__agmsg_invalid__' END FROM input;" 2>/dev/null)"
+    if [ "$record_type" = __agmsg_invalid__ ] || ! _sqlite_import_required_fields_valid "$line" "$record_type"; then
+      rm -f "$sql_file"
+      echo "agmsg: import failed: invalid JSON record" >&2
+      return 13
+    fi
+    t="$record_type"; id=$(j id); team=$(j team); at=$(j at)
     if [ "$t" = message_sent ]; then
       frm=$(j from); to=$(j to)
       body_hex="$(sqlite3 :memory: "SELECT hex(json_extract('$(_sqlite_lit "$line")','\$.body'))" 2>/dev/null | tr -d '\r\n')"
