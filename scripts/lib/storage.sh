@@ -437,6 +437,33 @@ agmsg_storage_driver() {
 # Resolution reuses the registry search bases (in-tree builtins always trusted;
 # external plugin dirs gated by the opt-in trustfile, ADR 0002).
 _AGMSG_STORAGE_LOADED=""
+_AGMSG_STORAGE_LIFECYCLE_DRIVER=""
+
+_agmsg_storage_install_lifecycle_defaults() {
+  _AGMSG_STORAGE_LIFECYCLE_DRIVER="$1"
+  if ! declare -F storage_capabilities >/dev/null 2>&1; then
+    storage_capabilities() {
+      printf '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"%s","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","application_ack":"unsupported","work_registration":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}\n' "$_AGMSG_STORAGE_LIFECYCLE_DRIVER"
+    }
+  fi
+  if ! declare -F _storage_lifecycle_unsupported >/dev/null 2>&1; then
+    _storage_lifecycle_unsupported() {
+      printf 'agmsg: unsupported_capability lifecycle-v1 for %s\n' "$_AGMSG_STORAGE_LIFECYCLE_DRIVER" >&2
+      return 13
+    }
+  fi
+  declare -F storage_operation_send >/dev/null 2>&1 || storage_operation_send() { _storage_lifecycle_unsupported; }
+  declare -F storage_operation_fetch >/dev/null 2>&1 || storage_operation_fetch() { _storage_lifecycle_unsupported; }
+  declare -F storage_operation_ack >/dev/null 2>&1 || storage_operation_ack() { _storage_lifecycle_unsupported; }
+  declare -F storage_work_register >/dev/null 2>&1 || storage_work_register() { _storage_lifecycle_unsupported; }
+  declare -F storage_work_event >/dev/null 2>&1 || storage_work_event() { _storage_lifecycle_unsupported; }
+  declare -F storage_outbox_claim >/dev/null 2>&1 || storage_outbox_claim() { _storage_lifecycle_unsupported; }
+  declare -F storage_outbox_complete >/dev/null 2>&1 || storage_outbox_complete() { _storage_lifecycle_unsupported; }
+  declare -F storage_outbox_retry >/dev/null 2>&1 || storage_outbox_retry() { _storage_lifecycle_unsupported; }
+  declare -F storage_lifecycle_history >/dev/null 2>&1 || storage_lifecycle_history() { _storage_lifecycle_unsupported; }
+  declare -F storage_lifecycle_active >/dev/null 2>&1 || storage_lifecycle_active() { _storage_lifecycle_unsupported; }
+}
+
 agmsg_storage_load() {
   [ -n "$_AGMSG_STORAGE_LOADED" ] && return 0
   # Pull in the axis-generic registry once (its functions may not be sourced yet).
@@ -458,6 +485,7 @@ agmsg_storage_load() {
     # shellcheck disable=SC1090
     . "$file"
     _AGMSG_STORAGE_LOADED="$name"
+    _agmsg_storage_install_lifecycle_defaults "$name"
     return 0
   done < <(agmsg_driver_bases)
   printf 'agmsg: no trusted storage driver "%s" found\n' "$name" >&2

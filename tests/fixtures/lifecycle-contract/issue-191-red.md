@@ -18,4 +18,12 @@ This proves that the existing green suites do not detect the missing public
 idempotency, receipt, outbox, and history contract. The initial eight assertions
 remained in the candidate suite; the API, work-event, notifier, and additional
 crash/idempotency cases were then added RED-first before their matching
-production paths, bringing the final contract file to seventeen assertions.
+  production paths, bringing the first reviewed candidate to seventeen
+  assertions.
+
+The first exact-head review then identified five contract gaps. The matching
+tests were added before their fixes and ran `0/5`: atomic work registration plus
+launch outbox was absent; a receipt fault left a partial send committed; fetch
+expiry omitted its recovery history; notifier errors were absent from public
+history/active queries; and a trusted legacy external driver had no structured
+unsupported defaults.

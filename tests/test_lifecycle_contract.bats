@@ -22,7 +22,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$status" -eq 0 ]
   [ "$(sqlite_mem "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','$.schema');")" = "agmsg-lifecycle-capabilities/v1" ]
   [ "$(sqlite_mem "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','$.driver');")" = "sqlite" ]
-  for capability in operation_key delivery_receipt read_receipt application_ack outbox history_query; do
+  for capability in operation_key delivery_receipt read_receipt application_ack work_registration outbox history_query; do
     [ "$(sqlite_mem "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','$.capabilities.$capability');")" = "supported" ]
   done
 }
@@ -350,4 +350,137 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE id='$outbox_id';")" = "pending" ]
+}
+
+@test "lifecycle contract: work registration and launch outbox commit atomically" {
+  local registration replay api_registration
+  registration="$(storage_work_register agsuite issue-277:m2 register:m2 origin 7 origin-seat launch:worker wake:origin 900)"
+  replay="$(storage_work_register agsuite issue-277:m2 register:m2 origin 7 origin-seat launch:worker wake:origin 900)"
+
+  [ "$registration" = "$replay" ]
+  contains "$registration" '"type":"work_registration"'
+  contains "$registration" '"generation":7'
+  contains "$registration" '"origin":"origin-seat"'
+  contains "$registration" '"wake_target":"wake:origin"'
+  contains "$registration" '"stall_deadline":900'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE type='work_event' AND operation_key='register:m2' AND state='registered';")" -eq 1 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='register:m2' AND kind='launch' AND target='launch:worker';")" -eq 1 ]
+
+  run --separate-stderr storage_work_register agsuite issue-277:m2 register:m2 origin 8 origin-seat launch:worker wake:origin 900
+  [ "$status" -ne 0 ]
+  contains "$stderr" operation_key_conflict
+
+  api_registration="$(printf '%s\n' '{"work_key":"issue-277:m2-api","operation_key":"register:m2-api","actor":"origin","generation":8,"origin":"origin-seat","launch_target":"launch:worker","wake_target":"wake:origin","stall_deadline":1200}' | "$SCRIPTS/api.sh" post teams agsuite registrations)"
+  contains "$api_registration" '"type":"work_registration"'
+  contains "$api_registration" '"operation_key":"register:m2-api"'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='register:m2-api' AND kind='launch';")" -eq 1 ]
+}
+
+@test "lifecycle contract: a middle-statement fault rolls back the whole send" {
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "CREATE TRIGGER fail_delivery_receipt BEFORE INSERT ON lifecycle_events WHEN NEW.type='delivery_receipt' BEGIN SELECT RAISE(ABORT,'receipt_fault'); END;"
+
+  run --separate-stderr storage_operation_send agsuite alice bob action op-rollback wake:bob "must roll back"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_messages WHERE operation_key='op-rollback';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='op-rollback';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM events WHERE type='message_sent' AND body='must roll back';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages WHERE body='must roll back';")" -eq 0 ]
+}
+
+@test "lifecycle contract: ACK and outbox control faults roll back their state changes" {
+  local sent message_id claimed outbox_id
+  sent="$(storage_operation_send agsuite alice bob action op-control-rollback wake:bob "apply")"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+  storage_operation_fetch agsuite bob handler 900 >/dev/null
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "CREATE TRIGGER fail_cleanup BEFORE INSERT ON lifecycle_outbox WHEN NEW.kind='cleanup' BEGIN SELECT RAISE(ABORT,'cleanup_fault'); END;"
+
+  run --separate-stderr storage_operation_ack agsuite bob "$message_id" op-control-rollback handler applied cleanup:bob done
+  [ "$status" -ne 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE type='application_ack' AND message_id='$message_id';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_processing_leases WHERE message_id='$message_id';")" -eq 1 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE kind='cleanup' AND message_id='$message_id';")" -eq 0 ]
+
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "DROP TRIGGER fail_cleanup;"
+  storage_operation_ack agsuite bob "$message_id" op-control-rollback handler applied cleanup:bob done >/dev/null
+  claimed="$(storage_outbox_claim agsuite notifier 30)"
+  outbox_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$claimed" | sed "s/'/''/g")','$.id');")"
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "CREATE TRIGGER fail_outbox_sent BEFORE INSERT ON lifecycle_events WHEN NEW.type='outbox_sent' BEGIN SELECT RAISE(ABORT,'complete_fault'); END;"
+
+  run storage_outbox_complete agsuite "$outbox_id" notifier
+  [ "$status" -ne 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE id='$outbox_id';")" = leased ]
+
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "CREATE TRIGGER fail_outbox_error BEFORE INSERT ON lifecycle_events WHEN NEW.type='outbox_error' BEGIN SELECT RAISE(ABORT,'retry_fault'); END;"
+  run storage_outbox_retry agsuite "$outbox_id" notifier 10 adapter_failed
+  [ "$status" -ne 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE id='$outbox_id';")" = leased ]
+  [ -z "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COALESCE(last_error,'') FROM lifecycle_outbox WHERE id='$outbox_id';")" ]
+}
+
+@test "lifecycle contract: fetch observes processing expiry before redelivery" {
+  storage_operation_send agsuite alice bob action op-fetch-expiry wake:bob "retry" >/dev/null
+  storage_operation_fetch agsuite bob first-consumer 900 >/dev/null
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "UPDATE lifecycle_processing_leases SET expires_at=0;"
+
+  run storage_operation_fetch agsuite bob second-consumer 900
+  [ "$status" -eq 0 ]
+  contains "$output" '"operation_key":"op-fetch-expiry"'
+  contains "$output" '"attempt":2'
+
+  run storage_lifecycle_history agsuite --operation-key op-fetch-expiry
+  [ "$status" -eq 0 ]
+  contains "$output" '"reason":"processing_lease_expired"'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE operation_key='op-fetch-expiry' AND kind='wake';")" = done ]
+}
+
+@test "lifecycle contract: notifier failure is visible through public history and active queries" {
+  storage_operation_send agsuite alice bob terminal op-visible-error wake:bob "done" >/dev/null
+  local claimed outbox_id
+  claimed="$(storage_outbox_claim agsuite notifier 30)"
+  outbox_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$claimed" | sed "s/'/''/g")','$.id');")"
+  storage_outbox_retry agsuite "$outbox_id" notifier 10 adapter_failed >/dev/null
+
+  run storage_lifecycle_history agsuite --operation-key op-visible-error
+  [ "$status" -eq 0 ]
+  contains "$output" '"type":"outbox_error"'
+  contains "$output" '"reason":"adapter_failed"'
+
+  run storage_lifecycle_active agsuite bob
+  [ "$status" -eq 0 ]
+  contains "$output" '"type":"delivery_error"'
+  contains "$output" '"reason":"adapter_failed"'
+}
+
+@test "lifecycle contract: a trusted legacy external driver gets explicit unsupported defaults" {
+  local plugin_root="$TEST_SKILL_DIR/plugins" driver="$TEST_SKILL_DIR/plugins/storage/legacy.sh"
+  mkdir -p "$plugin_root/storage" "$TEST_SKILL_DIR/db"
+  printf '%s\n' \
+    'storage_check() { echo ok; }' \
+    "storage_describe() { printf 'name=legacy\\n'; }" \
+    >"$driver"
+  printf 'storage/legacy\t%s\n' "$driver" >"$TEST_SKILL_DIR/db/trusted-plugins"
+
+  run env AGMSG_STORAGE_DRIVER=legacy bash -c 'source "$SKILL_DIR/scripts/lib/storage.sh"; agmsg_storage_load; storage_capabilities agsuite'
+  [ "$status" -eq 0 ]
+  contains "$output" '"driver":"legacy"'
+  contains "$output" '"operation_key":"unsupported"'
+  contains "$output" '"work_registration":"unsupported"'
+
+  run --separate-stderr env AGMSG_STORAGE_DRIVER=legacy bash -c 'source "$SKILL_DIR/scripts/lib/storage.sh"; agmsg_storage_load; storage_operation_send agsuite alice bob action op wake:bob body'
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'unsupported_capability lifecycle-v1 for legacy'
+}
+
+@test "lifecycle API: typed fields reject wrong JSON types and preserve trailing newlines" {
+  local sent message_id body_hex
+  sent="$(printf '%s\n' '{"from":"alice","to":"bob","kind":"info","operation_key":"api-typed","wake_target":"wake:bob","body":"line one\n\n"}' | "$SCRIPTS/api.sh" post teams agsuite messages)"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+  body_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM events WHERE type='message_sent' AND id='$message_id';")"
+  [ "$body_hex" = 6C696E65206F6E650A0A ]
+
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"from":"alice","to":"bob","kind":"info","operation_key":"api-wrong-type","wake_target":"wake:bob","body":7}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite messages'
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  contains "$stderr" "field 'body' must be text"
 }

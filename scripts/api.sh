@@ -32,6 +32,7 @@ set -euo pipefail
 #   api.sh post teams <team> messages       # typed JSON on stdin
 #   api.sh post teams <team> fetch          # typed JSON on stdin
 #   api.sh post teams <team> acknowledgements # typed JSON on stdin
+#   api.sh post teams <team> registrations # atomic work record + launch outbox
 #   api.sh post teams <team> work-events    # typed JSON on stdin
 #   api.sh post teams <team> outbox-claims|outbox-completions|outbox-retries
 #
@@ -247,25 +248,41 @@ _api_request_close() {
 }
 
 _api_request_field() {
-  local key="$1" required="${2:-required}" path_sql value
+  local key="$1" required="${2:-required}" expected_type="${3:-text}" path_sql value actual_type
   path_sql="$(agmsg_sql_readfile_path "$API_REQUEST_FILE")"
-  value="$(agmsg_sqlite_mem "SELECT COALESCE(json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key'),'');")"
-  if [ "$required" = required ] && [ -z "$value" ]; then
+  actual_type="$(agmsg_sqlite_mem "SELECT COALESCE(json_type(CAST(readfile('$path_sql') AS TEXT), '\$.$key'),'');")"
+  if [ -z "$actual_type" ] || [ "$actual_type" = null ]; then
+    if [ "$required" != required ]; then
+      API_REQUEST_VALUE=""
+      return 0
+    fi
     echo "agmsg: invalid_request: missing '$key'" >&2
     return 2
   fi
-  printf '%s' "$value"
+  if [ "$actual_type" != "$expected_type" ]; then
+    echo "agmsg: invalid_request: field '$key' must be $expected_type" >&2
+    return 2
+  fi
+  value="$(agmsg_sqlite_mem "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key') || '__AGMSG_FIELD_END__';")"
+  API_REQUEST_VALUE="${value%__AGMSG_FIELD_END__}"
+}
+
+_api_request_assign() {
+  local destination="$1"
+  shift
+  _api_request_field "$@" || return
+  printf -v "$destination" '%s' "$API_REQUEST_VALUE"
 }
 
 post_messages() {
   local team="$1" from to kind operation_key wake_target body
   _api_request_open || return
-  from="$(_api_request_field from)" || return
-  to="$(_api_request_field to)" || return
-  kind="$(_api_request_field kind)" || return
-  operation_key="$(_api_request_field operation_key)" || return
-  wake_target="$(_api_request_field wake_target)" || return
-  body="$(_api_request_field body)" || return
+  _api_request_assign from from || return
+  _api_request_assign to to || return
+  _api_request_assign kind kind || return
+  _api_request_assign operation_key operation_key || return
+  _api_request_assign wake_target wake_target || return
+  _api_request_assign body body || return
   agmsg_validate_agent_name "$from" || return
   agmsg_validate_agent_name "$to" || return
   storage_operation_send "$team" "$from" "$to" "$kind" "$operation_key" "$wake_target" "$body"
@@ -274,9 +291,9 @@ post_messages() {
 post_fetch() {
   local team="$1" agent consumer lease_seconds
   _api_request_open || return
-  agent="$(_api_request_field agent)" || return
-  consumer="$(_api_request_field consumer)" || return
-  lease_seconds="$(_api_request_field lease_seconds)" || return
+  _api_request_assign agent agent || return
+  _api_request_assign consumer consumer || return
+  _api_request_assign lease_seconds lease_seconds required integer || return
   agmsg_validate_agent_name "$agent" || return
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
@@ -286,13 +303,13 @@ post_fetch() {
 post_acknowledgements() {
   local team="$1" agent message_id operation_key consumer result cleanup_target reason
   _api_request_open || return
-  agent="$(_api_request_field agent)" || return
-  message_id="$(_api_request_field message_id)" || return
-  operation_key="$(_api_request_field operation_key)" || return
-  consumer="$(_api_request_field consumer)" || return
-  result="$(_api_request_field result)" || return
-  cleanup_target="$(_api_request_field cleanup_target)" || return
-  reason="$(_api_request_field reason optional)" || return
+  _api_request_assign agent agent || return
+  _api_request_assign message_id message_id || return
+  _api_request_assign operation_key operation_key || return
+  _api_request_assign consumer consumer || return
+  _api_request_assign result result || return
+  _api_request_assign cleanup_target cleanup_target || return
+  _api_request_assign reason reason optional || return
   agmsg_validate_agent_name "$agent" || return
   storage_operation_ack "$team" "$agent" "$message_id" "$operation_key" "$consumer" "$result" "$cleanup_target" "$reason"
 }
@@ -300,20 +317,42 @@ post_acknowledgements() {
 post_work_events() {
   local team="$1" work_key operation_key actor state result reason
   _api_request_open || return
-  work_key="$(_api_request_field work_key)" || return
-  operation_key="$(_api_request_field operation_key)" || return
-  actor="$(_api_request_field actor)" || return
-  state="$(_api_request_field state)" || return
-  result="$(_api_request_field result optional)" || return
-  reason="$(_api_request_field reason optional)" || return
+  _api_request_assign work_key work_key || return
+  _api_request_assign operation_key operation_key || return
+  _api_request_assign actor actor || return
+  _api_request_assign state state || return
+  _api_request_assign result result optional || return
+  _api_request_assign reason reason optional || return
   storage_work_event "$team" "$work_key" "$operation_key" "$actor" "$state" "$result" "$reason"
+}
+
+post_registrations() {
+  local team="$1" work_key operation_key actor generation origin launch_target wake_target stall_deadline
+  _api_request_open || return
+  _api_request_assign work_key work_key || return
+  _api_request_assign operation_key operation_key || return
+  _api_request_assign actor actor || return
+  _api_request_assign generation generation required integer || return
+  _api_request_assign origin origin || return
+  _api_request_assign launch_target launch_target || return
+  _api_request_assign wake_target wake_target || return
+  _api_request_assign stall_deadline stall_deadline required integer || return
+  case "$generation:$stall_deadline" in
+    *[!0-9:]*|:*|*:) echo "agmsg: invalid_request: generation and stall_deadline must be positive integers" >&2; return 2 ;;
+  esac
+  if [ "$generation" -le 0 ] || [ "$stall_deadline" -le 0 ]; then
+    echo "agmsg: invalid_request: generation and stall_deadline must be positive integers" >&2
+    return 2
+  fi
+  storage_work_register "$team" "$work_key" "$operation_key" "$actor" "$generation" \
+    "$origin" "$launch_target" "$wake_target" "$stall_deadline"
 }
 
 post_outbox_claims() {
   local team="$1" owner lease_seconds
   _api_request_open || return
-  owner="$(_api_request_field owner)" || return
-  lease_seconds="$(_api_request_field lease_seconds)" || return
+  _api_request_assign owner owner || return
+  _api_request_assign lease_seconds lease_seconds required integer || return
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
   storage_outbox_claim "$team" "$owner" "$lease_seconds"
@@ -322,18 +361,18 @@ post_outbox_claims() {
 post_outbox_completions() {
   local team="$1" outbox_id owner
   _api_request_open || return
-  outbox_id="$(_api_request_field outbox_id)" || return
-  owner="$(_api_request_field owner)" || return
+  _api_request_assign outbox_id outbox_id || return
+  _api_request_assign owner owner || return
   storage_outbox_complete "$team" "$outbox_id" "$owner"
 }
 
 post_outbox_retries() {
   local team="$1" outbox_id owner delay_seconds error
   _api_request_open || return
-  outbox_id="$(_api_request_field outbox_id)" || return
-  owner="$(_api_request_field owner)" || return
-  delay_seconds="$(_api_request_field delay_seconds)" || return
-  error="$(_api_request_field error optional)" || return
+  _api_request_assign outbox_id outbox_id || return
+  _api_request_assign owner owner || return
+  _api_request_assign delay_seconds delay_seconds required integer || return
+  _api_request_assign error error optional || return
   case "$delay_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: delay_seconds must be a non-negative integer" >&2; return 2 ;; esac
   storage_outbox_retry "$team" "$outbox_id" "$owner" "$delay_seconds" "$error"
 }
@@ -368,19 +407,20 @@ route_get() {
 }
 
 route_post() {
-  local resource="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local resource="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   shift
   [ "$resource" = teams ] || { echo "Unknown resource: $resource" >&2; exit 1; }
-  local team="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local team="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   agmsg_validate_team_name "$team" || exit 1
   shift
-  local sub="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local sub="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   shift
   [ $# -eq 0 ] || { echo "Unknown option: $1" >&2; exit 1; }
   case "$sub" in
     messages) post_messages "$team" ;;
     fetch) post_fetch "$team" ;;
     acknowledgements) post_acknowledgements "$team" ;;
+    registrations) post_registrations "$team" ;;
     work-events) post_work_events "$team" ;;
     outbox-claims) post_outbox_claims "$team" ;;
     outbox-completions) post_outbox_completions "$team" ;;
