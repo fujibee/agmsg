@@ -439,6 +439,64 @@ EOF
   wait "$sentinel_pid" 2>/dev/null || true
 }
 
+@test "codex-monitor: same live project and scope duplicate fails without touching first" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local scope=scope-duplicate
+  local gate="$TEST_PROJECT/release-first-tui"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  local tui_exit="$TEST_PROJECT/tui-exit"
+  local tui_pid_file="$TEST_PROJECT/tui.pid"
+  local launcher="$TEST_PROJECT/fake-launcher"
+  local launcher_term="$TEST_PROJECT/launcher-term.log"
+  local key pidfile first_monitor first_server first_launcher first_tui calls_before
+  _make_term_recording_launcher "$launcher"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
+
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" "$scope" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+  env FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_READY_FILE="$launcher_ready" FAKE_LAUNCHER_TERM_LOG="$launcher_term" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
+    FAKE_TUI_EXIT_MARKER="$tui_exit" FAKE_TUI_PID_FILE="$tui_pid_file" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope "$scope" --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+  first_monitor="$TEST_MONITOR_PID"
+
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  first_server="$(cat "$pidfile")"
+  first_launcher="$(cat "$launcher_ready")"
+  first_tui="$(cat "$tui_pid_file")"
+  calls_before="$(wc -l < "$CALL_LOG" | tr -d ' ')"
+
+  run env AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope "$scope" --codex-command codex --
+  [ "$status" -eq 1 ]
+  grep -Fq "invocation scope is already active" <<< "$output"
+  [ "$(wc -l < "$CALL_LOG" | tr -d ' ')" = "$calls_before" ]
+  [ "$(cat "$pidfile")" = "$first_server" ]
+  kill -0 "$first_monitor"
+  kill -0 "$first_server"
+  kill -0 "$first_launcher"
+  kill -0 "$first_tui"
+
+  : > "$gate"
+  wait "$first_monitor"
+  TEST_MONITOR_PID=""
+  wait_for_pid_exit "$first_server"
+  wait_for_pid_exit "$first_launcher"
+  wait_for_pid_exit "$first_tui"
+  [ ! -e "$pidfile" ]
+}
+
 @test "codex-monitor: different invocation scopes use different live app-servers" {
   skip_on_windows "spawns python socket listeners; flaky on the Windows runner"
 

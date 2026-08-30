@@ -451,6 +451,89 @@ run_launcher() {
   wait "$launcher_b" 2>/dev/null || true
 }
 
+@test "launcher: scoped child survives one empty identity read after role lock" {
+  put_record team alice thread-A "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=3
+  local key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local url=ws://127.0.0.1:1111
+  local counter="$TEST_SKILL_DIR/identity-count"
+  local real_identities="$SCRIPTS/identities.real.sh"
+  local server launcher_pid i capture_count
+
+  mv "$SCRIPTS/identities.sh" "$real_identities"
+  cat > "$SCRIPTS/identities.sh" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$AGMSG_TEST_IDENTITY_COUNTER" ] || count="$(cat "$AGMSG_TEST_IDENTITY_COUNTER")"
+count=$((count + 1))
+printf '%s' "$count" > "$AGMSG_TEST_IDENTITY_COUNTER"
+[ "$count" -eq 2 ] && exit 0
+exec "$AGMSG_TEST_IDENTITIES_REAL" "$@"
+EOF
+  chmod +x "$SCRIPTS/identities.sh"
+  export AGMSG_TEST_IDENTITY_COUNTER="$counter"
+  export AGMSG_TEST_IDENTITIES_REAL="$real_identities"
+
+  sleep 4 3>&- & server=$!
+  printf '%s' "$server" > "$RUN_DIR/codex-app-server.$key.pid"
+  write_scoped_request "$key" thread-A "$url"
+
+  AGMSG_CODEX_APP_SERVER_KEY="$key" \
+    bash "$LAUNCHER" codex "$PROJ" "$url" "$server" $'team\talice' >/dev/null 2>&1 3>&- &
+  launcher_pid=$!
+
+  for i in {1..30}; do
+    capture_count="$(grep -Fc -- $'--pair team\talice --thread thread-A --app-server ws://127.0.0.1:1111' "$CAPTURE" 2>/dev/null || true)"
+    [ "${capture_count:-0}" -eq 1 ] && break
+    sleep 0.1
+  done
+
+  [ "$(cat "$counter")" -ge 3 ]
+  [ "${capture_count:-0}" -eq 1 ]
+
+  kill "$server" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+}
+
+@test "launcher: malformed scoped requests stay unread and start no bridge" {
+  put_record team alice thread-A "$PROJ" codex
+  local key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local url=ws://127.0.0.1:1111
+  local request="$RUN_DIR/codex-bridge-request.$key"
+  local before payload server
+  local payloads=(
+    __missing__
+    $'codex\tthread-A'
+    $'codex\tthread-A\tws://127.0.0.1:1111\textra'
+    $'codex\t\tws://127.0.0.1:1111'
+    $'claude-code\tthread-A\tws://127.0.0.1:1111'
+    $'codex\tthread-A\tws://127.0.0.1:2222'
+  )
+
+  for payload in "${payloads[@]}"; do
+    rm -f "$CAPTURE" "$request"
+    before=""
+    if [ "$payload" != __missing__ ]; then
+      printf '%s' "$payload" > "$request"
+      before="$(cat "$request")"
+    fi
+
+    sleep 0.7 3>&- & server=$!
+    printf '%s' "$server" > "$RUN_DIR/codex-app-server.$key.pid"
+    run env AGMSG_CODEX_APP_SERVER_KEY="$key" \
+      bash "$LAUNCHER" codex "$PROJ" "$url" "$server" $'team\talice'
+    [ "$status" -eq 0 ]
+    [ ! -e "$CAPTURE" ]
+    if [ "$payload" = __missing__ ]; then
+      [ ! -e "$request" ]
+    else
+      [ "$(cat "$request")" = "$before" ]
+    fi
+    wait "$server" 2>/dev/null || true
+  done
+}
+
 @test "launcher: role record update keeps child scoped to the same pair" {
   put_record team alice thread-before "$PROJ" codex
   sleep 6 3>&- & local p=$!

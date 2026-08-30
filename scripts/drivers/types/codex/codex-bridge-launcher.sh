@@ -429,7 +429,15 @@ fi
 
 if [ "$SCOPED_LAUNCH" -eq 1 ]; then
   acquire_runtime_lock_while_alive "$CHILD_LOCK_RESOURCE" "$PARENT_PID" || exit 0
-  ids="$(resolve_identity || true)"
+  ids=""
+  post_lock_empty_ticks=0
+  while _agmsg_pid_alive_local "$PARENT_PID"; do
+    ids="$(resolve_identity || true)"
+    [ -n "$ids" ] && break
+    post_lock_empty_ticks=$((post_lock_empty_ticks + 1))
+    [ "$post_lock_empty_ticks" -ge 2 ] && break
+    sleep 0.3
+  done
   [ -n "$ids" ] || exit 0
   build_safety_state "$ids"
   safety_state="$SAFETY_STATE"
