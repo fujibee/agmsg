@@ -248,7 +248,7 @@ _api_request_close() {
 }
 
 _api_request_field() {
-  local key="$1" required="${2:-required}" expected_type="${3:-text}" path_sql value actual_type
+  local key="$1" required="${2:-required}" expected_type="${3:-text}" semantic="${4:-value}" path_sql value actual_type
   path_sql="$(agmsg_sql_readfile_path "$API_REQUEST_FILE")"
   actual_type="$(agmsg_sqlite_mem "SELECT COALESCE(json_type(CAST(readfile('$path_sql') AS TEXT), '\$.$key'),'');")"
   if [ -z "$actual_type" ] || [ "$actual_type" = null ]; then
@@ -267,6 +267,10 @@ _api_request_field() {
     echo "agmsg: invalid_request: field '$key' contains U+0000" >&2
     return 2
   fi
+  if [ "$semantic" = token ] && [ "$(agmsg_sqlite_mem "WITH RECURSIVE input(value) AS (SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key')), positions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM positions,input WHERE n<length(input.value)) SELECT EXISTS(SELECT 1 FROM input,positions WHERE unicode(substr(input.value,n,1)) BETWEEN 1 AND 31 OR unicode(substr(input.value,n,1))=127);")" = 1 ]; then
+    echo "agmsg: invalid_request: field '$key' contains control characters" >&2
+    return 2
+  fi
   value="$(agmsg_sqlite_mem "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key') || '__AGMSG_FIELD_END__';")"
   API_REQUEST_VALUE="${value%__AGMSG_FIELD_END__}"
 }
@@ -276,6 +280,11 @@ _api_request_assign() {
   shift
   _api_request_field "$@" || return
   printf -v "$destination" '%s' "$API_REQUEST_VALUE"
+}
+
+_api_request_assign_token() {
+  local destination="$1" key="$2"
+  _api_request_assign "$destination" "$key" required text token
 }
 
 _api_require_nonempty() {
@@ -289,11 +298,11 @@ _api_require_nonempty() {
 post_messages() {
   local team="$1" from to kind operation_key wake_target body
   _api_request_open || return
-  _api_request_assign from from || return
-  _api_request_assign to to || return
-  _api_request_assign kind kind || return
-  _api_request_assign operation_key operation_key || return
-  _api_request_assign wake_target wake_target || return
+  _api_request_assign_token from from || return
+  _api_request_assign_token to to || return
+  _api_request_assign_token kind kind || return
+  _api_request_assign_token operation_key operation_key || return
+  _api_request_assign_token wake_target wake_target || return
   _api_request_assign body body || return
   _api_require_nonempty from "$from" || return
   _api_require_nonempty to "$to" || return
@@ -308,8 +317,8 @@ post_messages() {
 post_fetch() {
   local team="$1" agent consumer lease_seconds
   _api_request_open || return
-  _api_request_assign agent agent || return
-  _api_request_assign consumer consumer || return
+  _api_request_assign_token agent agent || return
+  _api_request_assign_token consumer consumer || return
   _api_request_assign lease_seconds lease_seconds required integer || return
   _api_require_nonempty agent "$agent" || return
   _api_require_nonempty consumer "$consumer" || return
@@ -322,12 +331,12 @@ post_fetch() {
 post_acknowledgements() {
   local team="$1" agent message_id operation_key consumer result cleanup_target reason
   _api_request_open || return
-  _api_request_assign agent agent || return
-  _api_request_assign message_id message_id || return
-  _api_request_assign operation_key operation_key || return
-  _api_request_assign consumer consumer || return
-  _api_request_assign result result || return
-  _api_request_assign cleanup_target cleanup_target || return
+  _api_request_assign_token agent agent || return
+  _api_request_assign_token message_id message_id || return
+  _api_request_assign_token operation_key operation_key || return
+  _api_request_assign_token consumer consumer || return
+  _api_request_assign_token result result || return
+  _api_request_assign_token cleanup_target cleanup_target || return
   _api_request_assign reason reason optional || return
   _api_require_nonempty agent "$agent" || return
   _api_require_nonempty message_id "$message_id" || return
@@ -342,10 +351,10 @@ post_acknowledgements() {
 post_work_events() {
   local team="$1" work_key operation_key actor state result reason
   _api_request_open || return
-  _api_request_assign work_key work_key || return
-  _api_request_assign operation_key operation_key || return
-  _api_request_assign actor actor || return
-  _api_request_assign state state || return
+  _api_request_assign_token work_key work_key || return
+  _api_request_assign_token operation_key operation_key || return
+  _api_request_assign_token actor actor || return
+  _api_request_assign_token state state || return
   _api_request_assign result result optional || return
   _api_request_assign reason reason optional || return
   _api_require_nonempty work_key "$work_key" || return
@@ -358,13 +367,13 @@ post_work_events() {
 post_registrations() {
   local team="$1" work_key operation_key actor generation origin launch_target wake_target stall_deadline
   _api_request_open || return
-  _api_request_assign work_key work_key || return
-  _api_request_assign operation_key operation_key || return
-  _api_request_assign actor actor || return
+  _api_request_assign_token work_key work_key || return
+  _api_request_assign_token operation_key operation_key || return
+  _api_request_assign_token actor actor || return
   _api_request_assign generation generation required integer || return
-  _api_request_assign origin origin || return
-  _api_request_assign launch_target launch_target || return
-  _api_request_assign wake_target wake_target || return
+  _api_request_assign_token origin origin || return
+  _api_request_assign_token launch_target launch_target || return
+  _api_request_assign_token wake_target wake_target || return
   _api_request_assign stall_deadline stall_deadline required integer || return
   _api_require_nonempty work_key "$work_key" || return
   _api_require_nonempty operation_key "$operation_key" || return
@@ -386,7 +395,7 @@ post_registrations() {
 post_outbox_claims() {
   local team="$1" owner lease_seconds
   _api_request_open || return
-  _api_request_assign owner owner || return
+  _api_request_assign_token owner owner || return
   _api_request_assign lease_seconds lease_seconds required integer || return
   _api_require_nonempty owner "$owner" || return
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
@@ -397,8 +406,8 @@ post_outbox_claims() {
 post_outbox_completions() {
   local team="$1" outbox_id owner
   _api_request_open || return
-  _api_request_assign outbox_id outbox_id || return
-  _api_request_assign owner owner || return
+  _api_request_assign_token outbox_id outbox_id || return
+  _api_request_assign_token owner owner || return
   _api_require_nonempty outbox_id "$outbox_id" || return
   _api_require_nonempty owner "$owner" || return
   storage_outbox_complete "$team" "$outbox_id" "$owner"
@@ -407,10 +416,10 @@ post_outbox_completions() {
 post_outbox_retries() {
   local team="$1" outbox_id owner delay_seconds error
   _api_request_open || return
-  _api_request_assign outbox_id outbox_id || return
-  _api_request_assign owner owner || return
+  _api_request_assign_token outbox_id outbox_id || return
+  _api_request_assign_token owner owner || return
   _api_request_assign delay_seconds delay_seconds required integer || return
-  _api_request_assign error error || return
+  _api_request_assign_token error error || return
   _api_require_nonempty outbox_id "$outbox_id" || return
   _api_require_nonempty owner "$owner" || return
   _api_require_nonempty error "$error" || return
