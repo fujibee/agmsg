@@ -101,25 +101,36 @@ await_barrier_reached() {
     | sqlite3 "$db" >/dev/null &
   holder=$!
   # Proceed only once a real write attempt has failed — the backgrounded holder
-  # existing is not the lock being held.
+  # existing is not the lock being held. No assertion may run while the holder
+  # is still parked on the fifo: a failed assert would abort the test body
+  # before the release, leaving a lock-holding process behind instead of a
+  # clean red. So this path, like the main one, releases before it judges.
   local held=0
   for _ in $(seq 1 100); do
     if ! sqlite3 -cmd '.timeout 20' "$db" 'BEGIN IMMEDIATE; COMMIT;' >/dev/null 2>&1; then held=1; break; fi
     sleep 0.05
   done
-  [ "$held" -eq 1 ]
+  if [ "$held" -ne 1 ]; then
+    : > "$TEST_SKILL_DIR/hold.release"
+    wait "$holder"
+    false
+  fi
 
   local st=0
   AGMSG_BUSY_TIMEOUT=200 bash "$SCRIPTS/inbox.sh" testteam alice \
     > "$TEST_SKILL_DIR/held.out" 2> "$TEST_SKILL_DIR/held.err" || st=$?
+  # The run under contention is over; let the holder go BEFORE any assertion.
+  : > "$TEST_SKILL_DIR/hold.release"
+  wait "$holder"
+
   # Delivered, exit 0 — and the failed mark is now SAID, not swallowed.
   [ "$st" -eq 0 ]
   grep -q 'trapped' "$TEST_SKILL_DIR/held.out"
-  grep -q 'failed to mark 1 displayed message(s) read' "$TEST_SKILL_DIR/held.err"
+  grep -q 'failed to record read state for 1 displayed message(s)' "$TEST_SKILL_DIR/held.err"
   grep -q '#1011' "$TEST_SKILL_DIR/held.err"
-
-  : > "$TEST_SKILL_DIR/hold.release"
-  wait "$holder"
+  # All-unread is a fact about THIS driver (sqlite marks in one transaction);
+  # the jsonl driver can legitimately leave a partial batch, which is why the
+  # diagnostic says "some or all".
   [ "$(unread_count alice)" -eq 1 ]
 
   # The same inbox once the writer is gone: shown again, marked, and silent.

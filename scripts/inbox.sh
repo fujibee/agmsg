@@ -85,11 +85,13 @@ fi
 # rows actually displayed above — never a blanket match — so a message that
 # arrives after the SELECT above can never be marked read unseen. Non-fatal —
 # may fail in sandboxed environments or lose to a concurrent writer — but a
-# failure is reported on stderr, because the messages above were displayed and
-# will now be shown again as unread (#1011). The exit status stays 0: the
-# inbox did deliver, and the rows are still there.
+# failure is reported on stderr, because the messages above were displayed
+# and their read state is now unknown (#1011). "Some or all", not "they":
+# only the sqlite driver marks in one transaction; the jsonl driver can have
+# recorded part of the batch before the failing step. The exit status stays
+# 0: the inbox did deliver.
 if [ "${#IDS[@]}" -gt 0 ]; then
   if ! storage_mark_read_batch "$TEAM" "$AGENT" "${IDS[@]}" >/dev/null 2>&1; then
-    echo "agmsg: failed to mark ${#IDS[@]} displayed message(s) read; they remain unread and will be shown again (#1011)" >&2
+    echo "agmsg: failed to record read state for ${#IDS[@]} displayed message(s); some or all may be shown again (#1011)" >&2
   fi
 fi
