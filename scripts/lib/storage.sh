@@ -443,7 +443,7 @@ _agmsg_storage_clear_lifecycle_contract() {
   local function_name
   for function_name in \
     storage_capabilities storage_operation_send storage_operation_fetch \
-    storage_operation_ack storage_work_register storage_work_event \
+    storage_operation_ack storage_operation_renew storage_work_register storage_work_event \
     storage_outbox_claim storage_outbox_complete storage_outbox_retry \
     storage_lifecycle_history storage_lifecycle_active \
     _storage_lifecycle_unsupported; do
@@ -455,7 +455,7 @@ _agmsg_storage_install_lifecycle_defaults() {
   _AGMSG_STORAGE_LIFECYCLE_DRIVER="$1"
   if ! declare -F storage_capabilities >/dev/null 2>&1; then
     storage_capabilities() {
-      printf '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"%s","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","application_ack":"unsupported","work_registration":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}\n' "$_AGMSG_STORAGE_LIFECYCLE_DRIVER"
+      printf '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"%s","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","processing_lease_renewal":"unsupported","application_ack":"unsupported","work_registration":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}\n' "$_AGMSG_STORAGE_LIFECYCLE_DRIVER"
     }
   fi
   if ! declare -F _storage_lifecycle_unsupported >/dev/null 2>&1; then
@@ -467,6 +467,7 @@ _agmsg_storage_install_lifecycle_defaults() {
   declare -F storage_operation_send >/dev/null 2>&1 || storage_operation_send() { _storage_lifecycle_unsupported; }
   declare -F storage_operation_fetch >/dev/null 2>&1 || storage_operation_fetch() { _storage_lifecycle_unsupported; }
   declare -F storage_operation_ack >/dev/null 2>&1 || storage_operation_ack() { _storage_lifecycle_unsupported; }
+  declare -F storage_operation_renew >/dev/null 2>&1 || storage_operation_renew() { _storage_lifecycle_unsupported; }
   declare -F storage_work_register >/dev/null 2>&1 || storage_work_register() { _storage_lifecycle_unsupported; }
   declare -F storage_work_event >/dev/null 2>&1 || storage_work_event() { _storage_lifecycle_unsupported; }
   declare -F storage_outbox_claim >/dev/null 2>&1 || storage_outbox_claim() { _storage_lifecycle_unsupported; }

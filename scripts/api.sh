@@ -328,6 +328,24 @@ post_fetch() {
   storage_operation_fetch "$team" "$agent" "$consumer" "$lease_seconds"
 }
 
+post_lease_renewals() {
+  local team="$1" agent message_id operation_key consumer lease_seconds
+  _api_request_open || return
+  _api_request_assign_token agent agent || return
+  _api_request_assign_token message_id message_id || return
+  _api_request_assign_token operation_key operation_key || return
+  _api_request_assign_token consumer consumer || return
+  _api_request_assign lease_seconds lease_seconds required integer || return
+  _api_require_nonempty agent "$agent" || return
+  _api_require_nonempty message_id "$message_id" || return
+  _api_require_nonempty operation_key "$operation_key" || return
+  _api_require_nonempty consumer "$consumer" || return
+  agmsg_validate_agent_name "$agent" || return
+  case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
+  [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
+  storage_operation_renew "$team" "$agent" "$message_id" "$operation_key" "$consumer" "$lease_seconds"
+}
+
 post_acknowledgements() {
   local team="$1" agent message_id operation_key consumer result cleanup_target reason
   _api_request_open || return
@@ -457,18 +475,19 @@ route_get() {
 }
 
 route_post() {
-  local resource="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local resource="${1:?Usage: api.sh post teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   shift
   [ "$resource" = teams ] || { echo "Unknown resource: $resource" >&2; exit 1; }
-  local team="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local team="${1:?Usage: api.sh post teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   agmsg_validate_team_name "$team" || exit 1
   shift
-  local sub="${1:?Usage: api.sh post teams <team> messages|fetch|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
+  local sub="${1:?Usage: api.sh post teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries}"
   shift
   [ $# -eq 0 ] || { echo "Unknown option: $1" >&2; exit 1; }
   case "$sub" in
     messages) post_messages "$team" ;;
     fetch) post_fetch "$team" ;;
+    lease-renewals) post_lease_renewals "$team" ;;
     acknowledgements) post_acknowledgements "$team" ;;
     registrations) post_registrations "$team" ;;
     work-events) post_work_events "$team" ;;

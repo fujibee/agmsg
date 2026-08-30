@@ -148,7 +148,7 @@ storage_describe() {
 }
 
 storage_capabilities() {
-  printf '%s\n' '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"jsonl","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","application_ack":"unsupported","work_registration":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}'
+  printf '%s\n' '{"schema":"agmsg-lifecycle-capabilities/v1","driver":"jsonl","capabilities":{"operation_key":"unsupported","delivery_receipt":"unsupported","read_receipt":"unsupported","processing_lease_renewal":"unsupported","application_ack":"unsupported","work_registration":"unsupported","work_event":"unsupported","outbox":"unsupported","history_query":"unsupported"}}'
 }
 
 _jsonl_lifecycle_unsupported() {
@@ -159,6 +159,7 @@ _jsonl_lifecycle_unsupported() {
 storage_operation_send() { _jsonl_lifecycle_unsupported; }
 storage_operation_fetch() { _jsonl_lifecycle_unsupported; }
 storage_operation_ack() { _jsonl_lifecycle_unsupported; }
+storage_operation_renew() { _jsonl_lifecycle_unsupported; }
 storage_work_register() { _jsonl_lifecycle_unsupported; }
 storage_work_event() { _jsonl_lifecycle_unsupported; }
 storage_outbox_claim() { _jsonl_lifecycle_unsupported; }
