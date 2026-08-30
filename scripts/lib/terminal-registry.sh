@@ -92,8 +92,25 @@ agmsg_terminal_has() {
   return 1
 }
 
+# The full terminal ABI. EVERY driver must define EVERY one of these; the loader
+# verifies it. Naming the set here (not relying on each driver being complete) is
+# what makes a missing op FAIL rather than silently borrow the previously loaded
+# driver's same-named function.
+_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_peek terminal_poke terminal_name"
+
+# Wipe every terminal_* ABI function from the current shell. Called before each
+# source so a driver that is switched to cannot inherit the previous driver's ops
+# — the clobber co1 flagged: "no function" fails loudly (command not found), but a
+# LEFTOVER function of a different driver succeeds and runs the wrong backend.
+_agmsg_terminal_unset_ops() {
+  local fn
+  for fn in $_AGMSG_TERMINAL_REQUIRED; do unset -f "$fn" 2>/dev/null || true; done
+}
+
 # Source driver <name>'s ops.sh into the CALLER's context, trust-gated, idempotent.
-# After this, terminal_* resolve to <name>'s implementation. Loud on failure.
+# Structurally clobber-proof: wipe all terminal_* first, then source, then VERIFY
+# every required ABI function is now defined (an incomplete driver fails here
+# rather than running a leftover from a prior load). Loud on any failure.
 _AGMSG_TERMINAL_LOADED="${_AGMSG_TERMINAL_LOADED:-}"
 agmsg_terminal_load() {
   local name="$1"
@@ -104,8 +121,19 @@ agmsg_terminal_load() {
     echo "agmsg: no terminal driver '$name'" >&2; return 1;
   }
   [ -f "$dir/ops.sh" ] || { echo "agmsg: terminal driver '$name' has no ops.sh" >&2; return 1; }
+  _agmsg_terminal_unset_ops
+  _AGMSG_TERMINAL_LOADED=""   # a half-loaded driver must not read as loaded
   # shellcheck disable=SC1090
   . "$dir/ops.sh" || { echo "agmsg: failed to source terminal driver '$name'" >&2; return 1; }
+  local fn missing=""
+  for fn in $_AGMSG_TERMINAL_REQUIRED; do
+    declare -F "$fn" >/dev/null 2>&1 || missing="$missing $fn"
+  done
+  if [ -n "$missing" ]; then
+    echo "agmsg: terminal driver '$name' is missing ABI functions:$missing" >&2
+    _agmsg_terminal_unset_ops   # leave no partial driver behind to be borrowed
+    return 1
+  fi
   _AGMSG_TERMINAL_LOADED="$name"
 }
 
@@ -117,32 +145,49 @@ _agmsg_terminal_detect_one() {
   dir="$(agmsg_terminal_dir "$name")" || return 1
   [ -f "$dir/ops.sh" ] || return 1
   (
+    # Wipe any inherited terminal_* (SAME required set as the loader, derived from
+    # one place) so a candidate whose ops.sh omits terminal_detect cannot be
+    # judged by a terminal_detect left in the caller's env.
+    _agmsg_terminal_unset_ops
     # shellcheck disable=SC1090
     . "$dir/ops.sh" || exit 13
+    declare -F terminal_detect >/dev/null 2>&1 || exit 13
     terminal_detect "$sid"
   )
 }
 
 # Resolve which terminal we are under. Prints "<terminal>\t<self-id>" and exits 0.
-# Precedence: an explicit override (AGMSG_TERMINAL, or arg 2) wins over detection;
-# otherwise detection runs in order herdr > tmux > plain (plain always matches, so
-# resolution never fails). This is the single answer that ends the historical
-# $TMUX-vs-HERDR_* dual system; callers record the result rather than re-deciding
-# (a nested herdr-in-tmux otherwise lies — measured 2026-08-21).
+# Precedence: an explicit override (AGMSG_TERMINAL_DRIVER, or arg 2) wins over
+# detection; otherwise detection runs in order herdr > tmux > plain (plain always
+# matches, so resolution never fails). This is the single answer that ends the
+# historical $TMUX-vs-HERDR_* dual system; callers record the result rather than
+# re-deciding (a nested herdr-in-tmux otherwise lies — measured 2026-08-21).
+#
+# NOTE the override env is AGMSG_TERMINAL_DRIVER, NOT AGMSG_TERMINAL: the latter
+# is already the OS-terminal COMMAND template read by the plain driver's spawn
+# (pre-axis spawn.sh), so reusing it for the driver name would collide. Flagged to
+# tl (the scope named AGMSG_TERMINAL); this is the fail-safe non-colliding name.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
 agmsg_terminal_resolve() {
-  local sid="${1:-}" override="${2:-${AGMSG_TERMINAL:-}}" name selfid rc
+  local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name selfid rc
   if [ -n "$override" ]; then
-    # An override forces the terminal NAME. Self-id is best-effort via its detect;
-    # if detection fails under a forced terminal, self-id is empty and ops that
-    # need a pane will error clearly rather than silently acting on the wrong one.
+    # An override forces the terminal NAME, but only a REAL driver: a typo must
+    # fail loudly, not resolve to "<typo>\t" (which would mint an invalid record).
+    agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
+      echo "agmsg: unknown terminal '$override' (AGMSG_TERMINAL_DRIVER / --terminal)" >&2
+      return 1
+    }
+    # Self-id is best-effort under a forced terminal: if its detect fails, ops
+    # that need a pane error clearly rather than acting on the wrong one.
     selfid="$(_agmsg_terminal_detect_one "$override" "$sid")" || selfid=""
     printf '%s\t%s\n' "$override" "$selfid"
     return 0
   fi
   for name in herdr tmux plain; do
     selfid="$(_agmsg_terminal_detect_one "$name" "$sid")"; rc=$?
-    if [ "$rc" -eq 0 ]; then
+    # A match requires exit 0 AND a non-empty id — a driver that exits 0 with no
+    # id (e.g. tmux with $TMUX set but $TMUX_PANE empty) is NOT a valid match.
+    if [ "$rc" -eq 0 ] && [ -n "$selfid" ]; then
       printf '%s\t%s\n' "$name" "$selfid"
       return 0
     fi

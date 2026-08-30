@@ -7,14 +7,15 @@
 # MEASURED (seat 0, 2026-08-29) vs ASSERTED-pending-live-matrix:
 #   measured: `herdr agent list` is JSON; the pane is resolved from it by the
 #     session id (inherited HERDR_PANE_ID is NOT trusted); name encoding
-#     <team>/<name> -> team__name ('/' is not in herdr's name regex); the
-#     existing spawn/despawn calls (pane split/rename/run, tab create, pane close).
+#     <team>/<name> -> team__name ('/' is not in herdr's name regex); the existing
+#     spawn/despawn calls (pane split/rename/run, tab create, pane close); and
+#     `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #   asserted (exact argv/JSON fields verified only by the live matrix on koit's
 #     machine, NOT measured here): the `agent list` JSON field names used to
-#     extract the pane (agent_session / pane_id), `herdr agent prompt`'s argv for
-#     poke, and `herdr pane read --source` for peek. These are flagged inline and
-#     in the PR body; the fixtures pin the control flow and the argv THIS driver
-#     emits, so a real-CLI mismatch is a localized one-line fix the matrix catches.
+#     extract the pane (agent_session / pane_id), and `herdr agent prompt`'s argv
+#     for poke. These are flagged inline and in the PR body; the fixtures pin the
+#     control flow and the argv THIS driver emits, so a real-CLI mismatch is a
+#     localized one-line fix the matrix catches.
 
 # control op: herdr binary present?
 terminal_check() {
@@ -81,15 +82,18 @@ _herdr_new_pane_id() {
 }
 
 # record op: create a pane/window, launch boot, print the new bare pane id.
-# Usage: terminal_spawn <name> <project> <target> <boot...>  target=pane|window
-# Mirrors spawn.sh's herdr placement (tab create / pane split, then rename + run).
+# Usage: terminal_spawn <name> <project> <target> <boot...>
+# <target> fully specifies the placement (no ambient config): 'window', or
+# 'pane-h' / 'pane-v' (herdr directions right / down). Mirrors spawn.sh's herdr
+# placement (tab create / pane split, then rename + run).
 terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
-  local boot="$*" json pane
+  local boot="$*" json pane dir
   if [ "$target" = window ] && [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
     json="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --label "$name" --cwd "$project" 2>/dev/null)" || return 13
   else
-    json="$(herdr pane split "${HERDR_PANE_ID:-}" --direction "${AGMSG_HERDR_SPLIT:-down}" --no-focus --cwd "$project" 2>/dev/null)" || return 13
+    case "$target" in pane-h) dir=right ;; *) dir=down ;; esac
+    json="$(herdr pane split "${HERDR_PANE_ID:-}" --direction "$dir" --no-focus --cwd "$project" 2>/dev/null)" || return 13
   fi
   pane="$(_herdr_new_pane_id "$json")" || return 13
   herdr pane rename "$pane" "$name" >/dev/null 2>&1 || true

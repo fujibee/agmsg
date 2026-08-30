@@ -100,7 +100,7 @@ EOF
 
 @test "resolve: an explicit override wins over detection" {
   _install_fake_tmux
-  export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" AGMSG_TERMINAL=plain
+  export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" AGMSG_TERMINAL_DRIVER=plain
   run agmsg_terminal_resolve "sess-x"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'plain\t-')" ]
@@ -175,8 +175,7 @@ EOF
 @test "tmux: spawn a pane emits split-window and returns the captured id" {
   _install_fake_tmux
   agmsg_terminal_load tmux
-  export AGMSG_TMUX_SPLIT=-v
-  run terminal_spawn alice /proj pane bash -lc boot
+  run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 0 ]
   [ "$output" = "%9" ]
   grep -q 'split-window' "$ARGV_LOG"
@@ -208,7 +207,6 @@ EOF
 @test "tmux: poke sends text and the Enter in SEPARATE bursts with an arrow between (#619)" {
   _install_fake_tmux
   agmsg_terminal_load tmux
-  export AGMSG_POKE_GAP=0
   run terminal_poke '%9' 'hello world'
   [ "$status" -eq 0 ]
   grep -q '\[send-keys\] \[-l\] \[-t\] \[%9\] \[--\] \[hello world\]' "$ARGV_LOG"
@@ -242,7 +240,7 @@ EOF
   _install_fake_herdr "sess-77"
   agmsg_terminal_load herdr
   export HERDR_PANE_ID='wC:p1'
-  run terminal_spawn alice /proj pane bash -lc boot
+  run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 0 ]
   [ "$output" = "wC:p9" ]
   grep -q '\[pane\] \[split\]' "$ARGV_LOG"
@@ -262,4 +260,100 @@ EOF
   : > "$ARGV_LOG"
   terminal_name 'wC:p9' teamx alice >/dev/null
   grep -q '\[pane\] \[rename\] \[wC:p9\] \[teamx__alice\]' "$ARGV_LOG"
+}
+
+# --- ABI completeness + structural clobber-proofing (co1 #1014 review) -------
+
+@test "abi: every driver defines every required terminal_* function" {
+  # The declaration/implementation match co1 flagged: an ops.sh missing a verb
+  # would, after a prior load, silently run the previous driver's same-named
+  # function. agmsg_terminal_load verifies the full set; loading each driver must
+  # therefore succeed (a missing verb fails the load loudly).
+  agmsg_terminal_load plain
+  agmsg_terminal_load tmux
+  agmsg_terminal_load herdr
+}
+
+@test "abi: capabilities= verbs are actually implemented by each driver" {
+  local d cap fn
+  for d in plain tmux herdr; do
+    ( agmsg_terminal_load "$d"
+      for cap in $(agmsg_terminal_get "$d" capabilities); do
+        fn="terminal_$cap"
+        declare -F "$fn" >/dev/null 2>&1 || { echo "$d advertises $cap but lacks $fn" >&2; exit 1; }
+      done )
+  done
+}
+
+@test "load: switching drivers does not inherit the previous driver's ops (clobber)" {
+  _install_fake_tmux
+  # Load tmux, then plain. plain has NO addressable pane, so its despawn is
+  # unsupported. If plain load left tmux's terminal_despawn behind, despawn on a
+  # herdr-shaped id would call tmux; instead it must be plain's unsupported.
+  agmsg_terminal_load tmux
+  agmsg_terminal_load plain
+  run terminal_despawn 'wC:p9'
+  [ "$status" -eq 13 ]
+  grep -q 'unsupported' <<<"$output"
+  # And the tmux binary was never invoked by plain's despawn.
+  refute grep -q '^tmux ' "$ARGV_LOG"
+}
+
+@test "load: a driver missing an ABI function fails the load, leaving nothing behind" {
+  # Register a broken external driver (missing terminal_poke) as a trusted plugin.
+  local pdir="$TEST_SKILL_DIR/plugins/terminals/broken"
+  mkdir -p "$pdir"
+  printf 'name=broken\ncapabilities=\n' > "$pdir/terminal.conf"
+  cat > "$pdir/ops.sh" <<'OPS'
+terminal_check(){ echo ok; }
+terminal_describe(){ printf 'name=broken\n'; }
+terminal_detect(){ printf -- '-\n'; }
+terminal_spawn(){ printf -- '-\n'; }
+terminal_despawn(){ echo ok; }
+terminal_peek(){ echo ok; }
+terminal_name(){ echo ok; }
+OPS
+  mkdir -p "$TEST_SKILL_DIR/db"
+  printf 'terminals/broken\t%s\n' "$pdir" > "$TEST_SKILL_DIR/db/trusted-plugins"
+  # First load a good driver so a leftover COULD be borrowed. Call load DIRECTLY
+  # with stderr to a FILE (NOT `run` or $(...), both subshells) so its unset
+  # affects THIS shell, which is where "nothing left behind" must hold.
+  agmsg_terminal_load plain
+  local err="$TEST_SKILL_DIR/load.err" rc=0
+  agmsg_terminal_load broken 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q 'missing ABI functions' "$err"
+  grep -q 'terminal_poke' "$err"
+  # Nothing partial left behind: terminal_poke must be undefined now.
+  refute declare -F terminal_poke
+}
+
+# --- fail-closed resolution (co1 #1014 review) ------------------------------
+
+@test "detect: tmux with \$TMUX set but \$TMUX_PANE empty is NOT a match" {
+  export TMUX="/tmp/sock,1,0"
+  unset TMUX_PANE
+  run agmsg_terminal_resolve "sess-x"
+  # falls through tmux (no valid pane) to plain
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'plain\t-')" ]
+}
+
+@test "resolve: an override that names no real driver fails loudly, not '<typo>\t'" {
+  export AGMSG_TERMINAL_DRIVER=tnux
+  run agmsg_terminal_resolve "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "unknown terminal 'tnux'" <<<"$output"
+}
+
+# --- plain spawn (OS-terminal driver-ification) -----------------------------
+
+@test "plain: spawn runs the AGMSG_TERMINAL template and returns '-' (no addressable id)" {
+  agmsg_terminal_load plain
+  local ran="$TEST_SKILL_DIR/plain-ran"
+  export AGMSG_TERMINAL="touch $ran # {cmd}"
+  run terminal_spawn alice /proj window /path/to/boot
+  [ "$status" -eq 0 ]
+  [ "$output" = "-" ]
+  [ -f "$ran" ]
 }
