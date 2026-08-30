@@ -236,9 +236,11 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 }
 
 @test "lifecycle contract: export and restore preserve receipts outbox and work history" {
-  local sent message_id export_file="$BATS_TEST_TMPDIR/lifecycle.jsonl"
-  sent="$(storage_operation_send agsuite alice bob terminal op-export wake:bob "done")"
+  local sent message_id before_body_hex after_body_hex export_file="$BATS_TEST_TMPDIR/lifecycle.jsonl"
+  sent="$(storage_operation_send agsuite alice bob terminal op-export wake:bob $'done\n\n')"
   message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+  before_body_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM events WHERE type='message_sent' AND id='$message_id';")"
+  [ "$before_body_hex" = 646F6E650A0A ]
   storage_operation_fetch agsuite bob exporter 900 >/dev/null
   storage_operation_ack agsuite bob "$message_id" op-export exporter applied cleanup:bob "recorded" >/dev/null
   storage_work_event agsuite issue-277 op-export-work origin running "" "restore me" >/dev/null
@@ -246,6 +248,8 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 
   rm -f "$TEST_SKILL_DIR/db/messages.db" "$TEST_SKILL_DIR/db/messages.db-wal" "$TEST_SKILL_DIR/db/messages.db-shm"
   storage_import agsuite "$export_file"
+  after_body_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM events WHERE type='message_sent' AND id='$message_id';")"
+  [ "$after_body_hex" = "$before_body_hex" ]
 
   run storage_lifecycle_history agsuite --operation-key op-export
   [ "$status" -eq 0 ]
@@ -472,6 +476,28 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   contains "$stderr" 'unsupported_capability lifecycle-v1 for legacy'
 }
 
+@test "lifecycle contract: reloading a legacy driver cannot retain sqlite lifecycle functions" {
+  local plugin_root="$TEST_SKILL_DIR/plugins" driver="$TEST_SKILL_DIR/plugins/storage/legacy.sh"
+  mkdir -p "$plugin_root/storage"
+  printf '%s\n' \
+    'storage_check() { echo ok; }' \
+    "storage_describe() { printf 'name=legacy\\n'; }" \
+    >"$driver"
+  printf 'storage/legacy\t%s\n' "$driver" >"$TEST_SKILL_DIR/db/trusted-plugins"
+
+  export AGMSG_STORAGE_DRIVER=legacy
+  _AGMSG_STORAGE_LOADED=""
+  agmsg_storage_load
+
+  run storage_capabilities agsuite
+  [ "$status" -eq 0 ]
+  contains "$output" '"driver":"legacy"'
+  contains "$output" '"operation_key":"unsupported"'
+  run --separate-stderr storage_operation_send agsuite alice bob action op-reload wake:bob body
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'unsupported_capability lifecycle-v1 for legacy'
+}
+
 @test "lifecycle API: typed fields reject wrong JSON types and preserve trailing newlines" {
   local sent message_id body_hex
   sent="$(printf '%s\n' '{"from":"alice","to":"bob","kind":"info","operation_key":"api-typed","wake_target":"wake:bob","body":"line one\n\n"}' | "$SCRIPTS/api.sh" post teams agsuite messages)"
@@ -483,4 +509,38 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$status" -eq 2 ]
   [ -z "$output" ]
   contains "$stderr" "field 'body' must be text"
+}
+
+@test "lifecycle API: identity and outbox error fields reject empty text without mutation" {
+  local sent message_id claimed outbox_id
+  sent="$(storage_operation_send agsuite alice bob action op-empty-identity wake:bob body)"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"agent":"bob","consumer":"","lease_seconds":30}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite fetch'
+  [ "$status" -eq 2 ]
+  contains "$stderr" "field 'consumer' must not be empty"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_processing_leases WHERE message_id='$message_id';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE message_id='$message_id' AND type='read_receipt';")" -eq 0 ]
+
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"owner":"","lease_seconds":30}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite outbox-claims'
+  [ "$status" -eq 2 ]
+  contains "$stderr" "field 'owner' must not be empty"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE operation_key='op-empty-identity';")" = pending ]
+
+  claimed="$(storage_outbox_claim agsuite notifier 30)"
+  outbox_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$claimed" | sed "s/'/''/g")','$.id');")"
+  run --separate-stderr bash -c 'printf "%s\n" "{\"outbox_id\":\"'$outbox_id'\",\"owner\":\"notifier\",\"delay_seconds\":1,\"error\":\"\"}" | "$SKILL_DIR/scripts/api.sh" post teams agsuite outbox-retries'
+  [ "$status" -eq 2 ]
+  contains "$stderr" "field 'error' must not be empty"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE id='$outbox_id';")" = leased ]
+}
+
+@test "lifecycle API: U+0000 text is rejected before shell extraction and commits nothing" {
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"from":"alice","to":"bob","kind":"action","operation_key":"api-nul","wake_target":"wake:bob","body":"before\u0000after"}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite messages'
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  contains "$stderr" 'U+0000'
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_messages WHERE operation_key='api-nul';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE operation_key='api-nul';")" -eq 0 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='api-nul';")" -eq 0 ]
 }

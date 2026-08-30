@@ -263,6 +263,10 @@ _api_request_field() {
     echo "agmsg: invalid_request: field '$key' must be $expected_type" >&2
     return 2
   fi
+  if [ "$expected_type" = text ] && [ "$(agmsg_sqlite_mem "SELECT instr(json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key'), char(0)) > 0;")" = 1 ]; then
+    echo "agmsg: invalid_request: field '$key' contains U+0000" >&2
+    return 2
+  fi
   value="$(agmsg_sqlite_mem "SELECT json_extract(CAST(readfile('$path_sql') AS TEXT), '\$.$key') || '__AGMSG_FIELD_END__';")"
   API_REQUEST_VALUE="${value%__AGMSG_FIELD_END__}"
 }
@@ -274,6 +278,14 @@ _api_request_assign() {
   printf -v "$destination" '%s' "$API_REQUEST_VALUE"
 }
 
+_api_require_nonempty() {
+  local key="$1" value="$2"
+  [ -n "$value" ] || {
+    echo "agmsg: invalid_request: field '$key' must not be empty" >&2
+    return 2
+  }
+}
+
 post_messages() {
   local team="$1" from to kind operation_key wake_target body
   _api_request_open || return
@@ -283,6 +295,11 @@ post_messages() {
   _api_request_assign operation_key operation_key || return
   _api_request_assign wake_target wake_target || return
   _api_request_assign body body || return
+  _api_require_nonempty from "$from" || return
+  _api_require_nonempty to "$to" || return
+  _api_require_nonempty kind "$kind" || return
+  _api_require_nonempty operation_key "$operation_key" || return
+  _api_require_nonempty wake_target "$wake_target" || return
   agmsg_validate_agent_name "$from" || return
   agmsg_validate_agent_name "$to" || return
   storage_operation_send "$team" "$from" "$to" "$kind" "$operation_key" "$wake_target" "$body"
@@ -294,6 +311,8 @@ post_fetch() {
   _api_request_assign agent agent || return
   _api_request_assign consumer consumer || return
   _api_request_assign lease_seconds lease_seconds required integer || return
+  _api_require_nonempty agent "$agent" || return
+  _api_require_nonempty consumer "$consumer" || return
   agmsg_validate_agent_name "$agent" || return
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
@@ -310,6 +329,12 @@ post_acknowledgements() {
   _api_request_assign result result || return
   _api_request_assign cleanup_target cleanup_target || return
   _api_request_assign reason reason optional || return
+  _api_require_nonempty agent "$agent" || return
+  _api_require_nonempty message_id "$message_id" || return
+  _api_require_nonempty operation_key "$operation_key" || return
+  _api_require_nonempty consumer "$consumer" || return
+  _api_require_nonempty result "$result" || return
+  _api_require_nonempty cleanup_target "$cleanup_target" || return
   agmsg_validate_agent_name "$agent" || return
   storage_operation_ack "$team" "$agent" "$message_id" "$operation_key" "$consumer" "$result" "$cleanup_target" "$reason"
 }
@@ -323,6 +348,10 @@ post_work_events() {
   _api_request_assign state state || return
   _api_request_assign result result optional || return
   _api_request_assign reason reason optional || return
+  _api_require_nonempty work_key "$work_key" || return
+  _api_require_nonempty operation_key "$operation_key" || return
+  _api_require_nonempty actor "$actor" || return
+  _api_require_nonempty state "$state" || return
   storage_work_event "$team" "$work_key" "$operation_key" "$actor" "$state" "$result" "$reason"
 }
 
@@ -337,6 +366,12 @@ post_registrations() {
   _api_request_assign launch_target launch_target || return
   _api_request_assign wake_target wake_target || return
   _api_request_assign stall_deadline stall_deadline required integer || return
+  _api_require_nonempty work_key "$work_key" || return
+  _api_require_nonempty operation_key "$operation_key" || return
+  _api_require_nonempty actor "$actor" || return
+  _api_require_nonempty origin "$origin" || return
+  _api_require_nonempty launch_target "$launch_target" || return
+  _api_require_nonempty wake_target "$wake_target" || return
   case "$generation:$stall_deadline" in
     *[!0-9:]*|:*|*:) echo "agmsg: invalid_request: generation and stall_deadline must be positive integers" >&2; return 2 ;;
   esac
@@ -353,6 +388,7 @@ post_outbox_claims() {
   _api_request_open || return
   _api_request_assign owner owner || return
   _api_request_assign lease_seconds lease_seconds required integer || return
+  _api_require_nonempty owner "$owner" || return
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid_request: lease_seconds must be a positive integer" >&2; return 2; }
   storage_outbox_claim "$team" "$owner" "$lease_seconds"
@@ -363,6 +399,8 @@ post_outbox_completions() {
   _api_request_open || return
   _api_request_assign outbox_id outbox_id || return
   _api_request_assign owner owner || return
+  _api_require_nonempty outbox_id "$outbox_id" || return
+  _api_require_nonempty owner "$owner" || return
   storage_outbox_complete "$team" "$outbox_id" "$owner"
 }
 
@@ -372,7 +410,10 @@ post_outbox_retries() {
   _api_request_assign outbox_id outbox_id || return
   _api_request_assign owner owner || return
   _api_request_assign delay_seconds delay_seconds required integer || return
-  _api_request_assign error error optional || return
+  _api_request_assign error error || return
+  _api_require_nonempty outbox_id "$outbox_id" || return
+  _api_require_nonempty owner "$owner" || return
+  _api_require_nonempty error "$error" || return
   case "$delay_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: delay_seconds must be a non-negative integer" >&2; return 2 ;; esac
   storage_outbox_retry "$team" "$outbox_id" "$owner" "$delay_seconds" "$error"
 }

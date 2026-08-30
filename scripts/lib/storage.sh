@@ -439,6 +439,18 @@ agmsg_storage_driver() {
 _AGMSG_STORAGE_LOADED=""
 _AGMSG_STORAGE_LIFECYCLE_DRIVER=""
 
+_agmsg_storage_clear_lifecycle_contract() {
+  local function_name
+  for function_name in \
+    storage_capabilities storage_operation_send storage_operation_fetch \
+    storage_operation_ack storage_work_register storage_work_event \
+    storage_outbox_claim storage_outbox_complete storage_outbox_retry \
+    storage_lifecycle_history storage_lifecycle_active \
+    _storage_lifecycle_unsupported; do
+    unset -f "$function_name" 2>/dev/null || true
+  done
+}
+
 _agmsg_storage_install_lifecycle_defaults() {
   _AGMSG_STORAGE_LIFECYCLE_DRIVER="$1"
   if ! declare -F storage_capabilities >/dev/null 2>&1; then
@@ -482,6 +494,10 @@ agmsg_storage_load() {
     if [ "$kind" = external ] && ! agmsg_driver_is_trusted storage "$name" "$file"; then
       continue
     fi
+    # A caller can intentionally reset _AGMSG_STORAGE_LOADED to select a new
+    # driver in the same process. Remove the optional extension first so a
+    # legacy driver cannot inherit SQLite's supported lifecycle functions.
+    _agmsg_storage_clear_lifecycle_contract
     # shellcheck disable=SC1090
     . "$file"
     _AGMSG_STORAGE_LOADED="$name"

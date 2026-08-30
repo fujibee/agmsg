@@ -28,12 +28,18 @@ _sqlite_db() { agmsg_db_path "$1"; }
 # producing '' on bash 4+. tests/test_sqlpath.bats holds this equal to the
 # forking form it replaces, on the inputs that matter to SQL quoting.
 _sqlite_lit() {
-  local q="'" newline=$'\n' value
-  value="${1//$q/$q$q}"
-  # Command substitution strips trailing newlines. Render every LF as a SQL
-  # expression so message bodies ending in LF survive the quoting helper too.
-  value="${value//$newline/$q || char(10) || $q}"
-  printf '%s' "$value"
+  local q="'"
+  printf '%s' "${1//$q/$q$q}"
+}
+
+# Unlike _sqlite_lit, this returns a COMPLETE SQL text expression. It exists
+# only for values whose trailing LF must survive command substitution; changing
+# _sqlite_lit itself would break its public byte-for-byte quoting contract.
+_sqlite_text_expr() {
+  local quote="'" newline=$'\n' value
+  value="${1//$quote/$quote$quote}"
+  value="${value//$newline/$quote || char(10) || $quote}"
+  printf "'%s'" "$value"
 }
 
 # Run a record-returning query: strip CR but PRESERVE the sqlite exit status
@@ -376,19 +382,25 @@ storage_init() {
 # Both tables in one transaction, and the legacy rowid recorded on the event.
 # The correspondence is not bookkeeping: it is what every reader that unions the
 # two tables uses to recognise one message rather than list it twice.
-_sqlite_message_sent_sql() {
-  local team="$1" from="$2" to="$3" body="$4" id="$5" at="$6"
-  local tl fl ol bl il al
+_sqlite_message_sent_sql_expr() {
+  local team="$1" from="$2" to="$3" body_expr="$4" id="$5" at="$6"
+  local tl fl ol il al
   tl="$(_sqlite_lit "$team")"; fl="$(_sqlite_lit "$from")"; ol="$(_sqlite_lit "$to")"
-  bl="$(_sqlite_lit "$body")"; il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
+  il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
   printf '%s\n' "
     BEGIN IMMEDIATE;
     INSERT INTO messages (team,from_agent,to_agent,body,created_at)
-    VALUES ('$tl','$fl','$ol','$bl','$al');
+    VALUES ('$tl','$fl','$ol',$body_expr,'$al');
     INSERT INTO events (type,id,team,from_agent,to_agent,body,at,legacy_id)
-    VALUES ('message_sent','$il','$tl','$fl','$ol','$bl','$al',last_insert_rowid());
+    VALUES ('message_sent','$il','$tl','$fl','$ol',$body_expr,'$al',last_insert_rowid());
     COMMIT;
   "
+}
+
+_sqlite_message_sent_sql() {
+  local body_expr
+  body_expr="'$(_sqlite_lit "$4")'"
+  _sqlite_message_sent_sql_expr "$1" "$2" "$3" "$body_expr" "$5" "$6"
 }
 
 storage_send() {
@@ -541,7 +553,8 @@ storage_work_event() {
 storage_operation_send() {
   local team="$1" sender="$2" recipient="$3" kind="$4" operation_key="$5"
   local wake_target="$6" body="$7"
-  if ! _sqlite_lifecycle_kind_valid "$kind" || [ -z "$operation_key" ] || [ -z "$wake_target" ]; then
+  if [ -z "$sender" ] || [ -z "$recipient" ] || ! _sqlite_lifecycle_kind_valid "$kind" \
+      || [ -z "$operation_key" ] || [ -z "$wake_target" ]; then
     echo "agmsg: invalid lifecycle send request" >&2
     return 13
   fi
@@ -562,12 +575,12 @@ storage_operation_send() {
     INSERT INTO lifecycle_new VALUES(changes());
     INSERT INTO messages(team,from_agent,to_agent,body,created_at)
       SELECT '$(_sqlite_lit "$team")','$(_sqlite_lit "$sender")',
-             '$(_sqlite_lit "$recipient")','$(_sqlite_lit "$body")','$(_sqlite_lit "$at")'
+             '$(_sqlite_lit "$recipient")',$(_sqlite_text_expr "$body"),'$(_sqlite_lit "$at")'
        WHERE (SELECT inserted FROM lifecycle_new)=1;
     INSERT INTO events(type,id,team,from_agent,to_agent,body,at,legacy_id)
       SELECT 'message_sent','$(_sqlite_lit "$message_id")','$(_sqlite_lit "$team")',
              '$(_sqlite_lit "$sender")','$(_sqlite_lit "$recipient")',
-             '$(_sqlite_lit "$body")','$(_sqlite_lit "$at")',last_insert_rowid()
+             $(_sqlite_text_expr "$body"),'$(_sqlite_lit "$at")',last_insert_rowid()
        WHERE (SELECT inserted FROM lifecycle_new)=1;
     INSERT INTO lifecycle_events
       (id,type,team,operation_key,message_id,actor,at)
@@ -600,7 +613,7 @@ storage_operation_send() {
     WHERE lm.team='$(_sqlite_lit "$team")' AND lm.sender='$(_sqlite_lit "$sender")'
       AND lm.operation_key='$(_sqlite_lit "$operation_key")'
       AND lm.recipient='$(_sqlite_lit "$recipient")' AND lm.kind='$(_sqlite_lit "$kind")'
-      AND lm.wake_target='$(_sqlite_lit "$wake_target")' AND e.body='$(_sqlite_lit "$body")';"
+      AND lm.wake_target='$(_sqlite_lit "$wake_target")' AND e.body=$(_sqlite_text_expr "$body");"
   output="$(_sqlite_data_stdin "$team" "$sql")" || return 13
   if [ -z "$output" ]; then
     echo "agmsg: operation_key_conflict" >&2
@@ -611,6 +624,10 @@ storage_operation_send() {
 
 storage_operation_fetch() {
   local team="$1" recipient="$2" consumer="$3" lease_seconds="$4"
+  if [ -z "$recipient" ] || [ -z "$consumer" ]; then
+    echo "agmsg: invalid lifecycle fetch request" >&2
+    return 13
+  fi
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid lifecycle lease" >&2; return 13 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid lifecycle lease" >&2; return 13; }
   storage_init "$team" >/dev/null || return 13
@@ -701,7 +718,8 @@ storage_operation_fetch() {
 storage_operation_ack() {
   local team="$1" recipient="$2" message_id="$3" operation_key="$4"
   local consumer="$5" result="$6" cleanup_target="$7" reason="${8-}"
-  if ! _sqlite_lifecycle_result_valid "$result" || [ -z "$cleanup_target" ]; then
+  if [ -z "$recipient" ] || [ -z "$message_id" ] || [ -z "$operation_key" ] \
+      || [ -z "$consumer" ] || ! _sqlite_lifecycle_result_valid "$result" || [ -z "$cleanup_target" ]; then
     echo "agmsg: invalid lifecycle acknowledgement" >&2
     return 13
   fi
@@ -768,6 +786,7 @@ storage_operation_ack() {
 
 storage_outbox_claim() {
   local team="$1" owner="$2" lease_seconds="$3"
+  [ -n "$owner" ] || { echo "agmsg: invalid outbox owner" >&2; return 13; }
   case "$lease_seconds" in ''|*[!0-9]*) echo "agmsg: invalid outbox lease" >&2; return 13 ;; esac
   [ "$lease_seconds" -gt 0 ] || { echo "agmsg: invalid outbox lease" >&2; return 13; }
   storage_init "$team" >/dev/null || return 13
@@ -819,6 +838,7 @@ storage_outbox_claim() {
 
 storage_outbox_complete() {
   local team="$1" outbox_id="$2" owner="$3" at output event_id
+  [ -n "$outbox_id" ] && [ -n "$owner" ] || { echo runtime_error; return 13; }
   storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
   at="$(_sqlite_now)"
   event_id="$(compat_uuid7)"
@@ -843,6 +863,7 @@ storage_outbox_complete() {
 
 storage_outbox_retry() {
   local team="$1" outbox_id="$2" owner="$3" delay="$4" error="${5-}" at output event_id
+  [ -n "$outbox_id" ] && [ -n "$owner" ] && [ -n "$error" ] || { echo runtime_error; return 13; }
   case "$delay" in ''|*[!0-9]*) echo runtime_error; return 13 ;; esac
   storage_init "$team" >/dev/null || { echo runtime_error; return 13; }
   at="$(_sqlite_now)"
@@ -1203,7 +1224,7 @@ storage_import() {
   local selector="$1" file="$2" db; db="$(_sqlite_db "$selector")"
   [ -f "$file" ] || return 1
   storage_init "$selector" >/dev/null
-  local line t id team frm to body msg_id agent at operation_key sender recipient kind
+  local line t id team frm to body_hex body_expr msg_id agent at operation_key sender recipient kind
   local wake_target created_at event_type actor result reason target work_key state generation origin stall_deadline
   local status available_at lease_owner lease_expires_at attempt last_error updated_at
   local consumer expires_at read_receipt_id
@@ -1212,11 +1233,13 @@ storage_import() {
     [ -n "$line" ] || continue
     t=$(j type); id=$(j id); team=$(j team); at=$(j at)
     if [ "$t" = message_sent ]; then
-      frm=$(j from); to=$(j to); body=$(j body)
+      frm=$(j from); to=$(j to)
+      body_hex="$(sqlite3 :memory: "SELECT hex(json_extract('$(_sqlite_lit "$line")','\$.body'))" 2>/dev/null | tr -d '\r\n')"
+      body_expr="CAST(X'$body_hex' AS TEXT)"
       # Same utility as a live send, so an imported store presents the same
       # legacy view as the store it came from (#689).
       agmsg_sqlite_warm
-      printf '%s\n' "$(_sqlite_message_sent_sql "$team" "$frm" "$to" "$body" "$id" "$at")" \
+      printf '%s\n' "$(_sqlite_message_sent_sql_expr "$team" "$frm" "$to" "$body_expr" "$id" "$at")" \
         | agmsg_sqlite -bail "$db" >/dev/null 2>&1
     elif [ "$t" = message_read ]; then
       agent=$(j agent); msg_id=$(j msg_id)
