@@ -108,6 +108,10 @@ _launcher_bridge_pids() {
     [ -f "$f" ] || continue
     cat "$f" 2>/dev/null
   done
+  for f in "$RUN_DIR"/codex-bridge-lease.*; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "${f##*.}"
+  done
 }
 
 # A test's own kill/wait sequence reaches the dispatcher and the short-lived
@@ -146,6 +150,11 @@ write_request() {
   hash=$(SKILL_DIR="$TEST_SKILL_DIR" bash -c \
     'source "$1/lib/hash.sh"; printf "%s" "$2" | agmsg_sha1' _ "$SCRIPTS" "$PROJ")
   printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
+}
+
+write_scoped_request() {
+  local key="$1" thread="$2" url="$3"
+  printf 'codex\t%s\t%s\n' "$thread" "$url" > "$RUN_DIR/codex-bridge-request.$key"
 }
 
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
@@ -305,6 +314,141 @@ run_launcher() {
   grep -q -- $'--pair team\talice --thread thread-alice' "$CAPTURE"
   grep -q -- $'--pair team\tbob --thread thread-bob' "$CAPTURE"
   ! grep -q -- $'--pair team\talice --thread thread-bob' "$CAPTURE"
+}
+
+@test "launcher: two scoped servers route distinct roles to exact app servers" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-A "$PROJ" codex
+  put_record team bob thread-B "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local key_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local key_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local url_a=ws://127.0.0.1:1111 url_b=ws://127.0.0.1:2222
+  local server_a server_b launcher_a launcher_b
+  sleep 30 3>&- & server_a=$!
+  sleep 30 3>&- & server_b=$!
+  printf '%s' "$server_a" > "$RUN_DIR/codex-app-server.$key_a.pid"
+  printf '%s' "$server_b" > "$RUN_DIR/codex-app-server.$key_b.pid"
+  write_scoped_request "$key_a" thread-A "$url_a"
+  write_scoped_request "$key_b" thread-B "$url_b"
+
+  AGMSG_CODEX_APP_SERVER_KEY="$key_a" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_a" "$server_a" >/dev/null 2>&1 3>&- &
+  launcher_a=$!
+  AGMSG_CODEX_APP_SERVER_KEY="$key_b" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_b" "$server_b" >/dev/null 2>&1 3>&- &
+  launcher_b=$!
+
+  wait_for_file_contains "$CAPTURE" 'thread-A'
+  wait_for_file_contains "$CAPTURE" 'thread-B'
+  grep -Fq -- $'--pair team\talice --thread thread-A --app-server ws://127.0.0.1:1111' "$CAPTURE"
+  grep -Fq -- $'--pair team\tbob --thread thread-B --app-server ws://127.0.0.1:2222' "$CAPTURE"
+  refute grep -Fq -- $'--pair team\talice --thread thread-A --app-server ws://127.0.0.1:2222' "$CAPTURE"
+  refute grep -Fq -- $'--pair team\tbob --thread thread-B --app-server ws://127.0.0.1:1111' "$CAPTURE"
+  kill -0 "$launcher_a"
+  kill -0 "$launcher_b"
+
+  kill "$server_a" "$server_b" 2>/dev/null || true
+  wait "$server_a" 2>/dev/null || true
+  wait "$server_b" 2>/dev/null || true
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+}
+
+@test "launcher: scope exit leaves peer delivery alive" {
+  bash "$SCRIPTS/join.sh" team bob codex "$PROJ" >/dev/null
+  put_record team alice thread-A "$PROJ" codex
+  put_record team bob thread-B "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local key_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local key_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local url_a=ws://127.0.0.1:1111 url_b=ws://127.0.0.1:2222
+  local server_a server_b launcher_a launcher_b bob_bridge
+  sleep 30 3>&- & server_a=$!
+  sleep 30 3>&- & server_b=$!
+  printf '%s' "$server_a" > "$RUN_DIR/codex-app-server.$key_a.pid"
+  printf '%s' "$server_b" > "$RUN_DIR/codex-app-server.$key_b.pid"
+  write_scoped_request "$key_a" thread-A "$url_a"
+  write_scoped_request "$key_b" thread-B "$url_b"
+
+  AGMSG_CODEX_APP_SERVER_KEY="$key_a" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_a" "$server_a" >/dev/null 2>&1 3>&- &
+  launcher_a=$!
+  AGMSG_CODEX_APP_SERVER_KEY="$key_b" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_b" "$server_b" >/dev/null 2>&1 3>&- &
+  launcher_b=$!
+  wait_for_file_contains "$CAPTURE" 'thread-A'
+  wait_for_file_contains "$CAPTURE" 'thread-B'
+  grep -Fq -- $'--pair team\talice --thread thread-A --app-server ws://127.0.0.1:1111' "$CAPTURE"
+  grep -Fq -- $'--pair team\tbob --thread thread-B --app-server ws://127.0.0.1:2222' "$CAPTURE"
+  bob_bridge="$(cat "$RUN_DIR/codex-bridge.team.bob.pid")"
+
+  kill "$server_a"
+  wait "$server_a" 2>/dev/null || true
+  wait_for_pid_exit "$launcher_a"
+  wait "$launcher_a" 2>/dev/null || true
+  kill -0 "$launcher_b"
+  kill -0 "$server_b"
+  kill -0 "$bob_bridge"
+
+  kill "$server_b" 2>/dev/null || true
+  wait "$server_b" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
+}
+
+@test "launcher: scoped role seat transfers between exact servers" {
+  put_record team alice thread-A "$PROJ" codex
+  export MOCK_BRIDGE_SLEEP=25
+  local key_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local key_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local url_a=ws://127.0.0.1:1111 url_b=ws://127.0.0.1:2222
+  local server_a server_b launcher_a launcher_b old_bridge new_bridge
+  local project_hash pair_hash lock_resource lock_owner i
+  sleep 30 3>&- & server_a=$!
+  sleep 30 3>&- & server_b=$!
+  printf '%s' "$server_a" > "$RUN_DIR/codex-app-server.$key_a.pid"
+  printf '%s' "$server_b" > "$RUN_DIR/codex-app-server.$key_b.pid"
+  write_scoped_request "$key_a" thread-A "$url_a"
+  write_scoped_request "$key_b" thread-B "$url_b"
+
+  AGMSG_CODEX_APP_SERVER_KEY="$key_a" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_a" "$server_a" >/dev/null 2>&1 3>&- &
+  launcher_a=$!
+  AGMSG_CODEX_APP_SERVER_KEY="$key_b" \
+    bash "$LAUNCHER" codex "$PROJ" "$url_b" "$server_b" >/dev/null 2>&1 3>&- &
+  launcher_b=$!
+  wait_for_file_contains "$CAPTURE" 'thread-A'
+  grep -Fq -- $'--pair team\talice --thread thread-A --app-server ws://127.0.0.1:1111' "$CAPTURE"
+  old_bridge="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  kill -0 "$old_bridge"
+
+  put_record team alice thread-B "$PROJ" codex
+  for i in {1..150}; do
+    grep -Fq -- $'--pair team\talice --thread thread-B --app-server ws://127.0.0.1:2222' "$CAPTURE" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -Fq -- $'--pair team\talice --thread thread-B --app-server ws://127.0.0.1:2222' "$CAPTURE"
+  wait_for_pid_exit "$old_bridge"
+  new_bridge="$(cat "$RUN_DIR/codex-bridge.team.alice.pid")"
+  [ "$new_bridge" != "$old_bridge" ]
+  kill -0 "$new_bridge"
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread")" = thread-B ]
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver")" = "$url_b" ]
+  [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
+
+  source "$SCRIPTS/lib/hash.sh"
+  project_hash="$(printf '%s' "$PROJ" | agmsg_sha1)"
+  pair_hash="$(printf '%s' $'team\talice' | agmsg_sha1)"
+  lock_resource="codex-child:$project_hash:$pair_hash"
+  lock_owner="$(source "$SCRIPTS/lib/storage.sh"; agmsg_runtime_lock_owner "$lock_resource")"
+  [ -n "$lock_owner" ]
+  kill -0 "$lock_owner"
+
+  kill "$server_a" "$server_b" 2>/dev/null || true
+  wait "$server_a" 2>/dev/null || true
+  wait "$server_b" 2>/dev/null || true
+  wait "$launcher_a" 2>/dev/null || true
+  wait "$launcher_b" 2>/dev/null || true
 }
 
 @test "launcher: role record update keeps child scoped to the same pair" {
