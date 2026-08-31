@@ -5,7 +5,10 @@ name: tests
 # names because a list goes quiet exactly when a new integration branch
 # appears: a PR onto an unlisted base has no required checks, so GitHub reports
 # `mergeStateStatus: CLEAN` -- "nothing to check", not "everything checked" --
-# and that reads as green in every summary view (measured 2026-08-31). The suite is
+# and the PR's summary status alone cannot tell those apart (measured
+# 2026-08-31). The detail views can: `gh pr checks`, `gh run list` and the
+# Checks tab all show zero runs. That is why the merge gate reads a run whose
+# headSha matches the head being merged, and never the PR's status. The suite is
 # fast (~2 min) and this repo is public, so GitHub-hosted runners are free —
 # running everything every time is simpler and safer than selectively running
 # "only the changed tests", which would miss regressions in shared libs

@@ -17,9 +17,10 @@ name: verify-versions
 # The filter is `integration/**`, not one branch name, because naming them one
 # at a time is a gate that goes quiet exactly when a new one appears: a PR onto
 # an unlisted base reports `mergeStateStatus: CLEAN`, which means "nothing to
-# check", not "everything checked" -- indistinguishable from a green run in
-# every summary view (measured 2026-08-31 on a PR retargeted onto a fresh
-# integration branch).
+# check", not "everything checked". The PR's summary status alone does not
+# separate those two (measured 2026-08-31 on a PR retargeted onto a fresh
+# integration branch); the detail views do, which is the reason a merge is
+# gated on a run whose headSha matches the head rather than on that status.
 on:
   push:
     branches: [main, 'integration/**']
