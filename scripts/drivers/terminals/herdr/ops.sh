@@ -12,10 +12,11 @@
 #     `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #   asserted (exact argv/JSON fields verified only by the live matrix on koit's
 #     machine, NOT measured here): the `agent list` JSON field names used to
-#     extract the pane (agent_session / pane_id), and `herdr agent prompt`'s argv
-#     for poke. These are flagged inline and in the PR body; the fixtures pin the
-#     control flow and the argv THIS driver emits, so a real-CLI mismatch is a
-#     localized one-line fix the matrix catches.
+#     extract the pane (agent_session / pane_id), `herdr agent prompt`'s argv for
+#     poke, and `herdr agent rename`'s argv for the internal name key (no existing
+#     agent-rename call in main to measure against). These are flagged inline and
+#     in the PR body; the fixtures pin the control flow and the argv THIS driver
+#     emits, so a real-CLI mismatch is a localized one-line fix the matrix catches.
 
 # control op: herdr binary present?
 terminal_check() {

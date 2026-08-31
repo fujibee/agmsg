@@ -170,22 +170,29 @@ _agmsg_terminal_detect_one() {
 # historical $TMUX-vs-HERDR_* dual system; callers record the result rather than
 # re-deciding (a nested herdr-in-tmux otherwise lies — measured 2026-08-21).
 #
+# The override is a SPAWN/NAME resolution PREFERENCE, not current-placement
+# detection: it forces which terminal a NEW spawn (or a re-name) uses. Ops on an
+# EXISTING member (despawn/peek/poke) never consult it — they read the terminal
+# from the placement record, so a shell that exported an override cannot make
+# despawn misread a herdr-placed pane as tmux (scope L96-98; tl 2026-08-31). So a
+# forced driver whose detect fails still resolves (driver + empty id): "spawn into
+# tmux" is valid even when we are not currently under tmux.
+#
 # NOTE the override env is AGMSG_TERMINAL_DRIVER, NOT AGMSG_TERMINAL: the latter
-# is already the OS-terminal COMMAND template read by the plain driver's spawn
-# (pre-axis spawn.sh), so reusing it for the driver name would collide. Flagged to
-# tl (the scope named AGMSG_TERMINAL); this is the fail-safe non-colliding name.
+# is already the OS-terminal COMMAND template read by plain's spawn (pre-axis
+# spawn.sh), so reusing it for the driver name would collide. The final override
+# surface (this vs the scope's AGMSG_TERMINAL / --terminal, which would require
+# renaming the existing template) is a tl decision, pending; this is the fail-safe
+# non-colliding name and the flag surface is not wired until that ruling.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
 agmsg_terminal_resolve() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name selfid rc
   if [ -n "$override" ]; then
-    # An override forces the terminal NAME, but only a REAL driver: a typo must
-    # fail loudly, not resolve to "<typo>\t" (which would mint an invalid record).
+    # A typo must fail loudly, not resolve to "<typo>\t" (an invalid record).
     agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
-      echo "agmsg: unknown terminal '$override' (AGMSG_TERMINAL_DRIVER / --terminal)" >&2
+      echo "agmsg: unknown terminal driver '$override' (AGMSG_TERMINAL_DRIVER)" >&2
       return 1
     }
-    # Self-id is best-effort under a forced terminal: if its detect fails, ops
-    # that need a pane error clearly rather than acting on the wrong one.
     selfid="$(_agmsg_terminal_detect_one "$override" "$sid")" || selfid=""
     printf '%s\t%s\n' "$override" "$selfid"
     return 0

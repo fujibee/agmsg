@@ -347,7 +347,7 @@ OPS
   export AGMSG_TERMINAL_DRIVER=tnux
   run agmsg_terminal_resolve "sess-x"
   [ "$status" -ne 0 ]
-  grep -q "unknown terminal 'tnux'" <<<"$output"
+  grep -q "unknown terminal driver 'tnux'" <<<"$output"
 }
 
 # --- plain: OS-terminal spawn/despawn; peek/poke/name unsupported ------------
@@ -362,15 +362,23 @@ OPS
   done
 }
 
-@test "plain: spawn runs an AGMSG_TERMINAL {cmd} template and returns '-'; despawn is a no-op ok" {
+@test "plain: spawn runs the boot THROUGH the {cmd} template, and returns '-'; despawn is a no-op ok" {
   agmsg_terminal_load plain
-  local ran="$TEST_SKILL_DIR/plain-ran"
-  local boot="$TEST_SKILL_DIR/boot"; : > "$boot"
-  export AGMSG_TERMINAL="touch $ran -- {cmd}"
+  # The fake BOOT records that IT ran — so the test proves the template actually
+  # launched the boot, not merely that the template's own side effect fired. A
+  # dropped/garbled {cmd} would leave $ran absent (red), which a "touch marker;
+  # ignore {cmd}" template would hide.
+  local ran="$TEST_SKILL_DIR/boot-ran"
+  local boot="$TEST_SKILL_DIR/boot"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$ran" > "$boot"
+  chmod +x "$boot"
+  # The template invokes {cmd} directly (a runnable path), like a real terminal
+  # would run the boot script.
+  export AGMSG_TERMINAL="{cmd}"
   run terminal_spawn alice /proj window "$boot"
   [ "$status" -eq 0 ]
   [ "$output" = "-" ]
-  [ -f "$ran" ]
+  [ -f "$ran" ]     # the boot itself ran, reached via the template
   run terminal_despawn "-"
   [ "$status" -eq 0 ]
   [ "$output" = "ok" ]
