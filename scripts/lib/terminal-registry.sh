@@ -148,7 +148,7 @@ agmsg_terminal_load() {
 # functions cannot leak into or clobber the resolver. On success prints the
 # driver's self pane id and exits 0; else non-zero (no stdout).
 _agmsg_terminal_detect_one() {
-  local name="$1" sid="${2:-}" dir
+  local name="$1" sid="${2:-}" errf="${3:-/dev/null}" dir
   dir="$(agmsg_terminal_dir "$name")" || return 1
   [ -f "$dir/ops.sh" ] || return 1
   (
@@ -159,54 +159,81 @@ _agmsg_terminal_detect_one() {
     # shellcheck disable=SC1090
     . "$dir/ops.sh" || exit 13
     declare -F terminal_detect >/dev/null 2>&1 || exit 13
-    terminal_detect "$sid"
+    # detect reports two facts: exit code = PRESENCE (are we this terminal), stdout
+    # = self-id (may be empty = "could not resolve"), stderr = the reason for an
+    # empty id. We forward the id on stdout and capture the reason to <errf>.
+    terminal_detect "$sid" 2>"$errf"
   )
 }
 
-# Resolve which terminal we are under. Prints "<terminal>\t<self-id>" and exits 0.
-# Precedence: an explicit override (AGMSG_TERMINAL_DRIVER, or arg 2) wins over
-# detection; otherwise detection runs in order herdr > tmux > plain (plain always
-# matches, so resolution never fails). This is the single answer that ends the
-# historical $TMUX-vs-HERDR_* dual system; callers record the result rather than
-# re-deciding (a nested herdr-in-tmux otherwise lies — measured 2026-08-21).
+# Detection has TWO callers with different needs (tl 2026-08-31); detect itself
+# decides nothing — these do.
 #
-# The override is a SPAWN/NAME resolution PREFERENCE, not current-placement
-# detection: it forces which terminal a NEW spawn (or a re-name) uses. Ops on an
-# EXISTING member (despawn/peek/poke) never consult it — they read the terminal
-# from the placement record, so a shell that exported an override cannot make
-# despawn misread a herdr-placed pane as tmux (scope L96-98; tl 2026-08-31). So a
-# forced driver whose detect fails still resolves (driver + empty id): "spawn into
-# tmux" is valid even when we are not currently under tmux.
-#
-# NOTE the override env is AGMSG_TERMINAL_DRIVER, NOT AGMSG_TERMINAL: the latter
-# is already the OS-terminal COMMAND template read by plain's spawn (pre-axis
-# spawn.sh). tl ruled 2026-08-31 that a new axis gets a NEW name — so the driver
-# override is AGMSG_TERMINAL_DRIVER / --terminal-driver, and the existing
-# --terminal / AGMSG_TERMINAL template surface is left unchanged. The flag
-# (--terminal-driver) is wired into spawn's argument parsing in PR2; the env works
-# now.
+# Precedence for both: an explicit override (AGMSG_TERMINAL_DRIVER, or arg 2) wins
+# over detection; else detection runs herdr > tmux > plain. This ends the historic
+# $TMUX-vs-HERDR_* dual system; callers RECORD the resolved terminal rather than
+# re-deciding later from an inherited env (a nested herdr-in-tmux lies — measured
+# 2026-08-21). The override is a SPAWN/NAME preference only: ops on an EXISTING
+# member (despawn/peek/poke) read the terminal from the placement record, never
+# the env. The override env is AGMSG_TERMINAL_DRIVER (flag --terminal-driver,
+# wired in spawn's arg parsing) — a NEW name, because --terminal / AGMSG_TERMINAL
+# are the OS-terminal command template and stay unchanged (tl 2026-08-31).
+
+# resolve-for-PLACEMENT (spawn): which terminal are we under? Prints the terminal
+# NAME, exit 0. Uses PRESENCE only — it does NOT need the caller's own pane id
+# (spawn records the id of the pane it CREATES, from terminal_spawn's result), so
+# an empty self-id never blocks placement. herdr with a live HERDR_PANE_ID but an
+# unresolvable session still places in herdr.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
-agmsg_terminal_resolve() {
-  local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name selfid rc
+agmsg_terminal_resolve_placement() {
+  local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name
   if [ -n "$override" ]; then
-    # A typo must fail loudly, not resolve to "<typo>\t" (an invalid record).
     agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
       echo "agmsg: unknown terminal driver '$override' (AGMSG_TERMINAL_DRIVER)" >&2
       return 1
     }
-    selfid="$(_agmsg_terminal_detect_one "$override" "$sid")" || selfid=""
-    printf '%s\t%s\n' "$override" "$selfid"
+    printf '%s\n' "$override"
     return 0
   fi
   for name in herdr tmux plain; do
-    selfid="$(_agmsg_terminal_detect_one "$name" "$sid")"; rc=$?
-    # A match requires exit 0 AND a non-empty id — a driver that exits 0 with no
-    # id (e.g. tmux with $TMUX set but $TMUX_PANE empty) is NOT a valid match.
-    if [ "$rc" -eq 0 ] && [ -n "$selfid" ]; then
-      printf '%s\t%s\n' "$name" "$selfid"
+    if _agmsg_terminal_detect_one "$name" "$sid" >/dev/null 2>&1; then
+      printf '%s\n' "$name"
       return 0
     fi
   done
+  return 1
+}
+
+# resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
+# and exit 0, REQUIRING a non-empty self-id. Present-but-no-id is FATAL: it prints
+# the driver's reason (why the pane could not be resolved) and returns non-zero —
+# "better to say we cannot name this pane than to name nothing." co1's fail-closed
+# (tmux with an empty $TMUX_PANE) lives here.
+#   $1 = session_id (may be empty)   $2 = optional override terminal name
+agmsg_terminal_resolve_name() {
+  local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
+  errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
+  local names="herdr tmux plain"
+  if [ -n "$override" ]; then
+    agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
+      echo "agmsg: unknown terminal driver '$override' (AGMSG_TERMINAL_DRIVER)" >&2
+      [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
+    }
+    names="$override"
+  fi
+  for name in $names; do
+    id="$(_agmsg_terminal_detect_one "$name" "$sid" "$errf")"; rc=$?
+    [ "$rc" -eq 0 ] || continue          # not this terminal — try the next
+    if [ -n "$id" ]; then
+      printf '%s\t%s\n' "$name" "$id"
+      [ "$errf" = /dev/null ] || rm -f "$errf"; return 0
+    fi
+    # Present but no id: fatal for naming — surface the reason detect gave.
+    reason="$( [ -f "$errf" ] && cat "$errf" 2>/dev/null )"
+    echo "agmsg: under terminal '$name' but cannot identify this pane to name it${reason:+: $reason}" >&2
+    [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
+  done
+  [ "$errf" = /dev/null ] || rm -f "$errf"
   return 1
 }
 

@@ -19,16 +19,21 @@ terminal_describe() {
   printf 'capabilities=spawn despawn peek poke name\n'
 }
 
-# record op: we are under tmux iff $TMUX is set AND $TMUX_PANE names our pane.
-# Both are required: $TMUX alone with an empty $TMUX_PANE cannot yield a valid
-# pane id, so it is NOT a match (returning an empty id would mint an invalid
-# 'tmux:' record). The session id arg is unused — tmux reports the pane through
-# the environment, not a lookup. A missing tmux BINARY is a terminal_check
-# concern, not a detection one (we still ARE under tmux).
+# record op: report TWO facts and decide nothing (tl 2026-08-31). PRESENCE — are
+# we under tmux — is the exit code: 0 iff $TMUX is set (we ARE in tmux, whether or
+# not we can name our own pane). SELF-ID is stdout: $TMUX_PANE, which may be EMPTY
+# — that is the third value "could not resolve", NOT "not tmux"; the reason goes
+# to stderr so a caller that needs the id (resolve-for-name) can report WHY. A
+# caller that only needs the terminal (resolve-for-placement) uses the exit code
+# and ignores the id. A missing tmux BINARY is a terminal_check concern (we are
+# still under tmux). The session id arg is unused — tmux reports via the env.
 terminal_detect() {
   [ -n "${TMUX:-}" ] || return 1
-  [ -n "${TMUX_PANE:-}" ] || return 1
-  printf '%s\n' "$TMUX_PANE"
+  if [ -n "${TMUX_PANE:-}" ]; then
+    printf '%s\n' "$TMUX_PANE"
+  else
+    echo "tmux: \$TMUX_PANE is unset — cannot identify this pane" >&2
+  fi
   return 0
 }
 

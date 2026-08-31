@@ -63,11 +63,27 @@ _herdr_pane_for_session() {
 # HERDR_PANE_ID). Non-zero if not under herdr or the pane cannot be resolved.
 terminal_detect() {
   local sid="${1:-}"
+  # PRESENCE (exit code): we ARE under herdr iff HERDR_ENV=1 and herdr is on PATH
+  # — independent of whether we can resolve our OWN pane. SELF-ID (stdout): the
+  # pane from agent list, which may be EMPTY. Empty is the third value "could not
+  # resolve", NOT "not herdr" — the reason (no session id / list did not answer /
+  # answered but we are not in it) goes to stderr for resolve-for-name's error;
+  # resolve-for-placement uses only the exit code and does not need the id.
   [ "${HERDR_ENV:-}" = 1 ] || return 1
   command -v herdr >/dev/null 2>&1 || return 1
+  if [ -z "$sid" ]; then
+    echo "herdr: no session id to resolve this pane by" >&2
+    return 0
+  fi
   local pane
-  pane="$(_herdr_pane_for_session "$sid")" || return 1
-  [ -n "$pane" ] || return 1
+  pane="$(_herdr_pane_for_session "$sid")" || {
+    echo "herdr: 'agent list' did not answer — cannot resolve this pane" >&2
+    return 0
+  }
+  if [ -z "$pane" ]; then
+    echo "herdr: session '$sid' is not among the live agents — cannot resolve this pane" >&2
+    return 0
+  fi
   printf '%s\n' "$pane"
   return 0
 }
