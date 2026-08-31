@@ -432,15 +432,19 @@ post_outbox_completions() {
 }
 
 post_outbox_retries() {
-  local team="$1" outbox_id owner delay_seconds error
+  local team="$1" outbox_id owner delay_seconds error request_path
   _api_request_open || return
   _api_request_assign_token outbox_id outbox_id || return
   _api_request_assign_token owner owner || return
   _api_request_assign delay_seconds delay_seconds required integer || return
-  _api_request_assign_token error error || return
+  _api_request_assign error error optional text token || return
   _api_require_nonempty outbox_id "$outbox_id" || return
   _api_require_nonempty owner "$owner" || return
-  _api_require_nonempty error "$error" || return
+  request_path="$(agmsg_sql_readfile_path "$API_REQUEST_FILE")"
+  if [ -z "$error" ] && [ "$(agmsg_sqlite_mem "SELECT json_type(CAST(readfile('$request_path') AS TEXT),'\$.error') IS NOT NULL;")" = 1 ]; then
+    echo "agmsg: invalid_request: field 'error' must not be empty" >&2
+    return 2
+  fi
   case "$delay_seconds" in ''|*[!0-9]*) echo "agmsg: invalid_request: delay_seconds must be a non-negative integer" >&2; return 2 ;; esac
   storage_outbox_retry "$team" "$outbox_id" "$owner" "$delay_seconds" "$error"
 }

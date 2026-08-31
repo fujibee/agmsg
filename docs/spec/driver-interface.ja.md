@@ -101,6 +101,8 @@ storage_import <file>
 
 ドライバーはこれらのイベントを射影してクエリに応答する。`storage_unread` は、要求元エージェントに対応する `message_read` が存在しない `id` を持つ `message_sent` イベントを返す。
 
+これは event-log schema v1 である。forward compatibility のため、projection は認識しない event `type` と認識しない object field を無視する。export は raw event stream を出力し、v1 import は既知の record type を受け入れ、未知の record type を破棄してよい。既存 field の削除または意味変更だけが major schema version の更新を必要とする。
+
 ### 2.3 レガシー互換性（sqliteのみ）
 
 バンドル済みのsqliteドライバーは、`storage_unread` と `storage_history` について2つのソースを読み取る：

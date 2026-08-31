@@ -587,6 +587,84 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages WHERE operation_key='op-import-semantic';")" -eq 1 ]
 }
 
+@test "lifecycle contract: import rejects invalid acknowledgement results atomically" {
+  local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/invalid-ack-result.jsonl"
+  printf '%s\n' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-invalid-ack","message_id":"m-invalid-ack","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"ack-invalid","event_type":"application_ack","team":"agsuite","operation_key":"op-import-invalid-ack","message_id":"m-invalid-ack","actor":"handler","result":"not-a-result","reason":"done","target":"cleanup:bob","work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}' \
+    >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events;")" -eq 0 ]
+}
+
+@test "lifecycle contract: import rejects invalid known event shapes and references" {
+  local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/invalid-event.jsonl" record
+  local records=(
+    '{"type":"lifecycle_event","id":"event-unknown","event_type":"future_known_wrapper","team":"agsuite","operation_key":"op-invalid-event","message_id":null,"actor":"worker","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}'
+    '{"type":"lifecycle_event","id":"delivery-orphan","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-invalid-event","message_id":"m-missing","actor":"bob","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}'
+    '{"type":"lifecycle_event","id":"work-incomplete","event_type":"work_event","team":"agsuite","operation_key":"op-invalid-event","message_id":null,"actor":"worker","result":null,"reason":null,"target":null,"work_key":null,"state":"running","generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}'
+  )
+
+  for record in "${records[@]}"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    storage_init agsuite >/dev/null
+    printf '%s\n' "$record" >"$candidate"
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events;")" -eq 0 ]
+  done
+}
+
+@test "lifecycle contract: import rejects orphan processing leases atomically" {
+  local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/orphan-processing-lease.jsonl"
+  printf '%s\n' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-control","message_id":"m-control","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_processing_lease","message_id":"m-missing","consumer":"handler","expires_at":2000000000,"attempt":1,"read_receipt_id":"read-missing","updated_at":"2026-01-01T00:01:00Z"}' \
+    >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_processing_leases;")" -eq 0 ]
+}
+
+@test "lifecycle contract: import rejects an ownerless leased outbox atomically" {
+  local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/ownerless-leased-outbox.jsonl"
+  printf '%s\n' \
+    '{"type":"lifecycle_outbox","id":"outbox-orphan","team":"agsuite","operation_key":"op-import-outbox","kind":"launch","target":"launch:worker","message_id":null,"status":"leased","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":1,"last_error":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:01:00Z"}' \
+    >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
+}
+
+@test "lifecycle contract: documented optional retry error may be omitted" {
+  local claimed outbox_id
+  storage_work_register agsuite work-retry-optional op-retry-optional worker 1 origin \
+    launch:worker wake:origin 2000000000 >/dev/null
+  claimed="$(storage_outbox_claim agsuite notifier 30)"
+  outbox_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$claimed" | sed "s/'/''/g")','$.id');")"
+
+  run storage_outbox_retry agsuite "$outbox_id" notifier 1
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT status FROM lifecycle_outbox WHERE id='$outbox_id';")" = pending ]
+
+  sqlite3 "$TEST_SKILL_DIR/db/messages.db" "UPDATE lifecycle_outbox SET available_at=0 WHERE id='$outbox_id';"
+  storage_outbox_claim agsuite api-notifier 30 >/dev/null
+  run --separate-stderr bash -c 'printf "%s\n" "{\"outbox_id\":\"'$outbox_id'\",\"owner\":\"api-notifier\",\"delay_seconds\":1}" | "$SKILL_DIR/scripts/api.sh" post teams agsuite outbox-retries'
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+}
+
 @test "lifecycle contract: fetch observes processing expiry before redelivery" {
   storage_operation_send agsuite alice bob action op-fetch-expiry wake:bob "retry" >/dev/null
   storage_operation_fetch agsuite bob first-consumer 900 >/dev/null
