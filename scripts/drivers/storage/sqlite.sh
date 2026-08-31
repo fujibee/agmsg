@@ -496,12 +496,12 @@ _sqlite_lifecycle_event_valid() {
   case "$event_type" in
     delivery_receipt)
       _sqlite_lifecycle_token_valid "$message_id" && _sqlite_lifecycle_token_valid "$actor" \
-        && [ -z "$result$target$work_key$state$generation$origin$wake_target$stall_deadline" ]
+        && [ -z "$result$reason$target$work_key$state$generation$origin$wake_target$stall_deadline" ]
       ;;
     read_receipt)
       _sqlite_lifecycle_token_valid "$message_id" && _sqlite_lifecycle_token_valid "$actor" \
         && _sqlite_lifecycle_kind_valid "$result" \
-        && [ -z "$target$work_key$state$generation$origin$wake_target$stall_deadline" ]
+        && [ -z "$reason$target$work_key$state$generation$origin$wake_target$stall_deadline" ]
       ;;
     application_ack)
       _sqlite_lifecycle_token_valid "$message_id" && _sqlite_lifecycle_token_valid "$actor" \
@@ -643,7 +643,11 @@ storage_work_event() {
          AND NOT EXISTS(SELECT 1 FROM lifecycle_events newer
            WHERE newer.type='work_event' AND newer.team=registration.team
              AND newer.work_key=registration.work_key AND newer.state='registered'
-             AND newer.seq>registration.seq));
+             AND newer.seq>registration.seq))
+       AND NOT EXISTS(SELECT 1 FROM lifecycle_events finished
+         WHERE finished.type='work_event' AND finished.team='$(_sqlite_lit "$team")'
+           AND finished.work_key='$(_sqlite_lit "$work_key")' AND finished.generation=$generation
+           AND finished.state IN ('terminal','closed','attention','error'));
     COMMIT;
     SELECT json_object('type','work_event','id',id,'team',team,
       'operation_key',operation_key,'work_key',work_key,'actor',actor,
@@ -1116,6 +1120,7 @@ storage_lifecycle_active() {
           'operation_key',lm.operation_key,'kind',lm.kind,'recipient',lm.recipient,
           'consumer',p.consumer,'processing_expires_at',p.expires_at,
           'processing_attempt',p.attempt,'read_receipt_id',p.read_receipt_id,
+          'ack_result',a.result,'reason',a.reason,
           'state',CASE
             WHEN a.result IN ('rejected','failed') THEN 'attention'
             WHEN a.result='applied' THEN 'cleanup_pending'
@@ -1474,14 +1479,36 @@ storage_import() {
       frm=$(j from); to=$(j to)
       body_hex="$(sqlite3 :memory: "SELECT hex(json_extract('$(_sqlite_lit "$line")','\$.body'))" 2>/dev/null | tr -d '\r\n')"
       body_expr="CAST(X'$body_hex' AS TEXT)"
-      # Same utility as a live send, so an imported store presents the same
-      # legacy view as the store it came from (#689).
-      _sqlite_message_sent_statements_expr "$team" "$frm" "$to" "$body_expr" "$id" "$at" >> "$sql_file"
+      # Exact replay is a no-op, while an existing UUID with different content
+      # is a visible conflict. Insert both legacy projections only when this is
+      # the first copy so their legacy_id correspondence remains one-to-one.
+      printf '%s\n' "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM events WHERE id='$(_sqlite_lit "$id")')
+          OR EXISTS(SELECT 1 FROM events WHERE type='message_sent' AND id='$(_sqlite_lit "$id")'
+            AND team='$(_sqlite_lit "$team")' AND from_agent='$(_sqlite_lit "$frm")'
+            AND to_agent='$(_sqlite_lit "$to")' AND hex(body)='$body_hex' AND at='$(_sqlite_lit "$at")')
+        THEN 1 ELSE json('agmsg import conflict') END;
+        INSERT INTO messages (team,from_agent,to_agent,body,created_at)
+          SELECT '$(_sqlite_lit "$team")','$(_sqlite_lit "$frm")','$(_sqlite_lit "$to")',$body_expr,'$(_sqlite_lit "$at")'
+           WHERE NOT EXISTS(SELECT 1 FROM events WHERE type='message_sent' AND id='$(_sqlite_lit "$id")'
+             AND team='$(_sqlite_lit "$team")' AND from_agent='$(_sqlite_lit "$frm")'
+             AND to_agent='$(_sqlite_lit "$to")' AND hex(body)='$body_hex' AND at='$(_sqlite_lit "$at")');
+        INSERT INTO events (type,id,team,from_agent,to_agent,body,at,legacy_id)
+          SELECT 'message_sent','$(_sqlite_lit "$id")','$(_sqlite_lit "$team")',
+                 '$(_sqlite_lit "$frm")','$(_sqlite_lit "$to")',$body_expr,'$(_sqlite_lit "$at")',last_insert_rowid()
+           WHERE changes()=1;" >> "$sql_file"
     elif [ "$t" = message_read ]; then
       agent=$(j agent); msg_id=$(j msg_id)
-      printf '%s\n' "INSERT INTO events (type,id,team,agent,msg_id,at)
-        VALUES ('message_read','$(_sqlite_lit "$id")','$(_sqlite_lit "$team")',
-                '$(_sqlite_lit "$agent")','$(_sqlite_lit "$msg_id")','$(_sqlite_lit "$at")');
+      printf '%s\n' "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM events WHERE id='$(_sqlite_lit "$id")')
+          OR EXISTS(SELECT 1 FROM events WHERE type='message_read' AND id='$(_sqlite_lit "$id")'
+            AND team='$(_sqlite_lit "$team")' AND agent='$(_sqlite_lit "$agent")'
+            AND msg_id='$(_sqlite_lit "$msg_id")' AND at='$(_sqlite_lit "$at")')
+        THEN 1 ELSE json('agmsg import conflict') END;
+        INSERT INTO events (type,id,team,agent,msg_id,at)
+          SELECT 'message_read','$(_sqlite_lit "$id")','$(_sqlite_lit "$team")',
+                 '$(_sqlite_lit "$agent")','$(_sqlite_lit "$msg_id")','$(_sqlite_lit "$at")'
+           WHERE NOT EXISTS(SELECT 1 FROM events WHERE type='message_read' AND id='$(_sqlite_lit "$id")'
+             AND team='$(_sqlite_lit "$team")' AND agent='$(_sqlite_lit "$agent")'
+             AND msg_id='$(_sqlite_lit "$msg_id")' AND at='$(_sqlite_lit "$at")');
         UPDATE messages SET read_at='$(_sqlite_lit "$at")'
          WHERE read_at IS NULL
            AND id = (SELECT e.legacy_id FROM events e
@@ -1685,7 +1712,61 @@ storage_import() {
           THEN 1 ELSE json('agmsg import conflict') END;" >> "$sql_file"
     fi
   done < "$file"
-  printf '%s\n' 'COMMIT;' >> "$sql_file"
+  # Validate the completed graph after every record has been staged. Export
+  # order is not an integrity contract, so cross-record invariants belong here
+  # rather than in the per-line parser.
+  printf '%s\n' "SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events le
+      LEFT JOIN lifecycle_messages lm ON lm.message_id=le.message_id
+        AND lm.team=le.team AND lm.operation_key=le.operation_key
+      WHERE le.type='delivery_receipt'
+        AND (lm.message_id IS NULL OR le.actor!=lm.recipient OR le.result IS NOT NULL
+          OR le.reason IS NOT NULL OR le.target IS NOT NULL))
+    THEN 1 ELSE json('agmsg import invalid delivery receipt') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events le
+      LEFT JOIN lifecycle_messages lm ON lm.message_id=le.message_id
+        AND lm.team=le.team AND lm.operation_key=le.operation_key
+      WHERE le.type='read_receipt'
+        AND (lm.message_id IS NULL OR le.result!=lm.kind OR le.reason IS NOT NULL OR le.target IS NOT NULL))
+    THEN 1 ELSE json('agmsg import invalid read receipt') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events ack
+      LEFT JOIN lifecycle_messages lm ON lm.message_id=ack.message_id
+        AND lm.team=ack.team AND lm.operation_key=ack.operation_key
+      WHERE ack.type='application_ack'
+        AND (lm.message_id IS NULL OR lm.kind='info' OR NOT EXISTS(
+          SELECT 1 FROM lifecycle_events rr WHERE rr.type='read_receipt'
+            AND rr.message_id=ack.message_id AND rr.team=ack.team
+            AND rr.operation_key=ack.operation_key AND rr.actor=ack.actor
+            AND rr.result=lm.kind)))
+    THEN 1 ELSE json('agmsg import invalid application acknowledgement') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_outbox o
+      LEFT JOIN lifecycle_messages lm ON lm.message_id=o.message_id
+        AND lm.team=o.team AND lm.operation_key=o.operation_key
+      WHERE (o.kind='wake' AND (lm.message_id IS NULL OR o.target!=lm.wake_target))
+         OR (o.kind='cleanup' AND (lm.message_id IS NULL OR NOT EXISTS(
+           SELECT 1 FROM lifecycle_events ack WHERE ack.type='application_ack'
+             AND ack.message_id=o.message_id AND ack.team=o.team
+             AND ack.operation_key=o.operation_key AND ack.target=o.target))))
+    THEN 1 ELSE json('agmsg import invalid lifecycle outbox') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events le
+      WHERE le.type IN ('outbox_pending','outbox_sent','outbox_error')
+        AND NOT EXISTS(SELECT 1 FROM lifecycle_outbox o
+          WHERE o.team=le.team AND o.operation_key=le.operation_key AND o.kind=le.result
+            AND COALESCE(o.message_id,'')=COALESCE(le.message_id,'')))
+    THEN 1 ELSE json('agmsg import orphan outbox event') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events finished
+      JOIN lifecycle_events reopened ON reopened.type='work_event'
+        AND reopened.team=finished.team AND reopened.work_key=finished.work_key
+        AND reopened.generation=finished.generation AND reopened.seq>finished.seq
+      WHERE finished.type='work_event'
+        AND finished.state IN ('terminal','closed','attention','error'))
+    THEN 1 ELSE json('agmsg import reopened terminal work') END;
+    COMMIT;" >> "$sql_file"
   agmsg_sqlite_warm
   if ! agmsg_sqlite -bail -batch "$db" < "$sql_file" >/dev/null 2>&1; then
     rm -f "$sql_file"

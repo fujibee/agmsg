@@ -37,7 +37,9 @@ and launch, and outbox ownership transitions use the same rule. Processing
 leases are renewable only by their current consumer while unexpired.
 Registration is the only way to create a `registered` work event and its launch
 outbox. Later work events carry the current registration generation; stale
-generations fail rather than being projected onto newer work. Public history
+generations fail rather than being projected onto newer work. Terminal work
+states seal their generation and cannot be reopened by a delayed transition.
+Public history
 includes current processing leases and outbox rows, including ownership,
 expiry, attempt, and error state, so recovery does not require private-table
 access.
@@ -47,7 +49,10 @@ exports legacy v1 events and lifecycle messages, events, outboxes, and processin
 leases for every team in the physical store. Import validates known lifecycle
 records and applies the complete input atomically. Exact duplicates are
 idempotent; semantic, identity, or graph-reference conflicts fail instead of
-being ignored. Every record shape produced by the SQLite writer is valid input
+being ignored. Graph references are checked after the complete input has been
+staged, so record order cannot bypass receipt, ACK, outbox, or control-event
+invariants. Exact replay also leaves the legacy message projection unchanged.
+Every record shape produced by the SQLite writer is valid input
 to the same version's importer, including multiline diagnostic text.
 
 ## Alternatives considered

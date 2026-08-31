@@ -764,6 +764,97 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   not_contains "$output" '"actor":"old-worker"'
 }
 
+@test "lifecycle contract: exact whole-store import replay is idempotent for legacy messages" {
+  local exported="$BATS_TEST_TMPDIR/exact-replay.jsonl" db="$TEST_SKILL_DIR/db/messages.db" legacy_id
+  storage_operation_send agsuite alice bob action op-exact-replay wake:bob body >/dev/null
+  legacy_id="$(storage_send otherteam carol dave legacy-body)"
+  storage_mark_read_batch otherteam dave "$legacy_id"
+  storage_export agsuite "$exported"
+  rm -f "$db" "$db-wal" "$db-shm"
+  storage_import agsuite "$exported"
+  storage_import agsuite "$exported"
+
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_sent' AND id IN (SELECT message_id FROM lifecycle_messages WHERE operation_key='op-exact-replay');")" -eq 1 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE body='body';")" -eq 1 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_sent' AND id='$legacy_id';")" -eq 1 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM events WHERE type='message_read' AND team='otherteam' AND msg_id='$legacy_id';")" -eq 1 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM messages WHERE body='legacy-body';")" -eq 1 ]
+}
+
+@test "lifecycle contract: import rejects events that contradict lifecycle message semantics" {
+  local candidate="$BATS_TEST_TMPDIR/contradictory-events.jsonl" db="$TEST_SKILL_DIR/db/messages.db"
+  local records=(
+    '{"type":"lifecycle_event","id":"ack-info","event_type":"application_ack","team":"agsuite","operation_key":"op-semantic","message_id":"m-semantic","actor":"handler","result":"applied","reason":"impossible","target":"cleanup:bob","work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}'
+    '{"type":"lifecycle_event","id":"delivery-wrong","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-semantic","message_id":"m-semantic","actor":"mallory","result":null,"reason":"writer-never-emits","target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}'
+    '{"type":"lifecycle_event","id":"read-wrong","event_type":"read_receipt","team":"agsuite","operation_key":"op-semantic","message_id":"m-semantic","actor":"bob","result":"action","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}'
+  )
+  local record kind
+  for record in "${records[@]}"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    storage_init agsuite >/dev/null
+    kind=info
+    [[ "$record" == *'read-wrong'* ]] && kind=terminal
+    printf '%s\n' \
+      '{"type":"message_sent","id":"m-semantic","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+      "{\"type\":\"lifecycle_message\",\"team\":\"agsuite\",\"sender\":\"alice\",\"operation_key\":\"op-semantic\",\"message_id\":\"m-semantic\",\"recipient\":\"bob\",\"kind\":\"$kind\",\"wake_target\":\"wake:bob\",\"created_at\":\"2026-01-01T00:00:00Z\"}" \
+      "$record" >"$candidate"
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events;")" -eq 0 ]
+  done
+}
+
+@test "lifecycle contract: import rejects incomplete outbox graphs" {
+  local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/incomplete-outbox.jsonl"
+  local records=(
+    '{"type":"lifecycle_outbox","id":"cleanup-no-ack","team":"agsuite","operation_key":"op-outbox-graph","kind":"cleanup","target":"cleanup:bob","message_id":"m-outbox-graph","status":"pending","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:01:00Z","updated_at":"2026-01-01T00:01:00Z"}'
+    '{"type":"lifecycle_outbox","id":"wake-wrong","team":"agsuite","operation_key":"op-outbox-graph","kind":"wake","target":"wake:mallory","message_id":"m-outbox-graph","status":"pending","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:01:00Z","updated_at":"2026-01-01T00:01:00Z"}'
+    '{"type":"lifecycle_event","id":"missing-outbox","event_type":"outbox_pending","team":"agsuite","operation_key":"op-outbox-graph","message_id":"m-outbox-graph","actor":"wake:bob","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}'
+  )
+  local record
+  for record in "${records[@]}"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    storage_init agsuite >/dev/null
+    printf '%s\n' \
+      '{"type":"message_sent","id":"m-outbox-graph","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+      '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-outbox-graph","message_id":"m-outbox-graph","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+      "$record" >"$candidate"
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events;")" -eq 0 ]
+  done
+}
+
+@test "lifecycle contract: a terminal work state cannot reopen within its generation" {
+  storage_work_register agsuite work-terminal reg-terminal origin 1 origin launch:worker wake:origin 2000000000 >/dev/null
+  storage_work_event agsuite work-terminal close-terminal worker 1 closed success done >/dev/null
+
+  run --separate-stderr storage_work_event agsuite work-terminal reopen-terminal worker 1 running "" late
+  [ "$status" -eq 13 ]
+  run storage_lifecycle_active agsuite
+  not_contains "$output" '"work_key":"work-terminal"'
+}
+
+@test "lifecycle contract: active attention exposes acknowledgement result and reason" {
+  local sent message_id cleanup cleanup_id
+  sent="$(storage_operation_send agsuite alice bob action op-attention wake:bob body)"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+  storage_operation_fetch agsuite bob handler 900 >/dev/null
+  storage_operation_ack agsuite bob "$message_id" op-attention handler failed cleanup:bob denied >/dev/null
+  cleanup="$(storage_outbox_claim agsuite notifier 30)"
+  cleanup_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$cleanup" | sed "s/'/''/g")','$.id');")"
+  storage_outbox_complete agsuite "$cleanup_id" notifier >/dev/null
+
+  run storage_lifecycle_active agsuite bob
+  [ "$status" -eq 0 ]
+  contains "$output" '"state":"attention"'
+  contains "$output" '"ack_result":"failed"'
+  contains "$output" '"reason":"denied"'
+}
+
 @test "lifecycle contract: public queries expose current processing and outbox leases" {
   local sent claimed
   sent="$(storage_operation_send agsuite alice bob action op-query-leases wake:bob body)"

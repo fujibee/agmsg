@@ -174,7 +174,7 @@ application ACK は `applied`、`rejected`、`failed` のいずれかを記録�
 すべての ACK は同じ transaction で runtime cleanup outbox を作る。cleanup 後、`applied` は active item を閉じ、`rejected|failed` は runtime residue を除去しつつ attention/error を残す。
 outbox control frame は durable state transition であり、control frame 自体には ACK を要求しない。
 この制約により、wake と cleanup の再帰を防ぐ。
-work registration は registration event と launch outbox を一つの transaction で commit する。`registered` は `storage_work_event` から書けない。新しい registration generation は直前より大きく、後続の work event は現在の generation を持つ。stale generation は明示的に失敗する。active projection は registration の generation、origin、wake target、stall deadline を保持する。
+work registration は registration event と launch outbox を一つの transaction で commit する。`registered` は `storage_work_event` から書けない。新しい registration generation は直前より大きく、後続の work event は現在の generation を持つ。stale generation は明示的に失敗する。`terminal`、`closed`、`attention`、`error` はその generation を封鎖し、後続 event で再開できない。より大きい registration generation は新しい work を開始できる。active projection は registration の generation、origin、wake target、stall deadline を保持する。
 history query と active query は receipt、lease、ACK、outbox、error、work state を公開し、呼び出し側に driver-private storage を読ませない。
 
 API facade は、この関数群を `GET teams <team> capabilities|lifecycle|active` と `POST teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries` に対応づける。
@@ -196,13 +196,13 @@ lifecycle-v1 API object は次のとおり固定する。角括弧の field は�
 | `POST outbox-completions` | `outbox_id`, `owner` | control status `ok` |
 | `POST outbox-retries` | `outbox_id`, `owner`, `delay_seconds`, [`error`] | control status `ok`。省略は可能だが、明示した空の `error` は不正 |
 
-`GET lifecycle` は `message_sent`、lifecycle event、`outbox`、現在の `processing_lease` を JSONL で返す。outbox record は `status`, `lease_owner`, `lease_expires_at`, `attempt`, `last_error` を含み、processing lease record は `consumer`, `expires_at`, `attempt`, `read_receipt_id` を含む。`GET active` は bounded な `lifecycle_active`, `work_active`, `delivery_error` projection を返し、processing 中の active message は現在の consumer、expiry、attempt、read receipt id を含む。
+`GET lifecycle` は `message_sent`、lifecycle event、`outbox`、現在の `processing_lease` を JSONL で返す。outbox record は `status`, `lease_owner`, `lease_expires_at`, `attempt`, `last_error` を含み、processing lease record は `consumer`, `expires_at`, `attempt`, `read_receipt_id` を含む。`GET active` は bounded な `lifecycle_active`, `work_active`, `delivery_error` projection を返し、processing 中の active message は現在の consumer、expiry、attempt、read receipt id を含む。attention message は application ACK の `ack_result` と `reason` を含む。
 
 lifecycle table は SQLite への additive migration である。
 既存の message、unread、history、cursor、export、import は legacy client から引き続き利用できる。
 SQLite export は whole-store backup/convert operation である。
 選択された physical store から、legacy v1 event と全 team の lifecycle message、event、outbox、processing lease を出力する。
-import は完全一致する duplicate を受け入れるが、意味的に不正な既知 lifecycle record と既存 record に競合する入力を拒否し、file 全体を一つの transaction で適用する。
+import は完全一致する duplicate を受け入れるが、意味的に不正な既知 lifecycle record と既存 record に競合する入力を拒否する。全入力を適用した状態で receipt、ACK、outbox、control event の参照整合を検証し、file 全体を一つの transaction で適用する。完全一致する再適用は event log と legacy message projection の双方で no-op となる。
 未知の event-log record type には、§2.2 の forward compatibility 規則を適用する。
 
 ## 3. CLIマッピング

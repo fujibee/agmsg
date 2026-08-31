@@ -429,7 +429,10 @@ transitions and never require an ACK themselves, so wake and cleanup cannot
 recurse. Work registration commits the registration event and launch outbox
 atomically. `registered` cannot be written through `storage_work_event`; every
 new registration generation is greater than its predecessor, every later work
-event carries the current generation, and stale generations fail visibly.
+event carries the current generation, and stale generations fail visibly. A
+`terminal`, `closed`, `attention`, or `error` event seals that generation;
+later events cannot reopen it, though a greater registration generation can
+start new work.
 Active work retains the registration's generation,
 origin, wake target, and stall deadline.
 History and active queries expose receipt, lease, ACK, outbox, error, and work
@@ -463,7 +466,8 @@ current `processing_lease` records. Outbox records include `status`,
 records include `consumer`, `expires_at`, `attempt`, and `read_receipt_id`.
 `GET active` returns bounded `lifecycle_active`, `work_active`, and
 `delivery_error` projections; an active processing message includes its current
-consumer, expiry, attempt, and read-receipt id.
+consumer, expiry, attempt, and read-receipt id. An attention message includes
+the application ACK's `ack_result` and `reason`.
 
 Lifecycle tables are an additive SQLite migration. Existing message, unread,
 history, cursor, export, and import behavior remains available to legacy
@@ -471,7 +475,9 @@ clients. SQLite export is a whole-store backup/convert operation: it emits
 legacy v1 events and every team's lifecycle messages, events, outboxes, and
 processing leases from the selected physical store. Import accepts exact
 duplicates, rejects semantically invalid or conflicting known lifecycle records,
-and applies the complete file atomically. Unknown event-log record types retain
+validates receipt/ACK/outbox/control-event references across the completed input,
+and applies the complete file atomically. Exact replay is a no-op for both the
+event log and its legacy message projection. Unknown event-log record types retain
 the forward-compatibility behavior from §2.3.
 
 ## 3. CLI mapping
