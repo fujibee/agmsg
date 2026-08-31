@@ -202,7 +202,7 @@ lifecycle table は SQLite への additive migration である。
 既存の message、unread、history、cursor、export、import は legacy client から引き続き利用できる。
 SQLite export は whole-store backup/convert operation である。
 選択された physical store から、legacy v1 event と全 team の lifecycle message、event、outbox、processing lease を出力する。
-import は完全一致する duplicate を受け入れるが、意味的に不正な既知 lifecycle record と既存 record に競合する入力を拒否する。全入力を適用した状態で receipt、ACK、outbox、control event の参照整合を検証し、atomic な send、ACK/cleanup、registration/launch の両側が存在することも確認する。control event は到達可能な outbox state と一致しなければならない。processing lease は同じ message の ACK と共存できず、attempt は対応する read receipt 数と一致する。cross-record reference は JSONL の record-type 順序に依存せず、file 全体を一つの transaction で適用する。完全一致する再適用は event log と legacy message projection の双方で no-op となる。
+import は完全一致する duplicate を受け入れるが、意味的に不正な既知 lifecycle record と既存 record に競合する入力を拒否する。全入力を適用した状態で receipt、ACK、outbox、control event の参照整合を検証し、atomic な send、ACK/cleanup、registration/launch の両側が存在することも確認する。control event は到達可能な outbox state と一致しなければならない。過去の retry/sent event は後続 transition 後も有効だが、最新 control event、attempt、current status は相互に到達可能でなければならない。outbox attempt 数は完了した sent/error control event の全件と、存在する場合は現在の in-flight lease を包含する。完了した wake には read receipt が、完了した cleanup/launch には sent control event が存在する。launch control metadata は registration と双方向に一致する。processing lease は同じ message の ACK と共存できず、attempt は対応する read receipt 数と一致する。processing lease と application ACK の actor は最新の対応 read receipt の owner でなければならず、ACK はその receipt より後に発生する。cross-record reference は JSONL の record-type 順序に依存せず、file 全体を一つの transaction で適用する。完全一致する再適用は event log と legacy message projection の双方で no-op となる。
 未知の event-log record type には、§2.2 の forward compatibility 規則を適用する。
 
 ## 3. CLIマッピング

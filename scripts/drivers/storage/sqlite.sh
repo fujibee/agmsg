@@ -1627,7 +1627,7 @@ storage_import() {
             AND target='$(_sqlite_lit "$target")' AND COALESCE(message_id,'')='$(_sqlite_lit "$msg_id")'
             AND status='$(_sqlite_lit "$status")' AND available_at='$(_sqlite_lit "$available_at")'
             AND COALESCE(lease_owner,'')='$(_sqlite_lit "$lease_owner")'
-            AND COALESCE(lease_expires_at,'')='$(_sqlite_lit "$lease_expires_at")'
+            AND COALESCE(CAST(lease_expires_at AS TEXT),'')='$(_sqlite_lit "$lease_expires_at")'
             AND attempt='$(_sqlite_lit "$attempt")' AND COALESCE(last_error,'')='$(_sqlite_lit "$last_error")'
             AND created_at='$(_sqlite_lit "$created_at")' AND updated_at='$(_sqlite_lit "$updated_at")')
           THEN 1 ELSE json('agmsg import conflict') END;" >> "$sql_file"
@@ -1701,7 +1701,11 @@ storage_import() {
           SELECT 1 FROM lifecycle_events rr WHERE rr.type='read_receipt'
             AND rr.message_id=ack.message_id AND rr.team=ack.team
             AND rr.operation_key=ack.operation_key AND rr.actor=ack.actor
-            AND rr.result=lm.kind)))
+            AND rr.result=lm.kind AND rr.seq<ack.seq
+            AND rr.seq=(SELECT MAX(latest.seq) FROM lifecycle_events latest
+              WHERE latest.type='read_receipt' AND latest.message_id=ack.message_id
+                AND latest.team=ack.team AND latest.operation_key=ack.operation_key
+                AND latest.result=lm.kind))))
     THEN 1 ELSE json('agmsg import invalid application acknowledgement') END;
     SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_events ack
@@ -1739,7 +1743,28 @@ storage_import() {
          OR (o.kind='cleanup' AND (lm.message_id IS NULL OR NOT EXISTS(
            SELECT 1 FROM lifecycle_events ack WHERE ack.type='application_ack'
              AND ack.message_id=o.message_id AND ack.team=o.team
-             AND ack.operation_key=o.operation_key AND ack.target=o.target))))
+             AND ack.operation_key=o.operation_key AND ack.target=o.target)))
+         OR (o.kind='launch' AND NOT EXISTS(
+           SELECT 1 FROM lifecycle_events registration
+            WHERE registration.type='work_event' AND registration.state='registered'
+              AND registration.team=o.team AND registration.operation_key=o.operation_key
+              AND registration.target=o.target))
+         OR (o.status='leased' AND o.attempt<=0)
+         OR (o.status='done' AND o.kind='wake' AND NOT EXISTS(
+           SELECT 1 FROM lifecycle_events read
+            WHERE read.type='read_receipt' AND read.message_id=o.message_id
+              AND read.team=o.team AND read.operation_key=o.operation_key))
+         OR (o.status='done' AND o.kind IN ('cleanup','launch') AND NOT EXISTS(
+           SELECT 1 FROM lifecycle_events sent
+            WHERE sent.type='outbox_sent' AND sent.team=o.team
+              AND sent.operation_key=o.operation_key AND sent.result=o.kind
+              AND COALESCE(sent.message_id,'')=COALESCE(o.message_id,'')))
+         OR o.attempt<(SELECT COUNT(*) FROM lifecycle_events attempted
+              WHERE attempted.type IN ('outbox_sent','outbox_error')
+                AND attempted.team=o.team AND attempted.operation_key=o.operation_key
+                AND attempted.result=o.kind
+                AND COALESCE(attempted.message_id,'')=COALESCE(o.message_id,''))
+              + CASE WHEN o.status='leased' THEN 1 ELSE 0 END)
     THEN 1 ELSE json('agmsg import invalid lifecycle outbox') END;
     SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_events le
@@ -1748,8 +1773,28 @@ storage_import() {
           WHERE o.team=le.team AND o.operation_key=le.operation_key AND o.kind=le.result
             AND COALESCE(o.message_id,'')=COALESCE(le.message_id,'')
             AND (le.type!='outbox_pending' OR le.actor=o.target)
-            AND (le.type!='outbox_sent' OR o.status='done')
-            AND (le.type!='outbox_error' OR (o.status!='done' AND le.target=o.target))))
+            AND (le.type!='outbox_error' OR le.target=o.target)
+            AND (le.type!='outbox_pending' OR le.result!='launch' OR EXISTS(
+              SELECT 1 FROM lifecycle_events registration
+               WHERE registration.type='work_event' AND registration.state='registered'
+                 AND registration.team=le.team AND registration.operation_key=le.operation_key
+                 AND registration.target=le.actor AND registration.work_key=le.work_key
+                 AND registration.generation=le.generation AND registration.origin=le.origin
+                 AND registration.wake_target=le.wake_target
+                 AND registration.stall_deadline=le.stall_deadline))
+            AND (EXISTS(SELECT 1 FROM lifecycle_events newer
+                   WHERE newer.type IN ('outbox_pending','outbox_sent','outbox_error')
+                     AND newer.team=le.team AND newer.operation_key=le.operation_key
+                     AND newer.result=le.result
+                     AND COALESCE(newer.message_id,'')=COALESCE(le.message_id,'')
+                     AND newer.seq>le.seq)
+              OR le.type='outbox_pending'
+              OR (le.type='outbox_sent' AND (o.kind='wake' OR o.status='done'))
+              OR (le.type='outbox_error' AND (o.status!='done' OR
+                (o.kind='wake' AND EXISTS(SELECT 1 FROM lifecycle_events read
+                  WHERE read.type='read_receipt' AND read.message_id=o.message_id
+                    AND read.team=o.team AND read.operation_key=o.operation_key
+                    AND read.seq>le.seq)))))))
     THEN 1 ELSE json('agmsg import orphan outbox event') END;
     SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_processing_leases p
@@ -1757,6 +1802,10 @@ storage_import() {
       LEFT JOIN lifecycle_events rr ON rr.id=p.read_receipt_id AND rr.type='read_receipt'
         AND rr.message_id=p.message_id AND rr.actor=p.consumer
         AND rr.team=lm.team AND rr.operation_key=lm.operation_key AND rr.result=lm.kind
+        AND rr.seq=(SELECT MAX(latest.seq) FROM lifecycle_events latest
+          WHERE latest.type='read_receipt' AND latest.message_id=p.message_id
+            AND latest.team=lm.team AND latest.operation_key=lm.operation_key
+            AND latest.result=lm.kind)
       WHERE lm.message_id IS NULL OR lm.kind NOT IN ('action','terminal') OR rr.id IS NULL
         OR EXISTS(SELECT 1 FROM lifecycle_events ack
              WHERE ack.type='application_ack' AND ack.message_id=p.message_id)

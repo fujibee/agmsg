@@ -54,7 +54,14 @@ staged, so record order cannot bypass receipt, ACK, outbox, or control-event
 invariants. Validation is symmetric: atomic send, ACK/cleanup, and
 registration/launch pairs cannot lose either side. Control events agree with a
 reachable outbox state, and processing leases agree with ACK absence and their
-read-receipt attempt history. Cross-record references do not depend on JSONL
+read-receipt attempt history. Processing leases and ACKs belong to the latest
+matching read-receipt owner, with ACK causally after that receipt. Historical
+retry/sent events remain valid after later transitions, while current outbox
+status and attempts must be writer-
+reachable. Completed wakes are backed by reads; completed cleanup/launch rows
+are backed by sent events, outbox attempts cover completed controls plus any
+in-flight lease, and launch metadata matches registration both ways.
+Cross-record references do not depend on JSONL
 record-type order. Exact replay also leaves the legacy message projection unchanged.
 Every record shape produced by the SQLite writer is valid input
 to the same version's importer, including multiline diagnostic text.

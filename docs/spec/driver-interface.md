@@ -479,7 +479,16 @@ validates receipt/ACK/outbox/control-event references across the completed input
 including both sides of the atomic send, ACK/cleanup, and registration/launch
 pairs. Control events must agree with reachable outbox state; a processing lease
 cannot coexist with its ACK, and its attempt equals the matching read-receipt
-count. Cross-record references are independent of JSONL record-type order, and
+count. An outbox attempt count covers every completed sent/error control event
+and the current in-flight lease, if any. A processing lease and application ACK
+must name the owner of the latest matching read receipt; the ACK follows that
+receipt causally. Historical retry/sent events remain valid after later
+transitions, while
+the latest control event, attempt count, and current status must be mutually
+reachable. A completed wake is backed by its read receipt; completed cleanup and
+launch rows are backed by a sent control event. Launch control metadata matches
+its registration in both directions. Cross-record references are independent
+of JSONL record-type order, and
 the complete file applies atomically. Exact replay is a no-op for both the
 event log and its legacy message projection. Unknown event-log record types retain
 the forward-compatibility behavior from §2.3.
