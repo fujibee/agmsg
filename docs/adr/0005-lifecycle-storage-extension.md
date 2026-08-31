@@ -51,7 +51,11 @@ records and applies the complete input atomically. Exact duplicates are
 idempotent; semantic, identity, or graph-reference conflicts fail instead of
 being ignored. Graph references are checked after the complete input has been
 staged, so record order cannot bypass receipt, ACK, outbox, or control-event
-invariants. Exact replay also leaves the legacy message projection unchanged.
+invariants. Validation is symmetric: atomic send, ACK/cleanup, and
+registration/launch pairs cannot lose either side. Control events agree with a
+reachable outbox state, and processing leases agree with ACK absence and their
+read-receipt attempt history. Cross-record references do not depend on JSONL
+record-type order. Exact replay also leaves the legacy message projection unchanged.
 Every record shape produced by the SQLite writer is valid input
 to the same version's importer, including multiline diagnostic text.
 

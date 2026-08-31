@@ -476,7 +476,11 @@ legacy v1 events and every team's lifecycle messages, events, outboxes, and
 processing leases from the selected physical store. Import accepts exact
 duplicates, rejects semantically invalid or conflicting known lifecycle records,
 validates receipt/ACK/outbox/control-event references across the completed input,
-and applies the complete file atomically. Exact replay is a no-op for both the
+including both sides of the atomic send, ACK/cleanup, and registration/launch
+pairs. Control events must agree with reachable outbox state; a processing lease
+cannot coexist with its ACK, and its attempt equals the matching read-receipt
+count. Cross-record references are independent of JSONL record-type order, and
+the complete file applies atomically. Exact replay is a no-op for both the
 event log and its legacy message projection. Unknown event-log record types retain
 the forward-compatibility behavior from §2.3.
 

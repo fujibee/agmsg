@@ -575,12 +575,16 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 @test "lifecycle contract: known lifecycle import rejects semantic and conflicting records atomically" {
   local db="$TEST_SKILL_DIR/db/messages.db" invalid="$BATS_TEST_TMPDIR/invalid-kind.jsonl"
   local conflict="$BATS_TEST_TMPDIR/conflict.jsonl" duplicate="$BATS_TEST_TMPDIR/duplicate.jsonl" record message_one message_two
+  local delivery wake pending
   record='{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-semantic","message_id":"m-one","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}'
   message_one='{"type":"message_sent","id":"m-one","team":"agsuite","from":"alice","to":"bob","body":"one","at":"2026-01-01T00:00:00Z"}'
   message_two='{"type":"message_sent","id":"m-two","team":"agsuite","from":"alice","to":"bob","body":"two","at":"2026-01-01T00:00:00Z"}'
+  delivery='{"type":"lifecycle_event","id":"delivery-one","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-import-semantic","message_id":"m-one","actor":"bob","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}'
+  wake='{"type":"lifecycle_outbox","id":"wake-one","team":"agsuite","operation_key":"op-import-semantic","kind":"wake","target":"wake:bob","message_id":"m-one","status":"pending","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}'
+  pending='{"type":"lifecycle_event","id":"wake-one","event_type":"outbox_pending","team":"agsuite","operation_key":"op-import-semantic","message_id":"m-one","actor":"wake:bob","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}'
   printf '%s\n' "${record/\"kind\":\"action\"/\"kind\":\"not-a-kind\"}" >"$invalid"
   printf '%s\n%s\n%s\n%s\n' "$message_one" "$message_two" "$record" "${record/\"message_id\":\"m-one\"/\"message_id\":\"m-two\"}" >"$conflict"
-  printf '%s\n%s\n%s\n' "$message_one" "$record" "$record" >"$duplicate"
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$message_one" "$record" "$delivery" "$wake" "$pending" "$record" >"$duplicate"
 
   local candidate
   for candidate in "$invalid" "$conflict"; do
@@ -853,6 +857,107 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   contains "$output" '"state":"attention"'
   contains "$output" '"ack_result":"failed"'
   contains "$output" '"reason":"denied"'
+}
+
+@test "lifecycle contract: complete lifecycle graphs import independently of record order" {
+  local candidate="$BATS_TEST_TMPDIR/reordered-graph.jsonl"
+  printf '%s\n' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-reordered","message_id":"m-reordered","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"delivery-reordered","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-reordered","message_id":"m-reordered","actor":"bob","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"wake-reordered","event_type":"outbox_pending","team":"agsuite","operation_key":"op-reordered","message_id":"m-reordered","actor":"wake:bob","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_outbox","id":"wake-reordered","team":"agsuite","operation_key":"op-reordered","kind":"wake","target":"wake:bob","message_id":"m-reordered","status":"pending","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"message_sent","id":"m-reordered","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 0 ]
+  run storage_lifecycle_history agsuite --operation-key op-reordered
+  contains "$output" '"type":"delivery_receipt"'
+}
+
+@test "lifecycle contract: import rejects incomplete logical sends" {
+  local candidate="$BATS_TEST_TMPDIR/incomplete-send.jsonl" db="$TEST_SKILL_DIR/db/messages.db"
+  printf '%s\n' \
+    '{"type":"message_sent","id":"m-incomplete-send","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-incomplete-send","message_id":"m-incomplete-send","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
+}
+
+@test "lifecycle contract: import rejects ACKs without their atomic cleanup outbox" {
+  local candidate="$BATS_TEST_TMPDIR/incomplete-ack.jsonl"
+  printf '%s\n' \
+    '{"type":"message_sent","id":"m-incomplete-ack","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-incomplete-ack","message_id":"m-incomplete-ack","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"delivery-incomplete-ack","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-incomplete-ack","message_id":"m-incomplete-ack","actor":"bob","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"read-incomplete-ack","event_type":"read_receipt","team":"agsuite","operation_key":"op-incomplete-ack","message_id":"m-incomplete-ack","actor":"handler","result":"action","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:01Z"}' \
+    '{"type":"lifecycle_event","id":"ack-incomplete-ack","event_type":"application_ack","team":"agsuite","operation_key":"op-incomplete-ack","message_id":"m-incomplete-ack","actor":"handler","result":"applied","reason":"done","target":"cleanup:bob","work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:02Z"}' \
+    '{"type":"lifecycle_outbox","id":"wake-incomplete-ack","team":"agsuite","operation_key":"op-incomplete-ack","kind":"wake","target":"wake:bob","message_id":"m-incomplete-ack","status":"done","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":1,"last_error":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"}' \
+    '{"type":"lifecycle_event","id":"wake-incomplete-ack","event_type":"outbox_pending","team":"agsuite","operation_key":"op-incomplete-ack","message_id":"m-incomplete-ack","actor":"wake:bob","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+}
+
+@test "lifecycle contract: import rejects registrations without their atomic launch outbox" {
+  local candidate="$BATS_TEST_TMPDIR/incomplete-registration.jsonl"
+  printf '%s\n' \
+    '{"type":"lifecycle_event","id":"register-incomplete","event_type":"work_event","team":"agsuite","operation_key":"op-incomplete-registration","message_id":null,"actor":"origin","result":null,"reason":null,"target":"launch:worker","work_key":"work-incomplete","state":"registered","generation":1,"origin":"origin-seat","wake_target":"wake:origin","stall_deadline":2000000000,"at":"2026-01-01T00:00:00Z"}' >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+}
+
+@test "lifecycle contract: import rejects control events that contradict outbox state" {
+  local candidate="$BATS_TEST_TMPDIR/outbox-state.jsonl" db="$TEST_SKILL_DIR/db/messages.db"
+  printf '%s\n' \
+    '{"type":"message_sent","id":"m-outbox-state","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-outbox-state","message_id":"m-outbox-state","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"delivery-outbox-state","event_type":"delivery_receipt","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"bob","result":null,"reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"read-outbox-state","event_type":"read_receipt","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"handler","result":"action","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:01Z"}' \
+    '{"type":"lifecycle_event","id":"ack-outbox-state","event_type":"application_ack","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"handler","result":"applied","reason":"done","target":"cleanup:bob","work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:02Z"}' \
+    '{"type":"lifecycle_outbox","id":"wake-outbox-state","team":"agsuite","operation_key":"op-outbox-state","kind":"wake","target":"wake:bob","message_id":"m-outbox-state","status":"done","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"}' \
+    '{"type":"lifecycle_event","id":"wake-outbox-state","event_type":"outbox_pending","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"wake:bob","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"wake-sent-outbox-state","event_type":"outbox_sent","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"notifier","result":"wake","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:01Z"}' \
+    '{"type":"lifecycle_outbox","id":"cleanup-outbox-state","team":"agsuite","operation_key":"op-outbox-state","kind":"cleanup","target":"cleanup:bob","message_id":"m-outbox-state","status":"pending","available_at":0,"lease_owner":null,"lease_expires_at":null,"attempt":0,"last_error":null,"created_at":"2026-01-01T00:00:02Z","updated_at":"2026-01-01T00:00:02Z"}' \
+    '{"type":"lifecycle_event","id":"cleanup-pending-outbox-state","event_type":"outbox_pending","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"cleanup:bob","result":"cleanup","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:02Z"}' \
+    '{"type":"lifecycle_event","id":"cleanup-sent-outbox-state","event_type":"outbox_sent","team":"agsuite","operation_key":"op-outbox-state","message_id":"m-outbox-state","actor":"notifier","result":"cleanup","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:00:03Z"}' >"$candidate"
+
+  run --separate-stderr storage_import agsuite "$candidate"
+  [ "$status" -eq 13 ]
+  contains "$stderr" 'import failed'
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
+}
+
+@test "lifecycle contract: import rejects impossible processing lease state" {
+  local db="$TEST_SKILL_DIR/db/messages.db" leased="$BATS_TEST_TMPDIR/leased.jsonl"
+  local acked="$BATS_TEST_TMPDIR/acked.jsonl" ack_with_lease="$BATS_TEST_TMPDIR/ack-with-lease.jsonl"
+  local bad_attempt="$BATS_TEST_TMPDIR/bad-attempt.jsonl" sent message_id lease_line
+  sent="$(storage_operation_send agsuite alice bob action op-lease-graph wake:bob body)"
+  message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
+  storage_operation_fetch agsuite bob handler 900 >/dev/null
+  storage_export agsuite "$leased"
+  lease_line="$(grep '"type":"lifecycle_processing_lease"' "$leased")"
+  grep -v '"type":"lifecycle_processing_lease"' "$leased" >"$bad_attempt"
+  printf '%s\n' "${lease_line/\"attempt\":1/\"attempt\":7}" >>"$bad_attempt"
+
+  storage_operation_ack agsuite bob "$message_id" op-lease-graph handler applied cleanup:bob done >/dev/null
+  storage_export agsuite "$acked"
+  cp "$acked" "$ack_with_lease"
+  printf '%s\n' "$lease_line" >>"$ack_with_lease"
+
+  local candidate
+  for candidate in "$bad_attempt" "$ack_with_lease"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_processing_leases;")" -eq 0 ]
+  done
 }
 
 @test "lifecycle contract: public queries expose current processing and outbox leases" {

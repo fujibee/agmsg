@@ -1523,13 +1523,7 @@ storage_import() {
           || ! _sqlite_lifecycle_token_valid "$wake_target" || [ -z "$created_at" ]; then
         rm -f "$sql_file"; echo "agmsg: import failed: invalid lifecycle record" >&2; return 13
       fi
-      printf '%s\n' "SELECT CASE WHEN EXISTS(
-          SELECT 1 FROM events
-           WHERE type='message_sent' AND id='$(_sqlite_lit "$msg_id")'
-             AND team='$(_sqlite_lit "$team")' AND from_agent='$(_sqlite_lit "$sender")'
-             AND to_agent='$(_sqlite_lit "$recipient")' AND at='$(_sqlite_lit "$created_at")')
-        THEN 1 ELSE json('agmsg import orphan lifecycle message') END;
-        INSERT OR IGNORE INTO lifecycle_messages
+      printf '%s\n' "INSERT OR IGNORE INTO lifecycle_messages
         (team,sender,operation_key,message_id,recipient,kind,wake_target,created_at)
         VALUES ('$(_sqlite_lit "$team")','$(_sqlite_lit "$sender")',
           '$(_sqlite_lit "$operation_key")','$(_sqlite_lit "$msg_id")',
@@ -1559,40 +1553,7 @@ storage_import() {
           "$stall_deadline" "$at"; then
         rm -f "$sql_file"; echo "agmsg: import failed: invalid lifecycle record" >&2; return 13
       fi
-      printf '%s\n' "SELECT CASE WHEN
-          '$(_sqlite_lit "$event_type")'!='work_event'
-          OR '$(_sqlite_lit "$state")'!='registered'
-          OR NOT EXISTS(SELECT 1 FROM lifecycle_events existing
-            WHERE existing.type='work_event' AND existing.team='$(_sqlite_lit "$team")'
-              AND existing.work_key='$(_sqlite_lit "$work_key")' AND existing.state='registered'
-              AND existing.generation>='$(_sqlite_lit "$generation")')
-          OR EXISTS(SELECT 1 FROM lifecycle_events existing
-            WHERE existing.id='$(_sqlite_lit "$id")' AND existing.type='work_event'
-              AND existing.team='$(_sqlite_lit "$team")' AND existing.work_key='$(_sqlite_lit "$work_key")'
-              AND existing.state='registered' AND existing.generation='$(_sqlite_lit "$generation")')
-        THEN 1 ELSE json('agmsg import nonmonotonic work generation') END;
-        SELECT CASE WHEN
-          '$(_sqlite_lit "$event_type")'!='work_event'
-          OR '$(_sqlite_lit "$state")'='registered'
-          OR EXISTS(SELECT 1 FROM lifecycle_events existing
-            WHERE existing.id='$(_sqlite_lit "$id")' AND existing.type='work_event'
-              AND existing.team='$(_sqlite_lit "$team")' AND existing.work_key='$(_sqlite_lit "$work_key")'
-              AND existing.state='$(_sqlite_lit "$state")' AND existing.generation='$(_sqlite_lit "$generation")')
-          OR EXISTS(SELECT 1 FROM lifecycle_events registration
-            WHERE registration.type='work_event' AND registration.team='$(_sqlite_lit "$team")'
-              AND registration.work_key='$(_sqlite_lit "$work_key")'
-              AND registration.state='registered' AND registration.generation='$(_sqlite_lit "$generation")'
-              AND NOT EXISTS(SELECT 1 FROM lifecycle_events newer
-                WHERE newer.type='work_event' AND newer.team=registration.team
-                  AND newer.work_key=registration.work_key AND newer.state='registered'
-                  AND newer.seq>registration.seq))
-        THEN 1 ELSE json('agmsg import stale work generation') END;
-        SELECT CASE WHEN '$(_sqlite_lit "$msg_id")'='' OR EXISTS(
-          SELECT 1 FROM lifecycle_messages
-           WHERE message_id='$(_sqlite_lit "$msg_id")' AND team='$(_sqlite_lit "$team")'
-             AND operation_key='$(_sqlite_lit "$operation_key")')
-        THEN 1 ELSE json('agmsg import orphan lifecycle event') END;
-        INSERT OR IGNORE INTO lifecycle_events
+      printf '%s\n' "INSERT OR IGNORE INTO lifecycle_events
         (id,type,team,operation_key,message_id,actor,result,reason,target,work_key,state,
          generation,origin,wake_target,stall_deadline,at)
         VALUES ('$(_sqlite_lit "$id")','$(_sqlite_lit "$event_type")',
@@ -1650,17 +1611,7 @@ storage_import() {
           fi
           ;;
       esac
-      printf '%s\n' "SELECT CASE WHEN
-          ('$(_sqlite_lit "$kind")' IN ('wake','cleanup') AND EXISTS(
-            SELECT 1 FROM lifecycle_messages
-             WHERE message_id='$(_sqlite_lit "$msg_id")' AND team='$(_sqlite_lit "$team")'
-               AND operation_key='$(_sqlite_lit "$operation_key")'))
-          OR ('$(_sqlite_lit "$kind")'='launch' AND EXISTS(
-            SELECT 1 FROM lifecycle_events
-             WHERE type='work_event' AND state='registered' AND team='$(_sqlite_lit "$team")'
-               AND operation_key='$(_sqlite_lit "$operation_key")'))
-        THEN 1 ELSE json('agmsg import orphan lifecycle outbox') END;
-        INSERT OR IGNORE INTO lifecycle_outbox
+      printf '%s\n' "INSERT OR IGNORE INTO lifecycle_outbox
         (id,team,operation_key,kind,target,message_id,status,available_at,
          lease_owner,lease_expires_at,attempt,last_error,created_at,updated_at)
         VALUES ('$(_sqlite_lit "$id")','$(_sqlite_lit "$team")',
@@ -1693,14 +1644,7 @@ storage_import() {
       if [ "$expires_at" -le 0 ] || [ "$attempt" -le 0 ]; then
         rm -f "$sql_file"; echo "agmsg: import failed: invalid lifecycle record" >&2; return 13
       fi
-      printf '%s\n' "SELECT CASE WHEN EXISTS(
-          SELECT 1 FROM lifecycle_messages lm JOIN lifecycle_events rr
-            ON rr.id='$(_sqlite_lit "$read_receipt_id")' AND rr.type='read_receipt'
-           AND rr.message_id=lm.message_id AND rr.actor='$(_sqlite_lit "$consumer")'
-           AND rr.team=lm.team AND rr.operation_key=lm.operation_key AND rr.result=lm.kind
-         WHERE lm.message_id='$(_sqlite_lit "$msg_id")' AND lm.kind IN ('action','terminal'))
-        THEN 1 ELSE json('agmsg import orphan processing lease') END;
-        INSERT OR IGNORE INTO lifecycle_processing_leases
+      printf '%s\n' "INSERT OR IGNORE INTO lifecycle_processing_leases
         (message_id,consumer,expires_at,attempt,read_receipt_id,updated_at)
         VALUES ('$(_sqlite_lit "$msg_id")','$(_sqlite_lit "$consumer")',
           '$(_sqlite_lit "$expires_at")','$(_sqlite_lit "$attempt")',
@@ -1716,6 +1660,24 @@ storage_import() {
   # order is not an integrity contract, so cross-record invariants belong here
   # rather than in the per-line parser.
   printf '%s\n' "SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_messages lm
+      WHERE NOT EXISTS(SELECT 1 FROM events e
+              WHERE e.type='message_sent' AND e.id=lm.message_id AND e.team=lm.team
+                AND e.from_agent=lm.sender AND e.to_agent=lm.recipient AND e.at=lm.created_at)
+         OR NOT EXISTS(SELECT 1 FROM lifecycle_events delivery
+              WHERE delivery.type='delivery_receipt' AND delivery.message_id=lm.message_id
+                AND delivery.team=lm.team AND delivery.operation_key=lm.operation_key
+                AND delivery.actor=lm.recipient)
+         OR NOT EXISTS(SELECT 1 FROM lifecycle_outbox wake
+              WHERE wake.kind='wake' AND wake.message_id=lm.message_id
+                AND wake.team=lm.team AND wake.operation_key=lm.operation_key
+                AND wake.target=lm.wake_target)
+         OR NOT EXISTS(SELECT 1 FROM lifecycle_events pending
+              WHERE pending.type='outbox_pending' AND pending.message_id=lm.message_id
+                AND pending.team=lm.team AND pending.operation_key=lm.operation_key
+                AND pending.result='wake' AND pending.actor=lm.wake_target))
+    THEN 1 ELSE json('agmsg import incomplete logical send') END;
+    SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_events le
       LEFT JOIN lifecycle_messages lm ON lm.message_id=le.message_id
         AND lm.team=le.team AND lm.operation_key=le.operation_key
@@ -1742,6 +1704,34 @@ storage_import() {
             AND rr.result=lm.kind)))
     THEN 1 ELSE json('agmsg import invalid application acknowledgement') END;
     SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events ack
+      WHERE ack.type='application_ack'
+        AND (NOT EXISTS(SELECT 1 FROM lifecycle_outbox cleanup
+               WHERE cleanup.kind='cleanup' AND cleanup.message_id=ack.message_id
+                 AND cleanup.team=ack.team AND cleanup.operation_key=ack.operation_key
+                 AND cleanup.target=ack.target)
+          OR NOT EXISTS(SELECT 1 FROM lifecycle_events pending
+               WHERE pending.type='outbox_pending' AND pending.message_id=ack.message_id
+                 AND pending.team=ack.team AND pending.operation_key=ack.operation_key
+                 AND pending.result='cleanup' AND pending.actor=ack.target)))
+    THEN 1 ELSE json('agmsg import incomplete acknowledgement') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events registration
+      WHERE registration.type='work_event' AND registration.state='registered'
+        AND (NOT EXISTS(SELECT 1 FROM lifecycle_outbox launch
+               WHERE launch.kind='launch' AND launch.message_id IS NULL
+                 AND launch.team=registration.team
+                 AND launch.operation_key=registration.operation_key
+                 AND launch.target=registration.target)
+          OR NOT EXISTS(SELECT 1 FROM lifecycle_events pending
+               WHERE pending.type='outbox_pending' AND pending.message_id IS NULL
+                 AND pending.team=registration.team
+                 AND pending.operation_key=registration.operation_key
+                 AND pending.result='launch' AND pending.actor=registration.target
+                 AND pending.work_key=registration.work_key
+                 AND pending.generation=registration.generation)))
+    THEN 1 ELSE json('agmsg import incomplete work registration') END;
+    SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_outbox o
       LEFT JOIN lifecycle_messages lm ON lm.message_id=o.message_id
         AND lm.team=o.team AND lm.operation_key=o.operation_key
@@ -1756,8 +1746,44 @@ storage_import() {
       WHERE le.type IN ('outbox_pending','outbox_sent','outbox_error')
         AND NOT EXISTS(SELECT 1 FROM lifecycle_outbox o
           WHERE o.team=le.team AND o.operation_key=le.operation_key AND o.kind=le.result
-            AND COALESCE(o.message_id,'')=COALESCE(le.message_id,'')))
+            AND COALESCE(o.message_id,'')=COALESCE(le.message_id,'')
+            AND (le.type!='outbox_pending' OR le.actor=o.target)
+            AND (le.type!='outbox_sent' OR o.status='done')
+            AND (le.type!='outbox_error' OR (o.status!='done' AND le.target=o.target))))
     THEN 1 ELSE json('agmsg import orphan outbox event') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_processing_leases p
+      LEFT JOIN lifecycle_messages lm ON lm.message_id=p.message_id
+      LEFT JOIN lifecycle_events rr ON rr.id=p.read_receipt_id AND rr.type='read_receipt'
+        AND rr.message_id=p.message_id AND rr.actor=p.consumer
+        AND rr.team=lm.team AND rr.operation_key=lm.operation_key AND rr.result=lm.kind
+      WHERE lm.message_id IS NULL OR lm.kind NOT IN ('action','terminal') OR rr.id IS NULL
+        OR EXISTS(SELECT 1 FROM lifecycle_events ack
+             WHERE ack.type='application_ack' AND ack.message_id=p.message_id)
+        OR p.attempt!=(SELECT COUNT(*) FROM lifecycle_events reads
+             WHERE reads.type='read_receipt' AND reads.message_id=p.message_id
+               AND reads.team=lm.team AND reads.operation_key=lm.operation_key
+               AND reads.result=lm.kind))
+    THEN 1 ELSE json('agmsg import orphan processing lease') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events transition
+      WHERE transition.type='work_event' AND transition.state!='registered'
+        AND NOT EXISTS(SELECT 1 FROM lifecycle_events registration
+          WHERE registration.type='work_event' AND registration.state='registered'
+            AND registration.team=transition.team AND registration.work_key=transition.work_key
+            AND registration.generation=transition.generation AND registration.seq<transition.seq
+            AND NOT EXISTS(SELECT 1 FROM lifecycle_events newer
+              WHERE newer.type='work_event' AND newer.state='registered'
+                AND newer.team=registration.team AND newer.work_key=registration.work_key
+                AND newer.seq>registration.seq AND newer.seq<transition.seq)))
+    THEN 1 ELSE json('agmsg import stale work generation') END;
+    SELECT CASE WHEN NOT EXISTS(
+      SELECT 1 FROM lifecycle_events earlier
+      JOIN lifecycle_events later ON later.type='work_event' AND later.state='registered'
+        AND later.team=earlier.team AND later.work_key=earlier.work_key AND later.seq>earlier.seq
+      WHERE earlier.type='work_event' AND earlier.state='registered'
+        AND later.generation<=earlier.generation)
+    THEN 1 ELSE json('agmsg import nonmonotonic work generation') END;
     SELECT CASE WHEN NOT EXISTS(
       SELECT 1 FROM lifecycle_events finished
       JOIN lifecycle_events reopened ON reopened.type='work_event'
