@@ -68,7 +68,7 @@ EOF
 # --- resolution -------------------------------------------------------------
 
 @test "resolve: falls back to plain when neither tmux nor herdr is present" {
-  run agmsg_terminal_resolve "sess-x"
+  run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'plain\t-')" ]
 }
@@ -76,7 +76,7 @@ EOF
 @test "resolve: picks tmux from \$TMUX and returns \$TMUX_PANE as the self id" {
   _install_fake_tmux
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
-  run agmsg_terminal_resolve "sess-x"
+  run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'tmux\t%%4')" ]
 }
@@ -84,7 +84,7 @@ EOF
 @test "resolve: picks herdr from HERDR_ENV and resolves the pane from the session id" {
   _install_fake_herdr "sess-abc"
   export HERDR_ENV=1
-  run agmsg_terminal_resolve "sess-abc"
+  run agmsg_terminal_resolve_name "sess-abc"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twC:p4')" ]
 }
@@ -93,7 +93,7 @@ EOF
   _install_fake_tmux
   _install_fake_herdr "sess-abc"
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" HERDR_ENV=1
-  run agmsg_terminal_resolve "sess-abc"
+  run agmsg_terminal_resolve_name "sess-abc"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twC:p4')" ]
 }
@@ -101,7 +101,7 @@ EOF
 @test "resolve: an explicit override wins over detection" {
   _install_fake_tmux
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" AGMSG_TERMINAL_DRIVER=plain
-  run agmsg_terminal_resolve "sess-x"
+  run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'plain\t-')" ]
 }
@@ -118,8 +118,7 @@ EOF
   _install_fake_herdr "sess-77"
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" HERDR_ENV=1
   local res term
-  res="$(agmsg_terminal_resolve sess-77)"
-  term="$(printf '%s' "$res" | cut -f1)"
+  term="$(agmsg_terminal_resolve_placement sess-77)"
   [ "$term" = "herdr" ]
   : > "$ARGV_LOG"
   agmsg_terminal_load "$term"
@@ -334,18 +333,30 @@ OPS
 
 # --- fail-closed resolution (co1 #1014 review) ------------------------------
 
-@test "detect: tmux with \$TMUX set but \$TMUX_PANE empty is NOT a match" {
+@test "detect: tmux with an empty \$TMUX_PANE still PLACES in tmux (presence)" {
+  # For placement, being in tmux is enough — spawn records the pane it CREATES,
+  # not the caller's own. An empty $TMUX_PANE does not fall through to plain.
   export TMUX="/tmp/sock,1,0"
   unset TMUX_PANE
-  run agmsg_terminal_resolve "sess-x"
-  # falls through tmux (no valid pane) to plain
+  run agmsg_terminal_resolve_placement "sess-x"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'plain\t-')" ]
+  [ "$output" = "tmux" ]
+}
+
+@test "detect: tmux with an empty \$TMUX_PANE is FATAL for naming, with a reason" {
+  # For naming, we must identify the pane. Present-but-no-id is fatal: say why,
+  # non-zero — better than naming nothing (co1's fail-closed lives on this side).
+  export TMUX="/tmp/sock,1,0"
+  unset TMUX_PANE
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "cannot identify this pane" <<<"$output"
+  grep -q "TMUX_PANE" <<<"$output"
 }
 
 @test "resolve: an override that names no real driver fails loudly, not '<typo>\t'" {
   export AGMSG_TERMINAL_DRIVER=tnux
-  run agmsg_terminal_resolve "sess-x"
+  run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -ne 0 ]
   grep -q "unknown terminal driver 'tnux'" <<<"$output"
 }

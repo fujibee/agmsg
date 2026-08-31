@@ -126,12 +126,25 @@ agmsg_terminal_load() {
   # EVERY failure past this point routes through the same cleanup so no partial
   # terminal_* (from a failed source OR an incomplete driver) is left to be
   # borrowed, and the loaded marker stays empty for a clean retry.
+  #
+  # Lift errexit around the source and read its status separately (the codebase's
+  # two-line `set +e … set -e` pattern; cf. check-inbox.sh). On bash 3.2 (macOS
+  # /bin/bash) a failing command at the top of a sourced file fires the CALLER's
+  # `set -e` even though this source sits on the left of a guard — measured, the
+  # source-failure trace escaped the caller's `|| rc=$?`. The lift makes 3.2 and 5
+  # agree; it is restored immediately.
+  local _src_rc=0 _restore_e=0
+  case $- in *e*) _restore_e=1 ;; esac   # only re-enable errexit if it was on
+  set +e
   # shellcheck disable=SC1090
-  . "$dir/ops.sh" || {
+  . "$dir/ops.sh"
+  _src_rc=$?
+  [ "$_restore_e" = 1 ] && set -e
+  if [ "$_src_rc" -ne 0 ]; then
     echo "agmsg: failed to source terminal driver '$name'" >&2
     _agmsg_terminal_unset_ops
     return 1
-  }
+  fi
   local fn missing=""
   for fn in $_AGMSG_TERMINAL_REQUIRED; do
     declare -F "$fn" >/dev/null 2>&1 || missing="$missing $fn"
