@@ -89,7 +89,16 @@ _herdr_new_pane_id() {
 terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
   local boot="$*" json pane dir
-  if [ "$target" = window ] && [ -n "${HERDR_WORKSPACE_ID:-}" ]; then
+  # Validate target explicitly — a typo must fail, not silently pick a default.
+  case "$target" in
+    window|pane-h|pane-v) : ;;
+    *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
+  esac
+  if [ "$target" = window ]; then
+    # A window needs a workspace. Absent one, FAIL explicitly rather than
+    # silently splitting a pane the caller did not ask for.
+    [ -n "${HERDR_WORKSPACE_ID:-}" ] || {
+      printf 'unsupported: window target needs HERDR_WORKSPACE_ID\n' >&2; return 13; }
     json="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --label "$name" --cwd "$project" 2>/dev/null)" || return 13
   else
     case "$target" in pane-h) dir=right ;; *) dir=down ;; esac
@@ -136,11 +145,24 @@ terminal_poke() {
   return 0
 }
 
-# control op: name the pane. herdr's name regex has no '/', so encode
-# <team>/<name> as team__name (measured). Idempotent.
+# control op: name the pane (scope Naming). Two copies:
+#   VISIBLE:    herdr pane rename <id> <team>:<agent>   (free text, ':' is fine)
+#   RESOLVABLE: herdr agent rename <id> <folded>        where <folded> is the
+#               <team>:<agent> lowered with every char outside herdr's agent-name
+#               regex [a-z][a-z0-9_-]{0,31} folded to '-' (':' is not allowed, so
+#               it becomes '-'); this is an INTERNAL key, never shown — peek/poke
+#               go by the recorded pane id, so the user never meets the folded
+#               form. Idempotent. The visible rename is the required one; a failed
+#               agent rename (e.g. a live-name collision) is non-fatal — the pane
+#               id in the record still resolves.
 terminal_name() {
-  local id="$1" team="$2" name="$3"
-  herdr pane rename "$id" "${team}__${name}" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  local id="$1" team="$2" name="$3" label folded
+  label="$team:$name"
+  folded="$(printf '%s' "$label" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g')"
+  case "$folded" in [a-z]*) : ;; *) folded="a-$folded" ;; esac  # regex needs a leading letter
+  folded="${folded:0:32}"
+  herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  herdr agent rename "$id" "$folded" >/dev/null 2>&1 || true
   echo ok
   return 0
 }

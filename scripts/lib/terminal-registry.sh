@@ -123,8 +123,15 @@ agmsg_terminal_load() {
   [ -f "$dir/ops.sh" ] || { echo "agmsg: terminal driver '$name' has no ops.sh" >&2; return 1; }
   _agmsg_terminal_unset_ops
   _AGMSG_TERMINAL_LOADED=""   # a half-loaded driver must not read as loaded
+  # EVERY failure past this point routes through the same cleanup so no partial
+  # terminal_* (from a failed source OR an incomplete driver) is left to be
+  # borrowed, and the loaded marker stays empty for a clean retry.
   # shellcheck disable=SC1090
-  . "$dir/ops.sh" || { echo "agmsg: failed to source terminal driver '$name'" >&2; return 1; }
+  . "$dir/ops.sh" || {
+    echo "agmsg: failed to source terminal driver '$name'" >&2
+    _agmsg_terminal_unset_ops
+    return 1
+  }
   local fn missing=""
   for fn in $_AGMSG_TERMINAL_REQUIRED; do
     declare -F "$fn" >/dev/null 2>&1 || missing="$missing $fn"

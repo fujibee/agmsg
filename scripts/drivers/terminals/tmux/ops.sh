@@ -46,7 +46,7 @@ terminal_spawn() {
       id="$(tmux new-window -P -F '#{window_id}' -n "$name" -c "$project" "$@")" || return 13
       tmux set-window-option -t "$id" automatic-rename off >/dev/null 2>&1 || true
       ;;
-    pane-h|pane-v|pane)
+    pane-h|pane-v)
       case "$target" in pane-h) dir=-h ;; *) dir=-v ;; esac
       id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
       tmux select-pane -t "$id" -T "$name" >/dev/null 2>&1 || true
@@ -106,14 +106,19 @@ terminal_poke() {
   return 0
 }
 
-# control op: title the pane/window. Idempotent (safe to re-apply on SessionStart).
-# tmux takes team/name as a plain pane title.
+# control op: name the pane. The RESOLVABLE key is a pane user option
+# @agmsg_agent = <team>:<agent> (scope Naming: tmux is never targeted by name —
+# '-t a:b' is session:window to tmux — so peek/poke scan @agmsg_agent instead).
+# select-pane -T sets the human-visible title as a copy. Canonical separator is
+# ':' (both team and agent commonly contain '-'). Idempotent (safe to re-apply on
+# SessionStart).
 terminal_name() {
-  local id="$1" team="$2" name="$3"
+  local id="$1" team="$2" name="$3" label
+  label="$team:$name"
+  tmux set-option -p -t "$id" @agmsg_agent "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   case "$id" in
-    @*) tmux set-window-option -t "$id" -q automatic-rename off >/dev/null 2>&1 || true
-        tmux rename-window -t "$id" "$team/$name" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
-    *)  tmux select-pane -t "$id" -T "$team/$name" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
+    @*) tmux rename-window -t "$id" "$label" >/dev/null 2>&1 || true ;;
+    *)  tmux select-pane  -t "$id" -T "$label" >/dev/null 2>&1 || true ;;
   esac
   echo ok
   return 0

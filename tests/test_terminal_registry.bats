@@ -143,9 +143,10 @@ EOF
 # --- conf reader ------------------------------------------------------------
 
 @test "conf: get reads a key, has tests membership, absent key returns default" {
-  [ "$(agmsg_terminal_get plain capabilities)" = "spawn" ]
-  agmsg_terminal_has plain capabilities spawn
-  refute agmsg_terminal_has plain capabilities peek
+  [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke name" ]
+  agmsg_terminal_has tmux capabilities peek
+  refute agmsg_terminal_has tmux capabilities nonesuch
+  [ "$(agmsg_terminal_get plain capabilities)" = "spawn despawn" ]
   [ "$(agmsg_terminal_get plain nonesuch DEFLT)" = "DEFLT" ]
 }
 
@@ -161,13 +162,13 @@ EOF
   grep -q 'unsupported' <<<"$output"
 }
 
-@test "plain: check ok, describe advertises spawn only" {
+@test "plain: check ok, describe advertises spawn despawn" {
   agmsg_terminal_load plain
   run terminal_check
   [ "$status" -eq 0 ]
   [ "$output" = "ok" ]
   run terminal_describe
-  grep -q '^capabilities=spawn$' <<<"$output"
+  grep -q '^capabilities=spawn despawn$' <<<"$output"
 }
 
 # --- tmux driver ops (fake tmux argv) --------------------------------------
@@ -214,14 +215,16 @@ EOF
   [ "$(grep -c 'send-keys' "$ARGV_LOG")" -eq 2 ]
 }
 
-@test "tmux: name titles a pane and renames a window" {
+@test "tmux: name sets @agmsg_agent (resolvable) and a ':'-joined visible title" {
   _install_fake_tmux
   agmsg_terminal_load tmux
   terminal_name '%9' teamx alice >/dev/null
-  grep -q '\[select-pane\] \[-t\] \[%9\] \[-T\] \[teamx/alice\]' "$ARGV_LOG"
+  grep -q '\[set-option\] \[-p\] \[-t\] \[%9\] \[@agmsg_agent\] \[teamx:alice\]' "$ARGV_LOG"
+  grep -q '\[select-pane\] \[-t\] \[%9\] \[-T\] \[teamx:alice\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
   terminal_name '@7' teamx alice >/dev/null
-  grep -q '\[rename-window\] \[-t\] \[@7\] \[teamx/alice\]' "$ARGV_LOG"
+  grep -q '\[set-option\] \[-p\] \[-t\] \[@7\] \[@agmsg_agent\] \[teamx:alice\]' "$ARGV_LOG"
+  grep -q '\[rename-window\] \[-t\] \[@7\] \[teamx:alice\]' "$ARGV_LOG"
 }
 
 # --- herdr driver ops (fake herdr argv; live-verified argv flagged) ---------
@@ -259,7 +262,8 @@ EOF
   grep -q '\[pane\] \[read\] \[wC:p9\] \[--source\] \[visible\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
   terminal_name 'wC:p9' teamx alice >/dev/null
-  grep -q '\[pane\] \[rename\] \[wC:p9\] \[teamx__alice\]' "$ARGV_LOG"
+  grep -q '\[pane\] \[rename\] \[wC:p9\] \[teamx:alice\]' "$ARGV_LOG"
+  grep -q '\[agent\] \[rename\] \[wC:p9\] \[teamx-alice\]' "$ARGV_LOG"
 }
 
 # --- ABI completeness + structural clobber-proofing (co1 #1014 review) -------
@@ -287,15 +291,15 @@ EOF
 
 @test "load: switching drivers does not inherit the previous driver's ops (clobber)" {
   _install_fake_tmux
-  # Load tmux, then plain. plain has NO addressable pane, so its despawn is
-  # unsupported. If plain load left tmux's terminal_despawn behind, despawn on a
-  # herdr-shaped id would call tmux; instead it must be plain's unsupported.
+  # Load tmux, then plain. plain has NO addressable pane, so its PEEK is
+  # unsupported. If plain load left tmux's terminal_peek behind, peek on a pane id
+  # would call tmux; instead it must be plain's unsupported.
   agmsg_terminal_load tmux
   agmsg_terminal_load plain
-  run terminal_despawn 'wC:p9'
+  run terminal_peek '%9'
   [ "$status" -eq 13 ]
   grep -q 'unsupported' <<<"$output"
-  # And the tmux binary was never invoked by plain's despawn.
+  # And the tmux binary was never invoked by plain's peek.
   refute grep -q '^tmux ' "$ARGV_LOG"
 }
 
@@ -346,14 +350,81 @@ OPS
   grep -q "unknown terminal 'tnux'" <<<"$output"
 }
 
-# --- plain spawn (OS-terminal driver-ification) -----------------------------
+# --- plain: OS-terminal spawn/despawn; peek/poke/name unsupported ------------
 
-@test "plain: spawn runs the AGMSG_TERMINAL template and returns '-' (no addressable id)" {
+@test "plain: peek/poke/name are unsupported (no addressable pane)" {
+  agmsg_terminal_load plain
+  local v
+  for v in peek poke name; do
+    run "terminal_$v" "-" x y
+    [ "$status" -eq 13 ]
+    grep -q 'unsupported' <<<"$output"
+  done
+}
+
+@test "plain: spawn runs an AGMSG_TERMINAL {cmd} template and returns '-'; despawn is a no-op ok" {
   agmsg_terminal_load plain
   local ran="$TEST_SKILL_DIR/plain-ran"
-  export AGMSG_TERMINAL="touch $ran # {cmd}"
-  run terminal_spawn alice /proj window /path/to/boot
+  local boot="$TEST_SKILL_DIR/boot"; : > "$boot"
+  export AGMSG_TERMINAL="touch $ran -- {cmd}"
+  run terminal_spawn alice /proj window "$boot"
   [ "$status" -eq 0 ]
   [ "$output" = "-" ]
   [ -f "$ran" ]
+  run terminal_despawn "-"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ok" ]
+}
+
+# --- load failure cleanup: source failure, like missing-function, leaves nothing (co1 rd2) ---
+
+@test "load: a driver whose ops.sh fails to source leaves no partial functions behind" {
+  local pdir="$TEST_SKILL_DIR/plugins/terminals/halfsource"
+  mkdir -p "$pdir"
+  printf 'name=halfsource\ncapabilities=\n' > "$pdir/terminal.conf"
+  # Defines some terminal_* (these parse and DO get defined), then the source
+  # returns non-zero at runtime — so `. ops.sh` fails WITH partial functions live,
+  # which is exactly what the source-failure cleanup must wipe. (A parse error
+  # instead would define nothing, and the pre-source unset alone would pass the
+  # test — this fixture makes the source-failure arm actually load-bearing.)
+  cat > "$pdir/ops.sh" <<'OPS'
+terminal_check(){ echo ok; }
+terminal_despawn(){ echo ok; }
+false
+OPS
+  mkdir -p "$TEST_SKILL_DIR/db"
+  printf 'terminals/halfsource\t%s\n' "$pdir" > "$TEST_SKILL_DIR/db/trusted-plugins"
+  agmsg_terminal_load plain
+  local err="$TEST_SKILL_DIR/src.err" rc=0
+  agmsg_terminal_load halfsource 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ]
+  # Whatever the source defined before aborting must be gone, and no prior
+  # driver's ops remain either.
+  refute declare -F terminal_check
+  refute declare -F terminal_despawn
+  [ -z "$_AGMSG_TERMINAL_LOADED" ]
+}
+
+# --- herdr spawn target validation (co1 rd2) --------------------------------
+
+@test "herdr: spawn rejects an unknown target instead of defaulting" {
+  _install_fake_herdr "s"
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID='wC:p1'
+  run terminal_spawn alice /proj paen-v bash -lc boot
+  [ "$status" -eq 13 ]
+  grep -q 'unknown target' <<<"$output"
+  # It must NOT have split anything.
+  refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
+}
+
+@test "herdr: spawn window without HERDR_WORKSPACE_ID fails explicitly, not a silent split" {
+  _install_fake_herdr "s"
+  agmsg_terminal_load herdr
+  unset HERDR_WORKSPACE_ID
+  export HERDR_PANE_ID='wC:p1'
+  run terminal_spawn alice /proj window bash -lc boot
+  [ "$status" -eq 13 ]
+  grep -q 'needs HERDR_WORKSPACE_ID' <<<"$output"
+  refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
 }
