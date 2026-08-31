@@ -127,6 +127,66 @@ UUIDv7はドライバー内部で生成する（例：`python -c "..."`、v7に�
 
 イベントログは無制限に増加する。ドライバーは、冗長なイベントを圧縮する内部関数 `storage_compact` を実装しなければならない（例：`message_read` マーカーの統合、削除済みチームのイベントの削除）。v1ではこれを内部コマンドとしてのみ公開し、ユーザー向けCLIは今後追加される可能性がある。
 
+### 2.7 任意の lifecycle-v1 拡張
+
+lifecycle-v1 拡張は、既存の storage 軸に operation identity、receipt、処理中配信の lease、application acknowledgement、work history、notifier outbox を追加する。
+storage ドライバーにとって、この拡張は任意である。
+ただし、capability の報告は必須である。
+ドライバーは lifecycle-v1 capability ごとに `supported` または `unsupported` を明示する。
+lifecycle 契約を必要とする呼び出し側は、全 capability の `supported` を要求する。
+core は private table、第二の ledger、delivery hook に暗黙でフォールバックしない。
+
+公開関数は次のとおりである。
+
+```text
+storage_capabilities [<team>]
+storage_operation_send <team> <sender> <recipient> <kind> <operation-key> <wake-target> <body>
+storage_operation_fetch <team> <recipient> <consumer> <lease-seconds>
+storage_operation_renew <team> <recipient> <message-id> <operation-key> <consumer> <lease-seconds>
+storage_operation_ack <team> <recipient> <message-id> <operation-key> <consumer> <result> <cleanup-target> [<reason>]
+storage_work_register <team> <work-key> <operation-key> <actor> <generation> <origin> <launch-target> <wake-target> <stall-deadline>
+storage_work_event <team> <work-key> <operation-key> <actor> <state> [<result>] [<reason>]
+storage_outbox_claim <team> <owner> <lease-seconds>
+storage_outbox_complete <team> <outbox-id> <owner>
+storage_outbox_retry <team> <outbox-id> <owner> <delay-seconds> [<error>]
+storage_lifecycle_history <team> [--operation-key <key>]
+storage_lifecycle_active <team> [<recipient>]
+```
+
+`storage_capabilities` は、schema を `agmsg-lifecycle-capabilities/v1` とする JSON object を一つ出力する。
+この object は active driver 名と、`operation_key`、`delivery_receipt`、`read_receipt`、`processing_lease_renewal`、`application_ack`、`work_registration`、`work_event`、`outbox`、`history_query` の `supported` または `unsupported` を含む。
+同梱の SQLite ドライバーは全 capability を実装する。
+拡張を実装しない同梱ドライバーと外部ドライバーには fail-closed stub が入る。
+lifecycle の write と query は終了コード13で失敗し、stdout に data を書かず、stderr に `unsupported_capability` を出力する。
+
+operation key は `(team, sender, operation_key)` の範囲で安定する。
+同じ send を再試行すると、同じ logical message、delivery receipt、wake outbox を返す。
+同じ key を異なる immutable content に再利用すると、処理は明示的に失敗する。
+message、delivery receipt、wake outbox は一つの transaction で commit される。
+fetch は read receipt を記録し、`action` または `terminal` では message を削除せず processing lease を作る。
+期限内の lease を renew または ACK できるのは現在の consumer だけである。
+lease が期限切れになると、同じ message が再配信可能になる。
+新しい logical message は作られない。
+
+application ACK は `applied`、`rejected`、`failed` のいずれかを記録する。
+`applied` ACK は同じ transaction で cleanup outbox を作る。
+outbox control frame は durable state transition であり、control frame 自体には ACK を要求しない。
+この制約により、wake と cleanup の再帰を防ぐ。
+work registration は registration event と launch outbox を一つの transaction で commit する。
+後続の work event でも、active projection は registration の generation、origin、wake target、stall deadline を保持する。
+history query と active query は receipt、lease、ACK、outbox、error、work state を公開し、呼び出し側に driver-private storage を読ませない。
+
+API facade は、この関数群を `GET teams <team> capabilities|lifecycle|active` と `POST teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries` に対応づける。
+request body は型付き JSON object である。
+型違反、必須 token の空文字、control character を含む token、owner の競合、期限切れ lease は、部分 mutation が起きる前に失敗する。
+
+lifecycle table は SQLite への additive migration である。
+既存の message、unread、history、cursor、export、import は legacy client から引き続き利用できる。
+SQLite export は whole-store backup/convert operation である。
+選択された physical store から、legacy v1 event と全 team の lifecycle message、event、outbox、processing lease を出力する。
+import は完全一致する duplicate を受け入れるが、意味的に不正な既知 lifecycle record と既存 record に競合する入力を拒否し、file 全体を一つの transaction で適用する。
+未知の event-log record type には、§2.2 の forward compatibility 規則を適用する。
+
 ## 3. CLIマッピング
 
 | User command | Driver function(s) |

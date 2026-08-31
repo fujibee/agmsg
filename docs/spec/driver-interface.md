@@ -375,6 +375,76 @@ decrypt/import progress. Exact remote state is bounded and paginated, and may
 be garbage-collected only after a durable mapping proves that its own sequence
 is covered by the merged remote frontier.
 
+### 2.9 Optional lifecycle-v1 extension
+
+The lifecycle-v1 extension adds durable operation identity, receipts, actionable
+delivery leases, application acknowledgements, work history, and notifier
+outboxes to the existing storage axis. It is optional for a storage driver, but
+capability reporting is mandatory: every lifecycle-v1 capability is explicitly
+`supported` or `unsupported`. A caller that needs the lifecycle contract must
+require the complete set. Core must not silently fall back to a private table, a
+second ledger, or a delivery hook.
+
+The public function surface is:
+
+```text
+storage_capabilities [<team>]
+storage_operation_send <team> <sender> <recipient> <kind> <operation-key> <wake-target> <body>
+storage_operation_fetch <team> <recipient> <consumer> <lease-seconds>
+storage_operation_renew <team> <recipient> <message-id> <operation-key> <consumer> <lease-seconds>
+storage_operation_ack <team> <recipient> <message-id> <operation-key> <consumer> <result> <cleanup-target> [<reason>]
+storage_work_register <team> <work-key> <operation-key> <actor> <generation> <origin> <launch-target> <wake-target> <stall-deadline>
+storage_work_event <team> <work-key> <operation-key> <actor> <state> [<result>] [<reason>]
+storage_outbox_claim <team> <owner> <lease-seconds>
+storage_outbox_complete <team> <outbox-id> <owner>
+storage_outbox_retry <team> <outbox-id> <owner> <delay-seconds> [<error>]
+storage_lifecycle_history <team> [--operation-key <key>]
+storage_lifecycle_active <team> [<recipient>]
+```
+
+`storage_capabilities` prints one JSON object with schema
+`agmsg-lifecycle-capabilities/v1`, the active driver name, and explicit
+`supported` or `unsupported` values for `operation_key`, `delivery_receipt`,
+`read_receipt`, `processing_lease_renewal`, `application_ack`,
+`work_registration`, `work_event`, `outbox`, and `history_query`. The bundled
+SQLite driver supports the complete set. A bundled or external driver that does
+not implement the extension installs fail-closed stubs: lifecycle writes and
+queries exit 13, write no data to stdout, and identify `unsupported_capability`
+on stderr.
+
+An operation key is stable within `(team, sender, operation_key)`. Retrying the
+same send returns the same logical message, delivery receipt, and wake outbox;
+reusing that key with different immutable content fails visibly. The message,
+delivery receipt, and wake outbox commit in one transaction. A fetch records a
+read receipt and, for `action` or `terminal`, creates a processing lease without
+deleting the message. Only the current consumer may renew an unexpired lease or
+ACK it. Lease expiry makes the same message eligible for redelivery; it does not
+create a new logical message.
+
+An application ACK records one of `applied`, `rejected`, or `failed`. An
+`applied` ACK creates a cleanup outbox in the same transaction. Outbox control
+frames are durable state transitions and never require an ACK themselves, so
+wake and cleanup cannot recurse. Work registration commits the registration
+event and launch outbox atomically. Later work events retain the registration's
+generation, origin, wake target, and stall deadline in the active projection.
+History and active queries expose receipt, lease, ACK, outbox, error, and work
+state without requiring callers to read driver-private storage.
+
+The API facade maps this surface to `GET teams <team> capabilities|lifecycle|active`
+and `POST teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries`.
+Request bodies are typed JSON objects. Invalid types, empty required tokens,
+control-bearing tokens, ownership conflicts, and expired leases fail before any
+partial mutation.
+
+Lifecycle tables are an additive SQLite migration. Existing message, unread,
+history, cursor, export, and import behavior remains available to legacy
+clients. SQLite export is a whole-store backup/convert operation: it emits
+legacy v1 events and every team's lifecycle messages, events, outboxes, and
+processing leases from the selected physical store. Import accepts exact
+duplicates, rejects semantically invalid or conflicting known lifecycle records,
+and applies the complete file atomically. Unknown event-log record types retain
+the forward-compatibility behavior from §2.3.
+
 ## 3. CLI mapping
 
 | User command | Driver function(s) |

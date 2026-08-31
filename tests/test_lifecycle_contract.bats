@@ -344,6 +344,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   local export_file="$BATS_TEST_TMPDIR/shared-lifecycle.jsonl" db="$TEST_SKILL_DIR/db/messages.db"
   storage_operation_send agsuite alice bob action op-export-team-a wake:bob a >/dev/null
   storage_operation_send otherteam carol dave terminal op-export-team-b wake:dave b >/dev/null
+  storage_operation_fetch otherteam dave export-consumer 900 >/dev/null
   storage_export agsuite "$export_file"
 
   rm -f "$db" "$db-wal" "$db-shm"
@@ -352,6 +353,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages WHERE team IN ('agsuite','otherteam');")" -eq 2 ]
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_events WHERE type='delivery_receipt' AND team IN ('agsuite','otherteam');")" -eq 2 ]
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE kind='wake' AND team IN ('agsuite','otherteam');")" -eq 2 ]
+  [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_processing_leases p JOIN lifecycle_messages m ON m.message_id=p.message_id WHERE m.team='otherteam';")" -eq 1 ]
   run storage_lifecycle_history otherteam --operation-key op-export-team-b
   [ "$status" -eq 0 ]
   contains "$output" '"type":"delivery_receipt"'

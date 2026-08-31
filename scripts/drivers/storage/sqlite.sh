@@ -1276,27 +1276,27 @@ storage_export() {
     SELECT json_object('type','lifecycle_message','team',team,'sender',sender,
       'operation_key',operation_key,'message_id',message_id,'recipient',recipient,
       'kind',kind,'wake_target',wake_target,'created_at',created_at)
-      FROM lifecycle_messages WHERE team='$(_sqlite_lit "$team")'
+      FROM lifecycle_messages
       ORDER BY created_at,message_id;
     SELECT json_object('type','lifecycle_event','id',id,'event_type',type,
       'team',team,'operation_key',operation_key,'message_id',message_id,
       'actor',actor,'result',result,'reason',reason,'target',target,
       'work_key',work_key,'state',state,'generation',generation,'origin',origin,
       'wake_target',wake_target,'stall_deadline',stall_deadline,'at',at)
-      FROM lifecycle_events WHERE team='$(_sqlite_lit "$team")' ORDER BY seq;
+      FROM lifecycle_events ORDER BY seq;
     SELECT json_object('type','lifecycle_outbox','id',id,'team',team,
       'operation_key',operation_key,'kind',kind,'target',target,
       'message_id',message_id,'status',status,'available_at',available_at,
       'lease_owner',lease_owner,'lease_expires_at',lease_expires_at,
       'attempt',attempt,'last_error',last_error,'created_at',created_at,
       'updated_at',updated_at)
-      FROM lifecycle_outbox WHERE team='$(_sqlite_lit "$team")' ORDER BY seq;
+      FROM lifecycle_outbox ORDER BY seq;
     SELECT json_object('type','lifecycle_processing_lease','message_id',p.message_id,
       'consumer',p.consumer,'expires_at',p.expires_at,'attempt',p.attempt,
       'read_receipt_id',p.read_receipt_id,'updated_at',p.updated_at)
       FROM lifecycle_processing_leases p JOIN lifecycle_messages lm
         ON lm.message_id=p.message_id
-      WHERE lm.team='$(_sqlite_lit "$team")' ORDER BY p.message_id;
+      ORDER BY p.message_id;
     COMMIT;
   " > "$file"
 }
