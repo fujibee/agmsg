@@ -180,10 +180,11 @@ _agmsg_terminal_detect_one() {
 #
 # NOTE the override env is AGMSG_TERMINAL_DRIVER, NOT AGMSG_TERMINAL: the latter
 # is already the OS-terminal COMMAND template read by plain's spawn (pre-axis
-# spawn.sh), so reusing it for the driver name would collide. The final override
-# surface (this vs the scope's AGMSG_TERMINAL / --terminal, which would require
-# renaming the existing template) is a tl decision, pending; this is the fail-safe
-# non-colliding name and the flag surface is not wired until that ruling.
+# spawn.sh). tl ruled 2026-08-31 that a new axis gets a NEW name — so the driver
+# override is AGMSG_TERMINAL_DRIVER / --terminal-driver, and the existing
+# --terminal / AGMSG_TERMINAL template surface is left unchanged. The flag
+# (--terminal-driver) is wired into spawn's argument parsing in PR2; the env works
+# now.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
 agmsg_terminal_resolve() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name selfid rc
