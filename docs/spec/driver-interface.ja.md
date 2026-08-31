@@ -147,7 +147,7 @@ storage_operation_fetch <team> <recipient> <consumer> <lease-seconds>
 storage_operation_renew <team> <recipient> <message-id> <operation-key> <consumer> <lease-seconds>
 storage_operation_ack <team> <recipient> <message-id> <operation-key> <consumer> <result> <cleanup-target> [<reason>]
 storage_work_register <team> <work-key> <operation-key> <actor> <generation> <origin> <launch-target> <wake-target> <stall-deadline>
-storage_work_event <team> <work-key> <operation-key> <actor> <state> [<result>] [<reason>]
+storage_work_event <team> <work-key> <operation-key> <actor> <generation> <state> [<result>] [<reason>]
 storage_outbox_claim <team> <owner> <lease-seconds>
 storage_outbox_complete <team> <outbox-id> <owner>
 storage_outbox_retry <team> <outbox-id> <owner> <delay-seconds> [<error>]
@@ -171,16 +171,32 @@ lease が期限切れになると、同じ message が再配信可能になる�
 新しい logical message は作られない。
 
 application ACK は `applied`、`rejected`、`failed` のいずれかを記録する。
-`applied` ACK は同じ transaction で cleanup outbox を作る。
+すべての ACK は同じ transaction で runtime cleanup outbox を作る。cleanup 後、`applied` は active item を閉じ、`rejected|failed` は runtime residue を除去しつつ attention/error を残す。
 outbox control frame は durable state transition であり、control frame 自体には ACK を要求しない。
 この制約により、wake と cleanup の再帰を防ぐ。
-work registration は registration event と launch outbox を一つの transaction で commit する。
-後続の work event でも、active projection は registration の generation、origin、wake target、stall deadline を保持する。
+work registration は registration event と launch outbox を一つの transaction で commit する。`registered` は `storage_work_event` から書けない。新しい registration generation は直前より大きく、後続の work event は現在の generation を持つ。stale generation は明示的に失敗する。active projection は registration の generation、origin、wake target、stall deadline を保持する。
 history query と active query は receipt、lease、ACK、outbox、error、work state を公開し、呼び出し側に driver-private storage を読ませない。
 
 API facade は、この関数群を `GET teams <team> capabilities|lifecycle|active` と `POST teams <team> messages|fetch|lease-renewals|acknowledgements|registrations|work-events|outbox-claims|outbox-completions|outbox-retries` に対応づける。
 request body は型付き JSON object である。
 型違反、必須 token の空文字、control character を含む token、owner の競合、期限切れ lease は、部分 mutation が起きる前に失敗する。
+
+lifecycle-v1 API object は次のとおり固定する。角括弧の field は任意であり、それ以外の request field は必須である。
+
+| Resource | Request fields | 成功時の response |
+|---|---|---|
+| `GET capabilities` | なし | capability object 一つ |
+| `POST messages` | `from`, `to`, `kind`, `operation_key`, `wake_target`, `body` | `id`, `delivery_receipt_id`, `wake_outbox_id` を持つ `message_sent` |
+| `POST fetch` | `agent`, `consumer`, `lease_seconds` | 0 record、または `read_receipt_id`, `attempt` と actionable message の `lease_expires_at` を持つ message 一つ |
+| `POST lease-renewals` | `agent`, `message_id`, `operation_key`, `consumer`, `lease_seconds` | `processing_lease` 一つ |
+| `POST acknowledgements` | `agent`, `message_id`, `operation_key`, `consumer`, `result`, `cleanup_target`, [`reason`] | `application_ack` 一つ |
+| `POST registrations` | `work_key`, `operation_key`, `actor`, `generation`, `origin`, `launch_target`, `wake_target`, `stall_deadline` | `launch_outbox_id` を持つ `work_registration` 一つ |
+| `POST work-events` | `work_key`, `operation_key`, `actor`, `generation`, `state`, [`result`], [`reason`] | `work_event` 一つ。この endpoint では `registered` は不正 |
+| `POST outbox-claims` | `owner`, `lease_seconds` | 0 record、または `outbox` lease 一つ |
+| `POST outbox-completions` | `outbox_id`, `owner` | control status `ok` |
+| `POST outbox-retries` | `outbox_id`, `owner`, `delay_seconds`, [`error`] | control status `ok`。省略は可能だが、明示した空の `error` は不正 |
+
+`GET lifecycle` は `message_sent`、lifecycle event、`outbox`、現在の `processing_lease` を JSONL で返す。outbox record は `status`, `lease_owner`, `lease_expires_at`, `attempt`, `last_error` を含み、processing lease record は `consumer`, `expires_at`, `attempt`, `read_receipt_id` を含む。`GET active` は bounded な `lifecycle_active`, `work_active`, `delivery_error` projection を返し、processing 中の active message は現在の consumer、expiry、attempt、read receipt id を含む。
 
 lifecycle table は SQLite への additive migration である。
 既存の message、unread、history、cursor、export、import は legacy client から引き続き利用できる。

@@ -394,7 +394,7 @@ storage_operation_fetch <team> <recipient> <consumer> <lease-seconds>
 storage_operation_renew <team> <recipient> <message-id> <operation-key> <consumer> <lease-seconds>
 storage_operation_ack <team> <recipient> <message-id> <operation-key> <consumer> <result> <cleanup-target> [<reason>]
 storage_work_register <team> <work-key> <operation-key> <actor> <generation> <origin> <launch-target> <wake-target> <stall-deadline>
-storage_work_event <team> <work-key> <operation-key> <actor> <state> [<result>] [<reason>]
+storage_work_event <team> <work-key> <operation-key> <actor> <generation> <state> [<result>] [<reason>]
 storage_outbox_claim <team> <owner> <lease-seconds>
 storage_outbox_complete <team> <outbox-id> <owner>
 storage_outbox_retry <team> <outbox-id> <owner> <delay-seconds> [<error>]
@@ -421,12 +421,17 @@ deleting the message. Only the current consumer may renew an unexpired lease or
 ACK it. Lease expiry makes the same message eligible for redelivery; it does not
 create a new logical message.
 
-An application ACK records one of `applied`, `rejected`, or `failed`. An
-`applied` ACK creates a cleanup outbox in the same transaction. Outbox control
-frames are durable state transitions and never require an ACK themselves, so
-wake and cleanup cannot recurse. Work registration commits the registration
-event and launch outbox atomically. Later work events retain the registration's
-generation, origin, wake target, and stall deadline in the active projection.
+An application ACK records one of `applied`, `rejected`, or `failed`. Every ACK
+creates a runtime cleanup outbox in the same transaction. After cleanup,
+`applied` closes the active item; `rejected` and `failed` remove runtime residue
+but retain attention/error state. Outbox control frames are durable state
+transitions and never require an ACK themselves, so wake and cleanup cannot
+recurse. Work registration commits the registration event and launch outbox
+atomically. `registered` cannot be written through `storage_work_event`; every
+new registration generation is greater than its predecessor, every later work
+event carries the current generation, and stale generations fail visibly.
+Active work retains the registration's generation,
+origin, wake target, and stall deadline.
 History and active queries expose receipt, lease, ACK, outbox, error, and work
 state without requiring callers to read driver-private storage.
 
@@ -435,6 +440,30 @@ and `POST teams <team> messages|fetch|lease-renewals|acknowledgements|registrati
 Request bodies are typed JSON objects. Invalid types, empty required tokens,
 control-bearing tokens, ownership conflicts, and expired leases fail before any
 partial mutation.
+
+The lifecycle-v1 API objects are fixed as follows. Bracketed fields are optional;
+all other request fields are required.
+
+| Resource | Request fields | Successful response |
+|---|---|---|
+| `GET capabilities` | none | one capability object |
+| `POST messages` | `from`, `to`, `kind`, `operation_key`, `wake_target`, `body` | `message_sent` with `id`, `delivery_receipt_id`, and `wake_outbox_id` |
+| `POST fetch` | `agent`, `consumer`, `lease_seconds` | zero records, or one message with `read_receipt_id`, `attempt`, and actionable-message `lease_expires_at` |
+| `POST lease-renewals` | `agent`, `message_id`, `operation_key`, `consumer`, `lease_seconds` | one `processing_lease` |
+| `POST acknowledgements` | `agent`, `message_id`, `operation_key`, `consumer`, `result`, `cleanup_target`, [`reason`] | one `application_ack` |
+| `POST registrations` | `work_key`, `operation_key`, `actor`, `generation`, `origin`, `launch_target`, `wake_target`, `stall_deadline` | one `work_registration` with `launch_outbox_id` |
+| `POST work-events` | `work_key`, `operation_key`, `actor`, `generation`, `state`, [`result`], [`reason`] | one `work_event`; `registered` is invalid here |
+| `POST outbox-claims` | `owner`, `lease_seconds` | zero records, or one `outbox` lease |
+| `POST outbox-completions` | `outbox_id`, `owner` | control status `ok` |
+| `POST outbox-retries` | `outbox_id`, `owner`, `delay_seconds`, [`error`] | control status `ok`; omission is allowed but an explicitly empty `error` is invalid |
+
+`GET lifecycle` returns JSONL `message_sent`, lifecycle event, `outbox`, and
+current `processing_lease` records. Outbox records include `status`,
+`lease_owner`, `lease_expires_at`, `attempt`, and `last_error`; processing lease
+records include `consumer`, `expires_at`, `attempt`, and `read_receipt_id`.
+`GET active` returns bounded `lifecycle_active`, `work_active`, and
+`delivery_error` projections; an active processing message includes its current
+consumer, expiry, attempt, and read-receipt id.
 
 Lifecycle tables are an additive SQLite migration. Existing message, unread,
 history, cursor, export, and import behavior remains available to legacy

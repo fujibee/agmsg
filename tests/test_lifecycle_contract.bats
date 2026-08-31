@@ -315,20 +315,24 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 }
 
 @test "lifecycle contract: export and restore preserve receipts outbox and work history" {
-  local sent message_id before_body_hex after_body_hex export_file="$BATS_TEST_TMPDIR/lifecycle.jsonl"
+  local sent message_id before_body_hex after_body_hex before_reason_hex after_reason_hex export_file="$BATS_TEST_TMPDIR/lifecycle.jsonl"
   sent="$(storage_operation_send agsuite alice bob terminal op-export wake:bob $'done\n\n')"
   message_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$sent" | sed "s/'/''/g")','$.id');")"
   before_body_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM events WHERE type='message_sent' AND id='$message_id';")"
   [ "$before_body_hex" = 646F6E650A0A ]
   storage_operation_fetch agsuite bob exporter 900 >/dev/null
-  storage_operation_ack agsuite bob "$message_id" op-export exporter applied cleanup:bob "recorded" >/dev/null
-  storage_work_event agsuite issue-277 op-export-work origin running "" "restore me" >/dev/null
+  storage_operation_ack agsuite bob "$message_id" op-export exporter applied cleanup:bob $'recorded\nexactly' >/dev/null
+  before_reason_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(reason) FROM lifecycle_events WHERE type='application_ack' AND message_id='$message_id';")"
+  storage_work_register agsuite issue-277 op-export-register origin 1 origin launch:worker wake:origin 2000000000 >/dev/null
+  storage_work_event agsuite issue-277 op-export-work origin 1 running "" $'restore\nme' >/dev/null
   storage_export agsuite "$export_file"
 
   rm -f "$TEST_SKILL_DIR/db/messages.db" "$TEST_SKILL_DIR/db/messages.db-wal" "$TEST_SKILL_DIR/db/messages.db-shm"
   storage_import agsuite "$export_file"
   after_body_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM events WHERE type='message_sent' AND id='$message_id';")"
   [ "$after_body_hex" = "$before_body_hex" ]
+  after_reason_hex="$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(reason) FROM lifecycle_events WHERE type='application_ack' AND message_id='$message_id';")"
+  [ "$after_reason_hex" = "$before_reason_hex" ]
 
   run storage_lifecycle_history agsuite --operation-key op-export
   [ "$status" -eq 0 ]
@@ -338,6 +342,9 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_outbox WHERE operation_key='op-export';")" -eq 2 ]
   run storage_lifecycle_history agsuite --operation-key op-export-work
   contains "$output" '"type":"work_event"'
+  storage_import agsuite "$export_file"
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE operation_key='op-export-work';")" -eq 1 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(reason) FROM lifecycle_events WHERE operation_key='op-export-work';")" = 726573746F72650A6D65 ]
 }
 
 @test "lifecycle contract: shared-store export restores every team's lifecycle graph" {
@@ -413,25 +420,26 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 
 @test "lifecycle API: work events are idempotent canonical history records" {
   local first second
-  first="$(printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:registered","actor":"origin","state":"registered","result":"","reason":"launch committed"}' | "$SCRIPTS/api.sh" post teams agsuite work-events)"
-  second="$(printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:registered","actor":"origin","state":"registered","result":"","reason":"launch committed"}' | "$SCRIPTS/api.sh" post teams agsuite work-events)"
+  storage_work_register agsuite issue-277:m2 work:m2:registration origin 2 origin launch:worker wake:origin 2000000000 >/dev/null
+  first="$(printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:running","actor":"origin","generation":2,"state":"running","result":"","reason":"launch committed"}' | "$SCRIPTS/api.sh" post teams agsuite work-events)"
+  second="$(printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:running","actor":"origin","generation":2,"state":"running","result":"","reason":"launch committed"}' | "$SCRIPTS/api.sh" post teams agsuite work-events)"
   [ "$second" = "$first" ]
   contains "$first" '"type":"work_event"'
 
-  run "$SCRIPTS/api.sh" get teams agsuite lifecycle --operation-key work:m2:registered
+  run "$SCRIPTS/api.sh" get teams agsuite lifecycle --operation-key work:m2:running
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '"type":"work_event"')" -eq 1 ]
 
-  run --separate-stderr bash -c 'printf "%s\n" '\''{"work_key":"issue-277:m2","operation_key":"work:m2:registered","actor":"origin","state":"terminal","result":"success","reason":"different"}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite work-events'
+  run --separate-stderr bash -c 'printf "%s\n" '\''{"work_key":"issue-277:m2","operation_key":"work:m2:running","actor":"origin","generation":2,"state":"terminal","result":"success","reason":"different"}'\'' | "$SKILL_DIR/scripts/api.sh" post teams agsuite work-events'
   [ "$status" -ne 0 ]
   contains "$stderr" operation_key_conflict
 
   run "$SCRIPTS/api.sh" get teams agsuite active
   [ "$status" -eq 0 ]
   contains "$output" '"work_key":"issue-277:m2"'
-  contains "$output" '"state":"registered"'
+  contains "$output" '"state":"running"'
 
-  printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:closed","actor":"origin","state":"closed","result":"success","reason":"cleanup complete"}' | "$SCRIPTS/api.sh" post teams agsuite work-events >/dev/null
+  printf '%s\n' '{"work_key":"issue-277:m2","operation_key":"work:m2:closed","actor":"origin","generation":2,"state":"closed","result":"success","reason":"cleanup complete"}' | "$SCRIPTS/api.sh" post teams agsuite work-events >/dev/null
   run "$SCRIPTS/api.sh" get teams agsuite active
   [ "$status" -eq 0 ]
   not_contains "$output" '"work_key":"issue-277:m2"'
@@ -566,11 +574,13 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 
 @test "lifecycle contract: known lifecycle import rejects semantic and conflicting records atomically" {
   local db="$TEST_SKILL_DIR/db/messages.db" invalid="$BATS_TEST_TMPDIR/invalid-kind.jsonl"
-  local conflict="$BATS_TEST_TMPDIR/conflict.jsonl" duplicate="$BATS_TEST_TMPDIR/duplicate.jsonl" record
+  local conflict="$BATS_TEST_TMPDIR/conflict.jsonl" duplicate="$BATS_TEST_TMPDIR/duplicate.jsonl" record message_one message_two
   record='{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-semantic","message_id":"m-one","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}'
+  message_one='{"type":"message_sent","id":"m-one","team":"agsuite","from":"alice","to":"bob","body":"one","at":"2026-01-01T00:00:00Z"}'
+  message_two='{"type":"message_sent","id":"m-two","team":"agsuite","from":"alice","to":"bob","body":"two","at":"2026-01-01T00:00:00Z"}'
   printf '%s\n' "${record/\"kind\":\"action\"/\"kind\":\"not-a-kind\"}" >"$invalid"
-  printf '%s\n%s\n' "$record" "${record/\"message_id\":\"m-one\"/\"message_id\":\"m-two\"}" >"$conflict"
-  printf '%s\n%s\n' "$record" "$record" >"$duplicate"
+  printf '%s\n%s\n%s\n%s\n' "$message_one" "$message_two" "$record" "${record/\"message_id\":\"m-one\"/\"message_id\":\"m-two\"}" >"$conflict"
+  printf '%s\n%s\n%s\n' "$message_one" "$record" "$record" >"$duplicate"
 
   local candidate
   for candidate in "$invalid" "$conflict"; do
@@ -590,6 +600,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 @test "lifecycle contract: import rejects invalid acknowledgement results atomically" {
   local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/invalid-ack-result.jsonl"
   printf '%s\n' \
+    '{"type":"message_sent","id":"m-invalid-ack","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
     '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-invalid-ack","message_id":"m-invalid-ack","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
     '{"type":"lifecycle_event","id":"ack-invalid","event_type":"application_ack","team":"agsuite","operation_key":"op-import-invalid-ack","message_id":"m-invalid-ack","actor":"handler","result":"not-a-result","reason":"done","target":"cleanup:bob","work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}' \
     >"$candidate"
@@ -623,6 +634,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 @test "lifecycle contract: import rejects orphan processing leases atomically" {
   local db="$TEST_SKILL_DIR/db/messages.db" candidate="$BATS_TEST_TMPDIR/orphan-processing-lease.jsonl"
   printf '%s\n' \
+    '{"type":"message_sent","id":"m-control","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
     '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-import-control","message_id":"m-control","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
     '{"type":"lifecycle_processing_lease","message_id":"m-missing","consumer":"handler","expires_at":2000000000,"attempt":1,"read_receipt_id":"read-missing","updated_at":"2026-01-01T00:01:00Z"}' \
     >"$candidate"
@@ -632,6 +644,29 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   contains "$stderr" 'import failed'
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
   [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_processing_leases;")" -eq 0 ]
+}
+
+@test "lifecycle contract: import rejects orphan messages and mismatched processing receipt kinds" {
+  local db="$TEST_SKILL_DIR/db/messages.db" orphan="$BATS_TEST_TMPDIR/orphan-message.jsonl"
+  local mismatch="$BATS_TEST_TMPDIR/mismatched-processing-kind.jsonl"
+  printf '%s\n' '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-orphan-message","message_id":"m-orphan","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' >"$orphan"
+  printf '%s\n' \
+    '{"type":"message_sent","id":"m-kind","team":"agsuite","from":"alice","to":"bob","body":"body","at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_message","team":"agsuite","sender":"alice","operation_key":"op-kind","message_id":"m-kind","recipient":"bob","kind":"action","wake_target":"wake:bob","created_at":"2026-01-01T00:00:00Z"}' \
+    '{"type":"lifecycle_event","id":"read-kind","event_type":"read_receipt","team":"agsuite","operation_key":"op-kind","message_id":"m-kind","actor":"handler","result":"info","reason":null,"target":null,"work_key":null,"state":null,"generation":null,"origin":null,"wake_target":null,"stall_deadline":null,"at":"2026-01-01T00:01:00Z"}' \
+    '{"type":"lifecycle_processing_lease","message_id":"m-kind","consumer":"handler","expires_at":2000000000,"attempt":1,"read_receipt_id":"read-kind","updated_at":"2026-01-01T00:01:00Z"}' \
+    >"$mismatch"
+
+  local candidate
+  for candidate in "$orphan" "$mismatch"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    storage_init agsuite >/dev/null
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_messages;")" -eq 0 ]
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_processing_leases;")" -eq 0 ]
+  done
 }
 
 @test "lifecycle contract: import rejects an ownerless leased outbox atomically" {
@@ -695,7 +730,7 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
 
 @test "lifecycle contract: active work retains registration fencing and wake metadata" {
   storage_work_register agsuite issue-277:active-meta register:active-meta origin 7 origin-seat launch:worker wake:origin 900 >/dev/null
-  storage_work_event agsuite issue-277:active-meta transition:active-meta worker running "" started >/dev/null
+  storage_work_event agsuite issue-277:active-meta transition:active-meta worker 7 running "" started >/dev/null
 
   run storage_lifecycle_active agsuite
   [ "$status" -eq 0 ]
@@ -705,6 +740,48 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   contains "$output" '"origin":"origin-seat"'
   contains "$output" '"wake_target":"wake:origin"'
   contains "$output" '"stall_deadline":900'
+}
+
+@test "lifecycle contract: work transitions require atomic registration and current generation" {
+  run --separate-stderr storage_work_event agsuite issue-277:orphan transition:orphan worker 1 registered "" bypass
+  [ "$status" -eq 13 ]
+  [ "$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM lifecycle_events WHERE work_key='issue-277:orphan';")" -eq 0 ]
+
+  storage_work_register agsuite issue-277:fenced register:fenced:1 origin 1 origin launch:worker wake:origin 2000000000 >/dev/null
+  storage_work_event agsuite issue-277:fenced transition:fenced:old-running old-worker 1 running "" old >/dev/null
+  storage_work_register agsuite issue-277:fenced register:fenced:2 origin 2 origin launch:worker wake:origin 2000000000 >/dev/null
+  run --separate-stderr storage_work_register agsuite issue-277:fenced register:fenced:1 origin 1 origin launch:worker wake:origin 2000000000
+  [ "$status" -eq 13 ]
+  run --separate-stderr storage_work_event agsuite issue-277:fenced transition:fenced:old-running old-worker 1 running "" old
+  [ "$status" -eq 13 ]
+  run --separate-stderr storage_work_event agsuite issue-277:fenced transition:fenced:stale old-worker 1 terminal failed stale
+  [ "$status" -eq 13 ]
+  storage_work_event agsuite issue-277:fenced transition:fenced:current worker 2 running "" current >/dev/null
+  run storage_lifecycle_active agsuite
+  contains "$output" '"work_key":"issue-277:fenced"'
+  contains "$output" '"actor":"worker"'
+  contains "$output" '"generation":2'
+  not_contains "$output" '"actor":"old-worker"'
+}
+
+@test "lifecycle contract: public queries expose current processing and outbox leases" {
+  local sent claimed
+  sent="$(storage_operation_send agsuite alice bob action op-query-leases wake:bob body)"
+  contains "$sent" '"wake_outbox_id":'
+  claimed="$(storage_outbox_claim agsuite notifier 30)"
+  contains "$claimed" '"lease_owner":"notifier"'
+
+  run storage_lifecycle_history agsuite --operation-key op-query-leases
+  contains "$output" '"type":"outbox"'
+  contains "$output" '"lease_owner":"notifier"'
+  contains "$output" '"lease_expires_at":'
+
+  storage_operation_fetch agsuite bob handler 900 >/dev/null
+  run storage_lifecycle_history agsuite --operation-key op-query-leases
+  contains "$output" '"type":"processing_lease"'
+  contains "$output" '"consumer":"handler"'
+  contains "$output" '"read_receipt_id":'
+  contains "$output" '"expires_at":'
 }
 
 @test "lifecycle contract: notifier failure is visible through public history and active queries" {

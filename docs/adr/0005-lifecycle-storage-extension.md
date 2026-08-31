@@ -35,12 +35,20 @@ transaction domain as the message log. A logical send commits its message,
 delivery receipt, and wake outbox atomically. ACK and cleanup, work registration
 and launch, and outbox ownership transitions use the same rule. Processing
 leases are renewable only by their current consumer while unexpired.
+Registration is the only way to create a `registered` work event and its launch
+outbox. Later work events carry the current registration generation; stale
+generations fail rather than being projected onto newer work. Public history
+includes current processing leases and outbox rows, including ownership,
+expiry, attempt, and error state, so recovery does not require private-table
+access.
 
 Define SQLite `storage_export` as a whole-store backup/convert operation. It
 exports legacy v1 events and lifecycle messages, events, outboxes, and processing
 leases for every team in the physical store. Import validates known lifecycle
 records and applies the complete input atomically. Exact duplicates are
-idempotent; semantic or identity conflicts fail instead of being ignored.
+idempotent; semantic, identity, or graph-reference conflicts fail instead of
+being ignored. Every record shape produced by the SQLite writer is valid input
+to the same version's importer, including multiline diagnostic text.
 
 ## Alternatives considered
 

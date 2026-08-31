@@ -367,11 +367,12 @@ post_acknowledgements() {
 }
 
 post_work_events() {
-  local team="$1" work_key operation_key actor state result reason
+  local team="$1" work_key operation_key actor generation state result reason
   _api_request_open || return
   _api_request_assign_token work_key work_key || return
   _api_request_assign_token operation_key operation_key || return
   _api_request_assign_token actor actor || return
+  _api_request_assign generation generation required integer || return
   _api_request_assign_token state state || return
   _api_request_assign result result optional || return
   _api_request_assign reason reason optional || return
@@ -379,7 +380,9 @@ post_work_events() {
   _api_require_nonempty operation_key "$operation_key" || return
   _api_require_nonempty actor "$actor" || return
   _api_require_nonempty state "$state" || return
-  storage_work_event "$team" "$work_key" "$operation_key" "$actor" "$state" "$result" "$reason"
+  case "$generation" in ''|*[!0-9]*) echo "agmsg: invalid_request: generation must be a positive integer" >&2; return 2 ;; esac
+  [ "$generation" -gt 0 ] || { echo "agmsg: invalid_request: generation must be a positive integer" >&2; return 2; }
+  storage_work_event "$team" "$work_key" "$operation_key" "$actor" "$generation" "$state" "$result" "$reason"
 }
 
 post_registrations() {
