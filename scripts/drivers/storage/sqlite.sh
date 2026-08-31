@@ -1749,6 +1749,19 @@ storage_import() {
             WHERE registration.type='work_event' AND registration.state='registered'
               AND registration.team=o.team AND registration.operation_key=o.operation_key
               AND registration.target=o.target))
+         OR NOT EXISTS(SELECT 1 FROM lifecycle_events initial
+              WHERE initial.id=o.id AND initial.type='outbox_pending'
+                AND initial.team=o.team AND initial.operation_key=o.operation_key
+                AND initial.result=o.kind AND initial.actor=o.target
+                AND COALESCE(initial.message_id,'')=COALESCE(o.message_id,''))
+         OR COALESCE(o.last_error,'')!=COALESCE((
+              SELECT CASE WHEN terminal.type='outbox_error' THEN terminal.reason END
+                FROM lifecycle_events terminal
+               WHERE terminal.type IN ('outbox_sent','outbox_error')
+                 AND terminal.team=o.team AND terminal.operation_key=o.operation_key
+                 AND terminal.result=o.kind
+                 AND COALESCE(terminal.message_id,'')=COALESCE(o.message_id,'')
+               ORDER BY terminal.seq DESC LIMIT 1),'')
          OR (o.status='leased' AND o.attempt<=0)
          OR (o.status='done' AND o.kind='wake' AND NOT EXISTS(
            SELECT 1 FROM lifecycle_events read

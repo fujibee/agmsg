@@ -60,7 +60,9 @@ retry/sent events remain valid after later transitions, while current outbox
 status and attempts must be writer-
 reachable. Completed wakes are backed by reads; completed cleanup/launch rows
 are backed by sent events, outbox attempts cover completed controls plus any
-in-flight lease, and launch metadata matches registration both ways.
+in-flight lease, the initial pending control shares the outbox ID, and current
+error text agrees with the latest sent/error control. Launch metadata matches
+registration both ways.
 Cross-record references do not depend on JSONL
 record-type order. Exact replay also leaves the legacy message projection unchanged.
 Every record shape produced by the SQLite writer is valid input

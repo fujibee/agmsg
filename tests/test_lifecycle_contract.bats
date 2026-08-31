@@ -1077,6 +1077,33 @@ not_contains() { case "$1" in *"$2"*) return 1 ;; *) return 0 ;; esac; }
   done
 }
 
+@test "lifecycle contract: import rejects outbox identity and current-error contradictions" {
+  local db="$TEST_SKILL_DIR/db/messages.db" identity_export="$BATS_TEST_TMPDIR/outbox-identity.jsonl"
+  local identity_mismatch="$BATS_TEST_TMPDIR/outbox-identity-mismatch.jsonl"
+  local error_export="$BATS_TEST_TMPDIR/outbox-error.jsonl" error_mismatch="$BATS_TEST_TMPDIR/outbox-error-mismatch.jsonl"
+  local claimed outbox_id
+  storage_operation_send agsuite alice bob action op-outbox-identity wake:bob body >/dev/null
+  storage_export agsuite "$identity_export"
+  sed '/"event_type":"outbox_pending"/ s/"id":"[^"]*"/"id":"different-control-id"/' "$identity_export" >"$identity_mismatch"
+
+  rm -f "$db" "$db-wal" "$db-shm"
+  storage_operation_send agsuite alice bob action op-outbox-error wake:bob body >/dev/null
+  claimed="$(storage_outbox_claim agsuite notifier 900)"
+  outbox_id="$(sqlite_mem "SELECT json_extract('$(printf '%s' "$claimed" | sed "s/'/''/g")','$.id');")"
+  storage_outbox_retry agsuite "$outbox_id" notifier 1 canonical-error >/dev/null
+  storage_export agsuite "$error_export"
+  sed '/"type":"lifecycle_outbox"/ s/"last_error":"canonical-error"/"last_error":"different-error"/' "$error_export" >"$error_mismatch"
+
+  local candidate
+  for candidate in "$identity_mismatch" "$error_mismatch"; do
+    rm -f "$db" "$db-wal" "$db-shm"
+    run --separate-stderr storage_import agsuite "$candidate"
+    [ "$status" -eq 13 ]
+    contains "$stderr" 'import failed'
+    [ "$(sqlite3 "$db" "SELECT COUNT(*) FROM lifecycle_outbox;")" -eq 0 ]
+  done
+}
+
 @test "lifecycle contract: public queries expose current processing and outbox leases" {
   local sent claimed
   sent="$(storage_operation_send agsuite alice bob action op-query-leases wake:bob body)"

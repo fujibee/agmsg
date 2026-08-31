@@ -485,7 +485,10 @@ must name the owner of the latest matching read receipt; the ACK follows that
 receipt causally. Historical retry/sent events remain valid after later
 transitions, while
 the latest control event, attempt count, and current status must be mutually
-reachable. A completed wake is backed by its read receipt; completed cleanup and
+reachable. The outbox row and its initial pending control share one ID. Its
+current `last_error` agrees with the most recent sent/error control: a latest
+error supplies the same reason, while a latest sent control clears it. A
+completed wake is backed by its read receipt; completed cleanup and
 launch rows are backed by a sent control event. Launch control metadata matches
 its registration in both directions. Cross-record references are independent
 of JSONL record-type order, and
