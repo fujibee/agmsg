@@ -95,8 +95,8 @@ _herdr_pane_for_session() {
         AND json_type(value,'\$.agent_session') = 'object'
         AND json_type(value,'\$.agent_session.value') = 'text'" 2>/dev/null)" || wrc=$?
     [ "$wrc" -eq 0 ] || return 2
-    [ "${well:-0}" -ge 1 ] || return 2  # non-empty but no expected-shape entry -> could not answer
-    queried=1
+    # Search the session among the well-formed entries. A positive find is decisive
+    # regardless of any malformed siblings — we located the pane.
     qrc=0
     pane="$(sqlite3 :memory: "
       SELECT json_extract(value,'\$.pane_id')
@@ -104,8 +104,14 @@ _herdr_pane_for_session() {
       WHERE json_type(value,'\$.agent_session') = 'object'
         AND json_extract(value,'\$.agent_session.value') = '$sesc'
       LIMIT 1" 2>/dev/null)" || qrc=$?
-    [ "$qrc" -eq 0 ] || continue
+    [ "$qrc" -eq 0 ] || return 2
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
+    # No match. ABSENCE is only provable if the WHOLE set was comparable — every
+    # entry well-formed (co1, one layer further: >=1 well-formed proves some entries
+    # are readable, not that the target is not hiding in a malformed one). A single
+    # malformed sibling means the session could be there unread: could not answer.
+    [ "${well:-0}" -eq "${alen:-0}" ] || return 2
+    queried=1   # every entry was comparable and none matched -> answered, not among
   done
   # No candidate path held a recognizable agent list (all unknown/ill-formed) =>
   # could not answer. Only a real array (empty, or well-formed with no match)

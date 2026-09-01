@@ -98,6 +98,16 @@ _fake_herdr_list_unknown_schema() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''%s'\''; exit 0; }\nexit 0\n' "$payload" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` MIXES a well-formed entry (session <well_sid>, pane
+# wA:p1) with a MALFORMED one (agent_session as a scalar). Absence cannot be claimed
+# against this array — the searched session could be the unread malformed entry — so
+# a no-match must be did-not-answer, not not-among. A match on the well-formed entry
+# is still decisive.
+_fake_herdr_list_mixed() {
+  local well_sid="${1:-sess-OTHER}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wA:p1"},{"agent":"codex","agent_session":"scalar-broken","pane_id":"wB:p2"}]}}'\''; exit 0; }\nexit 0\n' "$well_sid" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 # A herdr whose `agent list` uses the OLD wrong shape: agent_session as a SCALAR.
 # The real herdr nests it as an object under .value; this fixture must resolve
 # NOTHING (the drift control — a scalar shape was green on the mock while resolving
@@ -648,6 +658,30 @@ M
   [ "$status" -ne 0 ]
   grep -q "not among the live agents" <<<"$output"
   refute grep -q "did not answer" <<<"$output"
+}
+
+@test "herdr naming: MIXED array, target ABSENT -> did-not-answer (cannot rule out the malformed entry)" {
+  # co1/tl one layer further: >=1 well-formed entry proves some entries are readable,
+  # NOT that the target is not hiding in a malformed sibling. Here alen=2 (a
+  # well-formed other-session entry + a malformed one) and well=1; the searched
+  # session is in neither well-formed slot. Absence is NOT provable — the target
+  # could be the unread malformed entry — so this is did-not-answer, not not-among.
+  _fake_herdr_list_mixed "sess-OTHER"
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: MIXED array, target IS the well-formed entry -> RESOLVES (find is decisive)" {
+  # A positive find is decisive regardless of malformed siblings — we located the
+  # pane. The malformed entry only blocks an ABSENCE claim, not a present one.
+  _fake_herdr_list_mixed "sess-mine"         # the well-formed entry IS this session
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'herdr\twA:p1')" ]
 }
 
 @test "resolve order: NESTED herdr-in-tmux — tmux (produces %0) wins over herdr (present, no id)" {
