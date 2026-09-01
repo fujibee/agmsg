@@ -78,70 +78,144 @@ scan() {
 import re, sys, pathlib
 
 ASSIGN = re.compile(r'^(?P<decl>local|declare|typeset|export|readonly)?\s*'
-                    r'(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<rhs>.*)$')
+                    r'(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<rhs>.*)$', re.S)
 SOURCEC = re.compile(r'^(\.|source)\s+\S')
-STATUS  = re.compile(r'\$\?')
+# A status READ is an assignment whose whole value is `$?` -- `rc=$?`,
+# `local rc=$?`. A statement that merely CONTAINS `$?` is not one: the
+# `|| vrc=$?` on a guarded assignment is that assignment's own handling,
+# and reporting the line before it (herdr/ops.sh:60) was a false positive.
+STATUS  = re.compile(r'^(local|declare|typeset|export|readonly)?\s*[A-Za-z_][A-Za-z0-9_]*=\$\?\s*$')
 COND    = re.compile(r'^(if|while|until|elif)\b')
+SETPLUS = re.compile(r'^set\s+\+[a-zA-Z]*e')
+SETMINUS= re.compile(r'^set\s+-[a-zA-Z]*e')
 
-def statements(line):
-    """Split a line into top-level statements on `;`, ignoring `;` inside
-    quotes or $( ). Good enough for the one-line `x=$(cmd); rc=$?` form,
-    which is how three of the four known instances were written."""
-    out, buf, depth, q = [], '', 0, None
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if q:
+def split_statements(text):
+    """Walk the file once, tracking quote state and $( ) nesting ACROSS LINES.
+
+    Splitting per line is what made this wrong: a SQL string that opens on one
+    line and closes on another left every `;` between them looking like a
+    statement separator, so
+
+        x="$(sqlite3 :memory: "SELECT ... LIMIT 1;" 2>/dev/null)" || rc=$?
+
+    was cut in half and its `|| rc=$?` guard was reported as an unguarded bare
+    assignment. A checker that reports the correct form gets worked around, and
+    a worked-around checker passes while guarding nothing.
+
+    A command substitution opens a FRESH quoting context even when it appears
+    inside double quotes -- `"$( ... "inner" ... )"` is one word to bash, and
+    the inner quotes are the substitution's, not the outer string's. So the
+    quote character is pushed on entering `$(` and restored on the matching
+    `)`. Modelling that as a flat flag is what let the first fix swallow a real
+    instance: the `"` right after `$(` read as CLOSING the outer string, and
+    everything after it fell out of the statement."""
+    out = []
+    buf, start = '', None
+    line = 1
+    q = None            # active quote char in the CURRENT context
+    stack = []          # saved quote chars, one per open $(
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+
+        if c == '\n':
+            here = line
+            line += 1
+            if q is None and not stack:
+                if buf.strip():
+                    out.append((start or here, buf.strip()))
+                buf, start = '', None
+            else:
+                buf += c
+            i += 1
+            continue
+
+        # inside single quotes nothing is special but the closing quote
+        if q == "'":
             buf += c
-            if c == q and line[i-1] != '\\':
+            if c == "'":
                 q = None
-        elif c in ('"', "'"):
-            q = c; buf += c
-        elif line[i:i+2] == '$(':
-            depth += 1; buf += line[i:i+2]; i += 2; continue
-        elif c == '(' and depth:
-            depth += 1; buf += c
-        elif c == ')' and depth:
-            depth -= 1; buf += c
-        elif c == ';' and depth == 0:
-            out.append(buf); buf = ''
-        else:
+            i += 1
+            continue
+
+        # command substitution opens a new quoting context, double quotes or not
+        if text[i:i+2] == '$(':
+            stack.append(q)
+            q = None
+            buf += '$('
+            if start is None:
+                start = line
+            i += 2
+            continue
+
+        if c == ')' and stack and q is None:
+            q = stack.pop()
             buf += c
+            i += 1
+            continue
+
+        if q == '"':
+            buf += c
+            if c == '"' and text[i-1] != '\\':
+                q = None
+            i += 1
+            continue
+
+        # unquoted, at some $( depth or none
+        if c in ('"', "'"):
+            q = c
+            buf += c
+            if start is None:
+                start = line
+            i += 1
+            continue
+
+        if c == '#' and not buf.strip() and not stack:
+            while i < n and text[i] != '\n':
+                i += 1
+            continue
+
+        if c == ';' and not stack:
+            if buf.strip():
+                out.append((start or line, buf.strip()))
+            buf, start = '', None
+            i += 1
+            continue
+
+        buf += c
+        if start is None and c.strip():
+            start = line
         i += 1
-    out.append(buf)
-    return [s.strip() for s in out if s.strip()]
+
+    if buf.strip():
+        out.append((start or line, buf.strip()))
+    return out
 
 rows = []
 for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.sh')):
     lifted = False
-    prev = None          # (lineno, statement) of the previous top-level statement
-    for n, raw in enumerate(f.read_text(errors='replace').splitlines(), 1):
-        s = raw.strip()
-        if not s or s.startswith('#'):
-            continue
-        for st in statements(s):
-            # errexit lift tracking: `set +e` (or `set +eu`, ...) lifts it,
-            # `set -e` puts it back. Anything in between is deliberate.
-            if re.match(r'^set\s+\+[a-zA-Z]*e', st):
-                lifted = True; prev = (n, st); continue
-            if re.match(r'^set\s+-[a-zA-Z]*e', st):
-                lifted = False; prev = (n, st); continue
+    prev = None
+    for n, st in split_statements(f.read_text(errors='replace')):
+        if SETPLUS.match(st):
+            lifted = True; prev = (n, st); continue
+        if SETMINUS.match(st):
+            lifted = False; prev = (n, st); continue
 
-            if prev and STATUS.search(st) and not lifted:
-                pn, ps = prev
-                if not COND.match(ps):
-                    m = ASSIGN.match(ps)
-                    guarded = re.search(r'\|\||&&', ps)
-                    kind = None
-                    if m and ('$(' in m.group('rhs') or '`' in m.group('rhs')):
-                        if not guarded:
-                            kind = 'decl' if m.group('decl') else 'bare'
-                    elif SOURCEC.match(ps):
-                        kind = 'source'      # `||` does not clear this on 3.2
-                    if kind:
-                        rel = f
-                        rows.append(f"{rel}:{n}: [{kind}] {ps[:60]} -> {st[:40]}")
-            prev = (n, st)
+        if prev and STATUS.match(st) and not lifted:
+            pn, ps = prev
+            if not COND.match(ps):
+                m = ASSIGN.match(ps)
+                guarded = re.search(r'\|\||&&', ps)
+                kind = None
+                if m and ('$(' in m.group('rhs') or '`' in m.group('rhs')):
+                    if not guarded:
+                        kind = 'decl' if m.group('decl') else 'bare'
+                elif SOURCEC.match(ps):
+                    kind = 'source'
+                if kind:
+                    flat = ' '.join(ps.split())
+                    rows.append(f"{f}:{n}: [{kind}] {flat[:60]} -> {' '.join(st.split())[:40]}")
+        prev = (n, st)
 
 for r in rows:
     print(r)
@@ -181,8 +255,38 @@ guarded_case() {         # explicit control — must NOT be reported
   out="$(some_command)" || rc=$?
   [ "${rc:-0}" -eq 0 ] || return 1
 }
+sql_guarded_case() {     # the false positive that cost a workaround — must NOT
+                         # be reported. The `;` sits inside a double-quoted SQL
+                         # string that OPENS on one line and CLOSES on another.
+  local out rc=0
+  out="$(sqlite3 :memory: "
+    SELECT json_extract(value,'$.pane_id')
+    FROM json_each('$j')
+    LIMIT 1;" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+}
+sql_bare_case() {        # the same multi-line SQL shape, genuinely unguarded —
+                         # MUST still be reported, or the splitter fix would have
+                         # bought a false negative in place of a false positive.
+  local out
+  out="$(sqlite3 :memory: "
+    SELECT 1;" 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 2
+}
 CTL
 control="$(scan "$control_dir")"
+# The multi-line SQL bare case must come back BY NAME, not merely by kind: the
+# kinds are covered below, and what this proves is the other direction — that a
+# quoted string spanning lines cannot swallow a real instance.
+case "$control" in
+  *sql_bare_case*|*"SELECT 1"*) ;;
+  *)
+    echo "check-errexit-status-reads: positive control did not report the multi-line" >&2
+    echo "SQL bare case; the splitter can be made to hide a real one." >&2
+    printf '%s\n' "$control" | sed 's/^/  /' >&2
+    exit 2 ;;
+esac
 for kind in bare decl source; do
   case "$control" in
     *"[$kind]"*) ;;
@@ -196,7 +300,7 @@ for kind in bare decl source; do
 done
 # and the two correct forms must not be reported, or every fix would look like
 # a defect and the baseline could never come down
-for bad in lifted_case guarded_case; do
+for bad in lifted_case guarded_case sql_guarded_case; do
   case "$control" in
     *"$bad"*)
       echo "check-errexit-status-reads: positive control reported $bad, which is the" >&2
