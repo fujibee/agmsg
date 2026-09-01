@@ -36,12 +36,16 @@ terminal_describe() {
 # Uses sqlite3 JSON1 (the codebase's no-jq convention). ASSERTED field names
 # (agent_session, pane_id) — verified by the live matrix. Prints the pane id, or
 # nothing (empty) if no entry matches.
+# Resolve <sid> to a pane via `agent list`, distinguishing THREE outcomes so the
+# caller can give an honest reason (co1/tl 2026-08-31):
+#   return 2         — could not ANSWER (herdr absent, or `agent list` errored/empty)
+#   return 0, pane   — answered, this session's pane is <pane>
+#   return 0, empty  — answered, but this session is not among the live agents
 _herdr_pane_for_session() {
-  local sid="$1" json
-  json="$(herdr agent list 2>/dev/null)" || return 1
-  [ -n "$json" ] || return 1
-  # The list may be a bare array or wrapped in {"result":{"agents":[...]}} — try
-  # a few shapes, first non-empty wins. All read-only.
+  local sid="$1" json rc=0
+  json="$(herdr agent list 2>/dev/null)"; rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  [ -n "$json" ] || return 2
   local q pane jesc sesc
   jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
   sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
@@ -55,7 +59,7 @@ _herdr_pane_for_session() {
       LIMIT 1;" 2>/dev/null)"
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
-  return 1
+  return 0   # answered, but this session is not among the live agents (empty)
 }
 
 # record op: we are under herdr iff HERDR_ENV=1 and herdr is on PATH. Resolve
@@ -63,23 +67,25 @@ _herdr_pane_for_session() {
 # HERDR_PANE_ID). Non-zero if not under herdr or the pane cannot be resolved.
 terminal_detect() {
   local sid="${1:-}"
-  # PRESENCE (exit code): we ARE under herdr iff HERDR_ENV=1 and herdr is on PATH
-  # — independent of whether we can resolve our OWN pane. SELF-ID (stdout): the
-  # pane from agent list, which may be EMPTY. Empty is the third value "could not
-  # resolve", NOT "not herdr" — the reason (no session id / list did not answer /
+  # PRESENCE (exit code) is HERDR_ENV=1 ALONE: whether herdr is on PATH is a
+  # terminal_check question ("can I operate it"), NOT "which terminal am I in"
+  # (co1/tl 2026-08-31). Conflating them would make a herdr session with no herdr
+  # on PATH place/name as tmux or plain. SELF-ID (stdout) is the pane from agent
+  # list, which may be EMPTY — the third value "could not resolve", NOT "not
+  # herdr". The reason (no session id / list did not answer, incl. herdr absent /
   # answered but we are not in it) goes to stderr for resolve-for-name's error;
-  # resolve-for-placement uses only the exit code and does not need the id.
+  # resolve-for-placement uses only the exit code and needs no id.
   [ "${HERDR_ENV:-}" = 1 ] || return 1
-  command -v herdr >/dev/null 2>&1 || return 1
   if [ -z "$sid" ]; then
     echo "herdr: no session id to resolve this pane by" >&2
     return 0
   fi
-  local pane
-  pane="$(_herdr_pane_for_session "$sid")" || {
-    echo "herdr: 'agent list' did not answer — cannot resolve this pane" >&2
+  local pane hrc
+  pane="$(_herdr_pane_for_session "$sid")"; hrc=$?
+  if [ "$hrc" -ne 0 ]; then
+    echo "herdr: 'agent list' did not answer (herdr not on PATH or errored) — cannot resolve this pane" >&2
     return 0
-  }
+  fi
   if [ -z "$pane" ]; then
     echo "herdr: session '$sid' is not among the live agents — cannot resolve this pane" >&2
     return 0

@@ -65,6 +65,17 @@ EOF
   export PATH="$FAKEBIN:$PATH"
 }
 
+# A herdr whose `agent list` ERRORS (stands in for herdr-absent/errored).
+_fake_herdr_list_fails() {
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && exit 1\nexit 0\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+# A herdr whose `agent list` answers with a valid EMPTY array (no live agents).
+_fake_herdr_list_empty() {
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo "[]"; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
 # --- resolution -------------------------------------------------------------
 
 @test "resolve: falls back to plain when neither tmux nor herdr is present" {
@@ -446,4 +457,53 @@ OPS
   [ "$status" -eq 13 ]
   grep -q 'needs HERDR_WORKSPACE_ID' <<<"$output"
   refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
+}
+
+# --- co1 round-5: presence vs binary availability; errexit-safe reason read ---
+
+@test "herdr: HERDR_ENV=1 with NO herdr binary still PLACES in herdr (presence != binary)" {
+  # Restrict PATH so `herdr` is genuinely absent (this machine has a real one),
+  # keeping bash/coreutils. TMUX is also set. Presence is HERDR_ENV alone, so
+  # placement must pick herdr — not fall through to tmux/plain.
+  export PATH="/usr/bin:/bin"
+  command -v herdr >/dev/null 2>&1 && skip "herdr on the minimal PATH; cannot test absence here"
+  export HERDR_ENV=1 TMUX="/tmp/s,1,0" TMUX_PANE="%4"
+  run agmsg_terminal_resolve_placement "sess-x"
+  [ "$status" -eq 0 ]
+  [ "$output" = "herdr" ]
+}
+
+@test "herdr naming: 'agent list' cannot answer -> fatal, reason 'did not answer'" {
+  # herdr present (HERDR_ENV=1) but its list errors: resolve-for-name is fatal and
+  # the driver's reason reaches the error (co1: the reason reaches A). A real herdr
+  # is on PATH here, so shadow it with a failing fake.
+  _fake_herdr_list_fails
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: answered but no match -> fatal, reason 'not among live agents'" {
+  _fake_herdr_list_empty
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "not among the live agents" <<<"$output"
+  refute grep -q "did not answer" <<<"$output"
+}
+
+@test "resolve_name: an mktemp failure does not leak set -e; the caller still reaches the non-zero verdict" {
+  # Force mktemp to fail by shadowing it with a stub that exits non-zero, and run
+  # under `set -e`. The reason read must not exit the shell before the verdict.
+  cat > "$FAKEBIN/mktemp" <<'M'
+#!/usr/bin/env bash
+exit 1
+M
+  chmod +x "$FAKEBIN/mktemp"; export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/s,1,0"; unset TMUX_PANE   # tmux present, no pane -> name is fatal
+  run bash -c 'set -euo pipefail; source "'"$SKILL_DIR"'/scripts/lib/terminal-registry.sh"; rc=0; agmsg_terminal_resolve_name sess-x >/dev/null 2>&1 || rc=$?; echo "verdict=$rc"'
+  [ "$status" -eq 0 ]
+  grep -q 'verdict=1' <<<"$output"
 }

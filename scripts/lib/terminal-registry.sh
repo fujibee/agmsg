@@ -242,7 +242,14 @@ agmsg_terminal_resolve_name() {
       [ "$errf" = /dev/null ] || rm -f "$errf"; return 0
     fi
     # Present but no id: fatal for naming — surface the reason detect gave.
-    reason="$( [ -f "$errf" ] && cat "$errf" 2>/dev/null )"
+    # Read the reason without ever leaving a bare failing status on the line —
+    # under errexit a `reason=$([ -f x ] && ...)` that short-circuits (e.g. errf is
+    # /dev/null after an mktemp failure) exits the caller before we report. Guard
+    # with an `if` (a guard's non-zero does not propagate) and swallow cat's status.
+    reason=""
+    if [ "$errf" != /dev/null ] && [ -f "$errf" ]; then
+      reason="$(cat "$errf" 2>/dev/null || true)"
+    fi
     echo "agmsg: under terminal '$name' but cannot identify this pane to name it${reason:+: $reason}" >&2
     [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
   done
