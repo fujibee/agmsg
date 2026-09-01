@@ -103,11 +103,17 @@ EOF
   [ ! -s "$ARGV_LOG" ]
 }
 
-@test "peek: a plain record is unsupported — non-zero with a reason, never a quiet 0" {
+@test "peek: a plain record is a dead end — and does NOT point at a native channel" {
   _write_record "plain:-"
   run bash "$SCRIPTS/peek.sh" testteam alice
   [ "$status" -eq 13 ]
   _out_has "unsupported: plain terminal has no addressable pane"
+  # The peek/poke asymmetry is measured, not stylistic: SendMessage gives poke
+  # a native write path, but today's CLI has no read path (`claude logs` is
+  # background-only; `agents --json` carries status, not screen content). A
+  # native-channel pointer here would send the reader chasing a door that does
+  # not exist — assert its absence so adding one back is a conscious decision.
+  [ "$(printf '%s\n' "$output" | grep -c 'native channel' || true)" -eq 0 ]
 }
 
 @test "peek: --lines rejects a non-number instead of passing it through" {
@@ -154,11 +160,12 @@ EOF
   [ "$(grep -ci 'enter' "$ARGV_LOG" || true)" -eq 0 ]
 }
 
-@test "poke: a plain record is unsupported — non-zero with a reason" {
+@test "poke: a plain record is unsupported as a TERMINAL answer, and points at the type's native channel (peek deliberately does not — no CLI read path)" {
   _write_record "plain:-"
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"
   [ "$status" -eq 13 ]
   _out_has "unsupported: plain terminal has no addressable pane"
+  _out_has "agent type may offer a native channel"
 }
 
 @test "poke: unquoted multi-word text is refused, not silently truncated" {

@@ -99,6 +99,25 @@ _plain_unsupported() {
   printf 'unsupported: plain terminal has no addressable pane (%s)\n' "$1" >&2
   return 13
 }
+# poke — and ONLY poke — gets the third value (koit's design): still non-zero,
+# because as a terminal answer "no pane" is correct and stays, but the refusal
+# must not end the conversation: the member's agent TYPE may have a native
+# channel (Claude Code's SendMessage), and the type template is where that
+# question is answered. Deliberately said WITHOUT asking who the caller is:
+# "which terminal am I in" is this driver's question, "does this agent have
+# native messaging" is the type's — mixing them here would rebuild the
+# presence-vs-binary confusion this axis just removed.
+#
+# peek stays a plain dead end ON PURPOSE — the asymmetry is measured, not an
+# oversight: a native WRITE path exists (SendMessage), but there is no native
+# READ path in today's CLI (`claude logs <id>` serves background jobs only —
+# interactive ids answer "No job matching" — and `claude agents --json` lists
+# status, never screen content). If a read endpoint ever appears, this is the
+# line to change.
+_plain_no_pane_but_maybe_native() {
+  printf 'unsupported: plain terminal has no addressable pane (%s) — not a dead end: the member'\''s agent type may offer a native channel; the type template says which\n' "$1" >&2
+  return 13
+}
 terminal_peek() { _plain_unsupported "peek"; }
-terminal_poke() { _plain_unsupported "poke"; }
+terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
 terminal_name() { _plain_unsupported "name"; }
