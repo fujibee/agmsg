@@ -1170,9 +1170,15 @@ _spawn_recorded_id() {
   [ -s "$CAPTURE" ]
 }
 
-@test "spawn: --terminal-driver with an unknown name errors loudly" {
-  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+@test "spawn: --terminal-driver validates EARLY — before team resolution or any state change" {
+  # co1: an unknown driver is a deterministic arg typo, so it must fail before spawn
+  # registers a role or writes a boot file, and before an unrelated 'no team' can mask
+  # it. With NO team registered for the project, a bogus driver must STILL error with
+  # 'unknown terminal driver' (not 'no team') — proving the check runs at parse time.
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver bogus
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown terminal driver"* ]]
+  grep -q "unknown terminal driver" <<<"$output"
+  refute grep -q "no team" <<<"$output"
+  # Nothing was registered for the spawn target (it failed before the pre-join).
+  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
 }

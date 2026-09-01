@@ -40,7 +40,13 @@ set -euo pipefail
 #                      `{cmd}` placeholder is replaced with the path to the
 #                      generated boot script (an executable file the terminal
 #                      should run). Overrides $AGMSG_TERMINAL and config
-#                      `spawn.terminal`.
+#                      `spawn.terminal`. This is the OS-terminal COMMAND axis.
+#   --terminal-driver <name>
+#                      force WHICH terminal axis places the member: tmux | herdr |
+#                      plain. A different axis from --terminal above: this selects
+#                      the driver, that is the OS-terminal command template. Bypasses
+#                      detection (otherwise $TMUX -> tmux -> herdr -> OS terminal).
+#                      Overrides $AGMSG_TERMINAL_DRIVER (the CLI flag wins).
 #   --no-wait          don't block on the readiness handshake; return as soon
 #                      as the agent is launched (fire-and-forget)
 #   --ready-timeout N  seconds to wait for readiness before giving up
@@ -171,6 +177,19 @@ done
 
 case "$SPLIT" in h|v) ;; *) die "--split must be 'h' or 'v'" ;; esac
 case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole number of seconds" ;; esac
+
+# Validate the terminal-driver override HERE, before any state change (co1): it is a
+# deterministic argument typo, so it must fail like --split does — before the role is
+# registered and a boot file is written (place_and_launch runs after both), and
+# before an unrelated "no team" error can mask it. The driver must exist AND be able
+# to place a spawn (declare the `spawn` capability). place_and_launch keeps its own
+# guard as defence in depth.
+if [ -n "$TERMINAL_DRIVER" ]; then
+  agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
+    || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
+  agmsg_terminal_has "$TERMINAL_DRIVER" capabilities spawn \
+    || die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)"
+fi
 
 # Resolve the terminal override for the non-tmux path:
 #   --terminal  >  $AGMSG_TERMINAL  >  config spawn.terminal
