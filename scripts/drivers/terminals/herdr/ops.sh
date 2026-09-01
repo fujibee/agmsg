@@ -199,9 +199,13 @@ terminal_detect() {
 
 # Read the new pane id from a herdr JSON result at one of the known paths.
 _herdr_new_pane_id() {
-  local json="$1" q pane
+  local json="$1" q pane esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
   for q in '$.result.pane.pane_id' '$.result.root_pane.pane_id' '$.pane.pane_id' '$.root_pane.pane_id'; do
-    pane="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$json" | sed "s/'/''/g")', '$q')" 2>/dev/null)"
+    # Only a TEXT value is a usable pane id: a numeric or null pane_id (a malformed or
+    # partial herdr response) must fail closed, exactly as spawn.sh's herdr_json_str
+    # does — otherwise the caller would rename/run against a value that is not a pane.
+    pane="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc', '$q') = 'text' THEN json_extract('$esc', '$q') END" 2>/dev/null)"
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
   return 1

@@ -341,6 +341,27 @@ _fake_herdr_list_scalar_session() {
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
 }
 
+@test "herdr: spawn fails closed on a NON-TEXT pane_id in the split response" {
+  # A numeric/null pane_id is a malformed or partial response, not a usable pane id.
+  # _herdr_new_pane_id must reject it (json_type='text' guard) so the driver returns
+  # 13 and never renames/runs against a non-pane value — mirrors spawn.sh's
+  # herdr_json_str fail-closed contract.
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = split ]; then echo '{"result":{"pane":{"pane_id":42}}}'; fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID='wC:p1'
+  : > "$ARGV_LOG"
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 13 ]
+  refute grep -q '\[pane\] \[rename\]' "$ARGV_LOG"
+  refute grep -q '\[pane\] \[run\]' "$ARGV_LOG"
+}
+
 @test "herdr: despawn closes the pane; peek reads visible; name sets visible ':' + derived key" {
   _install_fake_herdr "sess-77"
   agmsg_terminal_load herdr
