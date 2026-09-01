@@ -60,78 +60,86 @@ _herdr_pane_for_session() {
   valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
   [ "$vrc" -eq 0 ] || return 2
   [ "$valid" = 1 ] || return 2
-  local q pane qrc sesc queried=0 jtype jtrc alen arc well wrc
+  local q pane sesc jtype jtrc alen det badhit out orc
   sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
-  # POSITIVE PROOF, one layer down (co1/tl 2026-09-01, 3rd instance of the same
-  # shape — do not grab the proxy before the state it stands for). The answer here
-  # depends on "the session id was COMPARED against a real agent entry". So the
-  # positive proof is "at least one entry of the EXPECTED SHAPE existed", NOT "the
-  # container was an array" (json_type=array only closes {} / unknown wrapper). A
-  # non-empty array of the wrong entry shape — [1], [{}], or the old scalar
-  # agent_session — json_eaches to 0 matching rows and would be MISREAD as
-  # "answered, session not present". Three outcomes per candidate array path:
-  #   empty array (len 0)            -> answered, no agents (queried, not-among)
-  #   non-empty, 0 expected entries  -> could NOT answer (schema drift, return 2)
-  #   non-empty, >=1 expected entry  -> queried; search the session among them
-  # EXPECTED SHAPE (measured, herdr 0.8.0 read-only): entry is an object, pane_id is
-  # text, agent_session is an object whose .value is text (the session id is in
-  # .value, NOT the object itself). Candidate paths: $.result.agents is the measured
-  # location; the others are version-defensive.
+  # The claim "not among" is a claim about the WHOLE set, so it is only honest when
+  # every entry's membership is DECIDABLE. The trap (co1/tl over several rounds, then
+  # utildev's live measurement) is grabbing a proxy for "decidable":
+  #   1 query succeeded  2 container is an array  3 an entry of the expected shape
+  #   exists  4 >=1 well-formed  5 same predicate twice  6 the '|' delimiter is in
+  #   the value  7 the pane-id "shape" is just a skeleton
+  # and — measured on the real machine — a BARE PANE with no agent_session at all is
+  # a NORMAL herdr member, not schema drift; treating it as "unreadable" made
+  # `well == alen` never hold, so not-among was unreachable and every absent session
+  # returned did-not-answer. The fix is to split "could not read this entry" from
+  # "this entry legitimately has no session":
+  #   DETERMINATE entry  — its membership is decidable: an object that either has NO
+  #                        agent_session (a bare pane: definitely not the target) OR
+  #                        an agent_session OBJECT whose .value is text (comparable).
+  #   indeterminate      — an object with an agent_session that is PRESENT but
+  #                        malformed (scalar, or object without a text .value): the
+  #                        target could be hiding there unread.
+  # One query over the array at $q (the authority once found) returns four
+  # '|'-separated fields — alen, determinate count, "found-but-unusable-pane" count,
+  # and the matched pane id. The matched pane is the ONLY free-text field and it is
+  # constrained to the MEASURED herdr pane-id grammar, so it is [0-9A-Za-z:] only and
+  # the '|'/one-line framing cannot mis-split (a pane with '|' or a newline is not a
+  # usable id — the match is withheld and counted as found-but-unusable). Grammar
+  # (from read-only measurement, herdr 0.8.0: w1:p4, w1:pB, w5:p3; fixtures also
+  # wC:p4): w + >=1 alnum, exactly one ':', then p + >=1 alnum, alnum+':' only.
+  #   GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*' : w<n>:p<x>, n/x non-empty (rejects w:p, w1:t1)
+  #   NOT GLOB '*:*:*'                    : at most one ':' (rejects w1:x:p4)
+  #   NOT GLOB '*[^0-9A-Za-z:]*'          : alnum + ':' only (rejects '|', newline;
+  #                                         [^…] is GLOB's negated class, not [!…])
+  # Candidate paths: $.result.agents is the measured location; others are defensive.
   for q in '$.result.agents' '$' '$.agents' '$.result'; do
     jtrc=0
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
     [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
     [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
-    # ONE query, ONE predicate (co1: derive the count AND the lookup from the same
-    # well-formed set so the search cannot drift weaker than the count). Emits three
-    # fields, '|'-separated: total entries, well-formed entries, and the matched pane
-    # id (or empty).
-    #
-    # A well-formed entry is an object with an agent_session object whose .value is
-    # text AND a pane_id that is text of the ACTUAL herdr pane-id FORM (tl: narrow
-    # the shape, do not just carry any text). This closes a FRAMING hazard, not just
-    # a shape one: json_type='text' alone permits a pane_id containing '|' or a
-    # newline, which would corrupt this very '|'-separated / one-line-read framing
-    # (wA|p1 -> read keeps 'wA'). Requiring the pane-id grammar means only
-    # [0-9A-Za-z:] values reach the shell line, so the framing cannot mis-split; a
-    # pane_id of the wrong form is not well-formed -> did-not-answer (it is unusable
-    # anyway). MEASURED forms on this machine (read-only): real herdr is w<n>:p<x>
-    # (w1:p4, w1:pB, w5:p3); the fixtures also use w<L>:p<x> (wC:p4) — both admitted.
-    #   GLOB 'w*:p*'                     : the w…:p… skeleton (rejects 123, w1:t1)
-    #   NOT GLOB '*[^0-9A-Za-z:]*'       : only alnum + ':' (rejects '|', newline, space)
-    #                                      ([^…] is SQLite GLOB's negated class, not [!…])
-    local out orc=0
+    orc=0
     out="$(sqlite3 :memory: "
       WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
-           wf(value) AS (
+           det(value) AS (
              SELECT value FROM entries
              WHERE json_type(value) = 'object'
+               AND ( json_type(value,'\$.agent_session') IS NULL
+                     OR ( json_type(value,'\$.agent_session') = 'object'
+                          AND json_type(value,'\$.agent_session.value') = 'text' ) )),
+           hit(pid) AS (
+             SELECT json_extract(value,'\$.pane_id') FROM det
+             WHERE json_type(value,'\$.agent_session') = 'object'
+               AND json_extract(value,'\$.agent_session.value') = '$sesc'
                AND json_type(value,'\$.pane_id') = 'text'
-               AND json_extract(value,'\$.pane_id') GLOB 'w*:p*'
+               AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+               AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
                AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
-               AND json_type(value,'\$.agent_session') = 'object'
-               AND json_type(value,'\$.agent_session.value') = 'text')
+             LIMIT 1),
+           badhit(x) AS (
+             SELECT 1 FROM det
+             WHERE json_type(value,'\$.agent_session') = 'object'
+               AND json_extract(value,'\$.agent_session.value') = '$sesc'
+               AND NOT ( json_type(value,'\$.pane_id') = 'text'
+                         AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                         AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
+                         AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*') )
+             LIMIT 1)
       SELECT (SELECT count(*) FROM entries),
-             (SELECT count(*) FROM wf),
-             (SELECT json_extract(value,'\$.pane_id') FROM wf
-                WHERE json_extract(value,'\$.agent_session.value') = '$sesc' LIMIT 1)" 2>/dev/null)" || orc=$?
+             (SELECT count(*) FROM det),
+             (SELECT count(*) FROM badhit),
+             (SELECT pid FROM hit)" 2>/dev/null)" || orc=$?
     [ "$orc" -eq 0 ] || return 2
-    IFS='|' read -r alen well pane <<< "$out"
-    if [ "${alen:-0}" -eq 0 ]; then queried=1; continue; fi   # empty list -> answered, no agents
-    # A match is drawn from the well-formed set, so its pane id is a real text id;
-    # a positive find is decisive regardless of any malformed siblings.
+    IFS='|' read -r alen det badhit pane <<< "$out"
+    # Found, with a usable pane id (grammar-constrained -> framing-safe).
     if [ -n "$pane" ] && [ "$pane" != "null" ]; then printf '%s\n' "$pane"; return 0; fi
-    # No match. ABSENCE is only provable if the WHOLE set was comparable — every
-    # entry well-formed. A single malformed sibling means the session could be there
-    # unread (co1): could not answer, not "not among".
-    [ "${well:-0}" -eq "${alen:-0}" ] || return 2
-    queried=1   # every entry was comparable and none matched -> answered, not among
+    # Target present but its pane id is unusable -> we cannot address it: could not answer.
+    [ "${badhit:-0}" -gt 0 ] && return 2
+    # No match. Not-among is honest only if EVERY entry was decidable (bare panes
+    # count as decidable — they simply have no session). Empty array: det==alen==0.
+    [ "${det:-0}" -eq "${alen:-0}" ] && return 0   # answered, this session is not among the agents
+    return 2   # some entry had a malformed agent_session -> the target may be unread
   done
-  # No candidate path held a recognizable agent list (all unknown/ill-formed) =>
-  # could not answer. Only a real array (empty, or well-formed with no match)
-  # reaches here with queried=1 => answered, not among.
-  [ "$queried" = 1 ] || return 2
-  return 0
+  return 2   # no candidate array path (unknown schema) -> could not answer
 }
 
 # record op: we are under herdr iff HERDR_ENV=1 and herdr is on PATH. Resolve

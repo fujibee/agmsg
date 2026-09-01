@@ -118,6 +118,16 @@ _fake_herdr_list_numeric_pane() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"wA:p1"},{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"%s"},"pane_id":123}]}}'\''; exit 0; }\nexit 0\n' "$target_sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` mixes a well-formed agent entry (session <sid>, pane
+# w1:p4) with a BARE PANE that has NO agent_session at all (pane w5:p3). Measured on
+# the real machine: a session-less pane is a NORMAL herdr member, not schema drift.
+# Its membership IS decidable (it definitely is not the target), so an absent target
+# must be not-among — NOT did-not-answer.
+_fake_herdr_list_bare_pane() {
+  local sid="${1:-sess-OTHER}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4"},{"agent":"","pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 # A herdr whose `agent list` has ONE entry: well-formed agent_session (value=<sid>)
 # and a caller-supplied pane_id VALUE. Lets a test drive the pane-id grammar: a
 # '|' or newline pane_id must be rejected (did-not-answer, and must not corrupt the
@@ -677,6 +687,27 @@ M
   [ "$status" -ne 0 ]
   grep -q "not among the live agents" <<<"$output"
   refute grep -q "did not answer" <<<"$output"
+}
+
+@test "herdr naming: a BARE PANE (no agent_session) is decidable — absent target is not-among" {
+  # utildev live-measured: the real machine has a session-less pane among the agents.
+  # A bare pane definitely is not the target, so it does NOT block a not-among answer
+  # (the earlier well==alen rule treated it as unreadable, making not-among
+  # unreachable — every absent session wrongly returned did-not-answer).
+  _fake_herdr_list_bare_pane "sess-OTHER"
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
+  grep -q "not among the live agents" <<<"$output"
+  refute grep -q "did not answer" <<<"$output"
+}
+
+@test "herdr naming: a BARE PANE does not block resolving a present target" {
+  _fake_herdr_list_bare_pane "sess-mine"     # the agent entry IS this session; a bare pane also present
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'herdr\tw1:p4')" ]
 }
 
 @test "herdr naming: MIXED array, target ABSENT -> did-not-answer (cannot rule out the malformed entry)" {
