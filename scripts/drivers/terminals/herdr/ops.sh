@@ -60,39 +60,56 @@ _herdr_pane_for_session() {
   valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
   [ "$vrc" -eq 0 ] || return 2
   [ "$valid" = 1 ] || return 2
-  local q pane qrc sesc queried=0 jtype jtrc
+  local q pane qrc sesc queried=0 jtype jtrc alen arc well wrc
   sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
-  # POSITIVE SCHEMA PROOF (co1/tl 2026-09-01): a SUCCESSFUL json_each is NOT proof
-  # of a recognized agent list. json_each on a valid {} — or on an object with only
-  # unknown keys — returns 0 rows and succeeds, which would misclassify an unknown
-  # schema as "answered, session not present". Two existence checks are not a
-  # relation: that a query SUCCEEDED and that the EXPECTED SHAPE existed are
-  # different facts. So confirm json_type(path)='array' FIRST, and count a path as
-  # "queried" only when a real array actually existed there.
-  #
-  # Candidate paths: $.result.agents is the MEASURED shape (herdr 0.8.0 `agent list`
-  # on this machine, read-only: 12 entries under $.result.agents); the others are
-  # version-defensive. Within an entry, agent_session is an OBJECT
-  # { agent, kind, source, value } — the session id is in .value, NOT the object
-  # itself (comparing the object to a scalar sid matched 0 rows; .value matched the
-  # live pane). pane_id is a top-level scalar sibling.
+  # POSITIVE PROOF, one layer down (co1/tl 2026-09-01, 3rd instance of the same
+  # shape — do not grab the proxy before the state it stands for). The answer here
+  # depends on "the session id was COMPARED against a real agent entry". So the
+  # positive proof is "at least one entry of the EXPECTED SHAPE existed", NOT "the
+  # container was an array" (json_type=array only closes {} / unknown wrapper). A
+  # non-empty array of the wrong entry shape — [1], [{}], or the old scalar
+  # agent_session — json_eaches to 0 matching rows and would be MISREAD as
+  # "answered, session not present". Three outcomes per candidate array path:
+  #   empty array (len 0)            -> answered, no agents (queried, not-among)
+  #   non-empty, 0 expected entries  -> could NOT answer (schema drift, return 2)
+  #   non-empty, >=1 expected entry  -> queried; search the session among them
+  # EXPECTED SHAPE (measured, herdr 0.8.0 read-only): entry is an object, pane_id is
+  # text, agent_session is an object whose .value is text (the session id is in
+  # .value, NOT the object itself). Candidate paths: $.result.agents is the measured
+  # location; the others are version-defensive.
   for q in '$.result.agents' '$' '$.agents' '$.result'; do
     jtrc=0
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
     [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
     [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
+    arc=0
+    alen="$(sqlite3 :memory: "SELECT json_array_length('$jesc', '$q')" 2>/dev/null)" || arc=$?
+    [ "$arc" -eq 0 ] || return 2
+    if [ "${alen:-0}" -eq 0 ]; then queried=1; continue; fi   # empty list -> answered, no agents
+    # Count entries that satisfy the measured entry shape.
+    wrc=0
+    well="$(sqlite3 :memory: "
+      SELECT count(*) FROM json_each('$jesc', '$q')
+      WHERE json_type(value) = 'object'
+        AND json_type(value,'\$.pane_id') = 'text'
+        AND json_type(value,'\$.agent_session') = 'object'
+        AND json_type(value,'\$.agent_session.value') = 'text'" 2>/dev/null)" || wrc=$?
+    [ "$wrc" -eq 0 ] || return 2
+    [ "${well:-0}" -ge 1 ] || return 2  # non-empty but no expected-shape entry -> could not answer
     queried=1
     qrc=0
     pane="$(sqlite3 :memory: "
       SELECT json_extract(value,'\$.pane_id')
       FROM json_each('$jesc', '$q')
-      WHERE json_extract(value,'\$.agent_session.value') = '$sesc'
+      WHERE json_type(value,'\$.agent_session') = 'object'
+        AND json_extract(value,'\$.agent_session.value') = '$sesc'
       LIMIT 1" 2>/dev/null)" || qrc=$?
     [ "$qrc" -eq 0 ] || continue
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
-  # No candidate path was an array (unknown schema) => could not answer. Only a
-  # real, valid, EMPTY array reaches here with queried=1 => answered, not among.
+  # No candidate path held a recognizable agent list (all unknown/ill-formed) =>
+  # could not answer. Only a real array (empty, or well-formed with no match)
+  # reaches here with queried=1 => answered, not among.
   [ "$queried" = 1 ] || return 2
   return 0
 }

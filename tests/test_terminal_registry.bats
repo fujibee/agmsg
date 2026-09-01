@@ -622,19 +622,32 @@ M
   refute grep -q "not among the live agents" <<<"$output"
 }
 
-@test "herdr naming: fixture-drift guard — a SCALAR agent_session resolves NOTHING" {
-  # tl: the mock was green while resolving zero panes on the real machine, because
-  # its agent_session was a scalar and the real one nests the id under .value. This
-  # pins the real shape: with a scalar agent_session, .agent_session.value is null,
-  # so no row matches and resolution is fatal (not 'herdr\twC:p4'). If the code were
-  # reverted to compare the scalar path, THIS would resolve wC:p4 and go green — and
-  # the real-shape test (resolves the pane) would then fail. The pair pins both.
+@test "herdr naming: entry-shape drift (SCALAR agent_session) is did-not-answer, NOT not-among" {
+  # co1/tl 2026-09-01 (3rd instance of the shape): the answer depends on the session
+  # id being COMPARED against a real entry, so schema drift is NOT a positive proof
+  # of absence. A non-empty array whose entries are the OLD scalar-agent_session
+  # shape has 0 expected-shape entries -> did-not-answer (return 2), not "answered,
+  # not among". (The earlier version of this test asserted the misclassification.)
   _fake_herdr_list_scalar_session "sess-77"
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-77"
   [ "$status" -ne 0 ]
   refute grep -q 'wC:p4' <<<"$output"
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: real shape, a DIFFERENT live session -> not-among (the other side)" {
+  # The both-sides control: real entry shape (well-formed agents), but this session
+  # id is not among them. THIS is the only 'answered, not among' case. Paired with
+  # the drift test above, it pins that only a real-shape entry set answers, and a
+  # scalar/ill-formed one does not.
+  _install_fake_herdr "sess-OTHER"           # a well-formed list whose only agent is someone else
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
   grep -q "not among the live agents" <<<"$output"
+  refute grep -q "did not answer" <<<"$output"
 }
 
 @test "resolve order: NESTED herdr-in-tmux — tmux (produces %0) wins over herdr (present, no id)" {
