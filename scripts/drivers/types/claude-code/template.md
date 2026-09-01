@@ -229,6 +229,11 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 3. `poke` TYPES INTO another agent's session and submits it, as if a person had typed it there. Use it to reach a member whose watcher is not delivering (that is what it is for); use `send` for ordinary messages, which the member reads on its own terms.
 4. Exit 13 means the member's terminal cannot be poked (no addressable pane). Do not fall back to `send` silently — the two are not the same act; say which one you did.
 
+5. Exit 13 whose message says the member's agent type "may offer a native channel" is the plain terminal declining while pointing here. For a **claude-code** member that channel is **this session's own `SendMessage` tool** — find the target with `ListAgents` and send to it by name. That is the only route today; there is no pane to type into, and no shell command that substitutes.
+6. There is deliberately **no CLI fallback to reach for**, and this is measured rather than assumed: `claude agents --json` enumerates agents and their status but sends nothing, `claude logs <id>` serves background jobs only (an interactive id answers "No job matching"), and `~/.claude/daemon/dispatch` is an unpublished internal, not an interface. If a send subcommand ever ships, this is the paragraph to replace — say so rather than quietly leaving the reader to re-derive it.
+7. `peek` has **no** native equivalent, and the asymmetry is a finding, not an oversight: a native WRITE path exists (`SendMessage`), while today's CLI exposes no READ path — the same `claude logs <id>` measurement is the reason. So peek's exit 13 really is the end of the line; do not offer the user a substitute that does not exist.
+8. Whether a native poke **wakes an idle session** is **not verified**. Delivering a message and the recipient noticing it in that turn are different claims, and only the first has been shown. Report what you did ("sent via SendMessage"), not that it worked.
+
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`
 2. Show the output to the user.
