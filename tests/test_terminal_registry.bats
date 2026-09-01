@@ -51,7 +51,12 @@ _install_fake_herdr() {
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
-  printf '[{"agent_session":"%s","pane_id":"wC:p4"}]\n' "$sid"
+  # REAL herdr 0.8.0 shape (measured read-only): a { id, result:{ type, agents:[] } }
+  # wrapper; each entry has agent_session as an OBJECT whose .value is the session
+  # id, and pane_id as a top-level scalar sibling. Keeping the fixture faithful to
+  # this is what the drift control below pins — a scalar agent_session was green
+  # while resolving nothing on the real machine.
+  printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"team:alice","name":"a-key"}]}}\n' "$sid"
 elif [ "\$1" = pane ] && [ "\$2" = split ]; then
   echo '{"result":{"pane":{"pane_id":"wC:p9"}}}'
 elif [ "\$1" = tab ] && [ "\$2" = create ]; then
@@ -70,16 +75,36 @@ _fake_herdr_list_fails() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && exit 1\nexit 0\n' > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
-# A herdr whose `agent list` answers with a valid EMPTY array (no live agents).
+# A herdr whose `agent list` answers with a valid EMPTY agents array (real wrapper
+# shape, zero live agents) — the ONLY shape that means "answered, not among agents".
 _fake_herdr_list_empty() {
-  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo "[]"; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[]}}'\''; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 # A herdr whose `agent list` EXITS 0 but prints NON-JSON garbage. Exit-0 bytes are
 # not proof of a readable agent set: this must classify as "could not answer"
-# (json_valid gate), NOT "answered, no match".
+# (return 2), NOT "answered, no match".
 _fake_herdr_list_garbage() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo "not json at all"; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+# A herdr whose `agent list` EXITS 0 with VALID JSON but an UNRECOGNIZED schema (no
+# agents array at any candidate path). A successful json_each on this returns 0 rows
+# — so it must NOT be downgraded to "answered, not among"; it is "could not answer".
+# arg 1 selects the payload: 'obj' -> {}, 'wrap' -> {"unknown":[]}.
+_fake_herdr_list_unknown_schema() {
+  local payload='{}'
+  [ "${1:-}" = wrap ] && payload='{"unknown":[]}'
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''%s'\''; exit 0; }\nexit 0\n' "$payload" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+# A herdr whose `agent list` uses the OLD wrong shape: agent_session as a SCALAR.
+# The real herdr nests it as an object under .value; this fixture must resolve
+# NOTHING (the drift control — a scalar shape was green on the mock while resolving
+# zero panes on the real machine).
+_fake_herdr_list_scalar_session() {
+  local sid="${1:-}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent_session":"%s","pane_id":"wC:p4"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
@@ -292,16 +317,20 @@ _last_agent_rename_key() {
   sed -n 's/.*\[agent\] \[rename\] \[[^]]*\] \[\([^]]*\)\].*/\1/p' "$ARGV_LOG" | tail -1
 }
 
-@test "herdr naming: the internal key is INJECTIVE — ('-'/':' ) that fold-collide stay distinct" {
-  # tl/cc1 2026-09-01: the old fold (':' and non-regex chars -> '-') and ANY literal
-  # separator collide, because the separator is legal inside a name. cc1's example:
+@test "herdr naming: the internal key avoids the known fold/join collisions ('-' and ':')" {
+  # tl/cc1/co1 2026-09-01: the old fold (':' and non-regex chars -> '-') and ANY
+  # literal separator have a STRUCTURAL (deterministic, reachable) collision, because
+  # the separator is legal inside a name. cc1's example:
   #     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
   # and the same holds for the ':' the spec proposed as the join char:
   #     ("a:b","c") and ("a","b:c")   both join to  a:b:c
-  # The SHA-256 derivation (newline-joined; newline is a forbidden control char in
-  # both names) must map each of these four DISTINCT members to a DISTINCT key.
-  # A test that only checks "a key is produced" passes even if the fold returns —
-  # so we assert two colliding-under-fold inputs get two DIFFERENT keys.
+  # The newline-joined SHA-256 derivation (newline is a forbidden control char in
+  # both names) removes that STRUCTURAL ambiguity, so each of these four members
+  # gets a distinct key. This is NOT a proof of injectivity — a 96-bit hash of
+  # arbitrary input has collisions by pigeonhole; the key is collision-RESISTANT,
+  # and uniqueness is only needed among the dozens of live agents. This control
+  # pins that the known fold/join collisions specifically do not recur (a test that
+  # only checks "a key is produced" passes even if the fold returns).
   _install_fake_herdr "sess-77"
   agmsg_terminal_load herdr
   : > "$ARGV_LOG"; terminal_name 'p1' 'a-b' 'c'  >/dev/null; local k1; k1="$(_last_agent_rename_key)"
@@ -565,4 +594,86 @@ M
   run /bin/bash -c 'set -euo pipefail; source "'"$SKILL_DIR"'/scripts/lib/terminal-registry.sh"; agmsg_terminal_resolve_name sess-x'
   [ "$status" -eq 1 ]
   grep -q "cannot identify this pane to name it" <<<"$output"
+}
+
+@test "herdr naming: valid JSON, UNKNOWN schema ({}) -> did-not-answer, NOT 'no match'" {
+  # co1/tl 2026-09-01: a SUCCESSFUL json_each is not proof of a recognized list.
+  # json_each on {} returns 0 rows and succeeds, which without the json_type gate
+  # would misclassify an unknown schema as "answered, session not present". Only a
+  # real ARRAY at a candidate path counts as answered. This is the OTHER side of the
+  # empty-valid-array control; invalid-JSON alone does not cover this hole.
+  _fake_herdr_list_unknown_schema           # payload {}
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: valid JSON, UNKNOWN wrapper ({\"unknown\":[]}) -> did-not-answer" {
+  # An object whose only array lives at an UNRECOGNIZED key must not be read as an
+  # agent list. None of the candidate paths ($.result.agents, $, $.agents, $.result)
+  # is an array here, so no path is queried -> could not answer.
+  _fake_herdr_list_unknown_schema wrap      # payload {"unknown":[]}
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: fixture-drift guard — a SCALAR agent_session resolves NOTHING" {
+  # tl: the mock was green while resolving zero panes on the real machine, because
+  # its agent_session was a scalar and the real one nests the id under .value. This
+  # pins the real shape: with a scalar agent_session, .agent_session.value is null,
+  # so no row matches and resolution is fatal (not 'herdr\twC:p4'). If the code were
+  # reverted to compare the scalar path, THIS would resolve wC:p4 and go green — and
+  # the real-shape test (resolves the pane) would then fail. The pair pins both.
+  _fake_herdr_list_scalar_session "sess-77"
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-77"
+  [ "$status" -ne 0 ]
+  refute grep -q 'wC:p4' <<<"$output"
+  grep -q "not among the live agents" <<<"$output"
+}
+
+@test "resolve order: NESTED herdr-in-tmux — tmux (produces %0) wins over herdr (present, no id)" {
+  # tl 2026-09-01: a nested herdr-in-tmux inherits HERDR_* into a tmux server it
+  # spawned. herdr says 'present' but resolves no pane; tmux CAN produce %0. The
+  # id-producer must win (record tmux:%0 — the pane really is a tmux pane), not the
+  # first-present. herdr is tried first in declaration order, so this proves the
+  # preference is by id-produced, not by order.
+  _fake_herdr_list_empty                       # herdr present, resolves nothing
+  export HERDR_ENV=1
+  export TMUX="/tmp/s,1,0" TMUX_PANE="%0"      # tmux present, has a pane
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'tmux\t%%0')" ]
+}
+
+@test "resolve order: herdr broken AND no tmux pane -> FATAL with BOTH reasons, not silent plain" {
+  # tl's load-bearing case: real herdr with the lookup broken, and $TMUX_PANE empty.
+  # No candidate produces a nameable id. This must fail LOUDLY with EVERY present
+  # candidate's reason (not one), rather than fall through to plain's '-' and succeed
+  # silently. 'noisy wrong' beats 'silent wrong'.
+  _fake_herdr_list_fails                        # herdr present, 'did not answer'
+  export HERDR_ENV=1
+  export TMUX="/tmp/s,1,0"; unset TMUX_PANE     # tmux present, no pane
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  refute grep -q $'^plain\t-' <<<"$output"      # did NOT silently resolve to plain
+  grep -q "herdr:" <<<"$output"                 # BOTH reasons present, not one
+  grep -q "tmux:" <<<"$output"
+}
+
+@test "resolve order: BOTH produce an id -> declaration order wins (herdr over tmux)" {
+  # When more than one candidate produces a nameable id, the declaration order
+  # (herdr > tmux > plain) is the tiebreak. herdr resolves its pane AND tmux has a
+  # pane; herdr must win.
+  _install_fake_herdr "sess-77"                 # herdr resolves wC:p4 for sess-77
+  export HERDR_ENV=1
+  export TMUX="/tmp/s,1,0" TMUX_PANE="%0"       # tmux also has a pane
+  run agmsg_terminal_resolve_name "sess-77"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'herdr\twC:p4')" ]
 }

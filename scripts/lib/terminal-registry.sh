@@ -218,13 +218,30 @@ agmsg_terminal_resolve_placement() {
 }
 
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
-# and exit 0, REQUIRING a non-empty self-id. Present-but-no-id is FATAL: it prints
-# the driver's reason (why the pane could not be resolved) and returns non-zero —
-# "better to say we cannot name this pane than to name nothing." co1's fail-closed
-# (tmux with an empty $TMUX_PANE) lives here.
+# and exit 0. ORDER (tl 2026-09-01, from cc1's nested measurement): prefer a
+# candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
+# declaration order (herdr > tmux > plain) is the tiebreak AMONG id-producers.
+#
+# Why not "first present wins": a nested herdr-in-tmux inherits HERDR_* into a tmux
+# server it spawned, so herdr answers "present" though tmux is the real terminal. If
+# present-but-no-id were fatal at the FIRST candidate, herdr's dead-end would mask
+# tmux's live '%0'. Preferring the id-producer records `tmux:<pane>`, which is
+# CORRECT — that pane really is a tmux pane, and peek/poke read the record.
+#
+# FATAL only when NO candidate produced a nameable id AND some non-plain candidate
+# was present-but-unresolved — then EVERY such candidate's reason is printed (not
+# one). This is the load-bearing case: when herdr is genuinely broken (the
+# agent_session-object lookup bug) and tmux cannot answer either, we must fail
+# LOUDLY rather than let plain's '-' fallback succeed silently ("noisy wrong" beats
+# "silent wrong"). plain's '-' is the "no addressable pane" sentinel: it never wins
+# naming and is not a reason; it is only the fallback when NOTHING nameable was
+# present-but-unresolved (a genuinely plain OS-terminal member — herdr/tmux absent),
+# for which the caller (name_self) decides "skipped" by plain's missing `name`
+# capability.
 #   $1 = session_id (may be empty)   $2 = optional override terminal name
 agmsg_terminal_resolve_name() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
+  local reasons="" saw_present_unnamed=0 plain_present=0 plain_name=""
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
   local names="herdr tmux plain"
   if [ -n "$override" ]; then
@@ -241,24 +258,39 @@ agmsg_terminal_resolve_name() {
     # trying the next candidate. The conditional context suppresses errexit; rc=0
     # init covers the success path where `||` does not run. Same fix as herdr.
     rc=0; id="$(_agmsg_terminal_detect_one "$name" "$sid" "$errf")" || rc=$?
-    [ "$rc" -eq 0 ] || continue          # not this terminal — try the next
-    if [ -n "$id" ]; then
+    [ "$rc" -eq 0 ] || continue          # not this terminal at all — try the next
+    if [ "$id" = '-' ]; then             # present, but no addressable pane (plain sentinel)
+      plain_present=1; plain_name="$name"; continue
+    fi
+    if [ -n "$id" ]; then                # produced a nameable id — this candidate wins
       printf '%s\t%s\n' "$name" "$id"
       [ "$errf" = /dev/null ] || rm -f "$errf"; return 0
     fi
-    # Present but no id: fatal for naming — surface the reason detect gave.
-    # Read the reason without ever leaving a bare failing status on the line —
-    # under errexit a `reason=$([ -f x ] && ...)` that short-circuits (e.g. errf is
-    # /dev/null after an mktemp failure) exits the caller before we report. Guard
-    # with an `if` (a guard's non-zero does not propagate) and swallow cat's status.
+    # Present but produced no id: remember the reason and KEEP LOOKING for a
+    # candidate that can. Read the reason without leaving a bare failing status on
+    # the line — under errexit a `reason=$([ -f x ] && ...)` that short-circuits
+    # (e.g. errf is /dev/null after an mktemp failure) exits the caller before we
+    # report. Guard with an `if` (a guard's non-zero does not propagate).
     reason=""
     if [ "$errf" != /dev/null ] && [ -f "$errf" ]; then
       reason="$(cat "$errf" 2>/dev/null || true)"
     fi
-    echo "agmsg: under terminal '$name' but cannot identify this pane to name it${reason:+: $reason}" >&2
-    [ "$errf" = /dev/null ] || rm -f "$errf"; return 1
+    reasons="${reasons:+$reasons; }$name: ${reason:-present but could not identify this pane}"
+    saw_present_unnamed=1
   done
   [ "$errf" = /dev/null ] || rm -f "$errf"
+  # A non-plain candidate was present but could not be named: fail LOUDLY with every
+  # such reason, rather than let plain mask it.
+  if [ "$saw_present_unnamed" = 1 ]; then
+    echo "agmsg: under a terminal but cannot identify this pane to name it — $reasons" >&2
+    return 1
+  fi
+  # Nothing nameable was present-but-unresolved: fall back to plain if it matched
+  # (genuinely-plain member) so name_self can report "skipped" by capability.
+  if [ "$plain_present" = 1 ]; then
+    printf '%s\t%s\n' "$plain_name" '-'
+    return 0
+  fi
   return 1
 }
 

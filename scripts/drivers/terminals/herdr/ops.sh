@@ -6,10 +6,11 @@
 #
 # MEASURED (seat 0, 2026-08-29) vs ASSERTED-pending-live-matrix:
 #   measured: `herdr agent list` is JSON; the pane is resolved from it by the
-#     session id (inherited HERDR_PANE_ID is NOT trusted); the internal agent-name
-#     key is an injective SHA-256 derivation of (team, agent) — see
-#     _herdr_internal_key for why concatenation/folding is not injective; the
-#     existing spawn/despawn calls (pane split/rename/run, tab create, pane close);
+#     session id (inherited HERDR_PANE_ID is NOT trusted; agent_session in the list
+#     is an OBJECT and the id is at .value); the internal agent-name key is a
+#     collision-resistant SHA-256 derivation of (team, agent) — see
+#     _herdr_internal_key for why concatenation/folding has a structural collision;
+#     the existing spawn/despawn calls (pane split/rename/run, tab create, pane close);
 #     and `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #   asserted (exact argv/JSON fields verified only by the live matrix on koit's
 #     machine, NOT measured here): the `agent list` JSON field names used to
@@ -56,29 +57,44 @@ _herdr_pane_for_session() {
   # POSITIVE PROOF the list is something we could actually read: exit-0 bytes are
   # not proof of a live-agent set. Invalid JSON, a bad schema, or an unavailable
   # sqlite all mean "could not answer" (return 2), NOT "answered, no match".
-  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc');" 2>/dev/null)" || vrc=$?
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
   [ "$vrc" -eq 0 ] || return 2
   [ "$valid" = 1 ] || return 2
-  local q pane qrc sesc queried=0
+  local q pane qrc sesc queried=0 jtype jtrc
   sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
-  # json_each(J, P) iterates the array/object at path P; the array may be the root
-  # ($) or nested under a wrapper key. A shape whose path is not an iterable array
-  # ERRORS (qrc != 0) — skip it; a shape that queried (qrc 0) counts as "answered"
-  # even with no row. First shape that yields a pane wins.
-  for q in '$' '$.result.agents' '$.agents' '$.result'; do
+  # POSITIVE SCHEMA PROOF (co1/tl 2026-09-01): a SUCCESSFUL json_each is NOT proof
+  # of a recognized agent list. json_each on a valid {} — or on an object with only
+  # unknown keys — returns 0 rows and succeeds, which would misclassify an unknown
+  # schema as "answered, session not present". Two existence checks are not a
+  # relation: that a query SUCCEEDED and that the EXPECTED SHAPE existed are
+  # different facts. So confirm json_type(path)='array' FIRST, and count a path as
+  # "queried" only when a real array actually existed there.
+  #
+  # Candidate paths: $.result.agents is the MEASURED shape (herdr 0.8.0 `agent list`
+  # on this machine, read-only: 12 entries under $.result.agents); the others are
+  # version-defensive. Within an entry, agent_session is an OBJECT
+  # { agent, kind, source, value } — the session id is in .value, NOT the object
+  # itself (comparing the object to a scalar sid matched 0 rows; .value matched the
+  # live pane). pane_id is a top-level scalar sibling.
+  for q in '$.result.agents' '$' '$.agents' '$.result'; do
+    jtrc=0
+    jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
+    [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
+    [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
+    queried=1
     qrc=0
     pane="$(sqlite3 :memory: "
       SELECT json_extract(value,'\$.pane_id')
       FROM json_each('$jesc', '$q')
-      WHERE json_extract(value,'\$.agent_session') = '$sesc'
-      LIMIT 1;" 2>/dev/null)" || qrc=$?
+      WHERE json_extract(value,'\$.agent_session.value') = '$sesc'
+      LIMIT 1" 2>/dev/null)" || qrc=$?
     [ "$qrc" -eq 0 ] || continue
-    queried=1
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
-  # Valid JSON but no shape was queryable (unrecognized schema) => could not answer.
+  # No candidate path was an array (unknown schema) => could not answer. Only a
+  # real, valid, EMPTY array reaches here with queried=1 => answered, not among.
   [ "$queried" = 1 ] || return 2
-  return 0   # answered, valid list, but this session is not among the live agents
+  return 0
 }
 
 # record op: we are under herdr iff HERDR_ENV=1 and herdr is on PATH. Resolve
@@ -120,7 +136,7 @@ terminal_detect() {
 _herdr_new_pane_id() {
   local json="$1" q pane
   for q in '$.result.pane.pane_id' '$.result.root_pane.pane_id' '$.pane.pane_id' '$.root_pane.pane_id'; do
-    pane="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$json" | sed "s/'/''/g")', '$q');" 2>/dev/null)"
+    pane="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$json" | sed "s/'/''/g")', '$q')" 2>/dev/null)"
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
   return 1
@@ -190,23 +206,34 @@ terminal_poke() {
   return 0
 }
 
-# Derive herdr's INTERNAL resolvable agent-name key from (team, agent), INJECTIVELY.
+# Derive herdr's INTERNAL resolvable agent-name key from (team, agent): a
+# COLLISION-RESISTANT 96-bit key (NOT injective — see below).
 #
-# The key must satisfy herdr's agent-name regex [a-z][a-z0-9_-]{0,31} AND map
-# distinct members to distinct keys — a collision makes `herdr agent rename`
-# clobber another member's addressing. FOLDING or CONCATENATING with any literal
-# separator fails the second property, because that separator can itself appear in
-# a name (agmsg only forbids . / \ " [ ] control chars and a leading '-', so ':',
-# '-' and '_' are all legal in team AND agent names):
+# The key must satisfy herdr's agent-name regex [a-z][a-z0-9_-]{0,31} AND, in
+# practice, not collide between live members — a collision makes `herdr agent
+# rename` clobber another member's addressing. FOLDING or CONCATENATING with any
+# literal separator has a STRUCTURAL (deterministic, reachable) collision, because
+# that separator can itself appear in a name (agmsg only forbids . / \ " [ ] control
+# chars and a leading '-', so ':', '-' and '_' are all legal in team AND agent
+# names):
 #     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
 #     ("a:b","c") and ("a","b:c")   both join to  a:b:c   (tl's `<team>:<agent>` too)
-# So we DERIVE instead: a SHA-256 of the pair, hex-truncated. The pair is joined
-# with a NEWLINE, which is a control character and therefore FORBIDDEN in both
-# names (scripts/lib/validate.sh rejects [[:cntrl:]]) — so the join is unambiguous
-# and the derivation is injective for the '-' case AND the ':' case. 'a' + 24 hex
-# = 25 chars, leading letter, all within the regex. Uses the store's canonical
-# agmsg_sha256 (lib/hash.sh); sourced context may not have it, so load it relative
-# to this driver file. Prints the key, or non-zero if no SHA-256 tool is present.
+# We DERIVE instead: 'a' + the first 24 hex (96 bits) of SHA-256 of the pair. The
+# pair is joined with a NEWLINE, a control char FORBIDDEN in both names
+# (scripts/lib/validate.sh rejects [[:cntrl:]]), so the PREIMAGE encoding is
+# unambiguous — this removes the structural '-'/':' ambiguity above. It is NOT
+# mathematically injective: any hash of arbitrary-length input into 96 bits has
+# collisions by pigeonhole. It is COLLISION-RESISTANT, which is what this needs:
+# herdr requires a unique name only AMONG LIVE agents (scope Naming), a population
+# of dozens in this store — 96 bits against dozens is far more than enough. A true
+# no-collision guarantee would need a persistent map + collision detection (storage
+# + migration), which is out of v1's scope. RECOVERY BOUNDARY on the vanishing
+# chance of a collision: terminal_name's `herdr agent rename` fails, and that is
+# non-fatal — the pane id in the placement record still resolves peek/poke.
+#
+# 'a' + 24 hex = 25 chars, leading letter, all within the regex. Uses the store's
+# canonical agmsg_sha256 (lib/hash.sh); sourced context may not have it, so load it
+# relative to this driver file. Prints the key, or non-zero if no SHA-256 tool.
 _herdr_internal_key() {
   local team="$1" agent="$2" hex
   if ! command -v agmsg_sha256 >/dev/null 2>&1; then
@@ -221,12 +248,13 @@ _herdr_internal_key() {
 
 # control op: name the pane (scope Naming). Two copies:
 #   VISIBLE:    herdr pane rename <id> <team>:<agent>   (free text, ':' is fine)
-#   RESOLVABLE: herdr agent rename <id> <key>           where <key> is the injective
-#               SHA-256 derivation above — an INTERNAL key, never shown; peek/poke
-#               go by the recorded pane id, so the user never meets it. Idempotent.
-#               The visible rename is the required one; a failed agent rename (a
-#               live-name collision, or no SHA-256 tool to derive the key) is
-#               non-fatal — the pane id in the record still resolves.
+#   RESOLVABLE: herdr agent rename <id> <key>           where <key> is the
+#               collision-resistant SHA-256 derivation above — an INTERNAL key,
+#               never shown; peek/poke go by the recorded pane id, so the user never
+#               meets it. Idempotent. The visible rename is the required one; a
+#               failed agent rename (a live-name collision, or no SHA-256 tool to
+#               derive the key) is non-fatal — the pane id in the record still
+#               resolves.
 terminal_name() {
   local id="$1" team="$2" name="$3" label key
   label="$team:$name"
