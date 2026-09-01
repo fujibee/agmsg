@@ -121,7 +121,7 @@ done <<< "$TEAMS"
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   while IFS= read -r team; do
     [ -z "$team" ] && continue
-    agmsg_terminal_name_self_safe "$SESSION_ID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" || true
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record || true
   done <<< "$TEAMS"
 fi
 

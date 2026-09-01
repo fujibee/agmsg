@@ -690,3 +690,49 @@ M
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twC:p4')" ]
 }
+
+# --- naming vs placement: join must not take a seat's record ------------------
+#
+# The record is what peek/poke/despawn resolve a member's pane through, so the
+# pane it names has to be the one HOLDING the seat. `join` proves nothing about
+# that: the same identity can be joined from a second session while a first one
+# holds it through actas. The assertion is deliberately on the OLD value's
+# survival, not on "nothing broke" — a version that wiped the record to empty
+# would pass the weaker form.
+@test "terminal_name_self: without 'record' the seat's existing placement is untouched" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path seatteam alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%HELD\t/proj/A\tclaude-code\n' > "$rec"
+  local before; before="$(cat "$rec")"
+
+  # The second session names its own pane for the same identity, without claiming
+  # the seat: the 6th argument is omitted, which is the default.
+  run agmsg_terminal_name_self "" seatteam alice /proj/B claude-code
+  [ "$status" -eq 0 ]
+
+  # Positive control first: the pane WAS named, so a green result below cannot be
+  # "the call did nothing".
+  grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
+
+  local after; after="$(cat "$rec")"
+  [ "$after" = "$before" ]
+  printf '%s' "$after" | grep -q '%HELD'
+}
+
+@test "terminal_name_self: with 'record' the placement is written" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path seatteam bob)"
+  run agmsg_terminal_name_self "" seatteam bob /proj/B claude-code record
+  [ "$status" -eq 0 ]
+  [ -f "$rec" ]
+  grep -q 'tmux:%1' "$rec"
+}

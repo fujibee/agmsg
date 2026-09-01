@@ -388,7 +388,7 @@ if [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
   _agmsg_tr_rc=$?
   [ "$_agmsg_tr_e" = 1 ] && set -e
   if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-    agmsg_terminal_name_self_safe "$SESSION_ID" "$ROLE_TEAM" "$ROLE_NAME" "$PROJECT" "$TYPE" || true
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$ROLE_TEAM" "$ROLE_NAME" "$PROJECT" "$TYPE" record || true
   fi
 fi
 

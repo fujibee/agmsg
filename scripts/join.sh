@@ -230,8 +230,13 @@ if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
 fi
 agmsg_lock_release
 
-# Name this pane for the seat just joined, so peek/poke can reach a session a
-# human started by hand rather than only one `spawn` placed.
+# Name this pane for the seat just joined -- the VISIBLE name only. join does not
+# write a placement record, and must not: it is not a claim of the seat. The same
+# identity can be joined from a second session while a first one holds it through
+# actas, and a record written here would point peek/poke/despawn at the pane that
+# does NOT hold it. Showing your own name on your own pane is harmless; declaring
+# yourself the seat's placement is not. (The 6th argument is omitted deliberately;
+# its default is the safe half.)
 #
 # Called with NO session id: join is a plain CLI invocation and nothing tells it
 # which env var carries this type's session id (`detect=` answers whether a type

@@ -341,9 +341,10 @@ agmsg_terminal_ref_id() {
 #
 # Three outcomes, deliberately kept apart:
 #
-#   named    the terminal can name a pane AND this pane was identified: the
-#            driver names it and a "<terminal>:<id>" placement record is written,
-#            the same record spawn writes.
+#   named    the terminal can name a pane AND this pane was identified, so the
+#            driver names it. A "<terminal>:<id>" placement record -- the same one
+#            spawn writes -- follows ONLY when the caller asked for one; see the
+#            6th argument.
 #   skipped  the terminal has no `name` capability (plain has no addressable
 #            pane). QUIET, 0, and NO record: a permanent property of the terminal
 #            is not news on every join, and a record whose id cannot be acted on
@@ -363,9 +364,21 @@ agmsg_terminal_ref_id() {
 # session-start they are performing. Naming is additive; it must not change what
 # those commands do or return.
 #
-#   agmsg_terminal_name_self <session_id> <team> <agent> <project> <type>
+# The 6th argument decides whether a PLACEMENT RECORD is written, and it defaults
+# to NOT writing one. Naming a pane and being the authoritative placement for a
+# seat are different claims: `join` names a pane but proves nothing about who
+# holds the seat -- the same identity can be joined from a second session while a
+# first one holds it through actas -- so a record written there would redirect
+# peek/poke/despawn at a pane that does not have the seat. Only a caller with
+# positive evidence of ownership passes `record`: actas (it went through the
+# claim) and SessionStart (the seat is resolved). The default is the safe half, so
+# a caller added later that has not thought about it cannot silently take a
+# placement over.
+#
+#   agmsg_terminal_name_self <session_id> <team> <agent> <project> <type> [record]
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
+  local write_record="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] || {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
@@ -413,6 +426,10 @@ agmsg_terminal_name_self() {
     echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
     return "$rc"
   fi
+
+  # Named. Whether that ALSO makes this pane the seat's recorded placement is the
+  # caller's claim to make, not this function's.
+  [ "$write_record" = record ] || return 0
 
   # The record is what despawn/peek/poke resolve through, so it is written only
   # after the driver has actually named the pane.
