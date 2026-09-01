@@ -235,7 +235,12 @@ agmsg_terminal_resolve_name() {
     names="$override"
   fi
   for name in $names; do
-    id="$(_agmsg_terminal_detect_one "$name" "$sid" "$errf")"; rc=$?
+    # `|| rc=$?` (not `; rc=$?`): a bare command-substitution assignment fires the
+    # caller's set -e the instant _detect_one returns non-zero (the common
+    # not-this-terminal case), so `; rc=$?` never runs and resolve_name dies before
+    # trying the next candidate. The conditional context suppresses errexit; rc=0
+    # init covers the success path where `||` does not run. Same fix as herdr.
+    rc=0; id="$(_agmsg_terminal_detect_one "$name" "$sid" "$errf")" || rc=$?
     [ "$rc" -eq 0 ] || continue          # not this terminal — try the next
     if [ -n "$id" ]; then
       printf '%s\t%s\n' "$name" "$id"

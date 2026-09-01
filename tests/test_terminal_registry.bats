@@ -75,6 +75,13 @@ _fake_herdr_list_empty() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo "[]"; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` EXITS 0 but prints NON-JSON garbage. Exit-0 bytes are
+# not proof of a readable agent set: this must classify as "could not answer"
+# (json_valid gate), NOT "answered, no match".
+_fake_herdr_list_garbage() {
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo "not json at all"; exit 0; }\nexit 0\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 
 # --- resolution -------------------------------------------------------------
 
@@ -261,7 +268,7 @@ _fake_herdr_list_empty() {
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
 }
 
-@test "herdr: despawn closes the pane; peek reads visible; name encodes team__name" {
+@test "herdr: despawn closes the pane; peek reads visible; name sets visible ':' + derived key" {
   _install_fake_herdr "sess-77"
   agmsg_terminal_load herdr
   terminal_despawn 'wC:p9' >/dev/null
@@ -272,8 +279,40 @@ _fake_herdr_list_empty() {
   grep -q '\[pane\] \[read\] \[wC:p9\] \[--source\] \[visible\]' "$ARGV_LOG"
   : > "$ARGV_LOG"
   terminal_name 'wC:p9' teamx alice >/dev/null
+  # VISIBLE name is the free-text '<team>:<agent>'.
   grep -q '\[pane\] \[rename\] \[wC:p9\] \[teamx:alice\]' "$ARGV_LOG"
-  grep -q '\[agent\] \[rename\] \[wC:p9\] \[teamx-alice\]' "$ARGV_LOG"
+  # RESOLVABLE key is the injective SHA-256 derivation: 'a' + 24 hex, matching
+  # herdr's [a-z][a-z0-9_-]{0,31} regex. (Exact value is asserted for distinctness
+  # in the injectivity test below, not pinned here.)
+  grep -qE '\[agent\] \[rename\] \[wC:p9\] \[a[0-9a-f]{24}\]' "$ARGV_LOG"
+}
+
+# Pull the internal key (4th bracket of the `agent rename` line) from the argv log.
+_last_agent_rename_key() {
+  sed -n 's/.*\[agent\] \[rename\] \[[^]]*\] \[\([^]]*\)\].*/\1/p' "$ARGV_LOG" | tail -1
+}
+
+@test "herdr naming: the internal key is INJECTIVE — ('-'/':' ) that fold-collide stay distinct" {
+  # tl/cc1 2026-09-01: the old fold (':' and non-regex chars -> '-') and ANY literal
+  # separator collide, because the separator is legal inside a name. cc1's example:
+  #     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
+  # and the same holds for the ':' the spec proposed as the join char:
+  #     ("a:b","c") and ("a","b:c")   both join to  a:b:c
+  # The SHA-256 derivation (newline-joined; newline is a forbidden control char in
+  # both names) must map each of these four DISTINCT members to a DISTINCT key.
+  # A test that only checks "a key is produced" passes even if the fold returns —
+  # so we assert two colliding-under-fold inputs get two DIFFERENT keys.
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  : > "$ARGV_LOG"; terminal_name 'p1' 'a-b' 'c'  >/dev/null; local k1; k1="$(_last_agent_rename_key)"
+  : > "$ARGV_LOG"; terminal_name 'p2' 'a'   'b-c' >/dev/null; local k2; k2="$(_last_agent_rename_key)"
+  : > "$ARGV_LOG"; terminal_name 'p3' 'a:b' 'c'  >/dev/null; local k3; k3="$(_last_agent_rename_key)"
+  : > "$ARGV_LOG"; terminal_name 'p4' 'a'   'b:c' >/dev/null; local k4; k4="$(_last_agent_rename_key)"
+  # every key is well-formed against herdr's regex ('a' + 24 hex)
+  for k in "$k1" "$k2" "$k3" "$k4"; do [[ "$k" =~ ^a[0-9a-f]{24}$ ]]; done
+  # the two '-' collisions are distinct, and the two ':' collisions are distinct
+  [ "$k1" != "$k2" ]
+  [ "$k3" != "$k4" ]
 }
 
 # --- ABI completeness + structural clobber-proofing (co1 #1014 review) -------
@@ -494,16 +533,36 @@ OPS
   refute grep -q "did not answer" <<<"$output"
 }
 
-@test "resolve_name: an mktemp failure does not leak set -e; the caller still reaches the non-zero verdict" {
-  # Force mktemp to fail by shadowing it with a stub that exits non-zero, and run
-  # under `set -e`. The reason read must not exit the shell before the verdict.
+@test "herdr naming: exit-0 INVALID json -> did-not-answer, NOT 'no match' (json_valid gate)" {
+  # POSITIVE PROOF the json_valid gate discriminates: a herdr that exits 0 with
+  # non-JSON bytes must be "could not answer" (return 2), not silently downgraded to
+  # "answered, this session is not among the agents". The two reasons are the two
+  # sides co1 named: garbage -> did-not-answer; empty valid array -> not-among.
+  _fake_herdr_list_garbage
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-x"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "resolve_name: no set -e leak; a BARE call still reaches and PRINTS the verdict line" {
+  # co1 round-6: the old control wrapped the call in `|| rc=$?`, which disables set -e
+  # for the ENTIRE function body — so an internal errexit leak could not be observed.
+  # This is a BARE call under `set -e`: two leak-prone sites run before the verdict —
+  #   (1) the loop's `id="$(_detect_one herdr ...)"` returns non-zero (HERDR_ENV unset)
+  #   (2) the reason read when errf=/dev/null (mktemp forced to fail)
+  # Under bash 3.2 an unguarded either would ABORT before the verdict prints, so the
+  # discriminator is the LINE, not the status (a clean return 1 and a mid-body abort
+  # share status). Run under /bin/bash (3.2 on macOS) where the leak actually fires.
   cat > "$FAKEBIN/mktemp" <<'M'
 #!/usr/bin/env bash
 exit 1
 M
   chmod +x "$FAKEBIN/mktemp"; export PATH="$FAKEBIN:$PATH"
   export TMUX="/tmp/s,1,0"; unset TMUX_PANE   # tmux present, no pane -> name is fatal
-  run bash -c 'set -euo pipefail; source "'"$SKILL_DIR"'/scripts/lib/terminal-registry.sh"; rc=0; agmsg_terminal_resolve_name sess-x >/dev/null 2>&1 || rc=$?; echo "verdict=$rc"'
-  [ "$status" -eq 0 ]
-  grep -q 'verdict=1' <<<"$output"
+  unset HERDR_ENV                             # herdr tried first, detect returns non-zero
+  run /bin/bash -c 'set -euo pipefail; source "'"$SKILL_DIR"'/scripts/lib/terminal-registry.sh"; agmsg_terminal_resolve_name sess-x'
+  [ "$status" -eq 1 ]
+  grep -q "cannot identify this pane to name it" <<<"$output"
 }

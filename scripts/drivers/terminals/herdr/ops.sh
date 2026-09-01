@@ -6,10 +6,11 @@
 #
 # MEASURED (seat 0, 2026-08-29) vs ASSERTED-pending-live-matrix:
 #   measured: `herdr agent list` is JSON; the pane is resolved from it by the
-#     session id (inherited HERDR_PANE_ID is NOT trusted); name encoding
-#     <team>/<name> -> team__name ('/' is not in herdr's name regex); the existing
-#     spawn/despawn calls (pane split/rename/run, tab create, pane close); and
-#     `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
+#     session id (inherited HERDR_PANE_ID is NOT trusted); the internal agent-name
+#     key is an injective SHA-256 derivation of (team, agent) — see
+#     _herdr_internal_key for why concatenation/folding is not injective; the
+#     existing spawn/despawn calls (pane split/rename/run, tab create, pane close);
+#     and `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #   asserted (exact argv/JSON fields verified only by the live matrix on koit's
 #     machine, NOT measured here): the `agent list` JSON field names used to
 #     extract the pane (agent_session / pane_id), `herdr agent prompt`'s argv for
@@ -43,23 +44,41 @@ terminal_describe() {
 #   return 0, empty  — answered, but this session is not among the live agents
 _herdr_pane_for_session() {
   local sid="$1" json rc=0
-  json="$(herdr agent list 2>/dev/null)"; rc=$?
+  # `|| rc=$?` (not `; rc=$?`): a bare command-substitution assignment fires the
+  # caller's set -e the instant the command fails, so the next line never runs and
+  # the "could not answer" case can't be classified. The conditional context
+  # suppresses errexit and captures the status — same fix as agmsg_terminal_load.
+  json="$(herdr agent list 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
   [ -n "$json" ] || return 2
-  local q pane jesc sesc
+  local jesc valid vrc=0
   jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  # POSITIVE PROOF the list is something we could actually read: exit-0 bytes are
+  # not proof of a live-agent set. Invalid JSON, a bad schema, or an unavailable
+  # sqlite all mean "could not answer" (return 2), NOT "answered, no match".
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc');" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] || return 2
+  [ "$valid" = 1 ] || return 2
+  local q pane qrc sesc queried=0
   sesc="$(printf '%s' "$sid" | sed "s/'/''/g")"
-  # json_each(J, P) iterates the array/object at path P; the array may be the
-  # root ($) or nested under a wrapper key. First shape that yields a pane wins.
+  # json_each(J, P) iterates the array/object at path P; the array may be the root
+  # ($) or nested under a wrapper key. A shape whose path is not an iterable array
+  # ERRORS (qrc != 0) — skip it; a shape that queried (qrc 0) counts as "answered"
+  # even with no row. First shape that yields a pane wins.
   for q in '$' '$.result.agents' '$.agents' '$.result'; do
+    qrc=0
     pane="$(sqlite3 :memory: "
       SELECT json_extract(value,'\$.pane_id')
       FROM json_each('$jesc', '$q')
       WHERE json_extract(value,'\$.agent_session') = '$sesc'
-      LIMIT 1;" 2>/dev/null)"
+      LIMIT 1;" 2>/dev/null)" || qrc=$?
+    [ "$qrc" -eq 0 ] || continue
+    queried=1
     [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
   done
-  return 0   # answered, but this session is not among the live agents (empty)
+  # Valid JSON but no shape was queryable (unrecognized schema) => could not answer.
+  [ "$queried" = 1 ] || return 2
+  return 0   # answered, valid list, but this session is not among the live agents
 }
 
 # record op: we are under herdr iff HERDR_ENV=1 and herdr is on PATH. Resolve
@@ -80,8 +99,11 @@ terminal_detect() {
     echo "herdr: no session id to resolve this pane by" >&2
     return 0
   fi
-  local pane hrc
-  pane="$(_herdr_pane_for_session "$sid")"; hrc=$?
+  local pane hrc=0
+  # `|| hrc=$?` (not `; hrc=$?`): a bare command-substitution assignment fires the
+  # caller's set -e when the helper returns non-zero, so the classification below
+  # never runs. The conditional context suppresses errexit and captures the code.
+  pane="$(_herdr_pane_for_session "$sid")" || hrc=$?
   if [ "$hrc" -ne 0 ]; then
     echo "herdr: 'agent list' did not answer (herdr not on PATH or errored) — cannot resolve this pane" >&2
     return 0
@@ -168,24 +190,50 @@ terminal_poke() {
   return 0
 }
 
+# Derive herdr's INTERNAL resolvable agent-name key from (team, agent), INJECTIVELY.
+#
+# The key must satisfy herdr's agent-name regex [a-z][a-z0-9_-]{0,31} AND map
+# distinct members to distinct keys — a collision makes `herdr agent rename`
+# clobber another member's addressing. FOLDING or CONCATENATING with any literal
+# separator fails the second property, because that separator can itself appear in
+# a name (agmsg only forbids . / \ " [ ] control chars and a leading '-', so ':',
+# '-' and '_' are all legal in team AND agent names):
+#     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
+#     ("a:b","c") and ("a","b:c")   both join to  a:b:c   (tl's `<team>:<agent>` too)
+# So we DERIVE instead: a SHA-256 of the pair, hex-truncated. The pair is joined
+# with a NEWLINE, which is a control character and therefore FORBIDDEN in both
+# names (scripts/lib/validate.sh rejects [[:cntrl:]]) — so the join is unambiguous
+# and the derivation is injective for the '-' case AND the ':' case. 'a' + 24 hex
+# = 25 chars, leading letter, all within the regex. Uses the store's canonical
+# agmsg_sha256 (lib/hash.sh); sourced context may not have it, so load it relative
+# to this driver file. Prints the key, or non-zero if no SHA-256 tool is present.
+_herdr_internal_key() {
+  local team="$1" agent="$2" hex
+  if ! command -v agmsg_sha256 >/dev/null 2>&1; then
+    local _libd
+    _libd="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)" || return 1
+    [ -n "$_libd" ] && [ -f "$_libd/hash.sh" ] && . "$_libd/hash.sh"
+  fi
+  command -v agmsg_sha256 >/dev/null 2>&1 || return 1
+  hex="$(printf '%s\n%s' "$team" "$agent" | agmsg_sha256)" || return 1
+  printf 'a%s\n' "${hex:0:24}"
+}
+
 # control op: name the pane (scope Naming). Two copies:
 #   VISIBLE:    herdr pane rename <id> <team>:<agent>   (free text, ':' is fine)
-#   RESOLVABLE: herdr agent rename <id> <folded>        where <folded> is the
-#               <team>:<agent> lowered with every char outside herdr's agent-name
-#               regex [a-z][a-z0-9_-]{0,31} folded to '-' (':' is not allowed, so
-#               it becomes '-'); this is an INTERNAL key, never shown — peek/poke
-#               go by the recorded pane id, so the user never meets the folded
-#               form. Idempotent. The visible rename is the required one; a failed
-#               agent rename (e.g. a live-name collision) is non-fatal — the pane
-#               id in the record still resolves.
+#   RESOLVABLE: herdr agent rename <id> <key>           where <key> is the injective
+#               SHA-256 derivation above — an INTERNAL key, never shown; peek/poke
+#               go by the recorded pane id, so the user never meets it. Idempotent.
+#               The visible rename is the required one; a failed agent rename (a
+#               live-name collision, or no SHA-256 tool to derive the key) is
+#               non-fatal — the pane id in the record still resolves.
 terminal_name() {
-  local id="$1" team="$2" name="$3" label folded
+  local id="$1" team="$2" name="$3" label key
   label="$team:$name"
-  folded="$(printf '%s' "$label" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g')"
-  case "$folded" in [a-z]*) : ;; *) folded="a-$folded" ;; esac  # regex needs a leading letter
-  folded="${folded:0:32}"
   herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
-  herdr agent rename "$id" "$folded" >/dev/null 2>&1 || true
+  if key="$(_herdr_internal_key "$team" "$name")"; then
+    herdr agent rename "$id" "$key" >/dev/null 2>&1 || true
+  fi
   echo ok
   return 0
 }
