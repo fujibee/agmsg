@@ -108,6 +108,16 @@ _fake_herdr_list_mixed() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wA:p1"},{"agent":"codex","agent_session":"scalar-broken","pane_id":"wB:p2"}]}}'\''; exit 0; }\nexit 0\n' "$well_sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` MIXES a well-formed OTHER-session entry with a MALFORMED
+# entry that DOES carry agent_session.value=<target_sid> but a NUMERIC pane_id (not
+# text). The malformed entry is excluded from the well-formed set, so the search must
+# NOT return its 123 pane — a weaker search predicate (agent_session object + value
+# only) would. No match among well-formed + a malformed sibling -> did-not-answer.
+_fake_herdr_list_numeric_pane() {
+  local target_sid="${1:-sess-mine}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"wA:p1"},{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"%s"},"pane_id":123}]}}'\''; exit 0; }\nexit 0\n' "$target_sid" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 # A herdr whose `agent list` uses the OLD wrong shape: agent_session as a SCALAR.
 # The real herdr nests it as an object under .value; this fixture must resolve
 # NOTHING (the drift control — a scalar shape was green on the mock while resolving
@@ -682,6 +692,21 @@ M
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twA:p1')" ]
+}
+
+@test "herdr naming: the SEARCH predicate == the well-formed predicate (no numeric pane_id find)" {
+  # co1: the search must not be weaker than the count. A malformed entry that carries
+  # the target agent_session.value but a NUMERIC pane_id is NOT well-formed; the
+  # search must skip it (not return pane 123), and with a well-formed sibling present
+  # the set is not fully comparable -> did-not-answer. A search predicate of only
+  # (agent_session object + value match) would resolve '123' here.
+  _fake_herdr_list_numeric_pane "sess-mine"
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
+  refute grep -q '123' <<<"$output"
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
 }
 
 @test "resolve order: NESTED herdr-in-tmux — tmux (produces %0) wins over herdr (present, no id)" {

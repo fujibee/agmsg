@@ -82,34 +82,35 @@ _herdr_pane_for_session() {
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
     [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
     [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
-    arc=0
-    alen="$(sqlite3 :memory: "SELECT json_array_length('$jesc', '$q')" 2>/dev/null)" || arc=$?
-    [ "$arc" -eq 0 ] || return 2
+    # ONE query, ONE predicate (co1: derive the count AND the lookup from the same
+    # well-formed set so the search cannot drift weaker than the count — else a
+    # malformed entry whose agent_session.value matches but whose pane_id is not text
+    # would be "found" and its non-text pane_id returned). Emits three fields,
+    # '|'-separated: total entries, well-formed entries, and the matched pane id (or
+    # empty). A well-formed entry is an object with a text pane_id and an
+    # agent_session object whose .value is text (measured herdr 0.8.0 shape).
+    local out orc=0
+    out="$(sqlite3 :memory: "
+      WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           wf(value) AS (
+             SELECT value FROM entries
+             WHERE json_type(value) = 'object'
+               AND json_type(value,'\$.pane_id') = 'text'
+               AND json_type(value,'\$.agent_session') = 'object'
+               AND json_type(value,'\$.agent_session.value') = 'text')
+      SELECT (SELECT count(*) FROM entries),
+             (SELECT count(*) FROM wf),
+             (SELECT json_extract(value,'\$.pane_id') FROM wf
+                WHERE json_extract(value,'\$.agent_session.value') = '$sesc' LIMIT 1)" 2>/dev/null)" || orc=$?
+    [ "$orc" -eq 0 ] || return 2
+    IFS='|' read -r alen well pane <<< "$out"
     if [ "${alen:-0}" -eq 0 ]; then queried=1; continue; fi   # empty list -> answered, no agents
-    # Count entries that satisfy the measured entry shape.
-    wrc=0
-    well="$(sqlite3 :memory: "
-      SELECT count(*) FROM json_each('$jesc', '$q')
-      WHERE json_type(value) = 'object'
-        AND json_type(value,'\$.pane_id') = 'text'
-        AND json_type(value,'\$.agent_session') = 'object'
-        AND json_type(value,'\$.agent_session.value') = 'text'" 2>/dev/null)" || wrc=$?
-    [ "$wrc" -eq 0 ] || return 2
-    # Search the session among the well-formed entries. A positive find is decisive
-    # regardless of any malformed siblings — we located the pane.
-    qrc=0
-    pane="$(sqlite3 :memory: "
-      SELECT json_extract(value,'\$.pane_id')
-      FROM json_each('$jesc', '$q')
-      WHERE json_type(value,'\$.agent_session') = 'object'
-        AND json_extract(value,'\$.agent_session.value') = '$sesc'
-      LIMIT 1" 2>/dev/null)" || qrc=$?
-    [ "$qrc" -eq 0 ] || return 2
-    [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
+    # A match is drawn from the well-formed set, so its pane id is a real text id;
+    # a positive find is decisive regardless of any malformed siblings.
+    if [ -n "$pane" ] && [ "$pane" != "null" ]; then printf '%s\n' "$pane"; return 0; fi
     # No match. ABSENCE is only provable if the WHOLE set was comparable — every
-    # entry well-formed (co1, one layer further: >=1 well-formed proves some entries
-    # are readable, not that the target is not hiding in a malformed one). A single
-    # malformed sibling means the session could be there unread: could not answer.
+    # entry well-formed. A single malformed sibling means the session could be there
+    # unread (co1): could not answer, not "not among".
     [ "${well:-0}" -eq "${alen:-0}" ] || return 2
     queried=1   # every entry was comparable and none matched -> answered, not among
   done
