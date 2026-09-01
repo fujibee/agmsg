@@ -738,6 +738,24 @@ M
   done
 }
 
+@test "herdr naming: target session with a MISSING/null pane_id -> did-not-answer (unaddressable)" {
+  # co1 round 10: pane_ok must be a definite 0/1, not a boolean that goes NULL when
+  # pane_id is absent — else a target session with no pane_id falls into neither hit
+  # (AND pane_ok) nor badhit (AND NOT pane_ok) and, if it is the only decidable
+  # entry, reads as not-among though the target is present-but-unaddressable. Both a
+  # MISSING pane_id and an explicit null must land in badhit -> did-not-answer.
+  export HERDR_ENV=1
+  local raw
+  for raw in '{"agent":"claude","agent_session":{"value":"sess-mine"}}' \
+             '{"agent":"claude","agent_session":{"value":"sess-mine"},"pane_id":null}'; do
+    _fake_herdr_list_plus "$raw"
+    run agmsg_terminal_resolve_name "sess-mine"
+    [ "$status" -ne 0 ]                    || { echo "FAIL resolved: $raw"; return 1; }
+    grep -q "did not answer" <<<"$output"  || { echo "FAIL not did-not-answer: $raw"; return 1; }
+    refute grep -q "not among the live agents" <<<"$output" || { echo "FAIL claimed not-among: $raw"; return 1; }
+  done
+}
+
 @test "herdr naming: MIXED array, target ABSENT -> did-not-answer (cannot rule out the malformed entry)" {
   # co1/tl one layer further: >=1 well-formed entry proves some entries are readable,
   # NOT that the target is not hiding in a malformed sibling. Here alen=2 (a

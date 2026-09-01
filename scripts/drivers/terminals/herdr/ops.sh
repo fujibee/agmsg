@@ -103,11 +103,18 @@ _herdr_pane_for_session() {
            -- Tag every object entry ONCE (co1: one predicate, no drift): does its
            -- pane_id match the measured grammar, and what is agent_session's type.
            tagged(value, pane_ok, as_type) AS (
+             -- pane_ok is normalized to a definite 0/1 (co1): a boolean expression
+             -- would be NULL when pane_id is ABSENT, and then a target session with
+             -- no pane_id lands in NEITHER hit (AND pane_ok -> NULL) nor badhit
+             -- (AND NOT pane_ok -> NULL), so present-but-unaddressable would read as
+             -- not-among. CASE WHEN … THEN 1 ELSE 0 END collapses the three-valued
+             -- logic so hit draws from pane_ok=1 and badhit from pane_ok=0.
              SELECT value,
-               ( json_type(value,'\$.pane_id') = 'text'
+               CASE WHEN json_type(value,'\$.pane_id') = 'text'
                  AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
                  AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
-                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*') ),
+                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               THEN 1 ELSE 0 END,
                json_type(value,'\$.agent_session')
              FROM entries WHERE json_type(value) = 'object'),
            -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01):
@@ -120,7 +127,7 @@ _herdr_pane_for_session() {
            det(value) AS (
              SELECT value FROM tagged
              WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
-                OR ( as_type IS NULL AND pane_ok
+                OR ( as_type IS NULL AND pane_ok = 1
                      AND json_type(value,'\$.agent') = 'text'
                      AND json_extract(value,'\$.agent') = '' )),
            -- the target, present as a session entry with a usable (grammar) pane:
@@ -128,14 +135,14 @@ _herdr_pane_for_session() {
              SELECT json_extract(value,'\$.pane_id') FROM tagged
              WHERE as_type = 'object'
                AND json_extract(value,'\$.agent_session.value') = '$sesc'
-               AND pane_ok
+               AND pane_ok = 1
              LIMIT 1),
-           -- the target present as a session entry but with an UNUSABLE pane id:
+           -- the target present as a session entry but with an UNUSABLE/absent pane id:
            badhit(x) AS (
              SELECT 1 FROM tagged
              WHERE as_type = 'object'
                AND json_extract(value,'\$.agent_session.value') = '$sesc'
-               AND NOT pane_ok
+               AND pane_ok = 0
              LIMIT 1)
       SELECT (SELECT count(*) FROM entries),
              (SELECT count(*) FROM det),
