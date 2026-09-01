@@ -1157,7 +1157,7 @@ _spawn_recorded_id() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver plain
   [ "$status" -eq 0 ]
-  [[ "$output" == *"terminal template"* ]]
+  grep -q "terminal template" <<<"$output"
   [ -s "$CAPTURE" ]        # the OS-terminal launcher ran (record.sh captured it)
 }
 
