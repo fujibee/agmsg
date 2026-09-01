@@ -100,29 +100,42 @@ _herdr_pane_for_session() {
     orc=0
     out="$(sqlite3 :memory: "
       WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           -- Tag every object entry ONCE (co1: one predicate, no drift): does its
+           -- pane_id match the measured grammar, and what is agent_session's type.
+           tagged(value, pane_ok, as_type) AS (
+             SELECT value,
+               ( json_type(value,'\$.pane_id') = 'text'
+                 AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*') ),
+               json_type(value,'\$.agent_session')
+             FROM entries WHERE json_type(value) = 'object'),
+           -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01):
+           --   A. a session entry: agent_session object with a text .value
+           --   B. a bare pane: recognized AS a pane (pane_ok) with NO agent_session
+           --      AND agent is empty text (the measured bare shape). 'no agent_session'
+           --      alone is NOT B — a renamed/unknown session field would slip in.
+           -- Anything else ({}, {\"future_session\":…}, a wrong pane form) is neither
+           -- kind -> indeterminate -> a new entry shape falls to did-not-answer.
            det(value) AS (
-             SELECT value FROM entries
-             WHERE json_type(value) = 'object'
-               AND ( json_type(value,'\$.agent_session') IS NULL
-                     OR ( json_type(value,'\$.agent_session') = 'object'
-                          AND json_type(value,'\$.agent_session.value') = 'text' ) )),
+             SELECT value FROM tagged
+             WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
+                OR ( as_type IS NULL AND pane_ok
+                     AND json_type(value,'\$.agent') = 'text'
+                     AND json_extract(value,'\$.agent') = '' )),
+           -- the target, present as a session entry with a usable (grammar) pane:
            hit(pid) AS (
-             SELECT json_extract(value,'\$.pane_id') FROM det
-             WHERE json_type(value,'\$.agent_session') = 'object'
+             SELECT json_extract(value,'\$.pane_id') FROM tagged
+             WHERE as_type = 'object'
                AND json_extract(value,'\$.agent_session.value') = '$sesc'
-               AND json_type(value,'\$.pane_id') = 'text'
-               AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
-               AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
-               AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               AND pane_ok
              LIMIT 1),
+           -- the target present as a session entry but with an UNUSABLE pane id:
            badhit(x) AS (
-             SELECT 1 FROM det
-             WHERE json_type(value,'\$.agent_session') = 'object'
+             SELECT 1 FROM tagged
+             WHERE as_type = 'object'
                AND json_extract(value,'\$.agent_session.value') = '$sesc'
-               AND NOT ( json_type(value,'\$.pane_id') = 'text'
-                         AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
-                         AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
-                         AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*') )
+               AND NOT pane_ok
              LIMIT 1)
       SELECT (SELECT count(*) FROM entries),
              (SELECT count(*) FROM det),
@@ -134,10 +147,10 @@ _herdr_pane_for_session() {
     if [ -n "$pane" ] && [ "$pane" != "null" ]; then printf '%s\n' "$pane"; return 0; fi
     # Target present but its pane id is unusable -> we cannot address it: could not answer.
     [ "${badhit:-0}" -gt 0 ] && return 2
-    # No match. Not-among is honest only if EVERY entry was decidable (bare panes
-    # count as decidable — they simply have no session). Empty array: det==alen==0.
+    # No match. Not-among is honest only if EVERY entry was decidable — positively a
+    # session entry (A) or a bare pane (B). Empty array: det==alen==0 -> not-among.
     [ "${det:-0}" -eq "${alen:-0}" ] && return 0   # answered, this session is not among the agents
-    return 2   # some entry had a malformed agent_session -> the target may be unread
+    return 2   # some entry was neither A nor B (unknown/drift) -> the target may be unread
   done
   return 2   # no candidate array path (unknown schema) -> could not answer
 }

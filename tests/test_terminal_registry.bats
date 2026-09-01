@@ -128,6 +128,15 @@ _fake_herdr_list_bare_pane() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4"},{"agent":"","pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` pairs a well-formed OTHER-session entry with a raw
+# caller-supplied second entry (JSON object literal). Lets a test drive the A/B
+# decidability boundary: an entry that is neither a session entry (A) nor a
+# positively-recognized bare pane (B) must make an absent target did-not-answer.
+_fake_herdr_list_plus() {
+  local raw="${1:-{\}}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"w1:p4"},%s]}}'\''; exit 0; }\nexit 0\n' "$raw" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 # A herdr whose `agent list` has ONE entry: well-formed agent_session (value=<sid>)
 # and a caller-supplied pane_id VALUE. Lets a test drive the pane-id grammar: a
 # '|' or newline pane_id must be rejected (did-not-answer, and must not corrupt the
@@ -708,6 +717,25 @@ M
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\tw1:p4')" ]
+}
+
+@test "herdr naming: the bare-pane arm is POSITIVE — unknown/drift entries are did-not-answer" {
+  # tl round 9: 'no agent_session' alone is not a bare pane. Only a positively
+  # recognized bare pane (empty agent + valid pane_id, no agent_session) is decidable
+  # as 'not the target'. An empty object, a renamed/unknown session field, or a bare
+  # pane with a bad pane_id is NEITHER kind -> did-not-answer (so a future entry shape
+  # falls to could-not-answer, never silently to not-among).
+  export HERDR_ENV=1
+  local raw
+  for raw in '{}' \
+             '{"agent":"claude","future_session":{"value":"z"},"pane_id":"w2:p2"}' \
+             '{"agent":"","pane_id":"BADFORM"}'; do
+    _fake_herdr_list_plus "$raw"
+    run agmsg_terminal_resolve_name "sess-mine"
+    [ "$status" -ne 0 ]              || { echo "FAIL resolved: $raw"; return 1; }
+    grep -q "did not answer" <<<"$output" || { echo "FAIL not did-not-answer: $raw"; return 1; }
+    refute grep -q "not among the live agents" <<<"$output" || { echo "FAIL claimed not-among: $raw"; return 1; }
+  done
 }
 
 @test "herdr naming: MIXED array, target ABSENT -> did-not-answer (cannot rule out the malformed entry)" {
