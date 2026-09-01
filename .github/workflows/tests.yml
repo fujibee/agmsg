@@ -1075,6 +1075,24 @@ jobs:
       - name: No new assertion that cannot fail
         run: .github/scripts/check-enforced-assertions.sh
 
+  errexit-status-reads:
+    name: errexit status reads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Unconditional for the same reason as `enforced-assertions` above: a job
+    # that skips on some diffs is a required context that can sit pending. It
+    # is a static read of `scripts/**/*.sh`.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu's bash is 5.x, and one of the three shapes this looks for is
+      # fatal ONLY on bash 3.2 (macOS /bin/bash). That is why the check is
+      # static: running it under one interpreter would miss the shape that
+      # kills the other. The behaviour was measured on both (see the header);
+      # what runs here is the count.
+      - name: No status read that errexit already decided
+        run: .github/scripts/check-errexit-status-reads.sh
+
   private-names:
     name: internal names
     runs-on: ubuntu-latest
