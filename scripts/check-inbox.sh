@@ -38,10 +38,16 @@ POSTTOOL_OUTPUT="$(agmsg_type_get "$TYPE" posttooluse_output 2>/dev/null || true
 # SILENT: codex 0.149.1 treats malformed post-tool-use JSON as a failure, and an
 # empty additionalContext on every tool call would be pure noise — so a no-op
 # turn emits no bytes, which every runtime reads as "hook did nothing".
+# Status of the write that hands a payload over. Declared before the first emit
+# (the cooldown one) so EVERY emit in this file reports through the same
+# variable: "each emit says whether it worked" is checkable, while "the emits
+# that can carry a message are guarded" needs the next reader to work out which
+# ones those are -- and that is how one of three ends up unguarded.
+EMIT_RC=0
 emit_status_json() {
   [ "$EVENT" = "PostToolUse" ] && return 0
   [ "$STOP_OUTPUT" = "json" ] || return 0
-  printf '{\n  "continue": true,\n  "systemMessage": "%s"\n}\n' "$1"
+  printf '{\n  "continue": true,\n  "systemMessage": "%s"\n}\n' "$1" || EMIT_RC=$?
 }
 
 # Hook runtimes that pass JSON do so on stdin. Interactive invocations such as
@@ -217,6 +223,9 @@ agmsg_storage_load
 # poll was partial; only when there is nothing to deliver does the status carry
 # the failure.
 OUTPUT=""
+# Ids that have been FORMATTED but not yet written out: one "team<TAB>id id id"
+# entry per team. They become read only after the payload leaves this process.
+PENDING_MARKS=()
 LOOP_RC=0
 LOOP_FAILED_TEAM=""
 for team in "${TEAM_LIST[@]}"; do
@@ -333,8 +342,10 @@ for team in "${TEAM_LIST[@]}"; do
   # ADDITIVE: it may show a message earlier, but Stop still fetches, shows, and
   # consumes it as before. A duplicate display is harmless; an invisible loss is
   # not.
+  # DEFERRED, not skipped: what was formatted is remembered here and consumed
+  # after the payload has actually left this process. See the emit below (#677).
   if [ "$EVENT" != "PostToolUse" ] && [ "${#IDS[@]}" -gt 0 ]; then
-    storage_mark_read_batch "$team" "$AGENT" "${IDS[@]}" >/dev/null 2>&1 || true
+    PENDING_MARKS+=("$team"$'\t'"${IDS[*]}")
   fi
 done
 
@@ -375,17 +386,69 @@ if [ -n "$OUTPUT" ]; then
     # unverified part (see PR): this is the shape the 0.149.1 parser accepts.
     case "$POSTTOOL_OUTPUT" in
       hookSpecificOutput)
-        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$ESCAPED"
+        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$ESCAPED" || EMIT_RC=$?
         ;;
-      *) : ;;
+      # Emitted nothing (no known shape for this event), which is not the same
+      # fact as "emitted and it worked". EMIT_RC is left at 0 because there is
+      # nothing to protect: this branch reaches the consume loop with an empty
+      # PENDING_MARKS, exactly as the line above it does.
+      *) EMIT_RC=0 ;;
     esac
   else
-    cat <<ENDJSON
+    cat <<ENDJSON || EMIT_RC=$?
 {
   "decision": "block",
   "reason": "$ESCAPED"
 }
 ENDJSON
+  fi
+  # A test-only observation point, and the reason it has to be HERE rather than
+  # in the test: the failure this ordering exists for makes stdout unwritable, so
+  # the run that matters cannot report on itself through the payload. Running the
+  # hook a second time with a writable stdout shows that OTHER process reached
+  # the write; it says nothing about this one. The exit status goes in with it,
+  # so a test can tell "reached the emit and it failed" from "reached the emit
+  # and it worked" -- otherwise a control here would be satisfied by the happy
+  # path it is meant to exclude.
+  if [ -n "${AGMSG_TEST_MARK_BARRIER:-}" ]; then
+    printf '%s\n' "$EMIT_RC" > "$AGMSG_TEST_MARK_BARRIER.emitted"
+  fi
+  # THE PAYLOAD HAS NOW LEFT THIS PROCESS. Only here do the rows it carried stop
+  # being unread (#677).
+  #
+  # Both emits above set EMIT_RC, including the PostToolUse one that has nothing
+  # to consume today -- `PENDING_MARKS` is only filled when EVENT is not
+  # PostToolUse. Guarding only the branch that currently matters would make the
+  # invariant "the one emit that counts happens to be the guarded one" instead of
+  # "every emit reports whether it worked", and the day PostToolUse starts
+  # consuming, the guard would not cover it and nothing would say so.
+  #
+  # Before this, the mark happened while the messages were still sitting in a
+  # shell variable: "displayed" meant "formatted", not "written". watch.sh has had
+  # the right shape all along -- it consumes only the ids whose `printf`
+  # succeeded -- and this brings the third path to it.
+  #
+  # WHAT THIS PROVES, EXACTLY: that the write to this process's stdout returned
+  # success. It does NOT prove the hook runtime parsed the payload, or that the
+  # model received it. A runtime that rejects what it was handed leaves the write
+  # successful and the rows consumed, exactly as before -- which is why #1015
+  # (a Windows login shell prepending profile output, so the JSON is rejected) is
+  # NOT fixed by this ordering. Claiming otherwise would be claiming more than the
+  # exit status can carry.
+  #
+  # The reverse risk is accepted deliberately. If the write succeeds and the mark
+  # fails, the message is offered twice; if the mark precedes a failed write, it
+  # is offered never. The two are not equal -- a duplicate is visible and a
+  # silence is not -- so the failure is placed on the side the user can see.
+  if [ "${EMIT_RC:-0}" -eq 0 ]; then
+    for _pending in ${PENDING_MARKS[@]+"${PENDING_MARKS[@]}"}; do
+      _p_team="${_pending%%$'\t'*}"
+      _p_ids="${_pending#*$'\t'}"
+      [ -n "$_p_team" ] && [ -n "$_p_ids" ] || continue
+      # word-split on purpose: $_p_ids is the space-joined id list for this team
+      # shellcheck disable=SC2086
+      storage_mark_read_batch "$_p_team" "$AGENT" $_p_ids >/dev/null 2>&1 || true
+    done
   fi
   # Exit 0 even when the poll failed part-way: this is the delivering path, and
   # a non-zero status here throws the delivery away.
