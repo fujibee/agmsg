@@ -90,6 +90,8 @@ source "$SCRIPT_DIR/lib/resolve-project.sh"
 source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record lookup (#339)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/boot-command.sh"  # shared boot-command construction (#339)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/terminal-registry.sh"  # terminals axis: placement via drivers
 
 die() { echo "spawn: $*" >&2; exit 1; }
 
@@ -137,6 +139,10 @@ TEAM=""
 TMUX_TARGET="pane"   # pane | window
 SPLIT="h"            # h | v
 TERMINAL_TMPL=""     # --terminal override (resolved below if empty)
+# --terminal-driver / AGMSG_TERMINAL_DRIVER: a NEW surface that forces WHICH terminal
+# axis places the member (tmux | herdr | plain), bypassing detection. Distinct from
+# --terminal / AGMSG_TERMINAL, which is the OS-terminal command TEMPLATE (unchanged).
+TERMINAL_DRIVER="${AGMSG_TERMINAL_DRIVER:-}"
 WAIT_READY=1         # block until the spawned agent's watcher attaches
 READY_TIMEOUT=90     # seconds to wait for readiness before giving up
 MODEL_ID=""          # --model: pass-through model id for the launched CLI
@@ -154,6 +160,7 @@ while [ $# -gt 0 ]; do
     --window)  TMUX_TARGET="window"; shift ;;
     --split)   SPLIT="${2:?--split needs h|v}"; shift 2 ;;
     --terminal) TERMINAL_TMPL="${2:?--terminal needs a template}"; shift 2 ;;
+    --terminal-driver) TERMINAL_DRIVER="${2:?--terminal-driver needs a name (tmux|herdr|plain)}"; shift 2 ;;
     --no-wait) WAIT_READY=0; shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?--ready-timeout needs seconds}"; shift 2 ;;
     --model) MODEL_ID="${2:?--model needs a model id}"; shift 2 ;;
@@ -645,20 +652,7 @@ launch_in_herdr() {
     > "$_spawn_rec" 2>/dev/null || true
 }
 
-place_and_launch() {
-  # Priority: $TMUX (tmux-inside-herdr backward compat) → herdr → OS terminal.
-  if [ -n "${TMUX:-}" ]; then
-    launch_in_tmux
-    echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
-    return 0
-  fi
-
-  if is_herdr_env; then
-    launch_in_herdr
-    echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
-    return 0
-  fi
-
+_launch_os_terminal() {
   # Non-tmux/herdr: open an OS terminal. A {cmd} template wins outright on any OS.
   if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
     launch_with_template
@@ -698,6 +692,42 @@ place_and_launch() {
       die "unsupported platform '$(uname -s)' for the non-tmux path; run inside tmux or set a {cmd} terminal template via AGMSG_TERMINAL." ;;
   esac
   echo "spawned ${AGENT_TYPE} '${NAME}' in a new terminal window"
+}
+
+place_and_launch() {
+  # --terminal-driver / AGMSG_TERMINAL_DRIVER forces WHICH axis places the member,
+  # bypassing detection. It is a spawn/name PREFERENCE on a NEW surface (tl
+  # 2026-08-31); tmux/herdr each still require their own environment (a forced tmux
+  # split needs to be inside tmux, a forced herdr split needs HERDR_PANE_ID), so an
+  # impossible force fails in the launcher with that launcher's own error.
+  if [ -n "$TERMINAL_DRIVER" ]; then
+    agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
+      || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
+    case "$TERMINAL_DRIVER" in
+      tmux)  launch_in_tmux;      echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})" ;;
+      herdr) launch_in_herdr;     echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})" ;;
+      plain) _launch_os_terminal ;;
+      *)     die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)" ;;
+    esac
+    return 0
+  fi
+
+  # No override: PRESERVE the detection order — $TMUX (tmux-inside-herdr backward
+  # compat) → herdr → OS terminal. tl deferred the nested spawn-placement decision to
+  # the live matrix, so this does NOT switch to the registry's herdr-first resolver.
+  if [ -n "${TMUX:-}" ]; then
+    launch_in_tmux
+    echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
+    return 0
+  fi
+
+  if is_herdr_env; then
+    launch_in_herdr
+    echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
+    return 0
+  fi
+
+  _launch_os_terminal
 }
 
 # Readiness handshake (#108). The spawned agent's actas flow starts its watcher

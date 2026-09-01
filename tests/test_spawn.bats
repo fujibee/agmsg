@@ -1146,3 +1146,33 @@ _spawn_recorded_id() {
     ! grep -q "pane run" "$HERDR_CALL_LOG"
   done
 }
+
+# --- --terminal-driver / AGMSG_TERMINAL_DRIVER override ---
+@test "spawn: --terminal-driver plain forces the OS-terminal path even when \$TMUX is set" {
+  # The default setup provides a {cmd} template (AGMSG_TERMINAL -> record.sh), so the
+  # plain path is captured. With $TMUX set, detection would pick tmux; the override
+  # must force the OS terminal instead.
+  export TMUX="/tmp/fake,1,0"
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"terminal template"* ]]
+  [ -s "$CAPTURE" ]        # the OS-terminal launcher ran (record.sh captured it)
+}
+
+@test "spawn: AGMSG_TERMINAL_DRIVER=plain forces the OS-terminal path (env form)" {
+  export TMUX="/tmp/fake,1,0" AGMSG_TERMINAL_DRIVER=plain
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [ -s "$CAPTURE" ]
+}
+
+@test "spawn: --terminal-driver with an unknown name errors loudly" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown terminal driver"* ]]
+}
