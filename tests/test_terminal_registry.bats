@@ -118,6 +118,15 @@ _fake_herdr_list_numeric_pane() {
   printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"wA:p1"},{"agent":"codex","agent_session":{"agent":"codex","kind":"id","source":"herdr:codex","value":"%s"},"pane_id":123}]}}'\''; exit 0; }\nexit 0\n' "$target_sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
+# A herdr whose `agent list` has ONE entry: well-formed agent_session (value=<sid>)
+# and a caller-supplied pane_id VALUE. Lets a test drive the pane-id grammar: a
+# '|' or newline pane_id must be rejected (did-not-answer, and must not corrupt the
+# '|'-framed / one-line read), while a real measured form (w1:p4) resolves.
+_fake_herdr_list_one_pane() {
+  local sid="${1:-sess-mine}" pane="${2:-w1:p4}"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"%s"}]}}'\''; exit 0; }\nexit 0\n' "$sid" "$pane" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
 # A herdr whose `agent list` uses the OLD wrong shape: agent_session as a SCALAR.
 # The real herdr nests it as an object under .value; this fixture must resolve
 # NOTHING (the drift control — a scalar shape was green on the mock while resolving
@@ -692,6 +701,39 @@ M
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twA:p1')" ]
+}
+
+@test "herdr naming: a pane_id containing '|' is NOT well-formed -> did-not-answer (framing-safe)" {
+  # co1/tl: json text can contain the '|' this function frames on. 'w1:p|4' passes
+  # the skeleton but the '|' is caught by the safety class, so it exercises that
+  # guard (not just the skeleton). Its entry is not well-formed -> the sole entry is
+  # ill-formed -> did-not-answer, and no truncated/garbled pane is resolved.
+  _fake_herdr_list_one_pane "sess-mine" 'w1:p|4'
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+  refute grep -q "not among the live agents" <<<"$output"
+}
+
+@test "herdr naming: a pane_id containing a newline is NOT well-formed -> did-not-answer" {
+  # 'w1:p\n4' passes the skeleton (w…:p…) but the newline is caught by the safety
+  # class, so this exercises the '*[^…]*' guard specifically, not just the skeleton.
+  _fake_herdr_list_one_pane "sess-mine" 'w1:p\n4'    # \n is a JSON string escape -> a real newline
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -ne 0 ]
+  grep -q "did not answer" <<<"$output"
+}
+
+@test "herdr naming: the MEASURED real pane-id form (w1:p4) still RESOLVES (not over-narrowed)" {
+  # tl: assert with the measured value that narrowing did not reject the real form.
+  # Real herdr 0.8.0 on this machine emits w<n>:p<x> (w1:p4, w1:pB, w5:p3).
+  _fake_herdr_list_one_pane "sess-mine" 'w1:p4'
+  export HERDR_ENV=1
+  run agmsg_terminal_resolve_name "sess-mine"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'herdr\tw1:p4')" ]
 }
 
 @test "herdr naming: the SEARCH predicate == the well-formed predicate (no numeric pane_id find)" {

@@ -83,12 +83,23 @@ _herdr_pane_for_session() {
     [ "$jtrc" -eq 0 ] || return 2       # sqlite unavailable / JSON unparseable -> could not answer
     [ "$jtype" = array ] || continue    # no array at this path -> not this shape (a valid {} lands here)
     # ONE query, ONE predicate (co1: derive the count AND the lookup from the same
-    # well-formed set so the search cannot drift weaker than the count — else a
-    # malformed entry whose agent_session.value matches but whose pane_id is not text
-    # would be "found" and its non-text pane_id returned). Emits three fields,
-    # '|'-separated: total entries, well-formed entries, and the matched pane id (or
-    # empty). A well-formed entry is an object with a text pane_id and an
-    # agent_session object whose .value is text (measured herdr 0.8.0 shape).
+    # well-formed set so the search cannot drift weaker than the count). Emits three
+    # fields, '|'-separated: total entries, well-formed entries, and the matched pane
+    # id (or empty).
+    #
+    # A well-formed entry is an object with an agent_session object whose .value is
+    # text AND a pane_id that is text of the ACTUAL herdr pane-id FORM (tl: narrow
+    # the shape, do not just carry any text). This closes a FRAMING hazard, not just
+    # a shape one: json_type='text' alone permits a pane_id containing '|' or a
+    # newline, which would corrupt this very '|'-separated / one-line-read framing
+    # (wA|p1 -> read keeps 'wA'). Requiring the pane-id grammar means only
+    # [0-9A-Za-z:] values reach the shell line, so the framing cannot mis-split; a
+    # pane_id of the wrong form is not well-formed -> did-not-answer (it is unusable
+    # anyway). MEASURED forms on this machine (read-only): real herdr is w<n>:p<x>
+    # (w1:p4, w1:pB, w5:p3); the fixtures also use w<L>:p<x> (wC:p4) — both admitted.
+    #   GLOB 'w*:p*'                     : the w…:p… skeleton (rejects 123, w1:t1)
+    #   NOT GLOB '*[^0-9A-Za-z:]*'       : only alnum + ':' (rejects '|', newline, space)
+    #                                      ([^…] is SQLite GLOB's negated class, not [!…])
     local out orc=0
     out="$(sqlite3 :memory: "
       WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
@@ -96,6 +107,8 @@ _herdr_pane_for_session() {
              SELECT value FROM entries
              WHERE json_type(value) = 'object'
                AND json_type(value,'\$.pane_id') = 'text'
+               AND json_extract(value,'\$.pane_id') GLOB 'w*:p*'
+               AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
                AND json_type(value,'\$.agent_session') = 'object'
                AND json_type(value,'\$.agent_session.value') = 'text')
       SELECT (SELECT count(*) FROM entries),
