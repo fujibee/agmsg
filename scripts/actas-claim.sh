@@ -36,6 +36,18 @@ source "$SCRIPT_DIR/lib/actas-lock.sh"
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/role-session.sh"  # role->session record (#339)
+# Terminal registry, for naming this pane after the claim (v1 scope, item 4). The
+# errexit lift is not decoration: on bash 3.2 a failure inside a sourced file
+# fires THIS script's `set -e`, so `. x || true` would take the script down
+# instead of the guard arm. Naming must never be able to fail a claim.
+_agmsg_tr_rc=0; _agmsg_tr_e=0
+case $- in *e*) _agmsg_tr_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_tr_rc=$?
+[ "$_agmsg_tr_e" = 1 ] && set -e
+[ "$_agmsg_tr_rc" -eq 0 ] || echo "agmsg: terminal registry unavailable; this pane will not be named" >&2
 
 # Resolve the session's real project root (see #92) before any lookup, so an
 # actas issued from a subdir/worktree claims against the registered project
@@ -96,6 +108,22 @@ while IFS= read -r team; do
   [ -z "$team" ] && continue
   agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" || true
 done <<< "$TEAMS"
+
+# Name this pane for the role just claimed, so peek/poke can reach a session a
+# human started by hand — not only one `spawn` placed. `|| true` twice over: the
+# claim is what the caller is waiting on, and naming must not be able to fail it
+# or delay its status line. A terminal that cannot name says so on stderr once.
+#
+# Once per claimed team, mirroring the role-session loop above: each (team, role)
+# gets its own record, because that pair is what peek/poke resolve by. The
+# VISIBLE pane name is whichever team comes last — panes have one name and a role
+# in two teams is one pane. Stable, since the order is $TEAMS'.
+if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  while IFS= read -r team; do
+    [ -z "$team" ] && continue
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" || true
+  done <<< "$TEAMS"
+fi
 
 # Start the engine for each claimed team, if one is not already up (#774).
 #

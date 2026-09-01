@@ -298,3 +298,136 @@ agmsg_terminal_ref_id() {
     *)       printf '%s\n' "$ref" ;;         # legacy bare id
   esac
 }
+
+# --- name THIS pane, and record where it is ---------------------------------
+#
+# The step that makes peek/poke reach a member nobody spawned: join, actas and
+# SessionStart all call it, so a pane a human opened by hand is as addressable as
+# a spawned one. Limiting peek/poke to spawned members was refused (fujibee,
+# 2026-08-28); this is what lifts the limit. SessionStart is not optional — herdr
+# drops an agent's name when the agent exits, so a resume must re-apply it.
+#
+# Three outcomes, deliberately kept apart:
+#
+#   named    the terminal can name a pane AND this pane was identified: the
+#            driver names it and a "<terminal>:<id>" placement record is written,
+#            the same record spawn writes.
+#   skipped  the terminal has no `name` capability (plain has no addressable
+#            pane). QUIET, 0, and NO record: a permanent property of the terminal
+#            is not news on every join, and a record whose id cannot be acted on
+#            is not a placement -- writing one is a bug in the writer (ruling,
+#            2026-08-31).
+#   unnamed  the terminal CAN name, A SESSION ID WAS GIVEN, and this pane still
+#            could not be identified. non-zero, reason already on stderr from the
+#            resolver: saying "cannot name this pane" beats naming nothing.
+#
+# The session id qualifies `unnamed` on purpose. Called WITHOUT one -- join has
+# none to give, there being no per-type datum saying which env var carries it --
+# a terminal that needs it is `skipped`, not `unnamed`. No input is a different
+# fact from a failed lookup, and reporting the first as the second would warn on
+# every join under herdr about a condition nobody can act on.
+#
+# Callers treat non-zero as a WARNING, never as a failure of the join/claim/
+# session-start they are performing. Naming is additive; it must not change what
+# those commands do or return.
+#
+#   agmsg_terminal_name_self <session_id> <team> <agent> <project> <type>
+agmsg_terminal_name_self() {
+  local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
+  [ -n "$team" ] && [ -n "$agent" ] || {
+    echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
+  }
+
+  # No bare `x=$(cmd)` past this point. Under `set -e` a non-zero inside a command
+  # substitution ends the CALLER before the status can be read -- the shape review
+  # caught four times in this branch -- so every capture carries `|| rc=$?`.
+  local resolved="" rc=0
+  if [ -n "$sid" ]; then
+    resolved="$(agmsg_terminal_resolve_name "$sid")" || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"        # unnamed: resolver printed the reason
+  else
+    # NO SID GIVEN is not "resolution failed" -- it is "there was no input to
+    # resolve with", and folding the two into one value is the mistake this
+    # branch keeps finding elsewhere. A terminal that needs no session id (tmux
+    # reads $TMUX_PANE) still names the pane; one that needs it (herdr looks the
+    # pane up BY agent session id) is SKIPPED, quietly, because nothing was asked
+    # of it. The resolver's reason is dropped on purpose: it would report a
+    # missing input as a failure, on every join, forever.
+    resolved="$(agmsg_terminal_resolve_name "" 2>/dev/null)" || rc=$?
+    [ "$rc" -eq 0 ] || return 0            # skipped
+  fi
+
+  local tab terminal="" id=""
+  tab="$(printf '\t')"
+  terminal="${resolved%%$tab*}"
+  id="${resolved#*$tab}"
+  [ -n "$terminal" ] && [ -n "$id" ] && [ "$id" != "$resolved" ] || {
+    echo "agmsg: terminal resolution returned no pane to name" >&2; return 1
+  }
+
+  # Capability is DATA (terminal.conf), not a test on the driver's name: a
+  # terminal that cannot name a pane is skipped without a word, and a terminal
+  # that grows the ability later needs no change here.
+  local caps=""
+  caps="$(agmsg_terminal_get "$terminal" capabilities 2>/dev/null)" || caps=""
+  case " $caps " in *" name "*) ;; *) return 0 ;; esac
+
+  agmsg_terminal_load "$terminal" || return 1
+
+  local out=""
+  rc=0
+  out="$(terminal_name "$id" "$team" "$agent")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
+    return "$rc"
+  fi
+
+  # The record is what despawn/peek/poke resolve through, so it is written only
+  # after the driver has actually named the pane.
+  if ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/actas-lock.sh" ] || {
+      echo "agmsg: named the pane but cannot record it (no actas-lock.sh)" >&2; return 1
+    }
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/actas-lock.sh" || {
+      echo "agmsg: named the pane but cannot record it" >&2; return 1
+    }
+  fi
+
+  local rec="" ref=""
+  rec="$(agmsg_spawn_path "$team" "$agent")" || rc=$?
+  ref="$(agmsg_terminal_ref "$terminal" "$id")" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
+    echo "agmsg: named the pane but could not build its record path" >&2; return 1
+  }
+  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
+  printf '%s\t%s\t%s\n' "$ref" "$project" "$type" > "$rec" 2>/dev/null || {
+    echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
+  }
+  return 0
+}
+
+# Load the terminal registry from a caller running under `set -e`, and name this
+# pane -- the whole of what join / actas / SessionStart need, in one line each.
+#
+# The source is wrapped in the errexit lift for the reason measured on 2026-08-31:
+# on bash 3.2 (macOS /bin/bash) a failure inside a sourced file fires the CALLER's
+# `set -e` even when the source sits on the left of `||`, so the guard arm is not
+# merely skipped, it is UNREACHABLE. join and actas must never die because a
+# terminal could not be named, so the lift is the difference between a warning and
+# a broken command on macOS.
+#
+# Sourced BY the registry, so this function exists only once the registry is
+# loaded; callers that cannot source it at all simply never name a pane, which is
+# the same outcome as a terminal without the capability.
+#
+#   agmsg_terminal_name_self_safe <session_id> <team> <agent> <project> <type>
+agmsg_terminal_name_self_safe() {
+  local _rc=0 _restore_e=0
+  case $- in *e*) _restore_e=1 ;; esac
+  set +e
+  agmsg_terminal_name_self "$@"
+  _rc=$?
+  [ "$_restore_e" = 1 ] && set -e
+  return "$_rc"
+}

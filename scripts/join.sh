@@ -230,4 +230,29 @@ if agmsg_roster_has_journal "$TEAMS_DIR/$TEAM"; then
 fi
 agmsg_lock_release
 
+# Name this pane for the seat just joined, so peek/poke can reach a session a
+# human started by hand rather than only one `spawn` placed.
+#
+# Called with NO session id: join is a plain CLI invocation and nothing tells it
+# which env var carries this type's session id (`detect=` answers whether a type
+# is present, not where its id lives -- a different question). A terminal that
+# does not need one (tmux, via $TMUX_PANE) is named here; one that does (herdr,
+# which looks the pane up by agent session id) is skipped in silence, and picked
+# up by actas or SessionStart, which both have the id. Passing "" is therefore a
+# statement, not an omission.
+#
+# The source carries the errexit lift: on bash 3.2 a failure inside a sourced
+# file fires THIS script's `set -e`, so a plain `. x || true` would take the join
+# down instead of skipping the naming. Nothing here may fail a join.
+_agmsg_tr_rc=0; _agmsg_tr_e=0
+case $- in *e*) _agmsg_tr_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_tr_rc=$?
+[ "$_agmsg_tr_e" = 1 ] && set -e
+if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
+fi
+
 echo "Joined team $TEAM as $AGENT_ID"
