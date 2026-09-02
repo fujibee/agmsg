@@ -198,15 +198,31 @@ terminal_detect() {
 }
 
 # Read the new pane id from a herdr JSON result at one of the known paths.
+# The measured herdr pane-id grammar as ONE shell authority (co1: the resolver and
+# the spawn side must not implement the predicate twice and drift). w + >=1 alnum,
+# exactly one ':', then p + >=1 alnum, alnum+':' only. A test cross-checks that this
+# agrees with the resolver's SQL GLOB form on the boundary values. (bash negated
+# class is [!…]; SQLite GLOB's is [^…] — same grammar, different dialect.)
+_herdr_pane_id_ok() {
+  case "$1" in
+    w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;   # skeleton w<n>:p<x>, n/x non-empty
+    *) return 1 ;;
+  esac
+  case "$1" in *:*:*) return 1 ;; esac            # at most one colon
+  case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac  # alnum + ':' only (rejects '|', newline, space)
+  return 0
+}
+
 _herdr_new_pane_id() {
   local json="$1" q pane esc
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
   for q in '$.result.pane.pane_id' '$.result.root_pane.pane_id' '$.pane.pane_id' '$.root_pane.pane_id'; do
-    # Only a TEXT value is a usable pane id: a numeric or null pane_id (a malformed or
-    # partial herdr response) must fail closed, exactly as spawn.sh's herdr_json_str
-    # does — otherwise the caller would rename/run against a value that is not a pane.
-    pane="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc', '$q') = 'text' THEN json_extract('$esc', '$q') END" 2>/dev/null)"
-    [ -n "$pane" ] && [ "$pane" != "null" ] && { printf '%s\n' "$pane"; return 0; }
+    # A usable pane id must match the pane-id grammar, not merely be non-empty text:
+    # a numeric/null pane_id (malformed/partial response) OR a text one carrying a
+    # newline / '|' / wrong shape must fail closed — otherwise the caller renames/runs
+    # against a non-pane, and in the <terminal>:<id> record a newline breaks framing.
+    pane="$(sqlite3 :memory: "SELECT json_extract('$esc', '$q')" 2>/dev/null)"
+    _herdr_pane_id_ok "$pane" && { printf '%s\n' "$pane"; return 0; }
   done
   return 1
 }

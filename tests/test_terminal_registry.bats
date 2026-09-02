@@ -341,25 +341,53 @@ _fake_herdr_list_scalar_session() {
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
 }
 
-@test "herdr: spawn fails closed on a NON-TEXT pane_id in the split response" {
-  # A numeric/null pane_id is a malformed or partial response, not a usable pane id.
-  # _herdr_new_pane_id must reject it (json_type='text' guard) so the driver returns
-  # 13 and never renames/runs against a non-pane value — mirrors spawn.sh's
-  # herdr_json_str fail-closed contract.
-  cat > "$FAKEBIN/herdr" <<EOF
-#!/usr/bin/env bash
-{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-if [ "\$1" = pane ] && [ "\$2" = split ]; then echo '{"result":{"pane":{"pane_id":42}}}'; fi
-exit 0
-EOF
-  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+@test "herdr: spawn fails closed on a non-grammar pane_id (numeric, newline, '|', bad shape)" {
+  # A usable pane id must match the measured grammar, not merely be non-empty text.
+  # Numeric/null (malformed/partial response) AND text values carrying a newline, a
+  # '|', or a wrong shape must all make terminal_spawn return 13 and touch nothing —
+  # a newline would otherwise break the <terminal>:<id> record framing downstream.
   agmsg_terminal_load herdr
   export HERDR_PANE_ID='wC:p1'
-  : > "$ARGV_LOG"
-  run terminal_spawn alice /proj pane-v bash -lc boot
-  [ "$status" -eq 13 ]
-  refute grep -q '\[pane\] \[rename\]' "$ARGV_LOG"
-  refute grep -q '\[pane\] \[run\]' "$ARGV_LOG"
+  local body
+  for body in '{"result":{"pane":{"pane_id":42}}}' \
+              '{"result":{"pane":{"pane_id":"w1:p|4"}}}' \
+              '{"result":{"pane":{"pane_id":"w1:x:p4"}}}' \
+              '{"result":{"pane":{"pane_id":"w:p"}}}' \
+              '{"result":{"pane":{"pane_id":"w1:p\n4"}}}'; do
+    printf '#!/usr/bin/env bash\n{ printf '\''herdr'\''; for a in "$@"; do printf '\'' [%%s]'\'' "$a"; done; printf '\''\\n'\''; } >> "%s"\nif [ "$1" = pane ] && [ "$2" = split ]; then echo '\''%s'\''; fi\nexit 0\n' "$ARGV_LOG" "$body" > "$FAKEBIN/herdr"
+    chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+    : > "$ARGV_LOG"
+    run terminal_spawn alice /proj pane-v bash -lc boot
+    [ "$status" -eq 13 ]                       || { echo "FAIL not 13: $body"; return 1; }
+    refute grep -q '\[pane\] \[rename\]' "$ARGV_LOG" || { echo "FAIL renamed: $body"; return 1; }
+    refute grep -q '\[pane\] \[run\]' "$ARGV_LOG"    || { echo "FAIL ran: $body"; return 1; }
+  done
+}
+
+@test "herdr: the pane-id grammar shell authority agrees with the resolver on boundary values" {
+  # co1: the resolver (SQL GLOB) and the spawn side (_herdr_pane_id_ok, bash) express
+  # the SAME grammar; a drift between them would let one accept what the other rejects.
+  # Cross-check both on the boundary set: the shell authority and a resolver lookup
+  # (via a one-entry list whose pane_id is the value) must agree on accept/reject.
+  agmsg_terminal_load herdr    # brings _herdr_pane_id_ok into scope
+  export HERDR_ENV=1
+  local v want
+  for v in 'w1:p4:ACCEPT' 'wC:p4:ACCEPT' 'w1:pB:ACCEPT' \
+           'w:p:REJECT' 'w1:p:REJECT' 'w:p4:REJECT' 'w1:x:p4:REJECT' 'w1:p|4:REJECT'; do
+    local pane="${v%:*}" want="${v##*:}"
+    # shell authority
+    if _herdr_pane_id_ok "$pane"; then [ "$want" = ACCEPT ] || { echo "shell accepted $pane"; return 1; }
+    else [ "$want" = REJECT ] || { echo "shell rejected $pane"; return 1; }; fi
+    # resolver: a well-formed session entry whose pane is $pane -> ACCEPT resolves it,
+    # REJECT makes the target present-but-unaddressable (did-not-answer).
+    _fake_herdr_list_one_pane "sess-mine" "$pane"
+    run agmsg_terminal_resolve_name "sess-mine"
+    if [ "$want" = ACCEPT ]; then
+      [ "$status" -eq 0 ] && [ "$output" = "$(printf 'herdr\t%s' "$pane")" ] || { echo "resolver rejected $pane"; return 1; }
+    else
+      [ "$status" -ne 0 ] && grep -q "did not answer" <<<"$output" || { echo "resolver accepted $pane"; return 1; }
+    fi
+  done
 }
 
 @test "herdr: despawn closes the pane; peek reads visible; name sets visible ':' + derived key" {
