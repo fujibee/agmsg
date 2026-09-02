@@ -204,12 +204,20 @@ terminal_detect() {
 # agrees with the resolver's SQL GLOB form on the boundary values. (bash negated
 # class is [!…]; SQLite GLOB's is [^…] — same grammar, different dialect.)
 _herdr_pane_id_ok() {
+  # Delegate to the registry's single per-terminal id authority so the spawn-side
+  # extraction, the resolver's cross-check, and agmsg_terminal_ref_terminal all use
+  # ONE herdr pane grammar (co1: do not implement the predicate twice). The herdr
+  # driver is always loaded through the registry, so the helper is in scope; a bare
+  # source without it falls back to the inline grammar rather than accepting anything.
+  if declare -F _agmsg_terminal_id_ok >/dev/null 2>&1; then
+    _agmsg_terminal_id_ok herdr "$1"; return $?
+  fi
   case "$1" in
-    w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;   # skeleton w<n>:p<x>, n/x non-empty
+    w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;
     *) return 1 ;;
   esac
-  case "$1" in *:*:*) return 1 ;; esac            # at most one colon
-  case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac  # alnum + ':' only (rejects '|', newline, space)
+  case "$1" in *:*:*) return 1 ;; esac
+  case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac
   return 0
 }
 

@@ -230,19 +230,26 @@ _fake_herdr_list_scalar_session() {
   [ "$(agmsg_terminal_ref_id '%3')" = "%3" ]
 }
 
-@test "record: an unknown or CORRUPT ref FAILS CLOSED — never defaults to a tmux target (co1)" {
-  # A ref is handed to a terminal as a TARGET (peek/poke/despawn). Only %<n>/@<n> is a
-  # provable legacy tmux id; a corrupt or future-scheme ref must not fall through to
-  # tmux, where its target grammar could name an unrelated pane. Unknown -> non-zero,
-  # no output, so every caller can guard and never call a terminal binary.
+@test "record: an unknown or CORRUPT ref FAILS CLOSED — validates the ID, not just the scheme (co1)" {
+  # A ref is handed to a terminal as a TARGET (peek/poke/despawn). A KNOWN scheme is
+  # not enough — the id after it must be a well-formed id for that terminal, or a
+  # corrupt id (tmux:%9;kill, tmux:alice -> a real session, herdr:junk, plain:any)
+  # reaches the backend. Unknown scheme AND malformed-id-behind-a-known-scheme both
+  # -> non-zero, no output, so no terminal binary is ever invoked on it.
   local bad
-  for bad in 'garbage' 'wC:p4' '%' '@abc' '% rm -rf' '%9;kill' 'herdr' ''; do
+  for bad in 'garbage' 'wC:p4' '%' '@abc' '% rm -rf' '%9;kill' 'herdr' '' \
+             'tmux:garbage' 'tmux:%9;kill' 'tmux:alice' 'tmux:' 'tmux:@' \
+             'herdr:not-a-pane' 'herdr:w1:p4:x' 'herdr:' 'plain:x' 'plain:'; do
     run agmsg_terminal_ref_terminal "$bad"
     [ "$status" -ne 0 ]   || { echo "FAIL: '$bad' resolved to a terminal ($output)"; return 1; }
     [ -z "$output" ]      || { echo "FAIL: '$bad' printed '$output'"; return 1; }
   done
-  # ...and the known/legacy shapes still resolve.
+  # ...and the well-formed shapes (scheme + a valid id, and the legacy bare tmux id)
+  # still resolve.
   [ "$(agmsg_terminal_ref_terminal 'plain:-')" = "plain" ]
+  [ "$(agmsg_terminal_ref_terminal 'tmux:%42')" = "tmux" ]
+  [ "$(agmsg_terminal_ref_terminal 'tmux:@7')" = "tmux" ]
+  [ "$(agmsg_terminal_ref_terminal 'herdr:wC:p4')" = "herdr" ]
   [ "$(agmsg_terminal_ref_terminal '%42')" = "tmux" ]
   [ "$(agmsg_terminal_ref_terminal '@7')" = "tmux" ]
 }

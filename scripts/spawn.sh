@@ -618,8 +618,14 @@ _launch_os_terminal() {
   # and returns '-' (no addressable pane, so no placement record for plain). It reads
   # AGMSG_TERMINAL as the template / macOS app hint; hand it the resolved value.
   agmsg_terminal_load plain || die "could not load the plain terminal driver"
-  AGMSG_TERMINAL="$TERMINAL_TMPL" terminal_spawn "$NAME" "$PROJECT" - "$BOOT" \
+  # CAPTURE the driver's record-op stdout — it is a protocol value ('-' = placed, no
+  # addressable pane), not something a spawn user should see on stdout. Verify it is
+  # exactly '-' (a malformed/empty result is NOT a success), and do not echo it.
+  local _plain_id
+  _plain_id="$(AGMSG_TERMINAL="$TERMINAL_TMPL" terminal_spawn "$NAME" "$PROJECT" - "$BOOT")" \
     || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
+  [ "$_plain_id" = '-' ] \
+    || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected '-' (an OS terminal has no addressable pane)"
   # The message keeps the two shapes the tests and users know: a custom template vs a
   # plain new window.
   if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then

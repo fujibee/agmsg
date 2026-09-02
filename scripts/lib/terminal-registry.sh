@@ -307,26 +307,49 @@ agmsg_terminal_ref() {
 }
 
 # Print the terminal name of a record ref (stdout). Handles legacy bare ids.
-agmsg_terminal_ref_terminal() {
-  local ref="$1" rest
-  case "$ref" in
-    tmux:*)  printf 'tmux\n' ;;
-    herdr:*) printf 'herdr\n' ;;
-    plain:*) printf 'plain\n' ;;
-    %*|@*)
-      # Legacy pre-axis record: a bare tmux id, but ONLY the provable shape %<n> /
-      # @<n> (n decimal). A ref is handed to a terminal as a TARGET (peek/poke/
-      # despawn), so a corrupt or future-scheme ref that fell through to tmux could
-      # name an unrelated pane/window depending on tmux's target grammar. Anything
-      # after the sigil that is not all-decimal is NOT a known id -> fail closed.
-      rest="${ref#?}"
-      case "$rest" in
-        ''|*[!0-9]*) return 1 ;;
-        *)           printf 'tmux\n' ;;
-      esac ;;
-    *) return 1 ;;   # unknown/corrupt ref -> no terminal (callers must guard); never
-                     # default to tmux and hand it an untrusted target.
+# Is <id> a well-formed id for <terminal>? The SINGLE authority for the per-terminal
+# bare-id grammar, shared by agmsg_terminal_ref_terminal (below) and the herdr
+# driver's _herdr_pane_id_ok (which delegates here), so the two cannot drift. The id
+# is handed to a terminal as a TARGET, so this is the line between a value we may
+# pass and one we must refuse:
+#   tmux   %<n> / @<n>, n decimal   (rejects tmux:alice -> a real session; %9;kill)
+#   herdr  w<n>:p<x>, one ':', alnum+':' only   (rejects a newline / '|' / junk)
+#   plain  exactly '-'              (no addressable pane; any other value is corrupt)
+_agmsg_terminal_id_ok() {   # <terminal> <id>
+  local id="$2" rest
+  case "$1" in
+    tmux)
+      case "$id" in %*|@*) : ;; *) return 1 ;; esac
+      rest="${id#?}"
+      case "$rest" in ''|*[!0-9]*) return 1 ;; esac
+      return 0 ;;
+    herdr)
+      case "$id" in w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;; *) return 1 ;; esac
+      case "$id" in *:*:*) return 1 ;; esac
+      case "$id" in *[!0-9A-Za-z:]*) return 1 ;; esac
+      return 0 ;;
+    plain)
+      [ "$id" = '-' ] || return 1
+      return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+agmsg_terminal_ref_terminal() {
+  local ref="$1" term id
+  case "$ref" in
+    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
+    herdr:*) term=herdr; id="${ref#herdr:}" ;;
+    plain:*) term=plain; id="${ref#plain:}" ;;
+    %*|@*)   term=tmux;  id="$ref" ;;    # legacy pre-axis bare tmux id
+    *)       return 1 ;;                 # unknown scheme -> no terminal
+  esac
+  # A KNOWN scheme is not enough: the id after it is still handed to the terminal as a
+  # TARGET, so a corrupt id (tmux:%9;kill, tmux:alice, herdr:<newline>, plain:any)
+  # must not fall through. Validate it against the terminal's grammar; fail closed
+  # otherwise (co1: the container is not the contents).
+  _agmsg_terminal_id_ok "$term" "$id" || return 1
+  printf '%s\n' "$term"
 }
 
 # Print the bare id of a record ref (stdout) — the scheme prefix stripped, or the

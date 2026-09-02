@@ -1203,3 +1203,14 @@ T
   grep -q "status=spawned-but-unrecorded" <<<"$output"
   grep -q "tmux:%9" <<<"$output"
 }
+
+@test "spawn: the plain driver's '-' protocol value never leaks to spawn stdout" {
+  # _launch_os_terminal captures terminal_spawn's record-op stdout ('-' = placed, no
+  # pane) and verifies it, rather than letting it print. A normal OS-terminal spawn
+  # must not emit a lone '-' line alongside the human status.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -qx -- '-' <<<"$output"          # no line that is just the protocol '-'
+  grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
+}
