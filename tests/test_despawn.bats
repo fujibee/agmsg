@@ -171,6 +171,25 @@ _control_row_exists_for_alice() {
   [[ "$output" == *"no-live-lock"* ]]
 }
 
+@test "despawn: a free lock WITH a placement record does not report ok or delete the record (#625)" {
+  # A monitor=no member (cursor) never holds an actas lock, so the graceful path
+  # lands in `free` on every despawn. The old code read that as "gone", deleted the
+  # placement record and reported status=ok — while the pane/process were still
+  # there, and the deletion made the --force it advises impossible. A free lock WITH
+  # a record must NOT report ok and must NOT delete the record.
+  bash "$SCRIPTS/join.sh" team alice cursor "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" cursor > "$RUN/spawn.team__alice"
+  run bash "$SCRIPTS/despawn.sh" team leader alice
+  [ "$status" -ne 0 ]
+  grep -q "needs-force" <<<"$output"
+  refute grep -q "status=ok" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]              # record KEPT so --force can use it
+  # ...and --force then works against the preserved record.
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  grep -q "status=forced" <<<"$output"
+}
+
 @test "despawn --force: kills a herdr: placement via herdr pane close" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   # Record a herdr-tagged placement (herdr: scheme prefix).

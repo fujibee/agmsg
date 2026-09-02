@@ -90,8 +90,21 @@ fi
 state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
 case "$state" in
   free)
-    echo "despawn: '$NAME' holds no live actas lock — nothing to confirm a teardown against (a codex member has no watcher; a tmux member may already be gone). If a window remains, use --force." >&2
-    rm -f "$SPAWN_REC" 2>/dev/null || true
+    # #625: a free actas lock does NOT prove the member is gone. A monitor=no type
+    # (cursor, codex) never runs a watcher and so NEVER holds a lock; a member whose
+    # watcher merely died reads identically. So split on the placement record — the
+    # positive evidence that something was spawned and may still be running.
+    if [ -f "$SPAWN_REC" ]; then
+      # A pane/process was placed and is likely still there. Do NOT delete the record
+      # (--force reads exactly this — deleting it here is what made the advised
+      # recovery impossible), and do NOT report a teardown we did not perform.
+      echo "despawn: '$NAME' holds no live actas lock, but a placement record remains — graceful despawn cannot confirm a teardown (a monitor=no member such as cursor/codex never holds a lock; a watcher may have died). Retry with --force to tear it down via the record, which is kept intact." >&2
+      echo "status=needs-force name=$NAME team=$TEAM note=no-live-lock-recorded"
+      exit 1
+    fi
+    # No placement record: nothing was spawned here to tear down (a hand-joined
+    # member, or one already gone). The free lock is all there is to act on.
+    echo "despawn: '$NAME' holds no live actas lock and has no placement record — nothing to tear down here (if a window remains, it was not launched via spawn; close it directly)." >&2
     echo "status=ok name=$NAME team=$TEAM note=no-live-lock"
     exit 0
     ;;
