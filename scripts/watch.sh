@@ -49,6 +49,12 @@ agmsg_storage_load
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
+# Terminal driver registry — the graceful-despawn teardown resolves this
+# member's own pane through it. Guarded: an install predating the terminals
+# axis simply has no registry, and close_own_placement says so rather than
+# reaching for $TMUX_PANE behind its own back.
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
 
 # Resolve a session id when the launcher could not bake one in (empty first arg).
 # Grok Build's `monitor` tool runs the watcher with $GROK_SESSION_ID unset, so
@@ -188,6 +194,109 @@ watch_log() {
   fi
   # Never fatal: a sandbox that cannot write here must not take delivery down.
   printf '%s\n' "$record" >> "$LOGFILE" 2>/dev/null || true
+}
+
+# Close THIS member's own pane at the end of a graceful despawn, through the
+# terminal driver named by its placement record.
+#
+# It used to be `tmux kill-pane -t "$TMUX_PANE"`, which is the asymmetry the v1
+# scope named: a tmux member could fold itself away and a herdr member could
+# not, for no reason other than which multiplexer the teardown was written
+# against. The record already says which terminal placed the pane, and
+# despawn.sh already tears down through it; this is the same route for the
+# member tearing down ITSELF.
+#
+# Two things this deliberately does NOT do:
+#
+# 1. It does not fall back to $TMUX_PANE when the record is unusable. Keeping
+#    that fallback would leave tmux on a private path and reinstate the very
+#    asymmetry being removed — and it would make the failure invisible, because
+#    the one terminal that still worked is the one nobody would notice.
+#
+# 2. It does not fold a pane it cannot show is its own. `despawn.sh` tears down
+#    SOMEBODY ELSE from a record; this path tears down ITSELF, and the two need
+#    different proof. A record naming (team, name) says a pane was placed for
+#    that seat — it does not say the pane this process is running in IS that
+#    pane. Acting on the weaker fact is how a record gets used as authority it
+#    was never given. So the record's terminal+id must match what this session
+#    resolves to right now, and anything short of a match is reported, not
+#    guessed at.
+#
+# Silence is never the answer here: a pane that should have closed and did not
+# is exactly the state an operator cannot see. Every path that declines says
+# why, on stderr and in the watcher log.
+close_own_placement() {
+  local team="$1" name="$2"
+  local rec ref rec_term rec_id mine my_term my_id
+
+  rec="$(agmsg_spawn_path "$team" "$name")"
+  if [ ! -f "$rec" ]; then
+    # A record is written when a pane is PLACED. A seat that joined by hand and
+    # never went through spawn has none — normal, not an error, and there is
+    # nothing here to close. Say so rather than exiting quietly, because the
+    # same silence would also cover "the record was lost".
+    watch_log "despawned '$name' (role dropped); no placement record for '$team/$name', so there is no pane to close from here — if a window remains it was not placed by agmsg; close it directly"
+    return 0
+  fi
+  IFS=$'\t' read -r ref _ _ < "$rec"
+  if [ -z "$ref" ]; then
+    watch_log "despawned '$name' (role dropped); the placement record at $rec is empty, so the pane cannot be identified — close this window manually"
+    return 0
+  fi
+
+  if ! declare -F agmsg_terminal_ref_terminal >/dev/null 2>&1; then
+    watch_log "despawned '$name' (role dropped); the terminal registry is not available in this install, so the recorded pane cannot be closed — close this window manually"
+    return 0
+  fi
+
+  rec_term="$(agmsg_terminal_ref_terminal "$ref")"
+  rec_id="$(agmsg_terminal_ref_id "$ref")"
+
+  # Which pane is THIS process in, right now. resolve-for-name is the strict
+  # resolver: it answers only with a self-id it could actually establish, and
+  # says why when it cannot. That is the property wanted here — an unidentified
+  # pane must not be matched against a record by default.
+  #
+  # The BARE session id, not $SESSION_ID. watch.sh normalises its argument into
+  # an instance id (watch.sh:99), which for claude-code is the composite
+  # "<sid>.<pid>" — that composite exists only inside agmsg. What a terminal
+  # knows is what the CLI told it at SessionStart, which is the bare sid; herdr
+  # stores exactly that in agent_session.value. Handing it the composite asks a
+  # question no terminal can answer, and the answer comes back as "this session
+  # cannot identify its own pane" — a fail-closed that looks like a resolution
+  # problem and is really an identifier mismatch. Caught by the herdr test,
+  # which is the whole reason it stubs a session id rather than trusting one.
+  mine=""
+  if declare -F agmsg_terminal_resolve_name >/dev/null 2>&1; then
+    local bare_sid="$SESSION_ID"
+    if declare -F agmsg_instance_bare_sid >/dev/null 2>&1; then
+      bare_sid="$(agmsg_instance_bare_sid "$SESSION_ID")"
+    fi
+    mine="$(agmsg_terminal_resolve_name "$bare_sid" 2>/dev/null || true)"
+  fi
+  if [ -z "$mine" ]; then
+    watch_log "despawned '$name' (role dropped); this session cannot identify its own pane, so the recorded placement ($ref) is not provably ours and was left alone — close this window manually"
+    return 0
+  fi
+  my_term="${mine%%	*}"
+  my_id="${mine#*	}"
+
+  if [ "$my_term" != "$rec_term" ] || [ "$my_id" != "$rec_id" ]; then
+    watch_log "despawned '$name' (role dropped); the placement record names $rec_term:$rec_id but this session is in $my_term:$my_id, so that pane belongs to someone else and was left alone — close this window manually"
+    return 0
+  fi
+
+  if ! agmsg_terminal_load "$rec_term" 2>/dev/null; then
+    watch_log "despawned '$name' (role dropped); the '$rec_term' terminal driver would not load, so the pane could not be closed — close this window manually"
+    return 0
+  fi
+  if ! terminal_despawn "$rec_id" >/dev/null 2>&1; then
+    # 13 is the drivers' "unsupported" — plain has no addressable pane, so there
+    # is genuinely nothing to close and the member must be told, not left with a
+    # window it thinks was folded.
+    watch_log "despawned '$name' (role dropped); the '$rec_term' terminal did not close pane $rec_id — close this window manually"
+  fi
+  return 0
 }
 
 # Resolve poll interval. Env var wins over config, default 5s.
@@ -763,11 +872,7 @@ while true; do
     fi
     if [ -n "$DESPAWN_TARGET" ]; then
       "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$DESPAWN_TARGET" "$SESSION_ID" >/dev/null 2>&1 || true
-      if [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
-        tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
-      else
-        watch_log "despawned '$DESPAWN_TARGET' (role dropped); close this window manually"
-      fi
+      close_own_placement "$pair_team" "$DESPAWN_TARGET"
       exit 0
     fi
     fi
