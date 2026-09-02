@@ -1054,3 +1054,40 @@ M
   [ -f "$rec" ]
   grep -q 'tmux:%1' "$rec"
 }
+
+# --- actas hands the terminal the identifier the TERMINAL knows ---------------
+#
+# The lock token and the terminal's identifier are different things. actas
+# normalizes its argument into the composite "<sid>.<pid>" — a token that exists
+# only inside agmsg — and that is right for the lock; herdr's agent_session.value
+# is the BARE sid the CLI published. Passing the composite asks herdr a question
+# it cannot answer, the answer is "cannot identify this pane", and the `|| true`
+# on the naming call means the CLAIM still reports success. So a hand-started
+# herdr seat claims its role and is silently unreachable to peek/poke.
+#
+# Driven through actas-claim.sh rather than the helper, because the defect is in
+# what the caller passes. The sid goes in already composite so the normalizer's
+# pid discovery cannot change what is under test.
+@test "actas-claim: names the pane when the sid arrives COMPOSITE and herdr knows the bare one" {
+  _install_fake_herdr "sess-bare"
+  export HERDR_ENV=1
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A >/dev/null
+
+  run bash "$SKILL_DIR/scripts/actas-claim.sh" /proj/A claude-code alice "sess-bare.4242"
+  [ "$status" -eq 0 ]
+  # Positive controls, both before the claim under test can be read as a pass:
+  # the claim really happened, and the fake herdr really was reached (otherwise
+  # "no rename" would only mean the resolver never ran).
+  printf '%s' "$output" | grep -Fq 'status=ok'
+  grep -Fq 'herdr [agent] [list]' "$ARGV_LOG"
+
+  # The pane was named for this role.
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [seatteam:alice]' "$ARGV_LOG"
+
+  # ...and the placement record points peek/poke at that pane.
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local rec; rec="$(agmsg_spawn_path seatteam alice)"
+  [ -f "$rec" ]
+  grep -Fq 'herdr:wC:p4' "$rec"
+}

@@ -114,6 +114,17 @@ done <<< "$TEAMS"
 # claim is what the caller is waiting on, and naming must not be able to fail it
 # or delay its status line. A terminal that cannot name says so on stderr once.
 #
+# BARE_SID, not $SESSION_ID. In THIS script $SESSION_ID has been overwritten with
+# the normalized composite "<sid>.<pid>" (above), a token that exists only inside
+# agmsg; in session-start.sh the identically named variable holds the BARE sid the
+# CLI handed the hook, and it passes that. What a terminal knows is the bare one —
+# herdr stores exactly it in agent_session.value — so handing over the composite
+# asks a question no terminal can answer. It comes back as "cannot identify this
+# pane", which reads as a resolution problem and is an identifier mismatch, and
+# the `|| true` below means the claim still reports success while the pane goes
+# unnamed and unaddressable. watch.sh does the same lookup and was corrected the
+# same way (watch.sh:271); this was the remaining site.
+#
 # Once per claimed team, mirroring the role-session loop above: each (team, role)
 # gets its own record, because that pair is what peek/poke resolve by. The
 # VISIBLE pane name is whichever team comes last — panes have one name and a role
@@ -121,7 +132,7 @@ done <<< "$TEAMS"
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   while IFS= read -r team; do
     [ -z "$team" ] && continue
-    agmsg_terminal_name_self_safe "$SESSION_ID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record || true
+    agmsg_terminal_name_self_safe "$BARE_SID" "$team" "$NAME" "$PROJECT_PHYS" "$TYPE" record || true
   done <<< "$TEAMS"
 fi
 
