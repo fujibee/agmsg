@@ -117,19 +117,24 @@ _herdr_pane_for_session() {
                THEN 1 ELSE 0 END,
                json_type(value,'\$.agent_session')
              FROM entries WHERE json_type(value) = 'object'),
-           -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01):
-           --   A. a session entry: agent_session object with a text .value
-           --   B. a bare pane: recognized AS a pane (pane_ok) with NO agent_session
-           --      AND agent is empty text (the measured bare shape). 'no agent_session'
-           --      alone is NOT B — a renamed/unknown session field would slip in.
-           -- Anything else ({}, {\"future_session\":…}, a wrong pane form) is neither
-           -- kind -> indeterminate -> a new entry shape falls to did-not-answer.
+           -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01;
+           -- shapes remeasured on the live machine 2026-09-02 by utildev):
+           --   A. a session entry: agent_session is an OBJECT with a text .value
+           --   B. a bare pane: pane_ok AND agent_session is JSON null. The measured
+           --      session-less pane is {..,"agent":"grok","agent_session":null,..} —
+           --      the KEY is present with a null VALUE (json_type = 'null'), NOT
+           --      absent, and the agent field is the kind (claude/grok), not "".
+           -- The distinction that matters: agent_session PRESENT-as-null (B, a pane
+           -- that explicitly has no live session) vs ABSENT entirely (a {} or a
+           -- {\"future_session\":…} drift, where a renamed session could hide the
+           -- target) -> indeterminate. A scalar/malformed agent_session, or a null
+           -- one on a bad pane_id, is also indeterminate -> did-not-answer. (The
+           -- earlier B required agent=="" and a MISSING key; neither matches the real
+           -- shape, so B matched nothing and not-among was unreachable — round 8 again.)
            det(value) AS (
              SELECT value FROM tagged
              WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
-                OR ( as_type IS NULL AND pane_ok = 1
-                     AND json_type(value,'\$.agent') = 'text'
-                     AND json_extract(value,'\$.agent') = '' )),
+                OR ( as_type = 'null' AND pane_ok = 1 )),
            -- the target, present as a session entry with a usable (grammar) pane:
            hit(pid) AS (
              SELECT json_extract(value,'\$.pane_id') FROM tagged
