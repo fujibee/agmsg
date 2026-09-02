@@ -1184,3 +1184,22 @@ _spawn_recorded_id() {
   # Nothing was registered for the spawn target (it failed before the pre-join).
   [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
 }
+
+@test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
+  # The record is the only authority peek/poke/despawn --force have. If the write
+  # fails (here: forced by making the record PATH a directory), the member is live
+  # but unaddressable — a distinct, worse state than a clean spawn, so spawn reports
+  # status=spawned-but-unrecorded with the pane ref and exits non-zero, not ready.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run/spawn.myteam__alice"   # record write will fail
+  cat > "$STUB_BIN/tmux" <<'T'
+#!/usr/bin/env bash
+case "$1" in split-window) echo '%9' ;; select-pane|set-window-option) ;; esac
+exit 0
+T
+  chmod +x "$STUB_BIN/tmux"
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  grep -q "status=spawned-but-unrecorded" <<<"$output"
+  grep -q "tmux:%9" <<<"$output"
+}

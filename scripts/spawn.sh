@@ -513,6 +513,26 @@ chmod +x "$BOOT"
 # Placement — every launcher just runs $BOOT.
 # ============================================================================
 
+# Write the placement record, and REPORT if the write itself failed. The record is
+# the ONLY authority peek / poke / despawn --force have over a spawned member, so a
+# live pane with no record (disk full, permission) is a distinct, worse state than a
+# clean spawn — not a success (co1/tl, full-head review). We cannot un-spawn the pane
+# that already exists, so we do not roll back; we set a flag the main flow turns into
+# `status=spawned-but-unrecorded` (a DIFFERENT word from `spawned`) with the pane id,
+# and a non-zero exit, so the operator knows a window exists it cannot address.
+SPAWN_UNRECORDED=0
+SPAWN_UNREC_REF=""
+_record_placement() {   # <terminal> <id>
+  local rec; rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
+  if ! printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref "$1" "$2")" "$PROJECT" "$AGENT_TYPE" > "$rec" 2>/dev/null; then
+    SPAWN_UNRECORDED=1
+    SPAWN_UNREC_REF="$(agmsg_terminal_ref "$1" "$2")"
+    return 1
+  fi
+  return 0
+}
+
 launch_in_tmux() {
   # $TMUX is set (we are inside a tmux pane), but the `tmux` client binary
   # still has to be on PATH for split-window/new-window to work. In a
@@ -550,64 +570,14 @@ launch_in_tmux() {
 
   # Record placement as <terminal>:<id> so despawn --force (and peek/poke) read the
   # terminal from the record; despawn still tolerates the pre-axis bare %N/@N. See #109.
-  printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref tmux "$target_id")" "$PROJECT" "$AGENT_TYPE" \
-    > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
+  _record_placement tmux "$target_id" || true
 }
 
-launch_macos_terminal() {
-  # `open -a` is a launch, not an AppleEvent, so it does not trip the
-  # Automation (TCC) consent prompts that `osascript ... do script` does.
-  # `-g`/`--background` keeps the newly opened terminal from stealing focus.
-  # This path is taken whenever $TMUX is unset -- notably when the spawning
-  # process itself has no tmux context (e.g. a GUI app, or any non-terminal
-  # caller), where a foreground terminal popup interrupts whatever the user
-  # is currently doing in the foreground app.
-  local app="${1:-Terminal}"
-  case "$app" in
-    iterm|iterm2|iTerm|iTerm2) open -g -a iTerm "$BOOT" ;;
-    *)                         open -g -a Terminal "$BOOT" ;;
-  esac
-}
-
-launch_linux_terminal() {
-  local term
-  for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal xterm; do
-    command -v "$term" >/dev/null 2>&1 || continue
-    case "$term" in
-      gnome-terminal) gnome-terminal --working-directory="$PROJECT" -- "$BOOT" ;;
-      konsole)        konsole --workdir "$PROJECT" -e "$BOOT" ;;
-      *)              "$term" -e "$BOOT" ;;
-    esac
-    return 0
-  done
-  die "no supported terminal emulator found (tried gnome-terminal/konsole/xterm/...); set AGMSG_TERMINAL or run inside tmux"
-}
-
-launch_windows_terminal() {
-  if command -v wt.exe >/dev/null 2>&1; then
-    wt.exe new-tab bash -l "$BOOT"
-    return 0
-  fi
-  if command -v wt >/dev/null 2>&1; then
-    wt new-tab bash -l "$BOOT"
-    return 0
-  fi
-  die "Windows Terminal (wt) not found; set AGMSG_TERMINAL or run inside tmux"
-}
-
-launch_with_template() {
-  # User-supplied terminal command. `{cmd}` is replaced with the path to the
-  # boot script (an executable file); if there is no placeholder, the path is
-  # appended. Quote it so a TMPDIR with spaces still works.
-  local q_boot; q_boot="$(printf '%q' "$BOOT")"
-  local cmd
-  if [[ "$TERMINAL_TMPL" == *"{cmd}"* ]]; then
-    cmd="${TERMINAL_TMPL//\{cmd\}/$q_boot}"
-  else
-    cmd="$TERMINAL_TMPL $q_boot"
-  fi
-  bash -c "$cmd"
-}
+# The OS-terminal launchers (macOS `open -g -a`, Linux emulators, Windows Terminal,
+# and the `{cmd}` template) now live in the PLAIN terminal driver
+# (drivers/terminals/plain/ops.sh); _launch_os_terminal below routes through it, so
+# the plain driver is a real production caller and the OS-terminal path has one
+# implementation, not two.
 
 is_herdr_env() {
   [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
@@ -636,53 +606,27 @@ launch_in_herdr() {
     || die "herdr placement failed (split/tab create returned no usable pane id)"
   # Record placement as <terminal>:<id>. despawn reads the terminal from the record
   # (herdr pane ids contain ':', preserved by the first-colon ref split).
-  local _spawn_rec
-  _spawn_rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
-  mkdir -p "$(dirname "$_spawn_rec")"
-  printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref herdr "$new_id")" "$PROJECT" "$AGENT_TYPE" \
-    > "$_spawn_rec" 2>/dev/null || true
+  _record_placement herdr "$new_id" || true
 }
 
 _launch_os_terminal() {
-  # Non-tmux/herdr: open an OS terminal. A {cmd} template wins outright on any OS.
+  # Place THROUGH the plain terminal driver (tl 2026-09-02: the driver claims
+  # capabilities=spawn despawn, so production must actually go through it, not a
+  # duplicate). plain's terminal_spawn does the OS-terminal launch — a {cmd} template
+  # on any OS, else the current macOS terminal (`open -g -a`) / a Linux emulator /
+  # Windows Terminal, with the same headless + platform guards it moved from here —
+  # and returns '-' (no addressable pane, so no placement record for plain). It reads
+  # AGMSG_TERMINAL as the template / macOS app hint; hand it the resolved value.
+  agmsg_terminal_load plain || die "could not load the plain terminal driver"
+  AGMSG_TERMINAL="$TERMINAL_TMPL" terminal_spawn "$NAME" "$PROJECT" - "$BOOT" \
+    || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
+  # The message keeps the two shapes the tests and users know: a custom template vs a
+  # plain new window.
   if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
-    launch_with_template
     echo "spawned ${AGENT_TYPE} '${NAME}' via custom terminal template"
-    return 0
+  else
+    echo "spawned ${AGENT_TYPE} '${NAME}' in a new terminal window"
   fi
-
-  case "$(uname -s)" in
-    Darwin)
-      # Default to the terminal the user is *currently* in, so spawning from
-      # iTerm opens iTerm rather than jarringly launching Terminal.app. A bare
-      # override (no {cmd}) is an explicit app-name hint and wins, e.g. "iterm".
-      local mac_app="${TERMINAL_TMPL:-}"
-      if [ -z "$mac_app" ]; then
-        case "${TERM_PROGRAM:-}" in
-          iTerm.app) mac_app="iterm" ;;
-          *)         mac_app="Terminal" ;;
-        esac
-      fi
-      launch_macos_terminal "$mac_app" ;;
-    Linux)
-      if [ -n "$TERMINAL_TMPL" ]; then
-        die "AGMSG_TERMINAL/spawn.terminal must contain a {cmd} placeholder on Linux (got: $TERMINAL_TMPL)"
-      fi
-      # No display → cannot open a GUI terminal, and there is no tmux to fall
-      # back to. The agent CLI needs an interactive terminal, so error.
-      if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-        die "headless environment: no tmux session and no display available — cannot open a terminal for ${CLI_BIN}. Run inside tmux, or set a {cmd} terminal template via AGMSG_TERMINAL."
-      fi
-      launch_linux_terminal ;;
-    MINGW*|MSYS*|CYGWIN*)
-      if [ -n "$TERMINAL_TMPL" ]; then
-        die "AGMSG_TERMINAL/spawn.terminal must contain a {cmd} placeholder on Windows (got: $TERMINAL_TMPL)"
-      fi
-      launch_windows_terminal ;;
-    *)
-      die "unsupported platform '$(uname -s)' for the non-tmux path; run inside tmux or set a {cmd} terminal template via AGMSG_TERMINAL." ;;
-  esac
-  echo "spawned ${AGENT_TYPE} '${NAME}' in a new terminal window"
 }
 
 place_and_launch() {
@@ -742,6 +686,15 @@ fi
 [ "$WAIT_READY" = "1" ] && rm -f "$READY_PATH" 2>/dev/null || true
 
 place_and_launch
+
+# The pane was placed. If its placement record could not be written, the member is
+# running but unaddressable by peek/poke/despawn --force — report that distinctly and
+# fail, rather than let a normal `status=ready` imply everything is fine (co1/tl).
+if [ "$SPAWN_UNRECORDED" = "1" ]; then
+  echo "status=spawned-but-unrecorded name=${NAME} team=${TEAM} ref=${SPAWN_UNREC_REF}"
+  echo "spawn: '${NAME}' launched, but its placement record could not be written (disk full or a permission error) — peek/poke/despawn --force cannot reach it. The pane is ${SPAWN_UNREC_REF}; close it manually if needed." >&2
+  exit 1
+fi
 
 if [ "$WAIT_READY" = "1" ]; then
   waited=0
