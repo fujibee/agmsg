@@ -266,6 +266,7 @@ _fake_herdr_list_scalar_session() {
 @test "tmux: spawn a pane emits split-window and returns the captured id" {
   _install_fake_tmux
   agmsg_terminal_load tmux
+  export TMUX_PANE='%1'      # a pane split targets the caller's pane (#990)
   run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 0 ]
   [ "$output" = "%9" ]
@@ -285,15 +286,26 @@ _fake_herdr_list_scalar_session() {
   grep -q '\[split-window\] \[-v\] \[-t\] \[%7\]' "$ARGV_LOG"
 }
 
-@test "tmux: spawn --split falls back to the ambient target when \$TMUX_PANE is unset" {
+@test "tmux: spawn --split FAILS CLOSED when \$TMUX_PANE is unset (no ambient guess, #990)" {
+  # Not observing the caller's pane is not evidence the ambient target is the caller
+  # (co1). A pane split must fail closed (13) rather than let tmux pick the attached
+  # client's active window — and it must not call split-window at all.
   _install_fake_tmux
   agmsg_terminal_load tmux
   unset TMUX_PANE
   : > "$ARGV_LOG"
   run terminal_spawn alice /proj pane-v boot
+  [ "$status" -eq 13 ]
+  refute grep -q 'split-window' "$ARGV_LOG"
+}
+
+@test "tmux: spawn a WINDOW does not need \$TMUX_PANE (creates in the session)" {
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  unset TMUX_PANE
+  run terminal_spawn alice /proj window boot
   [ "$status" -eq 0 ]
-  # The split-window line carries no explicit target (select-pane's own -t is separate).
-  refute grep -q '\[split-window\].*\[-t\]' "$ARGV_LOG"
+  [ "$output" = "@7" ]
 }
 
 # A tmux stub whose split-window / new-window print a caller-supplied id.
@@ -313,6 +325,7 @@ EOF
 
 @test "tmux: spawn validates the id KIND — %N for a pane, @N for a window" {
   agmsg_terminal_load tmux
+  export TMUX_PANE='%0'      # pane splits target the caller pane (#990)
   # normal ids of the right kind succeed
   _install_fake_tmux_id '%3' '@4'
   run terminal_spawn a /proj pane-h boot;  [ "$status" -eq 0 ]; [ "$output" = "%3" ]
@@ -321,6 +334,7 @@ EOF
 
 @test "tmux: spawn fails closed on a wrong-kind / garbage / newline id" {
   agmsg_terminal_load tmux
+  export TMUX_PANE='%0'      # pane splits target the caller pane (#990)
   # (1) pane target but a window id, (2) window target but a pane id,
   # (3) garbage, (4) an id carrying a newline — each must be 13, no id on stdout.
   _install_fake_tmux_id '@9' '@9'          # pane split returns a window id

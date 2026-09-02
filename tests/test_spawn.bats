@@ -639,7 +639,7 @@ YAML
       [ -e "$notmux/$b" ] || ln -s "$f" "$notmux/$b" 2>/dev/null || true
     done
   done
-  run env TMUX="/tmp/fake,1,0" PATH="$STUB_BIN:$notmux" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" PATH="$STUB_BIN:$notmux" \
     bash "$SCRIPTS/spawn.sh" claude-code foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "tmux binary is not on PATH" ]]
@@ -913,11 +913,11 @@ EOF
   chmod +x "$STUB_BIN/tmux"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   # Default target is a split pane.
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
     bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   # A new window is the other branch.
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
     bash "$SCRIPTS/spawn.sh" claude-code bob --project "$PROJ" --no-wait --window
   [ "$status" -eq 0 ]
   # Both branches must launch through `bash -l <boot>`, not the bare path.
@@ -946,7 +946,7 @@ exit 0
 EOF
   chmod +x "$STUB_BIN/tmux"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="Linux" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="Linux" \
     bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   # Unix tmux honors the shebang, so no `bash -l` wrapper is emitted.
@@ -1058,7 +1058,7 @@ STUB
   _setup_fake_herdr
   # Set $TMUX so the tmux path wins; re-set the terminal template so the test
   # doesn't actually run tmux (use the stub recorder).
-  export TMUX="/tmp/fake,1,0"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
   # Provide a tmux stub that just records the call.
   cat > "$STUB_BIN/tmux" <<'TMUXSTUB'
@@ -1154,7 +1154,7 @@ _spawn_recorded_id() {
   # The default setup provides a {cmd} template (AGMSG_TERMINAL -> record.sh), so the
   # plain path is captured. With $TMUX set, detection would pick tmux; the override
   # must force the OS terminal instead.
-  export TMUX="/tmp/fake,1,0"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
   : > "$CAPTURE"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver plain
@@ -1164,7 +1164,7 @@ _spawn_recorded_id() {
 }
 
 @test "spawn: AGMSG_TERMINAL_DRIVER=plain forces the OS-terminal path (env form)" {
-  export TMUX="/tmp/fake,1,0" AGMSG_TERMINAL_DRIVER=plain
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0" AGMSG_TERMINAL_DRIVER=plain
   : > "$CAPTURE"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait

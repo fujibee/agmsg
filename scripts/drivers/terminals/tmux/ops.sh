@@ -69,16 +69,16 @@ terminal_spawn() {
     pane-h|pane-v)
       case "$target" in pane-h) dir=-h ;; *) dir=-v ;; esac
       # #990: split the CALLER's pane, not the attached client's active window. With
-      # no -t, tmux resolves the target from the attached client, so a spawn from one
+      # no -t, tmux resolves the target from the ATTACHED client, so a spawn from one
       # agent's pane can land in ANOTHER agent's window when several share the server.
-      # $TMUX_PANE is the caller's pane — the tmux equivalent of herdr's $HERDR_PANE_ID
-      # (which this driver's herdr sibling already targets explicitly). Name it when we
-      # have it; fall back to the ambient target only if it is somehow unset.
-      if [ -n "${TMUX_PANE:-}" ]; then
-        id="$(tmux split-window "$dir" -t "$TMUX_PANE" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
-      else
-        id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
-      fi
+      # $TMUX_PANE is the caller's pane (tmux sets it in every pane; the tmux
+      # equivalent of herdr's $HERDR_PANE_ID). Require it and target it EXPLICITLY —
+      # not observing the caller's pane is NOT evidence the ambient target is the
+      # caller, so fail closed rather than guess (positive-proof; co1). A window
+      # target does not need it and is handled above.
+      [ -n "${TMUX_PANE:-}" ] \
+        || { printf 'unsupported: a tmux split needs $TMUX_PANE to target the caller pane (#990)\n' >&2; return 13; }
+      id="$(tmux split-window "$dir" -t "$TMUX_PANE" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
       _tmux_id_ok "$id" '%' || return 13
       tmux select-pane -t "$id" -T "$name" >/dev/null 2>&1 || true
       ;;
