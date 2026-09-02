@@ -36,10 +36,16 @@ terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
   local boot="$1"
   local tmpl="${AGMSG_TERMINAL:-}"
+  # This is a RECORD op: its stdout must be the placement id ('-') and NOTHING else.
+  # Every backend below (a {cmd} template's bash -c, `open`, a Linux emulator, wt)
+  # can write to stdout — a custom template especially — and that would be captured
+  # by the caller as the placement id. So each backend's STDOUT is redirected to
+  # stderr (kept as a diagnostic, not swallowed), leaving only the '-' this function
+  # prints on stdout (co1).
   if [ -n "$tmpl" ] && _plain_has_template "$tmpl"; then
     local q_boot; q_boot="$(printf '%q' "$boot")"
     local cmd="${tmpl//\{cmd\}/$q_boot}"
-    bash -c "$cmd" || return 13
+    bash -c "$cmd" 1>&2 || return 13
     printf '%s\n' '-'; return 0
   fi
   case "$(uname -s)" in
@@ -49,8 +55,8 @@ terminal_spawn() {
         case "${TERM_PROGRAM:-}" in iTerm.app) app=iterm ;; *) app=Terminal ;; esac
       fi
       case "$app" in
-        iterm|iterm2|iTerm|iTerm2) open -g -a iTerm "$boot" || return 13 ;;
-        *)                         open -g -a Terminal "$boot" || return 13 ;;
+        iterm|iterm2|iTerm|iTerm2) open -g -a iTerm "$boot" 1>&2 || return 13 ;;
+        *)                         open -g -a Terminal "$boot" 1>&2 || return 13 ;;
       esac ;;
     Linux)
       if [ -n "$tmpl" ]; then
@@ -65,9 +71,9 @@ terminal_spawn() {
       for term in x-terminal-emulator gnome-terminal konsole xfce4-terminal xterm; do
         command -v "$term" >/dev/null 2>&1 || continue
         case "$term" in
-          gnome-terminal) gnome-terminal --working-directory="$project" -- "$boot" || return 13 ;;
-          konsole)        konsole --workdir "$project" -e "$boot" || return 13 ;;
-          *)              "$term" -e "$boot" || return 13 ;;
+          gnome-terminal) gnome-terminal --working-directory="$project" -- "$boot" 1>&2 || return 13 ;;
+          konsole)        konsole --workdir "$project" -e "$boot" 1>&2 || return 13 ;;
+          *)              "$term" -e "$boot" 1>&2 || return 13 ;;
         esac
         printf '%s\n' '-'; return 0
       done
@@ -78,8 +84,8 @@ terminal_spawn() {
         printf 'unsupported: AGMSG_TERMINAL must contain a {cmd} placeholder on Windows (got: %s)\n' "$tmpl" >&2
         return 13
       fi
-      if command -v wt.exe >/dev/null 2>&1; then wt.exe new-tab bash -l "$boot" || return 13
-      elif command -v wt >/dev/null 2>&1; then wt new-tab bash -l "$boot" || return 13
+      if command -v wt.exe >/dev/null 2>&1; then wt.exe new-tab bash -l "$boot" 1>&2 || return 13
+      elif command -v wt >/dev/null 2>&1; then wt new-tab bash -l "$boot" 1>&2 || return 13
       else printf 'unsupported: Windows Terminal (wt) not found; set a {cmd} AGMSG_TERMINAL\n' >&2; return 13; fi ;;
     *)
       printf 'unsupported: platform %s (run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL)\n' "$(uname -s)" >&2

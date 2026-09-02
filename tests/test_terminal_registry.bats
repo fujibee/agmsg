@@ -669,6 +669,22 @@ OPS
   [ "$output" = "ok" ]
 }
 
+@test "plain: spawn ISOLATES backend stdout — the record-op result is exactly '-' (co1)" {
+  # spawn is a record op: its stdout must be the id ('-') and nothing else. A backend
+  # (here a {cmd} template) that writes to stdout must not pollute the captured result
+  # — otherwise the caller reads '<noise>\n-' as the placement id. Capture stdout
+  # ALONE (stderr, where the noise now goes as a diagnostic, is separated).
+  agmsg_terminal_load plain
+  local noisy="$TEST_SKILL_DIR/noisy-boot"
+  printf '#!/usr/bin/env bash\necho "BACKEND STDOUT NOISE"\nprintf "and more\\n"\n' > "$noisy"
+  chmod +x "$noisy"
+  export AGMSG_TERMINAL="{cmd}"
+  local out rc=0
+  out="$(terminal_spawn alice /proj window "$noisy" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$out" = "-" ]                       # exactly '-', the backend noise did not leak
+}
+
 # --- load failure cleanup: source failure, like missing-function, leaves nothing (co1 rd2) ---
 
 @test "load: a driver whose ops.sh fails to source leaves no partial functions behind" {
