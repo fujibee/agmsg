@@ -103,12 +103,20 @@ _control_row_exists_for_alice() {
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
 
+# A tmux stub whose kill-pane / kill-window exits with a chosen code, so a --force
+# teardown can be made to CONFIRM (0) or FAIL (non-zero).
+_stub_tmux_exit() {
+  local code="${1:-0}" bin="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\ncase "$1" in kill-pane|kill-window) exit %s ;; esac\nexit 0\n' "$code" > "$bin/tmux"
+  chmod +x "$bin/tmux"; export PATH="$bin:$PATH"
+}
+
 @test "despawn --force: kills recorded placement and drops registration without the member" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  # Placement as spawn would have recorded it (pane %99 doesn't exist; kill is
-  # best-effort/no-op here — we assert the registration + lock + record effects).
   printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
   printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  _stub_tmux_exit 0                                 # kill-pane confirms the teardown
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
@@ -117,6 +125,36 @@ _control_row_exists_for_alice() {
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
+}
+
+@test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
+  # If the terminal driver does not confirm the pane closed (here: kill-pane exits
+  # non-zero), the pane may still be alive. --force must NOT delete the record (the
+  # only retry authority) or claim status=forced.
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+  _stub_tmux_exit 1                                 # kill-pane FAILS -> not confirmed
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  grep -q "status=error" <<<"$output"
+  grep -q "force-teardown-unconfirmed" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT for a retry
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" == *alice* ]]                        # registration NOT dropped
+}
+
+@test "despawn --force: a CORRUPT placement ref does not tear down and keeps the record" {
+  # A corrupt ref resolves to no terminal (agmsg_terminal_ref_terminal fails closed),
+  # so there is nothing to confirm — treat it as an unconfirmed teardown, keep the
+  # record, and never hand the corrupt value to a terminal as a target.
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'garbage-ref' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  grep -q "status=error" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -184,7 +222,8 @@ _control_row_exists_for_alice() {
   grep -q "needs-force" <<<"$output"
   refute grep -q "status=ok" <<<"$output"
   [ -f "$RUN/spawn.team__alice" ]              # record KEPT so --force can use it
-  # ...and --force then works against the preserved record.
+  # ...and --force then works against the preserved record (teardown confirmed).
+  _stub_tmux_exit 0
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
   grep -q "status=forced" <<<"$output"
