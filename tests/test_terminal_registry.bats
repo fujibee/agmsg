@@ -507,6 +507,24 @@ EOF
   grep -qE '\[agent\] \[rename\] \[wC:p9\] \[a[0-9a-f]{24}\]' "$ARGV_LOG"
 }
 
+@test "herdr peek: an error body is NOT returned as content, and the single 13 is split (tl/co1)" {
+  agmsg_terminal_load herdr
+  # (1) herdr answers but the pane is GONE: it exits non-zero AND writes an error JSON
+  # to STDOUT. peek must NOT hand that back as the pane content (stdout empty), and it
+  # must use a code distinct from plain's documented 13.
+  printf '#!/usr/bin/env bash\nif [ "$1" = pane ] && [ "$2" = read ]; then echo '\''{"error":{"code":"pane_not_found","message":"gone"}}'\''; exit 13; fi\nexit 0\n' > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+  local out rc=0
+  out="$(terminal_peek 'wC:p99' 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 12 ]                       # pane-gone: distinct from plain's 13
+  [ -z "$out" ]                          # the error JSON did NOT reach the content channel
+  # (2) herdr is UNREACHABLE (not on PATH): a third, distinct code — not 12, not 13.
+  rm -f "$FAKEBIN/herdr"
+  rc=0
+  out="$(PATH=/usr/bin:/bin terminal_peek 'wC:p1' 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 10 ]
+}
+
 # Pull the internal key (4th bracket of the `agent rename` line) from the argv log.
 _last_agent_rename_key() {
   sed -n 's/.*\[agent\] \[rename\] \[[^]]*\] \[\([^]]*\)\].*/\1/p' "$ARGV_LOG" | tail -1

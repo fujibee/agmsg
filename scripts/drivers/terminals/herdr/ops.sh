@@ -285,7 +285,25 @@ terminal_peek() {
       *) shift ;;
     esac
   done
-  herdr pane read "$id" --source "$src" || return 13
+  # peek is a READ op: only the pane CONTENT may reach stdout. herdr writes an error
+  # JSON to STDOUT on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
+  # caller would otherwise read as the pane's content — "read" and "could-not-read"
+  # returning in the same shape (tl/co1, the third instance of one channel carrying two
+  # meanings). ISOLATE it (capture; the error body goes to stderr, never stdout), and
+  # SPLIT the single 13 so the caller can tell the three cases apart:
+  #   plain has no peek path        -> 13 (unchanged; documented, and the templates say so)
+  #   the terminal is unreachable   -> 10 (herdr not on PATH / cannot even be run)
+  #   the pane is gone / unreadable -> 12 (herdr answered, but not with content)
+  command -v herdr >/dev/null 2>&1 \
+    || { echo "herdr: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
+  local out rc=0
+  out="$(herdr pane read "$id" --source "$src" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out" >&2   # the error body is a diagnostic, not content
+    echo "herdr: could not read pane '$id' (it may no longer exist)" >&2
+    return 12
+  fi
+  printf '%s\n' "$out"   # only the real pane content reaches stdout
   return 0
 }
 
