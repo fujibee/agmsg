@@ -273,6 +273,29 @@ _fake_herdr_list_scalar_session() {
   grep -q '\[-v\]' "$ARGV_LOG"
 }
 
+@test "tmux: spawn --split targets the CALLER's pane, not the active window (#990)" {
+  # With no -t, tmux splits the attached client's active window, so a spawn from one
+  # agent's pane can land in another agent's window. Target $TMUX_PANE explicitly.
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  export TMUX_PANE='%7'
+  : > "$ARGV_LOG"
+  run terminal_spawn alice /proj pane-v boot
+  [ "$status" -eq 0 ]
+  grep -q '\[split-window\] \[-v\] \[-t\] \[%7\]' "$ARGV_LOG"
+}
+
+@test "tmux: spawn --split falls back to the ambient target when \$TMUX_PANE is unset" {
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  unset TMUX_PANE
+  : > "$ARGV_LOG"
+  run terminal_spawn alice /proj pane-v boot
+  [ "$status" -eq 0 ]
+  # The split-window line carries no explicit target (select-pane's own -t is separate).
+  refute grep -q '\[split-window\].*\[-t\]' "$ARGV_LOG"
+}
+
 # A tmux stub whose split-window / new-window print a caller-supplied id.
 _install_fake_tmux_id() {
   local split_id="$1" win_id="$2"

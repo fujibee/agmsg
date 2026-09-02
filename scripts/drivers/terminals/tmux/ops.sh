@@ -68,7 +68,17 @@ terminal_spawn() {
       ;;
     pane-h|pane-v)
       case "$target" in pane-h) dir=-h ;; *) dir=-v ;; esac
-      id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
+      # #990: split the CALLER's pane, not the attached client's active window. With
+      # no -t, tmux resolves the target from the attached client, so a spawn from one
+      # agent's pane can land in ANOTHER agent's window when several share the server.
+      # $TMUX_PANE is the caller's pane — the tmux equivalent of herdr's $HERDR_PANE_ID
+      # (which this driver's herdr sibling already targets explicitly). Name it when we
+      # have it; fall back to the ambient target only if it is somehow unset.
+      if [ -n "${TMUX_PANE:-}" ]; then
+        id="$(tmux split-window "$dir" -t "$TMUX_PANE" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
+      else
+        id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
+      fi
       _tmux_id_ok "$id" '%' || return 13
       tmux select-pane -t "$id" -T "$name" >/dev/null 2>&1 || true
       ;;
