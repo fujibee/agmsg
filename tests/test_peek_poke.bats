@@ -177,6 +177,40 @@ EOF
   [ ! -s "$ARGV_LOG" ]
 }
 
+@test "poke: --body-file delivers a shell-hostile body verbatim (#507's class)" {
+  _install_fake_herdr
+  _write_record "herdr:wC:p4"
+  # Backtick, $( ), quotes, $VAR — none of it may execute or change: the body
+  # never crosses the caller's shell. Equality against the argv line is the
+  # assertion; a vanished span (what #507 did to send bodies) changes the line.
+  printf '%s' 'check `whoami` and $(hostname) plus "quotes" and $HOME here' > "$TEST_SKILL_DIR/body.txt"
+  run bash "$SCRIPTS/poke.sh" testteam alice --body-file "$TEST_SKILL_DIR/body.txt"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via herdr"
+  [ "$(sed -n '1p' "$ARGV_LOG")" = 'herdr [agent] [prompt] [wC:p4] [check `whoami` and $(hostname) plus "quotes" and $HOME here]' ]
+  [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 1 ]
+}
+
+@test "poke: --body - reads stdin; a missing file and an empty body refuse before any terminal runs" {
+  _install_fake_tmux
+  _write_record "tmux:%5"
+  printf 'from stdin' | { run bash "$SCRIPTS/poke.sh" testteam alice --body -; \
+    [ "$status" -eq 0 ]; }
+  grep -q '\[send-keys\] \[-l\] \[-t\] \[%5\] \[--\] \[from stdin\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  run bash "$SCRIPTS/poke.sh" testteam alice --body-file "$TEST_SKILL_DIR/does-not-exist"
+  [ "$status" -ne 0 ]
+  _out_has "cannot read body file"
+  : > "$TEST_SKILL_DIR/empty.txt"
+  run bash "$SCRIPTS/poke.sh" testteam alice --body-file "$TEST_SKILL_DIR/empty.txt"
+  [ "$status" -ne 0 ]
+  _out_has "the body is empty"
+  run bash "$SCRIPTS/poke.sh" testteam alice --body not-a-dash
+  [ "$status" -ne 0 ]
+  _out_has "--body accepts only '-'"
+  [ ! -s "$ARGV_LOG" ]
+}
+
 @test "poke: no placement record refuses loudly and runs no terminal binary" {
   _install_fake_tmux
   run bash "$SCRIPTS/poke.sh" testteam alice "hello"

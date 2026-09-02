@@ -58,6 +58,8 @@ IFS=$'\t' read -r REF _PROJ _TYPE < "$REC" || true
 
 TERMINAL="$(agmsg_terminal_ref_terminal "$REF")"
 BARE_ID="$(agmsg_terminal_ref_id "$REF")"
+[ -n "$TERMINAL" ] && [ -n "$BARE_ID" ] \
+  || die "placement record for '$TEAM/$NAME' did not resolve to a terminal and pane id (ref: '$REF')"
 
 agmsg_terminal_load "$TERMINAL" \
   || die "cannot load terminal driver '$TERMINAL' recorded for '$TEAM/$NAME'"
