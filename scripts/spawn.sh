@@ -181,15 +181,16 @@ case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole numbe
 # Validate the terminal-driver override HERE, before any state change (co1): it is a
 # deterministic argument typo, so it must fail like --split does — before the role is
 # registered and a boot file is written (place_and_launch runs after both), and
-# before an unrelated "no team" error can mask it. The driver must exist AND be able
-# to place a spawn (declare the `spawn` capability). place_and_launch keeps its own
-# guard as defence in depth.
-if [ -n "$TERMINAL_DRIVER" ]; then
-  agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
-    || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
-  agmsg_terminal_has "$TERMINAL_DRIVER" capabilities spawn \
-    || die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)"
-fi
+# before an unrelated "no team" error can mask it. The accepted set is EXACTLY the
+# public contract place_and_launch dispatches (tmux|herdr|plain), derived from the
+# same list — an external spawn-capable driver would pass a capability check here but
+# have no dispatch arm, so it must be rejected at parse time, not after the pre-join.
+# Generalizing to arbitrary spawn-capable drivers is the launcher→driver reroute's
+# scope. place_and_launch keeps its own guard as defence in depth.
+case "$TERMINAL_DRIVER" in
+  ''|tmux|herdr|plain) ;;
+  *) die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain" ;;
+esac
 
 # Resolve the terminal override for the non-tmux path:
 #   --terminal  >  $AGMSG_TERMINAL  >  config spawn.terminal
@@ -520,34 +521,36 @@ launch_in_tmux() {
   # aborting on a raw "tmux: command not found", and don't silently fall back
   # to an OS terminal — opening a separate window while inside tmux is more
   # confusing than an explicit error.
+  # $TMUX is set but the `tmux` client still has to be on PATH. Keep this spawn-level
+  # pre-check with its clear message (and its "do not fall back to an OS terminal"
+  # intent) rather than letting the driver abort on a raw "tmux: command not found".
   command -v tmux >/dev/null 2>&1 \
     || die "\$TMUX is set but the tmux binary is not on PATH; add it to PATH, or run outside tmux to use the OS-terminal path"
 
-  # On Windows (psmux), tmux launches processes via Windows APIs that do not
-  # process shebang lines; an extensionless boot script is accepted but never
-  # executed (#335). Wrap with `bash -l` — same pattern as launch_windows_terminal.
+  # On Windows (psmux), tmux launches processes via Windows APIs that do not process
+  # shebang lines; an extensionless boot script is accepted but never executed
+  # (#335). Wrap with `bash -l` — same pattern as launch_windows_terminal.
   local -a tmux_boot=("$BOOT")
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) tmux_boot=(bash -l "$BOOT") ;;
   esac
 
-  # Name the window/pane after the agent rather than letting tmux fall back to
-  # the boot script's filename (boot-XXXXXX). `automatic-rename off` keeps the
-  # name from being clobbered once the boot script runs the CLI / drops to a
-  # shell.
-  local target_id
-  if [ "$TMUX_TARGET" = "window" ]; then
-    target_id="$(tmux new-window -P -F '#{window_id}' -n "$NAME" -c "$PROJECT" "${tmux_boot[@]}")"
-    tmux set-window-option -t "$target_id" automatic-rename off 2>/dev/null || true
-  else
-    local dir="-h"; [ "$SPLIT" = "v" ] && dir="-v"
-    target_id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$PROJECT" "${tmux_boot[@]}")"
-    tmux select-pane -t "$target_id" -T "$NAME" 2>/dev/null || true
+  # Place THROUGH the tmux driver (the terminals axis). target fully specifies the
+  # placement: a window, or a horizontal/vertical split. The driver names the
+  # window/pane after the agent and turns automatic-rename off.
+  local target
+  if [ "$TMUX_TARGET" = "window" ]; then target=window
+  elif [ "$SPLIT" = "v" ];        then target=pane-v
+  else                                 target=pane-h
   fi
-  # Record placement so `despawn --force` can tear this member down even if its
-  # watcher later can't respond to ctrl:despawn. tmux ids are self-describing:
-  # %N = pane (kill-pane), @N = window (kill-window). See #109.
-  printf '%s\t%s\t%s\n' "$target_id" "$PROJECT" "$AGENT_TYPE" \
+  agmsg_terminal_load tmux || die "could not load the tmux terminal driver"
+  local target_id
+  target_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "${tmux_boot[@]}")" \
+    || die "tmux placement failed"
+
+  # Record placement as <terminal>:<id> so despawn --force (and peek/poke) read the
+  # terminal from the record; despawn still tolerates the pre-axis bare %N/@N. See #109.
+  printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref tmux "$target_id")" "$PROJECT" "$AGENT_TYPE" \
     > "$(agmsg_spawn_path "$TEAM" "$NAME")" 2>/dev/null || true
 }
 
