@@ -120,8 +120,19 @@ If argument starts with "peek" (e.g. "peek reviewer", "peek alice --lines 80"):
 
 If argument starts with "poke" (e.g. "poke reviewer status?"):
 1. Parse `<name>` and the remaining text as the message.
-2. Determine which team `<name>` belongs to (as with `send`), then run:
-   `~/.agents/skills/__SKILL_NAME__/scripts/poke.sh <team> <name> "<text>"`
+2. Determine which team `<name>` belongs to (as with `send`). Write the text to
+   a file with whatever file-writing tool this agent has, then run:
+   `~/.agents/skills/__SKILL_NAME__/scripts/poke.sh <team> <name> --body-file <path>`
+   Do NOT interpolate the text into the command line. A body passed as a shell
+   argument crosses THIS agent's shell first, where a backtick or `$( )` inside
+   it is executed and its span vanishes from what arrives — with no error and a
+   zero exit, so the member simply reads a message with a hole in it (#507).
+   The file never crosses that shell, so there is no quoting rule to get right.
+   `--body -` reads the body from stdin for the same reason. A positional
+   `"<text>"` still works and is fine for a human typing short plain text, but
+   do not generate one.
+   `send.sh` has no such path yet (#1032), so a body given to `send` must still
+   be single-quoted — the two surfaces differ today, and this is why.
 3. `poke` TYPES INTO another agent's session and submits it, as if a person had typed it there. Use it to reach a member whose watcher is not delivering (that is what it is for); use `send` for ordinary messages, which the member reads on its own terms.
 4. Exit 13 means the member's terminal cannot be poked (no addressable pane). Do not fall back to `send` silently — the two are not the same act; say which one you did.
 
