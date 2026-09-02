@@ -37,28 +37,43 @@ terminal_detect() {
   return 0
 }
 
+# Positive proof that a captured id is a tmux id of the expected KIND: a pane is
+# %<n>, a window is @<n>, n a non-negative integer (tmux docs). Without this the
+# driver would accept whatever tmux printed — exit-0 garbage, a wrong-kind id, or a
+# value with a newline — and the caller would record `tmux:<raw>`, breaking the
+# <terminal>:<id> record framing (newline) or leaving despawn unable to act
+# (wrong-kind/garbage). $1 = id, $2 = expected sigil ('%' or '@').
+_tmux_id_ok() {
+  local id="$1" sigil="$2" rest="${1#"$2"}"
+  [ "$rest" != "$id" ] || return 1               # id actually started with the sigil
+  case "$rest" in ''|*[!0-9]*) return 1 ;; esac   # >=1 char after it, all decimal
+  return 0
+}
+
 # record op: create a pane/window, launch the boot command, print the new bare
 # id (%N for a pane, @N for a window). Usage:
 #   terminal_spawn <name> <project> <target> <boot...>
 # <target> fully specifies the placement (no ambient config): 'window', or
 # 'pane-h' / 'pane-v' for a horizontal / vertical split. Mirrors spawn.sh's tmux
-# placement faithfully.
+# placement faithfully. The captured id is validated against its expected kind
+# BEFORE it is named or returned, so a garbage/wrong-kind/newline id fails closed.
 terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
   local id dir
   case "$target" in
     window)
       id="$(tmux new-window -P -F '#{window_id}' -n "$name" -c "$project" "$@")" || return 13
+      _tmux_id_ok "$id" '@' || return 13
       tmux set-window-option -t "$id" automatic-rename off >/dev/null 2>&1 || true
       ;;
     pane-h|pane-v)
       case "$target" in pane-h) dir=-h ;; *) dir=-v ;; esac
       id="$(tmux split-window "$dir" -P -F '#{pane_id}' -c "$project" "$@")" || return 13
+      _tmux_id_ok "$id" '%' || return 13
       tmux select-pane -t "$id" -T "$name" >/dev/null 2>&1 || true
       ;;
     *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
   esac
-  [ -n "$id" ] || return 13
   printf '%s\n' "$id"
   return 0
 }

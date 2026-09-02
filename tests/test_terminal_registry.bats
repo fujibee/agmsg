@@ -273,6 +273,43 @@ _fake_herdr_list_scalar_session() {
   grep -q '\[-v\]' "$ARGV_LOG"
 }
 
+# A tmux stub whose split-window / new-window print a caller-supplied id.
+_install_fake_tmux_id() {
+  local split_id="$1" win_id="$2"
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$1" in
+  new-window)   printf '%s\n' '$win_id' ;;
+  split-window) printf '%s\n' '$split_id' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "tmux: spawn validates the id KIND — %N for a pane, @N for a window" {
+  agmsg_terminal_load tmux
+  # normal ids of the right kind succeed
+  _install_fake_tmux_id '%3' '@4'
+  run terminal_spawn a /proj pane-h boot;  [ "$status" -eq 0 ]; [ "$output" = "%3" ]
+  run terminal_spawn a /proj window boot;  [ "$status" -eq 0 ]; [ "$output" = "@4" ]
+}
+
+@test "tmux: spawn fails closed on a wrong-kind / garbage / newline id" {
+  agmsg_terminal_load tmux
+  # (1) pane target but a window id, (2) window target but a pane id,
+  # (3) garbage, (4) an id carrying a newline — each must be 13, no id on stdout.
+  _install_fake_tmux_id '@9' '@9'          # pane split returns a window id
+  run terminal_spawn a /proj pane-h boot;  [ "$status" -eq 13 ]; [ -z "$output" ]
+  _install_fake_tmux_id '%9' '%9'          # window target returns a pane id
+  run terminal_spawn a /proj window boot;  [ "$status" -eq 13 ]; [ -z "$output" ]
+  _install_fake_tmux_id 'garbage' 'garbage'
+  run terminal_spawn a /proj pane-h boot;  [ "$status" -eq 13 ]; [ -z "$output" ]
+  _install_fake_tmux_id '%1 rm -rf' '%1'   # trailing junk (would break record framing)
+  run terminal_spawn a /proj pane-h boot;  [ "$status" -eq 13 ]; [ -z "$output" ]
+}
+
 @test "tmux: despawn kills a pane vs a window by id shape" {
   _install_fake_tmux
   agmsg_terminal_load tmux
