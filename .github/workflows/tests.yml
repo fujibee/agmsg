@@ -642,6 +642,18 @@ jobs:
           # differently there than on the hosts that were measured. The engine's
           # own bats leg is ubuntu and macos only, so this selects the two tests
           # that would notice and runs them on the platform in question.
+          # The codex hook wrapper (#1015). The defect is a Windows-only path -- a
+          # PowerShell one-liner that invokes Git Bash as a LOGIN shell, so the
+          # profile's output lands on the stdout codex parses -- and the fix
+          # moves the payload off that stdout. The bash half is bash's
+          # everywhere and is proved on the POSIX legs; the PowerShell half is
+          # asserted as a string there because nothing on those hosts can run
+          # it. This leg is the only place it is EXECUTED. Without it the fix
+          # ships to Windows having never run on Windows.
+          - leg: codex hook wrapper (#1015)
+            filter: "windows-wrapper"
+            target: tests/test_delivery.bats
+            sqlite: true
           - leg: driver input (#817)
             filter: "driver-input"
             target: tests/test_remote_sync_driver_input.bats

@@ -1734,11 +1734,15 @@ JSON
   local cw
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
   [ -n "$cw" ]
-  [[ "$cw" == *"Program Files\\Git\\bin\\bash.exe"* ]]
-  [[ "$cw" == *"GIT_BASH"* ]]
-  [[ "$cw" == *"-lc"* ]]
-  [[ "$cw" != *".agents/bin"* ]]
-  [[ "$cw" == *"check-inbox.sh"* ]]
+  # Was five non-final `[[ ]]`, four of which could not fail this test on bash
+  # 3.2 (#670) -- including the one pinning `-lc`, so on macOS the flag this
+  # whole entry turns on was asserted by nothing. `grep -Fq` fails everywhere.
+  printf '%s' "$cw" > "$TEST_PROJECT/cw"
+  grep -Fq 'Program Files\Git\bin\bash.exe' "$TEST_PROJECT/cw"
+  grep -Fq 'GIT_BASH' "$TEST_PROJECT/cw"
+  grep -Fq -- '-lc' "$TEST_PROJECT/cw"
+  refute grep -Fq '.agents/bin' "$TEST_PROJECT/cw"
+  grep -Fq 'check-inbox.sh' "$TEST_PROJECT/cw"
 }
 
 @test "delivery set turn (claude-code): Stop entry has NO commandWindows (regression guard)" {
@@ -1750,6 +1754,159 @@ JSON
   cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
   [ -z "$cw" ]
 }
+
+# --- #1015: the login shell's stdout is not the payload's channel -------------
+#
+# The wrapper runs the hook through a LOGIN shell, and everything the profile
+# prints lands on that shell's stdout ahead of the JSON. Codex parses the whole
+# stream as one document, so one line of profile chatter loses the message --
+# after the rows have been consumed.
+#
+# This runs on every platform on purpose. The mechanism is bash's, not
+# Windows's: `-l` reads the profile chain everywhere, so a Linux or macOS runner
+# reproduces it exactly. Confining the control to the Windows legs would leave
+# the property unwatched on eleven of the twelve.
+#
+# What it models and what it does not: the bash half is executed for real, and
+# `cygpath` is stubbed with the identity function because here the two path
+# spaces are the same. The PowerShell half is NOT executed -- it is asserted on
+# as a string in the test below this one, which is the honest split: this test
+# can prove the payload survives a talking profile, and it cannot prove
+# PowerShell quotes it correctly.
+@test "codex Windows hook: what the login profile prints does not reach the payload (#1015)" {
+  skip_on_windows "commandWindows is not written on native Windows (#182)"
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "profile-must-not-eat-this" --force >/dev/null
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+
+  local hook_file="$TEST_PROJECT/.codex/hooks.json" cw rest flag cmd
+  cw=$(sqlite_mem "SELECT json_extract(readfile('$(rf "$hook_file")'), '\$.hooks.Stop[0].hooks[0].commandWindows');")
+  [ -n "$cw" ]
+
+  # `& $b <flag> '<command>'`, the command's own single quotes doubled by
+  # windows_wrap, and PowerShell's own plumbing after the closing quote. Both
+  # halves are READ rather than written here, so this test follows the wrapper:
+  # it does not have to be edited when the shape changes.
+  rest=$(printf '%s' "$cw" | sed 's/.*& [$]b //')
+  flag=${rest%% *}
+  cmd=${rest#* }
+  cmd=${cmd#\'}
+  cmd=${cmd%\'*}
+  cmd=$(printf '%s' "$cmd" | sed "s/''/'/g")
+  [ -n "$flag" ]
+  [ -n "$cmd" ]
+
+  # The profile prints, and it also puts something on PATH -- both halves of why
+  # `-l` is there in the first place. Supplied rather than waited for: a Git Bash
+  # install whose profile happens to be silent never shows the defect and would
+  # make this pass for the wrong reason. HOME is the harness's sandbox (#41).
+  local bin="$TEST_PROJECT/bin"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nshift\nprintf "%%s" "$1"\n' > "$bin/cygpath"
+  chmod +x "$bin/cygpath"
+  printf 'echo "PROFILE-CHATTER"\nexport PATH="%s:$PATH"\n' "$bin" > "$HOME/.bash_profile"
+
+  # The login shell's own stdout goes nowhere, exactly as PowerShell's Out-Null
+  # sends it; the payload is whatever the wrapper arranged to be printed instead.
+  local payload="$TEST_PROJECT/hook-payload" shell_stdout="$TEST_PROJECT/shell-stdout"
+  echo '{}' | AGMSG_HOOK_OUT="$payload" bash "$flag" "$cmd" > "$shell_stdout" 2>/dev/null
+
+  # Positive control, FIRST: the hook ran and the message really was delivered.
+  # Without it, a wrapper that emitted nothing at all satisfies everything below.
+  # The existence check is separate so a wrapper that stopped writing the file
+  # says so, instead of failing as a grep error on a missing path.
+  [ -s "$payload" ]
+  grep -Fq "profile-must-not-eat-this" "$payload"
+
+  # The defect.
+  refute grep -Fq "PROFILE-CHATTER" "$payload"
+
+  # And the consequence codex sees: it parses the whole stream as one document.
+  [ "$(sqlite_mem "SELECT json_valid(CAST(readfile('$(rf "$payload")') AS TEXT));")" = "1" ]
+
+  # The profile did talk. Without this the test also passes on a machine where
+  # nothing was ever printed -- which is the state it is meant to survive, not
+  # the state it is meant to run in.
+  grep -Fq "PROFILE-CHATTER" "$shell_stdout"
+}
+
+# The half the test above cannot execute. PowerShell is not run here, so this
+# asserts the SHAPE of the string that will be: the payload leaves through a
+# temp file, the shell's own stdout is discarded, and the thing that finally
+# prints it is PowerShell -- which read no profile. It cannot prove the wrapper
+# works; it catches the wrapper being quietly returned to the shape that does
+# not (#1015).
+@test "codex Windows hook: the wrapper does not print through the login shell (#1015)" {
+  skip_on_windows "commandWindows is not written on native Windows (#182)"
+  bash "$SCRIPTS/delivery.sh" set turn codex "$TEST_PROJECT" >/dev/null
+  local cwf="$TEST_PROJECT/commandWindows"
+  sqlite_mem "SELECT json_extract(readfile('$(rf "$TEST_PROJECT/.codex/hooks.json")'), '\$.hooks.Stop[0].hooks[0].commandWindows');" > "$cwf"
+  [ -s "$cwf" ]
+
+  # A place for the payload that is not the shell's stdout, and the conversion
+  # that makes a Windows path usable by the redirect inside Git Bash.
+  grep -Fq 'AGMSG_HOOK_OUT' "$cwf"
+  grep -Fq 'cygpath' "$cwf"
+  grep -Fq 'GetTempFileName' "$cwf"
+
+  # The login shell's stdout is thrown away, and PowerShell prints the file.
+  grep -Fq 'Out-Null' "$cwf"
+  grep -Fq 'Get-Content' "$cwf"
+
+  # The status the hook reports is the command's, not the cleanup's.
+  grep -Fq 'exit $rc' "$cwf"
+
+  # PowerShell reads a backslash-escaped quote as a literal backslash and ends
+  # the string there, which is why the codex template warns about it.
+  refute grep -Fq '\"' "$cwf"
+}
+
+# The half the two tests above cannot reach: PowerShell actually running the
+# string. This is the only place the wrapper is EXECUTED as written, so it is
+# the only evidence that the fix works on the platform it exists for -- the rest
+# is a shape assertion and a bash-half simulation.
+#
+# It drives a stub command rather than check-inbox: what has never been executed
+# anywhere is the PowerShell plumbing, and a stub isolates it from the store, the
+# registration and the hook's own logic, which other tests already cover.
+#
+# The string goes through a .ps1 file rather than `-Command "$cw"`: it contains
+# `$b`, `$o` and single quotes, and handing it to PowerShell through a shell
+# argument is a second quoting layer this test is not about.
+#
+# The name carries `windows-wrapper` because the Windows matrix leg selects by
+# `-f`; renaming it without the workflow stops it running anywhere at all, which
+# is indistinguishable from it passing.
+@test "windows-wrapper: PowerShell prints the payload and not the profile (#1015)" {
+  skip_unless_windows "the wrapper is PowerShell; only Windows can run it"
+  . "$SCRIPTS/lib/hooks-json.sh"
+
+  local emit="$TEST_PROJECT/emit.sh"
+  printf '#!/bin/sh\nprintf %%s "{\\"decision\\":\\"block\\",\\"reason\\":\\"windows-payload\\"}"\n' > "$emit"
+  chmod +x "$emit"
+
+  # The condition under test: a login profile that talks.
+  printf 'echo PROFILE-CHATTER\n' > "$HOME/.bash_profile"
+
+  local ps1="$TEST_PROJECT/wrap.ps1"
+  # Single-quoted the way delivery.sh quotes it, so the `''` doubling inside
+  # windows_wrap is exercised rather than bypassed.
+  windows_wrap "sh '$emit'" > "$ps1"
+  [ -s "$ps1" ]
+
+  run powershell -NoProfile -ExecutionPolicy Bypass -File "$ps1"
+
+  # Positive control first: the payload really came through. Without it a
+  # PowerShell that failed to launch bash at all passes the two lines below.
+  printf '%s' "$output" > "$TEST_PROJECT/ps-stdout"
+  grep -Fq 'windows-payload' "$TEST_PROJECT/ps-stdout"
+  refute grep -Fq 'PROFILE-CHATTER' "$TEST_PROJECT/ps-stdout"
+  [ "$(sqlite_mem "SELECT json_valid(CAST(readfile('$(rf "$TEST_PROJECT/ps-stdout")') AS TEXT));")" = "1" ]
+
+  # The status is the command's, carried across the cleanup.
+  [ "$status" -eq 0 ]
+}
+
 
 # --- #1003: codex mid-turn PostToolUse hook install/strip/status wiring ---
 #
