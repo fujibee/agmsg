@@ -230,6 +230,23 @@ _fake_herdr_list_scalar_session() {
   [ "$(agmsg_terminal_ref_id '%3')" = "%3" ]
 }
 
+@test "record: an unknown or CORRUPT ref FAILS CLOSED — never defaults to a tmux target (co1)" {
+  # A ref is handed to a terminal as a TARGET (peek/poke/despawn). Only %<n>/@<n> is a
+  # provable legacy tmux id; a corrupt or future-scheme ref must not fall through to
+  # tmux, where its target grammar could name an unrelated pane. Unknown -> non-zero,
+  # no output, so every caller can guard and never call a terminal binary.
+  local bad
+  for bad in 'garbage' 'wC:p4' '%' '@abc' '% rm -rf' '%9;kill' 'herdr' ''; do
+    run agmsg_terminal_ref_terminal "$bad"
+    [ "$status" -ne 0 ]   || { echo "FAIL: '$bad' resolved to a terminal ($output)"; return 1; }
+    [ -z "$output" ]      || { echo "FAIL: '$bad' printed '$output'"; return 1; }
+  done
+  # ...and the known/legacy shapes still resolve.
+  [ "$(agmsg_terminal_ref_terminal 'plain:-')" = "plain" ]
+  [ "$(agmsg_terminal_ref_terminal '%42')" = "tmux" ]
+  [ "$(agmsg_terminal_ref_terminal '@7')" = "tmux" ]
+}
+
 # --- conf reader ------------------------------------------------------------
 
 @test "conf: get reads a key, has tests membership, absent key returns default" {

@@ -308,13 +308,24 @@ agmsg_terminal_ref() {
 
 # Print the terminal name of a record ref (stdout). Handles legacy bare ids.
 agmsg_terminal_ref_terminal() {
-  local ref="$1"
+  local ref="$1" rest
   case "$ref" in
     tmux:*)  printf 'tmux\n' ;;
     herdr:*) printf 'herdr\n' ;;
     plain:*) printf 'plain\n' ;;
-    %*|@*)   printf 'tmux\n' ;;   # legacy bare tmux pane/window id
-    *)       printf 'tmux\n' ;;   # unknown/legacy -> tmux (the pre-axis default)
+    %*|@*)
+      # Legacy pre-axis record: a bare tmux id, but ONLY the provable shape %<n> /
+      # @<n> (n decimal). A ref is handed to a terminal as a TARGET (peek/poke/
+      # despawn), so a corrupt or future-scheme ref that fell through to tmux could
+      # name an unrelated pane/window depending on tmux's target grammar. Anything
+      # after the sigil that is not all-decimal is NOT a known id -> fail closed.
+      rest="${ref#?}"
+      case "$rest" in
+        ''|*[!0-9]*) return 1 ;;
+        *)           printf 'tmux\n' ;;
+      esac ;;
+    *) return 1 ;;   # unknown/corrupt ref -> no terminal (callers must guard); never
+                     # default to tmux and hand it an untrusted target.
   esac
 }
 
