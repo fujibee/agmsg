@@ -614,33 +614,6 @@ is_herdr_env() {
     && command -v herdr >/dev/null 2>&1
 }
 
-# Extract one string field from a herdr JSON response by explicit path.
-#
-# herdr returns structured JSON, so the pane id must be addressed by path, not
-# by text matching. A greedy regex over the whole response picks the LAST
-# "pane_id" in it, which succeeds against a response carrying more than one
-# pane object and hands back somebody else's pane — the caller would then
-# rename it, run the boot script in it, and persist that id as the placement
-# record. Key order is not a contract either: a reordered or nested field
-# breaks a `[^}]*`-delimited match. sqlite3's JSON1 is already a core
-# dependency (whoami.sh, api.sh), so address the value directly.
-#
-# Fail closed: invalid JSON, a missing path, a non-string value, or an empty
-# string all yield empty output, and every caller treats empty as fatal.
-herdr_json_str() {
-  local resp="$1" path="$2" esc
-  esc="$(printf '%s' "$resp" | sed "s/'/''/g")"
-  agmsg_sqlite_mem "
-    WITH raw(json) AS (SELECT '$esc'),
-    doc(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
-    SELECT CASE
-             WHEN json_type(json, '$path') = 'text'
-             THEN json_extract(json, '$path')
-           END
-    FROM doc;
-  " 2>/dev/null
-}
-
 launch_in_herdr() {
   # --window needs a workspace. Keep spawn's fallback UX (warn + split) rather than
   # the driver's hard "window target needs HERDR_WORKSPACE_ID" error: downgrade the
