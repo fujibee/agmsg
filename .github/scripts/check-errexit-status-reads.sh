@@ -118,6 +118,33 @@ def split_statements(text):
     while i < n:
         c = text[i]
 
+        # A backslash escapes the next character, and a backslash-NEWLINE is a
+        # line continuation: bash removes both and the statement carries on.
+        # Splitting there is what hid
+        #
+        #     . \\
+        #       "$dir/ops.sh"
+        #     rc=$?
+        #
+        # from the source check -- `. \\` and `"$dir/ops.sh"` became two
+        # statements, so neither was the `rc=$?`'s predecessor and neither
+        # matched SOURCEC. `source` is one of the three forms this checker
+        # names, so that hole made a count of zero unprovable for it. Inside
+        # SINGLE quotes a backslash is literal and does not continue a line, so
+        # that case is left to the single-quote branch below.
+        if c == '\\' and q != "'":
+            nxt = text[i+1] if i + 1 < n else ''
+            if nxt == '\n':
+                line += 1
+                i += 2
+                continue
+            if nxt:
+                buf += c + nxt
+                if start is None:
+                    start = line
+                i += 2
+                continue
+
         if c == '\n':
             here = line
             line += 1
@@ -170,7 +197,19 @@ def split_statements(text):
             i += 1
             continue
 
-        if c == '#' and not buf.strip() and not stack:
+        # `#` opens a comment when it STARTS A WORD -- at the beginning of a
+        # statement or after whitespace. Requiring the statement to be empty
+        # was not merely incomplete, it was actively dangerous: a TRAILING
+        # comment stayed in the text, and the apostrophe in one (`co1's`) read
+        # as an opening single quote and swallowed everything to the next one.
+        # That silently disabled the sql_bare control several functions later,
+        # so the file reported three findings instead of four and still looked
+        # healthy. A checker whose own controls can be switched off by a
+        # comment is not measuring anything.
+        #
+        # `${x#f}` and `$#` are not comments and are not caught here: neither
+        # follows whitespace.
+        if c == '#' and (not buf or buf[-1].isspace()) and not stack:
             while i < n and text[i] != '\n':
                 i += 1
             continue
@@ -222,6 +261,49 @@ for r in rows:
 PY
 }
 
+# ---- what the controls DO and DO NOT cover ---------------------------------
+#
+# Each hole below was found by a reviewer, not by this file, so the list is
+# written down: a count of zero from the tree means "not present" only for the
+# syntax the controls actually exercise.
+#
+# COVERED (a control exists and is pinned by name or by kind):
+#   `;` as a separator                        bare_case / decl_case
+#   single- and double-quoted strings         all controls
+#   `$( )` nesting, incl. quotes inside it    sql_guarded_case / sql_bare_case
+#   a quoted string spanning several lines    sql_bare_case (pinned by name)
+#   backslash-newline continuation            source_continued_case, pinned on
+#                                             the path it sources
+#   a TRAILING comment, incl. one holding
+#     an apostrophe                           source_continued_case's own
+#                                             header comment carries one; if the
+#                                             scanner treats it as a quote the
+#                                             continuation pin goes red first
+#                                             (the swallow starts in that same
+#                                             header), and sql_bare with it
+#   the two ACCEPTED forms staying silent     lifted_case / guarded_case /
+#                                             sql_guarded_case
+#
+# NOT COVERED — a status read hidden inside any of these is invisible here, and
+# nobody has measured whether the tree contains one:
+#   backticks `cmd` instead of $( )           the scanner keys on `$(` and on a
+#                                             literal backtick in the RHS, but
+#                                             no control exercises a backtick
+#                                             spanning lines
+#   heredocs                                  their body is scanned as ordinary
+#                                             text, so a `;` or a quote inside
+#                                             one can still split a statement
+#   `{ ...; }` and `( ... )` grouping         treated as plain text
+#   arithmetic `$(( ))` and `((  ))`          `$((` enters the `$(` stack and
+#                                             its `))` pops only one level
+#   `case` patterns' `;;`                     splits, which is harmless today
+#                                             but is not asserted anywhere
+#   `set -e` toggled inside a function or a
+#     subshell                                lifting is tracked file-wide, not
+#                                             per scope
+#
+# Adding a control for one of these means moving it up, not deleting the line.
+#
 # ---- positive control: prove the scanner can still find each known-bad kind --
 control_dir="$(mktemp -d)"
 trap 'rm -rf "$control_dir"' EXIT
@@ -265,6 +347,17 @@ sql_guarded_case() {     # the false positive that cost a workaround — must NO
     LIMIT 1;" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
 }
+source_continued_case() { # co1's second hole — a source split across a
+                          # backslash-newline. MUST be reported: this is a
+                          # single-line source with a line break in it, and a
+                          # splitter that breaks there reports nothing while
+                          # looking exactly like a clean tree.
+  local rc=0
+  . \
+    "$dir/continued-ops.sh"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+}
 sql_bare_case() {        # the same multi-line SQL shape, genuinely unguarded —
                          # MUST still be reported, or the splitter fix would have
                          # bought a false negative in place of a false positive.
@@ -279,6 +372,15 @@ control="$(scan "$control_dir")"
 # The multi-line SQL bare case must come back BY NAME, not merely by kind: the
 # kinds are covered below, and what this proves is the other direction — that a
 # quoted string spanning lines cannot swallow a real instance.
+case "$control" in
+  *continued-ops.sh*) ;;
+  *)
+    echo "check-errexit-status-reads: positive control did not report the source" >&2
+    echo "split across a backslash-newline. A continuation is ONE statement to" >&2
+    echo "bash; a splitter that breaks there finds nothing and looks clean." >&2
+    printf '%s\n' "$control" | sed 's/^/  /' >&2
+    exit 2 ;;
+esac
 case "$control" in
   *sql_bare_case*|*"SELECT 1"*) ;;
   *)
