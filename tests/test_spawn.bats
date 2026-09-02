@@ -1140,9 +1140,11 @@ _spawn_recorded_id() {
     export HERDR_SPLIT_RESPONSE="$body"
     run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
     [ "$status" -ne 0 ]
-    [[ "$output" == *"could not read result.pane.pane_id"* ]]
+    # The pane-id extraction + fail-closed now lives in the herdr driver (its own
+    # tests pin the exact reasons); spawn reports the placement failure and — the
+    # contract that matters here — leaves NO placement record and renames/runs nothing.
+    grep -q "placement failed" <<<"$output"
     [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
-    # Nothing was renamed or run against a guessed id.
     ! grep -q "pane run" "$HERDR_CALL_LOG"
   done
 }

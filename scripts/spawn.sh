@@ -642,35 +642,31 @@ herdr_json_str() {
 }
 
 launch_in_herdr() {
-  local new_id resp
-  if [ "$TMUX_TARGET" = "window" ]; then
-    local ws="${HERDR_WORKSPACE_ID:-}"
-    if [ -z "$ws" ]; then
-      echo "spawn: --window requested but \$HERDR_WORKSPACE_ID is not set; falling back to split" >&2
-      TMUX_TARGET="pane"
-      launch_in_herdr
-      return $?
-    fi
-    resp="$(herdr tab create --workspace "$ws" --label "$NAME" --cwd "$PROJECT" 2>&1)" \
-      || die "herdr tab create failed: $resp"
-    new_id="$(herdr_json_str "$resp" '$.result.root_pane.pane_id')"
-    [ -n "$new_id" ] || die "herdr tab create: could not read result.root_pane.pane_id from response: $resp"
-  else
-    local dir="right"; [ "$SPLIT" = "v" ] && dir="down"
-    resp="$(herdr pane split "$HERDR_PANE_ID" --direction "$dir" --no-focus --cwd "$PROJECT" 2>&1)" \
-      || die "herdr pane split failed: $resp"
-    new_id="$(herdr_json_str "$resp" '$.result.pane.pane_id')"
-    [ -n "$new_id" ] || die "herdr pane split: could not read result.pane.pane_id from response: $resp"
+  # --window needs a workspace. Keep spawn's fallback UX (warn + split) rather than
+  # the driver's hard "window target needs HERDR_WORKSPACE_ID" error: downgrade the
+  # target BEFORE calling the driver.
+  if [ "$TMUX_TARGET" = "window" ] && [ -z "${HERDR_WORKSPACE_ID:-}" ]; then
+    echo "spawn: --window requested but \$HERDR_WORKSPACE_ID is not set; falling back to split" >&2
+    TMUX_TARGET="pane"
   fi
-  herdr pane rename "$new_id" "$NAME" >/dev/null 2>&1 || true
-  herdr pane run "$new_id" "$BOOT" 2>/dev/null \
-    || die "herdr pane run failed for pane $new_id"
-  # Record placement with herdr: scheme tag. The herdr pane_id contains ":"
-  # (e.g. wC:pN), so despawn strips the prefix with ${id#herdr:}.
+  local target
+  if [ "$TMUX_TARGET" = "window" ]; then target=window
+  elif [ "$SPLIT" = "v" ];        then target=pane-v
+  else                                 target=pane-h
+  fi
+  # Place THROUGH the herdr driver: it splits/creates, extracts the new pane id (with
+  # the pane-id grammar guard, so a malformed/partial response fails closed), renames
+  # and runs the boot, and prints the new pane id.
+  agmsg_terminal_load herdr || die "could not load the herdr terminal driver"
+  local new_id
+  new_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "$BOOT")" \
+    || die "herdr placement failed (split/tab create returned no usable pane id)"
+  # Record placement as <terminal>:<id>. despawn reads the terminal from the record
+  # (herdr pane ids contain ':', preserved by the first-colon ref split).
   local _spawn_rec
   _spawn_rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
   mkdir -p "$(dirname "$_spawn_rec")"
-  printf 'herdr:%s\t%s\t%s\n' "$new_id" "$PROJECT" "$AGENT_TYPE" \
+  printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref herdr "$new_id")" "$PROJECT" "$AGENT_TYPE" \
     > "$_spawn_rec" 2>/dev/null || true
 }
 
