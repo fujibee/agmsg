@@ -103,7 +103,7 @@ AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-
 # cursor) that had already drifted from the other two -- re-detecting one of
 # those three types as "codex" and then, via the template pick, overwriting
 # the SKILL.md the installer itself had written with the wrong flavor.
-AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
+AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build pi"
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
@@ -239,7 +239,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --cmd <name>      Command & skill folder name (default: agmsg)"
       echo "                    Claude Code: /<cmd>, Codex/Gemini/Antigravity: \$<cmd>"
-      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build"
+      echo "  --agent-type <t>  Agent type: claude-code, codex, gemini, antigravity, opencode, hermes, cursor, grok-build, pi"
       echo "                    Selects which template becomes SKILL.md (matches the"
       echo "                    <type> arg passed to join.sh / whoami.sh)"
       echo "  --update          Update skill scripts only (preserve DB and teams)"
@@ -404,6 +404,14 @@ if [ "$UPDATE_ONLY" = true ]; then
   if [ -d "$HOME/.grok" ]; then
     mkdir -p "$GROK_SKILL_DIR"
     sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path grok-build)" > "$GROK_SKILL_DIR/SKILL.md"
+  fi
+  # Refresh / install the Pi skill. Pi auto-discovers ~/.pi/agent/skills and
+  # ~/.agents/skills; the shared SKILL.md is Codex-typed, so keep a Pi-typed
+  # copy in Pi's own skills dir (later locations win on name collision).
+  PI_SKILL_DIR="$HOME/.pi/agent/skills/$SKILL_NAME"
+  if [ -d "$HOME/.pi" ]; then
+    mkdir -p "$PI_SKILL_DIR"
+    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path pi)" > "$PI_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   # A team config written by an older release can be group- or world-writable,
@@ -698,6 +706,18 @@ if [ -d "$HOME/.grok" ]; then
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
 fi
 
+# --- Install Pi skill ---
+# Pi auto-discovers ~/.pi/agent/skills/<name>/SKILL.md (and ~/.agents/skills as
+# a fallback). The shared ~/.agents/skills/<name>/SKILL.md is Codex-typed and
+# would mis-identify a Pi session — keep the Pi copy separate. Delivery writes
+# a project-local extension at <project>/.pi/extensions/agmsg.ts.
+PI_SKILL_DIR="$HOME/.pi/agent/skills/$CMD_NAME"
+if [ -d "$HOME/.pi" ]; then
+  mkdir -p "$PI_SKILL_DIR"
+  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path pi)" > "$PI_SKILL_DIR/SKILL.md"
+  echo "  + installed /$CMD_NAME skill to ~/.pi/agent/skills/"
+fi
+
 # Codex sandbox writable_roots are configured by configure_codex_sandbox() at
 # the "Done" step below — the single source of truth for db/, teams/, and run/.
 # (A legacy inline copy used to run here too, which double-mutated the array and
@@ -709,7 +729,7 @@ echo ""
 echo "  ✓ Installed to ~/.agents/skills/$CMD_NAME/ (version $INSTALLED_VERSION)"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity / OpenCode) to pick up the new skill"
+echo "    1. Restart your agent (Claude Code / Codex / Gemini CLI / Antigravity / OpenCode / Pi) to pick up the new skill"
 echo "    2. Run the command to join a team:"
 echo "       Claude Code:  /$CMD_NAME"
 echo "       Codex:        \$$CMD_NAME"
@@ -717,6 +737,7 @@ echo "       Gemini CLI:   \$$CMD_NAME"
 echo "       Antigravity:  \$$CMD_NAME"
 echo "       Copilot CLI:  /$CMD_NAME"
 echo "       OpenCode:     \$$CMD_NAME"
+echo "       Pi:           /$CMD_NAME"
 echo "       It will prompt for team name and agent name on first run."
 echo ""
 echo "  Docs: https://agmsg.cc/"

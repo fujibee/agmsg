@@ -29,11 +29,11 @@ write_node_launcher_fixtures() {
   printf '// stub node launcher fixture\n' > "$nd/nodetype-launcher.mjs"
 }
 
-@test "type-registry: known_types lists the ten built-ins" {
+@test "type-registry: known_types lists the eleven built-ins" {
   run env -i PATH="$PATH" bash -c \
     "source '$SCRIPTS/lib/type-registry.sh'; agmsg_known_types | sort -u | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,hermes,opencode" ]
+  [ "$output" = "agmsg-app,antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,hermes,opencode,pi" ]
 }
 
 @test "type-registry: is_known_type accepts a built-in and rejects a bogus type" {
@@ -92,9 +92,9 @@ write_node_launcher_fixtures() {
 }
 
 @test "agent templates all explain that readable local history is not evidence a team is unencrypted (#682)" {
-  # scripts/drivers/types/*/template.md is nine independent copies with no
+  # scripts/drivers/types/*/template.md is ten independent copies with no
   # shared fragment (#676's exact shape) -- a loop with `[ -f ] || continue`
-  # alone would silently pass if the glob matched fewer than nine files (a
+  # alone would silently pass if the glob matched fewer than ten files (a
   # renamed/missing template), so the count is asserted explicitly rather
   # than just "every file found had it."
   local template count=0
@@ -105,9 +105,9 @@ write_node_launcher_fixtures() {
       || { echo "missing the e2ee-verification paragraph: $template" >&2; return 1; }
   done
   # agmsg-app has no template.md (spawnable=no -- it's the desktop app's own
-  # identity, not a CLI type), so nine is the whole set, not a lower bound a
+  # identity, not a CLI type), so ten is the whole set, not a lower bound a
   # silently-skipped file could still satisfy.
-  [ "$count" -eq 9 ]
+  [ "$count" -eq 10 ]
 }
 
 @test "the e2ee-verification explanation also appears in both remote-setup docs (#682)" {
@@ -156,8 +156,8 @@ write_node_launcher_fixtures() {
     ! grep -qiE 'rotat(e|ion)[^.]*not available' "$surface" \
       || { echo "still calls rotation unavailable: $surface" >&2; return 1; }
   done
-  # nine templates (agmsg-app has none) plus SKILL.md.
-  [ "$count" -eq 10 ]
+  # ten templates (agmsg-app has none) plus SKILL.md.
+  [ "$count" -eq 11 ]
 
   # Bind the claim to the code. If `rotate` ever stops being a subcommand the
   # surfaces above become wrong again, and this is the line that says so.
@@ -170,7 +170,7 @@ write_node_launcher_fixtures() {
   grep -Fq 'To mint a replacement epoch instead:' "$BATS_TEST_DIRNAME/../scripts/key.sh"
 }
 
-@test "type-registry: spawnable set is exactly eight of the ten built-ins (#277, #279)" {
+@test "type-registry: spawnable set is exactly nine of the eleven built-ins (#277, #279)" {
   # hermes deliberately stays out (#279): no known CLI mode starts it
   # interactive with a seeded initial prompt. agmsg-app also stays out: it's
   # the desktop app itself (spawnable=no), not a spawnable agent type.
@@ -181,7 +181,7 @@ write_node_launcher_fixtures() {
        [ \"\$(agmsg_type_get \"\$t\" spawnable)\" = yes ] && echo \"\$t\"
      done <<< \"\$(agmsg_known_types | sort -u)\" | paste -sd, -"
   [ "$status" -eq 0 ]
-  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode" ]
+  [ "$output" = "antigravity,claude-code,codex,copilot,cursor,gemini,grok-build,opencode,pi" ]
 }
 
 @test "type-registry: detection manifests carry the expected env / proc keys" {
@@ -192,6 +192,7 @@ write_node_launcher_fixtures() {
   [ "$(g antigravity detect)" = "explicit" ]
   [ "$(g copilot detect)" = "explicit" ]
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
+  [ "$(g pi detect_proc)" = "pi pi-*" ]
 }
 
 @test "type-registry: whoami detects codex end-to-end from CODEX_THREAD_ID" {

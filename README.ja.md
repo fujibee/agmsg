@@ -50,7 +50,7 @@ CLI AI エージェント間のクロスエージェントメッセージング�
 # 1. インストール — npxが最速の道、クローン不要
 npx agmsg
 
-# 2. Claude Code / Codex / Gemini CLI / Antigravity / OpenCode を再起動して新しいスキルを反映
+# 2. Claude Code / Codex / Gemini CLI / Antigravity / OpenCode / Pi を再起動して新しいスキルを反映
 
 # 3. コマンドを実行 — 初回はチーム名とエージェント名を尋ねられる
 #    Claude Code:  /agmsg
@@ -121,7 +121,7 @@ cd agmsg
 
 `--cmd` と `--agent-type` は直接スクリプト経路でのみ利用可能。`npm` とプラグインの経路は常に `agmsg` としてインストールされ、ホストのエージェントタイプを自動検出する。
 
-インストール後、**エージェントを再起動**して（Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode）新しいスキルを反映させる。
+インストール後、**エージェントを再起動**して（Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode / Pi）新しいスキルを反映させる。
 
 ### Windows: Git Bash と Codex
 
@@ -210,7 +210,7 @@ codex:
   --dangerously-skip-permissions: false  # `false`の値はフラグ自体を出力しない
 ```
 
-9種類のエージェントタイプのうち8つがspawn可能 — `claude-code`、`codex`、`grok-build`、`cursor`、`gemini`、`antigravity`、`copilot`、`opencode`。`hermes` は不可 — そのCLIには初期プロンプトを事前に仕込んだインタラクティブセッションを開始するモードがない（#279）。macOSが主なターゲットで、LinuxとWindowsはベストエフォート（ターミナルが未対応の場合はissueまたはPRを歓迎）。ヘッドレス環境 — tmuxもなく使えるターミナルもない — はエージェントCLIがインタラクティブなターミナルを必要とするためエラーになる。
+10種類のエージェントタイプのうち9つがspawn可能 — `claude-code`、`codex`、`grok-build`、`cursor`、`gemini`、`antigravity`、`copilot`、`opencode`、`pi`。`hermes` は不可 — そのCLIには初期プロンプトを事前に仕込んだインタラクティブセッションを開始するモードがない（#279）。macOSが主なターゲットで、LinuxとWindowsはベストエフォート（ターミナルが未対応の場合はissueまたはPRを歓迎）。ヘッドレス環境 — tmuxもなく使えるターミナルもない — はエージェントCLIがインタラクティブなターミナルを必要とするためエラーになる。
 
 ### spawnしたエージェントを終了する（`despawn`）
 
@@ -313,6 +313,16 @@ $agmsg
 これによりOpenCodeは、Ollamaのようなローカルプロバイダーを使う構成を含め、ローカルのコーディングエージェントとして役立つ。
 
 完全なセットアップ手順は [docs/opencode.md](docs/opencode.md) を参照。
+
+### Pi
+
+```
+/agmsg
+```
+
+`./install.sh` でインストールする（`~/.pi/` が存在する場合、Pi向けスキルが `~/.pi/agent/skills/agmsg/SKILL.md` に、デフォルトのCodex向け共有スキルと並んで自動的に配置される）。`--agent-type pi` はCodexがインストールされていないPi専用環境でのみ使う。Piは `mode turn`（エージェントがsettleしたときにinboxを確認）、`mode monitor`（プロセス内15秒ポーリング — Piのセッションストアにはwriter leaseがあるため外部ウォッチャーでは注入できない）、`mode off` に対応。`spawn pi` は利用可能。`both` は非対応。
+
+完全なセットアップ手順は [docs/pi.md](docs/pi.md) を参照。
 
 ### シェル（任意のエージェント）
 

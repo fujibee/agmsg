@@ -50,7 +50,7 @@ In real use it looks like this — Claude Code asking Codex for a code review an
 # 1. Install — npx is the fastest path, no clone needed
 npx agmsg
 
-# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity / OpenCode to pick up the new skill
+# 2. Restart Claude Code / Codex / Gemini CLI / Antigravity / OpenCode / Pi to pick up the new skill
 
 # 3. Run the command — it will prompt for team and agent name on first use
 #    Claude Code:  /agmsg
@@ -121,7 +121,7 @@ The **command name** determines:
 
 `--cmd` and `--agent-type` are only available via the direct-script path; the `npm` and plugin paths always install as `agmsg` and auto-detect the host agent type.
 
-After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode) so it picks up the new skill.
+After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode / Pi) so it picks up the new skill.
 
 ### Windows: Git Bash & Codex
 
@@ -211,7 +211,7 @@ codex:
   --dangerously-skip-permissions: false  # a `false` value suppresses the flag entirely
 ```
 
-Eight of the nine agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`. `hermes` is not: its CLI has no mode that starts an interactive session pre-seeded with an initial prompt (#279). macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
+Nine of the ten agent types are spawnable — `claude-code`, `codex`, `grok-build`, `cursor`, `gemini`, `antigravity`, `copilot`, `opencode`, `pi`. `hermes` is not: its CLI has no mode that starts an interactive session pre-seeded with an initial prompt (#279). macOS is the primary target; Linux and Windows are best-effort (please open an issue/PR if your terminal isn't handled). Headless environments — no tmux **and** no usable terminal — error out, since the agent CLIs need an interactive terminal.
 
 ### Tear down a spawned agent (`despawn`)
 
@@ -327,6 +327,16 @@ Install with `./install.sh` (when `~/.config/opencode/` exists, the OpenCode-typ
 This makes OpenCode useful as a local coding agent, including configurations backed by local providers such as Ollama.
 
 See [docs/opencode.md](docs/opencode.md) for full setup instructions.
+
+### Pi
+
+```
+/agmsg
+```
+
+Install with `./install.sh` (when `~/.pi/` exists, the Pi-typed skill is placed at `~/.pi/agent/skills/agmsg/SKILL.md` alongside the default Codex-typed shared skill). Use `--agent-type pi` only for Pi-only environments where Codex is not installed. Pi supports `mode turn` (inbox check when the agent settles), `mode monitor` (in-process 15s poll — Pi's session store has a writer lease, so an external watcher cannot inject), and `mode off`. `spawn pi` is available. `both` is not supported.
+
+See [docs/pi.md](docs/pi.md) for full setup instructions.
 
 ### Shell (any agent)
 

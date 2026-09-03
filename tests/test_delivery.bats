@@ -2874,6 +2874,84 @@ JSON
   [[ "$output" =~ "mode: turn" ]]
 }
 
+# --- pi (in-process extension at .pi/extensions/agmsg.ts) ---
+# Pi's session store takes a writer lease, so delivery is a project-local
+# extension rather than watch.sh / JSON hooks. turn|monitor write the file;
+# off removes it. both is rejected by the central gate.
+
+@test "delivery set turn (pi): writes .pi/extensions/agmsg.ts with turn marker" {
+  run bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
+  [ -f "$ext_file" ]
+  run cat "$ext_file"
+  [[ "$output" == *"agmsg-delivery-mode: turn"* ]]
+  [[ "$output" == *"agent_settled"* ]]
+  [[ "$output" == *"$TEST_SKILL_DIR"* ]]
+  [[ "$output" != *"agmsg-delivery-mode: monitor"* ]]
+}
+
+@test "delivery set monitor (pi): writes the extension with a 15s poll" {
+  run bash "$SCRIPTS/delivery.sh" set monitor pi "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
+  [ -f "$ext_file" ]
+  run cat "$ext_file"
+  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
+  [[ "$output" == *"15000"* ]]
+  [[ "$output" == *"$TEST_SKILL_DIR"* ]]
+  [[ "$output" != *"watch.sh"* ]]
+}
+
+@test "delivery set off (pi): removes the extension" {
+  bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
+  [ -f "$TEST_PROJECT/.pi/extensions/agmsg.ts" ]
+  run bash "$SCRIPTS/delivery.sh" set off pi "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_PROJECT/.pi/extensions/agmsg.ts" ]
+}
+
+@test "delivery status (pi): derives mode from the extension marker" {
+  run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
+  [[ "$output" =~ "mode: off" ]]
+
+  bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
+  [[ "$output" =~ "mode: turn" ]]
+
+  bash "$SCRIPTS/delivery.sh" set monitor pi "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
+  [[ "$output" =~ "mode: monitor" ]]
+}
+
+@test "delivery set both (pi): rejected; does NOT delete an existing turn extension" {
+  bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT" >/dev/null
+  run bash "$SCRIPTS/delivery.sh" set both pi "$TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_PROJECT/.pi/extensions/agmsg.ts" ]
+}
+
+@test "delivery set off (pi): does not stop Claude Code watchers for the same project" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  AGMSG_WATCH_INTERVAL=10 bash "$SCRIPTS/watch.sh" pi-preserve-test "$TEST_PROJECT" claude-code 3>&- &
+  local watch_pid=$!
+  sleep 1
+  [ -f "$TEST_SKILL_DIR/run/watch.pi-preserve-test.pid" ]
+
+  run bash "$SCRIPTS/delivery.sh" set off pi "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  run kill -0 "$watch_pid"
+  [ "$status" -eq 0 ]
+
+  kill "$watch_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
+}
+
 @test "delivery status (codex): a recorded seat makes \"not running\" mean the process (#579)" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null

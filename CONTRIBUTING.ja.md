@@ -13,7 +13,7 @@
 
 ## バグ報告と機能要望
 
-[`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues) に issue を立てる。agmsg のバージョン、ホストエージェント(Claude Code / Codex / Gemini CLI / Antigravity)、可能なら最小の再現手順を含めること。
+[`fujibee/agmsg`](https://github.com/fujibee/agmsg/issues) に issue を立てる。agmsg のバージョン、ホストエージェント(Claude Code / Codex / Gemini CLI / Antigravity / Pi)、可能なら最小の再現手順を含めること。
 
 ## プルリクエスト
 

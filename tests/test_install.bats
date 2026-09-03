@@ -955,6 +955,39 @@ EOF
   ! grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
 }
 
+# --- pi skill (~/.pi/agent/skills/<name>/SKILL.md) ---
+
+@test "install: drops a Pi SKILL.md when ~/.pi exists" {
+  mkdir -p "$FAKE_HOME/.pi"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local pi_skill="$FAKE_HOME/.pi/agent/skills/agmsg/SKILL.md"
+  [ -f "$pi_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" pi" "$pi_skill"
+  refute grep -q "whoami.sh \"\$(pwd)\" codex" "$pi_skill"
+  grep -q "^name: agmsg" "$pi_skill"
+}
+
+@test "install: skips Pi skill when ~/.pi is absent" {
+  rm -rf "$FAKE_HOME/.pi"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.pi" ]
+}
+
+@test "install --update: installs Pi skill for upgraders without prior skill" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.pi/agent/skills/agmsg" ]
+  mkdir -p "$FAKE_HOME/.pi"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.pi/agent/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" pi" "$FAKE_HOME/.pi/agent/skills/agmsg/SKILL.md"
+}
+
+@test "install: --agent-type pi makes shared SKILL.md Pi-typed" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type pi
+  grep -q "whoami.sh \"\$(pwd)\" pi" "$SK/SKILL.md"
+  ! grep -q "whoami.sh \"\$(pwd)\" codex" "$SK/SKILL.md"
+}
+
 # Positive control for #846 (A), covering every type the installer can render a
 # shared SKILL.md for: install fresh with that type, then run bare --update
 # (no --agent-type, forcing the on-disk re-detection path) and confirm the
@@ -966,7 +999,7 @@ EOF
 # grepped for and was never broken -- it IS the fallback).
 @test "install: bare --update preserves every renderable type's SKILL.md flavor (#846)" {
   local t
-  for t in codex gemini antigravity opencode hermes cursor grok-build; do
+  for t in codex gemini antigravity opencode hermes cursor grok-build pi; do
     local cmd="agmsg-$t"
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd "$cmd" --agent-type "$t"
     local skill_md="$FAKE_HOME/.agents/skills/$cmd/SKILL.md"
