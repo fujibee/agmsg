@@ -120,21 +120,25 @@ _herdr_pane_for_session() {
            -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01;
            -- shapes remeasured on the live machine 2026-09-02 by utildev):
            --   A. a session entry: agent_session is an OBJECT with a text .value
-           --   B. a bare pane: pane_ok AND agent_session is JSON null. The measured
-           --      session-less pane is {..,"agent":"grok","agent_session":null,..} —
-           --      the KEY is present with a null VALUE (json_type = 'null'), NOT
-           --      absent, and the agent field is the kind (claude/grok), not "".
-           -- The distinction that matters: agent_session PRESENT-as-null (B, a pane
-           -- that explicitly has no live session) vs ABSENT entirely (a {} or a
-           -- {\"future_session\":…} drift, where a renamed session could hide the
-           -- target) -> indeterminate. A scalar/malformed agent_session, or a null
-           -- one on a bad pane_id, is also indeterminate -> did-not-answer. (The
-           -- earlier B required agent=="" and a MISSING key; neither matches the real
-           -- shape, so B matched nothing and not-among was unreachable — round 8 again.)
+           --   B. a bare pane: the MEASURED session-less pane (herdr 0.8.0, live) has
+           --      the agent_session KEY ABSENT entirely -- json_type is SQL NULL
+           --      (as_type IS NULL), NOT a JSON null value -- while its agent (the kind,
+           --      grok/codex, never "") and agent_status ("done") fields remain, on a
+           --      valid pane_id. So B is proven POSITIVELY: key-absent AND a valid
+           --      pane_id AND both real herdr pane markers (agent, agent_status) text.
+           -- The distinction that matters: a genuine bare pane (B) vs a bare {}, or a
+           -- renamed/unknown session field (a future_session drift, where the target
+           -- could hide) -- those lack the markers -> indeterminate. A scalar/malformed
+           -- or JSON-null agent_session, or one on a bad pane_id, is likewise
+           -- indeterminate -> did-not-answer, never a silent not-among. (Earlier B tried
+           -- agent=="" then a JSON-null value; neither exists in the real data, so B
+           -- matched nothing and not-among was unreachable -- the round-8 failure twice.)
            det(value) AS (
              SELECT value FROM tagged
              WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
-                OR ( as_type = 'null' AND pane_ok = 1 )),
+                OR ( as_type IS NULL AND pane_ok = 1
+                     AND json_type(value,'\$.agent') = 'text'
+                     AND json_type(value,'\$.agent_status') = 'text' )),
            -- the target, present as a session entry with a usable (grammar) pane:
            hit(pid) AS (
              SELECT json_extract(value,'\$.pane_id') FROM tagged

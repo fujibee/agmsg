@@ -125,10 +125,12 @@ _fake_herdr_list_numeric_pane() {
 # must be not-among — NOT did-not-answer.
 _fake_herdr_list_bare_pane() {
   local sid="${1:-sess-OTHER}"
-  # The MEASURED session-less pane (utildev, live herdr 2026-09-02): the
-  # agent_session KEY is present with a null VALUE, and `agent` is the kind ("grok"),
-  # not "". agent_status is "done". This is the shape B must recognize.
-  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4"},{"agent":"grok","agent_status":"done","name":null,"agent_session":null,"pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
+  # The MEASURED session-less pane (utildev, live herdr 2026-09-02, raw JSON): the
+  # agent_session KEY is ABSENT entirely (json_type -> SQL NULL, NOT a JSON null
+  # value) — as are `name`/`display_agent`. What REMAINS is `agent` (the kind,
+  # "grok"/"codex", never "") and `agent_status` ("done"), plus a valid pane_id.
+  # That is the positive fingerprint B recognizes (w5:p3=grok, w1:pC=codex live).
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4"},{"agent":"grok","agent_status":"done","cwd":"/x","pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 # A herdr whose `agent list` pairs a well-formed OTHER-session entry with a raw
@@ -903,17 +905,23 @@ M
   [ "$output" = "$(printf 'herdr\tw1:p4')" ]
 }
 
-@test "herdr naming: the bare-pane arm is POSITIVE — only agent_session:null + a real pane counts" {
-  # tl round 9 + live remeasure: a bare pane is agent_session PRESENT-as-null with a
-  # valid pane_id (the measured session-less shape). An agent_session that is ABSENT
-  # (a {} or a renamed/unknown session field, where the target could hide), or a null
-  # session on a BAD pane_id, is NEITHER kind -> did-not-answer, never silently
-  # not-among.
+@test "herdr naming: the bare-pane arm is POSITIVE — key-absent + real pane + agent/agent_status" {
+  # tl round 9 + the LIVE remeasure (utildev, raw JSON): the measured session-less
+  # pane has agent_session KEY ABSENT (json_type -> SQL NULL, not a JSON null value)
+  # and still carries `agent` (the kind) and `agent_status` as text on a valid pane.
+  # B is that whole fingerprint. Everything short of it is did-not-answer, never a
+  # silent not-among: a bare {}; a renamed/unknown session field (future_session)
+  # where the target could hide; a key-absent entry MISSING agent_status or agent (so
+  # it is not a recognizable herdr pane); a JSON-null session; a null/scalar session
+  # on a bad pane. None of these lets us decide the entry is not the target.
   export HERDR_ENV=1
   local raw
   for raw in '{}' \
              '{"agent":"claude","future_session":{"value":"z"},"pane_id":"w2:p2"}' \
+             '{"agent":"grok","pane_id":"w2:p2"}' \
+             '{"agent_status":"done","pane_id":"w2:p2"}' \
              '{"agent":"","pane_id":"BADFORM"}' \
+             '{"agent":"grok","agent_status":"done","pane_id":"BADFORM"}' \
              '{"agent":"grok","agent_session":null,"pane_id":"BADFORM"}' \
              '{"agent":"claude","agent_session":"scalar","pane_id":"w2:p2"}'; do
     _fake_herdr_list_plus "$raw"
