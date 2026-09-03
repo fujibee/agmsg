@@ -905,18 +905,23 @@ M
   [ "$output" = "$(printf 'herdr\tw1:p4')" ]
 }
 
-@test "herdr naming: the bare-pane arm is POSITIVE — key-absent + real pane + agent/agent_status" {
+@test "herdr naming: the bare-pane arm is POSITIVE — key-absent + real pane + agent + agent_status='done'" {
   # tl round 9 + the LIVE remeasure (utildev, raw JSON): the measured session-less
-  # pane has agent_session KEY ABSENT (json_type -> SQL NULL, not a JSON null value)
-  # and still carries `agent` (the kind) and `agent_status` as text on a valid pane.
-  # B is that whole fingerprint. Everything short of it is did-not-answer, never a
-  # silent not-among: a bare {}; a renamed/unknown session field (future_session)
-  # where the target could hide; a key-absent entry MISSING agent_status or agent (so
-  # it is not a recognizable herdr pane); a JSON-null session; a null/scalar session
-  # on a bad pane. None of these lets us decide the entry is not the target.
+  # pane has agent_session KEY ABSENT (json_type -> SQL NULL, not a JSON null value),
+  # carries `agent` (the kind), a valid pane_id, AND agent_status EXACTLY "done".
+  # co1: requiring only "agent_status is text" was too broad — a renamed-session drift
+  # ({"agent":..,"agent_status":"running","future_session":{"value":TARGET},"pane_id"..})
+  # meets every type test while HIDING a live target under a renamed key, so it would
+  # be miscounted as bare and TARGET reported not-among. Pinning the VALUE to the
+  # finished state "done" keeps every entry below at did-not-answer, never a silent
+  # not-among. The two future_session controls hide sess-mine ITSELF, so a too-broad B
+  # would return not-among for a session that is actually present-but-unread.
   export HERDR_ENV=1
   local raw
   for raw in '{}' \
+             '{"agent":"claude","agent_status":"running","future_session":{"value":"sess-mine"},"pane_id":"w1:p4"}' \
+             '{"agent":"claude","agent_status":"idle","future_session":{"value":"sess-mine"},"pane_id":"w1:p4"}' \
+             '{"agent":"grok","agent_status":"running","pane_id":"w2:p2"}' \
              '{"agent":"claude","future_session":{"value":"z"},"pane_id":"w2:p2"}' \
              '{"agent":"grok","pane_id":"w2:p2"}' \
              '{"agent_status":"done","pane_id":"w2:p2"}' \

@@ -4,21 +4,26 @@
 # Sourced by the terminals registry into the caller's context. terminal_* only,
 # no set -e/-u.
 #
-# MEASURED (seat 0, 2026-08-29) vs ASSERTED-pending-live-matrix:
-#   measured: `herdr agent list` is JSON; the pane is resolved from it by the
-#     session id (inherited HERDR_PANE_ID is NOT trusted; agent_session in the list
-#     is an OBJECT and the id is at .value); the internal agent-name key is a
-#     collision-resistant SHA-256 derivation of (team, agent) — see
-#     _herdr_internal_key for why concatenation/folding has a structural collision;
-#     the existing spawn/despawn calls (pane split/rename/run, tab create, pane close);
-#     and `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
-#   asserted (exact argv/JSON fields verified only by the live matrix on koit's
-#     machine, NOT measured here): the `agent list` JSON field names used to
-#     extract the pane (agent_session / pane_id), `herdr agent prompt`'s argv for
-#     poke, and `herdr agent rename`'s argv for the internal name key (no existing
-#     agent-rename call in main to measure against). These are flagged inline and
-#     in the PR body; the fixtures pin the control flow and the argv THIS driver
-#     emits, so a real-CLI mismatch is a localized one-line fix the matrix catches.
+# FACT BOUNDARY — what is measured vs still asserted (keep this honest):
+#   MEASURED on the real machine (seat 0, 2026-08-29; and live by utildev on
+#   koit's machine, herdr 0.8.0, 2026-09-02/03 — the resolver run against the real
+#   `agent list`, with positive controls):
+#     - `herdr agent list` is JSON; agent_session in the list is an OBJECT and the
+#       session id is at .value (inherited HERDR_PANE_ID is NOT trusted).
+#     - a session-less pane has the agent_session KEY ABSENT entirely, with agent
+#       present (the kind) and agent_status exactly "done" — this is the bare-pane
+#       fingerprint B relies on; no live-list entry carries a JSON-null agent_session.
+#     - the pane-id grammar (w1:p4, w1:pB, w5:p3, w1:pC).
+#     - `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
+#     - the internal agent-name key is a collision-resistant SHA-256 derivation of
+#       (team, agent) — see _herdr_internal_key for why concatenation/folding has a
+#       structural collision.
+#     - the existing spawn/despawn calls (pane split/run, tab create, pane close).
+#   ASSERTED, NOT yet measured against a live call: `herdr agent prompt`'s argv for
+#     poke and `herdr agent rename`'s argv for the internal name key (no agent-rename
+#     call in main to measure against). These stay flagged inline and in the PR body;
+#     the fixtures pin the control flow and the argv THIS driver emits, so a real-CLI
+#     mismatch is a localized one-line fix.
 
 # control op: herdr binary present?
 terminal_check() {
@@ -73,12 +78,16 @@ _herdr_pane_for_session() {
   # `well == alen` never hold, so not-among was unreachable and every absent session
   # returned did-not-answer. The fix is to split "could not read this entry" from
   # "this entry legitimately has no session":
-  #   DETERMINATE entry  — its membership is decidable: an object that either has NO
-  #                        agent_session (a bare pane: definitely not the target) OR
-  #                        an agent_session OBJECT whose .value is text (comparable).
-  #   indeterminate      — an object with an agent_session that is PRESENT but
-  #                        malformed (scalar, or object without a text .value): the
-  #                        target could be hiding there unread.
+  #   DETERMINATE entry  — its membership is decidable: EITHER an agent_session OBJECT
+  #                        whose .value is text (comparable to the target), OR a pane
+  #                        POSITIVELY recognized as session-less — no agent_session key,
+  #                        a valid pane_id, agent is text, and agent_status is exactly
+  #                        the measured finished value "done" (see the det CTE below).
+  #   indeterminate      — an agent_session PRESENT but malformed (scalar, or object
+  #                        without a text .value), OR a key-absent entry that is NOT the
+  #                        proven session-less shape (e.g. agent_status "running"/"idle"
+  #                        or a session hidden under a renamed key): the target could be
+  #                        hiding there unread, so it must NOT be silently ruled out.
   # One query over the array at $q (the authority once found) returns four
   # '|'-separated fields — alen, determinate count, "found-but-unusable-pane" count,
   # and the matched pane id. The matched pane is the ONLY free-text field and it is
@@ -123,22 +132,28 @@ _herdr_pane_for_session() {
            --   B. a bare pane: the MEASURED session-less pane (herdr 0.8.0, live) has
            --      the agent_session KEY ABSENT entirely -- json_type is SQL NULL
            --      (as_type IS NULL), NOT a JSON null value -- while its agent (the kind,
-           --      grok/codex, never "") and agent_status ("done") fields remain, on a
-           --      valid pane_id. So B is proven POSITIVELY: key-absent AND a valid
-           --      pane_id AND both real herdr pane markers (agent, agent_status) text.
-           -- The distinction that matters: a genuine bare pane (B) vs a bare {}, or a
-           -- renamed/unknown session field (a future_session drift, where the target
-           -- could hide) -- those lack the markers -> indeterminate. A scalar/malformed
-           -- or JSON-null agent_session, or one on a bad pane_id, is likewise
-           -- indeterminate -> did-not-answer, never a silent not-among. (Earlier B tried
-           -- agent=="" then a JSON-null value; neither exists in the real data, so B
-           -- matched nothing and not-among was unreachable -- the round-8 failure twice.)
+           --      grok/codex) and agent_status remain, on a valid pane_id, and the
+           --      MEASURED agent_status of a session-less pane is exactly the value done.
+           -- B demands that whole positive fingerprint, and the agent_status VALUE, not
+           -- merely its type: key-absent AND a valid pane_id AND agent is text AND
+           -- agent_status = 'done'. Requiring only that agent_status be text was too
+           -- broad (co1) -- a renamed-session drift (agent text, agent_status running, a
+           -- session under a renamed key such as future_session, a valid pane_id)
+           -- meets every type test while HIDING a live target under that renamed key, so
+           -- it would be miscounted as bare and the target reported not-among. Pinning the value
+           -- to the finished state keeps a running/idle pane -- which must own a session
+           -- -- OUT of B: no agent_session + not finished is an anomaly, so it stays
+           -- indeterminate. This deliberately errs NARROW: a session-less pane in some
+           -- other finished-state string would fall to did-not-answer (noisy) rather
+           -- than be silently ruled out -- better loud-and-unsure than quietly hiding a
+           -- target. A bare {}, a scalar/JSON-null agent_session, or a bad pane_id is
+           -- likewise indeterminate -> did-not-answer, never a silent not-among.
            det(value) AS (
              SELECT value FROM tagged
              WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
                 OR ( as_type IS NULL AND pane_ok = 1
                      AND json_type(value,'\$.agent') = 'text'
-                     AND json_type(value,'\$.agent_status') = 'text' )),
+                     AND json_extract(value,'\$.agent_status') = 'done' )),
            -- the target, present as a session entry with a usable (grammar) pane:
            hit(pid) AS (
              SELECT json_extract(value,'\$.pane_id') FROM tagged
