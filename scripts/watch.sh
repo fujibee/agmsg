@@ -249,8 +249,18 @@ close_own_placement() {
     return 0
   fi
 
-  rec_term="$(agmsg_terminal_ref_terminal "$ref")"
-  rec_id="$(agmsg_terminal_ref_id "$ref")"
+  # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. A bare
+  # assignment would leave rec_term/rec_id empty and fall through to the "belongs to
+  # someone else" branch with an empty recorded side — a misleading message, and
+  # under a caller's `set -e` it would take the watcher down with no log at all.
+  # Give the unresolvable ref its OWN contract, in the sibling guards' shape (co1).
+  rec_term=""; rec_id=""
+  rec_term="$(agmsg_terminal_ref_terminal "$ref")" || rec_term=""
+  rec_id="$(agmsg_terminal_ref_id "$ref")" || rec_id=""
+  if [ -z "$rec_term" ] || [ -z "$rec_id" ]; then
+    watch_log "despawned '$name' (role dropped); the placement record's pane ref ($ref) did not resolve to a terminal and pane id, so the pane cannot be identified — close this window manually"
+    return 0
+  fi
 
   # Which pane is THIS process in, right now. resolve-for-name is the strict
   # resolver: it answers only with a self-id it could actually establish, and

@@ -112,10 +112,21 @@ terminal_peek() {
     esac
   done
   case "$lines" in ''|*[!0-9]*) lines="" ;; esac
+  # peek exit taxonomy, SHARED with herdr so the template reads one meaning across
+  # every peek-capable driver (co1): the terminal being UNREACHABLE (tmux not on
+  # PATH — no server to talk to) is 10; an answered-but-no-content failure (the pane
+  # is gone / capture failed) is 12. 13 is reserved for a driver with no peek path at
+  # all (plain's permanent "no addressable pane") — a different message to the user,
+  # so a tmux pane's transient loss must NOT borrow it. Errors go to stderr; peek's
+  # stdout stays content-only (capture-pane streams straight through, no rewrapping).
+  command -v tmux >/dev/null 2>&1 \
+    || { echo "tmux: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
   if [ -n "$lines" ]; then
-    tmux capture-pane -p -t "$id" -S "-$lines" || return 13
+    tmux capture-pane -p -t "$id" -S "-$lines" \
+      || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   else
-    tmux capture-pane -p -t "$id" || return 13
+    tmux capture-pane -p -t "$id" \
+      || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   fi
   return 0
 }

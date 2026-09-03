@@ -305,14 +305,24 @@ terminal_peek() {
   #   the pane is gone / unreadable -> 12 (herdr answered, but not with content)
   command -v herdr >/dev/null 2>&1 \
     || { echo "herdr: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
-  local out rc=0
-  out="$(herdr pane read "$id" --source "$src" 2>/dev/null)" || rc=$?
+  # READ contract: stdout must be the pane's visible text VERBATIM. A command
+  # substitution strips EVERY trailing newline; a following printf '%s\n' then invents
+  # exactly one back, so empty content becomes a lone newline and content ending in
+  # 0 or 2+ newlines is silently rewritten (co1). Capture to a temp file instead,
+  # decide on rc, then cat the bytes unmodified. herdr writes its error JSON to
+  # STDOUT on failure, so on the failure path that body is a diagnostic -> stderr,
+  # never the caller's content.
+  local tmp rc=0
+  tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
+  herdr pane read "$id" --source "$src" >"$tmp" 2>/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
-    [ -n "$out" ] && printf '%s\n' "$out" >&2   # the error body is a diagnostic, not content
+    [ -s "$tmp" ] && cat "$tmp" >&2   # the error body is a diagnostic, not content
+    rm -f "$tmp"
     echo "herdr: could not read pane '$id' (it may no longer exist)" >&2
     return 12
   fi
-  printf '%s\n' "$out"   # only the real pane content reaches stdout
+  cat "$tmp"   # only the real pane content reaches stdout, byte-for-byte
+  rm -f "$tmp"
   return 0
 }
 

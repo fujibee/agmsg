@@ -979,3 +979,35 @@ _record_handover_events() {
   refute grep -q "Usage: watch.sh" "$out"
   refute grep -q "ERROR: unknown agent type" "$out"
 }
+
+# --- close_own_placement: an unresolvable pane ref gets its OWN logged branch ---
+# co1 (3): the ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref.
+# A bare `rec_term="$(...)"` left rec_term/rec_id empty and fell through to the
+# "belongs to someone else" branch with an EMPTY recorded side (a misleading log),
+# and under a caller's set -e it would take the watcher down with no log at all.
+# The function is extracted and sourced in isolation so the ref-unresolved branch
+# is exercised directly, without standing up a live watcher loop.
+@test "watch close_own_placement: a corrupt pane ref logs 'did not resolve', not a silent/misleading fallthrough" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  local shim="$TEST_SKILL_DIR/cop-shim.sh"
+  {
+    printf '%s\n' 'set -u'
+    printf '%s\n' 'watch_log() { printf "%s\n" "$*" >> "$WLOG"; }'
+    printf '%s\n' '. "$SCRIPTS/lib/actas-lock.sh"'
+    printf '%s\n' '. "$SCRIPTS/lib/terminal-registry.sh"'
+    awk '/^close_own_placement\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPTS/watch.sh"
+  } > "$shim"
+
+  # A placement record for (wt, carol) whose ref is corrupt (unknown scheme).
+  local rec
+  rec="$(bash -c '. "'"$SCRIPTS"'/lib/actas-lock.sh"; agmsg_spawn_path wt carol')"
+  mkdir -p "$(dirname "$rec")"
+  printf 'bogus:xyz\t/tmp/p\tclaude-code' > "$rec"
+
+  export WLOG="$TEST_SKILL_DIR/wlog"; : > "$WLOG"
+  # SESSION_ID is referenced only past the ref guard; the guard returns before it.
+  SESSION_ID=irrelevant bash -c '. "'"$shim"'"; close_own_placement wt carol'
+  grep -q "did not resolve to a terminal and pane id" "$WLOG"
+  # must NOT reach the "belongs to someone else" fallthrough with an empty recorded side
+  refute grep -q "belongs to someone else" "$WLOG"
+}

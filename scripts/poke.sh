@@ -72,8 +72,14 @@ REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 IFS=$'\t' read -r REF _PROJ _TYPE < "$REC" || true
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
-TERMINAL="$(agmsg_terminal_ref_terminal "$REF")"
-BARE_ID="$(agmsg_terminal_ref_id "$REF")"
+# The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. Under
+# `set -e` a bare `VAR="$(...)"` would take the shell down AT the assignment, so
+# the die below — the contract for an unresolvable ref — is never reached. Guard
+# each assignment with `|| VAR=""` (a condition, errexit-safe on bash 3.2) so the
+# failure lands in the emptiness check and reaches its message.
+TERMINAL=""; BARE_ID=""
+TERMINAL="$(agmsg_terminal_ref_terminal "$REF")" || TERMINAL=""
+BARE_ID="$(agmsg_terminal_ref_id "$REF")" || BARE_ID=""
 [ -n "$TERMINAL" ] && [ -n "$BARE_ID" ] \
   || die "placement record for '$TEAM/$NAME' did not resolve to a terminal and pane id (ref: '$REF')"
 

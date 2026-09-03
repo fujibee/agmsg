@@ -218,3 +218,163 @@ EOF
   _out_has "no placement record for 'testteam/alice'"
   [ ! -s "$ARGV_LOG" ]
 }
+
+# --- peek exit taxonomy: UNREACHABLE (10) vs pane-gone (12) vs unsupported (13) ---
+# co1: 13 must mean ONE thing to the template — a driver with no peek path at all
+# (plain). A terminal that is momentarily unreachable (its CLI not on PATH) is 10;
+# an answered-but-no-content failure (the pane is gone) is 12. Both peek-capable
+# backends (tmux, herdr) must answer with the SAME taxonomy, so the two failures
+# are tested on BOTH.
+
+# A PATH with coreutils but deliberately NO tmux/herdr, so `command -v <cli>` in the
+# driver fails and the UNREACHABLE arm (10) is reached. Built from scratch (not a
+# filtered real PATH) so a stray tmux/herdr elsewhere cannot sneak back in.
+_terminal_less_path() {
+  local dir tool
+  dir="$(mktemp -d)"
+  for tool in bash sh dirname basename readlink uname sed grep awk cat tr \
+              mktemp rm cp mv mkdir printf head tail wc sort cut date id sqlite3; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      ln -s "$(command -v "$tool")" "$dir/$tool" 2>/dev/null || true
+    fi
+  done
+  printf '%s' "$dir"
+}
+
+# tmux whose capture-pane FAILS (the pane is gone), erroring to stderr.
+_install_fake_tmux_gone() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$1" in
+  capture-pane) echo "can't find pane: %5" >&2; exit 1 ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
+}
+
+# herdr whose `pane read` FAILS, writing its error JSON to STDOUT (herdr's real
+# failure shape) and exiting non-zero.
+_install_fake_herdr_gone() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '{"error":{"code":"pane_not_found","pane":"%s"}}\n' "\$3"
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "peek taxonomy: tmux NOT on PATH -> 10 (unreachable), not 13 (plain-unsupported)" {
+  _write_record "tmux:%5"
+  local hp; hp="$(_terminal_less_path)"
+  run env PATH="$hp" bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 10 ]
+  _out_has "tmux: not on PATH"
+}
+
+@test "peek taxonomy: tmux capture-pane fails (pane gone) -> 12, not 13" {
+  _install_fake_tmux_gone
+  _write_record "tmux:%5"
+  run bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 12 ]
+  _out_has "could not capture pane '%5'"
+}
+
+@test "peek taxonomy: herdr NOT on PATH -> 10 (unreachable), not 13" {
+  _write_record "herdr:w1:p4"
+  local hp; hp="$(_terminal_less_path)"
+  run env PATH="$hp" HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 10 ]
+  _out_has "herdr: not on PATH"
+}
+
+@test "peek taxonomy: herdr pane read fails -> 12, and its error JSON is NOT on stdout" {
+  _install_fake_herdr_gone
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 12 ]
+  # the failure body is a diagnostic (stderr), never the caller's pane content
+  [ ! -s "$outf" ]
+  grep -q "pane_not_found" "$errf"
+  grep -q "could not read pane 'w1:p4'" "$errf"
+}
+
+# --- peek READ contract: content reaches stdout VERBATIM (co1) --------------
+# herdr's content is captured to a temp file and cat'd, NOT round-tripped through a
+# command substitution (which strips every trailing newline) + printf '%s\n' (which
+# invents exactly one back). Assert the BYTES, since `run`/$output would itself hide
+# a trailing-newline change.
+
+_install_fake_herdr_catfile() {
+  cat > "$FAKEBIN/herdr" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pane ] && [ "$2" = read ]; then
+  cat "$HERDR_CONTENT_FILE"
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "peek verbatim: EMPTY pane content stays empty (0 bytes), not a lone newline" {
+  _install_fake_herdr_catfile
+  export HERDR_CONTENT_FILE="$TEST_SKILL_DIR/content"
+  printf '' > "$HERDR_CONTENT_FILE"
+  _write_record "herdr:w1:p4"
+  local outf; outf="$TEST_SKILL_DIR/o"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>/dev/null; local rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$(wc -c < "$outf")" -eq 0 ]
+}
+
+@test "peek verbatim: content with NO final newline is not given one" {
+  _install_fake_herdr_catfile
+  export HERDR_CONTENT_FILE="$TEST_SKILL_DIR/content"
+  printf 'abc' > "$HERDR_CONTENT_FILE"    # 3 bytes, no newline
+  _write_record "herdr:w1:p4"
+  local outf; outf="$TEST_SKILL_DIR/o"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>/dev/null
+  [ "$(wc -c < "$outf")" -eq 3 ]
+  cmp -s "$HERDR_CONTENT_FILE" "$outf"
+}
+
+@test "peek verbatim: content with MULTIPLE final newlines keeps all of them" {
+  _install_fake_herdr_catfile
+  export HERDR_CONTENT_FILE="$TEST_SKILL_DIR/content"
+  printf 'abc\n\n\n' > "$HERDR_CONTENT_FILE"    # 6 bytes, three trailing newlines
+  _write_record "herdr:w1:p4"
+  local outf; outf="$TEST_SKILL_DIR/o"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>/dev/null
+  [ "$(wc -c < "$outf")" -eq 6 ]
+  cmp -s "$HERDR_CONTENT_FILE" "$outf"
+}
+
+# --- caller guard: an unresolvable ref must REACH its contract, not die silent ---
+# peek.sh/poke.sh run under `set -e`; a bare `VAR="$(ref-parser ...)"` would take the
+# shell down AT the assignment (the parser fails closed on a corrupt/unknown ref),
+# so the "did not resolve" die below was unreachable. watch.sh must give the same
+# ref its own logged branch rather than a misleading "belongs to someone else".
+
+@test "peek: a corrupt ref REACHES the resolve die (not a silent set -e exit)" {
+  _install_fake_tmux
+  _write_record "bogus:xyz"
+  run bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -ne 0 ]
+  _out_has "did not resolve to a terminal and pane id (ref: 'bogus:xyz')"
+  [ ! -s "$ARGV_LOG" ]    # never reached a terminal binary
+}
+
+@test "poke: a corrupt ref REACHES the resolve die (not a silent set -e exit)" {
+  _install_fake_tmux
+  _write_record "tmux:%9;kill"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -ne 0 ]
+  _out_has "did not resolve to a terminal and pane id (ref: 'tmux:%9;kill')"
+  [ ! -s "$ARGV_LOG" ]
+}
