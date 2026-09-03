@@ -21,6 +21,12 @@ printf '%s\n' "\$*" >> "$CAPTURE"
 EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
+  command -v sqlite3 >/dev/null 2>&1 || {
+    echo "test_spawn requires sqlite3" >&2
+    return 1
+  }
+  export SQLITE_BIN_DIR
+  SQLITE_BIN_DIR="$(dirname "$(command -v sqlite3)")"
 
   # Never inherit a real tmux server or herdr env from the test runner —
   # force the OS-terminal path, which we redirect into record.sh via a {cmd}
@@ -37,6 +43,30 @@ EOF
 
 teardown() {
   teardown_test_env
+}
+
+add_spawnable_type() {
+  local type="$1" cli="$2" type_dir
+  type_dir="$TYPES/$type"
+  mkdir -p "$type_dir"
+  printf 'name=%s\ncli=%s\nspawnable=yes\nmonitor=no\n' \
+    "$type" "$cli" > "$type_dir/type.conf"
+}
+
+force_windows_fallback_rules() {
+  cat > "$STUB_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+echo MSYS_NT-10.0
+EOF
+  chmod +x "$STUB_BIN/uname"
+}
+
+assert_boot_reaches_cleanup() {
+  local boot="$1"
+  run env PATH="/usr/bin:/bin" SHELL=/bin/false \
+    CHILD_CAPTURE="${CHILD_CAPTURE:-}" CHILD_CAPTURE_WIN="${CHILD_CAPTURE_WIN:-}" \
+    bash "$boot"
+  [ ! -e "$boot" ]
 }
 
 # --- argument validation ---
@@ -78,23 +108,170 @@ teardown() {
 }
 
 @test "spawn: errors when the target CLI is not installed" {
-  rm -f "$STUB_BIN/codex"
+  add_spawnable_type missingcli agmsg-test-guaranteed-missing-cli
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  # Restrict PATH so a real codex installed on the host can't satisfy the
-  # check — only the stub dir (now lacking codex) plus system utilities.
-  run env PATH="$STUB_BIN:/usr/bin:/bin" bash "$SCRIPTS/spawn.sh" codex foo --project "$PROJ"
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" missingcli foo --project "$PROJ"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "not found on PATH" ]]
+  [[ "$output" =~ "'agmsg-test-guaranteed-missing-cli' not found on PATH" ]]
 }
 
-@test "spawn: a multi-word cli= (opencode) checks only its first word's existence (#277)" {
-  rm -f "$STUB_BIN/opencode"
+@test "spawn: missing PATH CLI reports fallback locations before registration" {
+  add_spawnable_type missingfallback agmsg-test-nonexec-cli
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/agmsg-test-nonexec-cli"
+  chmod -x "$HOME/.local/bin/agmsg-test-nonexec-cli"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  run env PATH="$STUB_BIN:/usr/bin:/bin" bash "$SCRIPTS/spawn.sh" opencode foo --project "$PROJ"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" missingfallback reviewer --project "$PROJ"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "'opencode' not found on PATH" ]]
+  printf '%s\n' "$output" | grep -q "fallback locations"
+
+  run bash "$SCRIPTS/identities.sh" "$PROJ" missingfallback
+  [[ "$output" != *"reviewer"* ]]
+}
+
+@test "spawn: unset HOME skips the local-bin fallback probe" {
+  add_spawnable_type nohome agmsg-test-guaranteed-missing-cli
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env -u HOME PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" nohome foo --project "$PROJ"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q "fallback locations"
+  [[ "$output" != *"unbound variable"* ]]
+}
+
+@test "spawn: Windows fallback prefers the bare executable" {
+  add_spawnable_type winbare agmsg-test-win-bare
+  force_windows_fallback_rules
+  mkdir -p "$HOME/.local/bin"
+  for candidate in agmsg-test-win-bare agmsg-test-win-bare.exe; do
+    cp "$(type -P true)" "$HOME/.local/bin/$candidate"
+    chmod +x "$HOME/.local/bin/$candidate"
+  done
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" winbare alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=$HOME/.local/bin/agmsg-test-win-bare" "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "agmsg-test-win-bare.exe" "$boot"
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: Windows fallback executes exe before cmd and bat" {
+  add_spawnable_type winexe agmsg-test-win-exe
+  force_windows_fallback_rules
+  mkdir -p "$HOME/.local/bin"
+  cp "$(type -P true)" "$HOME/.local/bin/agmsg-test-win-exe.exe"
+  chmod +x "$HOME/.local/bin/agmsg-test-win-exe.exe"
+  printf '@echo off\r\n' > "$HOME/.local/bin/agmsg-test-win-exe.cmd"
+  printf '@echo off\r\n' > "$HOME/.local/bin/agmsg-test-win-exe.bat"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" winexe alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "agmsg-test-win-exe" "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F "agmsg-test-win-exe.cmd" "$boot"
+  [ "$status" -ne 0 ]
+  run grep -F "agmsg-test-win-exe.bat" "$boot"
+  [ "$status" -ne 0 ]
+  assert_boot_reaches_cleanup "$boot"
+}
+
+@test "spawn: Windows fallback resolves npm shims from APPDATA" {
+  add_spawnable_type winnpm agmsg-test-win-npm
+  force_windows_fallback_rules
+  export APPDATA="$TEST_SKILL_DIR/appdata"
+  if ! command -v cygpath >/dev/null 2>&1; then
+    cat > "$STUB_BIN/cygpath" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-u" ] || exit 2
+printf '%s\n' "$2"
+EOF
+    chmod +x "$STUB_BIN/cygpath"
+  fi
+  mkdir -p "$APPDATA/npm"
+  printf '@echo off\r\n' > "$APPDATA/npm/agmsg-test-win-npm.cmd"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" APPDATA="$APPDATA" \
+    bash "$SCRIPTS/spawn.sh" winnpm alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "agmsg-test-win-npm.cmd" "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: Windows fallback selects and executes cmd before bat" {
+  add_spawnable_type wincmd agmsg-test-win-cmd
+  force_windows_fallback_rules
+  mkdir -p "$HOME/.local/bin"
+  actual_platform="$(/usr/bin/uname -s)"
+  wrapper="$HOME/.local/bin/agmsg-test-win-cmd.cmd"
+  export CHILD_CAPTURE="$TEST_SKILL_DIR/windows-wrapper.txt"
+  if [[ "$actual_platform" == MINGW* || "$actual_platform" == MSYS* || "$actual_platform" == CYGWIN* ]]; then
+    export CHILD_CAPTURE_WIN="$(cygpath -w "$CHILD_CAPTURE")"
+    printf '@echo off\r\n> "%%CHILD_CAPTURE_WIN%%" echo cmd\r\n' > "$wrapper"
+  else
+    printf '#!/usr/bin/env bash\nprintf "cmd\\\\n" > "$CHILD_CAPTURE"\n' > "$wrapper"
+    chmod +x "$wrapper"
+  fi
+  printf '@echo off\r\n' > "$HOME/.local/bin/agmsg-test-win-cmd.bat"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" wincmd alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=$wrapper" "$boot"
+  [ "$status" -eq 0 ]
+  assert_boot_reaches_cleanup "$boot"
+  [ "$(tr -d '\r' < "$CHILD_CAPTURE")" = "cmd" ]
+}
+
+@test "spawn: Windows fallback selects and executes bat last" {
+  add_spawnable_type winbat agmsg-test-win-bat
+  force_windows_fallback_rules
+  mkdir -p "$HOME/.local/bin"
+  actual_platform="$(/usr/bin/uname -s)"
+  wrapper="$HOME/.local/bin/agmsg-test-win-bat.bat"
+  export CHILD_CAPTURE="$TEST_SKILL_DIR/windows-wrapper.txt"
+  if [[ "$actual_platform" == MINGW* || "$actual_platform" == MSYS* || "$actual_platform" == CYGWIN* ]]; then
+    export CHILD_CAPTURE_WIN="$(cygpath -w "$CHILD_CAPTURE")"
+    printf '@echo off\r\n> "%%CHILD_CAPTURE_WIN%%" echo bat\r\n' > "$wrapper"
+  else
+    printf '#!/usr/bin/env bash\nprintf "bat\\\\n" > "$CHILD_CAPTURE"\n' > "$wrapper"
+    chmod +x "$wrapper"
+  fi
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:$SQLITE_BIN_DIR:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" winbat alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=$wrapper" "$boot"
+  [ "$status" -eq 0 ]
+  assert_boot_reaches_cleanup "$boot"
+  [ "$(tr -d '\r' < "$CHILD_CAPTURE")" = "bat" ]
+}
+
+@test "spawn: a multi-word cli= checks only its first word's existence (#277)" {
+  add_spawnable_type missingprefix "agmsg-test-missing-prefix run --interactive"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" missingprefix foo --project "$PROJ"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "'agmsg-test-missing-prefix' not found on PATH" ]]
   # never searches for the literal multi-word string as one executable name
-  [[ "$output" != *"'opencode run --interactive' not found"* ]]
+  [[ "$output" != *"'agmsg-test-missing-prefix run --interactive' not found"* ]]
 }
 
 # --- team resolution ---
@@ -163,6 +340,114 @@ teardown() {
   [[ "$output" == *"actas"* ]]
   [[ "$output" == *"alice"* ]]
   [[ "$output" == *"$PROJ"* ]]
+}
+
+@test "spawn: PATH-resolved CLI remains late-bound in the boot script" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=" "$boot"
+  [ "$status" -ne 0 ]
+  run grep -E "^MSYS2_ARG_CONV_EXCL=/[^ ]+ claude " "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: parent PATH miss secures a local-bin fallback for the child" {
+  rm -f "$STUB_BIN/claude"
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/claude"
+  chmod +x "$HOME/.local/bin/claude"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=$HOME/.local/bin/claude" "$boot"
+  [ "$status" -eq 0 ]
+  run grep -F '"$_agmsg_cli"' "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: fallback executes when the child PATH still misses the logical CLI" {
+  rm -f "$STUB_BIN/claude"
+  mkdir -p "$HOME/.local/bin"
+  cat > "$HOME/.local/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'fallback\n' > "$CHILD_CAPTURE"
+EOF
+  chmod +x "$HOME/.local/bin/claude"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  export CHILD_CAPTURE="$TEST_SKILL_DIR/child-cli.txt"
+  run env PATH="/usr/bin:/bin" SHELL=/bin/false CHILD_CAPTURE="$CHILD_CAPTURE" \
+    bash "$boot"
+  [ "$(cat "$CHILD_CAPTURE")" = "fallback" ]
+}
+
+@test "spawn: child PATH shim wins over a parent-discovered fallback" {
+  rm -f "$STUB_BIN/claude"
+  mkdir -p "$HOME/.local/bin"
+  cat > "$HOME/.local/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'fallback\n' > "$CHILD_CAPTURE"
+EOF
+  chmod +x "$HOME/.local/bin/claude"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+
+  child_bin="$TEST_SKILL_DIR/child-bin"
+  mkdir -p "$child_bin"
+  cat > "$child_bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf 'shim\n' > "$CHILD_CAPTURE"
+EOF
+  chmod +x "$child_bin/claude"
+  export CHILD_CAPTURE="$TEST_SKILL_DIR/child-cli.txt"
+  run env PATH="$child_bin:/usr/bin:/bin" SHELL=/bin/false \
+    CHILD_CAPTURE="$CHILD_CAPTURE" bash "$boot"
+  [ "$(cat "$CHILD_CAPTURE")" = "shim" ]
+}
+
+@test "spawn: fallback path with spaces is shell-quoted" {
+  rm -f "$STUB_BIN/claude"
+  spaced_home="$TEST_SKILL_DIR/home with spaces"
+  mkdir -p "$spaced_home/.local/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$spaced_home/.local/bin/claude"
+  chmod +x "$spaced_home/.local/bin/claude"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env HOME="$spaced_home" PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F "_agmsg_cli=$TEST_SKILL_DIR/home\\ with\\ spaces/.local/bin/claude" "$boot"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: fallback preserves a multi-word cli prefix" {
+  add_spawnable_type fallbackprefix "agmsg-test-fallback-prefix run --interactive"
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/agmsg-test-fallback-prefix"
+  chmod +x "$HOME/.local/bin/agmsg-test-fallback-prefix"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  run env PATH="$STUB_BIN:/usr/bin:/bin" \
+    bash "$SCRIPTS/spawn.sh" fallbackprefix bob --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run grep -F '"$_agmsg_cli" run --interactive' "$boot"
+  [ "$status" -eq 0 ]
 }
 
 @test "spawn: names the session <team>-<agent> when the type has name_arg (#339)" {

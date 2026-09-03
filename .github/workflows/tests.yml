@@ -651,6 +651,12 @@ jobs:
             # started -- a leg that fails for something it does not use reports
             # on that thing, not on the code.
             sqlite: false
+          # Focused direct-CLI fallback coverage: locks the native extension
+          # order without running the POSIX-assuming remainder of test_spawn.
+          - leg: spawn resolution
+            filter: "[Ww]indows fallback"
+            target: tests/test_spawn.bats
+            sqlite: true
     defaults:
       run:
         # bats is bash; on Windows runners `shell: bash` is Git Bash, the same
