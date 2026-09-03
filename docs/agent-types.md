@@ -1,7 +1,7 @@
 # Agent types
 
 agmsg supports several agent runtimes — claude-code, codex, gemini, antigravity,
-copilot, opencode, hermes, cursor, devin, grok-build — plus `agmsg-app` and `ext-tool` for members that are not CLI agents — and each is described by a small **manifest** so that the rest
+copilot, opencode, hermes, cursor, devin, grok-build, pi — plus `agmsg-app` and `ext-tool` for members that are not CLI agents — and each is described by a small **manifest** so that the rest
 of agmsg (detection, the join whitelist, spawn, and delivery routing) discovers it
 from data instead of hardcoded `case` arms.
 
