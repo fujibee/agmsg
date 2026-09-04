@@ -302,6 +302,33 @@ PY
 #     subshell                                lifting is tracked file-wide, not
 #                                             per scope
 #
+# And one that is NOT a syntax gap, which is why the list above missed it:
+#
+#   a BARE COMMAND OR FUNCTION CALL           `f "$x"; rc=$?` is not looked at.
+#     followed by `rc=$?`  -> #1034           The predecessor is only examined
+#                                             when it is an assignment with a
+#                                             command substitution, or a
+#                                             `source` — so the most ordinary
+#                                             producer of `$?` is skipped
+#                                             entirely. Under `set -e` such a
+#                                             call exits the shell before the
+#                                             status can be classified. Found by
+#                                             review, not by this file. The
+#                                             splitter is NOT the problem: it
+#                                             already returns the two statements
+#                                             correctly; the PREDICATE is what
+#                                             is narrow. Widening it, and
+#                                             counting what the tree then shows,
+#                                             is #1034 — deliberately not done
+#                                             here, because the count is unknown
+#                                             and would move the baseline.
+#
+# The two lists are different axes. Everything above the gap line enumerates
+# SYNTAX the scanner may mis-split. The entry below it enumerates a SHAPE that
+# produces `$?` at all — and that axis had never been written down, which is how
+# the commonest shape of the three stayed invisible while the file looked
+# thorough.
+#
 # Adding a control for one of these means moving it up, not deleting the line.
 #
 # ---- positive control: prove the scanner can still find each known-bad kind --
