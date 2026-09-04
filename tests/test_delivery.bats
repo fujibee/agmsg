@@ -2882,27 +2882,25 @@ JSON
 @test "delivery set turn (pi): writes .pi/extensions/agmsg.ts with turn marker" {
   run bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Delivery mode set to 'turn'" ]]
+  printf '%s\n' "$output" | grep -q "Delivery mode set to 'turn'"
   local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
   [ -f "$ext_file" ]
-  run cat "$ext_file"
-  [[ "$output" == *"agmsg-delivery-mode: turn"* ]]
-  [[ "$output" == *"agent_settled"* ]]
-  [[ "$output" == *"$TEST_SKILL_DIR"* ]]
-  [[ "$output" != *"agmsg-delivery-mode: monitor"* ]]
+  grep -q "agmsg-delivery-mode: turn" "$ext_file"
+  grep -q "agent_settled" "$ext_file"
+  grep -F -q "$TEST_SKILL_DIR" "$ext_file"
+  refute grep -q "agmsg-delivery-mode: monitor" "$ext_file"
 }
 
 @test "delivery set monitor (pi): writes the extension with a 15s poll" {
   run bash "$SCRIPTS/delivery.sh" set monitor pi "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Delivery mode set to 'monitor'" ]]
+  printf '%s\n' "$output" | grep -q "Delivery mode set to 'monitor'"
   local ext_file="$TEST_PROJECT/.pi/extensions/agmsg.ts"
   [ -f "$ext_file" ]
-  run cat "$ext_file"
-  [[ "$output" == *"agmsg-delivery-mode: monitor"* ]]
-  [[ "$output" == *"15000"* ]]
-  [[ "$output" == *"$TEST_SKILL_DIR"* ]]
-  [[ "$output" != *"watch.sh"* ]]
+  grep -q "agmsg-delivery-mode: monitor" "$ext_file"
+  grep -q "15000" "$ext_file"
+  grep -F -q "$TEST_SKILL_DIR" "$ext_file"
+  refute grep -q "watch.sh" "$ext_file"
 }
 
 @test "delivery set off (pi): removes the extension" {
@@ -2915,15 +2913,15 @@ JSON
 
 @test "delivery status (pi): derives mode from the extension marker" {
   run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
-  [[ "$output" =~ "mode: off" ]]
+  printf '%s\n' "$output" | grep -q "mode: off"
 
   bash "$SCRIPTS/delivery.sh" set turn pi "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
-  [[ "$output" =~ "mode: turn" ]]
+  printf '%s\n' "$output" | grep -q "mode: turn"
 
   bash "$SCRIPTS/delivery.sh" set monitor pi "$TEST_PROJECT" >/dev/null
   run bash "$SCRIPTS/delivery.sh" status pi "$TEST_PROJECT"
-  [[ "$output" =~ "mode: monitor" ]]
+  printf '%s\n' "$output" | grep -q "mode: monitor"
 }
 
 @test "delivery set both (pi): rejected; does NOT delete an existing turn extension" {
