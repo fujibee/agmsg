@@ -10,9 +10,15 @@
 #   `agent list`, with positive controls):
 #     - `herdr agent list` is JSON; agent_session in the list is an OBJECT and the
 #       session id is at .value (inherited HERDR_PANE_ID is NOT trusted).
-#     - a session-less pane has the agent_session KEY ABSENT entirely, with agent
-#       present (the kind) and agent_status exactly "done" — this is the bare-pane
-#       fingerprint B relies on; no live-list entry carries a JSON-null agent_session.
+#     - a session-less pane has the agent_session KEY ABSENT entirely; no live-list
+#       entry carries a JSON-null agent_session. B recognizes it by STRUCTURE, not by
+#       a value or a key-name set — both drift while the pane lives (agent_status
+#       changes; name/display_agent come and go): the agent_session key is absent, the
+#       pane_id is valid, the fixed identity anchor (agent/terminal_id/tab_id/
+#       workspace_id, measured always-present, 0 variance over 11 panes, 2026-09-04)
+#       is present, and NO field is object/array-valued (so a session hidden under a
+#       renamed key cannot pass). display_agent was a string in one 2026-09-04 agent
+#       list; a NAMED bare pane was not observed by 2026-09-04 (its control is defensive).
 #     - the pane-id grammar (w1:p4, w1:pB, w5:p3, w1:pC).
 #     - `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #     - the internal agent-name key is a collision-resistant SHA-256 derivation of
@@ -80,14 +86,19 @@ _herdr_pane_for_session() {
   # "this entry legitimately has no session":
   #   DETERMINATE entry  — its membership is decidable: EITHER an agent_session OBJECT
   #                        whose .value is text (comparable to the target), OR a pane
-  #                        POSITIVELY recognized as session-less — no agent_session key,
-  #                        a valid pane_id, agent is text, and agent_status is exactly
-  #                        the measured finished value "done" (see the det CTE below).
+  #                        POSITIVELY recognized as session-less by STRUCTURE (see the
+  #                        det CTE): agent_session key absent, a valid pane_id, the fixed
+  #                        identity anchor present, and NO field object/array-valued.
+  #                        NOT by agent_status's value or the key-name set — both drift
+  #                        while the pane lives, which is what made the value-pinned
+  #                        version intermittently green (round-8 twice).
   #   indeterminate      — an agent_session PRESENT but malformed (scalar, or object
   #                        without a text .value), OR a key-absent entry that is NOT the
-  #                        proven session-less shape (e.g. agent_status "running"/"idle"
-  #                        or a session hidden under a renamed key): the target could be
-  #                        hiding there unread, so it must NOT be silently ruled out.
+  #                        proven session-less structure (a session hidden under a renamed
+  #                        key: future_session:{…}, future_sessions:[…], session_ids:[…]
+  #                        — any object/array-valued field), a bare {}, or a shape lacking
+  #                        the anchor: the target could be hiding there unread, so it must
+  #                        NOT be silently ruled out.
   # One query over the array at $q (the authority once found) returns four
   # '|'-separated fields — alen, determinate count, "found-but-unusable-pane" count,
   # and the matched pane id. The matched pane is the ONLY free-text field and it is
@@ -109,51 +120,61 @@ _herdr_pane_for_session() {
     orc=0
     out="$(sqlite3 :memory: "
       WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
-           -- Tag every object entry ONCE (co1: one predicate, no drift): does its
-           -- pane_id match the measured grammar, and what is agent_session's type.
-           tagged(value, pane_ok, as_type) AS (
+           -- Tag every object entry ONCE (co1: one predicate, no drift). The entries
+           -- table is ALIASED (e) so the correlated json_each below binds e.value per
+           -- row -- without the alias a bare json_each(value) does NOT correlate and
+           -- returns the same answer for every row (measured).
+           tagged(value, pane_ok, as_type, anchor_ok, struct_free) AS (
              -- pane_ok is normalized to a definite 0/1 (co1): a boolean expression
              -- would be NULL when pane_id is ABSENT, and then a target session with
              -- no pane_id lands in NEITHER hit (AND pane_ok -> NULL) nor badhit
              -- (AND NOT pane_ok -> NULL), so present-but-unaddressable would read as
              -- not-among. CASE WHEN … THEN 1 ELSE 0 END collapses the three-valued
              -- logic so hit draws from pane_ok=1 and badhit from pane_ok=0.
-             SELECT value,
-               CASE WHEN json_type(value,'\$.pane_id') = 'text'
-                 AND json_extract(value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
-                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*:*:*')
-                 AND NOT (json_extract(value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+             SELECT e.value,
+               CASE WHEN json_type(e.value,'\$.pane_id') = 'text'
+                 AND json_extract(e.value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
                THEN 1 ELSE 0 END,
-               json_type(value,'\$.agent_session')
-             FROM entries WHERE json_type(value) = 'object'),
-           -- DECIDABLE = positively one of the two KNOWN kinds (tl 2026-09-01;
-           -- shapes remeasured on the live machine 2026-09-02 by utildev):
-           --   A. a session entry: agent_session is an OBJECT with a text .value
-           --   B. a bare pane: the MEASURED session-less pane (herdr 0.8.0, live) has
-           --      the agent_session KEY ABSENT entirely -- json_type is SQL NULL
-           --      (as_type IS NULL), NOT a JSON null value -- while its agent (the kind,
-           --      grok/codex) and agent_status remain, on a valid pane_id, and the
-           --      MEASURED agent_status of a session-less pane is exactly the value done.
-           -- B demands that whole positive fingerprint, and the agent_status VALUE, not
-           -- merely its type: key-absent AND a valid pane_id AND agent is text AND
-           -- agent_status = 'done'. Requiring only that agent_status be text was too
-           -- broad (co1) -- a renamed-session drift (agent text, agent_status running, a
-           -- session under a renamed key such as future_session, a valid pane_id)
-           -- meets every type test while HIDING a live target under that renamed key, so
-           -- it would be miscounted as bare and the target reported not-among. Pinning the value
-           -- to the finished state keeps a running/idle pane -- which must own a session
-           -- -- OUT of B: no agent_session + not finished is an anomaly, so it stays
-           -- indeterminate. This deliberately errs NARROW: a session-less pane in some
-           -- other finished-state string would fall to did-not-answer (noisy) rather
-           -- than be silently ruled out -- better loud-and-unsure than quietly hiding a
-           -- target. A bare {}, a scalar/JSON-null agent_session, or a bad pane_id is
-           -- likewise indeterminate -> did-not-answer, never a silent not-among.
+               json_type(e.value,'\$.agent_session'),
+               -- (c) the fixed bare-pane ANCHOR: the herdr-pane identity keys every
+               --     agent-list entry carries (measured always-present, 0 variance over
+               --     11 panes, utildev 2026-09-04). This is the POSITIVE proof the entry
+               --     is a real herdr pane, so a minimal or unknown shape that merely has
+               --     a pane_id-looking field is NOT taken for one.
+               CASE WHEN json_type(e.value,'\$.agent') IS NOT NULL
+                 AND json_type(e.value,'\$.terminal_id') IS NOT NULL
+                 AND json_type(e.value,'\$.tab_id') IS NOT NULL
+                 AND json_type(e.value,'\$.workspace_id') IS NOT NULL
+               THEN 1 ELSE 0 END,
+               -- (d‴) NO field is object- or array-valued -- every value is a scalar.
+               CASE WHEN NOT EXISTS (
+                 SELECT 1 FROM json_each(e.value) k WHERE k.type IN ('object','array'))
+               THEN 1 ELSE 0 END
+             FROM entries e WHERE json_type(e.value) = 'object'),
+           -- DECIDABLE = positively one of the two KNOWN kinds. B (a session-less pane)
+           -- is proven by STRUCTURE, never by a value or a key-NAME set -- both of those
+           -- drift while the pane lives (agent_status changes state; name/display_agent
+           -- appear and vanish when the agent is named or ends), so pinning to either
+           -- makes the predicate intermittently green and reopens the round-8 regression.
+           -- The four conditions (co1/tl 2026-09-04):
+           --   (a) the agent_session KEY is ABSENT (as_type IS NULL);
+           --   (b) a valid pane_id (grammar above);
+           --   (c) the fixed identity anchor is present (anchor_ok);
+           --   (d‴) no field is object- or array-valued (struct_free).
+           -- (d‴) is what closes co1's renamed-session drift for ANY shape: a session
+           -- hidden under a renamed key (future_session:{…}, future_sessions:[…],
+           -- session_ids:[…]) is a structured value, so it fails struct_free -> the
+           -- entry is indeterminate and the target it hides is NOT reported not-among.
+           -- A scalar extension (name, display_agent -- measured as a string once in the
+           -- 2026-09-04 agent list) passes, so a NAMED bare pane still reaches not-among.
+           -- NOTE: a named bare pane (name present, agent_session absent) was NOT
+           -- observed as of 2026-09-04 (utildev); its control is DEFENSIVE.
            det(value) AS (
              SELECT value FROM tagged
              WHERE ( as_type = 'object' AND json_type(value,'\$.agent_session.value') = 'text' )
-                OR ( as_type IS NULL AND pane_ok = 1
-                     AND json_type(value,'\$.agent') = 'text'
-                     AND json_extract(value,'\$.agent_status') = 'done' )),
+                OR ( as_type IS NULL AND pane_ok = 1 AND anchor_ok = 1 AND struct_free = 1 )),
            -- the target, present as a session entry with a usable (grammar) pane:
            hit(pid) AS (
              SELECT json_extract(value,'\$.pane_id') FROM tagged

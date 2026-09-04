@@ -125,12 +125,13 @@ _fake_herdr_list_numeric_pane() {
 # must be not-among — NOT did-not-answer.
 _fake_herdr_list_bare_pane() {
   local sid="${1:-sess-OTHER}"
-  # The MEASURED session-less pane (utildev, live herdr 2026-09-02, raw JSON): the
-  # agent_session KEY is ABSENT entirely (json_type -> SQL NULL, NOT a JSON null
-  # value) — as are `name`/`display_agent`. What REMAINS is `agent` (the kind,
-  # "grok"/"codex", never "") and `agent_status` ("done"), plus a valid pane_id.
-  # That is the positive fingerprint B recognizes (w5:p3=grok, w1:pC=codex live).
-  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4"},{"agent":"grok","agent_status":"done","cwd":"/x","pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
+  # The MEASURED session-less pane (utildev, live herdr, raw JSON): the agent_session
+  # KEY is ABSENT entirely. B recognizes it by STRUCTURE, not by agent_status's value:
+  # the pane carries the herdr-pane identity anchor (agent, terminal_id, tab_id,
+  # workspace_id — measured always-present) and every field is a SCALAR. agent_status
+  # here is "working" ON PURPOSE — the old code pinned "done" and this pane, alive but
+  # not finished, then fell out of B (round-8 twice); the structural predicate takes it.
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '\''{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"w1:p4","terminal_id":"tm0","tab_id":"t0","workspace_id":"w0"},{"agent":"codex","agent_status":"working","cwd":"/x","focused":false,"revision":3,"state_change_seq":9,"tab_id":"t1","terminal_id":"tm1","terminal_title":"x","workspace_id":"w1","pane_id":"w5:p3"}]}}'\''; exit 0; }\nexit 0\n' "$sid" > "$FAKEBIN/herdr"
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 # A herdr whose `agent list` pairs a well-formed OTHER-session entry with a raw
@@ -905,28 +906,26 @@ M
   [ "$output" = "$(printf 'herdr\tw1:p4')" ]
 }
 
-@test "herdr naming: the bare-pane arm is POSITIVE — key-absent + real pane + agent + agent_status='done'" {
-  # tl round 9 + the LIVE remeasure (utildev, raw JSON): the measured session-less
-  # pane has agent_session KEY ABSENT (json_type -> SQL NULL, not a JSON null value),
-  # carries `agent` (the kind), a valid pane_id, AND agent_status EXACTLY "done".
-  # co1: requiring only "agent_status is text" was too broad — a renamed-session drift
-  # ({"agent":..,"agent_status":"running","future_session":{"value":TARGET},"pane_id"..})
-  # meets every type test while HIDING a live target under a renamed key, so it would
-  # be miscounted as bare and TARGET reported not-among. Pinning the VALUE to the
-  # finished state "done" keeps every entry below at did-not-answer, never a silent
-  # not-among. The two future_session controls hide sess-mine ITSELF, so a too-broad B
-  # would return not-among for a session that is actually present-but-unread.
+@test "herdr naming: the bare-pane arm is POSITIVE by STRUCTURE — an unresolvable entry is did-not-answer" {
+  # B recognizes a session-less pane by structure (co1/tl 2026-09-04), not by a value
+  # or a key-name set — both drift while a pane lives. An entry is did-not-answer, never
+  # a silent not-among, unless it is provably a bare pane: agent_session key absent, a
+  # valid pane_id, the fixed identity anchor present, and NO field object/array-valued.
+  # The crux is (d‴): a session hidden under a RENAMED key must not pass, in ANY shape —
+  # an object OR an array. Each future_* / session_ids control hides sess-mine ITSELF,
+  # so a too-broad B would return not-among for a session that is actually present.
   export HERDR_ENV=1
   local raw
   for raw in '{}' \
-             '{"agent":"claude","agent_status":"running","future_session":{"value":"sess-mine"},"pane_id":"w1:p4"}' \
-             '{"agent":"claude","agent_status":"idle","future_session":{"value":"sess-mine"},"pane_id":"w1:p4"}' \
+             '{"agent":"claude","agent_status":"running","future_session":{"value":"sess-mine"},"pane_id":"w1:p4","terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"}' \
+             '{"agent":"claude","agent_status":"idle","future_session":{"id":"sess-mine"},"pane_id":"w1:p4","terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"}' \
+             '{"agent":"claude","agent_status":"running","future_sessions":[{"id":"sess-mine"}],"pane_id":"w1:p4","terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"}' \
+             '{"agent":"claude","agent_status":"running","session_ids":["sess-mine"],"pane_id":"w1:p4","terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"}' \
              '{"agent":"grok","agent_status":"running","pane_id":"w2:p2"}' \
-             '{"agent":"claude","future_session":{"value":"z"},"pane_id":"w2:p2"}' \
-             '{"agent":"grok","pane_id":"w2:p2"}' \
-             '{"agent_status":"done","pane_id":"w2:p2"}' \
+             '{"agent":"grok","pane_id":"w2:p2","terminal_id":"tm1","tab_id":"t1"}' \
+             '{"pane_id":"w2:p2"}' \
              '{"agent":"","pane_id":"BADFORM"}' \
-             '{"agent":"grok","agent_status":"done","pane_id":"BADFORM"}' \
+             '{"agent":"grok","agent_status":"done","pane_id":"BADFORM","terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"}' \
              '{"agent":"grok","agent_session":null,"pane_id":"BADFORM"}' \
              '{"agent":"claude","agent_session":"scalar","pane_id":"w2:p2"}'; do
     _fake_herdr_list_plus "$raw"
@@ -934,6 +933,34 @@ M
     [ "$status" -ne 0 ]              || { echo "FAIL resolved: $raw"; return 1; }
     grep -q "did not answer" <<<"$output" || { echo "FAIL not did-not-answer: $raw"; return 1; }
     refute grep -q "not among the live agents" <<<"$output" || { echo "FAIL claimed not-among: $raw"; return 1; }
+  done
+}
+
+@test "herdr naming: a STRUCTURE-complete bare pane reaches not-among in every agent_status, named or with an unknown scalar" {
+  # The other side of the arm: a pane that IS provably session-less (anchor present, all
+  # scalar, agent_session absent) must be decidable REGARDLESS of agent_status's value,
+  # so an absent target is not-among. This is what the value-pinned 'done' broke — the
+  # real bare pane was 'working' and fell out (round-8 twice). Each raw below hides no
+  # session; the target sess-mine is genuinely absent, so the answer is not-among.
+  #   - working / idle / done: the live-changing value must NOT gate the answer.
+  #   - an unknown SCALAR extension key: herdr adding a scalar field must not break it.
+  #   - name + display_agent (a NAMED bare pane): DEFENSIVE — this state (name present,
+  #     agent_session absent) was NOT observed as of 2026-09-04 (utildev); display_agent
+  #     was a string in one 2026-09-04 agent list. Kept so naming (this driver's own job)
+  #     cannot silently make a member unresolvable.
+  export HERDR_ENV=1
+  local anchor='"terminal_id":"tm1","tab_id":"t1","workspace_id":"w1"'
+  local raw
+  for raw in '{"agent":"codex","agent_status":"working","pane_id":"w5:p3",'"$anchor"'}' \
+             '{"agent":"codex","agent_status":"idle","pane_id":"w5:p3",'"$anchor"'}' \
+             '{"agent":"codex","agent_status":"done","pane_id":"w5:p3",'"$anchor"'}' \
+             '{"agent":"codex","agent_status":"working","new_scalar_field":"whatever","pane_id":"w5:p3",'"$anchor"'}' \
+             '{"agent":"codex","agent_status":"done","name":"team__codex","display_agent":"team:codex","pane_id":"w5:p3",'"$anchor"'}'; do
+    _fake_herdr_list_plus "$raw"
+    run agmsg_terminal_resolve_name "sess-mine"
+    [ "$status" -ne 0 ]                                     || { echo "FAIL resolved: $raw"; return 1; }
+    grep -q "not among the live agents" <<<"$output"       || { echo "FAIL not not-among: $raw"; return 1; }
+    refute grep -q "did not answer" <<<"$output"           || { echo "FAIL claimed did-not-answer: $raw"; return 1; }
   done
 }
 
