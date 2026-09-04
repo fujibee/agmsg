@@ -762,4 +762,12 @@ elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
   # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly (tl).
   echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-readiness-handshake"
   echo "spawn: '${NAME}' was launched, but this type has no readiness handshake so its STARTUP IS UNCONFIRMED. If it does not appear, read its pane — a shell that prompts at startup (e.g. an update prompt) can eat the first keystroke of the boot command, and the failure then looks like a slow start." >&2
+else
+  # Explicit --no-wait (WAIT_READY cleared by the flag, not by a monitor=no type): the
+  # caller opted OUT of the readiness handshake, so — exactly like monitor=no — startup
+  # is not confirmed here, only that the boot was placed/typed. co1: both no-confirmation
+  # paths report launched-unconfirmed, so this arm must exist too; a distinct note keeps
+  # the two reasons legible. Silence (a bare `launched …` at rc 0) would imply success.
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-wait"
+  echo "spawn: '${NAME}' was launched with --no-wait, so its STARTUP IS UNCONFIRMED (the readiness handshake was skipped by request). If it does not appear, read its pane." >&2
 fi

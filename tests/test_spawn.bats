@@ -816,11 +816,18 @@ EOF
   [[ "$output" == *"status=timeout"* ]]
 }
 
-@test "spawn: --no-wait returns immediately with no readiness status" {
+@test "spawn: --no-wait on a monitor=YES type still reports launched-unconfirmed (no post-input confirmation)" {
+  # co1 full-head: --no-wait skips the readiness handshake by request, so startup is
+  # NOT confirmed — exactly like monitor=no. Both no-confirmation paths must report
+  # status=launched-unconfirmed (a distinct note keeps the reasons apart). A monitor=YES
+  # type (claude-code) with --no-wait is the arm that was silently falling through both
+  # branches with no status line at all.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" != *"status="* ]]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "status=ready" <<<"$output"
 }
 
 @test "spawn: codex skips the readiness wait (no Monitor)" {
@@ -862,17 +869,18 @@ EOF
   refute grep -q "spawned codex 'reviewer'" <<<"$output"
 }
 
-@test "spawn: an explicit --no-wait stays terse — 'launched', and NO launched-unconfirmed status" {
-  # --no-wait is the user opting out of the wait, not a no-handshake type; it must not
-  # acquire the unconfirmed status line (that is only for a type that CANNOT confirm).
-  # And the placement word is 'launched', never 'spawned', on this path too.
+@test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from monitor=no's" {
+  # The placement word is 'launched', never 'spawned', on the --no-wait path too; and
+  # the two no-confirmation reasons read apart — --no-wait carries note=no-wait, a
+  # monitor=no type carries note=no-readiness-handshake (utildev: distinct wording).
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   grep -q "launched claude-code 'alice'" <<<"$output"
   refute grep -q "spawned claude-code 'alice'" <<<"$output"
-  refute grep -q "status=launched-unconfirmed" <<<"$output"
-  refute grep -q "status=" <<<"$output"
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "note=no-readiness-handshake" <<<"$output"
 }
 
 @test "spawn: a CONFIRMED start (handshake) is the only path that proves startup (status=ready)" {
