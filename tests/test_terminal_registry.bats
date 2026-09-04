@@ -450,6 +450,22 @@ EOF
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
 }
 
+@test "herdr: terminal_spawn reaches the readiness arms under a NON-conditional set -e caller" {
+  # co1 (1): the readiness classifier returns non-zero for NOT-READY/UNKNOWN; a bare
+  # `classifier; ready_rc=$?` takes a set -e caller down BEFORE the arms classify. The
+  # spawn.sh tests call terminal_spawn inside `$(...)`, where errexit is masked — so
+  # prove the fix from a NON-conditional set -e caller (terminal_spawn called directly).
+  # A non-integer process-info is UNKNOWN, which must reach arm 3 (type + exit 4), not
+  # abort at the classifier.
+  _install_fake_herdr "sess-77"
+  export HERDR_PANE_ID='wC:p1'
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":"x","foreground_process_group_id":"x"}}}'
+  run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/herdr/ops.sh"; terminal_spawn alice /proj pane-v /boot'
+  [ "$status" -eq 4 ]                        # arm 3 reached (typed, unverified) — did NOT die at the classifier
+  [ "$output" = "wC:p9" ]                    # the pane id was printed, so the boot was typed
+  grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
+}
+
 @test "herdr: spawn fails closed on a non-grammar pane_id (numeric, newline, '|', bad shape)" {
   # A usable pane id must match the measured grammar, not merely be non-empty text.
   # Numeric/null (malformed/partial response) AND text values carrying a newline, a

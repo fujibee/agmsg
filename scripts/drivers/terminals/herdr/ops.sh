@@ -16,9 +16,11 @@
 #       changes; name/display_agent come and go): the agent_session key is absent, the
 #       pane_id is valid, the fixed identity anchor (agent/terminal_id/tab_id/
 #       workspace_id, measured always-present, 0 variance over 11 panes, 2026-09-04)
-#       is present, and NO field is object/array-valued (so a session hidden under a
-#       renamed key cannot pass). display_agent was a string in one 2026-09-04 agent
-#       list; a NAMED bare pane was not observed by 2026-09-04 (its control is defensive).
+#       is present, and NO field is object/array-valued (so a session moved to a renamed
+#       OBJECT/ARRAY key cannot pass; a session FLATTENED to a scalar is an unidentifiable
+#       residual — the cost of allowing unknown scalar extensions, named at the det CTE).
+#       display_agent was a string in one 2026-09-04 agent list; a NAMED bare pane was not
+#       observed by 2026-09-04 (its control is defensive).
 #     - the pane-id grammar (w1:p4, w1:pB, w5:p3, w1:pC).
 #     - `pane read --source <visible|recent|...>` (seat 0 measured the --source values).
 #     - the internal agent-name key is a collision-resistant SHA-256 derivation of
@@ -163,10 +165,20 @@ _herdr_pane_for_session() {
            --   (b) a valid pane_id (grammar above);
            --   (c) the fixed identity anchor is present (anchor_ok);
            --   (d‴) no field is object- or array-valued (struct_free).
-           -- (d‴) is what closes co1's renamed-session drift for ANY shape: a session
-           -- hidden under a renamed key (future_session:{…}, future_sessions:[…],
-           -- session_ids:[…]) is a structured value, so it fails struct_free -> the
-           -- entry is indeterminate and the target it hides is NOT reported not-among.
+           -- SCOPE of (d‴), stated exactly (co1): it catches a session moved to a
+           -- renamed OBJECT or ARRAY key -- future_session:{…}, future_sessions:[…],
+           -- session_ids:[…], inner shape irrelevant -- because the MEASURED agent_session
+           -- is an object, so a structured value where none belongs fails struct_free and
+           -- the target it hides is NOT reported not-among. It does NOT catch a session
+           -- FLATTENED to a scalar (a future_session or session_id key whose VALUE is the
+           -- bare target string, not an object/array): that passes struct_free and enters
+           -- B. RESIDUAL, named not hidden: an unknown
+           -- SCALAR field secretly carrying a session id is unidentifiable here -- the
+           -- deliberate cost of ALLOWING unknown scalar extensions, which is required
+           -- because name / display_agent are real scalar fields that come and go and a
+           -- named bare pane must still reach not-among. If a scalar-flattened session is
+           -- ever observed, add a condition then (same treatment as the hash-collision and
+           -- the process-info residuals: written down, not hidden).
            -- A scalar extension (name, display_agent -- measured as a string once in the
            -- 2026-09-04 agent list) passes, so a NAMED bare pane still reaches not-among.
            -- NOTE: a named bare pane (name present, agent_session absent) was NOT
@@ -315,10 +327,14 @@ _herdr_pane_input_ready() {
   info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
   jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
-  sp="$(sqlite3 :memory: "SELECT json_extract('$jesc','\$.result.process_info.shell_pid')" 2>/dev/null)" || return 2
-  fg="$(sqlite3 :memory: "SELECT json_extract('$jesc','\$.result.process_info.foreground_process_group_id')" 2>/dev/null)" || return 2
-  # Canonical positive integer only (^[1-9][0-9]*$): reject empty, null->empty, non-digit,
-  # a leading zero, and 0 itself. An unvalidated equality is no evidence of readiness.
+  # Require the JSON TYPE to be integer, in the SAME payload, BEFORE reading the value:
+  # a JSON string "123" extracts as 123 and would pass a digit check, but a pid that
+  # arrives as a string is not a validated pid (co1). The CASE yields the value only when
+  # json_type is 'integer', else empty -> the digit/positive guard below rejects it.
+  sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 2
+  fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 2
+  # Canonical positive integer (^[1-9][0-9]*$): reject empty (non-integer type / null /
+  # missing), a leading zero, and 0 or negatives. An unvalidated equality is no evidence.
   case "$sp" in ''|0*|*[!0-9]*) return 2 ;; esac
   case "$fg" in ''|0*|*[!0-9]*) return 2 ;; esac
   if [ "$sp" = "$fg" ]; then return 0; fi
@@ -355,9 +371,17 @@ terminal_spawn() {
   # are terminal. Every iteration uses the SAME classifier; UNKNOWN is never folded into
   # NOT READY. Exit codes carry the outcome to the caller: 0 typed+verified, 3 NOT typed
   # (pane never ready), 4 typed but pre-input state UNVERIFIED.
-  local ready_rc=2 tries=0 max_tries="${AGMSG_HERDR_INPUT_READY_TRIES:-50}"
-  while [ "$tries" -lt "$max_tries" ]; do
-    _herdr_pane_input_ready "$pane"; ready_rc=$?
+  #
+  # The bound is FIXED, not an env surface: a knob read from the environment could arrive
+  # empty / 0 / non-numeric and silently skip the observation (loop never runs -> UNKNOWN
+  # -> boot), which is the very thing this gate exists to prevent (co1). ~5s (50 * 0.1s)
+  # covers a slow interactive-shell startup without a knob to misconfigure.
+  # `ready_rc=0; classifier || ready_rc=$?`, NOT `classifier; ready_rc=$?`: the classifier
+  # returns non-zero for NOT-READY(1)/UNKNOWN(2), and a bare command whose status is read
+  # on the next line takes a `set -e` caller down BEFORE the branch classifies it (co1).
+  local ready_rc=2 tries=0
+  while [ "$tries" -lt 50 ]; do
+    ready_rc=0; _herdr_pane_input_ready "$pane" || ready_rc=$?
     [ "$ready_rc" = 1 ] || break
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))

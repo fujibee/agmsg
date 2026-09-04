@@ -1212,7 +1212,7 @@ _spawn_recorded_id() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   _setup_fake_herdr
   export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":100,"foreground_process_group_id":200}}}'
-  export AGMSG_HERDR_INPUT_READY_TRIES=2
+  # The wait bound is FIXED (no env knob): this loops the whole bound (~5s) before failing.
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -ne 0 ]
   grep -q "was not ready for input" <<<"$output"
@@ -1239,6 +1239,18 @@ _spawn_recorded_id() {
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   grep -q "BEFORE the boot was typed" <<<"$output"   # UNKNOWN, not a silent ready
+  grep -q "pane run" "$HERDR_CALL_LOG"
+}
+
+@test "spawn req1: a numeric-STRING pid is UNKNOWN, not READY (json_type must be integer)" {
+  # co1 (3): json_extract turns a JSON string "5" into 5, which would pass a digit check;
+  # the classifier requires json_type=integer, so "5"=="5" is UNKNOWN, never a silent ready.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"5"}}}'
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"
   grep -q "pane run" "$HERDR_CALL_LOG"
 }
 
