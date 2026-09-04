@@ -74,3 +74,39 @@
   # ...and the name pin no longer matches it.
   if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/4)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
 }
+
+# The suite has to run on the shape that actually gets dogfooded. A PR is only
+# ever tested as "this head against the base it was opened on", so when several
+# PRs collect on one integration branch, the tip -- all of them together -- is a
+# tree no PR run has seen. The push leg on `integration/**` is what covers it.
+@test "tests run on integration branches, on both legs" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+
+  # Two occurrences: one under push:, one under pull_request:. Asserting the
+  # count (not merely "present somewhere") is what makes this fail if only one
+  # leg is widened -- the failure mode that leaves the merged shape untested
+  # while every summary view still reads green.
+  run bash -c "grep -c \"branches: \[main, 'integration/\*\*'\]\" '$workflow'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# Guards the OTHER direction. A group expression alone cannot fail this: swap
+# cancel-in-progress to a bare `true` and the group still reads correctly while
+# main runs begin cancelling each other -- and a cancelled main run leaves the
+# commit a release ships with no verdict at all (#848). So the main arm is
+# asserted by name, not inferred from the group.
+@test "only main is exempt from cancellation" {
+  local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
+
+  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}" "$workflow"
+  [ "$status" -eq 0 ]
+
+  # main pushes group by run id, so nothing can ever supersede them.
+  run grep -F "github.ref == 'refs/heads/main' && github.run_id" "$workflow"
+  [ "$status" -eq 0 ]
+
+  # Every other push groups by ref, so a later merge supersedes an earlier one.
+  run grep -F "format('push-{0}', github.ref)" "$workflow"
+  [ "$status" -eq 0 ]
+}

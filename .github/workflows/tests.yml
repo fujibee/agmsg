@@ -1,6 +1,11 @@
 name: tests
 
 # Run the full Bats suite on PRs targeting main or any `integration/**` branch,
+# and on pushes to either. The push leg on integration branches is what tests
+# the MERGED shape: a PR is only ever tested as "my head against the base I was
+# opened on", so with several PRs collecting on one integration branch, the
+# state that is actually dogfooded -- all of them together at the tip -- is a
+# tree no PR run ever saw.
 # and on pushes to main. The filter is a pattern rather than a list of branch
 # names because a list goes quiet exactly when a new integration branch
 # appears: a PR onto an unlisted base has no required checks, so GitHub reports
@@ -54,7 +59,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   pull_request:
     branches: [main, 'integration/**']
 
@@ -70,8 +75,29 @@ permissions:
 # cancelled: its group is its own run id, and that run is what a release reads
 # (#848).
 concurrency:
-  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Three cases, and they want different things.
+  #
+  #   pull_request        -- group by PR. A head that has moved makes the run
+  #                          worthless, so cancel the one before it.
+  #   push to main        -- group by run id, i.e. never cancel. A release reads
+  #                          the run for the commit it ships (#848); a main run
+  #                          that another main run cancelled would leave that
+  #                          commit with no verdict at all.
+  #   push to integration -- group by ref, and cancel. An integration branch
+  #                          collects several PRs one after another, and it is
+  #                          only ever dogfooded at its tip. Without this the
+  #                          five merges of one release queue five full suites
+  #                          that all compete for the same five macOS slots
+  #                          (the header above measured 0-50 min queue waits at
+  #                          that contention), and four of the five verdicts are
+  #                          about a tip that no longer exists by the time they
+  #                          land.
+  group: >-
+    tests-${{ github.event_name == 'pull_request'
+    && format('pr-{0}', github.event.pull_request.number)
+    || (github.ref == 'refs/heads/main' && github.run_id
+    || format('push-{0}', github.ref)) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
 
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
