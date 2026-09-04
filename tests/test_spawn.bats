@@ -1242,16 +1242,31 @@ _spawn_recorded_id() {
   grep -q "pane run" "$HERDR_CALL_LOG"
 }
 
-@test "spawn req1: a numeric-STRING pid is UNKNOWN, not READY (json_type must be integer)" {
-  # co1 (3): json_extract turns a JSON string "5" into 5, which would pass a digit check;
-  # the classifier requires json_type=integer, so "5"=="5" is UNKNOWN, never a silent ready.
-  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  _setup_fake_herdr
-  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"5"}}}'
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
-  [ "$status" -eq 0 ]
-  grep -q "BEFORE the boot was typed" <<<"$output"
-  grep -q "pane run" "$HERDR_CALL_LOG"
+@test "spawn req1: a numeric-STRING pid is UNKNOWN on BOTH arms and either field (json_type must be integer)" {
+  # co1/tl (3): json_extract turns a JSON string "5" into 5, which would pass a digit
+  # check; the classifier requires json_type=integer on BOTH fields. Each case below
+  # must be UNKNOWN -> type + BEFORE-typing warning, NOT the NOT-READY 5s-wait/fail and
+  # NOT a silent ready. The cases pin the drift a one-sided control would miss:
+  #   - "5"/"5"  numeric string, EQUAL   (a value-only check would call it READY)
+  #   - "5"/"6"  numeric string, UNEQUAL (must NOT fall to NOT-READY; the gate is on the
+  #                                       values, not only the equality arm)
+  #   - 5 / "5"  MIXED: an integer and a numeric string (catches type-gating only ONE
+  #                                       field — the ungated string would match READY)
+  #   - "5"/ 5   MIXED the other way
+  local resp
+  for resp in '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"6"}}}' \
+              '{"result":{"process_info":{"shell_pid":5,"foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":5}}}'; do
+    bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ" >/dev/null 2>&1 || true
+    _setup_fake_herdr
+    export HERDR_PROCESS_INFO_RESPONSE="$resp"
+    run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+    [ "$status" -eq 0 ]                                     || { echo "FAIL status=$status for $resp"; return 1; }
+    grep -q "BEFORE the boot was typed" <<<"$output"       || { echo "FAIL not UNKNOWN warning for $resp"; return 1; }
+    grep -q "pane run" "$HERDR_CALL_LOG"                    || { echo "FAIL not typed for $resp"; return 1; }
+    refute grep -q "was not ready for input" <<<"$output"  || { echo "FAIL fell to NOT-READY for $resp"; return 1; }
+  done
 }
 
 @test "spawn req1: a READY pane types with NO readiness warning" {
