@@ -522,6 +522,10 @@ chmod +x "$BOOT"
 # and a non-zero exit, so the operator knows a window exists it cannot address.
 SPAWN_UNRECORDED=0
 SPAWN_UNREC_REF=""
+# requirement 1 (herdr): set when the pane's pre-input readiness could NOT be verified
+# before the boot was typed (herdr process-info did not answer). A WARNING, distinct
+# from the post-input startup verdict — see the note where it is emitted.
+SPAWN_READINESS_UNVERIFIED=0
 _record_placement() {   # <terminal> <id>
   local rec ref
   rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
@@ -608,9 +612,18 @@ launch_in_herdr() {
   # the pane-id grammar guard, so a malformed/partial response fails closed), renames
   # and runs the boot, and prints the new pane id.
   agmsg_terminal_load herdr || die "could not load the herdr terminal driver"
-  local new_id
-  new_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "$BOOT")" \
-    || die "herdr placement failed (split/tab create returned no usable pane id)"
+  # terminal_spawn carries requirement 1's THREE outcomes in its exit code: 0 typed and
+  # the pre-input state verified ready; 4 typed but that state UNVERIFIED; 3 NOT typed
+  # because the pane never reached its prompt. Capture the code and branch — a bare
+  # `|| die` would turn arm 4 (a success with a caveat) into a spurious failure.
+  local new_id rc=0
+  new_id="$(terminal_spawn "$NAME" "$PROJECT" "$target" "$BOOT")" || rc=$?
+  case "$rc" in
+    0) : ;;
+    4) SPAWN_READINESS_UNVERIFIED=1 ;;
+    3) die "herdr pane was not ready for input, so '${NAME}' was not launched (see the reason above)" ;;
+    *) die "herdr placement failed (split/tab create returned no usable pane id)" ;;
+  esac
   # Record placement as <terminal>:<id>. despawn reads the terminal from the record
   # (herdr pane ids contain ':', preserved by the first-colon ref split).
   _record_placement herdr "$new_id" || true
@@ -708,6 +721,16 @@ fi
 [ "$WAIT_READY" = "1" ] && rm -f "$READY_PATH" 2>/dev/null || true
 
 place_and_launch
+
+# requirement 1 arm 3 (herdr): the boot was typed, but the pane's pre-input readiness
+# could not be verified. Say so with the BEFORE-typing reason — deliberately worded
+# apart from the AFTER-typing "launched-unconfirmed" below, so an operator can tell
+# which check was blind (utildev). Per co1's priority this is only a WARNING: the final
+# startup verdict is still the post-input one — a watcher that then attaches makes the
+# status ready, and a monitor=no type still reports launched-unconfirmed on its own.
+if [ "$SPAWN_READINESS_UNVERIFIED" = "1" ]; then
+  echo "spawn: could not verify '${NAME}'s pane was at its shell prompt BEFORE the boot was typed (herdr process-info did not answer). If the agent does not appear, a startup shell prompt may have eaten the first keystroke — read the pane. This is the before-typing check; the startup confirmation below is separate." >&2
+fi
 
 # The pane was placed. If its placement record could not be written, the member is
 # running but unaddressable by peek/poke/despawn --force — report that distinctly and

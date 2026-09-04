@@ -280,6 +280,51 @@ _herdr_new_pane_id() {
   return 1
 }
 
+# requirement 1 (herdr pre-input readiness). Before typing the boot into the pane's
+# shell, confirm the shell is AT ITS PROMPT — nothing else in the foreground — so a
+# startup program (e.g. an oh-my-zsh update prompt) cannot eat the first keystroke.
+# The signal is STRUCTURAL and environment-independent (co1/tl 2026-09-04): herdr's
+# pane process-info reports shell_pid and foreground_process_group_id, and the shell is
+# at its prompt IFF the foreground process group IS the shell itself. No prompt string
+# is matched (zsh/bash/Windows alike) and no point-in-time value is baked in.
+#
+# Why not the obvious herdr calls (all MEASURED 2026-09-04, recorded so nobody re-hunts):
+#   - herdr agent start takes only a --kind enum, NOT an arbitrary boot script, and our
+#     spawn runs a boot script, so it cannot replace pane run.
+#   - herdr agent wait waits for an AGENT state; a pane with no agent yet is not in
+#     agent list (30 panes vs 11 agent-list entries), so it cannot see a bare shell.
+#   - agent list has no shell-readiness field; process-info is the one that does.
+#
+# NECESSARY, NOT SUFFICIENT (utildev, kept honest): this proves "no OTHER command is
+# running". It does NOT prove the keystroke survives — if the SHELL ITSELF is reading
+# (an oh-my-zsh "[Y/n]" has no child process), process-info returns equal and this
+# reports READY. That case was UNMEASURED as of 2026-09-04. So a first keystroke can
+# still be lost; that residual is caught AFTER typing by the readiness handshake /
+# launched-unconfirmed, never here. Do not read this gate as a guarantee.
+#
+# THREE outcomes, kept distinct (co1's positive-validation contract):
+#   0 READY      — command ok, BOTH ids present and canonical positive integers, EQUAL.
+#   1 NOT READY  — both ids validated the SAME way, and UNEQUAL (a foreground process).
+#   2 UNKNOWN    — the command failed, a field is missing, or a value is not a canonical
+#                  positive integer. "" == "" / null == null / same-malformed are NOT
+#                  ready: equality is read ONLY after both values pass validation. A
+#                  nonexistent pane and a malformed pane id return the SAME error, so
+#                  they are not split — both are UNKNOWN.
+_herdr_pane_input_ready() {
+  local pane="$1" info rc=0 sp fg jesc
+  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  sp="$(sqlite3 :memory: "SELECT json_extract('$jesc','\$.result.process_info.shell_pid')" 2>/dev/null)" || return 2
+  fg="$(sqlite3 :memory: "SELECT json_extract('$jesc','\$.result.process_info.foreground_process_group_id')" 2>/dev/null)" || return 2
+  # Canonical positive integer only (^[1-9][0-9]*$): reject empty, null->empty, non-digit,
+  # a leading zero, and 0 itself. An unvalidated equality is no evidence of readiness.
+  case "$sp" in ''|0*|*[!0-9]*) return 2 ;; esac
+  case "$fg" in ''|0*|*[!0-9]*) return 2 ;; esac
+  if [ "$sp" = "$fg" ]; then return 0; fi
+  return 1
+}
+
 # record op: create a pane/window, launch boot, print the new bare pane id.
 # Usage: terminal_spawn <name> <project> <target> <boot...>
 # <target> fully specifies the placement (no ambient config): 'window', or
@@ -305,8 +350,31 @@ terminal_spawn() {
   fi
   pane="$(_herdr_new_pane_id "$json")" || return 13
   herdr pane rename "$pane" "$name" >/dev/null 2>&1 || true
+  # requirement 1: wait (bounded) for the shell to reach its prompt, then act on the
+  # THREE outcomes distinctly. Only NOT-READY(1) is retried — READY(0) and UNKNOWN(2)
+  # are terminal. Every iteration uses the SAME classifier; UNKNOWN is never folded into
+  # NOT READY. Exit codes carry the outcome to the caller: 0 typed+verified, 3 NOT typed
+  # (pane never ready), 4 typed but pre-input state UNVERIFIED.
+  local ready_rc=2 tries=0 max_tries="${AGMSG_HERDR_INPUT_READY_TRIES:-50}"
+  while [ "$tries" -lt "$max_tries" ]; do
+    _herdr_pane_input_ready "$pane"; ready_rc=$?
+    [ "$ready_rc" = 1 ] || break
+    sleep 0.1 2>/dev/null || true
+    tries=$((tries + 1))
+  done
+  if [ "$ready_rc" = 1 ]; then
+    # NOT READY after the bound: a foreground process is still running, so a typed boot
+    # would be lost. Do NOT type; close the pane we created and fail with the reason.
+    printf 'unsupported: pane %s never returned to its shell prompt (a foreground process is still running); the boot was NOT typed, to avoid a lost keystroke\n' "$pane" >&2
+    herdr pane close "$pane" >/dev/null 2>&1 || true
+    return 3
+  fi
   herdr pane run "$pane" "$boot" >/dev/null 2>&1 || return 13
   printf '%s\n' "$pane"
+  # UNKNOWN: the boot WAS typed, but the pre-input state could not be verified. Signal
+  # that distinctly (4) so the caller can warn — a DIFFERENT reason from a missing
+  # post-input handshake, and it must not silently read as a clean spawn.
+  if [ "$ready_rc" = 2 ]; then return 4; fi
   return 0
 }
 

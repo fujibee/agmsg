@@ -63,6 +63,11 @@ elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
   printf 'herdr visible text\n'
+elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
+  # requirement 1 gate: a READY pane (foreground pgid == shell pid) so terminal_spawn
+  # proceeds to type. Overridable per test via HERDR_PROCESS_INFO_RESPONSE.
+  if [ -n "\${HERDR_PROCESS_INFO_RESPONSE:-}" ]; then printf '%s\n' "\$HERDR_PROCESS_INFO_RESPONSE"
+  else echo '{"result":{"process_info":{"shell_pid":7,"foreground_process_group_id":7}}}'; fi
 fi
 exit 0
 EOF

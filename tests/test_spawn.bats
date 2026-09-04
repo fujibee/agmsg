@@ -1022,6 +1022,17 @@ case "$1/$2" in
   pane/rename|pane/run|pane/close)
     echo '{"id":"cli:pane:'"$2"'","result":{"type":"ok"}}'
     ;;
+  pane/process-info)
+    # requirement 1: default to a READY pane (foreground pgid == shell pid) so the
+    # readiness gate passes; a test overrides HERDR_PROCESS_INFO_RESPONSE (and its exit
+    # via HERDR_PROCESS_INFO_RC) to drive the not-ready / unknown arms. The default is
+    # assigned separately, NOT inside ${VAR:-…}: braces in a default terminate the
+    # parameter expansion early and leak trailing } into the output.
+    pi_out="$HERDR_PROCESS_INFO_RESPONSE"
+    [ -n "$pi_out" ] || pi_out='{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242}}}'
+    printf '%s\n' "$pi_out"
+    exit "${HERDR_PROCESS_INFO_RC:-0}"
+    ;;
   tab/create)
     printf '%s\n' "${HERDR_TAB_RESPONSE:-$DEFAULT_TAB}"
     ;;
@@ -1191,6 +1202,74 @@ _spawn_recorded_id() {
     [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
     ! grep -q "pane run" "$HERDR_CALL_LOG"
   done
+}
+
+# --- requirement 1: herdr pre-input pane readiness (process-info gate) ---
+# process-info's foreground_process_group_id == shell_pid says the shell is at its
+# prompt. The gate acts on THREE outcomes distinctly (like peek's 10/12/13).
+
+@test "spawn req1: a NOT-READY pane (foreground process running) is not typed — fail with reason, pane closed" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":100,"foreground_process_group_id":200}}}'
+  export AGMSG_HERDR_INPUT_READY_TRIES=2
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  grep -q "was not ready for input" <<<"$output"
+  refute grep -q "pane run" "$HERDR_CALL_LOG"     # the boot was NOT typed
+  grep -q "pane close" "$HERDR_CALL_LOG"          # the pane we created was closed
+  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]   # nothing launched -> no record
+}
+
+@test "spawn req1: UNKNOWN readiness (process-info errors) still types, warns BEFORE-typing, and records" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # process-info fails -> UNKNOWN (arm 3)
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"            # arm 3 types anyway
+  grep -q "BEFORE the boot was typed" <<<"$output"
+  [ -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+}
+
+@test "spawn req1: null==null process-info is UNKNOWN, not READY (equality only after validation)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":null,"foreground_process_group_id":null}}}'
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"   # UNKNOWN, not a silent ready
+  grep -q "pane run" "$HERDR_CALL_LOG"
+}
+
+@test "spawn req1: a READY pane types with NO readiness warning" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr                                # default process-info = equal pids
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: a non-herdr (plain) spawn never runs the process-info gate" {
+  # The gate is herdr-only; a plain placement must not emit its warning.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: arm-3 (pre-input) and launched-unconfirmed (post-input) are DISTINCT messages" {
+  # utildev: the two 'unconfirmed' reasons must read apart. A monitor=no type spawned
+  # through herdr with UNKNOWN readiness shows BOTH, worded differently.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # arm 3 (before-typing unknown)
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"          # arm 3, before typing
+  grep -q "status=launched-unconfirmed" <<<"$output"         # requirement 2, after typing
+  grep -q "no-readiness-handshake" <<<"$output"
 }
 
 # --- --terminal-driver / AGMSG_TERMINAL_DRIVER override ---
