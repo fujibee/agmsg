@@ -1207,3 +1207,44 @@ M
   [ -f "$rec" ]
   grep -Fq 'herdr:wC:p4' "$rec"
 }
+
+# --- join names a pane; it does not take the seat -----------------------------
+#
+# The 6th argument's default is "do not write the record", and join is the caller
+# that relies on it: the same identity can be joined from a second session while a
+# first one holds it through actas, and the record is what peek/poke resolve a
+# member's pane through. A second pane joining an already-held identity must not
+# take that placement over.
+#
+# Driven through join.sh, because the property is the CALLER's choice. The
+# helper's default is covered above — and that test stays green when join passes
+# `record`, which is measured: adding it to join.sh:260 leaves every test in this
+# file and in test_actas_integration green. A safe default proves nothing about
+# who takes it.
+@test "join: names the pane but does NOT take the seat's placement" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  # A placement already held for this identity by whoever actually claimed it.
+  local rec; rec="$(agmsg_spawn_path seatteam alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%HELD\t/proj/OLD\tclaude-code\n' > "$rec"
+  local before; before="$(cat "$rec")"
+
+  run bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A
+  [ "$status" -eq 0 ]
+
+  # Positive control FIRST: join reached the naming step and the pane really was
+  # named. Without it a join that skipped naming altogether also leaves the record
+  # alone, and this test would read that as the property holding.
+  grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
+
+  # The seat's placement is not join's to take. Asserted on the OLD content, not
+  # on "a record exists": a version that emptied it would pass the weaker form.
+  [ "$(cat "$rec")" = "$before" ]
+  grep -q '%HELD' "$rec"
+  grep -q '/proj/OLD' "$rec"
+}
