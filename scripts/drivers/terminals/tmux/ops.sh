@@ -140,9 +140,16 @@ terminal_peek() {
 # — no env seam.
 terminal_poke() {
   local id="$1" text="$2"
-  tmux send-keys -l -t "$id" -- "$text" || { echo runtime_error; return 13; }
+  # Same exit taxonomy as peek (tl/co1): tmux not on PATH (unreachable) is 10; a
+  # send-keys failure (the pane is gone) is 12. 13 stays reserved for a driver with no
+  # poke path at all (plain) — a tmux pane's transient loss must not borrow it.
+  command -v tmux >/dev/null 2>&1 \
+    || { echo runtime_error; echo "tmux: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
+  tmux send-keys -l -t "$id" -- "$text" \
+    || { echo runtime_error; echo "tmux: could not send to pane '$id' (it may no longer exist)" >&2; return 12; }
   sleep 0.3 2>/dev/null || true
-  tmux send-keys -t "$id" Right Enter || { echo runtime_error; return 13; }
+  tmux send-keys -t "$id" Right Enter \
+    || { echo runtime_error; echo "tmux: could not send Enter to pane '$id' (it may no longer exist)" >&2; return 12; }
   echo ok
   return 0
 }

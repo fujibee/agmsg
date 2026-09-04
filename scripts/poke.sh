@@ -93,7 +93,15 @@ agmsg_terminal_load "$TERMINAL" \
 RC=0
 terminal_poke "$BARE_ID" "$TEXT" >/dev/null || RC=$?
 if [ "$RC" -ne 0 ]; then
-  echo "poke: could not poke '$TEAM/$NAME' (terminal '$TERMINAL', pane '$BARE_ID')" >&2
+  # 13 is the driver's "unsupported" — it has already printed a precise reason to
+  # stderr AND, for poke, a pointer to the type's native channel ("not a dead end").
+  # A generic "could not poke" added AFTER it is the last line the operator reads and
+  # would CANCEL that guidance (tl). So on 13, let the driver's reason stand as the
+  # final word; only a reachability/delivery failure (10/12) or an unexpected code —
+  # a genuine "it should have worked" — gets the entry's summary line.
+  if [ "$RC" -ne 13 ]; then
+    echo "poke: could not poke '$TEAM/$NAME' (terminal '$TERMINAL', pane '$BARE_ID')" >&2
+  fi
   exit "$RC"
 fi
 echo "poked '$TEAM/$NAME' via $TERMINAL"

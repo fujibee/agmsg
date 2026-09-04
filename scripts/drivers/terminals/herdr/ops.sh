@@ -346,7 +346,17 @@ terminal_peek() {
 # a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).
 terminal_poke() {
   local id="$1" text="$2"
-  herdr agent prompt "$id" "$text" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  # Same exit taxonomy as peek (tl/co1): a terminal that is UNREACHABLE (herdr not on
+  # PATH) is 10; a pane that cannot RECEIVE — gone, or with no live agent to accept the
+  # prompt — is 12. 13 stays reserved for a driver with no poke path at all (plain's
+  # permanent "no addressable pane"); a herdr pane whose agent has EXITED must not
+  # borrow it. This is the peek/poke asymmetry made concrete: peek reads a pane and
+  # succeeds even with no live agent, poke needs a running agent and so has a distinct
+  # "no one to receive" failure that peek does not.
+  command -v herdr >/dev/null 2>&1 \
+    || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
+  herdr agent prompt "$id" "$text" >/dev/null 2>&1 \
+    || { echo runtime_error; echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2; return 12; }
   echo ok
   return 0
 }

@@ -378,3 +378,90 @@ EOF
   _out_has "did not resolve to a terminal and pane id (ref: 'tmux:%9;kill')"
   [ ! -s "$ARGV_LOG" ]
 }
+
+# --- poke exit taxonomy: UNREACHABLE (10) vs no-live-agent / pane-gone (12) vs
+#     unsupported (13) --------------------------------------------------------
+# tl found the same 13-conflation co1 caught in peek, still in poke: a herdr pane
+# whose agent has EXITED returned 13, which the template reads as plain's permanent
+# "no addressable pane". poke now uses the SAME taxonomy as peek across both backends.
+# This also makes the peek/poke asymmetry concrete: peek reads a pane with no live
+# agent, poke needs a running agent, so poke has a "no one to receive" (12) that peek
+# does not.
+
+# herdr whose `agent prompt` FAILS (pane exists, no live agent to receive).
+_install_fake_herdr_poke_fails() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = agent ] && [ "\$2" = prompt ]; then echo "no live agent in pane" >&2; exit 1; fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+# tmux whose send-keys FAILS (the pane is gone).
+_install_fake_tmux_poke_fails() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$1" in send-keys) echo "can't find pane: %5" >&2; exit 1 ;; esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "poke taxonomy: herdr NOT on PATH -> 10 (unreachable), not 13" {
+  _write_record "herdr:w1:p4"
+  local hp; hp="$(_terminal_less_path)"
+  run env PATH="$hp" HERDR_ENV=1 bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 10 ]
+  _out_has "herdr: not on PATH"
+}
+
+@test "poke taxonomy: herdr pane has no live agent -> 12, not 13 (peek/poke asymmetry)" {
+  _install_fake_herdr_poke_fails
+  _write_record "herdr:w1:p4"
+  run env HERDR_ENV=1 bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 12 ]
+  _out_has "no live agent to receive"
+  _out_has "poke needs a running agent"
+}
+
+@test "poke taxonomy: tmux NOT on PATH -> 10 (unreachable), not 13" {
+  _write_record "tmux:%5"
+  local hp; hp="$(_terminal_less_path)"
+  run env PATH="$hp" bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 10 ]
+  _out_has "tmux: not on PATH"
+}
+
+@test "poke taxonomy: tmux send-keys fails (pane gone) -> 12, not 13" {
+  _install_fake_tmux_poke_fails
+  _write_record "tmux:%5"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 12 ]
+  _out_has "could not send to pane '%5'"
+}
+
+# --- poke entry: on `unsupported` (13) the driver's guidance is the LAST line ----
+# tl: for plain, the driver says "not a dead end — the type template says which native
+# channel"; poke.sh must not cover that with a generic "could not poke", which would be
+# the last line the operator reads. Only 13 (unsupported) suppresses the entry line;
+# a real delivery failure (12) still gets it.
+
+@test "poke entry: plain unsupported (13) keeps the driver's native-channel guidance as the last word" {
+  _write_record "plain:-"
+  run bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 13 ]
+  _out_has "native channel"
+  # the generic entry line must NOT be added on top of the driver's guidance
+  refute _out_has "could not poke"
+}
+
+@test "poke entry: a real delivery failure (12) DOES get the entry's summary line" {
+  _install_fake_herdr_poke_fails
+  _write_record "herdr:w1:p4"
+  run env HERDR_ENV=1 bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 12 ]
+  _out_has "could not poke 'testteam/alice'"
+}
