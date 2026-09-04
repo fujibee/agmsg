@@ -179,3 +179,40 @@ union_of_shards() {
   # log claims a split the workflow is not performing.
   grep -q "bats (\${{ matrix.os }} \${{ matrix.shard }}/$total)" "$wf"
 }
+
+# The pin's whole point is that these files' @test count does not describe their
+# cost. Seeding the balancer with that count undoes the pin: the shard reads as
+# empty and gets refilled, which is how one shard reached 32 minutes against a
+# 30-minute cap while two others sat at 11 and 12 (macOS, run 33850939213).
+#
+# What this asserts is the reservation itself: a shard holding a pinned file
+# must end up carrying MEASURABLY FEWER tests than the average shard, because
+# the seed already spent that shard's budget. A test that only checked the
+# pinned files land on different shards -- which the suite above already does --
+# stays green through exactly this regression, since they still land apart when
+# seeded by count. That is the break this one is here to catch.
+@test "a pinned file's shard is reserved, not refilled (pin seed is not the count)" {
+  local script="$BATS_TEST_DIRNAME/../.github/scripts/shard-tests.sh"
+  local dir="$BATS_TEST_DIRNAME/.."
+  local total=4 n f count mean grand=0
+
+  for f in "$BATS_TEST_DIRNAME"/*.bats; do
+    grand=$((grand + $(grep -c '^[[:space:]]*@test' "$f" || true)))
+  done
+  mean=$((grand / total))
+  [ "$mean" -gt 0 ]
+
+  # Shard 1 and shard 2 hold the two pinned files (slot 0 and slot 1).
+  for n in 1 2; do
+    count=0
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      count=$((count + $(grep -c '^[[:space:]]*@test' "$dir/$f" || true)))
+    done < <(cd "$dir" && bash "$script" "$n" "$total")
+
+    # Strictly below the average, with margin: seeded by count these shards come
+    # out at roughly the mean, so a bare "<= mean" would be a coin flip rather
+    # than a check. Two thirds is well clear of both states.
+    [ "$count" -lt $((mean * 2 / 3)) ]
+  done
+}

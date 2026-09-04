@@ -148,6 +148,44 @@ while [ "$i" -lt "$total" ]; do
   i=$((i + 1))
 done
 
+# What a pinned file is seeded with, and why it is not its @test count.
+#
+# The pin exists because these files' @test count does not describe their cost
+# (see above). Seeding `load` with that same count therefore hands the balancer
+# the one number it was told not to trust: a 630s file that contains 9 @test
+# blocks reports a load of 9, the shard reads as very nearly empty, and the
+# ordinary weighted pass fills it right back up. Measured on the terminal-driver
+# tree (macOS, run 33850939213 attempt 4): the four shards came out
+# 32.2/17.1/10.8/12.2 minutes against a 30-minute cap, and the 32.2 was the
+# shard holding the 630s pin plus a full share of everything else. It timed out
+# four attempts in a row while two other shards sat idle for fifteen minutes.
+#
+# So a pinned file is seeded at ONE SHARD'S AVERAGE SHARE instead: it is treated
+# as already worth about what a shard is supposed to hold, which is the honest
+# reading of "we cannot weigh this one". Same tree, same measured per-file
+# seconds: 14.5/15.8/21.0/21.1, a 21-minute worst case.
+#
+# This is deliberately not a table of per-file seconds. That alternative was
+# considered when the weights were first written and rejected because it goes
+# stale silently -- it would be wrong the moment a fixed `sleep` becomes a poll
+# loop, with nothing to say so. The share is derived from the tree on every run
+# and cannot drift away from it.
+#
+# The failure mode to watch is over-reservation: a pinned file that is actually
+# light leaves its shard underfilled and pushes the others up. That is bounded
+# while the pins are few relative to `total` -- at 2 pins in 4 shards the worst
+# case is the remaining work over two shards, which the numbers above clear with
+# room. Pinning a majority of the shards would invert this, and nothing here
+# detects that; keep PINNED_APART short.
+total_tests=0
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  total_tests=$((total_tests + $(file_weight "$f")))
+done <<EOF
+$files
+EOF
+pin_seed=$((total_tests / total))
+
 pinned_paths=" "
 slot=0
 for p in $PINNED_APART; do
@@ -163,7 +201,7 @@ $files
 EOF
   [ -n "$match" ] || continue
   s=$((slot % total))
-  load[s]=$((load[s] + $(file_weight "$match")))
+  load[s]=$((load[s] + pin_seed))
   if [ "$s" -eq "$((index - 1))" ]; then
     printf '%s\n' "$match"
   fi
