@@ -1244,11 +1244,13 @@ M
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
 
-  # A placement already held for this identity by whoever actually claimed it.
+  # A placement already held for this identity by whoever actually claimed it,
+  # and a byte-for-byte snapshot of it to compare against afterwards.
   local rec; rec="$(agmsg_spawn_path seatteam alice)"
   mkdir -p "$(dirname "$rec")"
   printf 'tmux:%%HELD\t/proj/OLD\tclaude-code\n' > "$rec"
-  local before; before="$(cat "$rec")"
+  local snapshot="$BATS_TEST_TMPDIR/placement.snapshot"
+  cp "$rec" "$snapshot"
 
   run bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A
   [ "$status" -eq 0 ]
@@ -1258,9 +1260,13 @@ M
   # alone, and this test would read that as the property holding.
   grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
 
-  # The seat's placement is not join's to take. Asserted on the OLD content, not
-  # on "a record exists": a version that emptied it would pass the weaker form.
-  [ "$(cat "$rec")" = "$before" ]
+  # The seat's placement is not join's to take. `cmp`, not `[ "$(cat …)" = … ]`:
+  # command substitution strips every trailing newline, so the string form is
+  # blind to a rewrite that changes only that — measured, both ways, before this
+  # line was written. Compared against the whole file, not against "a record
+  # exists": a version that emptied it would pass the weaker form.
+  cmp -s "$rec" "$snapshot"
+  # What that file still says, spelled out for the next reader.
   grep -q '%HELD' "$rec"
   grep -q '/proj/OLD' "$rec"
 }
