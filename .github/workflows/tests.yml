@@ -6,7 +6,8 @@ name: tests
 # opened on", so with several PRs collecting on one integration branch, the
 # state that is actually dogfooded -- all of them together at the tip -- is a
 # tree no PR run ever saw.
-# and on pushes to main. The filter is a pattern rather than a list of branch
+#
+# The filter is a pattern rather than a list of branch
 # names because a list goes quiet exactly when a new integration branch
 # appears: a PR onto an unlisted base has no required checks, so GitHub reports
 # `mergeStateStatus: CLEAN` -- "nothing to check", not "everything checked" --
@@ -71,9 +72,10 @@ permissions:
 # and the account runs at most five macOS jobs at once (measured 2026-08-21:
 # 35 runs that day, 140 macOS jobs, queue waits of 0-50 min, one PR's shard
 # waiting 50 min behind runs whose heads had already been replaced). So a new
-# run for the same PR cancels the one before it. A push to main is never
-# cancelled: its group is its own run id, and that run is what a release reads
-# (#848).
+# run for the same PR cancels the one before it. The same reasoning applies to
+# an integration branch, which is only ever dogfooded at its tip. A push to main
+# is the one case that is never cancelled: its group is its own run id, and that
+# run is what a release reads (#848). The block below spells out all three.
 concurrency:
   # Three cases, and they want different things.
   #
@@ -120,8 +122,11 @@ env:
   WINDOWS_SQLITE_SHA256: 'f46ee2475de4cbe287e6e5f7d43c838796b14e7379cd216bdbb28d391429f9fc'
 
 jobs:
-  # Cheap gate: is this PR's diff entirely documentation? Pushes to main always
-  # run the full suite (docs_only=false) — main must stay fully verified.
+  # Cheap gate: is this PR's diff entirely documentation? The gate is scoped to
+  # pull_request by event name, so EVERY push runs the full suite
+  # (docs_only=false) — main because it must stay fully verified, an integration
+  # branch because its tip is what gets dogfooded and a docs-only merge still
+  # changes that tip.
   changes:
     name: detect docs-only
     runs-on: ubuntu-latest
@@ -825,7 +830,8 @@ jobs:
   # cargo check + tsc --noEmit is a few minutes, not the full-bundle cost.
   # Same always-report pattern as bats: the job always completes, and only
   # the heavy steps are gated, so it can be promoted to a required check
-  # without ever leaving a PR stuck pending. Pushes to main always run it.
+  # without ever leaving a PR stuck pending. Every push runs it (the gate is
+  # scoped to pull_request by event name), main and integration alike.
   # Fail-open mirrors bats too: steps skip only on an EXPLICIT
   # app_changed=false — if the changes job breaks and its output is empty,
   # the typecheck runs rather than green-washing a possibly-app diff.
