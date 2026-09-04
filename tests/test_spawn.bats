@@ -143,7 +143,7 @@ teardown() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "spawned claude-code 'alice'" ]]
+  [[ "$output" =~ "launched claude-code 'alice'" ]]
 
   # alice is now registered to the resolved team.
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
@@ -845,6 +845,50 @@ EOF
   [[ "$output" != *"status=ready"* ]]
 }
 
+@test "spawn: a no-handshake type (monitor=no) reports startup UNCONFIRMED, not a bare success" {
+  # tl hit "spawned" printed while the agent had not started (a startup shell prompt
+  # ate the first keystroke of the boot command). A type with no readiness handshake
+  # cannot confirm startup, so spawn must say so DISTINCTLY — status=launched-unconfirmed
+  # with an explanation — instead of letting the placement line stand as success.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-readiness-handshake" <<<"$output"
+  grep -q "STARTUP IS UNCONFIRMED" <<<"$output"
+  # the placement line is a placement FACT, not a success claim
+  grep -q "launched codex 'reviewer'" <<<"$output"
+  refute grep -q "spawned codex 'reviewer'" <<<"$output"
+}
+
+@test "spawn: an explicit --no-wait stays terse — 'launched', and NO launched-unconfirmed status" {
+  # --no-wait is the user opting out of the wait, not a no-handshake type; it must not
+  # acquire the unconfirmed status line (that is only for a type that CANNOT confirm).
+  # And the placement word is 'launched', never 'spawned', on this path too.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  refute grep -q "spawned claude-code 'alice'" <<<"$output"
+  refute grep -q "status=launched-unconfirmed" <<<"$output"
+  refute grep -q "status=" <<<"$output"
+}
+
+@test "spawn: a CONFIRMED start (handshake) is the only path that proves startup (status=ready)" {
+  # The positive observation — the watcher attaching (the ready sentinel) — is what
+  # distinguishes "started" from "typed but never ran". Only status=ready asserts it.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 10 --terminal "touch $ready # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  grep -q "status=ready" <<<"$output"
+  refute grep -q "status=launched-unconfirmed" <<<"$output"
+}
+
 # --- initial prompt (--boot-prompt) ---
 # spawn folds an optional initial task into the agent's first prompt: the boot
 # prompt becomes the actas slash command followed (newline-separated) by the
@@ -1005,7 +1049,7 @@ STUB
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" == *"spawned claude-code 'alice' in herdr"* ]]
+  [[ "$output" == *"launched claude-code 'alice' in herdr"* ]]
 
   # herdr was called: pane split, pane rename, pane run.
   grep -q "pane split wT:pSelf --direction right --no-focus" "$HERDR_CALL_LOG"
@@ -1187,11 +1231,15 @@ _spawn_recorded_id() {
 
 @test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
   # The record is the only authority peek/poke/despawn --force have. If the write
-  # fails (here: forced by making the record PATH a directory), the member is live
-  # but unaddressable — a distinct, worse state than a clean spawn, so spawn reports
-  # status=spawned-but-unrecorded with the pane ref and exits non-zero, not ready.
+  # fails (here: the run dir made read-only, so agmsg_write_atomic cannot even create
+  # its temp beside the record — the shape a real ENOSPC/permission failure takes),
+  # the member is live but unaddressable — a distinct, worse state than a clean spawn,
+  # so spawn reports status=spawned-but-unrecorded with the pane ref and exits
+  # non-zero, not ready. The atomic write also guarantees the failure NEVER truncates
+  # a correct existing record; here there is none yet, only the failed create.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  mkdir -p "$TEST_SKILL_DIR/run/spawn.myteam__alice"   # record write will fail
+  mkdir -p "$TEST_SKILL_DIR/run"
+  chmod 500 "$TEST_SKILL_DIR/run"                       # record write will fail
   cat > "$STUB_BIN/tmux" <<'T'
 #!/usr/bin/env bash
 case "$1" in split-window) echo '%9' ;; select-pane|set-window-option) ;; esac
@@ -1199,6 +1247,7 @@ exit 0
 T
   chmod +x "$STUB_BIN/tmux"
   run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  chmod 700 "$TEST_SKILL_DIR/run"                       # restore so teardown can clean up
   [ "$status" -ne 0 ]
   grep -q "status=spawned-but-unrecorded" <<<"$output"
   grep -q "tmux:%9" <<<"$output"

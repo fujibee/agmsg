@@ -523,11 +523,18 @@ chmod +x "$BOOT"
 SPAWN_UNRECORDED=0
 SPAWN_UNREC_REF=""
 _record_placement() {   # <terminal> <id>
-  local rec; rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+  local rec ref
+  rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+  ref="$(agmsg_terminal_ref "$1" "$2")"
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
-  if ! printf '%s\t%s\t%s\n' "$(agmsg_terminal_ref "$1" "$2")" "$PROJECT" "$AGENT_TYPE" > "$rec" 2>/dev/null; then
+  # Atomic (temp + rename via agmsg_write_atomic, available transitively through
+  # terminal-registry.sh): a failed write must NOT truncate an existing correct
+  # record — SPAWN_UNRECORDED is reported only AFTER the old record is proven
+  # intact, not on top of one this write just emptied. The helper adds the
+  # trailing newline, so the row is passed without one.
+  if ! agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$PROJECT" "$AGENT_TYPE")" 2>/dev/null; then
     SPAWN_UNRECORDED=1
-    SPAWN_UNREC_REF="$(agmsg_terminal_ref "$1" "$2")"
+    SPAWN_UNREC_REF="$ref"
     return 1
   fi
   return 0
@@ -626,12 +633,19 @@ _launch_os_terminal() {
     || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
   [ "$_plain_id" = '-' ] \
     || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected '-' (an OS terminal has no addressable pane)"
+  # "launched", NOT "spawned" (tl): every placement line below states only that the
+  # pane was created and the boot typed into it — a PLACEMENT fact. It is deliberately
+  # not the word "spawned", because whether the agent actually STARTED is answered
+  # later and separately by the status= line (status=ready = a positive observation
+  # that its watcher attached; status=launched-unconfirmed = a type with no handshake,
+  # so startup cannot be confirmed here). tl hit "spawned" printed while the agent had
+  # not started (a shell prompt ate the first keystroke of the boot command).
   # The message keeps the two shapes the tests and users know: a custom template vs a
   # plain new window.
   if [ -n "$TERMINAL_TMPL" ] && is_terminal_template "$TERMINAL_TMPL"; then
-    echo "spawned ${AGENT_TYPE} '${NAME}' via custom terminal template"
+    echo "launched ${AGENT_TYPE} '${NAME}' via custom terminal template"
   else
-    echo "spawned ${AGENT_TYPE} '${NAME}' in a new terminal window"
+    echo "launched ${AGENT_TYPE} '${NAME}' in a new terminal window"
   fi
 }
 
@@ -645,8 +659,8 @@ place_and_launch() {
     agmsg_terminal_dir "$TERMINAL_DRIVER" >/dev/null 2>&1 \
       || die "unknown terminal driver '$TERMINAL_DRIVER' (--terminal-driver / AGMSG_TERMINAL_DRIVER); expected tmux, herdr or plain"
     case "$TERMINAL_DRIVER" in
-      tmux)  launch_in_tmux;      echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})" ;;
-      herdr) launch_in_herdr;     echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})" ;;
+      tmux)  launch_in_tmux;      echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})" ;;
+      herdr) launch_in_herdr;     echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})" ;;
       plain) _launch_os_terminal ;;
       *)     die "terminal driver '$TERMINAL_DRIVER' cannot place a spawn (no spawn capability)" ;;
     esac
@@ -658,13 +672,13 @@ place_and_launch() {
   # the live matrix, so this does NOT switch to the registry's herdr-first resolver.
   if [ -n "${TMUX:-}" ]; then
     launch_in_tmux
-    echo "spawned ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
+    echo "launched ${AGENT_TYPE} '${NAME}' in tmux (${TMUX_TARGET})"
     return 0
   fi
 
   if is_herdr_env; then
     launch_in_herdr
-    echo "spawned ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
+    echo "launched ${AGENT_TYPE} '${NAME}' in herdr (${TMUX_TARGET})"
     return 0
   fi
 
@@ -682,8 +696,10 @@ place_and_launch() {
 # (grok-build, whose monitor mode is real but not awaitable here) — receive there
 # is poll-based or agent-launched anyway.
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
+SKIPPED_READINESS_BY_TYPE=0
 if [ "$(agmsg_type_get "$AGENT_TYPE" monitor)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
+  SKIPPED_READINESS_BY_TYPE=1
   echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
 fi
 
@@ -714,4 +730,13 @@ if [ "$WAIT_READY" = "1" ]; then
     waited=$((waited + 1))
   done
   echo "status=ready name=${NAME} team=${TEAM} after=${waited}s"
+elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
+  # monitor=no: there is no readiness handshake, so spawn CANNOT confirm the agent
+  # actually started — only that its boot was placed/typed. Do not let the
+  # "spawned in <terminal>" placement log stand as success: a boot that never ran
+  # (measured — a shell that prompts at startup eats the FIRST keystroke of the boot
+  # command, so `/var/…/boot` becomes `var/…/boot: no such file or directory`) would
+  # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly (tl).
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-readiness-handshake"
+  echo "spawn: '${NAME}' was launched, but this type has no readiness handshake so its STARTUP IS UNCONFIRMED. If it does not appear, read its pane — a shell that prompts at startup (e.g. an update prompt) can eat the first keystroke of the boot command, and the failure then looks like a slow start." >&2
 fi

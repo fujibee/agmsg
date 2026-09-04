@@ -45,6 +45,16 @@ if ! declare -F agmsg_driver_bases >/dev/null 2>&1; then
   [ -n "$_AGMSG_TERMINAL_LIB_DIR" ] && . "$_AGMSG_TERMINAL_LIB_DIR/driver-registry.sh"
 fi
 
+# Placement records are the ONLY authority peek/poke/despawn have over a member,
+# so writing one must never truncate a correct existing record on a failed write.
+# agmsg_write_atomic (registry-lock.sh) writes to a temp and renames — a failure
+# leaves the old record whole. Pull it in if a caller has not (guarded, like the
+# registry above); the same helper six other scripts already use, not a 7th copy.
+if ! declare -F agmsg_write_atomic >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  [ -n "$_AGMSG_TERMINAL_LIB_DIR" ] && . "$_AGMSG_TERMINAL_LIB_DIR/registry-lock.sh"
+fi
+
 # Absolute dir of terminal driver <name>, honoring built-in vs opted-in external
 # (later eligible base wins). Requires a terminal.conf. Returns 1 if none.
 agmsg_terminal_dir() {
@@ -484,7 +494,9 @@ agmsg_terminal_name_self() {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
-  printf '%s\t%s\t%s\n' "$ref" "$project" "$type" > "$rec" 2>/dev/null || {
+  # Atomic (temp + rename): a failed write must not truncate a correct existing
+  # record. agmsg_write_atomic adds the trailing newline, so pass the row without.
+  agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
     echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
   }
   return 0

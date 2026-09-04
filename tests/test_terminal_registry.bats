@@ -1114,6 +1114,31 @@ M
   grep -q 'tmux:%1' "$rec"
 }
 
+@test "terminal_name_self: a failed record re-write leaves the EXISTING correct record intact (atomic)" {
+  # co1: SessionStart / actas re-name a pane that ALREADY has a correct record. A raw
+  # `>` truncates it at open, so a write that then fails (ENOSPC / permission) has
+  # destroyed the authority peek/poke/despawn depend on BEFORE it can report the
+  # failure. agmsg_write_atomic writes a temp beside the record and renames, so a
+  # failed write leaves the old record whole — the point of routing both writers
+  # through it. Here the run dir is made read-only so the temp cannot be created.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path seatteam carol)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%OLD\t/proj/OLD\tclaude-code\n' > "$rec"    # a correct existing record
+  chmod 500 "$(dirname "$rec")"                             # the re-write will fail
+
+  run agmsg_terminal_name_self "" seatteam carol /proj/NEW claude-code record
+  chmod 700 "$(dirname "$rec")"                             # restore for teardown
+  [ "$status" -ne 0 ]                                       # the write failed and said so
+  # the OLD record survives byte-for-byte — never truncated to empty or partial
+  grep -q 'tmux:%OLD' "$rec"
+  grep -q '/proj/OLD' "$rec"
+}
+
 # --- actas hands the terminal the identifier the TERMINAL knows ---------------
 #
 # The lock token and the terminal's identifier are different things. actas
