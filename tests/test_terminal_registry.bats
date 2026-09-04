@@ -1133,7 +1133,8 @@ M
   local rec; rec="$(agmsg_spawn_path seatteam alice)"
   mkdir -p "$(dirname "$rec")"
   printf 'tmux:%%HELD\t/proj/A\tclaude-code\n' > "$rec"
-  local before; before="$(cat "$rec")"
+  local snapshot="$BATS_TEST_TMPDIR/placement.snapshot"
+  cp "$rec" "$snapshot"
 
   # The second session names its own pane for the same identity, without claiming
   # the seat: the 6th argument is omitted, which is the default.
@@ -1144,9 +1145,11 @@ M
   # "the call did nothing".
   grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
 
-  local after; after="$(cat "$rec")"
-  [ "$after" = "$before" ]
-  printf '%s' "$after" | grep -q '%HELD'
+  # `cmp`, not a captured string: command substitution strips trailing newlines,
+  # so the string form cannot see a rewrite that changes only that. The sibling
+  # test below had the same blind spot and was narrowed with it.
+  cmp -s "$rec" "$snapshot"
+  grep -q '%HELD' "$rec"
 }
 
 @test "terminal_name_self: with 'record' the placement is written" {
