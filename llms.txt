@@ -72,6 +72,7 @@ directly-invokable commands; `scripts/drivers/<axis>/` holds axis drivers and
 - [scripts/join.sh](scripts/join.sh): join or create a team.
 - [scripts/whoami.sh](scripts/whoami.sh): resolve this project's agent identity.
 - [scripts/delivery.sh](scripts/delivery.sh): get/set the delivery mode.
+- [scripts/doctor.sh](scripts/doctor.sh): report who holds what — registrations, locks, watchers, delivery — read-only.
 - [scripts/spawn.sh](scripts/spawn.sh) / [scripts/despawn.sh](scripts/despawn.sh): launch / tear down a peer agent.
 - [scripts/history.sh](scripts/history.sh): replay a room's history.
 - [SKILL.md](SKILL.md): the agent-facing skill definition (full command reference).
