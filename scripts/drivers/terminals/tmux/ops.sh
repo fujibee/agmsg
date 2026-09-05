@@ -196,6 +196,20 @@ terminal_peek() {
   return 0
 }
 
+# tmux has no pane-label field independent of the CLI-owned terminal title.
+# The resolvable key is the pane-local @agmsg_agent user option.
+terminal_team_observe() {
+  local id="$1" key title
+  command -v tmux >/dev/null 2>&1 || return 10
+  case "$id" in @*|%*) : ;; *) return 13 ;; esac
+  key="$(tmux show-options -p -v -t "$id" @agmsg_agent 2>/dev/null)" || key=""
+  title="$(tmux display-message -p -t "$id" '#{pane_title}' 2>/dev/null)" || return 10
+  [ -n "$key" ] || key=unknown:agent_key_missing
+  [ -n "$title" ] || title=unknown:terminal_title_missing
+  case "$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
+  printf 'n/a:unsupported\tn/a:no_independent_field\t%s\t%s\n' "$key" "$title"
+}
+
 # control op: type <text> into the pane and submit it — in TWO bursts.
 # #619: text and Enter in the SAME send-keys burst are read as a paste by Codex,
 # and the Enter becomes a literal newline instead of submitting. A Right arrow in

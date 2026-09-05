@@ -37,6 +37,41 @@ EOF
   printf '%s\t%s\t%s\t%s\n' "$terminal" "$pane" "$container" "$live"
 }
 
+# Optional read extension supplied by terminal drivers that can observe live
+# naming state. It prints four TAB-separated raw fields:
+# activity, pane label, terminal agent key, CLI terminal title. A driver without
+# the extension is observable as unknown, never as a matching empty string.
+agmsg_team_observe_loaded() {
+  local pane="$1" raw rc=0 activity pane_label agent_key cli_title
+  if ! declare -F terminal_team_observe >/dev/null 2>&1; then
+    printf 'unknown:observe_unsupported\tunknown:observe_unsupported\tunknown:observe_unsupported\tunknown:observe_unsupported\n'
+    return 0
+  fi
+  raw="$(terminal_team_observe "$pane")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unknown:observe_rc_%s\tunknown:observe_rc_%s\tunknown:observe_rc_%s\tunknown:observe_rc_%s\n' \
+      "$rc" "$rc" "$rc" "$rc"
+    return 0
+  fi
+  IFS="$(printf '\t')" read -r activity pane_label agent_key cli_title <<EOF
+$raw
+EOF
+  if [ -z "$activity" ] || [ -z "$pane_label" ] || [ -z "$agent_key" ] || [ -z "$cli_title" ]; then
+    printf 'unknown:observe_malformed\tunknown:observe_malformed\tunknown:observe_malformed\tunknown:observe_malformed\n'
+    return 0
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$activity" "$pane_label" "$agent_key" "$cli_title"
+}
+
+agmsg_identity_cell() {
+  local expected="$1" actual="$2"
+  case "$actual" in
+    n/a:*|unknown:*) printf '%s\n' "$actual" ;;
+    "$expected") printf 'ok(actual=%s)\n' "$actual" ;;
+    *) printf 'mismatch(expected=%s,actual=%s)\n' "$expected" "$actual" ;;
+  esac
+}
+
 agmsg_identity_consistency() {
   local cell saw_unknown=0
   for cell in "$@"; do

@@ -40,6 +40,33 @@ agmsg_terminal_load() { return 0; }
   [ "$output" = $'herdr\tw2:p3\tunknown:location_contract_malformed\tunknown:location_contract_malformed' ]
 }
 
+@test "team observation preserves four explicit driver fields" {
+  terminal_team_observe() {
+    printf 'working\tteam:alice\ta123\t◐ team-alice\n'
+  }
+  run agmsg_team_observe_loaded w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'working\tteam:alice\ta123\t◐ team-alice' ]
+}
+
+@test "team observation does not turn an absent extension into empty success" {
+  unset -f terminal_team_observe
+  run agmsg_team_observe_loaded w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'unknown:observe_unsupported\tunknown:observe_unsupported\tunknown:observe_unsupported\tunknown:observe_unsupported' ]
+}
+
+@test "identity cell distinguishes n/a, unknown, match, and mismatch" {
+  run agmsg_identity_cell team:alice n/a:no_independent_field
+  [ "$output" = n/a:no_independent_field ]
+  run agmsg_identity_cell team:alice unknown:terminal_unavailable
+  [ "$output" = unknown:terminal_unavailable ]
+  run agmsg_identity_cell team:alice team:alice
+  [ "$output" = 'ok(actual=team:alice)' ]
+  run agmsg_identity_cell team:alice team:bob
+  [ "$output" = 'mismatch(expected=team:alice,actual=team:bob)' ]
+}
+
 @test "identity consistency treats expected n/a as verified" {
   run agmsg_identity_consistency \
     'n/a:no_independent_field' \
