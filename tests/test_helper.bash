@@ -40,45 +40,39 @@ setup_test_env() {
 # empty` on runs where every test passed. That message names the directory and
 # not the holder, so each red cost a rerun and taught the next one nothing.
 #
-# WHAT THIS ESTABLISHES, and what it does not. It records the pids this teardown
-# actually killed and waited for, and whether each is still alive at the moment
-# the removal failed, alongside a process inventory taken at that same moment.
-# It does NOT identify the holder: nothing here binds an open handle to the
-# remaining path, and neither `ps` nor `tasklist` can. The pids and the
-# inventory are correlation material for whoever reads the next red — the
-# holder's identity stays unproven until something can name it.
+# WHAT THIS ESTABLISHES, and what it does not. It records pids and their
+# liveness at the moment the removal failed, alongside a process inventory taken
+# at that same moment. It does NOT identify the holder: nothing here binds an
+# open handle to the remaining path, and neither `ps` nor `tasklist` can. All of
+# it is correlation material for whoever reads the next red.
 #
-# The pid set is captured BEFORE the removal, not scanned after it. A recursive
-# delete can unlink some of the tree before it fails, so the pid files may be
-# gone by the time the report runs; a reporter that re-scanned them would then
-# print nothing at exactly the moment its output was wanted.
+# TWO SETS, KEPT APART, because they are not the same claim:
 #
-# Reports, never repairs: the removal's own status is returned unchanged, so a
-# failure stays a failure. The probe body runs in a SUBSHELL so its `set +e`
-# cannot leak into the caller — a report-only probe must not alter the state the
+#   acted   pids a file-level teardown actually signalled and waited for, handed
+#           over before the removal ran. This is the set the question is about.
+#   seen    pid FILES that merely existed before the removal. Nobody may have
+#           waited on these. Printing them under the first heading would say
+#           something untrue about them — the same label-without-content defect
+#           that an earlier draft of this had, one layer along.
+#
+# Both are captured BEFORE the removal: a recursive delete can unlink part of
+# the tree before it fails, so a reporter that scanned afterwards would print
+# nothing at exactly the moment its output was wanted.
+#
+# Reports, never repairs: the removal's own status is returned unchanged. The
+# probe body is a SUBSHELL so its `set +e` cannot leak into the state the
 # framework runs in afterwards. `head` is avoided in the pipelines, as the
 # workflow's forensics step does, because it SIGPIPEs whatever was writing.
 _teardown_forensics() {
-  local dir="$1" waited="$2"
+  local dir="$1" acted="$2" seen="$3"
   (
     set +e
     set +o pipefail 2>/dev/null || true
     echo "##### teardown could not remove $dir (#1036)"
     echo "##### what is still there:"
     ls -laR "$dir" 2>/dev/null
-    echo "##### pids this teardown killed and waited for, captured BEFORE the rm:"
-    if [ -z "$waited" ]; then
-      echo "  (none — no pid file existed when the removal started)"
-    else
-      local pid
-      for pid in $waited; do
-        if kill -0 "$pid" 2>/dev/null; then
-          echo "  $pid STILL ALIVE at the moment the removal failed"
-        else
-          echo "  $pid exited"
-        fi
-      done
-    fi
+    _teardown_report_pids "pids a teardown SIGNALLED and WAITED FOR (captured before the rm)" "$acted"
+    _teardown_report_pids "pid FILES present before the rm — NOT known to have been waited on" "$seen"
     echo "##### process inventory at that same moment (correlation only —"
     echo "##### this does NOT say which of these holds the directory):"
     ps -ef 2>/dev/null || ps 2>/dev/null
@@ -89,19 +83,43 @@ _teardown_forensics() {
   return 0
 }
 
+_teardown_report_pids() {
+  local heading="$1" pids="$2" pid
+  echo "##### $heading:"
+  if [ -z "${pids// /}" ]; then
+    echo "  (none)"
+    return 0
+  fi
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  $pid STILL ALIVE at the moment the removal failed"
+    else
+      echo "  $pid exited"
+    fi
+  done
+}
+
+# Deduplicate a whitespace-separated pid list, order preserved.
+_teardown_uniq_pids() {
+  local seen=" " out="" p
+  for p in $1; do
+    case "$seen" in *" $p "*) continue ;; esac
+    seen="$seen$p "; out="$out $p"
+  done
+  printf '%s' "${out# }"
+}
+
 teardown_test_env() {
-  local rc=0 waited="" pf pid
-  # Snapshot BEFORE the removal (see above). AGMSG_TEARDOWN_WAITED_PIDS lets a
-  # file-level teardown hand over the pids it actually signalled, which is
-  # stronger than anything inferable from the files still on disk.
+  local rc=0 acted seen="" pf pid
+  acted="$(_teardown_uniq_pids "${AGMSG_TEARDOWN_WAITED_PIDS:-}")"
   for pf in "$TEST_SKILL_DIR"/run/*.pid; do
     [ -f "$pf" ] || continue
     pid="$(cat "$pf" 2>/dev/null)"
-    [ -n "$pid" ] && waited="$waited $pid"
+    [ -n "$pid" ] && case " $acted " in *" $pid "*) : ;; *) seen="$seen $pid" ;; esac
   done
-  waited="${AGMSG_TEARDOWN_WAITED_PIDS:-}$waited"
+  seen="$(_teardown_uniq_pids "$seen")"
   rm -rf "$TEST_SKILL_DIR" || rc=$?
-  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR" "$waited"
+  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR" "$acted" "$seen"
   return "$rc"
 }
 
