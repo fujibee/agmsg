@@ -1087,7 +1087,34 @@ class CodexBridge {
   //            and the only victim would be a same-(project,pair) bridge in the
   //            sub-ms window before it overwrites this pid's lease, self-corrected
   //            by the launcher respawning it.
+  //   win32 -> Process.StartTime.Ticks, read through PowerShell. Windows has no
+  //            /proc, and MSYS's `ps` rejects -o outright, so both POSIX sources
+  //            yield an empty token and no lease can be published at all.
+  //            ONE source, not a preference list: WMIC is deprecated and already
+  //            absent from some Windows 11 installs, and letting each side choose
+  //            between WMIC and PowerShell independently would let this writer and
+  //            _start_token (codex-bridge-launcher.sh) record differently-
+  //            FORMATTED tokens for the same process. powershell.exe and pwsh
+  //            return identical Ticks, so falling back between those two binaries
+  //            is safe: the src label names the format, not the executable.
   startToken() {
+    if (process.platform === "win32") {
+      for (const bin of ["powershell.exe", "pwsh"]) {
+        const r = spawnSync(
+          bin,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${process.pid}).StartTime.Ticks`,
+          ],
+          { encoding: "utf8" },
+        );
+        const ticks = (r.status === 0 ? (r.stdout || "") : "").trim();
+        if (/^\d+$/.test(ticks)) return { src: "pwsh", token: ticks };
+      }
+      return { src: "pwsh", token: "" };
+    }
     try {
       const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
       const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);

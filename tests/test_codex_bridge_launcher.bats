@@ -808,3 +808,86 @@ _fake_alice_lease() { # sets FAKE_PID once its lease file exists
   kill -0 "$victim"
   kill "$victim" "$disp" "$parent" 2>/dev/null || true; wait "$disp" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
 }
+
+# --- Windows start token: the lease schema must admit the source
+# codex-bridge.js writeLease() records on Windows, where /proc does not exist and
+# the only `ps` likely to be on PATH (MSYS's) rejects -o outright, so both POSIX
+# sources yield an empty token and the bridge can never publish a lease at all.
+#
+# _read_lease is the reaper's ONLY gate on a lease, so its accept/reject set is
+# the contract. These exercise it directly -- the pattern test_remote.bats uses
+# for _remote_endpoint_display -- rather than through the reaper: the reaper
+# needs a spawnable bridge and a live pid, which is exactly what does not work on
+# Git Bash (#567), and the schema question has nothing to do with either. Kept
+# out of the `windows-native` filter deliberately: nothing here runs PowerShell,
+# so these belong on every leg, not only the Windows one. ---
+_lease_verdict() { # <startsrc> <start> -> prints accept|reject
+  local h40=0123456789abcdef0123456789abcdef01234567
+  printf 'v=1\nproject=%s\npairs=%s\nhost=h\npid=123\nstart=%s\nstartsrc=%s\n' \
+    "$h40" "$h40" "$2" "$1" > "$TEST_SKILL_DIR/lease-under-test"
+  bash -c '
+    eval "$(sed -n "/^_read_lease() {/,/^}/p" "$1")"
+    _read_lease "$2" && echo accept || echo reject
+  ' _ "$LAUNCHER" "$TEST_SKILL_DIR/lease-under-test" 2>/dev/null
+}
+
+@test "launcher: the lease schema admits a pwsh start token" {
+  [ "$(_lease_verdict pwsh 639231441791462826)" = accept ]
+}
+
+@test "launcher: a pwsh lease whose token is not an integer is rejected, fail-closed" {
+  # .NET Ticks is a bare integer. Anything else under that label is a lease this
+  # side did not write, and a doubtful lease must never authorise a kill.
+  [ "$(_lease_verdict pwsh 6392314.5)" = reject ]
+  [ "$(_lease_verdict pwsh '')" = reject ]
+}
+
+@test "launcher: an unrecognised startsrc is rejected, fail-closed" {
+  # wmic is here on purpose, not as an arbitrary bad value: WMIC's CreationDate
+  # was the faster candidate and was deliberately NOT adopted, because a per-side
+  # "WMIC, else PowerShell" order lets the writer and the reaper resolve different
+  # sources for the same process whenever only one of them can reach wmic.exe.
+  # Rejecting the label pins that decision, so reintroducing it fails loudly.
+  [ "$(_lease_verdict wmic 20260824041348.411807+540)" = reject ]
+  [ "$(_lease_verdict bogus 123)" = reject ]
+}
+
+@test "launcher: proc and ps leases still parse (start-token regression)" {
+  [ "$(_lease_verdict proc 396341883)" = accept ]
+  [ "$(_lease_verdict ps 'Sun Aug 24 04:00:00 2026')" = accept ]
+  # ps stays exempt from the integer check (its token is a human date string
+  # whose punctuation varies by platform); proc does not.
+  [ "$(_lease_verdict proc abc)" = reject ]
+}
+
+_run_start_token() { # <pid> -> runs _start_token in a subshell
+  run bash -c '
+    eval "$(sed -n "/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p" "$1")"
+    _start_token "$2"
+  ' _ "$LAUNCHER" "$1"
+}
+
+@test "launcher: a live pid yields a proc or ps start token on POSIX" {
+  skip_on_windows "Windows has its own source; see the windows-native case"
+  _run_start_token $$
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  case "${output%%"$tab"*}" in proc|ps) ;; *) false ;; esac
+  [ -n "${output#*"$tab"}" ]
+}
+
+@test "launcher: windows-native a live pid yields an integer pwsh start token" {
+  skip_unless_windows "PowerShell and the Windows pid space are the point"
+  # The pid must be the WINDOWS one. MSYS/Cygwin number processes in their own
+  # space -- the same shell is MSYS pid 3994449 and winpid 19568 on our runner --
+  # and Get-Process only knows the latter, which is also the pid
+  # codex-bridge.js records as process.pid.
+  local winpid; winpid="$(cat /proc/$$/winpid)"
+  [ -n "$winpid" ]
+  _run_start_token "$winpid"
+  [ "$status" -eq 0 ]
+  local tab; tab=$(printf '\t')
+  [ "${output%%"$tab"*}" = pwsh ]
+  local tok="${output#*"$tab"}"
+  case "$tok" in ''|*[!0-9]*) false ;; esac
+}
