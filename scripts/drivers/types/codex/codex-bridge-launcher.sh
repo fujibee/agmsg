@@ -38,6 +38,8 @@ source "$SCRIPT_DIR/../../../lib/close-fds.sh"
 agmsg_close_inherited_fds
 # shellcheck source=../../../lib/hash.sh
 source "$SCRIPT_DIR/../../../lib/hash.sh"
+# shellcheck source=_app-server.sh
+source "$SCRIPT_DIR/_app-server.sh"
 # The liveness helpers. Every lifetime and lock-owner check below goes through
 # one of them, chosen by where the pid was minted: _agmsg_pid_alive_local for
 # the ones this shell or codex-monitor.sh produced, _agmsg_pid_alive for the
@@ -47,9 +49,15 @@ source "$SCRIPT_DIR/../../../lib/hash.sh"
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
-REQUEST_FILE="$RUN_DIR/codex-bridge-request.$PROJECT_HASH"
+SCOPED_LAUNCH=0
+[ -z "${AGMSG_CODEX_APP_SERVER_KEY:-}" ] || SCOPED_LAUNCH=1
+if ! SERVER_RECORD_KEY="$(_agmsg_codex_app_server_record_key "$PROJECT")"; then
+  exit 0
+fi
+REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SERVER_RECORD_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$PROJECT_HASH"
-SERVER_PID_FILE="$RUN_DIR/codex-app-server.$PROJECT_HASH.pid"
+[ "$SCOPED_LAUNCH" -eq 0 ] || DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SERVER_RECORD_KEY"
+SERVER_PID_FILE="$RUN_DIR/codex-app-server.$SERVER_RECORD_KEY.pid"
 
 # shellcheck source=../../../lib/node.sh
 source "$SCRIPT_DIR/../../../lib/node.sh"
@@ -71,12 +79,12 @@ PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PRO
 
 mkdir -p "$RUN_DIR"
 
-# The app-server is shared by every Codex TUI in a project. Bind dispatcher and
-# role-child lifetime to that shared process rather than whichever TUI happened
-# to start first. Tests/older launchers without the sidecar retain parent-PID
-# fallback behavior.
+# Scoped launchers bind only to their exact server. Legacy launchers retain the
+# parent-PID fallback used before scoped servers existed.
 LIFETIME_PID="$(cat "$SERVER_PID_FILE" 2>/dev/null || true)"
-if [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
+if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+  [ -n "$LIFETIME_PID" ] && _agmsg_pid_alive_local "$LIFETIME_PID" || exit 0
+elif [ -z "$LIFETIME_PID" ] || ! _agmsg_pid_alive_local "$LIFETIME_PID"; then
   LIFETIME_PID="$PARENT_PID"
 fi
 
@@ -140,11 +148,48 @@ acquire_runtime_lock() {
   return 1
 }
 
+load_scoped_request() {
+  local line rest
+  SCOPED_REQUEST_TYPE=""
+  SCOPED_REQUEST_THREAD=""
+  SCOPED_REQUEST_APP_SERVER=""
+  [ "$SCOPED_LAUNCH" -eq 1 ] || return 1
+  [ -f "$REQUEST_FILE" ] || return 1
+  line="$(cat "$REQUEST_FILE" 2>/dev/null)" || return 1
+  case "$line" in *$'\n'*) return 1 ;; esac
+  case "$line" in *"$TAB"*) ;; *) return 1 ;; esac
+  SCOPED_REQUEST_TYPE="${line%%"$TAB"*}"
+  rest="${line#*"$TAB"}"
+  case "$rest" in *"$TAB"*) ;; *) return 1 ;; esac
+  SCOPED_REQUEST_THREAD="${rest%%"$TAB"*}"
+  SCOPED_REQUEST_APP_SERVER="${rest#*"$TAB"}"
+  case "$SCOPED_REQUEST_APP_SERVER" in *"$TAB"*) return 1 ;; esac
+  [ "$SCOPED_REQUEST_TYPE" = "$TYPE" ] || return 1
+  [ -n "$SCOPED_REQUEST_THREAD" ] || return 1
+  [ "$SCOPED_REQUEST_APP_SERVER" = "$APP_SERVER" ] || return 1
+}
+
 resolve_identity() {  # prints "team<TAB>name" lines for the project's codex roles
-  "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null \
+  local identity team name candidate_thread candidate_project candidate_project_phys
+  identity="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" "$TYPE" 2>/dev/null \
     | awk -v t="$TAB" 'NF >= 2 { print $1 t $2 }' \
     | { if [ -n "$ROLE_PAIR" ]; then grep -Fx "$ROLE_PAIR" || true; else cat; fi; } \
-    | sort -u
+    | sort -u)"
+  if [ "$SCOPED_LAUNCH" -eq 0 ]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+  load_scoped_request || return 0
+  while IFS="$TAB" read -r team name; do
+    [ -n "$team" ] || continue
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    candidate_thread="$AGMSG_ROLE_SESSION_UUID"
+    candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
+    candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
+    [ "$candidate_project_phys" = "$PROJECT_PHYS" ] || continue
+    [ "$candidate_thread" = "$SCOPED_REQUEST_THREAD" ] || continue
+    printf '%s\t%s\n' "$team" "$name"
+  done <<< "$identity"
 }
 
 # identities.sh opens and parses EVERY teams/*/config.json on every call: two
@@ -184,6 +229,11 @@ identity_cache_is_fresh() {
 }
 
 refresh_identity_cache() {
+  if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+    IDENTITY_CACHE_FRESH=0
+    IDENTITY_CACHE="$(resolve_identity || true)"
+    return 0
+  fi
   if identity_cache_is_fresh; then
     IDENTITY_CACHE_FRESH=1
     return 0
@@ -222,6 +272,23 @@ poll_sleep() {
   sleep "${POLL_STEPS[$poll_index]}"
   [ "$poll_index" -lt 3 ] && poll_index=$((poll_index + 1))
   return 0
+}
+
+acquire_runtime_lock_while_alive() {
+  local resource="$1" lifetime_pid="$2"
+  while _agmsg_pid_alive_local "$lifetime_pid"; do
+    if acquire_runtime_lock "$resource"; then
+      if _agmsg_pid_alive_local "$lifetime_pid"; then
+        poll_reset
+        return 0
+      fi
+      agmsg_runtime_lock_release "$resource" "$$" || true
+      HELD_LOCK_RESOURCE=""
+      return 1
+    fi
+    poll_sleep
+  done
+  return 1
 }
 
 # Any change here can change the safe subscription set. Include the request
@@ -293,7 +360,9 @@ fi
 # this lock every dispatcher generation left another full set of children behind.
 # The lock makes those re-spawns exit on arrival instead of accumulating.
 CHILD_LOCK_RESOURCE="codex-child:$PROJECT_HASH:$(printf '%s' "$ROLE_PAIR" | agmsg_sha1)"
-acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
+if [ "$SCOPED_LAUNCH" -eq 0 ]; then
+  acquire_runtime_lock "$CHILD_LOCK_RESOURCE" || exit 0
+fi
 
 # Bounded, not open-ended. The dispatcher only spawns a child for a pair it has
 # already seen registered, so an empty list here is either the brief actas write
@@ -356,6 +425,22 @@ if [ -z "$ids" ]; then
   _agmsg_pid_alive_local "$PARENT_PID" || exit 0
   sleep 0.3
   exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
+fi
+
+if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+  acquire_runtime_lock_while_alive "$CHILD_LOCK_RESOURCE" "$PARENT_PID" || exit 0
+  ids=""
+  post_lock_empty_ticks=0
+  while _agmsg_pid_alive_local "$PARENT_PID"; do
+    ids="$(resolve_identity || true)"
+    [ -n "$ids" ] && break
+    post_lock_empty_ticks=$((post_lock_empty_ticks + 1))
+    [ "$post_lock_empty_ticks" -ge 2 ] && break
+    sleep 0.3
+  done
+  [ -n "$ids" ] || exit 0
+  build_safety_state "$ids"
+  safety_state="$SAFETY_STATE"
 fi
 
 identity_count="$(printf '%s\n' "$ids" | grep -c . || true)"
@@ -618,6 +703,13 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   if [ -z "$current_ids" ]; then
     deregistered_ticks=$((deregistered_ticks + 1))
     if [ "$deregistered_ticks" -ge 2 ]; then
+      if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+        if ! ( set +e; _reap_orphan_bridges ); then
+          poll_sleep
+          continue
+        fi
+        exit 0
+      fi
       if [ -f "$pidfile" ]; then
         old_pid=""
         IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
@@ -638,12 +730,17 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # so the new role is actually subscribed instead of being stranded.
   build_safety_state "$current_ids"
   if [ "$SAFETY_STATE" != "$safety_state" ]; then
-    if [ -f "$pidfile" ]; then
-      old_pid=""
-      IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
-      _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
+    if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+      safety_state="$SAFETY_STATE"
+      poll_reset
+    else
+      if [ -f "$pidfile" ]; then
+        old_pid=""
+        IFS= read -r old_pid < "$pidfile" 2>/dev/null || true
+        _agmsg_pid_valid "$old_pid" && kill "$old_pid" 2>/dev/null || true
+      fi
+      exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
     fi
-    exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
   # Resolve the app-server URL (and thread) this iteration would launch against
   # FIRST, so the reuse check can compare a live bridge's bound server with the
@@ -651,7 +748,14 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
   # discover the live TUI thread via thread/loaded/list.
   thread_id="loaded"
   req_app_server="$APP_SERVER"
-  if [ -f "$REQUEST_FILE" ]; then
+  if [ "$SCOPED_LAUNCH" -eq 1 ]; then
+    if ! load_scoped_request; then
+      poll_sleep
+      continue
+    fi
+    thread_id="$SCOPED_REQUEST_THREAD"
+    req_app_server="$SCOPED_REQUEST_APP_SERVER"
+  elif [ -f "$REQUEST_FILE" ]; then
     _rtype=""; _rthread=""; _rapp=""
     IFS="$TAB" read -r _rtype _rthread _rapp < "$REQUEST_FILE" 2>/dev/null || true
     [ -n "${_rthread:-}" ] && thread_id="$_rthread"
@@ -672,6 +776,10 @@ EOF
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That
     # wait is open-ended, so it has to be the cheapest path in the file.
+    poll_sleep
+    continue
+  fi
+  if [ "$SCOPED_LAUNCH" -eq 1 ] && [ "$rec_thread" != "$SCOPED_REQUEST_THREAD" ]; then
     poll_sleep
     continue
   fi

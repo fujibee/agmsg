@@ -14,6 +14,9 @@
 # launcher start the bridge — a hook-launched bridge cannot connect to the unix
 # socket from inside the Codex sandbox (#41).
 
+# shellcheck source=_app-server.sh
+source "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+
 # Newest-N rollout files under $sessions_dir, sorted by mtime descending.
 # `ls -t "$dir"/*/*/*/rollout-*.jsonl` is unreliable on Windows/Git Bash --
 # reported to intermittently return an empty/truncated list with no
@@ -120,28 +123,40 @@ agmsg_session_start() {
   done <<< "$PAIRS"
   PAIRS="$safe_pairs"
   [ -n "$PAIRS" ] || exit 0
-  app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
-  if [ -z "$app_server" ]; then
-    agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
-    if [ -n "$agent_pid" ]; then
-      agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
-      app_server=$(printf '%s\n' "$agent_cmd" \
-        | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
-        | head -1)
+  if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+    if ! app_server="$(_agmsg_codex_app_server_url "$PROJECT")"; then
+      exit 0
     fi
-  fi
-  if [ -z "$app_server" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    socket_path="$RUN_DIR/codex-app-server.$project_hash.sock"
-    if [ -S "$socket_path" ] || [ "${AGMSG_TEST_ASSUME_CODEX_SOCKET:-}" = "$socket_path" ]; then
-      app_server="unix://$socket_path"
+  else
+    app_server="${AGMSG_CODEX_BRIDGE_APP_SERVER:-}"
+    if [ -z "$app_server" ]; then
+      agent_pid=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
+      if [ -n "$agent_pid" ]; then
+        agent_cmd=$(compat_get_cmdline "$agent_pid" 2>/dev/null || true)
+        app_server=$(printf '%s\n' "$agent_cmd" \
+          | sed -n 's/.*\(unix:\/\/[^[:space:]]*\).*/\1/p' \
+          | head -1)
+      fi
+    fi
+    if [ -z "$app_server" ]; then
+      app_server="$(_agmsg_codex_app_server_url "$PROJECT")"
+    fi
+    if [ -z "$app_server" ]; then
+      project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
+      socket_path="$RUN_DIR/codex-app-server.$project_hash.sock"
+      if [ -S "$socket_path" ] || [ "${AGMSG_TEST_ASSUME_CODEX_SOCKET:-}" = "$socket_path" ]; then
+        app_server="unix://$socket_path"
+      fi
     fi
   fi
   [ -n "$app_server" ] || exit 0
 
   if [ "${AGMSG_CODEX_BRIDGE_LAUNCHER:-}" = "1" ]; then
-    project_hash=$(printf '%s' "$PROJECT" | agmsg_sha1)
-    request_file="$RUN_DIR/codex-bridge-request.$project_hash"
+    request_key=""
+    if ! request_key="$(_agmsg_codex_app_server_record_key "$PROJECT")"; then
+      exit 0
+    fi
+    request_file="$RUN_DIR/codex-bridge-request.$request_key"
     tmp_request="$request_file.$$"
     mkdir -p "$RUN_DIR" 2>/dev/null || true
     printf '%s\t%s\t%s\n' "$TYPE" "$thread_id" "$app_server" > "$tmp_request"

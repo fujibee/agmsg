@@ -24,20 +24,32 @@
 # got nothing". The two are different answers and only the first may fall
 # through to a weaker source.
 
+# Echo the app-server record key for <project>, or fail for an invalid scoped key.
+_agmsg_codex_app_server_record_key() {
+  local project="$1"
+  if [ -n "${AGMSG_CODEX_APP_SERVER_KEY:-}" ]; then
+    case "$AGMSG_CODEX_APP_SERVER_KEY" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#AGMSG_CODEX_APP_SERVER_KEY}" -eq 40 ] || return 1
+    printf '%s' "$AGMSG_CODEX_APP_SERVER_KEY"
+  else
+    printf '%s' "$project" | agmsg_sha1
+  fi
+}
+
 # Echo the app-server URL for <project>, or nothing.
-#
-# The environment variable wins when present: it is the value monitor exported
-# for this very process, and preferring it keeps every context that already
-# worked on exactly the path it used before.
+# A scoped key selects its exact record; only unscoped callers may prefer the
+# inherited generic URL.
 _agmsg_codex_app_server_url() {
-  local project="$1" port_file port
+  local project="$1" record_key port_file port
   [ -n "$project" ] || return 0
-  if [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
+  if [ -z "${AGMSG_CODEX_APP_SERVER_KEY:-}" ] \
+    && [ -n "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" ]; then
     printf '%s' "$AGMSG_CODEX_BRIDGE_APP_SERVER"
     return 0
   fi
   command -v agmsg_sha1 >/dev/null 2>&1 || return 0
-  port_file="$SKILL_DIR/run/codex-app-server.$(printf '%s' "$project" | agmsg_sha1 2>/dev/null).port"
+  record_key="$(_agmsg_codex_app_server_record_key "$project")" || return 1
+  port_file="$SKILL_DIR/run/codex-app-server.$record_key.port"
   port="$(cat "$port_file" 2>/dev/null || true)"
   # Digits, and a port a TCP stack could have handed out. Digits alone are not
   # enough on their own — a prefix of a real port (5 of 52962) is all digits and

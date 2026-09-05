@@ -4,8 +4,11 @@ load test_helper
 
 setup() {
   setup_test_env
-  export TEST_PROJECT="$(mktemp -d)"
+  export TEST_PROJECT="$(cd "$(mktemp -d)" && pwd -P)"
   export CALL_LOG="$TEST_PROJECT/calls.log"
+  export TEST_MONITOR_PID=""
+  export TEST_TUI_RELEASE_FILE=""
+  export TEST_TUI_EXIT_FILE=""
 
   # Fake codex for codex-monitor tests.
   #   --version            -> prints "codex-cli $FAKE_CODEX_VERSION"
@@ -28,10 +31,26 @@ case "${1:-}" in
       echo "error: unexpected argument '--listen' found" >&2
       exit 2
     fi
+    [ -z "${AGMSG_TEST_APP_SERVER_KEY_LOG:-}" ] || printf '%s' "${AGMSG_CODEX_APP_SERVER_KEY:-}" > "$AGMSG_TEST_APP_SERVER_KEY_LOG"
+    [ -z "${AGMSG_TEST_APP_SERVER_INHERITED_URL_LOG:-}" ] || printf '%s' "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" > "$AGMSG_TEST_APP_SERVER_INHERITED_URL_LOG"
+    if [ -n "${AGMSG_TEST_APP_SERVER_URL_LOG:-}" ]; then
+      (
+        SKILL_DIR="$TEST_SKILL_DIR"
+        source "$SKILL_DIR/scripts/lib/hash.sh"
+        source "$SKILL_DIR/scripts/drivers/types/codex/_app-server.sh"
+        nested_url=""
+        for _probe in $(seq 1 100); do
+          nested_url="$(_agmsg_codex_app_server_url "$AGMSG_TEST_APP_SERVER_PROJECT")"
+          [ -n "$nested_url" ] && break
+          sleep 0.05
+        done
+        printf '%s' "$nested_url" > "$AGMSG_TEST_APP_SERVER_URL_LOG"
+      ) &
+    fi
     # Run the listener as a CHILD (no exec) so this script stays the recorded pid;
     # its argv ("...real-codex app-server --listen") is what codex-monitor's
-    # cmdline check matches. The child exits when this parent is killed.
-    python3 - <<'PY'
+    # cmdline check matches.
+    python3 - <<'PY' &
 import socket, sys, os
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -47,11 +66,32 @@ while True:
     except Exception:
         pass
 PY
+    child=$!
+    record_server_term() {
+      [ -z "${FAKE_TERM_LOG:-}" ] || printf 'server TERM\n' >> "$FAKE_TERM_LOG"
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      exit 0
+    }
+    trap record_server_term TERM
+    [ -z "${FAKE_SERVER_READY_FILE:-}" ] || printf '%s' "$$" > "$FAKE_SERVER_READY_FILE"
+    wait "$child"
     ;;
   *)
+    record_tui_term() {
+      [ -z "${FAKE_TUI_TERM_LOG:-}" ] || printf 'tui TERM\n' > "$FAKE_TUI_TERM_LOG"
+      [ -z "${FAKE_TUI_EXIT_MARKER:-}" ] || : > "$FAKE_TUI_EXIT_MARKER"
+      exit 143
+    }
+    trap record_tui_term TERM
+    [ -z "${FAKE_TUI_PID_FILE:-}" ] || printf '%s' "$$" > "$FAKE_TUI_PID_FILE"
     printf 'plain-codex' >> "$CALL_LOG"
     for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
     printf '\n' >> "$CALL_LOG"
+    [ -z "${FAKE_TUI_READY_FILE:-}" ] || printf '%s' "$$" > "$FAKE_TUI_READY_FILE"
+    while [ -n "${FAKE_TUI_GATE:-}" ] && [ ! -e "$FAKE_TUI_GATE" ]; do sleep 0.1; done
+    [ -z "${FAKE_TUI_EXIT_MARKER:-}" ] || : > "$FAKE_TUI_EXIT_MARKER"
+    exit "${FAKE_TUI_STATUS:-0}"
     ;;
 esac
 EOF
@@ -65,6 +105,12 @@ teardown() {
   # process inside it is alive, so the rm below fails with "Directory not
   # empty" and the test reports a failure whose assertions all passed.
   local pf pid
+  if [ -n "${TEST_MONITOR_PID:-}" ]; then
+    kill "$TEST_MONITOR_PID" 2>/dev/null || true
+    wait "$TEST_MONITOR_PID" 2>/dev/null || true
+  fi
+  [ -z "${TEST_TUI_RELEASE_FILE:-}" ] || : > "$TEST_TUI_RELEASE_FILE"
+  [ -z "${TEST_TUI_EXIT_FILE:-}" ] || wait_for_file "$TEST_TUI_EXIT_FILE" || true
   for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
     [ -f "$pf" ] || continue
     pid="$(cat "$pf" 2>/dev/null)"
@@ -74,6 +120,21 @@ teardown() {
   done
   rm -rf "$TEST_PROJECT"
   teardown_test_env
+}
+
+_make_term_recording_launcher() {
+  local launcher="$1"
+  cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+record_launcher_term() {
+  printf 'launcher TERM\n' > "$FAKE_LAUNCHER_TERM_LOG"
+  exit 0
+}
+trap record_launcher_term TERM
+printf '%s' "$$" > "$FAKE_LAUNCHER_READY_FILE"
+while :; do sleep 0.1; done
+EOF
+  chmod +x "$launcher"
 }
 
 # --- fail-open (A) ---
@@ -134,6 +195,346 @@ teardown() {
   [ "$status" -eq 0 ]
   # Same server reused (pid unchanged), not recreated.
   [ "$(cat "$pidf")" = "$first_pid" ]
+}
+
+@test "codex-monitor: invocation scope is consumed before Codex argv" {
+  local key_log="$TEST_PROJECT/app-server-key"
+  run env AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope scope-A --codex-command codex -- --foo
+  [ "$status" -eq 0 ]
+  grep -Eq 'plain-codex <--remote> <ws://127\.0\.0\.1:[0-9]+> <--foo>' "$CALL_LOG"
+  refute grep -q -- '--invocation-scope' "$CALL_LOG"
+  local expected_key
+  expected_key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" scope-A | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  [ "$(cat "$key_log")" = "$expected_key" ]
+}
+
+@test "codex-monitor: malformed and duplicate invocation scopes fail before launch" {
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope
+  [ "$status" -eq 2 ]
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope bad/scope --codex-command codex --
+  [ "$status" -eq 2 ]
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" bash "$TYPES/codex/codex-monitor.sh" \
+    --project "$TEST_PROJECT" --invocation-scope one --invocation-scope two \
+    --codex-command codex --
+  [ "$status" -eq 2 ]
+  [ ! -e "$CALL_LOG" ]
+}
+
+@test "codex-monitor: help distinguishes legacy reuse from scoped supervision" {
+  run bash "$TYPES/codex/codex-monitor.sh" --help
+  [ "$status" -eq 0 ]
+  grep -Fq -- "--invocation-scope TOKEN" <<< "$output"
+  grep -Fq -- "Without --invocation-scope, starts/reuses" <<< "$output"
+  grep -Fq -- "then execs" <<< "$output"
+  grep -Fq -- "Scoped mode waits for its captured TUI, app-server, and bridge launcher processes." <<< "$output"
+}
+
+@test "codex-monitor: no-scope server ignores inherited scoped routing" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local hash base key_log nested_url_log nested_url own_url
+  hash="$(printf '%s' "$(cd "$TEST_PROJECT" && pwd -P)" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  base="$TEST_SKILL_DIR/run/codex-app-server.$hash"
+  key_log="$TEST_PROJECT/app-server-key"
+  nested_url_log="$TEST_PROJECT/nested-app-server-url"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.outer-scope.port"
+
+  run env AGMSG_CODEX_APP_SERVER_KEY=outer-scope \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_TEST_APP_SERVER_KEY_LOG="$key_log" \
+    AGMSG_TEST_APP_SERVER_URL_LOG="$nested_url_log" \
+    AGMSG_TEST_APP_SERVER_PROJECT="$TEST_PROJECT" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  wait_for_file "$nested_url_log"
+  [ -f "$base.pid" ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-app-server.outer-scope.pid" ]
+  nested_url="$(cat "$nested_url_log")"
+  own_url="ws://127.0.0.1:$(cat "$base.port")"
+  [ "$nested_url" = "$own_url" ]
+  [ ! -s "$key_log" ]
+  grep -Fq "<--remote> <$own_url>" "$CALL_LOG"
+}
+
+@test "codex-monitor: no-scope duplicate dispatcher does not inherit scoped standby" {
+  local launcher="$TEST_PROJECT/env-recording-launcher"
+  local launcher_log="$TEST_PROJECT/launcher-env"
+  cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "${AGMSG_CODEX_APP_SERVER_KEY:-}" "${AGMSG_CODEX_BRIDGE_APP_SERVER:-}" > "$FAKE_LAUNCHER_ENV_LOG"
+EOF
+  chmod +x "$launcher"
+
+  run env AGMSG_CODEX_APP_SERVER_KEY=outer-scope \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    FAKE_LAUNCHER_ENV_LOG="$launcher_log" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  wait_for_file "$launcher_log"
+  [ ! -s "$launcher_log" ] || [ -z "$(sed -n '1p' "$launcher_log")" ]
+  refute grep -Fxq 'ws://127.0.0.1:3333' "$launcher_log"
+}
+
+@test "codex-monitor: scoped TUI exit preserves status and removes exact artifacts" {
+  run env FAKE_TUI_STATUS=37 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-exit --codex-command resume -- --last -C "$TEST_PROJECT"
+  [ "$status" -eq 37 ]
+  grep -Eq '^plain-codex <resume> <--remote> <ws://127\.0\.0\.1:[0-9]+> <--last> <-C>' "$CALL_LOG"
+  [ "$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "codex-monitor: scoped TUI exit sends TERM to its captured server and launcher children" {
+  local server_term="$TEST_PROJECT/server-term.log"
+  local launcher_term="$TEST_PROJECT/launcher-term.log"
+  local launcher="$TEST_PROJECT/fake-launcher"
+  local gate="$TEST_PROJECT/release-tui"
+  local tui_exit="$TEST_PROJECT/tui-exit"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  _make_term_recording_launcher "$launcher"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
+
+  env FAKE_TERM_LOG="$server_term" FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_TERM_LOG="$launcher_term" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" FAKE_TUI_EXIT_MARKER="$tui_exit" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-term --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  : > "$gate"
+  wait "$TEST_MONITOR_PID"
+  TEST_MONITOR_PID=""
+
+  grep -qx 'server TERM' "$server_term"
+  grep -qx 'launcher TERM' "$launcher_term"
+}
+
+@test "codex-monitor: scoped launch clears stale request before launcher" {
+  local scope=scope-stale-request key request launcher launcher_log
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" "$scope" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  request="$TEST_SKILL_DIR/run/codex-bridge-request.$key"
+  launcher="$TEST_PROJECT/request-probing-launcher"
+  launcher_log="$TEST_PROJECT/request-observation"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'codex\tstale-thread\tws://127.0.0.1:9999\n' > "$request"
+  cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+request="$TEST_SKILL_DIR/run/codex-bridge-request.$AGMSG_CODEX_APP_SERVER_KEY"
+if [ -e "$request" ]; then printf 'present'; else printf 'absent'; fi > "$FAKE_REQUEST_OBSERVATION"
+EOF
+  chmod +x "$launcher"
+
+  run env FAKE_REQUEST_OBSERVATION="$launcher_log" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope "$scope" --codex-command codex --
+  [ "$status" -eq 0 ]
+  wait_for_file "$launcher_log"
+  [ "$(cat "$launcher_log")" = "absent" ]
+  [ ! -e "$request" ]
+}
+
+@test "codex-monitor: scoped direct TERM reaps TUI and returns signal status" {
+  skip_on_windows "uses POSIX direct-child signal semantics"
+
+  local gate="$TEST_PROJECT/hold-tui"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  local server_term="$TEST_PROJECT/server-term.log"
+  local launcher_term="$TEST_PROJECT/launcher-term.log"
+  local tui_term="$TEST_PROJECT/tui-term.log"
+  local tui_exit="$TEST_PROJECT/tui-exit"
+  local tui_pid_file="$TEST_PROJECT/tui.pid"
+  local launcher="$TEST_PROJECT/fake-launcher"
+  local key pidfile server_pid launcher_pid tui_pid monitor_status lock_owner
+  _make_term_recording_launcher "$launcher"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
+
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" scope-direct-term | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+  env FAKE_TERM_LOG="$server_term" FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_TERM_LOG="$launcher_term" FAKE_LAUNCHER_READY_FILE="$launcher_ready" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" FAKE_TUI_EXIT_MARKER="$tui_exit" \
+    FAKE_TUI_PID_FILE="$tui_pid_file" FAKE_TUI_TERM_LOG="$tui_term" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-direct-term --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  server_pid="$(cat "$pidfile")"
+  launcher_pid="$(cat "$launcher_ready")"
+  tui_pid="$(cat "$tui_pid_file")"
+
+  kill -TERM "$TEST_MONITOR_PID"
+  if wait "$TEST_MONITOR_PID"; then monitor_status=0; else monitor_status=$?; fi
+  TEST_MONITOR_PID=""
+  lock_owner="$(. "$SCRIPTS/lib/storage.sh"; agmsg_runtime_lock_owner "codex-app-server:$key")"
+
+  [ "$monitor_status" -eq 143 ]
+  wait_for_pid_exit "$tui_pid"
+  wait_for_pid_exit "$server_pid"
+  wait_for_pid_exit "$launcher_pid"
+  grep -qx 'tui TERM' "$tui_term"
+  grep -qx 'server TERM' "$server_term"
+  grep -qx 'launcher TERM' "$launcher_term"
+  [ "$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
+  [ -z "$lock_owner" ]
+}
+
+@test "codex-monitor: scoped fail-open exit preserves status and argv" {
+  run env FAKE_CODEX_MODE=broken FAKE_TUI_STATUS=37 AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-fail-open --codex-command resume -- --last -C "$TEST_PROJECT"
+  [ "$status" -eq 37 ]
+  grep -Eq '^plain-codex <resume> <--last> <-C>' "$CALL_LOG"
+  refute grep -q -- '--remote' "$CALL_LOG"
+  printf '%s\n' "$output" | grep -Fq 'Real-time agmsg delivery is OFF'
+  [ "$(find "$TEST_SKILL_DIR/run" -name 'codex-app-server.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "codex-monitor: scoped cleanup never signals a foreign pidfile target" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local gate="$TEST_PROJECT/release-tui"
+  local key pidfile server_pid sentinel_pid monitor_pid
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" scope-foreign | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+
+  env FAKE_TUI_GATE="$gate" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-foreign --codex-command codex -- &
+  monitor_pid=$!
+  wait_for_file "$pidfile"
+  wait_for_file_contains "$CALL_LOG" plain-codex
+  server_pid="$(cat "$pidfile")"
+
+  sleep 60 3>&- &
+  sentinel_pid=$!
+  printf '%s' "$sentinel_pid" > "$pidfile"
+  : > "$gate"
+  wait "$monitor_pid"
+
+  wait_for_pid_exit "$server_pid"
+  kill -0 "$sentinel_pid"
+  [ "$(cat "$pidfile")" = "$sentinel_pid" ]
+  kill "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+}
+
+@test "codex-monitor: same live project and scope duplicate fails without touching first" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+
+  local scope=scope-duplicate
+  local gate="$TEST_PROJECT/release-first-tui"
+  local server_ready="$TEST_PROJECT/server-ready"
+  local launcher_ready="$TEST_PROJECT/launcher-ready"
+  local tui_ready="$TEST_PROJECT/tui-ready"
+  local tui_exit="$TEST_PROJECT/tui-exit"
+  local tui_pid_file="$TEST_PROJECT/tui.pid"
+  local launcher="$TEST_PROJECT/fake-launcher"
+  local launcher_term="$TEST_PROJECT/launcher-term.log"
+  local key pidfile first_monitor first_server first_launcher first_tui calls_before
+  _make_term_recording_launcher "$launcher"
+  TEST_TUI_RELEASE_FILE="$gate"
+  TEST_TUI_EXIT_FILE="$tui_exit"
+
+  key="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" "$scope" | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile="$TEST_SKILL_DIR/run/codex-app-server.$key.pid"
+  env FAKE_SERVER_READY_FILE="$server_ready" \
+    FAKE_LAUNCHER_READY_FILE="$launcher_ready" FAKE_LAUNCHER_TERM_LOG="$launcher_term" \
+    FAKE_TUI_GATE="$gate" FAKE_TUI_READY_FILE="$tui_ready" \
+    FAKE_TUI_EXIT_MARKER="$tui_exit" FAKE_TUI_PID_FILE="$tui_pid_file" \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope "$scope" --codex-command codex -- &
+  TEST_MONITOR_PID=$!
+  first_monitor="$TEST_MONITOR_PID"
+
+  wait_for_file_contains "$server_ready" '[0-9]'
+  wait_for_file_contains "$launcher_ready" '[0-9]'
+  wait_for_file_contains "$tui_ready" '[0-9]'
+  first_server="$(cat "$pidfile")"
+  first_launcher="$(cat "$launcher_ready")"
+  first_tui="$(cat "$tui_pid_file")"
+  calls_before="$(wc -l < "$CALL_LOG" | tr -d ' ')"
+
+  run env AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$launcher" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope "$scope" --codex-command codex --
+  [ "$status" -eq 1 ]
+  grep -Fq "invocation scope is already active" <<< "$output"
+  [ "$(wc -l < "$CALL_LOG" | tr -d ' ')" = "$calls_before" ]
+  [ "$(cat "$pidfile")" = "$first_server" ]
+  kill -0 "$first_monitor"
+  kill -0 "$first_server"
+  kill -0 "$first_launcher"
+  kill -0 "$first_tui"
+
+  : > "$gate"
+  wait "$first_monitor"
+  TEST_MONITOR_PID=""
+  wait_for_pid_exit "$first_server"
+  wait_for_pid_exit "$first_launcher"
+  wait_for_pid_exit "$first_tui"
+  [ ! -e "$pidfile" ]
+}
+
+@test "codex-monitor: different invocation scopes use different live app-servers" {
+  skip_on_windows "spawns python socket listeners; flaky on the Windows runner"
+
+  local gate_a="$TEST_PROJECT/release-tui-a" gate_b="$TEST_PROJECT/release-tui-b"
+  local key_a key_b pidfile_a pidfile_b scope_a_monitor scope_b_monitor scope_a_server scope_b_server
+  key_a="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" scope-A | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  key_b="$(printf '%s\n%s' "$(cd "$TEST_PROJECT" && pwd -P)" scope-B | ( . "$SCRIPTS/lib/hash.sh"; agmsg_sha1 ))"
+  pidfile_a="$TEST_SKILL_DIR/run/codex-app-server.$key_a.pid"
+  pidfile_b="$TEST_SKILL_DIR/run/codex-app-server.$key_b.pid"
+
+  env FAKE_TUI_GATE="$gate_a" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-A --codex-command codex -- &
+  scope_a_monitor=$!
+  TEST_MONITOR_PID="$scope_a_monitor"
+  wait_for_file "$pidfile_a"
+  scope_a_server="$(cat "$pidfile_a")"
+
+  env FAKE_TUI_GATE="$gate_b" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" \
+    --invocation-scope scope-B --codex-command codex -- &
+  scope_b_monitor=$!
+  wait_for_file "$pidfile_b"
+  scope_b_server="$(cat "$pidfile_b")"
+  [ "$scope_a_server" != "$scope_b_server" ]
+  kill -0 "$scope_a_server"
+  kill -0 "$scope_b_server"
+
+  : > "$gate_a"
+  wait "$scope_a_monitor"
+  TEST_MONITOR_PID=""
+  wait_for_pid_exit "$scope_a_server"
+  kill -0 "$scope_b_monitor"
+  kill -0 "$scope_b_server"
+
+  : > "$gate_b"
+  wait "$scope_b_monitor"
+  wait_for_pid_exit "$scope_b_server"
 }
 
 # --- port discovery vs colorized banner (codex 0.144+) ---
