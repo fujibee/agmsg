@@ -20,6 +20,53 @@ if [ ! -f "$CONFIG" ]; then
   exit 1
 fi
 
+# Where each member's pane is, when we know. A pane with no name is invisible
+# from inside agmsg -- the #1044 dogfood found one by reading the terminal's own
+# JSON, because nothing here reported it -- and that is also why there was no way
+# to assert the naming requirement. This column is what makes it checkable.
+#
+# What is printed is the PLACEMENT RECORD, which is a recorded fact: the terminal
+# and the pane id that peek/poke resolve a member through. The visible label is
+# NOT printed, because reading it back means asking the terminal and no read op
+# for it exists; inferring it from the record would report a claim as an
+# observation, and under AGMSG_TERMINAL_NAMING=off it would be wrong.
+#
+# The source carries the errexit lift: a failure inside a sourced file fires this
+# script's `set -e` on bash 3.2, and a roster must still list its members on a
+# machine where the terminal layer is unavailable.
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+_agmsg_pl_rc=0; _agmsg_pl_e=0
+case $- in *e*) _agmsg_pl_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/actas-lock.sh" ] && . "$SCRIPT_DIR/lib/actas-lock.sh" \
+  && [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_pl_rc=$?
+[ "$_agmsg_pl_e" = 1 ] && set -e
+
+# "<terminal> <pane>" for <team>/<agent>, or a reason nobody has to guess at.
+_member_placement() {
+  local team="$1" agent="$2" rec ref t id
+  if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    printf 'placement unavailable — terminal support not loaded'; return 0
+  fi
+  rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
+  if [ -z "$rec" ] || [ ! -f "$rec" ]; then
+    printf 'no pane recorded — not named yet'; return 0
+  fi
+  IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
+  if [ -z "$ref" ]; then
+    printf 'placement record is empty'; return 0
+  fi
+  t=""; id=""
+  t="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || t=""
+  id="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || id=""
+  if [ -z "$t" ] || [ -z "$id" ]; then
+    printf 'placement record unreadable (%s)' "$ref"; return 0
+  fi
+  printf '%s %s' "$t" "$id"
+}
+
 echo "Team: $TEAM"
 echo ""
 
@@ -40,9 +87,9 @@ while IFS='	' read -r name types project registrations; do
     # empty type and a "?" project, which reads as damage.
     echo "  $name (remote — no local registration)"
   elif [ "$registrations" -gt 1 ]; then
-    echo "  $name ($types) — $project (+$((registrations - 1)) more)"
+    echo "  $name ($types) — $project (+$((registrations - 1)) more)   [$(_member_placement "$TEAM" "$name")]"
   else
-    echo "  $name ($types) — $project"
+    echo "  $name ($types) — $project   [$(_member_placement "$TEAM" "$name")]"
   fi
   COUNT=$((COUNT + 1))
 # tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
