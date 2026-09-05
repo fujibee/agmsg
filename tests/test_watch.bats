@@ -293,10 +293,24 @@ _wait_for_file_contains() {
   wait "$sesspid" 2>/dev/null || true
   bash "$SCRIPTS/send.sh" team bob alice "M2-undelivered" >/dev/null
   _wait_for_missing "$pf" || { kill "$w" 2>/dev/null || true; false; }
+  # The pidfile is removed on the exit path; the process itself dies a beat
+  # later, and on a loaded host that beat is long enough to lose a race against
+  # an instant kill -0. The contract is that the watcher EXITS within ~1 interval
+  # of the session dying, not that it is already reaped the microsecond its
+  # pidfile vanishes -- so wait a bounded moment for the process to be gone. A
+  # watcher that never exits (a real liveness bug) still fails: the loop exhausts
+  # and kill -0 keeps succeeding.
+  local _i; for _i in $(seq 1 50); do kill -0 "$w" 2>/dev/null || break; sleep 0.1; done
   run kill -0 "$w"; [ "$status" -ne 0 ]
   [ "$(_read_cursor team alice)" = "$first_cursor" ]
   refute grep -q "M2-undelivered" "$out"
-  run_watcher_for "after-liveness" "$TEST_SKILL_DIR/liveness-redelivery.log" 2
+  # Wait for the redelivery instead of sleeping a fixed 2s: a fresh watcher must
+  # deliver the row the dead one left unconsumed, but WHEN it lands depends on
+  # host load, not on the contract (see the run_watcher_for/until note above --
+  # a fixed sleep is a claim about the machine). run_watcher_until blocks until
+  # M2 is delivered and the cursor advances, or fails if it never does, so a real
+  # non-redelivery still fails while load-induced slowness no longer does.
+  run_watcher_until "after-liveness" "$TEST_SKILL_DIR/liveness-redelivery.log" "M2-undelivered"
   grep -q "M2-undelivered" "$TEST_SKILL_DIR/liveness-redelivery.log"
 }
 
@@ -1010,4 +1024,177 @@ _record_handover_events() {
   grep -q "did not resolve to a terminal and pane id" "$WLOG"
   # must NOT reach the "belongs to someone else" fallthrough with an empty recorded side
   refute grep -q "belongs to someone else" "$WLOG"
+}
+
+@test "watch: a backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Same exposure as the inbox argv-ceiling test (see it for why the backlog is
+  # many normal messages sized from the measured ARG_MAX, not one oversized body:
+  # a single >128 KB argv element fails on the ubuntu runner though it fits on
+  # macOS, and a fixed size can pass green without exceeding a larger ARG_MAX).
+  local arg_max body count i last filler
+  arg_max="$(getconf ARG_MAX)"
+  body=90000                                    # one message body, < 128 KB per-arg cap
+  count=$(( arg_max / body + 3 ))               # total payload > ARG_MAX, with margin
+  [ $(( count * body )) -gt "$arg_max" ]        # guarantee the ceiling is actually exceeded
+  filler="$(head -c "$body" /dev/zero | tr '\0' x)"
+  for i in $(seq 1 "$count"); do
+    bash "$SCRIPTS/send.sh" team bob alice "WMSG${i}-${filler}-WEND${i}" >/dev/null
+  done
+  last="$count"
+  run_watcher_until "sess-wbig" "$TEST_SKILL_DIR/wbig.log" "WEND${last}"
+  grep -q "WMSG1-" "$TEST_SKILL_DIR/wbig.log"
+  grep -q "WEND${last}" "$TEST_SKILL_DIR/wbig.log"
+}
+
+@test "watch: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Force the delivery query -- the ONLY sqlite call in the loop whose last arg is
+  # ':memory:' (SQL on stdin) -- to return nothing, while the store queries (a real DB
+  # file as the last arg) keep working. So OUT stays non-empty, ROWS is empty, the
+  # cursor never advances, and the SAME batch returns every cycle: the exact silent
+  # self-lock. The stuck guard must notice after STUCK_THRESHOLD cycles, say why on
+  # STDOUT (stderr is /dev/null here), and EXIT rather than loop in silence.
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  bash "$SCRIPTS/send.sh" team bob alice "STUCKMSG" >/dev/null   # pending; delivery will fail
+  local out="$TEST_SKILL_DIR/stuck.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-stuck "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # (1) the report must appear...
+  if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
+  # (2) ...and the watcher must EXIT on its own, not keep looping.
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
+  # (3) ...and it must report FAILURE at the process contract (the defined
+  # unhealthy code, 75), not exit 0 -- a supervisor must not read a wedged
+  # watcher as a clean shutdown. Reverting the arm to `exit 0` turns this red.
+  local st=0; wait "$w" || st=$?
+  [ "$st" -eq 75 ]
+  # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
+  grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
+}
+
+@test "watch: the stuck guard fires for a pair whose agent name has a space (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # End-to-end companion to test_watch_stuck_map.bats: the tracker keys on the
+  # "<team>:<agent>" pair, and identities.sh emits a spaced agent as one
+  # tab-separated field, so the key carries the space. The first cut framed the
+  # tracker with spaces and scanned it with `for e in $MAP`, splitting "sp aced"
+  # across words: its record never matched, the count reset every cycle, and the
+  # guard NEVER fired for that pair -- the silence-catcher silent. Restoring word
+  # splitting turns this red (the report never appears -> the wait times out).
+  local sproj="/tmp/agmsg-watch-spaced-proj"
+  bash "$SCRIPTS/join.sh" team 'sp aced' claude-code "$sproj" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob claude-code "$sproj" >/dev/null
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub2"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  bash "$SCRIPTS/send.sh" team bob 'sp aced' "SPACEDMSG" >/dev/null  # pending; delivery will fail
+  local out="$TEST_SKILL_DIR/stuck-spaced.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-stuck-sp "$sproj" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  [ "$alive" -eq 0 ]
+  grep -q "agmsg watch: delivery for team:sp aced is STUCK" "$out"
+}
+
+@test "watch: an idle pair seeing only a cursor high-water is not treated as stuck (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # storage_watch_after appends a trailing "cursor" high-water line even for a
+  # CAUGHT-UP pair, because the team's sequence advances whenever ANY pair in the
+  # team gets a message. So OUT is non-empty for an idle pair with zero messages
+  # of its own. The stuck tracker must key on real message_sent rows, not on
+  # [ -n "$OUT" ]; otherwise a healthy idle watcher whose cursor cannot advance
+  # (here: the delivery query is stubbed to fail, freezing every cursor) would
+  # climb to the threshold and EXIT. 'idle' has no messages; the bob->alice send
+  # only bumps the team high-water, so 'idle' sees a cursor-only OUT. The guard
+  # must NOT fire. Reverting the tracker to [ -n "$OUT" ] turns this red.
+  bash "$SCRIPTS/join.sh" team idle claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "BUMP" >/dev/null   # bumps team high-water, not for idle
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub3"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  local out="$TEST_SKILL_DIR/idle.log"
+  # actas 'idle' narrows this watcher to the idle pair only, so no other pair's
+  # real backlog can fire and mask the property under test.
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-idle "$PROJ" claude-code idle >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # Watch across well more than STUCK_THRESHOLD cycles: if "is STUCK" ever
+  # appears the guard fired on a healthy idle pair -- fail fast.
+  local i
+  for i in $(seq 1 70); do
+    if grep -q "is STUCK" "$out" 2>/dev/null; then kill "$w" 2>/dev/null || true; false; fi
+    kill -0 "$w" 2>/dev/null || break
+    sleep 0.1
+  done
+  # It must still be alive (it neither fired nor exited for any other reason).
+  kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  ! grep -q "is STUCK" "$out"
+}
+
+@test "watch: a failed pending-scan is surfaced and exits, not collapsed to caught-up (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # The loop reads whether messages are waiting with storage_watch_after. If that
+  # READ fails and the failure collapses to "" (the old `|| true`), the caught-up
+  # arm drops the tracker and the watcher continues in silence forever -- the very
+  # outage #1045 exists to catch, and one the stuck guard cannot see (a failed
+  # scan returns no message_sent row to count). So a failed read must be surfaced
+  # and exit, not treated as "no messages".
+  #
+  # Fail ONLY the pending scan: its SQL is the one passed on argv that contains
+  # "message_sent" (the startup "SELECT 1;" and the cursor read do not; the
+  # delivery query goes over stdin with ':memory:'). The startup DB healthcheck
+  # therefore still passes, so this exercises a RUNTIME read failure, not startup.
+  bash "$SCRIPTS/send.sh" team bob alice "SEED" >/dev/null   # create the store
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub4"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+for _a in "\$@"; do case "\$_a" in *message_sent*) exit 1 ;; esac; done
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  local out="$TEST_SKILL_DIR/pollfail.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-pollfail "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # The failed read must be surfaced...
+  if ! _wait_for_file_contains "$out" "cannot read delivery state"; then kill "$w" 2>/dev/null || true; false; fi
+  # ...and the watcher must EXIT, not loop in silence. (Reverting the read to
+  # `|| true` makes the message never appear and the watcher never exit -> red.)
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
+  # ...with the defined unhealthy exit code (75), not exit 0: a failed store read
+  # is unhealthy, and the process contract must say so. Reverting the arm to
+  # `exit 0` turns this red.
+  local st=0; wait "$w" || st=$?
+  [ "$st" -eq 75 ]
+  # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
+  grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
 }
