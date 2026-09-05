@@ -427,6 +427,19 @@ agmsg_terminal_name_self() {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
 
+  # The BARE sid, whatever the caller had. A terminal knows the id the CLI
+  # published; the composite "<sid>.<pid>" exists only inside agmsg, and handing
+  # it over asks a question no terminal can answer -- the answer comes back as
+  # "this session cannot identify its own pane", which reads as a resolution
+  # problem and is an identifier mismatch. That was a real defect at the actas
+  # call site, and watch.sh had it before that. Normalising HERE instead of at
+  # each caller is what stops the next entry point from repeating it: the
+  # conversion is idempotent (bare -> bare, composite -> bare, empty -> empty),
+  # so a caller cannot get it wrong by passing either form.
+  if [ -n "$sid" ] && declare -F agmsg_instance_bare_sid >/dev/null 2>&1; then
+    sid="$(agmsg_instance_bare_sid "$sid")"
+  fi
+
   # No bare `x=$(cmd)` past this point. Under `set -e` a non-zero inside a command
   # substitution ends the CALLER before the status can be read -- the shape review
   # caught four times in this branch -- so every capture carries `|| rc=$?`.
