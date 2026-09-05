@@ -1225,7 +1225,8 @@ STUB
   _stop_watcher "$pid"
 
   [ "$found" -eq 0 ]
-  # The key, specifically — the thing peek/poke resolve through, not just any
-  # tmux call.
+  # The key specifically — the name the terminal addresses the agent by — rather
+  # than just any tmux call. (peek/poke resolve through the placement record, not
+  # through this; the assertion is about which of the two names was set.)
   grep -Fq '[@agmsg_agent] [team:alice]' "$ARGV_LOG"
 }

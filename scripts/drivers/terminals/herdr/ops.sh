@@ -528,18 +528,28 @@ _herdr_internal_key() {
 # var, so the policy lives in one place and this only carries it out).
 #
 # Which of the two is which matters: `pane rename` is the label a person reads,
-# `agent rename` is what `peek`/`poke` resolve the member through. So under
-# `key` the addressing is still established and only the decoration is skipped —
+# `agent rename` is the name herdr itself addresses the agent by, in its own
+# namespace — NOT what this repo's `peek`/`poke` resolve through, which is the
+# placement record's pane id. So under `key` that name is still established and
+# only the decoration is skipped —
 # and a key that cannot be set is an error there, because nothing else happened.
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$team:$name"
 
-  # THE KEY FIRST, and its failure is fatal. It is what `peek` and `poke` resolve
-  # the member through; the label is what a person reads. Ordering the label
-  # first meant a failed decoration returned 13 before the key was ever
-  # attempted, so the requirement this driver is here to serve — a member's pane
-  # is never without a name — broke through the other door. tmux has always had
+  # THE KEY FIRST, and its failure is fatal.
+  #
+  # The reason is NOT that peek/poke resolve through the key — an earlier
+  # revision of this comment said so and it is false in this tree: those commands
+  # resolve through the placement record's pane id, and `_herdr_internal_key` is
+  # read nowhere outside this driver. The key is the name herdr knows the agent
+  # by, on its side.
+  #
+  # The reason that survives is the one below: the caller writes the placement
+  # record only when this returns 0. Ordering the label first meant a failed
+  # DECORATION returned 13 before the key was attempted and before the record was
+  # written, so a member ended up with neither name and no record — the
+  # requirement this driver serves broke through that door. tmux has always had
   # this order; herdr was the one driver that put the ornament in front.
   key="$(_herdr_internal_key "$team" "$name")" || { echo runtime_error; return 13; }
   herdr agent rename "$id" "$key" >/dev/null 2>&1 || { echo runtime_error; return 13; }

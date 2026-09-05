@@ -30,8 +30,11 @@
 #   terminal_name <id> <team> <name> [mode]
 #                                       control op: set the pane's names; idempotent.
 #                                       Two names, not one: the label a person
-#                                       reads and the key peek/poke resolve
-#                                       through. `mode=key` sets only the key
+#                                       reads and the key the TERMINAL addresses
+#                                       the agent by in its own namespace. This
+#                                       repo's peek/poke resolve through the
+#                                       placement record, not the key.
+#                                       `mode=key` sets only the key
 #                                       (AGMSG_TERMINAL_NAMING=off); absent sets
 #                                       both. A driver that has only one name
 #                                       treats it as the key.
@@ -484,10 +487,16 @@ agmsg_terminal_name_self() {
   agmsg_terminal_load "$terminal" || return 1
 
   # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
-  # key stays, always, because it is addressing rather than decoration: dropping
-  # it makes the member unreachable to peek and poke, which is the defect #1044
-  # is about, re-created on request. A caller that genuinely wants no terminal
-  # writes at all is describing the `plain` terminal.
+  # key stays, always, because it is addressing rather than decoration — the name
+  # the TERMINAL knows the agent by, in its own namespace.
+  #
+  # Narrower than an earlier revision of this comment claimed, and the difference
+  # matters: `peek`, `poke` and `despawn` in THIS repo resolve through the
+  # placement record's pane id, and `_herdr_internal_key` is read nowhere outside
+  # its own driver (counted). So dropping the key does not make a member
+  # unreachable to agmsg. Saying it did pointed at the wrong thing to protect.
+  # A caller that genuinely wants no terminal writes at all is describing the
+  # `plain` terminal.
   #
   # The env var is read HERE and handed to the driver as a mode, so the policy
   # has one home and each driver only carries it out. Read at call time, not

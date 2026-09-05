@@ -1271,10 +1271,11 @@ M
 
 # --- AGMSG_TERMINAL_NAMING=off drops the label and keeps the key (#1044) ------
 #
-# Two names, and only one of them is optional. The key is what peek/poke resolve
-# a member through, so turning it off would make the member unreachable — which
-# is the defect #1044 is about, re-created on request. A caller that wants no
-# terminal writes at all is describing `plain`.
+# Two names, and only one of them is optional. The key is the name the TERMINAL
+# addresses the agent by in its own namespace; the label is what a person reads.
+# (peek/poke/despawn in this repo resolve through the placement record's pane id
+# — an earlier version of this comment said the key, and that is false here.) A
+# caller that wants no terminal writes at all is describing `plain`.
 #
 # Both drivers are exercised because the split is not the same shape in each:
 # herdr has two commands (`pane rename` / `agent rename`), tmux has a pane option
