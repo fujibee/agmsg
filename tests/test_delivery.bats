@@ -3609,3 +3609,77 @@ JSON
   run bash "$SCRIPTS/inbox.sh" testteam alice
   printf '%s' "$output" | grep -Fq "mid-turn, still unread"
 }
+
+# A `herdr` that logs its argv and answers `agent list` with a roster holding one
+# session, so a lookup BY that session id succeeds. Deliberately not the registry
+# suite's fixture: that one pins the measured JSON shape, which is a different
+# job from the one here.
+_fake_herdr_with_session() {
+  local sid="$1"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"%s"},"pane_id":"wC:p4","display_agent":"x","name":"k"}]}}\n' "$sid"
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+# --- the per-turn hook re-asserts the pane's name (#1044) ---------------------
+#
+# For several agent types this is the ONLY entry point that ever knows the
+# session id: grok-build has no SessionStart hook, and `monitor=yes` holds on two
+# of the nine, so a hand-started pane on the rest is first named from here.
+# Naming is an invariant re-asserted at every entry point, not an assignment made
+# once somewhere — measured across the nine types, no single place covers them.
+@test "check-inbox: names this pane on the way through (#1044)" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+
+  bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  : > "$ARGV_LOG"   # drop whatever join itself did; this test is about the hook
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+
+  grep -Fq '[@agmsg_agent] [nameteam:alice]' "$ARGV_LOG"
+}
+
+# The other half of the same rule, and the half that is easy to lose: no session
+# id is "there was nothing to resolve with", not "resolution failed". It stays
+# quiet, and it must not go naming panes it cannot identify.
+#
+# A differential pair, because the two halves differ in exactly one input. The
+# first attempt asserted `herdr agent list` as a positive control for the no-sid
+# run and it failed — measured: with no session id the resolver does not ask
+# herdr anything at all, because there is nothing to ask BY. So the control is
+# the same invocation carrying a session id, which does reach herdr and does
+# rename; the silence of the other half means something only next to it.
+@test "check-inbox: no session id names nothing; the same call with one does (#1044)" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
+  _fake_herdr_with_session "sess-x"
+  export HERDR_ENV=1
+  unset TMUX TMUX_PANE
+
+  bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+
+  # No session id on stdin.
+  : > "$ARGV_LOG"
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+
+  # The same call, one input different.
+  : > "$ARGV_LOG"
+  run bash -c "printf '%s' '{\"session_id\":\"sess-x\"}' | bash '$SCRIPTS/check-inbox.sh' claude-code '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [nameteam:alice]' "$ARGV_LOG"
+}

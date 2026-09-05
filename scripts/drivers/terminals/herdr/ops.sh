@@ -523,12 +523,44 @@ _herdr_internal_key() {
 #               failed agent rename (a live-name collision, or no SHA-256 tool to
 #               derive the key) is non-fatal — the pane id in the record still
 #               resolves.
+# <mode> is `key` or absent. Absent means both names; `key` means the resolvable
+# one only, and the caller has already decided that (the registry reads the env
+# var, so the policy lives in one place and this only carries it out).
+#
+# Which of the two is which matters: `pane rename` is the label a person reads,
+# `agent rename` is the name herdr itself addresses the agent by, in its own
+# namespace — NOT what this repo's `peek`/`poke` resolve through, which is the
+# placement record's pane id. So under `key` that name is still established and
+# only the decoration is skipped —
+# and a key that cannot be set is an error there, because nothing else happened.
 terminal_name() {
-  local id="$1" team="$2" name="$3" label key
+  local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$team:$name"
-  herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
-  if key="$(_herdr_internal_key "$team" "$name")"; then
-    herdr agent rename "$id" "$key" >/dev/null 2>&1 || true
+
+  # THE KEY FIRST, and its failure is fatal.
+  #
+  # The reason is NOT that peek/poke resolve through the key — an earlier
+  # revision of this comment said so and it is false in this tree: those commands
+  # resolve through the placement record's pane id, and `_herdr_internal_key` is
+  # read nowhere outside this driver. The key is the name herdr knows the agent
+  # by, on its side.
+  #
+  # The reason that survives is the one below: the caller writes the placement
+  # record only when this returns 0. Ordering the label first meant a failed
+  # DECORATION returned 13 before the key was attempted and before the record was
+  # written, so a member ended up with neither name and no record — the
+  # requirement this driver serves broke through that door. tmux has always had
+  # this order; herdr was the one driver that put the ornament in front.
+  key="$(_herdr_internal_key "$team" "$name")" || { echo runtime_error; return 13; }
+  herdr agent rename "$id" "$key" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+
+  # The label, and its failure is deliberately NOT fatal — the same shape tmux
+  # has. Not merely for symmetry: the caller writes the placement record only
+  # when this returns 0, and that record is the other half of addressing. A
+  # non-zero here would therefore throw away the very thing the reordering above
+  # exists to protect, for a decoration.
+  if [ "$mode" != key ]; then
+    herdr pane rename "$id" "$label" >/dev/null 2>&1 || true
   fi
   echo ok
   return 0

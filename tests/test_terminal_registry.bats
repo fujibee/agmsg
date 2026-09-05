@@ -28,21 +28,9 @@ setup() {
 
 teardown() { teardown_test_env; }
 
-# A fake `tmux` that logs argv and produces the ids/text real tmux would.
-_install_fake_tmux() {
-  cat > "$FAKEBIN/tmux" <<EOF
-#!/usr/bin/env bash
-{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-case "\$1" in
-  new-window)   echo '@7' ;;
-  split-window) echo '%9' ;;
-  capture-pane) printf 'line one\nline two\n' ;;
-esac
-exit 0
-EOF
-  chmod +x "$FAKEBIN/tmux"
-  export PATH="$FAKEBIN:$PATH"
-}
+# One definition, in test_helper.bash: the watcher and delivery suites drive the
+# terminal layer too now (#1044).
+_install_fake_tmux() { agmsg_install_fake_tmux; }
 
 # A fake `herdr` that logs argv and returns canned JSON/text for session <sid>.
 _install_fake_herdr() {
@@ -63,6 +51,13 @@ elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
   printf 'herdr visible text\n'
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  exit "\${HERDR_PANE_RENAME_RC:-0}"
+elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
+  # The key rename. Failable per test (HERDR_AGENT_RENAME_RC), because "does it
+  # fire when it should" and "does it answer ok when it failed" are different
+  # questions and only the first one had a control.
+  exit "\${HERDR_AGENT_RENAME_RC:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
   # requirement 1 gate: a READY pane (foreground pgid == shell pid) so terminal_spawn
   # proceeds to type. Overridable per test via HERDR_PROCESS_INFO_RESPONSE.
@@ -1272,4 +1267,171 @@ M
   # What that file still says, spelled out for the next reader.
   grep -q '%HELD' "$rec"
   grep -q '/proj/OLD' "$rec"
+}
+
+# --- AGMSG_TERMINAL_NAMING=off drops the label and keeps the key (#1044) ------
+#
+# Two names, and only one of them is optional. The key is the name the TERMINAL
+# addresses the agent by in its own namespace; the label is what a person reads.
+# (peek/poke/despawn in this repo resolve through the placement record's pane id
+# — an earlier version of this comment said the key, and that is false here.) A
+# caller that wants no terminal writes at all is describing `plain`.
+#
+# Both drivers are exercised because the split is not the same shape in each:
+# herdr has two commands (`pane rename` / `agent rename`), tmux has a pane option
+# and a title. "Same idea, so same result" is not a measurement.
+@test "naming off (tmux): the pane option is set and the title is not (#1044)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "" offteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+
+  # The key: still set, because it is addressing.
+  grep -Fq 'tmux [set-option] [-p] [-t] [%1] [@agmsg_agent] [offteam:alice]' "$ARGV_LOG"
+  # The decoration: not set.
+  refute grep -Fq 'select-pane' "$ARGV_LOG"
+  refute grep -Fq 'rename-window' "$ARGV_LOG"
+}
+
+@test "naming ON by default (tmux): both the option and the title (#1044)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "" onteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+  grep -Fq '[@agmsg_agent] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq 'select-pane' "$ARGV_LOG"
+}
+
+@test "naming off (herdr): agent rename happens, pane rename does not (#1044)" {
+  _install_fake_herdr "sess-off"
+  export HERDR_ENV=1
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "sess-off" offteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+
+  # The key: still set.
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  # The visible label: not set.
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+}
+
+@test "naming ON by default (herdr): both renames (#1044)" {
+  _install_fake_herdr "sess-on"
+  export HERDR_ENV=1
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+# --- a failed KEY is a failure, in the mode everybody uses (#1044) ------------
+#
+# The severities were backwards: the label's failure was fatal and the key's was
+# swallowed with `|| true`, so "a member's name is never absent" held strictly in
+# the reduced mode and not in the default one. Measured by a reviewer, not
+# reasoned about: with the key rename failing, default mode returned rc=0 and
+# printed `ok`.
+#
+# Both modes are asserted, because "it goes red under `off`" is not evidence
+# about the default — that split is exactly what hid this.
+@test "a failed key rename fails the naming, in DEFAULT mode (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=1
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+
+  # It really did get as far as trying, rather than failing earlier for some
+  # other reason. The evidence used to be "the label was set first" — that was an
+  # artefact of the old order, and the key now goes first precisely so a failed
+  # label cannot take addressing down with it.
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+@test "a failed key rename fails the naming, in KEY-ONLY mode too (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=1
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+# And the paired positive: the same setup with the rename succeeding must pass,
+# or the two tests above are satisfied by naming being broken outright.
+@test "the same setup with the key rename succeeding is green (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=0
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+}
+
+# --- the label is decoration: its failure must not cost the addressing (#1044) -
+#
+# Reported by a reviewer against the previous revision: with the label renamed
+# first and its failure fatal, a failed decoration returned 13 before the key was
+# ever attempted. The requirement — a member's pane is never without a name —
+# broke through a second door, and the fix for the first door (the key's failure
+# no longer swallowed) did not touch it.
+@test "a failed LABEL rename still leaves the member addressable (#1044)" {
+  _install_fake_herdr "sess-l"
+  export HERDR_ENV=1
+  export HERDR_PANE_RENAME_RC=1     # the decoration fails
+  export HERDR_AGENT_RENAME_RC=0    # the key would succeed, if it is reached
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-l" labelteam alice /proj/A claude-code
+  # Not fatal: the caller writes the placement record only on 0, and that record
+  # is the other half of addressing — so failing here would throw away exactly
+  # what this test is about.
+  [ "$status" -eq 0 ]
+
+  # The key was set. This is the assertion the previous revision could not pass.
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  # ...and the label really was attempted and really did fail, or the line above
+  # proves nothing about this scenario.
+  grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+}
+
+# --- a key that cannot be DERIVED is a failure, not an ok (#1044) -------------
+#
+# The commit that made the key fatal claimed this branch in a comment and left it
+# unguarded: a reviewer's mutation that returned ok for an underivable key failed
+# no test. A comment is not a check.
+#
+# `_herdr_internal_key` can fail three ways — the lib directory not resolving,
+# `hash.sh` missing, and the hash itself failing. This drives the third: a
+# `agmsg_sha256` that is present and returns non-zero. The other two are the same
+# `return 1` one line apart and are not separately exercised.
+@test "a key that cannot be derived fails the naming (#1044)" {
+  _install_fake_herdr "sess-h"
+  export HERDR_ENV=1
+  unset AGMSG_TERMINAL_NAMING
+
+  # Present, so the `command -v` guard passes, and failing, so the hash does not.
+  agmsg_sha256() { return 1; }
+  export -f agmsg_sha256 2>/dev/null || true
+
+  run agmsg_terminal_name_self "sess-h" hashteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+
+  # Nothing was renamed: no key could be built, so the member is not addressable
+  # and saying `ok` would have claimed that it was.
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
 }

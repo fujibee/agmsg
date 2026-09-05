@@ -27,7 +27,17 @@
 #   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
 #                                       parsed). unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
-#   terminal_name <id> <team> <name>    control op: set the human pane name; idempotent
+#   terminal_name <id> <team> <name> [mode]
+#                                       control op: set the pane's names; idempotent.
+#                                       Two names, not one: the label a person
+#                                       reads and the key the TERMINAL addresses
+#                                       the agent by in its own namespace. This
+#                                       repo's peek/poke resolve through the
+#                                       placement record, not the key.
+#                                       `mode=key` sets only the key
+#                                       (AGMSG_TERMINAL_NAMING=off); absent sets
+#                                       both. A driver that has only one name
+#                                       treats it as the key.
 #                                       (safe to re-apply on SessionStart).
 #
 # Detection is a driver FUNCTION (not a manifest datum like the types axis's
@@ -427,6 +437,19 @@ agmsg_terminal_name_self() {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
 
+  # The BARE sid, whatever the caller had. A terminal knows the id the CLI
+  # published; the composite "<sid>.<pid>" exists only inside agmsg, and handing
+  # it over asks a question no terminal can answer -- the answer comes back as
+  # "this session cannot identify its own pane", which reads as a resolution
+  # problem and is an identifier mismatch. That was a real defect at the actas
+  # call site, and watch.sh had it before that. Normalising HERE instead of at
+  # each caller is what stops the next entry point from repeating it: the
+  # conversion is idempotent (bare -> bare, composite -> bare, empty -> empty),
+  # so a caller cannot get it wrong by passing either form.
+  if [ -n "$sid" ] && declare -F agmsg_instance_bare_sid >/dev/null 2>&1; then
+    sid="$(agmsg_instance_bare_sid "$sid")"
+  fi
+
   # No bare `x=$(cmd)` past this point. Under `set -e` a non-zero inside a command
   # substitution ends the CALLER before the status can be read -- the shape review
   # caught four times in this branch -- so every capture carries `|| rc=$?`.
@@ -463,9 +486,29 @@ agmsg_terminal_name_self() {
 
   agmsg_terminal_load "$terminal" || return 1
 
+  # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
+  # key stays, always, because it is addressing rather than decoration — the name
+  # the TERMINAL knows the agent by, in its own namespace.
+  #
+  # Narrower than an earlier revision of this comment claimed, and the difference
+  # matters: `peek`, `poke` and `despawn` in THIS repo resolve through the
+  # placement record's pane id, and `_herdr_internal_key` is read nowhere outside
+  # its own driver (counted). So dropping the key does not make a member
+  # unreachable to agmsg. Saying it did pointed at the wrong thing to protect.
+  # A caller that genuinely wants no terminal writes at all is describing the
+  # `plain` terminal.
+  #
+  # The env var is read HERE and handed to the driver as a mode, so the policy
+  # has one home and each driver only carries it out. Read at call time, not
+  # cached: a value cached at source time is a value nobody can change.
+  local name_mode=""
+  case "${AGMSG_TERMINAL_NAMING:-}" in
+    off) name_mode=key ;;
+  esac
+
   local out=""
   rc=0
-  out="$(terminal_name "$id" "$team" "$agent")" || rc=$?
+  out="$(terminal_name "$id" "$team" "$agent" "$name_mode")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
     return "$rc"
