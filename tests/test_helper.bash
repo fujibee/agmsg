@@ -48,12 +48,16 @@ setup_test_env() {
 #
 # TWO SETS, KEPT APART, because they are not the same claim:
 #
-#   acted   pids a file-level teardown actually signalled and waited for, handed
-#           over before the removal ran. This is the set the question is about.
-#   seen    pid FILES that merely existed before the removal. Nobody may have
-#           waited on these. Printing them under the first heading would say
-#           something untrue about them — the same label-without-content defect
-#           that an earlier draft of this had, one layer along.
+#   acted   pids a file-level teardown CALLED `kill` and a wait on, handed over
+#           before the removal ran. Not "killed": the producer discards both
+#           statuses (`kill … || true`, `wait_for_pid_exit … || true`), so a pid
+#           that was already gone, and one whose wait timed out, are both in
+#           here. Read as intent, not as outcome — the STILL ALIVE marker
+#           beside each pid is the outcome, and it is measured here.
+#   seen    pid FILES that merely existed before the removal. Nothing here
+#           signalled them. Printing them in the first column would say
+#           something untrue about them — the same label-wider-than-its-content
+#           defect that an earlier draft of this had, one layer along.
 #
 # Both are captured BEFORE the removal: a recursive delete can unlink part of
 # the tree before it fails, so a reporter that scanned afterwards would print
@@ -71,8 +75,8 @@ _teardown_forensics() {
     echo "##### teardown could not remove $dir (#1036)"
     echo "##### what is still there:"
     ls -laR "$dir" 2>/dev/null
-    _teardown_report_pids "pids a teardown SIGNALLED and WAITED FOR (captured before the rm)" "$acted"
-    _teardown_report_pids "pid FILES present before the rm — NOT known to have been waited on" "$seen"
+    _teardown_report_pids "pids a teardown CALLED kill AND wait ON (captured before the rm)" "$acted"
+    _teardown_report_pids "pid FILES present before the rm — NOT known to have been signalled" "$seen"
     echo "##### process inventory at that same moment (correlation only —"
     echo "##### this does NOT say which of these holds the directory):"
     ps -ef 2>/dev/null || ps 2>/dev/null
