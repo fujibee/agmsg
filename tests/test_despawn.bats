@@ -103,12 +103,20 @@ _control_row_exists_for_alice() {
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
 
+# A tmux stub whose kill-pane / kill-window exits with a chosen code, so a --force
+# teardown can be made to CONFIRM (0) or FAIL (non-zero).
+_stub_tmux_exit() {
+  local code="${1:-0}" bin="$TEST_SKILL_DIR/stub-bin"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\ncase "$1" in kill-pane|kill-window) exit %s ;; esac\nexit 0\n' "$code" > "$bin/tmux"
+  chmod +x "$bin/tmux"; export PATH="$bin:$PATH"
+}
+
 @test "despawn --force: kills recorded placement and drops registration without the member" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
-  # Placement as spawn would have recorded it (pane %99 doesn't exist; kill is
-  # best-effort/no-op here — we assert the registration + lock + record effects).
   printf '%s\t%s\t%s\n' '%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
   printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  _stub_tmux_exit 0                                 # kill-pane confirms the teardown
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
@@ -117,6 +125,36 @@ _control_row_exists_for_alice() {
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [[ "$output" != *alice* ]]                        # registration dropped
+}
+
+@test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
+  # If the terminal driver does not confirm the pane closed (here: kill-pane exits
+  # non-zero), the pane may still be alive. --force must NOT delete the record (the
+  # only retry authority) or claim status=forced.
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+  _stub_tmux_exit 1                                 # kill-pane FAILS -> not confirmed
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  grep -q "status=error" <<<"$output"
+  grep -q "force-teardown-unconfirmed" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT for a retry
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [[ "$output" == *alice* ]]                        # registration NOT dropped
+}
+
+@test "despawn --force: a CORRUPT placement ref does not tear down and keeps the record" {
+  # A corrupt ref resolves to no terminal (agmsg_terminal_ref_terminal fails closed),
+  # so there is nothing to confirm — treat it as an unconfirmed teardown, keep the
+  # record, and never hand the corrupt value to a terminal as a target.
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'garbage-ref' "$PROJ" claude-code > "$RUN/spawn.team__alice"
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  grep -q "status=error" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]                   # record KEPT
 }
 
 @test "despawn --force: errors when there is no placement record" {
@@ -171,6 +209,26 @@ _control_row_exists_for_alice() {
   [[ "$output" == *"no-live-lock"* ]]
 }
 
+@test "despawn: a free lock WITH a placement record does not report ok or delete the record (#625)" {
+  # A monitor=no member (cursor) never holds an actas lock, so the graceful path
+  # lands in `free` on every despawn. The old code read that as "gone", deleted the
+  # placement record and reported status=ok — while the pane/process were still
+  # there, and the deletion made the --force it advises impossible. A free lock WITH
+  # a record must NOT report ok and must NOT delete the record.
+  bash "$SCRIPTS/join.sh" team alice cursor "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\n' 'tmux:%99' "$PROJ" cursor > "$RUN/spawn.team__alice"
+  run bash "$SCRIPTS/despawn.sh" team leader alice
+  [ "$status" -ne 0 ]
+  grep -q "needs-force" <<<"$output"
+  refute grep -q "status=ok" <<<"$output"
+  [ -f "$RUN/spawn.team__alice" ]              # record KEPT so --force can use it
+  # ...and --force then works against the preserved record (teardown confirmed).
+  _stub_tmux_exit 0
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  grep -q "status=forced" <<<"$output"
+}
+
 @test "despawn --force: kills a herdr: placement via herdr pane close" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   # Record a herdr-tagged placement (herdr: scheme prefix).
@@ -194,4 +252,137 @@ STUB
   [ ! -f "$RUN/spawn.team__alice" ]
   # herdr was called with "pane close wC:p99" (prefix stripped).
   grep -q "pane close wC:p99" "$HERDR_CALL_LOG"
+}
+
+# --- graceful despawn folds the member's OWN pane through its terminal driver
+#
+# Until the terminals axis, this teardown was `tmux kill-pane -t $TMUX_PANE`
+# inline: a tmux member could fold itself away and a herdr member could not.
+# The v1 scope named that asymmetry and said the teardown goes through the
+# placement record like despawn.sh does. These four cover the two terminals and
+# the two ways the record can fail to authorise anything.
+#
+# The terminals are STUBBED on PATH rather than real: the point being proved is
+# "the driver was invoked with the recorded id", and a real pane cannot be part
+# of a test that must not close the developer's own session (see the setup note
+# above — that has already happened once here).
+
+_spawn_rec_path() {
+  ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$RUN"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"
+    agmsg_spawn_path "$1" "$2" )
+}
+
+# Stub terminal binaries. Each logs its argv so the test can assert WHAT was
+# asked of it, not merely that something happened.
+_stub_herdr() {   # <bindir> <session_id> <pane_id>
+  mkdir -p "$1"
+  cat > "$1/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$1/herdr.log"
+if [ "\$1" = agent ] && [ "\$2" = list ]; then
+  cat <<'JSON'
+{"id":1,"result":{"type":"agents","agents":[
+ {"pane_id":"$3","agent_session":{"agent":"claude","kind":"id","value":"$2"}}
+]}}
+JSON
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$1/herdr"
+}
+
+_stub_tmux() {    # <bindir>
+  mkdir -p "$1"
+  cat > "$1/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$1/tmux.log"
+exit 0
+EOF
+  chmod +x "$1/tmux"
+}
+
+# Run a member watcher to the point where a ctrl:despawn has been handled.
+# Returns with the watcher already exited (the teardown path ends in exit 0).
+_despawn_member_with_env() {   # <bindir> <env assignments...>
+  local bindir="$1"; shift
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  setup_live_owner "$RUN" sess-m
+
+  AGMSG_WATCH_INTERVAL=1 PATH="$bindir:$PATH" env "$@" \
+    bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
+    >/dev/null 2>"$RUN/watch.err" 3>&- &
+  WPID=$!
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
+  [ -e "$RUN/ready.team__alice" ]
+
+  bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10 >/dev/null 2>&1 || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$WPID" 2>/dev/null || break; sleep 0.5; done
+  kill "$WPID" 2>/dev/null || true; wait "$WPID" 2>/dev/null || true
+}
+
+@test "despawn: graceful — a herdr member closes its own pane through the driver" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_herdr "$bin" sess-m wT:p1
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'herdr:wT:p1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  _despawn_member_with_env "$bin" HERDR_ENV=1
+
+  # THE point of the change: herdr is asked to close the recorded pane. Before
+  # this, no herdr member could fold itself away at all.
+  [ -f "$bin/herdr.log" ]
+  grep -Fq 'pane close wT:p1' "$bin/herdr.log"
+}
+
+@test "despawn: graceful — a tmux member still closes its own pane (no regression)" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux "$bin"
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%9\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%9
+
+  [ -f "$bin/tmux.log" ]
+  grep -Fq 'kill-pane -t %9' "$bin/tmux.log"
+}
+
+@test "despawn: graceful — no placement record closes nothing, and says why" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux "$bin"
+  # deliberately NO record written
+
+  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%9
+
+  # Nothing was closed...
+  if [ -f "$bin/tmux.log" ]; then
+    refute grep -Fq 'kill-pane' "$bin/tmux.log"
+  fi
+  # ...and the member was TOLD, rather than left wondering why its window is
+  # still open. Silence here is the state an operator cannot see.
+  grep -Fq 'no placement record' "$RUN/watch.err"
+}
+
+@test "despawn: graceful — a record naming another session's pane is left alone" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux "$bin"
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  # The record says %9; this session is in %1. A record for (team, alice) proves
+  # a pane was placed for that seat — never that THIS process is in it. Acting
+  # on the weaker fact is how a record becomes authority it was not given.
+  printf 'tmux:%%9\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%1
+
+  if [ -f "$bin/tmux.log" ]; then
+    refute grep -Fq 'kill-pane -t %9' "$bin/tmux.log"
+  fi
+  grep -Fq 'belongs to someone else' "$RUN/watch.err"
 }

@@ -366,6 +366,32 @@ EOF
   fi
 fi
 
+# Re-apply this pane's name for the seat we just re-established. herdr DROPS an
+# agent's name when the agent exits, so join and actas alone leave a resumed
+# session nameless — and a nameless pane is invisible to peek/poke. This is the
+# third caller of the naming step for exactly that reason (v1 scope, item 4).
+#
+# Only when the seat is KNOWN: an empty ROLE_NAME here is the ambiguous case the
+# block above deliberately refuses to guess at, and naming a pane for the wrong
+# seat is worse than leaving it unnamed. The bare session id is what herdr's
+# `agent list` carries (not the composite INSTANCE_ID).
+#
+# The registry is sourced with the errexit lift: on bash 3.2 a failure inside a
+# sourced file fires THIS script's `set -e`, so a plain `. x || true` would take
+# SessionStart down rather than skip the naming.
+if [ -n "$ROLE_NAME" ] && [ -n "$ROLE_TEAM" ]; then
+  _agmsg_tr_rc=0; _agmsg_tr_e=0
+  case $- in *e*) _agmsg_tr_e=1 ;; esac
+  set +e
+  # shellcheck disable=SC1091
+  [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+  _agmsg_tr_rc=$?
+  [ "$_agmsg_tr_e" = 1 ] && set -e
+  if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$ROLE_TEAM" "$ROLE_NAME" "$PROJECT" "$TYPE" record || true
+  fi
+fi
+
 WATCH="$SKILL_DIR/scripts/watch.sh"
 # Shell-quote each argv so the host can paste the command into Monitor and run
 # it verbatim. A plain '...' wrap breaks on paths with an apostrophe

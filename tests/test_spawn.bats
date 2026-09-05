@@ -143,7 +143,7 @@ teardown() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "spawned claude-code 'alice'" ]]
+  [[ "$output" =~ "launched claude-code 'alice'" ]]
 
   # alice is now registered to the resolved team.
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
@@ -639,7 +639,7 @@ YAML
       [ -e "$notmux/$b" ] || ln -s "$f" "$notmux/$b" 2>/dev/null || true
     done
   done
-  run env TMUX="/tmp/fake,1,0" PATH="$STUB_BIN:$notmux" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" PATH="$STUB_BIN:$notmux" \
     bash "$SCRIPTS/spawn.sh" claude-code foo --project "$PROJ"
   [ "$status" -ne 0 ]
   [[ "$output" =~ "tmux binary is not on PATH" ]]
@@ -816,11 +816,18 @@ EOF
   [[ "$output" == *"status=timeout"* ]]
 }
 
-@test "spawn: --no-wait returns immediately with no readiness status" {
+@test "spawn: --no-wait on a monitor=YES type still reports launched-unconfirmed (no post-input confirmation)" {
+  # co1 full-head: --no-wait skips the readiness handshake by request, so startup is
+  # NOT confirmed — exactly like monitor=no. Both no-confirmation paths must report
+  # status=launched-unconfirmed (a distinct note keeps the reasons apart). A monitor=YES
+  # type (claude-code) with --no-wait is the arm that was silently falling through both
+  # branches with no status line at all.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" != *"status="* ]]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "status=ready" <<<"$output"
 }
 
 @test "spawn: codex skips the readiness wait (no Monitor)" {
@@ -843,6 +850,51 @@ EOF
   [[ "$output" == *"skipping readiness wait"* ]]
   [[ "$output" != *"status=timeout"* ]]
   [[ "$output" != *"status=ready"* ]]
+}
+
+@test "spawn: a no-handshake type (monitor=no) reports startup UNCONFIRMED, not a bare success" {
+  # tl hit "spawned" printed while the agent had not started (a startup shell prompt
+  # ate the first keystroke of the boot command). A type with no readiness handshake
+  # cannot confirm startup, so spawn must say so DISTINCTLY — status=launched-unconfirmed
+  # with an explanation — instead of letting the placement line stand as success.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-readiness-handshake" <<<"$output"
+  grep -q "STARTUP IS UNCONFIRMED" <<<"$output"
+  # the placement line is a placement FACT, not a success claim
+  grep -q "launched codex 'reviewer'" <<<"$output"
+  refute grep -q "spawned codex 'reviewer'" <<<"$output"
+}
+
+@test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from monitor=no's" {
+  # The placement word is 'launched', never 'spawned', on the --no-wait path too; and
+  # the two no-confirmation reasons read apart — --no-wait carries note=no-wait, a
+  # monitor=no type carries note=no-readiness-handshake (utildev: distinct wording).
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  refute grep -q "spawned claude-code 'alice'" <<<"$output"
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-wait" <<<"$output"
+  refute grep -q "note=no-readiness-handshake" <<<"$output"
+}
+
+@test "spawn: a CONFIRMED start (handshake) is the only path that proves startup (status=ready)" {
+  # The positive observation — the watcher attaching (the ready sentinel) — is what
+  # distinguishes "started" from "typed but never ran". Only status=ready asserts it.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 10 --terminal "touch $ready # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "launched claude-code 'alice'" <<<"$output"
+  grep -q "status=ready" <<<"$output"
+  refute grep -q "status=launched-unconfirmed" <<<"$output"
 }
 
 # --- initial prompt (--boot-prompt) ---
@@ -913,11 +965,11 @@ EOF
   chmod +x "$STUB_BIN/tmux"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   # Default target is a split pane.
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
     bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   # A new window is the other branch.
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="MINGW64_NT-10.0-19045" \
     bash "$SCRIPTS/spawn.sh" claude-code bob --project "$PROJ" --no-wait --window
   [ "$status" -eq 0 ]
   # Both branches must launch through `bash -l <boot>`, not the bare path.
@@ -946,7 +998,7 @@ exit 0
 EOF
   chmod +x "$STUB_BIN/tmux"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
-  run env TMUX="/tmp/fake,1,0" FAKE_UNAME_S="Linux" \
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" FAKE_UNAME_S="Linux" \
     bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   # Unix tmux honors the shebang, so no `bash -l` wrapper is emitted.
@@ -978,6 +1030,17 @@ case "$1/$2" in
   pane/rename|pane/run|pane/close)
     echo '{"id":"cli:pane:'"$2"'","result":{"type":"ok"}}'
     ;;
+  pane/process-info)
+    # requirement 1: default to a READY pane (foreground pgid == shell pid) so the
+    # readiness gate passes; a test overrides HERDR_PROCESS_INFO_RESPONSE (and its exit
+    # via HERDR_PROCESS_INFO_RC) to drive the not-ready / unknown arms. The default is
+    # assigned separately, NOT inside ${VAR:-…}: braces in a default terminate the
+    # parameter expansion early and leak trailing } into the output.
+    pi_out="$HERDR_PROCESS_INFO_RESPONSE"
+    [ -n "$pi_out" ] || pi_out='{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242}}}'
+    printf '%s\n' "$pi_out"
+    exit "${HERDR_PROCESS_INFO_RC:-0}"
+    ;;
   tab/create)
     printf '%s\n' "${HERDR_TAB_RESPONSE:-$DEFAULT_TAB}"
     ;;
@@ -1005,7 +1068,7 @@ STUB
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [[ "$output" == *"spawned claude-code 'alice' in herdr"* ]]
+  [[ "$output" == *"launched claude-code 'alice' in herdr"* ]]
 
   # herdr was called: pane split, pane rename, pane run.
   grep -q "pane split wT:pSelf --direction right --no-focus" "$HERDR_CALL_LOG"
@@ -1058,7 +1121,7 @@ STUB
   _setup_fake_herdr
   # Set $TMUX so the tmux path wins; re-set the terminal template so the test
   # doesn't actually run tmux (use the stub recorder).
-  export TMUX="/tmp/fake,1,0"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
   # Provide a tmux stub that just records the call.
   cat > "$STUB_BIN/tmux" <<'TMUXSTUB'
@@ -1140,9 +1203,177 @@ _spawn_recorded_id() {
     export HERDR_SPLIT_RESPONSE="$body"
     run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
     [ "$status" -ne 0 ]
-    [[ "$output" == *"could not read result.pane.pane_id"* ]]
+    # The pane-id extraction + fail-closed now lives in the herdr driver (its own
+    # tests pin the exact reasons); spawn reports the placement failure and — the
+    # contract that matters here — leaves NO placement record and renames/runs nothing.
+    grep -q "placement failed" <<<"$output"
     [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
-    # Nothing was renamed or run against a guessed id.
     ! grep -q "pane run" "$HERDR_CALL_LOG"
   done
+}
+
+# --- requirement 1: herdr pre-input pane readiness (process-info gate) ---
+# process-info's foreground_process_group_id == shell_pid says the shell is at its
+# prompt. The gate acts on THREE outcomes distinctly (like peek's 10/12/13).
+
+@test "spawn req1: a NOT-READY pane (foreground process running) is not typed — fail with reason, pane closed" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":100,"foreground_process_group_id":200}}}'
+  # The wait bound is FIXED (no env knob): this loops the whole bound (~5s) before failing.
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  grep -q "was not ready for input" <<<"$output"
+  refute grep -q "pane run" "$HERDR_CALL_LOG"     # the boot was NOT typed
+  grep -q "pane close" "$HERDR_CALL_LOG"          # the pane we created was closed
+  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]   # nothing launched -> no record
+}
+
+@test "spawn req1: UNKNOWN readiness (process-info errors) still types, warns BEFORE-typing, and records" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # process-info fails -> UNKNOWN (arm 3)
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"            # arm 3 types anyway
+  grep -q "BEFORE the boot was typed" <<<"$output"
+  [ -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+}
+
+@test "spawn req1: null==null process-info is UNKNOWN, not READY (equality only after validation)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":null,"foreground_process_group_id":null}}}'
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"   # UNKNOWN, not a silent ready
+  grep -q "pane run" "$HERDR_CALL_LOG"
+}
+
+@test "spawn req1: a numeric-STRING pid is UNKNOWN on BOTH arms and either field (json_type must be integer)" {
+  # co1/tl (3): json_extract turns a JSON string "5" into 5, which would pass a digit
+  # check; the classifier requires json_type=integer on BOTH fields. Each case below
+  # must be UNKNOWN -> type + BEFORE-typing warning, NOT the NOT-READY 5s-wait/fail and
+  # NOT a silent ready. The cases pin the drift a one-sided control would miss:
+  #   - "5"/"5"  numeric string, EQUAL   (a value-only check would call it READY)
+  #   - "5"/"6"  numeric string, UNEQUAL (must NOT fall to NOT-READY; the gate is on the
+  #                                       values, not only the equality arm)
+  #   - 5 / "5"  MIXED: an integer and a numeric string (catches type-gating only ONE
+  #                                       field — the ungated string would match READY)
+  #   - "5"/ 5   MIXED the other way
+  local resp
+  for resp in '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":"6"}}}' \
+              '{"result":{"process_info":{"shell_pid":5,"foreground_process_group_id":"5"}}}' \
+              '{"result":{"process_info":{"shell_pid":"5","foreground_process_group_id":5}}}'; do
+    bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ" >/dev/null 2>&1 || true
+    _setup_fake_herdr
+    export HERDR_PROCESS_INFO_RESPONSE="$resp"
+    run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+    [ "$status" -eq 0 ]                                     || { echo "FAIL status=$status for $resp"; return 1; }
+    grep -q "BEFORE the boot was typed" <<<"$output"       || { echo "FAIL not UNKNOWN warning for $resp"; return 1; }
+    grep -q "pane run" "$HERDR_CALL_LOG"                    || { echo "FAIL not typed for $resp"; return 1; }
+    refute grep -q "was not ready for input" <<<"$output"  || { echo "FAIL fell to NOT-READY for $resp"; return 1; }
+  done
+}
+
+@test "spawn req1: a READY pane types with NO readiness warning" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr                                # default process-info = equal pids
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  grep -q "pane run" "$HERDR_CALL_LOG"
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: a non-herdr (plain) spawn never runs the process-info gate" {
+  # The gate is herdr-only; a plain placement must not emit its warning.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -q "BEFORE the boot was typed" <<<"$output"
+}
+
+@test "spawn req1: arm-3 (pre-input) and launched-unconfirmed (post-input) are DISTINCT messages" {
+  # utildev: the two 'unconfirmed' reasons must read apart. A monitor=no type spawned
+  # through herdr with UNKNOWN readiness shows BOTH, worded differently.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  _setup_fake_herdr
+  export HERDR_PROCESS_INFO_RC=1                  # arm 3 (before-typing unknown)
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q "BEFORE the boot was typed" <<<"$output"          # arm 3, before typing
+  grep -q "status=launched-unconfirmed" <<<"$output"         # requirement 2, after typing
+  grep -q "no-readiness-handshake" <<<"$output"
+}
+
+# --- --terminal-driver / AGMSG_TERMINAL_DRIVER override ---
+@test "spawn: --terminal-driver plain forces the OS-terminal path even when \$TMUX is set" {
+  # The default setup provides a {cmd} template (AGMSG_TERMINAL -> record.sh), so the
+  # plain path is captured. With $TMUX set, detection would pick tmux; the override
+  # must force the OS terminal instead.
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0"
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver plain
+  [ "$status" -eq 0 ]
+  grep -q "terminal template" <<<"$output"
+  [ -s "$CAPTURE" ]        # the OS-terminal launcher ran (record.sh captured it)
+}
+
+@test "spawn: AGMSG_TERMINAL_DRIVER=plain forces the OS-terminal path (env form)" {
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%0" AGMSG_TERMINAL_DRIVER=plain
+  : > "$CAPTURE"
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  [ -s "$CAPTURE" ]
+}
+
+@test "spawn: --terminal-driver validates EARLY — before team resolution or any state change" {
+  # co1: an unknown driver is a deterministic arg typo, so it must fail before spawn
+  # registers a role or writes a boot file, and before an unrelated 'no team' can mask
+  # it. With NO team registered for the project, a bogus driver must STILL error with
+  # 'unknown terminal driver' (not 'no team') — proving the check runs at parse time.
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --terminal-driver bogus
+  [ "$status" -ne 0 ]
+  grep -q "unknown terminal driver" <<<"$output"
+  refute grep -q "no team" <<<"$output"
+  # Nothing was registered for the spawn target (it failed before the pre-join).
+  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+}
+
+@test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
+  # The record is the only authority peek/poke/despawn --force have. If the write
+  # fails (here: the run dir made read-only, so agmsg_write_atomic cannot even create
+  # its temp beside the record — the shape a real ENOSPC/permission failure takes),
+  # the member is live but unaddressable — a distinct, worse state than a clean spawn,
+  # so spawn reports status=spawned-but-unrecorded with the pane ref and exits
+  # non-zero, not ready. The atomic write also guarantees the failure NEVER truncates
+  # a correct existing record; here there is none yet, only the failed create.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  chmod 500 "$TEST_SKILL_DIR/run"                       # record write will fail
+  cat > "$STUB_BIN/tmux" <<'T'
+#!/usr/bin/env bash
+case "$1" in split-window) echo '%9' ;; select-pane|set-window-option) ;; esac
+exit 0
+T
+  chmod +x "$STUB_BIN/tmux"
+  run env TMUX="/tmp/fake,1,0" TMUX_PANE="%0" bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  chmod 700 "$TEST_SKILL_DIR/run"                       # restore so teardown can clean up
+  [ "$status" -ne 0 ]
+  grep -q "status=spawned-but-unrecorded" <<<"$output"
+  grep -q "tmux:%9" <<<"$output"
+}
+
+@test "spawn: the plain driver's '-' protocol value never leaks to spawn stdout" {
+  # _launch_os_terminal captures terminal_spawn's record-op stdout ('-' = placed, no
+  # pane) and verifies it, rather than letting it print. A normal OS-terminal spawn
+  # must not emit a lone '-' line alongside the human status.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -qx -- '-' <<<"$output"          # no line that is just the protocol '-'
+  grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
 }

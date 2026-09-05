@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage:
 #   delivery.sh set <mode> <type> <project_path>
-#   delivery.sh status [<type> <project_path>]
+#   delivery.sh status [<type> <project_path> [<session_id>]]
 #   delivery.sh stop
 #   delivery.sh restart [<project_path> <type>]
 #
@@ -72,6 +72,8 @@ RUN_DIR="$SKILL_DIR/run"
 # command; see lib/shquote.sh for why naive `'$var'` is not enough.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/shquote.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_shq() { agmsg_shq "$1"; }
 
 # True (0) iff <cli>'s reported version is >= <min>, compared as MAJOR.MINOR.PATCH.
@@ -718,9 +720,60 @@ do_set() {
   esac
 }
 
+# Report which terminal this session resolves to, as three distinguishable
+# answers rather than one hopeful line:
+#
+#   terminal: herdr (pane w1:p1)              resolved, and nameable/peekable
+#   terminal: herdr (cannot identify ...)     under it, but this pane is unknown
+#   terminal: unknown                         the resolver answered for nothing
+#
+# The middle one is the one worth printing separately: it is the state where
+# `name` and `peek` will fail while everything else looks fine, and a status
+# that folded it into either neighbour would be the reason nobody could tell.
+#
+# The session id is optional because delivery.sh is type-generic and each CLI
+# names its own session differently. Without one, PLACEMENT still answers
+# ("which terminal am I under") — that needs no self-id — and the pane is
+# reported as not asked for, not as absent.
+print_terminal_status() {
+  local sid="${1:-}" line name id errf reason
+
+  if [ -z "$sid" ]; then
+    if name="$(agmsg_terminal_resolve_placement "" 2>/dev/null)"; then
+      echo "terminal: $name (pane not resolved — no session id given)"
+    else
+      echo "terminal: unknown"
+    fi
+    return 0
+  fi
+
+  errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-status.XXXXXX")" || errf=/dev/null
+  # resolve_name is fail-closed: present-but-unidentifiable is a non-zero with
+  # the driver's reason on stderr. Keep that reason — it is the whole content
+  # of the middle state.
+  line="$(agmsg_terminal_resolve_name "$sid" 2>"$errf")" || line=""
+  if [ -n "$line" ]; then
+    name="${line%%	*}"
+    id="${line#*	}"
+    echo "terminal: $name (pane $id)"
+  else
+    reason=""
+    if [ "$errf" != /dev/null ] && [ -f "$errf" ]; then
+      reason="$(cat "$errf" 2>/dev/null || true)"
+    fi
+    if name="$(agmsg_terminal_resolve_placement "$sid" 2>/dev/null)"; then
+      echo "terminal: $name (${reason:-cannot identify this pane})"
+    else
+      echo "terminal: unknown${reason:+ ($reason)}"
+    fi
+  fi
+  [ "$errf" = /dev/null ] || rm -f "$errf"
+}
+
 do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
+  local SESSION_ID="${3:-}"
 
   # Mode is derived from the project's settings.local.json — there's no
   # global mode value. When called without <type> <project>, we can't infer
@@ -734,6 +787,8 @@ do_status() {
   fi
 
   agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
+
+  print_terminal_status "$SESSION_ID"
 }
 
 kill_all_watchers() {
