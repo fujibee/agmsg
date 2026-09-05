@@ -1279,3 +1279,47 @@ CYG
   fi
   [ "$before" = "664" ]
 }
+
+# The repo's own SKILL.md is NOT what an install puts on disk: install.sh renders
+# `$SKILL_DIR/SKILL.md` from `scripts/drivers/types/<type>/template.md` (one sed
+# over __SKILL_NAME__). So an edit to the root SKILL.md alone ships nothing —
+# #1022 added a policy paragraph there, and all nine templates, and therefore
+# every installed skill, went out without it. The tests were green; the change
+# was inert.
+#
+# This asserts the slot rather than a list of remembered sentences: everything
+# between the "NEVER directly read" line and "**Shell requirement:**" must be
+# byte-identical in the root and in every template. A checked-in list of markers
+# would need someone to remember to extend it, which is the same failure one
+# level up; a slot comparison covers the next paragraph nobody has written yet.
+@test "policy paragraphs in SKILL.md reach every installed skill, not just the repo's own" {
+  local root="$BATS_TEST_DIRNAME/.."
+  local t out_root out_t n=0
+
+  extract() {
+    awk '
+      /There is NO register\.sh/        { grab = 1; next }
+      /\*\*Shell requirement:\*\*/      { grab = 0 }
+      grab                              { print }
+    ' "$1" | sed -e '/^[[:space:]]*$/d'
+  }
+
+  out_root="$(extract "$root/SKILL.md")"
+  # The slot is not empty — otherwise this test passes on two files that both
+  # lost the paragraph, which is exactly the state it exists to reject.
+  [ -n "$out_root" ]
+
+  for t in "$root"/scripts/drivers/types/*/template.md; do
+    [ -e "$t" ] || continue
+    n=$((n + 1))
+    out_t="$(extract "$t")"
+    if [ "$out_t" != "$out_root" ]; then
+      echo "template diverges from SKILL.md: $t" >&2
+      diff <(printf '%s\n' "$out_root") <(printf '%s\n' "$out_t") >&2 || true
+      return 1
+    fi
+  done
+
+  # And the loop actually ran over the templates rather than over nothing.
+  [ "$n" -ge 9 ]
+}

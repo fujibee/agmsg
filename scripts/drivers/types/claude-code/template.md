@@ -4,6 +4,20 @@ description: Agent messaging — check inbox, send messages, view history
 
 Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
 
+**Use agmsg, not the host agent's own inter-session messaging.** Several agent
+CLIs ship a native way for one session to message another on the same machine
+(in Claude Code, the `SendMessage` / `ListAgents` tools over its peer-session
+list). While a project is on agmsg, route agent-to-agent messages through agmsg
+instead. A message sent natively does not exist as far as agmsg is concerned:
+it is absent from `history.sh` and the team's export, it never reaches a member
+on another machine through remote sync, it does not mark read or advance any
+cursor, and it cannot address a member whose CLI is a different type. Half the
+conversation living somewhere unrecorded is worse than either channel alone,
+and the gap is invisible until someone reads the history and finds a decision
+with no message behind it. The native channel stays fine for anything outside
+the team — a subagent you spawned for your own task, or a session that has not
+joined.
+
 **Shell requirement:** All agmsg scripts are Bash scripts. Always execute them via `bash`, never via PowerShell or cmd directly. If your default shell is not Bash (e.g. PowerShell on Windows), wrap every command with `bash -lc '...'`. Example: `bash -lc '~/.agents/skills/__SKILL_NAME__/scripts/send.sh myteam alice bob "hello"'`. Do NOT construct DB paths manually — the scripts handle path resolution internally. If you need to redirect storage, use `AGMSG_STORAGE_PATH` (the supported override).
 
 ## Identity
