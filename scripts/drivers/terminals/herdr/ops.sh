@@ -614,6 +614,35 @@ terminal_team_observe() {
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }
 
+# Positive input-readiness proof for team --fix. A pane is writable only when
+# Herdr itself recognizes an agent of the expected kind there and reports one of
+# its measured interactive lifecycle states. A shell prompt (including an OMZ
+# confirmation) is therefore not mistaken for an agent merely because it owns
+# the foreground process group.
+terminal_team_input_ready() {
+  local id="$1" expected="$2" raw escaped kind status rc=0
+  command -v herdr >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
+  raw="$(herdr agent get "$id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'not_ready:agent_not_found\n'
+    return 1
+  fi
+  escaped="$(printf '%s' "$raw" | sed "s/'/''/g")"
+  kind="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent')='text' THEN json_extract('$escaped','$.result.agent.agent') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  status="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent_status')='text' THEN json_extract('$escaped','$.result.agent.agent_status') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  [ -n "$kind" ] && [ -n "$status" ] \
+    || { printf 'unknown:agent_response_incomplete\n'; return 2; }
+  [ "$kind" = "$expected" ] \
+    || { printf 'not_ready:agent_kind_mismatch\n'; return 1; }
+  case "$status" in
+    idle|done|working) printf 'ready\n'; return 0 ;;
+    *) printf 'not_ready:agent_status_%s\n' "$status"; return 1 ;;
+  esac
+}
+
 # control op: submit <text> to the agent in the pane. herdr's `agent prompt`
 # submits on its own (no separate Enter, unlike tmux) — the #619 paste hazard is
 # a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).

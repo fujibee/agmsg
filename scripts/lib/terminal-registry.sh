@@ -125,7 +125,7 @@ agmsg_terminal_has() {
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe"
+_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
 
 # Wipe every terminal_* ABI function from the current shell. Called before each
 # source so a driver that is switched to cannot inherit the previous driver's ops

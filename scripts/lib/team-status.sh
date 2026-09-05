@@ -63,6 +63,142 @@ EOF
   printf '%s\t%s\t%s\t%s\n' "$activity" "$pane_label" "$agent_key" "$cli_title"
 }
 
+# Normalize a driver's three-valued positive readiness proof. Output is
+# "ready|not_ready|unknown<TAB>reason" and always returns zero so a diagnostic
+# roster survives a terminal failure.
+agmsg_team_input_ready_loaded() {
+  local type="$1" pane="$2" cli raw rc=0 state reason
+  cli="$(agmsg_type_get "$type" cli 2>/dev/null || true)"
+  if [ -z "$cli" ]; then
+    printf 'unknown\ttype_cli_unavailable\n'
+    return 0
+  fi
+  if ! declare -F terminal_team_input_ready >/dev/null 2>&1; then
+    printf 'unknown\treadiness_unsupported\n'
+    return 0
+  fi
+  raw="$(terminal_team_input_ready "$pane" "$cli")" || rc=$?
+  case "$rc" in
+    0) state=ready ;;
+    1) state=not_ready ;;
+    *) state=unknown ;;
+  esac
+  case "$raw" in
+    ready) reason=positive_agent_identity ;;
+    not_ready:*) reason="${raw#not_ready:}" ;;
+    unknown:*) reason="${raw#unknown:}" ;;
+    *) state=unknown; reason=readiness_response_malformed ;;
+  esac
+  printf '%s\t%s\n' "$state" "$reason"
+}
+
+_agmsg_team_fix_result() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+}
+
+_agmsg_team_identity_field_loaded() {
+  local field="$1"; shift
+  local identity _activity _al _el _ak _ek _as _es pane_cell key_cell session_cell _consistency
+  identity="$(agmsg_team_identity_loaded "$@")"
+  IFS="$(printf '\t')" read -r _activity _al _el _ak _ek _as _es pane_cell key_cell session_cell _consistency <<EOF
+$identity
+EOF
+  case "$field" in
+    pane_label) printf '%s\n' "$pane_cell" ;;
+    agent_key) printf '%s\n' "$key_cell" ;;
+    cli_session) printf '%s\n' "$session_cell" ;;
+    *) printf 'unknown:invalid_identity_field\n' ;;
+  esac
+}
+
+# Repair the independently writable identity fields for a live registration.
+# Each field gets an explicit changed/skipped/failed action; no write is
+# attempted unless its observed cell is a mismatch, and CLI input additionally
+# requires a positive readiness proof.
+agmsg_team_fix_identity_loaded() {
+  local team="$1" agent="$2" type="$3" terminal="$4" pane="$5"
+  local pane_cell="$6" key_cell="$7" session_cell="$8"
+  local expected_session="$team-$agent" readiness state reason rc=0 observed title tries
+
+  case "$pane_cell" in
+    mismatch\(*)
+      if [ "$terminal" != herdr ]; then
+        _agmsg_team_fix_result pane_label skipped no_independent_field
+      elif [ "${AGMSG_TERMINAL_NAMING:-}" = off ]; then
+        _agmsg_team_fix_result pane_label skipped disabled_by_policy
+      else
+        terminal_name "$pane" "$team" "$agent" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -eq 0 ] && case "$(_agmsg_team_identity_field_loaded pane_label "$team" "$agent" "$type" "$terminal" "$pane")" in ok\(*) true ;; *) false ;; esac; then
+          _agmsg_team_fix_result pane_label changed renamed_and_verified
+        else
+          if [ "$rc" -eq 0 ]; then reason=rename_not_observed; else reason="terminal_name_rc_$rc"; fi
+          _agmsg_team_fix_result pane_label failed "$reason"
+        fi
+      fi
+      ;;
+    ok\(*) _agmsg_team_fix_result pane_label skipped already_matches ;;
+    n/a:*) _agmsg_team_fix_result pane_label skipped "${pane_cell#n/a:}" ;;
+    *) _agmsg_team_fix_result pane_label skipped "${pane_cell#unknown:}" ;;
+  esac
+
+  rc=0
+  case "$key_cell" in
+    mismatch\(*)
+      terminal_name "$pane" "$team" "$agent" key >/dev/null 2>&1 || rc=$?
+      if [ "$rc" -eq 0 ] && case "$(_agmsg_team_identity_field_loaded agent_key "$team" "$agent" "$type" "$terminal" "$pane")" in ok\(*) true ;; *) false ;; esac; then
+        _agmsg_team_fix_result agent_key changed renamed_and_verified
+      else
+        if [ "$rc" -eq 0 ]; then reason=rename_not_observed; else reason="terminal_name_rc_$rc"; fi
+        _agmsg_team_fix_result agent_key failed "$reason"
+      fi
+      ;;
+    ok\(*) _agmsg_team_fix_result agent_key skipped already_matches ;;
+    n/a:*) _agmsg_team_fix_result agent_key skipped "${key_cell#n/a:}" ;;
+    *) _agmsg_team_fix_result agent_key skipped "${key_cell#unknown:}" ;;
+  esac
+
+  case "$session_cell" in
+    mismatch\(*)
+      if [ "$type" != claude-code ]; then
+        _agmsg_team_fix_result cli_session skipped rename_unsupported
+        return 0
+      fi
+      readiness="$(agmsg_team_input_ready_loaded "$type" "$pane")"
+      IFS="$(printf '\t')" read -r state reason <<EOF
+$readiness
+EOF
+      if [ "$state" != ready ]; then
+        _agmsg_team_fix_result cli_session skipped "${state}_$reason"
+        return 0
+      fi
+      rc=0
+      terminal_poke "$pane" "/rename $expected_session" >/dev/null 2>&1 || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        _agmsg_team_fix_result cli_session failed "terminal_poke_rc_$rc"
+        return 0
+      fi
+      tries=0
+      while [ "$tries" -lt 20 ]; do
+        observed="$(agmsg_team_observe_loaded "$pane")"
+        IFS="$(printf '\t')" read -r _ _ _ title <<EOF
+$observed
+EOF
+        case "$title" in
+          n/a:*|unknown:*) : ;;
+          *) [ "$(agmsg_cli_session_from_title "$title")" = "$expected_session" ] \
+               && { _agmsg_team_fix_result cli_session changed renamed_and_verified; return 0; } ;;
+        esac
+        sleep 0.1 2>/dev/null || true
+        tries=$((tries + 1))
+      done
+      _agmsg_team_fix_result cli_session failed rename_not_observed
+      ;;
+    ok\(*) _agmsg_team_fix_result cli_session skipped already_matches ;;
+    n/a:*) _agmsg_team_fix_result cli_session skipped "${session_cell#n/a:}" ;;
+    *) _agmsg_team_fix_result cli_session skipped "${session_cell#unknown:}" ;;
+  esac
+}
+
 agmsg_identity_cell() {
   local expected="$1" actual="$2"
   case "$actual" in

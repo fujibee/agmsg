@@ -16,6 +16,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ "$FIX" -eq 1 ] && [ "$OUTPUT_MODE" = json ]; then
+  echo "Usage: team.sh <team> [--json] [--fix] (--json and --fix cannot be combined)" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -105,11 +109,28 @@ _emit_unknown_row() {
     "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified
 }
 
+_emit_fix_actions() {
+  local actions="$1" field result reason
+  while IFS="$(printf '\t')" read -r field result reason; do
+    [ -n "$field" ] || continue
+    printf '    fix.%s=%s(reason=%s)\n' "$field" "$result" "$reason"
+  done <<EOF
+$actions
+EOF
+}
+
+_emit_unfixable_actions() {
+  local reason="$1"
+  [ "$FIX" -eq 1 ] || return 0
+  _emit_fix_actions "$(printf 'pane_label\tskipped\t%s\nagent_key\tskipped\t%s\ncli_session\tskipped\t%s\n' "$reason" "$reason" "$reason")"
+}
+
 _member_status() {
   local team="$1" agent="$2" type="$3" project="$4" registered="$5"
   local rec ref terminal pane location container live delivery identity
   local activity pane_label agent_key cli_session consistency reason
   local _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session
+  local fix_actions=""
   if [ "$registered" -eq 0 ]; then
     _emit_row "$agent" remote n/a:remote_registration \
       n/a:remote n/a:no_local_registration n/a:no_local_registration \
@@ -117,6 +138,7 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration ok
+    _emit_unfixable_actions no_local_registration
     return 0
   fi
   delivery="$(_member_delivery "$type" "$project")"
@@ -124,6 +146,7 @@ _member_status() {
     reason=terminal_support_not_loaded
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    _emit_unfixable_actions "$reason"
     return 0
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
@@ -131,6 +154,7 @@ _member_status() {
     reason=no_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    _emit_unfixable_actions "$reason"
     return 0
   fi
   IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
@@ -138,6 +162,7 @@ _member_status() {
     reason=empty_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    _emit_unfixable_actions "$reason"
     return 0
   fi
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
@@ -146,6 +171,7 @@ _member_status() {
     reason=invalid_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    _emit_unfixable_actions "$reason"
     return 0
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
@@ -157,6 +183,14 @@ EOF
     IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
 EOF
+    if [ "$FIX" -eq 1 ]; then
+      fix_actions="$(agmsg_team_fix_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane" \
+        "$pane_label" "$agent_key" "$cli_session")"
+      identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
+      IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
+$identity
+EOF
+    fi
   else
     reason="live_${live}"
     activity="unknown:$reason"; pane_label="unknown:$reason"
@@ -171,6 +205,13 @@ EOF
     "$pane_label" "$_expected_label" "$_actual_label" \
     "$agent_key" "$_expected_key" "$_actual_key" \
     "$cli_session" "$_expected_session" "$_actual_session" "$consistency"
+  if [ "$FIX" -eq 1 ]; then
+    if [ -n "$fix_actions" ]; then
+      _emit_fix_actions "$fix_actions"
+    else
+      _emit_unfixable_actions "live_${live}"
+    fi
+  fi
 }
 
 if [ "$OUTPUT_MODE" = json ]; then

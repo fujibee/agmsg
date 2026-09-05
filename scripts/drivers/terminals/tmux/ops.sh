@@ -211,6 +211,35 @@ terminal_team_observe() {
   printf 'n/a:unsupported\tn/a:no_independent_field\t%s\t%s\n' "$key" "$title"
 }
 
+# Positive input-readiness proof for team --fix. pane_current_command is only a
+# display hint (Claude may publish a version there), so identify the foreground
+# process-group leader from the pane tty and compare its argv with the expected
+# CLI executable.
+terminal_team_input_ready() {
+  local id="$1" expected="$2" bare facts in_mode pane_pid pane_tty tpgid command first
+  command -v tmux >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  bare="$(_tmux_bare_of "$id")"
+  case "$bare" in @*|%*) : ;; *) printf 'unknown:invalid_pane_id\n'; return 2 ;; esac
+  facts="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_in_mode}|#{pane_pid}|#{pane_tty}' 2>/dev/null)" \
+    || { printf 'unknown:pane_query_failed\n'; return 2; }
+  IFS='|' read -r in_mode pane_pid pane_tty <<EOF
+$facts
+EOF
+  [ "$in_mode" = 0 ] || { printf 'not_ready:copy_mode\n'; return 1; }
+  case "$pane_pid" in ''|0*|*[!0-9]*) printf 'unknown:pane_pid_invalid\n'; return 2 ;; esac
+  case "$pane_tty" in /dev/*) : ;; *) printf 'unknown:pane_tty_invalid\n'; return 2 ;; esac
+  tpgid="$(ps -o tpgid= -p "$pane_pid" 2>/dev/null | tr -d '[:space:]')" \
+    || { printf 'unknown:foreground_pgid_unavailable\n'; return 2; }
+  case "$tpgid" in ''|0*|*[!0-9]*) printf 'unknown:foreground_pgid_invalid\n'; return 2 ;; esac
+  command="$(ps -o command= -p "$tpgid" 2>/dev/null)" \
+    || { printf 'unknown:foreground_argv_unavailable\n'; return 2; }
+  first="${command%% *}"
+  case "$first" in
+    "$expected"|*/"$expected") printf 'ready\n'; return 0 ;;
+    *) printf 'not_ready:foreground_cli_mismatch\n'; return 1 ;;
+  esac
+}
+
 # control op: type <text> into the pane and submit it — in TWO bursts.
 # #619: text and Enter in the SAME send-keys burst are read as a paste by Codex,
 # and the Enter becomes a literal newline instead of submitting. A Right arrow in

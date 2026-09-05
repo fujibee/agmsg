@@ -167,3 +167,105 @@ agmsg_terminal_load() { return 0; }
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.expected');")" = team-carol ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.actual');")" = carol ]
 }
+
+@test "readiness wrapper preserves a positive driver proof" {
+  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  terminal_team_input_ready() { printf 'ready\n'; return 0; }
+  run agmsg_team_input_ready_loaded claude-code w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'ready\tpositive_agent_identity' ]
+}
+
+@test "readiness wrapper fails closed when the driver cannot prove readiness" {
+  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  terminal_team_input_ready() { printf 'unknown:agent_response_incomplete\n'; return 2; }
+  run agmsg_team_input_ready_loaded claude-code w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'unknown\tagent_response_incomplete' ]
+}
+
+@test "identity fix repairs names and verifies the CLI rename" {
+  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  _herdr_internal_key() { printf 'a123\n'; }
+  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }
+  terminal_team_observe() { printf 'idle\tteam:alice\ta123\t✳ team-alice\n'; }
+  run agmsg_team_fix_identity_loaded team alice claude-code herdr w2:p3 \
+    'mismatch(expected=team:alice,actual=alice)' \
+    'mismatch(expected=a123,actual=old)' \
+    'mismatch(expected=team-alice,actual=alice)'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'pane_label\tchanged\trenamed_and_verified' ]
+  [ "${lines[1]}" = $'agent_key\tchanged\trenamed_and_verified' ]
+  [ "${lines[2]}" = $'cli_session\tchanged\trenamed_and_verified' ]
+  [ "$(< "$BATS_TEST_TMPDIR/poke")" = '/rename team-alice' ]
+}
+
+@test "identity fix never pokes a CLI without positive readiness" {
+  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  terminal_team_input_ready() { printf 'not_ready:agent_not_found\n'; return 1; }
+  terminal_poke() { printf 'called\n' > "$BATS_TEST_TMPDIR/poke"; }
+  run agmsg_team_fix_identity_loaded team alice claude-code herdr w2:p3 \
+    'ok(actual=team:alice)' 'ok(actual=a123)' \
+    'mismatch(expected=team-alice,actual=alice)'
+  [ "$status" -eq 0 ]
+  [ "${lines[2]}" = $'cli_session\tskipped\tnot_ready_agent_not_found' ]
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}
+
+@test "herdr readiness positively identifies the expected live agent" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  herdr() {
+    printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w2:p3"}}}'
+  }
+  run terminal_team_input_ready w2:p3 claude
+  [ "$status" -eq 0 ]
+  [ "$output" = ready ]
+}
+
+@test "herdr readiness rejects a shell pane that has no agent" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  herdr() { return 1; }
+  run terminal_team_input_ready w2:p3 claude
+  [ "$status" -eq 1 ]
+  [ "$output" = not_ready:agent_not_found ]
+}
+
+@test "tmux readiness follows the socket-qualified pane to its foreground CLI" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  tmux() { return 0; }
+  _tmux_bare_of() { printf '%%3\n'; }
+  _tmux_do() { printf '0|64066|/dev/ttys066\n'; }
+  ps() {
+    case "$*" in
+      *tpgid*) printf '85225\n' ;;
+      *command*) printf 'claude -n team-alice\n' ;;
+    esac
+  }
+  run terminal_team_input_ready '/private/tmp/tmux.sock:%3' claude
+  [ "$status" -eq 0 ]
+  [ "$output" = ready ]
+}
+
+@test "tmux readiness rejects a foreground shell" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  tmux() { return 0; }
+  _tmux_bare_of() { printf '%%3\n'; }
+  _tmux_do() { printf '0|64066|/dev/ttys066\n'; }
+  ps() {
+    case "$*" in
+      *tpgid*) printf '64066\n' ;;
+      *command*) printf '/bin/zsh\n' ;;
+    esac
+  }
+  run terminal_team_input_ready '/private/tmp/tmux.sock:%3' claude
+  [ "$status" -eq 1 ]
+  [ "$output" = not_ready:foreground_cli_mismatch ]
+}

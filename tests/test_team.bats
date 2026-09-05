@@ -216,6 +216,22 @@ EOF
   [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_type(value,'\$.pane_label')='object';")" -eq 2 ]
 }
 
+@test "team --fix reports every skipped action with a reason" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --fix
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "fix.pane_label=skipped(reason=no_placement_record)" ]]
+  [[ "$output" =~ "fix.agent_key=skipped(reason=no_placement_record)" ]]
+  [[ "$output" =~ "fix.cli_session=skipped(reason=no_placement_record)" ]]
+}
+
+@test "team refuses an ambiguous JSON fix request" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --json --fix
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "cannot be combined" ]]
+}
+
 # --- whoami.sh ---
 
 @test "whoami: returns agent identity" {
