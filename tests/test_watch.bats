@@ -1028,16 +1028,23 @@ _record_handover_events() {
 
 @test "watch: a backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  # Same exposure as inbox: the pending batch interpolated into one argv element
-  # exceeds ARG_MAX and the delivery call fails; on stdin it does not. Send past 1 MB.
-  local big i
-  big="$(head -c 200000 /dev/zero | tr '\0' x)"       # 200 KB body
-  for i in 1 2 3 4 5 6; do
-    bash "$SCRIPTS/send.sh" team bob alice "WMSG${i}-${big}-WEND${i}" >/dev/null
-  done                                                 # ~1.2 MB backlog, past ARG_MAX
-  run_watcher_until "sess-wbig" "$TEST_SKILL_DIR/wbig.log" "WEND6"
+  # Same exposure as the inbox argv-ceiling test (see it for why the backlog is
+  # many normal messages sized from the measured ARG_MAX, not one oversized body:
+  # a single >128 KB argv element fails on the ubuntu runner though it fits on
+  # macOS, and a fixed size can pass green without exceeding a larger ARG_MAX).
+  local arg_max body count i last filler
+  arg_max="$(getconf ARG_MAX)"
+  body=90000                                    # one message body, < 128 KB per-arg cap
+  count=$(( arg_max / body + 3 ))               # total payload > ARG_MAX, with margin
+  [ $(( count * body )) -gt "$arg_max" ]        # guarantee the ceiling is actually exceeded
+  filler="$(head -c "$body" /dev/zero | tr '\0' x)"
+  for i in $(seq 1 "$count"); do
+    bash "$SCRIPTS/send.sh" team bob alice "WMSG${i}-${filler}-WEND${i}" >/dev/null
+  done
+  last="$count"
+  run_watcher_until "sess-wbig" "$TEST_SKILL_DIR/wbig.log" "WEND${last}"
   grep -q "WMSG1-" "$TEST_SKILL_DIR/wbig.log"
-  grep -q "WEND6" "$TEST_SKILL_DIR/wbig.log"
+  grep -q "WEND${last}" "$TEST_SKILL_DIR/wbig.log"
 }
 
 @test "watch: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
@@ -1144,4 +1151,42 @@ STUB
   kill -0 "$w" 2>/dev/null
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
   ! grep -q "is STUCK" "$out"
+}
+
+@test "watch: a failed pending-scan is surfaced and exits, not collapsed to caught-up (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # The loop reads whether messages are waiting with storage_watch_after. If that
+  # READ fails and the failure collapses to "" (the old `|| true`), the caught-up
+  # arm drops the tracker and the watcher continues in silence forever -- the very
+  # outage #1045 exists to catch, and one the stuck guard cannot see (a failed
+  # scan returns no message_sent row to count). So a failed read must be surfaced
+  # and exit, not treated as "no messages".
+  #
+  # Fail ONLY the pending scan: its SQL is the one passed on argv that contains
+  # "message_sent" (the startup "SELECT 1;" and the cursor read do not; the
+  # delivery query goes over stdin with ':memory:'). The startup DB healthcheck
+  # therefore still passes, so this exercises a RUNTIME read failure, not startup.
+  bash "$SCRIPTS/send.sh" team bob alice "SEED" >/dev/null   # create the store
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub4"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+for _a in "\$@"; do case "\$_a" in *message_sent*) exit 1 ;; esac; done
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  local out="$TEST_SKILL_DIR/pollfail.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-pollfail "$PROJ" claude-code alice >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # The failed read must be surfaced...
+  if ! _wait_for_file_contains "$out" "cannot read delivery state"; then kill "$w" 2>/dev/null || true; false; fi
+  # ...and the watcher must EXIT, not loop in silence. (Reverting the read to
+  # `|| true` makes the message never appear and the watcher never exit -> red.)
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  [ "$alive" -eq 0 ]
+  # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
+  grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
 }

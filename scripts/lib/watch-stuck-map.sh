@@ -52,3 +52,34 @@ _stuck_set() {
   _stuck_drop "$1"
   STUCK_MAP="${STUCK_MAP:+$STUCK_MAP$_AGMSG_NL}$(printf '%s\x1f%s\x1f%s' "$1" "$2" "$3")"
 }
+
+# Decide whether the watcher should serve (team=$1, agent=$2) this cycle, given
+# its actas-lock state=$3 ("other:<sid>", "free", "ours", ...). Sets PAIR_VERDICT
+# to one of:
+#   serve       -- free/ours and the team's store exists: deliver this cycle
+#   held:<sid>  -- another session holds it (broad watcher): SKIP
+#   nostore     -- the team's store does not exist yet: SKIP
+# and returns 0. On EITHER skip verdict it has already dropped the pair's stuck
+# tracker via _stuck_drop, because a cycle this watcher does not observe is not a
+# consecutive stall -- a resumed pair must start a fresh count or a healthy
+# watcher would trip the guard on the first cycle back.
+#
+# The drop lives HERE, inside the skip decision, on purpose: the two are one
+# operation. Earlier the drop was a separate statement at each `continue`, so a
+# refactor could delete it and every test stayed green -- the property was at the
+# call sites, not in a tested contract. Now removing the drop reddens this
+# function's unit test, and removing the call reddens the held/no-store behavior
+# tests. It must NOT run in a `$(...)`: _stuck_drop mutates the STUCK_MAP global,
+# which a command-substitution subshell would discard -- hence the verdict is
+# returned in PAIR_VERDICT, not on stdout. The caller handles the actas-fatal
+# case (a dedicated watcher that lost its only role EXITS) before calling this,
+# and does the once-per-transition logging keyed on the verdict.
+_pair_gate() {
+  case "$3" in
+    other:*) _stuck_drop "$1:$2"; PAIR_VERDICT="held:${3#other:}"; return 0 ;;
+  esac
+  if ! storage_store_exists "$1"; then
+    _stuck_drop "$1:$2"; PAIR_VERDICT="nostore"; return 0
+  fi
+  PAIR_VERDICT="serve"
+}

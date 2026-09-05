@@ -411,18 +411,34 @@ _codex_proj() {
 }
 
 @test "inbox: an unread backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
-  # The old inline-SQL path handed the whole backlog to sqlite3 as ONE argv element;
-  # once it exceeded ARG_MAX the call failed and the backlog could never clear itself.
-  # Building the statement into a temp file and passing it on stdin removes the ceiling.
-  local big i
-  big="$(head -c 200000 /dev/zero | tr '\0' x)"      # 200 KB body
-  for i in 1 2 3 4 5 6; do
-    bash "$SCRIPTS/send.sh" testteam bob alice "MSG${i}-${big}-END${i}" >/dev/null
-  done                                                # ~1.2 MB backlog, past ARG_MAX (1 MB)
+  # The old inline-SQL path handed the whole backlog to sqlite3 as ONE argv
+  # element; once that exceeded the OS argument limit the call failed and the
+  # backlog could never clear itself. Building the statement into a temp file and
+  # passing it on stdin removes the ceiling.
+  #
+  # The backlog is built from many NORMAL-sized messages -- the real shape of the
+  # bug -- so the fixture itself never puts an oversized argument on argv. Linux
+  # caps a single argv element at 128 KB (MAX_ARG_STRLEN), which macOS does not;
+  # the earlier 200 KB single body passed on macOS and failed on the ubuntu
+  # runner with "Argument list too long". The COUNT is derived from the measured
+  # ARG_MAX so the delivered batch is guaranteed to exceed it ON THIS host -- a
+  # fixed size can sit under the limit where ARG_MAX is larger and pass green
+  # without exercising the ceiling at all.
+  local arg_max body count total i last filler
+  arg_max="$(getconf ARG_MAX)"
+  body=90000                                    # one message body, < 128 KB per-arg cap
+  count=$(( arg_max / body + 3 ))               # total payload > ARG_MAX, with margin
+  total=$(( count * body ))
+  [ "$total" -gt "$arg_max" ]                   # guarantee the ceiling is actually exceeded
+  filler="$(head -c "$body" /dev/zero | tr '\0' x)"
+  for i in $(seq 1 "$count"); do
+    bash "$SCRIPTS/send.sh" testteam bob alice "MSG${i}-${filler}-END${i}" >/dev/null
+  done
+  last="$count"
   run bash "$SCRIPTS/inbox.sh" testteam alice
   [ "$status" -eq 0 ]
-  grep -q "6 new message(s):" <<<"$output"
+  grep -q "${count} new message(s):" <<<"$output"
   # the first and last actually came through -- not a truncated or empty head
   grep -q "MSG1-" <<<"$output"
-  grep -q "END6" <<<"$output"
+  grep -q "END${last}" <<<"$output"
 }

@@ -101,3 +101,43 @@ _get() {
   _stuck_drop "team:nobody"    # full map, pair absent
   _get "team:bob"; [ "$GN" = "1" ]
 }
+
+# --- _pair_gate: the drop is TIED to the skip decision (finding 2, round 3) ---
+# These pin the property AT the two skip entries, which a helper-only reset test
+# could not: the earlier code dropped the tracker in a separate statement at each
+# `continue`, so deleting it left every test green. Now the drop is inside the
+# gate's skip verdict, and these seed a count at threshold-1, fire each skip
+# transition, and assert the production state was removed -- no wall clock.
+
+@test "pair-gate: held-by-another drops the pair's stuck count and says skip" {
+  storage_store_exists() { return 0; }        # not consulted on the held path
+  _stuck_set "team:alice" 42 2                 # seed threshold-1
+  _pair_gate team alice "other:sess9"
+  [ "$PAIR_VERDICT" = "held:sess9" ]
+  _get "team:alice"; [ -z "$GN" ]              # the count was forgotten
+}
+
+@test "pair-gate: no-store drops the pair's stuck count and says skip" {
+  storage_store_exists() { return 1; }         # store absent
+  _stuck_set "team:alice" 42 2                 # seed threshold-1
+  _pair_gate team alice "free"
+  [ "$PAIR_VERDICT" = "nostore" ]
+  _get "team:alice"; [ -z "$GN" ]              # the count was forgotten
+}
+
+@test "pair-gate: a servable pair keeps its count (a success is not a skip)" {
+  storage_store_exists() { return 0; }         # store present
+  _stuck_set "team:alice" 42 2                 # seed threshold-1
+  _pair_gate team alice "free"
+  [ "$PAIR_VERDICT" = "serve" ]
+  _get "team:alice"; [ "$GC" = "42" ] && [ "$GN" = "2" ]   # untouched -> guard can still fire
+}
+
+@test "pair-gate: skip drops only the gated pair, not another tracked pair" {
+  storage_store_exists() { return 1; }
+  _stuck_set "team:alice" 42 2
+  _stuck_set "team:bob" 99 2
+  _pair_gate team alice "free"                  # no-store skip for alice
+  _get "team:alice"; [ -z "$GN" ]
+  _get "team:bob"; [ "$GC" = "99" ] && [ "$GN" = "2" ]
+}

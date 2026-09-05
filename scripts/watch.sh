@@ -772,74 +772,92 @@ while true; do
     # pair is the half a running process can detect for the price of a file
     # read. Gaining one is the caller's job, at the point it creates the team.
     pair_state="$(actas_lock_state "$pair_team" "$pair_agent" "$SESSION_ID" 2>/dev/null || echo free)"
-    case "$pair_state" in
-      other:*)
-        if [ -n "$ACTIVE_NAME" ]; then
-          # This watcher exists to serve exactly this role and no longer owns
-          # it. Stop -- and say so: stderr is the only place a reason survives,
-          # and a watcher that ends without one is indistinguishable from one
-          # that crashed.
+    # actas-fatal: a watcher that exists to serve exactly this one role, and no
+    # longer owns it, stops -- and says so on stderr (the only place a reason
+    # survives; a watcher that ends without one is indistinguishable from a
+    # crash). This is decided here, before the gate, because it EXITS rather than
+    # skips; the gate only decides serve-vs-skip for a watcher that keeps running.
+    if [ -n "$ACTIVE_NAME" ]; then
+      case "$pair_state" in
+        other:*)
           watch_log "${pair_team}/${pair_agent} is now held by session ${pair_state#other:}."
           watch_log "this watcher no longer owns that role and is stopping."
           watch_log "messages for it stay unread and reach the session that claimed it."
           exit 0
-        fi
+          ;;
+      esac
+    fi
+    # Serve-or-skip, with the stuck-tracker drop tied to the skip (see _pair_gate
+    # in lib/watch-stuck-map.sh). held/nostore -> skip and the count is already
+    # forgotten; serve -> proceed. The transition logging stays here, keyed on the
+    # verdict, so it is announced once per transition, not once per cycle.
+    _pair_gate "$pair_team" "$pair_agent" "$pair_state"
+    case "$PAIR_VERDICT" in
+      held:*)
         # Broad subscription: this watcher serves other roles too, so skip the
         # pair rather than ending the process -- exiting here would take down a
         # whole session's delivery because one of its roles moved elsewhere.
-        #
-        # Skipped FOR AS LONG AS someone else holds it, not permanently. When
-        # the holder goes away the lock reads free again and this watcher takes
-        # the pair back, which is the same rule the startup filter uses (a
-        # stale lock is free). Dropping it for good would be worse: the role is
-        # still registered to this project, so nobody would deliver for it
-        # until the session restarted.
-        #
-        # Announced on each transition, not each cycle -- a per-cycle message
-        # would bury the log, and announcing only the first time would make a
-        # second departure invisible.
+        # Skipped FOR AS LONG AS someone else holds it: when the holder goes away
+        # the lock reads free again and this watcher takes the pair back (a stale
+        # lock is free, the startup filter's rule). Announced on each transition,
+        # not each cycle, and not only the first time (a second departure must
+        # still be visible).
         if ! _held_elsewhere_has "${pair_team}/${pair_agent}"; then
           HELD_ELSEWHERE="${HELD_ELSEWHERE:+$HELD_ELSEWHERE
 }${pair_team}/${pair_agent}"
-          echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${pair_state#other:}; not serving it while they hold it." >&2
+          echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${PAIR_VERDICT#held:}; not serving it while they hold it." >&2
         fi
-        # Stopped observing this pair -- the holder advances the cursor now, not
-        # us -- so forget any stuck count; a gap is not consecutive stalling.
-        _stuck_drop "$pair_team:$pair_agent"
         continue
         ;;
-      *)
-        # Free or ours. If we had stepped aside for it, say that we are taking
-        # it back -- otherwise the log shows a role leaving and never returning,
-        # which reads as a permanent drop.
-        if _held_elsewhere_has "${pair_team}/${pair_agent}"; then
-          HELD_ELSEWHERE="$(_held_elsewhere_without "${pair_team}/${pair_agent}")"
-          echo "agmsg watch: ${pair_team}/${pair_agent} is unheld again; serving it here." >&2
-        fi
+      nostore)
+        # Per team: with a store per team, "one team has no store yet" is a
+        # normal state, and a single check outside this loop would silence
+        # delivery for every OTHER team as well. Said once per pair per process
+        # (#692) -- a line every poll interval would bury the log it exists to
+        # make readable.
+        case " $NO_STORE_REPORTED " in
+          *" $pair_team:$pair_agent "*) ;;
+          *) NO_STORE_REPORTED="$NO_STORE_REPORTED $pair_team:$pair_agent"
+             watch_log "${pair_team}/${pair_agent}: no store yet; skipping this pair until one exists." ;;
+        esac
+        continue
         ;;
     esac
-    # Per team: with a store per team, "one team has no store yet" is a
-    # normal state, and a single check outside this loop would silence
-    # delivery for every OTHER team as well.
-    # Skipped, and said once. The same "stop quietly" shape as the guard above
-    # (#692): a team with no store yet is a normal state, but a team that
-    # silently stops being delivered every cycle is not distinguishable from
-    # one that is fine. Once per pair per process -- a line every poll interval
-    # would bury the log this exists to make readable.
-    if ! storage_store_exists "$pair_team"; then
-      case " $NO_STORE_REPORTED " in
-        *" $pair_team:$pair_agent "*) ;;
-        *) NO_STORE_REPORTED="$NO_STORE_REPORTED $pair_team:$pair_agent"
-           watch_log "${pair_team}/${pair_agent}: no store yet; skipping this pair until one exists." ;;
-      esac
-      # No store to read this cycle -- not an observation of a stalled cursor, so
-      # drop any prior count; the backlog (if any) starts a fresh one on return.
-      _stuck_drop "$pair_team:$pair_agent"
-      continue
+    # serve: free or ours, store present. If we had stepped aside for it, say we
+    # are taking it back -- otherwise the log shows a role leaving and never
+    # returning, which reads as a permanent drop.
+    if _held_elsewhere_has "${pair_team}/${pair_agent}"; then
+      HELD_ELSEWHERE="$(_held_elsewhere_without "${pair_team}/${pair_agent}")"
+      echo "agmsg watch: ${pair_team}/${pair_agent} is unheld again; serving it here." >&2
     fi
-    READ_CURSOR="$(storage_read_cursor_get "$pair_team" "$pair_agent" 2>/dev/null || true)"
-    [ -n "$READ_CURSOR" ] || READ_CURSOR=0
-    OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null || true)"
+    # Read this pair's delivery state -- its read frontier, then the messages
+    # past it -- and KEEP THE STATUS separate from the output. A failed read must
+    # not collapse to "" and fall into the caught-up arm below: that arm drops the
+    # tracker and continues in silence, which is the exact outage #1045 exists to
+    # catch, one level earlier. The stuck guard cannot see this one -- a failed
+    # scan returns no message_sent row to count, so the pair looks caught up
+    # forever. So on a failed observation, say why on stdout (a plain
+    # "agmsg watch:" line, not the delivery shape) and exit: a bounded, visible
+    # stop, never silent continuation. This is the same failure-is-not-empty
+    # collapse the cursor-only fix above closed, at the read itself.
+    #
+    # The two OTHER reads in this cycle that also fall back to empty are the
+    # DIFFERENT case the stuck guard already covers, so they are left as-is: the
+    # mktemp and the ':memory:' delivery query (below) can fail to "", but OUT
+    # still holds the message_sent rows, so a frozen cursor climbs to the
+    # threshold and fires. actas_lock_state's fall back to "free" (above) is a
+    # deliberate fail-open (a stale/unreadable lock is free, #595), not this
+    # class. Reverting either read here to `|| true` reopens the silent hole --
+    # a mutation test asserts it.
+    if READ_CURSOR="$(storage_read_cursor_get "$pair_team" "$pair_agent" 2>/dev/null)" \
+       && OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null)"; then
+      [ -n "$READ_CURSOR" ] || READ_CURSOR=0
+    else
+      printf 'agmsg watch: cannot read delivery state for %s — the store read failed, so whether messages are waiting is unknown. Treating "unknown" as "no messages" would leave this watcher alive and silent, so it is exiting instead; restart this session (or run /%s actas <name>) to resume delivery (#1045/#777).\n' \
+        "$pair_team:$pair_agent" "$(basename "$SKILL_DIR")"
+      cleanup
+      exit 0
+    fi
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
     # non-empty OUT. storage_watch_after also emits a trailing "cursor" high-water
