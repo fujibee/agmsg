@@ -78,8 +78,8 @@ _member_delivery() {
 JSON_FIRST=1
 _emit_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
-  local container="$6" live="$7" activity="$8" delivery="$9"
-  shift 9
+  local container="$6" activity="$7" delivery="$8"
+  shift 8
   local label_cell="$1" label_expected="$2" label_actual="$3"
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
@@ -89,23 +89,23 @@ _emit_row() {
     [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
     JSON_FIRST=0
     agmsg_team_render_json_row "$member" "$type" "$project" "$terminal" "$pane" \
-      "$container" "$live" "$activity" "$delivery" \
+      "$container" "$activity" "$delivery" \
       "$label_cell" "$label_expected" "$label_actual" \
       "$key_cell" "$key_expected" "$key_actual" \
       "$session_cell" "$session_expected" "$session_actual" "$consistency"
   else
     agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
-      "$container" "$live" "$activity" "$delivery" \
+      "$container" "$activity" "$delivery" \
       "$label_cell" "$key_cell" "$session_cell" "$consistency"
   fi
 }
 
 _emit_unknown_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
-  local container="$6" live="$7" activity="$8" delivery="$9" reason="${10}"
+  local container="$6" activity="$7" delivery="$8" reason="$9"
   local cell="unknown:$reason"
   _emit_row "$member" "$type" "$project" "$terminal" "$pane" "$container" \
-    "$live" "$activity" "$delivery" \
+    "$activity" "$delivery" \
     "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified
 }
 
@@ -127,14 +127,14 @@ _emit_unfixable_actions() {
 
 _member_status() {
   local team="$1" agent="$2" type="$3" project="$4" registered="$5"
-  local rec ref terminal pane location container live delivery identity
+  local rec ref terminal pane location container delivery identity
   local activity pane_label agent_key cli_session consistency reason
   local _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session
   local fix_actions=""
   if [ "$registered" -eq 0 ]; then
     _emit_row "$agent" remote n/a:remote_registration \
       n/a:remote n/a:no_local_registration n/a:no_local_registration \
-      unknown:no_local_registration n/a:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration ok
@@ -145,7 +145,7 @@ _member_status() {
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
     reason=terminal_support_not_loaded
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     _emit_unfixable_actions "$reason"
     return 0
   fi
@@ -153,7 +153,7 @@ _member_status() {
   if [ -z "$rec" ] || [ ! -f "$rec" ]; then
     reason=no_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     _emit_unfixable_actions "$reason"
     return 0
   fi
@@ -161,7 +161,7 @@ _member_status() {
   if [ -z "$ref" ]; then
     reason=empty_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     _emit_unfixable_actions "$reason"
     return 0
   fi
@@ -170,15 +170,15 @@ _member_status() {
   if [ -z "$terminal" ] || [ -z "$pane" ]; then
     reason=invalid_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     _emit_unfixable_actions "$reason"
     return 0
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
-  IFS="$(printf '\t')" read -r terminal pane container live <<EOF
+  IFS="$(printf '\t')" read -r terminal pane container <<EOF
 $location
 EOF
-  if [ "$live" = present ] && agmsg_terminal_load "$terminal" >/dev/null 2>&1; then
+  if agmsg_terminal_load "$terminal" >/dev/null 2>&1; then
     identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
     IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
@@ -192,7 +192,7 @@ $identity
 EOF
     fi
   else
-    reason="live_${live}"
+    reason=terminal_driver_load_failed
     activity="unknown:$reason"; pane_label="unknown:$reason"
     agent_key="unknown:$reason"; cli_session="unknown:$reason"
     _actual_label="$pane_label"; _expected_label="$team:$agent"
@@ -201,7 +201,7 @@ EOF
     consistency=unverified
   fi
   _emit_row "$agent" "$type" "$project" "$terminal" "$pane" "$container" \
-    "$live" "$activity" "$delivery" \
+    "$activity" "$delivery" \
     "$pane_label" "$_expected_label" "$_actual_label" \
     "$agent_key" "$_expected_key" "$_actual_key" \
     "$cli_session" "$_expected_session" "$_actual_session" "$consistency"
@@ -209,7 +209,7 @@ EOF
     if [ -n "$fix_actions" ]; then
       _emit_fix_actions "$fix_actions"
     else
-      _emit_unfixable_actions "live_${live}"
+      _emit_unfixable_actions terminal_driver_load_failed
     fi
   fi
 }

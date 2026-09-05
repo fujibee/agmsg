@@ -4,37 +4,31 @@
 # terminal drivers; these functions only turn already-observed fields into the
 # human-facing compact form.
 
-# Resolve a recorded terminal/pane through the terminal registry's location
-# contract. Output is always four TAB-separated, non-empty fields:
-# terminal, pane, container, live. The driver's liveness answer is never
-# inferred or revised here.
+# Resolve a recorded terminal/pane through the terminal driver's location read.
+# Output is always three TAB-separated, non-empty fields: terminal, pane, and
+# container. Liveness is deliberately absent until the pane-state contract
+# lands; an unavailable column is not rendered as if it were an observation.
 agmsg_team_location() {
-  local terminal="$1" pane="$2" location rc=0 container live
+  local terminal="$1" pane="$2" container rc=0
   if ! agmsg_terminal_load "$terminal" >/dev/null 2>&1; then
-    printf '%s\t%s\tunknown:driver_load_failed\tunknown:driver_load_failed\n' \
-      "$terminal" "$pane"
+    printf '%s\t%s\tunknown:driver_load_failed\n' "$terminal" "$pane"
     return 0
   fi
-  if ! declare -F agmsg_terminal_location_loaded >/dev/null 2>&1; then
-    printf '%s\t%s\tunknown:location_contract_unavailable\tunknown:location_contract_unavailable\n' \
-      "$terminal" "$pane"
+  if ! declare -F terminal_where >/dev/null 2>&1; then
+    printf '%s\t%s\tunknown:location_unsupported\n' "$terminal" "$pane"
     return 0
   fi
-  location="$(agmsg_terminal_location_loaded "$pane")" || rc=$?
+  container="$(terminal_where "$pane")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\t%s\tunknown:location_contract_rc_%s\tunknown:location_contract_rc_%s\n' \
-      "$terminal" "$pane" "$rc" "$rc"
+    printf '%s\t%s\tunknown:location_rc_%s\n' "$terminal" "$pane" "$rc"
     return 0
   fi
-  IFS="$(printf '\t')" read -r container live <<EOF
-$location
-EOF
-  if [ -z "$container" ] || [ -z "$live" ]; then
-    printf '%s\t%s\tunknown:location_contract_malformed\tunknown:location_contract_malformed\n' \
-      "$terminal" "$pane"
+  if [ -z "$container" ]; then
+    printf '%s\t%s\tunknown:location_malformed\n' "$terminal" "$pane"
     return 0
   fi
-  printf '%s\t%s\t%s\t%s\n' "$terminal" "$pane" "$container" "$live"
+  case "$container" in *$'\t'*|*$'\n'*|*$'\r'*) container=unknown:location_malformed ;; esac
+  printf '%s\t%s\t%s\n' "$terminal" "$pane" "$container"
 }
 
 # Optional read extension supplied by terminal drivers that can observe live
@@ -344,18 +338,18 @@ agmsg_team_identity_json() {
 
 agmsg_team_render_json_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
-  local container="$6" live="$7" activity="$8" delivery="$9"
-  shift 9
+  local container="$6" activity="$7" delivery="$8"
+  shift 8
   local label_cell="$1" label_expected="$2" label_actual="$3"
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
   local consistency="$1"
-  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"live":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s}' \
+  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s}' \
     "$(_agmsg_team_json_quote "$member")" "$(_agmsg_team_json_quote "$type")" \
     "$(_agmsg_team_json_quote "$project")" "$(_agmsg_team_json_quote "$terminal")" \
     "$(_agmsg_team_json_quote "$pane")" "$(_agmsg_team_json_quote "$container")" \
-    "$(_agmsg_team_json_quote "$live")" "$(_agmsg_team_json_quote "$activity")" \
+    "$(_agmsg_team_json_quote "$activity")" \
     "$(_agmsg_team_json_quote "$delivery")" \
     "$(agmsg_team_identity_json "$label_cell" "$label_expected" "$label_actual")" \
     "$(agmsg_team_identity_json "$key_cell" "$key_expected" "$key_actual")" \
@@ -365,13 +359,13 @@ agmsg_team_render_json_row() {
 
 agmsg_team_render_human_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
-  local container="$6" live="$7" activity="$8" delivery="$9"
-  shift 9
+  local container="$6" activity="$7" delivery="$8"
+  shift 8
   local pane_label="$1" agent_key="$2" cli_session="$3" consistency="$4"
 
-  printf '  %s (%s) — %s   [%s %s @%s live=%s activity=%s delivery=%s identity=%s]\n' \
+  printf '  %s (%s) — %s   [%s %s @%s activity=%s delivery=%s identity=%s]\n' \
     "$member" "$type" "$project" "$terminal" "$pane" "$container" \
-    "$live" "$activity" "$delivery" "$consistency"
+    "$activity" "$delivery" "$consistency"
   [ "$consistency" = ok ] && return 0
   _agmsg_team_identity_detail pane_label "$pane_label"
   _agmsg_team_identity_detail agent_key "$agent_key"

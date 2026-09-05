@@ -10,34 +10,25 @@ setup() {
 
 agmsg_terminal_load() { return 0; }
 
-@test "team location preserves a confirmed present answer" {
-  agmsg_terminal_location_loaded() { printf 'w2:t1\tpresent\n'; }
+@test "team location preserves an observed container" {
+  terminal_where() { printf 'w2:t1\n'; }
   run agmsg_team_location herdr w2:p3
   [ "$status" -eq 0 ]
-  [ "$output" = $'herdr\tw2:p3\tw2:t1\tpresent' ]
+  [ "$output" = $'herdr\tw2:p3\tw2:t1' ]
 }
 
-@test "team location preserves confirmed gone without inventing a container" {
-  agmsg_terminal_location_loaded() { printf 'n/a:pane_gone\tgone\n'; }
+@test "team location keeps a failed lookup explicit" {
+  terminal_where() { return 10; }
   run agmsg_team_location tmux '%3'
   [ "$status" -eq 0 ]
-  [ "$output" = $'tmux\t%3\tn/a:pane_gone\tgone' ]
-}
-
-@test "team location keeps a present-then-missing race present" {
-  agmsg_terminal_location_loaded() {
-    printf 'unknown:present_then_location_rc_10\tpresent\n'
-  }
-  run agmsg_team_location herdr w2:p3
-  [ "$status" -eq 0 ]
-  [ "$output" = $'herdr\tw2:p3\tunknown:present_then_location_rc_10\tpresent' ]
+  [ "$output" = $'tmux\t%3\tunknown:location_rc_10' ]
 }
 
 @test "team location reports a malformed contract without empty fields" {
-  agmsg_terminal_location_loaded() { printf '\tpresent\n'; }
+  terminal_where() { printf '\n'; }
   run agmsg_team_location herdr w2:p3
   [ "$status" -eq 0 ]
-  [ "$output" = $'herdr\tw2:p3\tunknown:location_contract_malformed\tunknown:location_contract_malformed' ]
+  [ "$output" = $'herdr\tw2:p3\tunknown:location_malformed' ]
 }
 
 @test "team observation preserves four explicit driver fields" {
@@ -138,26 +129,26 @@ agmsg_terminal_load() { return 0; }
 
 @test "human team row collapses verified identity details" {
   run agmsg_team_render_human_row \
-    alice claude-code /repo herdr w2:p3 w2:t1 present working monitor \
+    alice claude-code /repo herdr w2:p3 w2:t1 working monitor \
     'ok(actual=team:alice)' 'ok(actual=a123)' 'ok(actual=team-alice)' ok
   [ "$status" -eq 0 ]
-  [ "$output" = '  alice (claude-code) — /repo   [herdr w2:p3 @w2:t1 live=present activity=working delivery=monitor identity=ok]' ]
+  [ "$output" = '  alice (claude-code) — /repo   [herdr w2:p3 @w2:t1 activity=working delivery=monitor identity=ok]' ]
 }
 
 @test "human team row expands only non-ok identity observations" {
   run agmsg_team_render_human_row \
-    carol claude-code /repo herdr w2:p7 w2:t2 present idle turn \
+    carol claude-code /repo herdr w2:p7 w2:t2 idle turn \
     'ok(actual=team:carol)' 'n/a:no_independent_key' \
     'mismatch(expected=team-carol,actual=carol)' mismatch
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = '  carol (claude-code) — /repo   [herdr w2:p7 @w2:t2 live=present activity=idle delivery=turn identity=mismatch]' ]
+  [ "${lines[0]}" = '  carol (claude-code) — /repo   [herdr w2:p7 @w2:t2 activity=idle delivery=turn identity=mismatch]' ]
   [ "${lines[1]}" = '    cli_session=mismatch(expected=team-carol,actual=carol)' ]
   [ "${#lines[@]}" -eq 2 ]
 }
 
 @test "JSON team row keeps every field and structured mismatch evidence" {
   run agmsg_team_render_json_row \
-    carol claude-code /repo herdr w2:p7 w2:t2 present idle turn \
+    carol claude-code /repo herdr w2:p7 w2:t2 idle turn \
     'ok(actual=team:carol)' team:carol team:carol \
     'ok(actual=a123)' a123 a123 \
     'mismatch(expected=team-carol,actual=carol)' team-carol carol mismatch
@@ -166,6 +157,7 @@ agmsg_terminal_load() { return 0; }
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.status');")" = mismatch ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.expected');")" = team-carol ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.actual');")" = carol ]
+  [ "$(sqlite3 :memory: "SELECT json_type('$(printf '%s' "$output" | sed "s/'/''/g")','\$.live');")" = "" ]
 }
 
 @test "readiness wrapper preserves a positive driver proof" {
