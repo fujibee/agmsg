@@ -1081,9 +1081,16 @@ _remote_resolve_team_id() {
   # malformed candidate -- and it needs to reach the operator, not get
   # replaced by a single line that names two different causes at once and
   # lets the reader guess which one happened.
+  # The status is captured ON the assignment, not read bare on the next line:
+  # under errexit a bare failing assignment ends the shell before either the
+  # `status=$?` or the message below it (#1025). Today's sole caller happens to
+  # suppress that (its `|| exit 1` disables errexit inside the substitution —
+  # measured on bash 5.3 and 3.2), but a bare call dies silently on both, and
+  # this function should not depend on how it is invoked for its own error
+  # report to exist.
+  status=0
   out="$("$SCRIPT_DIR/remote-sync.sh" resolve-team \
-    --endpoint "$endpoint" --name "$name")"
-  status=$?
+    --endpoint "$endpoint" --name "$name")" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "agmsg: could not look up '$name'" >&2
     return 1
