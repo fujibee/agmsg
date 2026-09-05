@@ -189,18 +189,28 @@ fake_session() {
 
 # --- watch.sh releasing a pair it no longer owns (#983) ---
 
-# The subscription set and the lock check both happen once, before the polling
-# loop (watch.sh 159-211 vs the loop at 274). So a watcher that is already
-# running never notices that another session took its role: it keeps polling the
-# same pair, and because the read cursor is one per (team, agent) and
-# storage_watch_after excludes rows already read, WHOEVER POLLS FIRST takes the
-# row and the other sees nothing.
+# A watcher that is already running would otherwise never notice that another
+# session took its role: it keeps polling the same pair, and because the read
+# cursor is one per (team, agent) and storage_watch_after excludes rows already
+# read, WHOEVER POLLS FIRST takes the row and the other sees nothing. When the
+# one that takes it is the older process its printf succeeds, the id is marked
+# read, and the message is gone. So the loop re-reads the lock each cycle and
+# releases the pair.
 #
-# When the one that takes it is the older process, its printf succeeds -- its
-# stdout is still an open pipe to a live session -- so the id is appended to
-# DELIVERED_IDS and the message is marked read. Nothing surfaces it. That is the
-# reported symptom: consumed, marked read, and never delivered.
-@test "watch: a pair claimed by another session is released, not consumed (#983)" {
+# What this test states is the released case: once the release is OBSERVABLE --
+# the reason on stderr, the process gone -- the old watcher takes nothing.
+#
+# What it deliberately does not state is the handover instant itself. The lock
+# is read once per cycle and the rows are read after it, so a message that
+# arrives between those two points can still be taken by the departing watcher.
+# The implementation does not make that atomic and does not claim to. An earlier
+# version of this test sent the message immediately after the claim and slept
+# four poll intervals, which asserted the atomic version by accident: it passed
+# or failed on whichever interleaving occurred, so a red did not identify a
+# defect and a green did not establish the property. If the atomic guarantee is
+# ever wanted, it needs the lock re-read moved next to the mark-read, and a test
+# that forces the interleaving rather than sampling it.
+@test "watch: a pair claimed by another session releases it and says why (#983)" {
   skip_on_windows "actas watcher process mgmt under Git Bash (#182)"
   fake_register T alice
   fake_register T bob
@@ -222,37 +232,49 @@ fake_session() {
   echo "sid-new" > "$RUN_DIR/cc-instance.$newpid"
   echo "sid-new" > "$(actas_lock_path T alice)"
 
-  bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
-
-  # Several poll cycles at the 1s interval set above.
-  sleep 4
-  kill "$newpid" 2>/dev/null || true
-
-  # It must not have taken a message addressed to a role it no longer owns.
-  run cat "$BATS_TEST_TMPDIR/old.out"
-  [[ "$output" != *"after the handover"* ]]
-
-  # It must have stopped. A watcher that keeps running is what consumes the
-  # next message too.
-  refute kill -0 "$old" 2>/dev/null
-
-  # And it must say why. Exiting silently is the same defect class -- this
-  # watcher's stderr is the only place a reason can survive.
+  # Gate on the watcher having OBSERVED the claim, not on elapsed time. The
+  # previous version slept four poll intervals and then asserted; that samples
+  # whichever interleaving happened to occur rather than establishing that the
+  # release took place, so a green said nothing and a red did not say what broke.
+  for i in $(seq 1 200); do
+    grep -q "no longer owns that role" "$BATS_TEST_TMPDIR/old.err" && break
+    sleep 0.1
+  done
+  # Assert the observation itself. The loop above cannot fail: exhausted and
+  # satisfied leave identical state.
   run cat "$BATS_TEST_TMPDIR/old.err"
   [[ "$output" == *"T/alice"* ]]
   [[ "$output" == *"sid-new"* ]]
+  [[ "$output" == *"no longer owns that role"* ]]
 
-  # The message is still unread, so the session that now owns the role is
-  # offered it. Without this, "did not print it" would also pass for a watcher
-  # that consumed the row and threw it away.
+  # And it must actually stop. A watcher that logs the reason and keeps running
+  # is what consumes the next message.
+  for i in $(seq 1 200); do
+    kill -0 "$old" 2>/dev/null || break
+    sleep 0.1
+  done
+  refute kill -0 "$old" 2>/dev/null
+
+  # Only NOW is a message sent. Every assertion below is about a watcher that
+  # has already released the role, which is the property this file can state:
+  # once the release is observable, the old watcher takes nothing.
+  bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
+
+  run cat "$BATS_TEST_TMPDIR/old.out"
+  [[ "$output" != *"after the handover"* ]]
+
+  # Still unread, so the session that now owns the role is offered it. Without
+  # this, "did not print it" would also pass for a watcher that consumed the row
+  # and threw it away.
   local left
   left="$(bash -c '
     source "'"$SKILL_DIR"'/scripts/lib/storage.sh"
     agmsg_storage_load
     storage_list_unread T alice
-  ' | grep -c .)"
+  ' | grep -c . || true)"
   [ "$left" -eq 1 ]
 
+  kill "$newpid" 2>/dev/null || true
   kill "$old" 2>/dev/null || true
   wait "$old" 2>/dev/null || true
 }
