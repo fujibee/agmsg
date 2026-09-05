@@ -1004,16 +1004,36 @@ storage_sync_apply_pull() {
                  "status","policy_revision","local_security_revision","reason",
                  "projection.kind","projection.from_agent","projection.to_agent",
                  "projection.body","projection.created_at"];
-    def pick($r; $name):
+    # envelope.blob and envelope.cipher have NO `// ""` default, unlike the twelve
+    # fields that do, and the value is `tostring`-ed below -- so on a message a
+    # JSON null, an absent key, or a number was silently stored as the plausible-
+    # looking text "null"/"12345", rc=0 (#1042). A `// ""` default (like the other
+    # twelve) would only trade "null" for "" -- still a silent non-ciphertext -- so
+    # instead REJECT a non-string, the way the two other unguarded fields already
+    # are: status against a whitelist, envelope.v against a numeric gate, both
+    # rc=13. A sentinel value was the alternative but it would add a thing four
+    # places (read/store/projection/migration) must recognise. The type is only
+    # known HERE, before `tostring` erases it (a real ciphertext and a former null
+    # both read as strings downstream), so the guard has to live in the pick. Only
+    # a sync_pull_message carries an envelope; a sync_pull_cursor legitimately has
+    # none, so the check is scoped to messages (a cursor reads blob/cipher but never
+    # uses them). An empty string is a present string and stays out of scope here.
+    def pick($n; $r; $name):
       (if   $name == "type"                    then $r.type // ""
        elif $name == "next_after"              then $r.next_after // ""
        elif $name == "server_seq"              then $r.server_seq // ""
        elif $name == "id"                      then $r.id // ""
        elif $name == "server_received_at"      then $r.server_received_at // ""
        elif $name == "envelope.v"              then $r.envelope.v
-       elif $name == "envelope.cipher"         then $r.envelope.cipher
+       elif $name == "envelope.cipher"         then
+             (if $r.type == "sync_pull_message"
+              then ($r.envelope.cipher | if type == "string" then . else error("record \($n): envelope.cipher is \(type), not a string") end)
+              else $r.envelope.cipher end)
        elif $name == "envelope.key_id"         then $r.envelope.key_id // ""
-       elif $name == "envelope.blob"           then $r.envelope.blob
+       elif $name == "envelope.blob"           then
+             (if $r.type == "sync_pull_message"
+              then ($r.envelope.blob | if type == "string" then . else error("record \($n): envelope.blob is \(type), not a string") end)
+              else $r.envelope.blob end)
        elif $name == "status"                  then $r.status
        elif $name == "policy_revision"         then $r.policy_revision // ""
        elif $name == "local_security_revision" then $r.local_security_revision // ""
@@ -1030,7 +1050,7 @@ storage_sync_apply_pull() {
         | (.key + 1) as $n
         | (try (.value | fromjson) catch error("record \($n): not one JSON value on its line")) as $r
         | fields[] as $name
-        | pick($r; $name) as $v
+        | pick($n; $r; $name) as $v
         | (if ($v | contains("\u0000"))
            then error("record \($n): field \($name) contains U+0000")
            else $v end) + "\u0000" )
