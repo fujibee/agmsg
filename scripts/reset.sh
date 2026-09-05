@@ -200,18 +200,32 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   TOUCHED_TEAMS=$((TOUCHED_TEAMS + 1))
   echo "Cleared $MATCH_COUNT registration(s) for $TARGET_AGENT from $TEAM_NAME"
 
+  # Remove the advisory role->session record for this seat (#1041). Nothing else
+  # deleted it, so it outlived every despawn -- graceful AND --force -- leaving one
+  # stale seat record (session uuid, name, team, type, project) per member ever
+  # spawned, which internal/resurrect-panes.sh reads.
+  #
+  # Two conditions the first cut got wrong (#1052 review, measured by utildev):
+  #  - ONLY when REMAINING is 0. The record is keyed on (team, agent) ALONE --
+  #    project is a field inside it -- so a peer still registered under a DIFFERENT
+  #    project shares this one file. Deleting it whenever any registration is
+  #    dropped tore the record out from under a live seat in another project. Ride
+  #    the same count the config removal above already uses.
+  #  - BEFORE the actas lock is released, not after. actas-claim acquires the lock
+  #    THEN writes the record, so a peer that legitimately claims in the window
+  #    between our release and our rm ends up holding the lock with no record --
+  #    its fresh record deleted by our late rm. Removing first closes that window.
+  # NOT gated on SESSION_ID: --force passes none and the record must go on both
+  # paths; the SESSION_ID gate stays on the lock release alone.
+  if [ "$REMAINING" -eq 0 ]; then
+    _agmsg_role_session_path_into "$TEAM_NAME" "$TARGET_AGENT"
+    rm -f "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null || true
+  fi
   # Release the actas lock for this (team, agent) pair so peer sessions can
   # claim it without waiting for owner-session-end / stale GC.
   if [ -n "$SESSION_ID" ]; then
     actas_lock_release "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID" 2>/dev/null || true
   fi
-  # Remove the advisory role->session record for this seat (#1041). Nothing else
-  # deleted it, so it outlived every despawn -- graceful AND --force -- leaving one
-  # stale seat record (session uuid, name, team, type, project) per member ever
-  # spawned, which internal/resurrect-panes.sh reads. NOT gated on SESSION_ID:
-  # --force calls reset.sh with none, and the record must go on both paths.
-  _agmsg_role_session_path_into "$TEAM_NAME" "$TARGET_AGENT"
-  rm -f "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null || true
 done
 
 if [ "$REMOVED" -eq 0 ]; then
