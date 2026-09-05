@@ -21,6 +21,29 @@ agmsg_identity_consistency() {
   fi
 }
 
+# Claude prefixes its terminal title with a transient state glyph. Herdr's
+# terminal_title_stripped removes terminal control bytes, not that glyph. Strip
+# one leading non-ASCII/non-name token and its following spaces; keep ordinary
+# text untouched so a real mismatching session name is still diagnosable.
+agmsg_cli_session_from_title() {
+  local title="$1" first rest
+  case "$title" in
+    *' '*)
+      first="${title%% *}"
+      rest="${title#* }"
+      case "$first" in
+        *[A-Za-z0-9_-]*) : ;;
+        *)
+          while [ "${rest# }" != "$rest" ]; do rest="${rest# }"; done
+          printf '%s\n' "$rest"
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  printf '%s\n' "$title"
+}
+
 _agmsg_team_identity_detail() {
   local field="$1" cell="$2"
   case "$cell" in

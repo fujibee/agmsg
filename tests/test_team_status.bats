@@ -35,6 +35,16 @@ setup() {
   [ "$output" = unverified ]
 }
 
+@test "CLI session title removes Claude state glyph without rewriting a name" {
+  run agmsg_cli_session_from_title '◐ team-alice'
+  [ "$status" -eq 0 ]
+  [ "$output" = team-alice ]
+
+  run agmsg_cli_session_from_title 'different session name'
+  [ "$status" -eq 0 ]
+  [ "$output" = 'different session name' ]
+}
+
 @test "human team row collapses verified identity details" {
   run agmsg_team_render_human_row \
     alice claude-code /repo herdr w2:p3 w2:t1 present working monitor \
