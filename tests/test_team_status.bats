@@ -88,6 +88,17 @@ agmsg_terminal_load() { return 0; }
   [ "$output" = $'idle\tok(actual=team:alice)\tok(actual=a123)\tn/a:no_session_name\tok' ]
 }
 
+@test "visible pane naming off is expected n/a while the key remains checked" {
+  terminal_team_observe() {
+    printf 'idle\tunknown:pane_label_missing\ta123\t✳ team-alice\n'
+  }
+  _herdr_internal_key() { printf 'a123\n'; }
+  agmsg_type_get() { [ "$2" = name_arg ] && printf '%s\n' -n; }
+  AGMSG_TERMINAL_NAMING=off run agmsg_team_identity_loaded team alice claude-code herdr w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'idle\tn/a:disabled_by_policy\tok(actual=a123)\tok(actual=team-alice)\tok' ]
+}
+
 @test "identity consistency treats expected n/a as verified" {
   run agmsg_identity_consistency \
     'n/a:no_independent_field' \

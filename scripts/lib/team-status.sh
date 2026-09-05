@@ -96,7 +96,11 @@ EOF
     plain) expected_key=n/a:no_addressable_pane ;;
     *) expected_key=unknown:terminal_key_contract_unknown ;;
   esac
-  pane_cell="$(agmsg_identity_cell "$expected_label" "$actual_label")"
+  if [ "${AGMSG_TERMINAL_NAMING:-}" = off ]; then
+    pane_cell=n/a:disabled_by_policy
+  else
+    pane_cell="$(agmsg_identity_cell "$expected_label" "$actual_label")"
+  fi
   case "$expected_key" in
     n/a:*|unknown:*) key_cell="$expected_key" ;;
     *) key_cell="$(agmsg_identity_cell "$expected_key" "$actual_key")" ;;

@@ -50,8 +50,9 @@ _agmsg_pl_rc=$?
 
 # Delivery belongs to a registration (type + project), not merely a member.
 _member_delivery() {
-  local type="$1" project="$2" first rc=0
-  first="$(bash "$SCRIPT_DIR/delivery.sh" status "$type" "$project" 2>/dev/null | head -1)" || rc=$?
+  local type="$1" project="$2" out first rc=0
+  out="$(bash "$SCRIPT_DIR/delivery.sh" status "$type" "$project" 2>/dev/null)" || rc=$?
+  first="${out%%$'\n'*}"
   if [ "$rc" -ne 0 ] || [ -z "$first" ]; then
     printf 'unknown:delivery_status_rc_%s' "$rc"
     return 0
