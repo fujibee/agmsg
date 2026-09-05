@@ -1364,7 +1364,10 @@ T
   chmod 700 "$TEST_SKILL_DIR/run"                       # restore so teardown can clean up
   [ "$status" -ne 0 ]
   grep -q "status=spawned-but-unrecorded" <<<"$output"
-  grep -q "tmux:%9" <<<"$output"
+  # The ref names the server that owns the pane (#1051): $TMUX is "/tmp/fake,1,0",
+  # so the socket is /tmp/fake. A bare 'tmux:%9' would not identify which tmux
+  # server to ask, and %9 is not unique across servers.
+  grep -q "tmux:/tmp/fake:%9" <<<"$output"
 }
 
 @test "spawn: the plain driver's '-' protocol value never leaks to spawn stdout" {

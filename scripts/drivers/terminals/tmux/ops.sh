@@ -95,11 +95,40 @@ terminal_arrange() {
 terminal_detect() {
   [ -n "${TMUX:-}" ] || return 1
   if [ -n "${TMUX_PANE:-}" ]; then
-    printf '%s\n' "$TMUX_PANE"
+    # `<socket>:<pane>`, so whatever records this can later ask the RIGHT server.
+    # $TMUX is "<socket-path>,<pid>,<session>"; the first field is the socket.
+    printf '%s:%s\n' "${TMUX%%,*}" "$TMUX_PANE"
   else
     echo "tmux: \$TMUX_PANE is unset — cannot identify this pane" >&2
   fi
   return 0
+}
+
+# A tmux id may carry the SERVER it belongs to: `<socket-path>:%1`, or a bare
+# `%1` for a record written before this existed.
+#
+# It has to, because a pane id is not unique across servers — measured: two
+# throwaway servers both had `%0`, and each answered "yes, I know %0" about the
+# other's pane. Without the socket, "is this pane still there?" cannot be asked
+# of the right authority, and a wrong answer deletes the placement record (#1051).
+#
+# The socket must be SPLIT OFF before the id reaches `-t`, never passed through:
+# measured, `tmux kill-pane -t '<socket>:%0'` is read as session:window, prints
+# "can't find window: %0" and closes NOTHING. Silent no-op, not a wrong kill —
+# but a teardown that did nothing while looking like it ran is exactly this
+# issue's shape.
+#
+# Split on the LAST colon: a socket path may contain one.
+_tmux_sock_of() { case "$1" in *:*) printf '%s' "${1%:*}" ;; *) printf '' ;; esac; }
+_tmux_bare_of() { printf '%s' "${1##*:}"; }
+
+# Run tmux against the server that owns <id>. With no socket in the id this is
+# plain `tmux`, which is what a legacy record gets and what the ambient
+# environment decides — the honest behaviour for a ref that does not say.
+_tmux_do() {   # <id> <tmux args...>
+  local id="$1"; shift
+  local sock; sock="$(_tmux_sock_of "$id")"
+  if [ -n "$sock" ]; then tmux -S "$sock" "$@"; else tmux "$@"; fi
 }
 
 # Positive proof that a captured id is a tmux id of the expected KIND: a pane is
@@ -149,16 +178,83 @@ terminal_spawn() {
       ;;
     *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
   esac
-  printf '%s\n' "$id"
+  # Socket-qualified, the same shape terminal_detect emits: whoever records this
+  # id must be able to ask the server that owns it, not whichever one they can
+  # reach. A spawn always happens from inside a tmux server, so $TMUX is set.
+  if [ -n "${TMUX:-}" ]; then
+    printf '%s:%s\n' "${TMUX%%,*}" "$id"
+  else
+    printf '%s\n' "$id"
+  fi
   return 0
 }
 
 # control op: kill the pane (%N) or window (@N) named by the bare id.
+# Is the recorded pane still there? READ ONLY — this never closes anything.
+#
+# It exists because `terminal_despawn` cannot answer the question. Measured on a
+# throwaway server: `kill-pane` returns 0 for a live pane and non-zero for one
+# that is already gone, and the driver maps both non-zeros to 13 — so "already
+# closed" and "could not close" arrive as the same value, and a graceful teardown
+# that succeeded would have to report needs-force.
+#
+# Prints a token and returns a code, like the other ops:
+#   present / 0    the id is in the terminal's own list
+#   gone    / 0    the list answered and the id is not in it
+#   unknown / 10   the terminal could not be reached to ask
+#   unknown / 13   the id is not one this terminal can be asked about
+#
+# "Could not ask" must never come back as 0: the caller deletes the placement
+# record — the only thing `--force` can work from — on `gone` alone.
+terminal_pane_state() {
+  local id="$1" out
+  command -v tmux >/dev/null 2>&1 \
+    || { echo unknown; return 10; }
+  # No socket in the id: a record written before refs carried one. The pane id
+  # alone cannot name an authority — two servers can both hold `%0` — so this
+  # cannot be answered, and saying `gone` here is what deletes a live member's
+  # record. An honest `unknown` sends the caller to --force instead (#1051).
+  local sock bare
+  sock="$(_tmux_sock_of "$id")"
+  bare="$(_tmux_bare_of "$id")"
+  [ -n "$sock" ] || { echo unknown; return 10; }
+
+  # The server that owned this pane is gone, so the pane is too — a pane does not
+  # outlive its server. This matters because it is the ORDINARY case: measured,
+  # killing a server's last pane ends the server, which is what folding a member
+  # that had its own window does, and without this the answer was `unknown`
+  # exactly when the teardown had worked.
+  #
+  # The discriminator is tmux SAYING SO, not the socket file: measured, the socket
+  # survives the server's exit, so its presence proves nothing. `no server running
+  # on <path>` is tmux telling us the server is not there, and only that sentence
+  # is taken as proof — every other failure stays `unknown`, because `gone` is
+  # what deletes the placement record and it must be earned.
+  local err="" out="" _rc=0
+  case "$bare" in
+    %*) out="$(_tmux_do "$id" list-panes  -a -F '#{pane_id}'   2>/tmp/.agmsg-tmux-err.$$)" || _rc=$? ;;
+    @*) out="$(_tmux_do "$id" list-windows -a -F '#{window_id}' 2>/tmp/.agmsg-tmux-err.$$)" || _rc=$? ;;
+    *)  rm -f "/tmp/.agmsg-tmux-err.$$" 2>/dev/null; echo unknown; return 13 ;;
+  esac
+  err="$(cat "/tmp/.agmsg-tmux-err.$$" 2>/dev/null)"
+  rm -f "/tmp/.agmsg-tmux-err.$$" 2>/dev/null
+  if [ "$_rc" -ne 0 ]; then
+    case "$err" in
+      *"no server running"*) echo gone; return 0 ;;
+      *)                     echo unknown; return 10 ;;
+    esac
+  fi
+  if printf '%s\n' "$out" | grep -qx -- "$bare"; then echo present; return 0; fi
+  echo gone
+  return 0
+}
+
 terminal_despawn() {
   local id="$1"
-  case "$id" in
-    %*) tmux kill-pane   -t "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
-    @*) tmux kill-window -t "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
+  # The KIND is in the bare id; a socket-qualified id starts with the socket path.
+  case "$(_tmux_bare_of "$id")" in
+    %*) _tmux_do "$id" kill-pane   -t "$(_tmux_bare_of "$id")" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
+    @*) _tmux_do "$id" kill-window -t "$(_tmux_bare_of "$id")" >/dev/null 2>&1 || { echo runtime_error; return 13; } ;;
     *)  printf 'unsupported: not a tmux pane/window id: %s\n' "$id" >&2; return 13 ;;
   esac
   echo ok
@@ -187,10 +283,10 @@ terminal_peek() {
   command -v tmux >/dev/null 2>&1 \
     || { echo "tmux: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
   if [ -n "$lines" ]; then
-    tmux capture-pane -p -t "$id" -S "-$lines" \
+    _tmux_do "$id" capture-pane -p -t "$(_tmux_bare_of "$id")" -S "-$lines" \
       || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   else
-    tmux capture-pane -p -t "$id" \
+    _tmux_do "$id" capture-pane -p -t "$(_tmux_bare_of "$id")" \
       || { echo "tmux: could not capture pane '$id' (it may no longer exist)" >&2; return 12; }
   fi
   return 0
@@ -252,10 +348,10 @@ terminal_poke() {
   # poke path at all (plain) — a tmux pane's transient loss must not borrow it.
   command -v tmux >/dev/null 2>&1 \
     || { echo runtime_error; echo "tmux: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
-  tmux send-keys -l -t "$id" -- "$text" \
+  _tmux_do "$id" send-keys -l -t "$(_tmux_bare_of "$id")" -- "$text" \
     || { echo runtime_error; echo "tmux: could not send to pane '$id' (it may no longer exist)" >&2; return 12; }
   sleep 0.3 2>/dev/null || true
-  tmux send-keys -t "$id" Right Enter \
+  _tmux_do "$id" send-keys -t "$(_tmux_bare_of "$id")" Right Enter \
     || { echo runtime_error; echo "tmux: could not send Enter to pane '$id' (it may no longer exist)" >&2; return 12; }
   echo ok
   return 0
@@ -273,11 +369,11 @@ terminal_poke() {
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label
   label="$team:$name"
-  tmux set-option -p -t "$id" @agmsg_agent "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  _tmux_do "$id" set-option -p -t "$(_tmux_bare_of "$id")" @agmsg_agent "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   if [ "$mode" = key ]; then echo ok; return 0; fi
-  case "$id" in
-    @*) tmux rename-window -t "$id" "$label" >/dev/null 2>&1 || true ;;
-    *)  tmux select-pane  -t "$id" -T "$label" >/dev/null 2>&1 || true ;;
+  case "$(_tmux_bare_of "$id")" in
+    @*) _tmux_do "$id" rename-window -t "$(_tmux_bare_of "$id")" "$label" >/dev/null 2>&1 || true ;;
+    *)  _tmux_do "$id" select-pane  -t "$(_tmux_bare_of "$id")" -T "$label" >/dev/null 2>&1 || true ;;
   esac
   echo ok
   return 0

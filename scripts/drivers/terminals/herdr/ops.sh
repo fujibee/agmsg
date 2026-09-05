@@ -407,6 +407,62 @@ terminal_spawn() {
 }
 
 # control op: close the herdr pane named by the bare id.
+# Is the recorded pane still there? READ ONLY — `agent list` and nothing else.
+#
+# Same reason as the tmux driver's: `terminal_despawn` collapses "already closed"
+# and "could not close" into 13, so it cannot tell a caller whether a graceful
+# teardown worked.
+#
+#   present / 0    the id appears in the list
+#   gone    / 0    the list answered, validly, and the id is not in it
+#   unknown / 10   herdr could not be reached, or answered something unreadable
+#
+# `gone` is a claim about the WHOLE list, so it is only made after the list has
+# been PROVEN readable — exit-0 bytes are not proof. Anything short of that is
+# `unknown`, because the caller deletes the placement record on `gone` alone.
+#
+# The read-and-validate preamble is deliberately the same shape as
+# `_herdr_pane_for_session` above and is NOT yet factored out of it: that
+# function is under review for a release block. Two copies of a preamble is a
+# thing to fix, not to leave unnamed — noted here so the next reader knows it is
+# known rather than accidental.
+terminal_pane_state() {
+  local id="$1" json rc=0
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
+  json="$(herdr agent list 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || { echo unknown; return 10; }
+  [ -n "$json" ] || { echo unknown; return 10; }
+
+  local jesc valid vrc=0
+  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] || { echo unknown; return 10; }
+  [ "$valid" = 1 ] || { echo unknown; return 10; }
+
+  local iesc q jtype jtrc hit hrc
+  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  for q in '$.result.agents' '$' '$.agents' '$.result'; do
+    jtrc=0
+    jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
+    [ "$jtrc" -eq 0 ] || { echo unknown; return 10; }
+    [ "$jtype" = array ] || continue
+    hrc=0
+    hit="$(sqlite3 :memory: "
+      SELECT EXISTS(
+        SELECT 1 FROM json_each('$jesc', '$q')
+         WHERE json_extract(value, '\$.pane_id') = '$iesc'
+      );" 2>/dev/null)" || hrc=$?
+    [ "$hrc" -eq 0 ] || { echo unknown; return 10; }
+    if [ "$hit" = 1 ]; then echo present; return 0; fi
+    echo gone
+    return 0
+  done
+  # No array at any candidate path: the list was readable JSON but not a shape
+  # this driver knows, which is "could not answer", not "not in it".
+  echo unknown
+  return 10
+}
+
 terminal_despawn() {
   local id="$1"
   herdr pane close "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; }
