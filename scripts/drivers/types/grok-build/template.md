@@ -139,9 +139,17 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
    b. Launch a fresh watcher with the `monitor` tool (persistent):
       - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh "${GROK_SESSION_ID:--}" "$(pwd)" grok-build <name>`
       - description: `agmsg inbox stream`
+   Wait until the monitor tool confirms that this watcher task has started and
+   is streaming before continuing. A launch request by itself is not readiness;
+   do not run step 6 while the watcher is still starting.
    The 4th argument restricts the subscription to messages addressed to `<name>` only. In `turn`/`off` mode there is no watcher to switch — skip this step.
 5. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-6. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
+6. After the identity claim is complete and, in monitor mode, the monitor tool has confirmed the watcher is running and streaming, signal one-shot spawn readiness exactly once. If this session was launched by `spawn` — the environment variables `AGMSG_SPAWN_TEAM` and `AGMSG_SPAWN_NONCE` are set — use those exactly, quoted, rather than the team resolved in steps 2-3: they identify which team and which specific launch spawn is waiting on (the boot prompt only names the agent, and the same name can be registered under more than one team; the nonce stops a stale mark from an earlier abandoned/timed-out launch from satisfying THIS launch's wait):
+   `~/.agents/skills/__SKILL_NAME__/scripts/ready.sh mark "$AGMSG_SPAWN_TEAM" '<name>' "$AGMSG_SPAWN_NONCE"`
+   Otherwise (a manual `/agmsg actas`, not from spawn) use the team resolved in steps 2-3, quoted, with no nonce:
+   `~/.agents/skills/__SKILL_NAME__/scripts/ready.sh mark '<team>' '<name>'`
+   This mark says only that actas bootstrap completed; it is not a watcher-liveness signal.
+7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from. In monitor mode, receive is restricted to `<name>`; in turn/off mode receive still covers all your registered roles."
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.

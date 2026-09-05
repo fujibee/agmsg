@@ -346,7 +346,7 @@ seed_resumable() {
 }
 
 @test "spawn: grok-build launches the plain grok CLI with the actas prompt" {
-  # grok-build is spawnable and monitor=no, so spawn skips the readiness wait.
+  # --no-wait makes this test independent of the project's delivery mode.
   # Delivery is a rule file (no hook), so no folder-trust flag is needed —
   # the launch is the bare `grok "/<cmd> actas <name>"`, like claude-code.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
@@ -830,19 +830,84 @@ EOF
   [[ "$output" == *"skipping readiness wait"* ]]
 }
 
-@test "spawn: grok-build skips the readiness wait even without --no-wait (monitor=no)" {
-  # Regression guard: grok-build's monitor watcher attaches via the agent's
-  # actas/rule launch (no SessionStart hook) and only in monitor mode, so there
-  # is no ready sentinel for spawn to await. With monitor=no, spawn must skip the
-  # wait and return immediately instead of hanging a default turn/off-mode spawn
-  # until --ready-timeout. (Without this, monitor=yes made the wait fire.)
+@test "spawn: grok-build waits for and consumes the one-shot actas handshake" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  # Simulate the agent completing its actas template after launch: read the
+  # spawn-exported team/nonce back out of the generated boot script (the same
+  # thing the real template does via $AGMSG_SPAWN_TEAM/$AGMSG_SPAWN_NONCE),
+  # then mark with them — a bare mark without the nonce would no longer
+  # satisfy spawn's check (review finding, 2026-07-19). This uses ready.sh
+  # rather than watch.sh's distinct, long-lived ready.* sentinel.
+  local mark_helper="$TEST_SKILL_DIR/mark-helper.sh"
+  cat > "$mark_helper" <<EOF
+#!/usr/bin/env bash
+eval "\$(grep -E '^export AGMSG_SPAWN_(TEAM|NONCE)=' "\$1")"
+bash "$SCRIPTS/ready.sh" mark "\$AGMSG_SPAWN_TEAM" alice "\$AGMSG_SPAWN_NONCE"
+EOF
+  chmod +x "$mark_helper"
+
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
+    --ready-timeout 300 \
+    --terminal "bash $mark_helper {cmd}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=ready"* ]]
+  [[ "$output" != *"skipping readiness wait"* ]]
+
+  # The mark is an edge, not liveness: spawn consumes it after observing it.
+  run bash "$SCRIPTS/ready.sh" check myteam alice
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn: a stale actas mark from an abandoned earlier launch does not satisfy a later spawn's wait" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  # An earlier, abandoned spawn attempt marks with SOME other nonce (as if a
+  # slow-booting agent from a previous, already-timed-out launch finally
+  # completed and called ready.sh mark late) — this must NOT satisfy a new
+  # spawn's wait (review finding, 2026-07-19: P2, converged Codex + Fugu).
+  bash "$SCRIPTS/ready.sh" mark myteam alice "stale-nonce-from-abandoned-launch"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/sleep"
+  chmod +x "$STUB_BIN/sleep"
+
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
+    --ready-timeout 2 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"status=timeout"* ]]
+  [[ "$output" != *"status=ready"* ]]
+}
+
+@test "spawn: actas handshake clears stale state and enforces the 300s timeout floor" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/ready.sh" mark myteam alice
+
+  # Avoid a real five-minute wait: each loop still increments one logical
+  # second, but this test-local sleep returns immediately.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/sleep"
+  chmod +x "$STUB_BIN/sleep"
+
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
+    --ready-timeout 2 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"300s minimum"* ]]
+  [[ "$output" == *"status=timeout"* ]]
+  [[ "$output" == *"after=300s"* ]]
+  [[ "$output" != *"status=ready"* ]]
+}
+
+@test "spawn: a no-monitor type without handshake key still returns immediately" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+
+  # Model an older/external grok driver: no handshake key and monitor=no.
+  awk '!/^handshake=/' "$TYPES/grok-build/type.conf" > "$TYPES/grok-build/type.conf.tmp"
+  mv "$TYPES/grok-build/type.conf.tmp" "$TYPES/grok-build/type.conf"
+
   run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
     --terminal "true # {cmd}"
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipping readiness wait"* ]]
-  [[ "$output" != *"status=timeout"* ]]
-  [[ "$output" != *"status=ready"* ]]
+  [[ "$output" != *"status="* ]]
 }
 
 # --- initial prompt (--boot-prompt) ---
