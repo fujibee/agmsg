@@ -637,7 +637,11 @@ if [ "\$1 \$2" = 'pane layout' ]; then
 elif [ "\$1 \$2" = 'pane move' ]; then
   case " \$* " in *' --tab '*) [ "\${HERDR_SECOND_RC:-0}" -eq 0 ] || exit "\$HERDR_SECOND_RC" ;; esac
   case " \$* " in
-    *' --new-tab '*) printf '%s\n' '{"result":{"move_result":{"changed":true,"created_tab":{"tab_id":"wA:t9"}}}}' ;;
+    *' --new-tab '*)
+      if [ "\${HERDR_FIRST_CHANGED:-true}" = true ]; then printf '%s\n' '{"result":{"move_result":{"changed":true,"created_tab":{"tab_id":"wA:t9"}}}}'
+      else printf '%s\n' '{"result":{"move_result":{"changed":false}}}'
+      fi
+      ;;
     *) printf '%s\n' '{"result":{"move_result":{"changed":true}}}' ;;
   esac
 fi
@@ -721,6 +725,18 @@ EOF
   printf '%s\n' "$output" | grep -q '^runtime_error'
   printf '%s\n' "$output" | grep -q "left in temporary tab 'wA:t9'"
   printf '%s\n' "$output" | grep -q "placing it back in tab 'wA:t1'"
+}
+
+@test "herdr: an unchanged temporary-tab move fails before the second step" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_FIRST_CHANGED=false
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":10,"height":20}},{"pane_id":"wA:p2","rect":{"x":10,"y":0,"width":10,"height":20}}],"splits":[{"id":"opaque","direction":"right","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 12 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+  printf '%s\n' "$output" | grep -q 'did not report changed=true'
+  [ "$(grep -c '\[pane\] \[move\]' "$ARGV_LOG")" -eq 1 ]
 }
 
 @test "herdr: arrange cannot locate a layout pane -> unknown/10, not runtime_error" {

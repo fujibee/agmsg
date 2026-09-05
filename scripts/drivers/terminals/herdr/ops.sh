@@ -430,7 +430,7 @@ terminal_where() {
     || { echo unknown; return 10; }
   if [ "$present" != 1 ] || [ -z "$container" ]; then
     echo unknown
-    echo "herdr: pane '$id' was present immediately before location lookup, but its tab could not be resolved" >&2
+    echo "herdr: the layout answered but did not contain '$id'; pane existence must be checked separately" >&2
     return 10
   fi
   printf '%s\n' "$container"
@@ -444,7 +444,7 @@ _herdr_arrange_state() {
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
   sesc="$(printf '%s' "$source" | sed "s/'/''/g")"
   tesc="$(printf '%s' "$target" | sed "s/'/''/g")"
-  case "$intent" in place_below) dir=down ;; place_right) dir=right ;; *) echo runtime_error; return 13 ;; esac
+  case "$intent" in place_below) dir=down ;; place_right) dir=right ;; *) echo unsupported; return 13 ;; esac
   # A candidate split must contain both panes, have the requested direction,
   # and agree with their rectangle order. Among those, the smallest area is the
   # LCA equivalent. Equal-area candidates really occur in degenerate layouts

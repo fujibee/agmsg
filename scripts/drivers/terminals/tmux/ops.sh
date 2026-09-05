@@ -34,7 +34,7 @@ terminal_where() {
   container="$(printf '%s\n' "$out" | awk -F '|' -v id="$id" '$1 == id { print $2; exit }')"
   if [ -z "$container" ]; then
     echo unknown
-    echo "tmux: pane '$id' was present immediately before location lookup, but its window could not be resolved" >&2
+    echo "tmux: the pane listing answered but did not contain '$id'; pane existence must be checked separately" >&2
     return 10
   fi
   printf '%s\n' "$container"
