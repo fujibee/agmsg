@@ -40,6 +40,11 @@ struct PtySession {
     pid: Option<u32>,
     tail: Arc<Mutex<TailBuffer>>,
     detection: Arc<Mutex<DetectionTracker>>,
+    /// Serializes concurrent pty_inject calls into this pane: two messages
+    /// arriving close together must not interleave their text/Enter writes
+    /// (text-A text-B Enter Enter submits a mangled line, then an Enter on
+    /// an empty composer).
+    inject_lock: Arc<Mutex<()>>,
 }
 
 /// All live sessions, keyed by a frontend-chosen id (e.g. "claude-1").
@@ -238,7 +243,14 @@ pub fn pty_spawn(
 
     manager.sessions.lock().unwrap().insert(
         id,
-        PtySession { master: pair.master, writer, pid, tail, detection },
+        PtySession {
+            master: pair.master,
+            writer,
+            pid,
+            tail,
+            detection,
+            inject_lock: Arc::new(Mutex::new(())),
+        },
     );
     Ok(())
 }
@@ -296,16 +308,97 @@ pub fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String
     Ok(())
 }
 
-/// Inject `text` (then Enter) into the agent's stdin — the universal,
+/// What the post-inject verify loop should do given the pane's detected
+/// state. Pure decision so it's unit-testable without a PTY.
+///
+/// Verification is by STATE TRANSITION, not by screen content, on purpose.
+/// An earlier revision of this fix looked for the injected text still
+/// sitting in the composer (a screen-scrape needle), and real captures
+/// killed it twice over: codex's redraw path drops non-ASCII characters
+/// (the kickoff's own em dash), and on Windows its title-escape churn
+/// (#383) floods the tail buffer with escape-only frames, aging the echo
+/// out of any byte-capped window within seconds — the stuck text was
+/// invisible to the buffer while plainly on screen. The state signal has
+/// neither problem: a submission always drives the pane Working (for codex
+/// that's the title-bar spinner, which detection already tracks), and it's
+/// exactly as observable under churn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerifyAction {
+    /// Working: the submission (or something) took — the agent is running;
+    /// nothing further to verify. Blocked: a permission/approval dialog owns
+    /// the keyboard — an Enter could accept it; never touch the pane.
+    Settled,
+    /// Unknown (e.g. detection's startup grace): can't act safely either
+    /// way; keep watching.
+    Wait,
+    /// Still Idle after the Enter should have landed: the Enter was
+    /// swallowed (codex reads a stall-batched text+Enter as a paste and
+    /// suppresses the Enter). Press Enter again — at a genuinely idle,
+    /// empty composer a lone Enter is a no-op, so a false retry is safe.
+    Retry,
+}
+
+fn verify_action(state: PaneState) -> VerifyAction {
+    match state {
+        PaneState::Working | PaneState::Blocked => VerifyAction::Settled,
+        PaneState::Unknown => VerifyAction::Wait,
+        PaneState::Idle => VerifyAction::Retry,
+    }
+}
+
+/// Submit whatever is in the agent's composer: Right-arrow, a beat, Enter.
+///
+/// The cursor key is the load-bearing half. Codex classifies any fast run of
+/// input as a paste burst, and while that classification is live an Enter is
+/// ACCUMULATED as a newline — and each Enter keeps the burst alive (its
+/// paste_burst.rs: `append_newline_if_active` / "Keep burst window alive"),
+/// so once a stall has batched text+Enter together, no amount of waiting and
+/// no number of further bare Enters ever submits (reproduced on a real
+/// machine: five spaced retry Enters over 15s each just added a newline).
+/// A non-char key is the documented way out: codex force-flushes the burst
+/// buffer and clears the suppression window before handling it
+/// (`flush_before_modified_input` + `clear_window_after_non_char`), after
+/// which Enter submits normally — even when the whole sequence arrives in
+/// one batched read. A Right-arrow at the end of the composer text is a
+/// cursor no-op in every TUI this app spawns, so it's safe universally.
+fn write_submit(sessions: &Arc<Mutex<HashMap<String, PtySession>>>, id: &str) {
+    if let Some(s) = sessions.lock().unwrap().get_mut(id) {
+        let _ = s.writer.write_all(b"\x1b[C");
+        let _ = s.writer.flush();
+    }
+    thread::sleep(Duration::from_millis(50));
+    if let Some(s) = sessions.lock().unwrap().get_mut(id) {
+        let _ = s.writer.write_all(b"\r");
+        let _ = s.writer.flush();
+    }
+}
+
+/// Inject `text` (then submit) into the agent's stdin — the universal,
 /// agent-agnostic agmsg delivery. No idle wait before writing the text; see
 /// the module doc comment for why waiting for quiescence was worse than not
-/// waiting. The text and Enter are NOT written back-to-back, though: real-
-/// machine testing showed codex's TUI reads a same-burst text+Enter as a
-/// paste (the trailing newline is swallowed as pasted content rather than
-/// submitting), so the Enter is held back a beat after the text — long
-/// enough that the agent's input parser has processed the text as typed
-/// input first. Runs on a background thread so the ~300ms gap doesn't block
-/// the Tauri command handler.
+/// waiting.
+///
+/// The submission is NOT a bare trailing Enter. Codex classifies fast input
+/// as a paste burst *in its own read timeline*: any event-loop stall
+/// spanning the text→Enter gap (CPU contention from agmsg's own hook
+/// subprocess storms on Windows #449, other agents, a busy machine) makes it
+/// read text+Enter in one batch, swallow the Enter as pasted newline, and
+/// leave the message sitting unsubmitted in the composer. Measured on a real
+/// Windows machine: with all cores busy, the old fixed 300ms gap failed 3/5
+/// and a 1000ms gap failed 5/5 — no open-loop delay survives a sustained
+/// stall, and once swallowed, later bare Enters only pile up newlines (the
+/// burst state self-extends; see write_submit). So the sequence is
+/// text → gap → Right-arrow → Enter (write_submit), which deterministically
+/// ends any paste classification before the Enter: 11/11 submitted across
+/// stalled / loaded / batched reproductions where the old sequence went
+/// 0-for-all. The gap stays as typed-input pacing for other agents.
+///
+/// After submitting, verify by state and retry: a submission always drives
+/// the pane Working, so if it instead sits Idle at spaced checkpoints, run
+/// write_submit again (harmless at an idle empty composer); a pane that
+/// goes Blocked is never touched — a stray Enter could accept the dialog.
+/// Runs on a background thread so none of the waiting blocks the Tauri
+/// command handler.
 #[tauri::command]
 pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> Result<(), String> {
     // Fail fast, synchronously, if the pane is already gone.
@@ -314,14 +407,48 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
     }
     let sessions = Arc::clone(&manager.sessions);
     thread::spawn(move || {
+        // One injection at a time per pane; a second message must not
+        // interleave its writes with this one's text/Enter/verify sequence.
+        // Clone the lock handle out so the sessions map isn't held while
+        // waiting (pty_write/pty_kill must stay responsive).
+        let Some(lock) = sessions.lock().unwrap().get(&id).map(|s| Arc::clone(&s.inject_lock))
+        else {
+            return;
+        };
+        let _guard = lock.lock().unwrap();
+
         if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
             let _ = s.writer.write_all(text.as_bytes());
             let _ = s.writer.flush();
         }
         thread::sleep(Duration::from_millis(300));
-        if let Some(s) = sessions.lock().unwrap().get_mut(&id) {
-            let _ = s.writer.write_all(b"\r");
-            let _ = s.writer.flush();
+        write_submit(&sessions, &id);
+
+        // Verify-and-retry: sample the pane state (200ms, finer than the
+        // 400ms detection tick) so a Working/Blocked transition is caught
+        // even if it's brief, and press Enter again at spaced checkpoints
+        // while the pane still sits Idle. Checkpoints stretch out so a slow
+        // wake (heavily stalled machine) still gets re-checked late.
+        const RETRY_AT_MS: [u64; 5] = [1000, 3000, 6000, 10000, 15000];
+        let started = std::time::Instant::now();
+        let mut next_retry = 0;
+        while next_retry < RETRY_AT_MS.len() {
+            thread::sleep(Duration::from_millis(200));
+            let Some(state) =
+                sessions.lock().unwrap().get(&id).map(|s| s.detection.lock().unwrap().state())
+            else {
+                return;
+            };
+            match verify_action(state) {
+                VerifyAction::Settled => return,
+                VerifyAction::Wait => continue,
+                VerifyAction::Retry => {
+                    if started.elapsed() >= Duration::from_millis(RETRY_AT_MS[next_retry]) {
+                        next_retry += 1;
+                        write_submit(&sessions, &id);
+                    }
+                }
+            }
         }
     });
     Ok(())
@@ -329,7 +456,35 @@ pub fn pty_inject(manager: State<'_, PtyManager>, id: String, text: String) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::windows_shell_argv;
+    use super::{verify_action, windows_shell_argv, VerifyAction};
+    use crate::agent_state::PaneState;
+
+    #[test]
+    fn an_idle_pane_after_the_enter_means_it_was_swallowed() {
+        // The reproduced failure: a stall makes codex read text+Enter as one
+        // paste burst and suppress the Enter — the pane never leaves Idle.
+        // Retrying Enter is safe even on a false positive (an Enter at an
+        // idle empty composer is a no-op).
+        assert_eq!(verify_action(PaneState::Idle), VerifyAction::Retry);
+    }
+
+    #[test]
+    fn a_working_pane_means_the_submission_took() {
+        assert_eq!(verify_action(PaneState::Working), VerifyAction::Settled);
+    }
+
+    #[test]
+    fn never_enter_into_a_blocked_pane() {
+        // A permission/approval dialog owns the keyboard — a stray Enter
+        // could accept it. Hands off entirely.
+        assert_eq!(verify_action(PaneState::Blocked), VerifyAction::Settled);
+    }
+
+    #[test]
+    fn unknown_state_neither_retries_nor_concludes() {
+        // e.g. detection's startup grace window — keep watching.
+        assert_eq!(verify_action(PaneState::Unknown), VerifyAction::Wait);
+    }
 
     #[test]
     fn wraps_the_agent_name_through_cmd_slash_c() {
