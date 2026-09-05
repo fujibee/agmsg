@@ -71,6 +71,7 @@ export default {
       "grok-build": "xAI 的构建/编程智能体。",
       hermes: "轻量级中继智能体。",
       antigravity: "智能体编程环境。",
+      devin: "自主AI软件工程师CLI。",
     },
   },
   showcase: {

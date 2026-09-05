@@ -73,6 +73,7 @@ export default {
       "grok-build": "El agente de compilación/codificación de xAI.",
       hermes: "Agente de retransmisión ligero.",
       antigravity: "Entorno de codificación agéntico.",
+      devin: "CLI de ingeniero de software de IA autónomo.",
     },
   },
   showcase: {
