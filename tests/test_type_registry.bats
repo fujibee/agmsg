@@ -170,6 +170,15 @@ write_node_launcher_fixtures() {
   grep -Fq 'To mint a replacement epoch instead:' "$BATS_TEST_DIRNAME/../scripts/key.sh"
 }
 
+@test "every agent template exposes declarative arrange without adding a public where verb" {
+  local template
+  for template in "$SCRIPTS"/drivers/types/*/template.md; do
+    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-agent>' "$template"
+    grep -q '`moved` as a performed move and `unchanged`' "$template"
+    [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
+  done
+}
+
 @test "type-registry: spawnable set is exactly eight of the ten built-ins (#277, #279)" {
   # hermes deliberately stays out (#279): no known CLI mode starts it
   # interactive with a seeded initial prompt. agmsg-app also stays out: it's
