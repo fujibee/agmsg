@@ -98,14 +98,16 @@ EOF
   [[ "$output" =~ "2 member" ]]
 }
 
-@test "join: re-join with same name adds registration instead of duplicate agent" {
+@test "join: re-join shows one row per registration without duplicating the member count" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "1 member" ]]
-  [[ "$output" =~ "+1 more" ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^  alice (claude-code)')" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF '/tmp/proj-a'
+  [[ "$output" =~ "/tmp/proj-b" ]]
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {
@@ -201,6 +203,33 @@ EOF
   [[ ! "$output" =~ ".parameter" ]]
   [[ ! "$output" =~ "Manage SQL parameter bindings" ]]
   [ "$(echo "$output" | grep -c "$agent")" -eq 1 ]
+}
+
+@test "team --json emits one full object per registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-b
+  run bash "$SCRIPTS/team.sh" myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_valid('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 1 ]
+  [ "$(sqlite_mem "SELECT json_array_length('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_extract(value,'\$.member')='alice';")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_type(value,'\$.pane_label')='object';")" -eq 2 ]
+}
+
+@test "team --fix reports every skipped action with a reason" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --fix
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF 'fix.pane_label=skipped(reason=no_placement_record)'
+  printf '%s\n' "$output" | grep -qF 'fix.agent_key=skipped(reason=no_placement_record)'
+  [[ "$output" =~ "fix.cli_session=skipped(reason=no_placement_record)" ]]
+}
+
+@test "team refuses an ambiguous JSON fix request" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --json --fix
+  [ "$status" -eq 2 ]
+  [[ "$output" =~ "cannot be combined" ]]
 }
 
 # --- whoami.sh ---
@@ -924,7 +953,7 @@ JSON
   # And the count agrees with the roster rather than with the join.
   [[ "$output" == *"3 member(s)"* ]]
   # The absence is described, not left blank.
-  [[ "$output" == *"no local registration"* ]]
+  [[ "$output" == *"n/a:no_local_registration"* ]]
 }
 
 @test "team: a locally registered member still lists its type and project" {

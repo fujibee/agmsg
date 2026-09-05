@@ -596,6 +596,55 @@ terminal_peek() {
   return 0
 }
 
+# Optional team.sh observation extension. Prints activity, visible pane label,
+# terminal agent key, and CLI terminal title as four TAB-separated fields.
+terminal_team_observe() {
+  local id="$1" pane_json agents_json pesc aesc activity label key title
+  command -v herdr >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  pane_json="$(herdr pane get "$id" 2>/dev/null)" || return 10
+  agents_json="$(herdr agent list 2>/dev/null)" || return 10
+  pesc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  aesc="$(printf '%s' "$agents_json" | sed "s/'/''/g")"
+  activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
+  label="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing')" 2>/dev/null)" || return 10
+  title="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing')" 2>/dev/null)" || return 10
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT json_extract(value,'\$.name') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:agent_key_missing')" 2>/dev/null)" || return 10
+  case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
+  printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
+}
+
+# Positive input-readiness proof for team --fix. A pane is writable only when
+# Herdr itself recognizes an agent of the expected kind there and reports one of
+# its measured interactive lifecycle states. A shell prompt (including an OMZ
+# confirmation) is therefore not mistaken for an agent merely because it owns
+# the foreground process group.
+terminal_team_input_ready() {
+  local id="$1" expected="$2" raw escaped kind status rc=0
+  command -v herdr >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
+  _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
+  raw="$(herdr agent get "$id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$raw" in
+      *agent_not_found*) printf 'not_ready:agent_not_found\n'; return 1 ;;
+      *) printf 'unknown:agent_query_failed\n'; return 2 ;;
+    esac
+  fi
+  escaped="$(printf '%s' "$raw" | sed "s/'/''/g")"
+  kind="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent')='text' THEN json_extract('$escaped','$.result.agent.agent') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  status="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent_status')='text' THEN json_extract('$escaped','$.result.agent.agent_status') ELSE '' END" 2>/dev/null)" \
+    || { printf 'unknown:agent_response_invalid\n'; return 2; }
+  [ -n "$kind" ] && [ -n "$status" ] \
+    || { printf 'unknown:agent_response_incomplete\n'; return 2; }
+  [ "$kind" = "$expected" ] \
+    || { printf 'not_ready:agent_kind_mismatch\n'; return 1; }
+  case "$status" in
+    idle|done|working) printf 'ready\n'; return 0 ;;
+    *) printf 'not_ready:agent_status_%s\n' "$status"; return 1 ;;
+  esac
+}
+
 # control op: submit <text> to the agent in the pane. herdr's `agent prompt`
 # submits on its own (no separate Enter, unlike tmux) — the #619 paste hazard is
 # a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).

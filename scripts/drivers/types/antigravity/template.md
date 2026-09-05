@@ -107,8 +107,8 @@ If argument starts with "team list" (e.g. "team list", "team list --json", "team
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh <the rest of the args after "team list", unchanged>`
 2. This is a distinct command from bare "team" below — check for "team list" FIRST so "list" is never mistaken for a team name.
 
-If argument is "team":
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM`
+If argument is "team", "team --json", or "team --fix":
+1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM [--json|--fix]`, preserving the option when present. `--json` returns every observed field; `--fix` repairs writable identity mismatches and reports changed, skipped, and failed actions.
 
 If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments

@@ -137,5 +137,9 @@ _plain_no_pane_but_maybe_native() {
   return 13
 }
 terminal_peek() { _plain_unsupported "peek"; }
+
+terminal_team_observe() {
+  printf 'n/a:unsupported\tn/a:no_addressable_pane\tn/a:no_addressable_pane\tn/a:no_addressable_pane\n'
+}
 terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
 terminal_name() { _plain_unsupported "name"; }
