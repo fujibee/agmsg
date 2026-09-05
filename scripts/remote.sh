@@ -2016,15 +2016,25 @@ _remote_sync_engine_start_locked() {
 }
 
 _remote_sync_engine_stop() {
-  local team="$1" pidfile pid state
+  local team="$1" pidfile pid state reaped=0
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   [ -f "$pidfile" ] || return 0
   IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
   if [ "$state" = "running" ]; then
-    if ! _remote_sync_engine_reap_owned "$team" "$pid"; then
-      echo "agmsg: sync engine pid $pid did not stop" >&2
-      return 1
-    fi
+    # 0 (signalled and gone) and 2 (already gone) are both "not running now",
+    # which is all this function needs. 2 cannot actually arrive here -- the
+    # `state = running` above already required the pid to be alive -- and it is
+    # accepted rather than left to fall into the failure branch by accident.
+    # `|| reaped=$?` and not a bare call: this file runs under `set -e`, where a
+    # bare call returning 1 exits the script instead of reaching the message
+    # below. The cost of the idiom is that errexit is off while the reap runs;
+    # the reap states every one of its outcomes with an explicit `return`.
+    _remote_sync_engine_reap_owned "$team" "$pid" || reaped=$?
+    case $reaped in
+      0|2) ;;
+      *)   echo "agmsg: sync engine pid $pid did not stop" >&2
+           return 1 ;;
+    esac
   fi
   rm -f "$pidfile"
   # The cycle record goes with the engine that made it. Left behind, the NEXT
@@ -2056,7 +2066,15 @@ _remote_sync_engine_status() {
     printf 'stale\t\n'
     return
   fi
-  if ! _agmsg_pid_alive_local "$pid"; then
+  # EVERY PROBE, not the POSIX one alone. Under Git Bash a live engine reads as
+  # dead to `kill -0` (#652), and this line answered `stale` for it -- which is
+  # what sent `sync start` away from a running engine three times in a row and
+  # left three of them pulling (#831). `compat_pid_gone` asks the Windows side
+  # about the WINPID as well, and only calls it gone when both agree.
+  #
+  # The identity check below is unchanged and still does the work `kill -0` never
+  # could: a recycled pid passes liveness and fails the cmdline.
+  if compat_pid_gone "$pid"; then
     printf 'stale\t%s\n' "$pid"
     return
   fi
@@ -2074,21 +2092,65 @@ _remote_sync_engine_status() {
   fi
 }
 
+# Returns 0 when it SIGNALLED the engine and the engine went, 2 when the engine
+# already read as gone and nothing was signalled, 1 when it could not stop it.
+#
+# THE DIFFERENCE BETWEEN 0 AND 2 IS WHO IS SPEAKING. 0 is this function's own
+# act; 2 is a reading, and a reading can be wrong -- on Windows a live engine
+# read as dead (#652), so this returned "reaped" for a process that was pulling
+# at the time. The caller then deleted its pidfile and walked away, and every
+# later `sync start` added another one beside it: three invocations, three live
+# engines, and `status` reporting stopped (#831).
+#
+# #832 fixed that probe. The separation stays because the harm does not depend on
+# WHICH misreading happens: a record deleted for a process that is still running
+# cannot be recovered by the operator, while a stale record is what `status`
+# already knows how to describe.
+# How many turns the readiness poll takes before giving up.
+#
+# A FUNCTION SO THE SHIPPED DEFAULT CAN BE CHECKED WITHOUT RUNNING IT. Bound by
+# a case that let the poll run to the ceiling, it cost 52 seconds -- half that
+# test file, on a CI shard already near its 25-minute cap, to hold one constant.
+# Asking the resolver costs nothing and pins the same two facts: unset means the
+# shipped 1600, and the seam is honoured when it is set.
+_remote_sync_ready_turns() {
+  case "${AGMSG_TEST_SYNC_READY_TURNS:-}" in
+    ''|*[!0-9]*) printf '1600' ;;
+    *)           printf '%s' "$AGMSG_TEST_SYNC_READY_TURNS" ;;
+  esac
+}
+
 _remote_sync_engine_reap_owned() {
-  local team="$1" owned_pid="$2" state pid signal attempts
+  local team="$1" owned_pid="$2" state pid signal attempts owned_winpid=""
   for signal in TERM KILL; do
+    # OWNERSHIP IS RE-DERIVED EVERY PASS, AND IT IS NOT THE PID NUMBER.
+    #
+    # A pid stops being an identity token the moment the process behind it
+    # exits: the number is reused, and a `kill -0` -- or a `taskkill /T` -- then
+    # lands on somebody else's tree. `_remote_sync_engine_status` answers
+    # `running` only when the cmdline still names this team's engine, which is
+    # the check that survives reuse (raised in review on #840).
     IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team")
-    if ! _agmsg_pid_alive_local "$owned_pid"; then return 0; fi
+    if compat_pid_gone "$owned_pid"; then return 2; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
-    kill "-$signal" "$owned_pid" 2>/dev/null || true
+    # THE WINDOWS NAME IS TAKEN HERE, WHILE THE LINE ABOVE STILL PROVES IT IS
+    # OURS, AND IT IS KEPT. `ps` stops answering for a pid whose MSYS side has
+    # exited, so the POSIX signal below can remove the only means of naming the
+    # native process still running underneath -- which is the reported symptom,
+    # "the kill returns and node.exe is still there". Resolving it after the
+    # signal reproduces the bug this function exists to fix (#840 review). The
+    # same mapping then carries through the signal, the taskkill, and the
+    # confirmation that it went.
+    [ -n "$owned_winpid" ] || owned_winpid="$(_compat_get_winpid "$owned_pid" 2>/dev/null || true)"
+    compat_signal_pid_tree "$owned_pid" "$signal" "$owned_winpid"
     attempts=0
     while [ "$attempts" -lt 100 ]; do
-      _agmsg_pid_alive_local "$owned_pid" || return 0
+      compat_pid_gone "$owned_pid" "$owned_winpid" && return 0
       attempts=$((attempts + 1))
       sleep 0.01
     done
   done
-  ! _agmsg_pid_alive_local "$owned_pid"
+  compat_pid_gone "$owned_pid" "$owned_winpid"
 }
 
 # Upgrade a team that predates local ids: mint a team_id AND a member_id for
@@ -2871,7 +2933,14 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  # Test seam: how many turns the readiness poll takes before giving up. No-op
+  # unless set, and the default below is the shipped one. The give-up path is
+  # what the #831 regressions drive, and reaching it costs the full ceiling every
+  # time -- six cases of that is minutes of CI for a number none of them are
+  # about. A case that IS about the shipped ceiling leaves this unset.
+  local ready_turns
+  ready_turns="$(_remote_sync_ready_turns)"
+  while [ "$i" -lt "$ready_turns" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
@@ -2900,9 +2969,16 @@ cmd_sync_start() {
     # A lock that cannot be retaken must not swallow the diagnostic below, so
     # the failure is reported and the files are left rather than removed blind:
     # a stale pidfile is what `status` already knows how to describe.
-    local relocked=1
+    #
+    # 0 (this call stopped it) and 2 (every probe says it is gone) both mean the
+    # process is not there, and only then are its records this call's to remove.
+    # 1 -- it is still running, or ownership could not be proven -- keeps them and
+    # is reported below, because a pidfile is the only thing that names an engine
+    # and deleting it is what left three of them unreachable on Windows (#831).
+    local relocked=1 reaped=0 stop_winpid=""
     agmsg_lock_acquire "$TEAMS_DIR/$team" || relocked=0
-    if _remote_sync_engine_reap_owned "$team" "$started_pid"; then
+    _remote_sync_engine_reap_owned "$team" "$started_pid" || reaped=$?   # `set -e`: see _remote_sync_engine_stop
+    if [ "$reaped" -eq 0 ] || [ "$reaped" -eq 2 ]; then
       if [ "$relocked" -eq 1 ]; then
         # AND ONLY IF IT IS STILL OURS. Retaking the lock stops the file from
         # changing under the removal; it does not make the file this call's to
@@ -2954,16 +3030,43 @@ cmd_sync_start() {
     # it. Measured: one after the first failed attempt, two after the second.
         {
       echo "agmsg: sync engine for '$team' did not become ready, and this command did not stop it."
-      echo "  pid $started_pid is still running. It cannot reach the server -- that is why"
-      echo "  it never became ready -- and it will keep retrying on a backoff."
+      # THE CAUSE IS NOT KNOWN HERE; THE CONSEQUENCE IS. Removing the cause
+      # claim took a measured fact out with it -- that the engine goes on
+      # retrying -- and #731's test was pinning exactly that fact, because it is
+      # what turns "a command failed" into "something is still running on your
+      # machine". The backoff is the engine's own documented loop, not an
+      # inference about this run.
+      echo "  pid $started_pid is still running, and it will keep retrying on a backoff."
+      # WHY IT IS NOT READY IS NOT KNOWN HERE, and this used to say it was: that
+      # it could not reach the server, and that nothing was syncing for the team.
+      # Neither was measured. The engines this text was written for were reaching
+      # the server and pulling the whole time (#831), and a readiness marker can
+      # also be missed while the engine works -- every engine appends to one log
+      # and the lines tear into each other, which is the half of #831 this does
+      # not fix. What is known is what the two clauses above say.
       echo "  This shell either could not confirm the process was ours or could not signal it."
       echo "  A sandboxed agent (Codex is one) produces both: signals to other processes are"
       echo "  blocked inside it, and ownership cannot be confirmed from in there either."
-      echo "  Nothing is syncing for this team meanwhile."
       echo "  Running sync start again leaves another one behind, and only the newest"
       echo "  is recorded in $(_remote_sync_engine_pidfile "$team")."
       echo "  Stop it from a shell that can signal it:"
-      echo "    kill $started_pid"
+      stop_winpid="$(_compat_get_winpid "$started_pid" 2>/dev/null || true)"
+      case "${MSYSTEM:-}" in
+        MINGW*|MSYS*|CLANGARM*)
+          # `kill` HERE IS THE THING THAT WAS MEASURED NOT TO WORK. It reaches
+          # the MSYS process and the native node.exe under it keeps running --
+          # which is how the engines in #831 survived a kill that had already
+          # been aimed at them. So the tree is named by its Windows pid instead.
+          case "$stop_winpid" in
+            ''|*[!0-9]*) echo "    taskkill /PID <its WINPID> /T /F   (ps could not read one here)" ;;
+            *)           echo "    taskkill /PID $stop_winpid /T /F" ;;
+          esac
+          echo "  (MSYS 'kill $started_pid' reaches the shell, not the node process under it.)"
+          ;;
+        *)
+          echo "    kill $started_pid"
+          ;;
+      esac
       echo "  or give up the binding entirely:"
       echo "    remote.sh disconnect $(agmsg_shq "$team")"
     } >&2
