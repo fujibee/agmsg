@@ -293,10 +293,24 @@ _wait_for_file_contains() {
   wait "$sesspid" 2>/dev/null || true
   bash "$SCRIPTS/send.sh" team bob alice "M2-undelivered" >/dev/null
   _wait_for_missing "$pf" || { kill "$w" 2>/dev/null || true; false; }
+  # The pidfile is removed on the exit path; the process itself dies a beat
+  # later, and on a loaded host that beat is long enough to lose a race against
+  # an instant kill -0. The contract is that the watcher EXITS within ~1 interval
+  # of the session dying, not that it is already reaped the microsecond its
+  # pidfile vanishes -- so wait a bounded moment for the process to be gone. A
+  # watcher that never exits (a real liveness bug) still fails: the loop exhausts
+  # and kill -0 keeps succeeding.
+  local _i; for _i in $(seq 1 50); do kill -0 "$w" 2>/dev/null || break; sleep 0.1; done
   run kill -0 "$w"; [ "$status" -ne 0 ]
   [ "$(_read_cursor team alice)" = "$first_cursor" ]
   refute grep -q "M2-undelivered" "$out"
-  run_watcher_for "after-liveness" "$TEST_SKILL_DIR/liveness-redelivery.log" 2
+  # Wait for the redelivery instead of sleeping a fixed 2s: a fresh watcher must
+  # deliver the row the dead one left unconsumed, but WHEN it lands depends on
+  # host load, not on the contract (see the run_watcher_for/until note above --
+  # a fixed sleep is a claim about the machine). run_watcher_until blocks until
+  # M2 is delivered and the cursor advances, or fails if it never does, so a real
+  # non-redelivery still fails while load-induced slowness no longer does.
+  run_watcher_until "after-liveness" "$TEST_SKILL_DIR/liveness-redelivery.log" "M2-undelivered"
   grep -q "M2-undelivered" "$TEST_SKILL_DIR/liveness-redelivery.log"
 }
 
@@ -1056,4 +1070,78 @@ STUB
   [ "$alive" -eq 0 ]
   # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
   grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
+}
+
+@test "watch: the stuck guard fires for a pair whose agent name has a space (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # End-to-end companion to test_watch_stuck_map.bats: the tracker keys on the
+  # "<team>:<agent>" pair, and identities.sh emits a spaced agent as one
+  # tab-separated field, so the key carries the space. The first cut framed the
+  # tracker with spaces and scanned it with `for e in $MAP`, splitting "sp aced"
+  # across words: its record never matched, the count reset every cycle, and the
+  # guard NEVER fired for that pair -- the silence-catcher silent. Restoring word
+  # splitting turns this red (the report never appears -> the wait times out).
+  local sproj="/tmp/agmsg-watch-spaced-proj"
+  bash "$SCRIPTS/join.sh" team 'sp aced' claude-code "$sproj" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob claude-code "$sproj" >/dev/null
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub2"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  bash "$SCRIPTS/send.sh" team bob 'sp aced' "SPACEDMSG" >/dev/null  # pending; delivery will fail
+  local out="$TEST_SKILL_DIR/stuck-spaced.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-stuck-sp "$sproj" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  [ "$alive" -eq 0 ]
+  grep -q "agmsg watch: delivery for team:sp aced is STUCK" "$out"
+}
+
+@test "watch: an idle pair seeing only a cursor high-water is not treated as stuck (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # storage_watch_after appends a trailing "cursor" high-water line even for a
+  # CAUGHT-UP pair, because the team's sequence advances whenever ANY pair in the
+  # team gets a message. So OUT is non-empty for an idle pair with zero messages
+  # of its own. The stuck tracker must key on real message_sent rows, not on
+  # [ -n "$OUT" ]; otherwise a healthy idle watcher whose cursor cannot advance
+  # (here: the delivery query is stubbed to fail, freezing every cursor) would
+  # climb to the threshold and EXIT. 'idle' has no messages; the bob->alice send
+  # only bumps the team high-water, so 'idle' sees a cursor-only OUT. The guard
+  # must NOT fire. Reverting the tracker to [ -n "$OUT" ] turns this red.
+  bash "$SCRIPTS/join.sh" team idle claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/send.sh" team bob alice "BUMP" >/dev/null   # bumps team high-water, not for idle
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub3"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  local out="$TEST_SKILL_DIR/idle.log"
+  # actas 'idle' narrows this watcher to the idle pair only, so no other pair's
+  # real backlog can fire and mask the property under test.
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-idle "$PROJ" claude-code idle >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # Watch across well more than STUCK_THRESHOLD cycles: if "is STUCK" ever
+  # appears the guard fired on a healthy idle pair -- fail fast.
+  local i
+  for i in $(seq 1 70); do
+    if grep -q "is STUCK" "$out" 2>/dev/null; then kill "$w" 2>/dev/null || true; false; fi
+    kill -0 "$w" 2>/dev/null || break
+    sleep 0.1
+  done
+  # It must still be alive (it neither fired nor exited for any other reason).
+  kill -0 "$w" 2>/dev/null
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  ! grep -q "is STUCK" "$out"
 }

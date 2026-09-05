@@ -716,7 +716,12 @@ _held_elsewhere_without() {
 # crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
 # would silently disable the very guard against silence.
 STUCK_THRESHOLD=3
-STUCK_MAP=""   # space-separated entries "<pair><US><cursor><US><count>" (US = \x1f)
+# Per-pair tracker state and its map operations (_stuck_get/_stuck_set/
+# _stuck_drop). Kept in a sourced lib so the record framing -- which broke for
+# names with spaces once and must not again -- can be unit-tested away from this
+# script's poll loop; see lib/watch-stuck-map.sh for the data-structure contract.
+STUCK_MAP=""
+source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 
 while true; do
   # The installation changed under us (#684). Say it on STDOUT, not stderr:
@@ -798,6 +803,9 @@ while true; do
 }${pair_team}/${pair_agent}"
           echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${pair_state#other:}; not serving it while they hold it." >&2
         fi
+        # Stopped observing this pair -- the holder advances the cursor now, not
+        # us -- so forget any stuck count; a gap is not consecutive stalling.
+        _stuck_drop "$pair_team:$pair_agent"
         continue
         ;;
       *)
@@ -824,45 +832,51 @@ while true; do
         *) NO_STORE_REPORTED="$NO_STORE_REPORTED $pair_team:$pair_agent"
            watch_log "${pair_team}/${pair_agent}: no store yet; skipping this pair until one exists." ;;
       esac
+      # No store to read this cycle -- not an observation of a stalled cursor, so
+      # drop any prior count; the backlog (if any) starts a fresh one on return.
+      _stuck_drop "$pair_team:$pair_agent"
       continue
     fi
     READ_CURSOR="$(storage_read_cursor_get "$pair_team" "$pair_agent" 2>/dev/null || true)"
     [ -n "$READ_CURSOR" ] || READ_CURSOR=0
     OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null || true)"
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
-    # before the loop). When OUT is non-empty the pair has pending rows; if READ_CURSOR
-    # is UNCHANGED from the previous cycle, delivery did not advance it -- count that.
-    # At the threshold, say why on stdout and exit. When OUT is empty the pair is caught
-    # up, so drop its tracker and a future backlog starts a fresh count.
+    # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
+    # non-empty OUT. storage_watch_after also emits a trailing "cursor" high-water
+    # line, and that line is present for a CAUGHT-UP pair too, because the team's
+    # sequence advances whenever ANY pair in the team receives a message. Keying the
+    # tracker on [ -n "$OUT" ] would therefore treat every idle pair as perpetually
+    # pending, and on any cycle its cursor could not advance (e.g. a delivery stall
+    # that is not this pair's fault) the count would climb and fire the guard on a
+    # perfectly healthy watcher. So track a pair only while a message_sent row is
+    # actually waiting for it; a glob avoids forking grep in the poll loop. When
+    # READ_CURSOR is UNCHANGED from the previous cycle delivery did not advance it --
+    # count that; at the threshold say why on stdout and exit. With no message row
+    # waiting the pair is caught up, so drop its tracker and a future backlog starts
+    # a fresh count.
     _agmsg_pair_key="$pair_team:$pair_agent"
-    if [ -n "$OUT" ]; then
-      _agmsg_prev_c=""; _agmsg_prev_n=0; _agmsg_rest=""
-      for _agmsg_e in $STUCK_MAP; do
-        case "$_agmsg_e" in
-          "$_agmsg_pair_key"$'\x1f'*) IFS=$'\x1f' read -r _ _agmsg_prev_c _agmsg_prev_n <<< "$_agmsg_e" ;;
-          *) _agmsg_rest="${_agmsg_rest:+$_agmsg_rest }$_agmsg_e" ;;
-        esac
-      done
-      if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
-        _agmsg_n=$((_agmsg_prev_n + 1))
-      else
-        _agmsg_n=1
-      fi
-      if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ]; then
-        _agmsg_bytes="$(printf '%s' "$OUT" | wc -c | tr -d ' ')"
-        printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
-          "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
-        cleanup
-        exit 0
-      fi
-      STUCK_MAP="${_agmsg_rest:+$_agmsg_rest }$(printf '%s\x1f%s\x1f%s' "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n")"
-    else
-      _agmsg_rest=""
-      for _agmsg_e in $STUCK_MAP; do
-        case "$_agmsg_e" in "$_agmsg_pair_key"$'\x1f'*) ;; *) _agmsg_rest="${_agmsg_rest:+$_agmsg_rest }$_agmsg_e" ;; esac
-      done
-      STUCK_MAP="$_agmsg_rest"
-    fi
+    case "$OUT" in
+      *'"type":"message_sent"'*)
+        IFS=$'\x1f' read -r _agmsg_prev_c _agmsg_prev_n <<< "$(_stuck_get "$_agmsg_pair_key")"
+        [ -n "$_agmsg_prev_n" ] || _agmsg_prev_n=0
+        if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
+          _agmsg_n=$((_agmsg_prev_n + 1))
+        else
+          _agmsg_n=1
+        fi
+        if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ]; then
+          _agmsg_bytes="$(printf '%s' "$OUT" | wc -c | tr -d ' ')"
+          printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
+            "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
+          cleanup
+          exit 0
+        fi
+        _stuck_set "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n"
+        ;;
+      *)
+        _stuck_drop "$_agmsg_pair_key"
+        ;;
+    esac
     if [ -n "$OUT" ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
