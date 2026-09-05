@@ -85,7 +85,7 @@ envelope を見て、保存し、再生・並べ替え・破棄でき、自分�
 う類のものではない:
 
 ```
-docs/spec/ref/age-v1-profile.md:342-345
+docs/spec/age-v1-profile.md:342-345
   "Recipient public keys, private identities, recipient-set manifests, and
    epoch history are provisioned outside the message server over an
    authenticated, freshness-proving channel. Copying only the current private
@@ -128,7 +128,7 @@ server/src/protocol.ts:68     cipher: z.string().regex(cipherPattern),
 は、鍵を*扱う*サーバである。
 
 鍵がそもそもそこに無いという主張は、この grep の発見ではなく**仕様上の要件**であ
-る —— 上で引用した `docs/spec/ref/age-v1-profile.md:342-345`。両者は互いを支え、ど
+る —— 上で引用した `docs/spec/age-v1-profile.md:342-345`。両者は互いを支え、ど
 ちらも他方を置き換えない: 仕様は鍵が別の場所で供給されると述べ、この検索はコードに
 それが届いたとして使うものが無いと述べる。
 
@@ -193,14 +193,14 @@ of scope」はこの文書が調べていないことを意味する —— 「n
 
 | 特性 | 状態 | 根拠 |
 |---|---|---|
-| メッセージ内容の秘匿性 | **Provided** | age X25519 暗号化。identity はサーバの外に在る (`docs/spec/ref/age-v1-profile.md:342-345`) |
-| メッセージ内容の完全性 | **Provided** | **inherited** —— age 自身の AEAD であり、このツリーではなく age フォーマットの性質である。プロファイルは意図的に第2の AEAD 層を足していない (`docs/spec/ref/age-v1-profile.md:13`) ので、保証は age のものであり、確かめるには age を読む。サーバの digest は*その機構ではない* —— 下記参照 |
-| メッセージ内容の偽造不可能性 | **Provided** | 受信者の公開鍵を要し、仕様はそれをサーバの外に置く (`docs/spec/ref/age-v1-profile.md:342-345`, `:58-63`) |
+| メッセージ内容の秘匿性 | **Provided** | age X25519 暗号化。identity はサーバの外に在る (`docs/spec/age-v1-profile.md:342-345`) |
+| メッセージ内容の完全性 | **Provided** | **inherited** —— age 自身の AEAD であり、このツリーではなく age フォーマットの性質である。プロファイルは意図的に第2の AEAD 層を足していない (`docs/spec/age-v1-profile.md:13`) ので、保証は age のものであり、確かめるには age を読む。サーバの digest は*その機構ではない* —— 下記参照 |
+| メッセージ内容の偽造不可能性 | **Provided** | 受信者の公開鍵を要し、仕様はそれをサーバの外に置く (`docs/spec/age-v1-profile.md:342-345`, `:58-63`) |
 | ピア認証 | **Not provided** | プロトコルに鍵と人の結びつきがない (`docs/design/remote-sync.md:93-94`) |
 | メタデータの秘匿性 | **Not provided** | **assumption**、しかも容易な種類のもの: サーバは envelope の宛先と時刻で配送し順序付けるので、それらを読む。引用を示さないのは、ツリーの中にそれを規則として述べたものが無いからである —— サーバが自分の仕事をすることから従う |
-| 前方秘匿性 (攻撃者 C) | **Not provided** | recipient set は epoch 単位で不変 (`docs/spec/ref/age-v1-profile.md:88`)。後に侵害された identity はその epoch の履歴を復号する |
+| 前方秘匿性 (攻撃者 C) | **Not provided** | recipient set は epoch 単位で不変 (`docs/spec/age-v1-profile.md:88`)。後に侵害された identity はその epoch の履歴を復号する |
 | 侵害後の回復 (攻撃者 C) | **Partial, by rotation** | 新しい epoch は新しい recipient set である。journal は回転と fingerprint を記録し、鍵は決して記録しない (`docs/design/remote-sync.md:103-104`) |
-| ダウングレード耐性 (サーバによる強制) | **Provided by the spec's stanza rules** | Scrypt、SSH、plugin、その他すべての非 X25519 stanza が除外される (`docs/spec/ref/age-v1-profile.md:58-63`) |
+| ダウングレード耐性 (サーバによる強制) | **Provided by the spec's stanza rules** | Scrypt、SSH、plugin、その他すべての非 X25519 stanza が除外される (`docs/spec/age-v1-profile.md:58-63`) |
 | ダウングレード耐性 (クライアントが `cipher: none` を受理) | **Provided by every caller in the tree** | 2つの `configure` 呼び出しはどちらも `--cipher age-v1` と `--minimum-security e2ee-required` を一緒に渡し (`scripts/remote.sh:1280`, `:1758`)、3つ目は存在しない。拒否は `scripts/internal/remote-sync.mjs:1686`。`configure` を直接 `plaintext-allowed` で叩いた場合にのみ外れる |
 
 ### 前方秘匿性について
@@ -209,7 +209,7 @@ of scope」はこの文書が調べていないことを意味する —— 「n
 は**不変の** recipient set を指す:
 
 ```
-docs/spec/ref/age-v1-profile.md:88
+docs/spec/age-v1-profile.md:88
   "A `key_id` identifies an immutable set of X25519 recipients and its private …"
 ```
 
@@ -400,7 +400,7 @@ scripts/remote.sh:1285       --cipher age-v1
 
 ## この文書が引用する仕様の古さについて
 
-`docs/spec/ref/age-v1-profile.md` は **"Status: proposed (dogfood profile)"** と記
+`docs/spec/age-v1-profile.md` は **"Status: proposed (dogfood profile)"** と記
 されており、最後に触れられたのは 2026-07-27、それを参照資料として整理したコミット
 `1a56d8e docs: file superseded work as reference` による。`ref/` の下に在り、その
 README はこう明言している: *"Nobody is building toward anything in a `ref/`
@@ -437,9 +437,9 @@ ASVS を起点に作業する読者のための相互参照として提供する
 | ASVS V6 area | この文書のどこが扱っているか |
 |---|---|
 | V6.1 Data classification | 「特性の表を読む前に」の項目 1 と 3 |
-| V6.2 Algorithms | 特性の表。`docs/spec/ref/age-v1-profile.md:58-63`(X25519 のみ) |
+| V6.2 Algorithms | 特性の表。`docs/spec/age-v1-profile.md:58-63`(X25519 のみ) |
 | V6.2 Integrity | 「`envelopeDigest` は署名ではない」 |
-| V6.4 Secret management | `docs/spec/ref/age-v1-profile.md:342-345`(供給はサーバの外) |
+| V6.4 Secret management | `docs/spec/age-v1-profile.md:342-345`(供給はサーバの外) |
 | V6.4 Key rotation | 特性の表の侵害後の回復。`docs/design/remote-sync.md:103-104` |
 
 ## この文書の確かめ方
@@ -448,7 +448,7 @@ ASVS を起点に作業する読者のための相互参照として提供する
 点でもよい —— コードはどちらでも同じである:
 
 ```
-sed -n '342,345p' docs/spec/ref/age-v1-profile.md
+sed -n '342,345p' docs/spec/age-v1-profile.md
 sed -n '221,238p' server/src/protocol.ts
 ```
 

@@ -10,7 +10,7 @@ set -euo pipefail
 #   key.sh rotate [<team>]
 #
 # Team-scoped end-to-end encryption key management (age-v1 profile,
-# docs/spec/ref/age-v1-profile.md). Scope: initial single-writer onboarding
+# docs/spec/age-v1-profile.md). Scope: initial single-writer onboarding
 # (generate the very first key, import one obtained out-of-band, or announce a
 # replacement through the team journal).
 # Authority-confirmed epoch snapshots are imported separately through

@@ -1,16 +1,16 @@
 # Operator-approved retention-gap resynchronization specification
 
-**Status:** dogfood specification
+**Status:** current
 **Last updated:** 2026-07-25
 
 The irreversible cursor and audit semantics behind this operation are recorded
-in [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md).
+in [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md).
 
 ## Context
 
 The HTTP v1 message stream returns `410 resync-required` when a client's
 transport cursor predates the team's authenticated `min_available_seq`.
-Stage 1 intentionally treats that response as terminal: silently assigning the
+Message synchronization intentionally treats that response as terminal: silently assigning the
 floor to the cursor would claim that unavailable messages had durable local
 outcomes.
 
@@ -64,7 +64,7 @@ matches the canonical `accepted-floor` argument or `audit: null`. It MUST NOT
 reserve a wire ID, seal an envelope, initialize a new binding, advance a cursor,
 or change any other storage state. This is the normative backend-neutral seam;
 the engine never inspects a driver's database directly and never substitutes
-the mutating Stage-1 prepare operation.
+the mutating prepare operation.
 
 The status output is exactly one JSONL object with no duplicate or unknown
 fields. A lookup without an audit is:
@@ -80,7 +80,7 @@ An accepted audit uses this strict shape:
 ```
 
 `driver_generation` is the non-empty, immutable generation identifier already
-used by Stage 1 and is limited to 256 UTF-8 bytes without control characters.
+used by message synchronization and is limited to 256 UTF-8 bytes without control characters.
 All cursor/floor/gap fields are canonical nonnegative decimal strings no greater
 than the signed 64-bit sequence maximum. The driver confines both cursor and
 audit lookup to the argv binding and returned generation.
@@ -126,7 +126,7 @@ checkpoints, or read state. In particular:
 - a replay whose wire ID has become a server tombstone still reconciles to its
   original `server_seq`;
 - existing blocking quarantine remains available to explicit reprocessing; and
-- Stage-2 read state independently max-merges the authenticated retention floor
+- Read state independently max-merges the authenticated retention floor
   under the read-state synchronization specification.
 
 The transaction emits exactly one strict result object:
@@ -148,7 +148,7 @@ input. After a commit, a normal polling cycle starts at the floor and downloads
 only `server_seq > min_available_seq`. No event is fabricated for the
 unavailable range.
 
-Drivers without `stage1-resync` remain valid Stage-1 drivers. The engine checks
+Drivers without `stage1-resync` still synchronize messages. The engine checks
 the advertised capability before the operator command and fails without a
 network or local mutation when it is absent.
 
@@ -201,8 +201,8 @@ live-row count without logging envelopes or credentials.
 
 ## References
 
-- [Stage-1 remote synchronization](stage-1-remote-sync.md)
-- [Stage-2 read-state synchronization](read-state-synchronization.md)
-- [ADR 0005: Remote synchronization contract](../../adr/ref/0005-remote-sync-contract.md)
-- [ADR 0006: Composite read-state frontier](../../adr/ref/0006-composite-read-state-frontier.md)
-- [HTTP API v1](../../../server/spec/v1.md)
+- [Message synchronization](message-synchronization.md)
+- [Read-state synchronization](read-state-synchronization.md)
+- [ADR 0005: Remote synchronization contract](../adr/0005-remote-sync-contract.md)
+- [ADR 0006: Composite read-state frontier](../adr/0006-composite-read-state-frontier.md)
+- [HTTP API v1](../../server/spec/v1.md)

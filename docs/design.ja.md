@@ -198,7 +198,7 @@ Claude Code コマンドは別途 `~/.claude/commands/<cmd>.md` にインスト�
   プラットフォームでも、いかなる状況でも、自身の使用可否を確認する目的
   で実行されることは無い — 「試しに実行してみて様子を見る」という類の
   解決策こそ、このチェックが避けようとしているものそのものである。
-- **remote sync data plane（Stage-1のポーリング同期クライアント）** —
+- **remote sync data plane（ポーリング方式のメッセージ同期クライアント）** —
   coreに加えて `node`（`remote-sync.sh`が`AGMSG_SYNC_NODE_BIN`/
   `agmsg_resolve_node`経由で`internal/remote-sync.mjs`とその周辺の`.mjs`
   ヘルパー群をexecする）。上記control planeのpython3必要性とは別の、

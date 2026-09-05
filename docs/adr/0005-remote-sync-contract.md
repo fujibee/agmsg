@@ -1,6 +1,6 @@
 # ADR 0005: Remote synchronization contract
 
-**Status:** proposed (dogfood architecture)
+**Status:** accepted
 **Date:** 2026-07-25
 **Deciders:** @fujibee
 
@@ -35,16 +35,13 @@ quarantined, or terminally corrupt.
 The immutable binding identity is
 `(server_instance_id, remote_team_id, protocol_version)` plus the storage
 driver's persistent generation for interpretation of local positions. Endpoint
-location and credential rotation do not change stream identity. A different
-server instance, remote team, protocol, or local position generation is a
-different synchronization namespace.
+location does not change stream identity. A different server instance, remote
+team, protocol, or local position generation is a different synchronization
+namespace.
 
-A device credential is bound to its endpoint origin, server instance, remote
-team, and non-secret `credential_id`. It cannot authorize a different binding,
-and revocation targets `credential_id`, never the bearer secret as an object
-identifier. Secret single-delivery and provisional activation/finalization are
-pinned by the onboarding API specification; an acknowledged secret is never
-reissued after response loss.
+A binding is a local record, not an authorization. It carries no secret, and
+every write that changes one advances a revision so a concurrent reconnect
+cannot have its newer binding overwritten by a caller that never saw it.
 
 ### At-least-once transport has exact conflict semantics
 
@@ -78,8 +75,9 @@ per-agent wake decisions stay local.
 The synchronization server never chooses team keys and never receives plaintext
 private team or recovery keys. Sealing and opening happen client-side. This is
 a content-confidentiality boundary, not an anonymity claim: team identity, wire
-ID, sequence, server receipt time, envelope version, cipher, key epoch, digest,
-size, timing, and traffic frequency remain visible as defined by the protocol.
+ID, sequence, server receipt time, envelope version, cipher, whichever key the
+scheme names for that envelope, digest, size, timing, and traffic frequency
+remain visible as defined by the protocol.
 
 ### Progress layers remain independent
 
@@ -104,10 +102,11 @@ again.
 
 ### Onboarding cannot overstate history durability
 
-A successful credential connection is not proof that local history is durable
-on the server. When onboarding backfills an existing store, retention cannot
-drop a range required by the promoted snapshot until the server has the
-manifest's terminal durable acknowledgement.
+A successful connect is not proof that local history is durable on the server.
+Registering a team and replicating its history are separate operations with
+separate crash boundaries, and only the acknowledgements of the second make a
+range durable. A client MUST NOT treat connect as backfill, and MUST NOT retire
+local state on the strength of it.
 
 Proofs over local source identities and proofs over translated wire identities
 use separate domains. They are never compared or reused as if translation
@@ -140,8 +139,8 @@ preserved identity bytes.
   loss requiring explicit acknowledgement, not a successful pull.
 - **Plaintext-only projections or a parallel table.** Rejected because E2EE
   would become a feature downgrade and two implementations would diverge.
-- **Implicit full-history durability at connect.** Rejected because credential
-  activation and history backfill have different crash boundaries.
+- **Implicit full-history durability at connect.** Rejected because team
+  registration and history backfill have different crash boundaries.
 
 ## Consequences
 
@@ -156,9 +155,9 @@ preserved identity bytes.
 
 ## Normative specifications
 
-- [HTTP API v1](../../../server/spec/v1.md)
-- [Stage-1 local-first remote synchronization](../../spec/ref/stage-1-remote-sync.md)
-- [Cipher-independent opaque-envelope server schema](../../spec/ref/server-opaque-envelope.md)
-- [Retention-gap resynchronization](../../spec/ref/retention-gap-resynchronization.md)
-- [Storage driver interface](../../spec/driver-interface.md)
-- [age-v1 profile](../../spec/ref/age-v1-profile.md)
+- [HTTP API v1](../../server/spec/v1.md)
+- [Local-first message synchronization](../spec/message-synchronization.md)
+- [Cipher-independent opaque-envelope server schema](../spec/server-opaque-envelope.md)
+- [Retention-gap resynchronization](../spec/retention-gap-resynchronization.md)
+- [Storage driver interface](../spec/driver-interface.md)
+- [age-v1 profile](../spec/age-v1-profile.md)
