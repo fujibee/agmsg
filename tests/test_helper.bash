@@ -34,8 +34,59 @@ setup_test_env() {
   mkdir -p "$HOME"
 }
 
+# When the removal fails, say WHO is still holding the directory (#1036).
+#
+# Three windows-latest failures reported nothing but `rm: cannot remove
+# '/tmp/tmp.XXXXXXXXXX': Directory not empty`, on a job whose every test passed.
+# That message names the directory and not the holder, so each red cost a rerun
+# and taught nobody anything. POSIX unlinks a directory whose files are open, so
+# this only ever fires on Windows -- which is also the only place the answer is
+# needed.
+#
+# The probe reports and does NOT repair: the removal's own status is returned
+# unchanged, so a failure stays a failure. Every probe is allowed to fail and
+# none of them can turn a green teardown red -- a dump is worth nothing if it
+# becomes a second thing to debug. `head` is avoided in the pipelines for the
+# reason the workflow's forensics step gives: it closes the pipe early and
+# SIGPIPEs whatever was writing.
+#
+# What it prints is chosen to answer ONE question, the one nobody could answer
+# from three reds: is the pid teardown killed and waited for the same pid that
+# is still holding the directory? The pid files record the wrapper that
+# codex-monitor backgrounded; the handle may belong to a CHILD of that wrapper,
+# which no wait on the parent covers.
+_teardown_forensics() {
+  local dir="$1" pf pid
+  set +e
+  {
+    echo "##### teardown could not remove $dir (#1036)"
+    echo "##### what is still there:"
+    ls -laR "$dir" 2>/dev/null
+    echo "##### pids teardown knew about, and whether they are still alive:"
+    for pf in "$dir"/run/*.pid; do
+      [ -f "$pf" ] || continue
+      pid="$(cat "$pf" 2>/dev/null)"
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "  $pf -> $pid STILL ALIVE (teardown waited for this one)"
+      else
+        echo "  $pf -> $pid exited"
+      fi
+    done
+    echo "##### every process this runner can see (the holder is in here):"
+    ps -ef 2>/dev/null || ps 2>/dev/null
+    # Native Windows processes do not appear in the MSYS ps at all, and the
+    # holder is exactly the kind that would not: a node started by a wrapper.
+    command -v tasklist >/dev/null 2>&1 && tasklist 2>/dev/null
+  } >&2
+  return 0
+}
+
 teardown_test_env() {
-  rm -rf "$TEST_SKILL_DIR"
+  local rc=0
+  rm -rf "$TEST_SKILL_DIR" || rc=$?
+  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR"
+  return "$rc"
 }
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
