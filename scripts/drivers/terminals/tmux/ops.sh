@@ -199,12 +199,11 @@ terminal_peek() {
 # tmux has no pane-label field independent of the CLI-owned terminal title.
 # The resolvable key is the pane-local @agmsg_agent user option.
 terminal_team_observe() {
-  local id="$1" bare key title
+  local id="$1" key title
   command -v tmux >/dev/null 2>&1 || return 10
-  bare="$(_tmux_bare_of "$id")"
-  case "$bare" in @*|%*) : ;; *) return 13 ;; esac
-  key="$(_tmux_do "$id" show-options -p -v -t "$bare" @agmsg_agent 2>/dev/null)" || key=""
-  title="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_title}' 2>/dev/null)" || return 10
+  case "$id" in @*|%*) : ;; *) return 13 ;; esac
+  key="$(tmux show-options -p -v -t "$id" @agmsg_agent 2>/dev/null)" || key=""
+  title="$(tmux display-message -p -t "$id" '#{pane_title}' 2>/dev/null)" || return 10
   [ -n "$key" ] || key=unknown:agent_key_missing
   [ -n "$title" ] || title=unknown:terminal_title_missing
   case "$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
@@ -216,11 +215,10 @@ terminal_team_observe() {
 # process-group leader from the pane tty and compare its argv with the expected
 # CLI executable.
 terminal_team_input_ready() {
-  local id="$1" expected="$2" bare facts in_mode pane_pid pane_tty tpgid command first
+  local id="$1" expected="$2" facts in_mode pane_pid pane_tty tpgid command first
   command -v tmux >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
-  bare="$(_tmux_bare_of "$id")"
-  case "$bare" in @*|%*) : ;; *) printf 'unknown:invalid_pane_id\n'; return 2 ;; esac
-  facts="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_in_mode}|#{pane_pid}|#{pane_tty}' 2>/dev/null)" \
+  case "$id" in @*|%*) : ;; *) printf 'unknown:invalid_pane_id\n'; return 2 ;; esac
+  facts="$(tmux display-message -p -t "$id" '#{pane_in_mode}|#{pane_pid}|#{pane_tty}' 2>/dev/null)" \
     || { printf 'unknown:pane_query_failed\n'; return 2; }
   IFS='|' read -r in_mode pane_pid pane_tty <<EOF
 $facts

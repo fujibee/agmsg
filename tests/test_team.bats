@@ -106,7 +106,7 @@ EOF
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "1 member" ]]
   [ "$(printf '%s\n' "$output" | grep -c '^  alice (claude-code)')" -eq 2 ]
-  [[ "$output" =~ "/tmp/proj-a" ]]
+  printf '%s\n' "$output" | grep -qF '/tmp/proj-a'
   [[ "$output" =~ "/tmp/proj-b" ]]
 }
 
@@ -220,8 +220,8 @@ EOF
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
   run bash "$SCRIPTS/team.sh" myteam --fix
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "fix.pane_label=skipped(reason=no_placement_record)" ]]
-  [[ "$output" =~ "fix.agent_key=skipped(reason=no_placement_record)" ]]
+  printf '%s\n' "$output" | grep -qF 'fix.pane_label=skipped(reason=no_placement_record)'
+  printf '%s\n' "$output" | grep -qF 'fix.agent_key=skipped(reason=no_placement_record)'
   [[ "$output" =~ "fix.cli_session=skipped(reason=no_placement_record)" ]]
 }
 

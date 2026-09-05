@@ -10,6 +10,25 @@ setup() {
 
 agmsg_terminal_load() { return 0; }
 
+install_team_fake_tmux() {
+  local bindir="$BATS_TEST_TMPDIR/fakebin"
+  mkdir -p "$bindir"
+  cat > "$bindir/tmux" <<'EOF'
+#!/usr/bin/env bash
+printf 'tmux' >> "$TEAM_TMUX_LOG"
+for arg in "$@"; do printf ' [%s]' "$arg" >> "$TEAM_TMUX_LOG"; done
+printf '\n' >> "$TEAM_TMUX_LOG"
+case "$*" in
+  *pane_in_mode*) printf '0|64066|/dev/ttys066\n' ;;
+  *show-options*) printf 'team:alice\n' ;;
+  *pane_title*) printf '✳ team-alice\n' ;;
+esac
+EOF
+  chmod +x "$bindir/tmux"
+  export TEAM_TMUX_LOG="$BATS_TEST_TMPDIR/tmux.log"
+  export PATH="$bindir:$PATH"
+}
+
 @test "team location preserves an observed container" {
   terminal_where() { printf 'w2:t1\n'; }
   run agmsg_team_location herdr w2:p3
@@ -97,6 +116,15 @@ agmsg_terminal_load() { return 0; }
     'ok(actual=team-alice)'
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
+}
+
+@test "identity consistency does not call an entirely unobservable identity ok" {
+  run agmsg_identity_consistency \
+    'n/a:no_independent_field' \
+    'n/a:no_addressable_pane' \
+    'n/a:no_session_name'
+  [ "$status" -eq 0 ]
+  [ "$output" = n/a ]
 }
 
 @test "identity consistency gives mismatch precedence over unknown" {
@@ -222,42 +250,84 @@ agmsg_terminal_load() { return 0; }
   # shellcheck disable=SC1090
   source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
   _herdr_pane_id_ok() { return 0; }
-  herdr() { return 1; }
+  herdr() { printf '%s\n' '{"error":{"code":"agent_not_found"}}'; return 1; }
   run terminal_team_input_ready w2:p3 claude
   [ "$status" -eq 1 ]
   [ "$output" = not_ready:agent_not_found ]
 }
 
-@test "tmux readiness follows the socket-qualified pane to its foreground CLI" {
+@test "herdr readiness rejects a different agent kind" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  herdr() {
+    printf '%s\n' '{"result":{"agent":{"agent":"codex","agent_status":"idle","pane_id":"w2:p3"}}}'
+  }
+  run terminal_team_input_ready w2:p3 claude
+  [ "$status" -eq 1 ]
+  [ "$output" = not_ready:agent_kind_mismatch ]
+}
+
+@test "herdr readiness rejects a non-interactive agent status" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  herdr() {
+    printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"blocked","pane_id":"w2:p3"}}}'
+  }
+  run terminal_team_input_ready w2:p3 claude
+  [ "$status" -eq 1 ]
+  [ "$output" = not_ready:agent_status_blocked ]
+}
+
+@test "herdr readiness keeps a generic query failure unknown" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  herdr() { return 1; }
+  run terminal_team_input_ready w2:p3 claude
+  [ "$status" -eq 2 ]
+  [ "$output" = unknown:agent_query_failed ]
+}
+
+@test "tmux readiness follows the bare pane to its foreground CLI" {
+  install_team_fake_tmux
   # shellcheck disable=SC1090
   source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
-  tmux() { return 0; }
-  _tmux_bare_of() { printf '%%3\n'; }
-  _tmux_do() { printf '0|64066|/dev/ttys066\n'; }
   ps() {
     case "$*" in
       *tpgid*) printf '85225\n' ;;
       *command*) printf 'claude -n team-alice\n' ;;
     esac
   }
-  run terminal_team_input_ready '/private/tmp/tmux.sock:%3' claude
+  run terminal_team_input_ready '%3' claude
   [ "$status" -eq 0 ]
   [ "$output" = ready ]
+  grep -qF 'tmux [display-message] [-p] [-t] [%3]' "$TEAM_TMUX_LOG"
 }
 
 @test "tmux readiness rejects a foreground shell" {
+  install_team_fake_tmux
   # shellcheck disable=SC1090
   source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
-  tmux() { return 0; }
-  _tmux_bare_of() { printf '%%3\n'; }
-  _tmux_do() { printf '0|64066|/dev/ttys066\n'; }
   ps() {
     case "$*" in
       *tpgid*) printf '64066\n' ;;
       *command*) printf '/bin/zsh\n' ;;
     esac
   }
-  run terminal_team_input_ready '/private/tmp/tmux.sock:%3' claude
+  run terminal_team_input_ready '%3' claude
   [ "$status" -eq 1 ]
   [ "$output" = not_ready:foreground_cli_mismatch ]
+}
+
+@test "tmux observation reads the key and CLI title from a bare pane" {
+  install_team_fake_tmux
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '%3'
+  [ "$status" -eq 0 ]
+  [ "$output" = $'n/a:unsupported\tn/a:no_independent_field\tteam:alice\t✳ team-alice' ]
+  grep -qF 'tmux [show-options] [-p] [-v] [-t] [%3] [@agmsg_agent]' "$TEAM_TMUX_LOG"
+  grep -qF 'tmux [display-message] [-p] [-t] [%3] [#{pane_title}]' "$TEAM_TMUX_LOG"
 }

@@ -625,8 +625,10 @@ terminal_team_input_ready() {
   _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
   raw="$(herdr agent get "$id" 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf 'not_ready:agent_not_found\n'
-    return 1
+    case "$raw" in
+      *agent_not_found*) printf 'not_ready:agent_not_found\n'; return 1 ;;
+      *) printf 'unknown:agent_query_failed\n'; return 2 ;;
+    esac
   fi
   escaped="$(printf '%s' "$raw" | sed "s/'/''/g")"
   kind="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$escaped','$.result.agent.agent')='text' THEN json_extract('$escaped','$.result.agent.agent') ELSE '' END" 2>/dev/null)" \

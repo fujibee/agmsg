@@ -259,17 +259,20 @@ EOF
 }
 
 agmsg_identity_consistency() {
-  local cell saw_unknown=0
+  local cell saw_unknown=0 saw_match=0
   for cell in "$@"; do
     case "$cell" in
       mismatch\(*) printf 'mismatch\n'; return 0 ;;
       unknown:*) saw_unknown=1 ;;
-      ok\(*\)|n/a:*) : ;;
+      ok\(*\)) saw_match=1 ;;
+      n/a:*) : ;;
       *) saw_unknown=1 ;;
     esac
   done
   if [ "$saw_unknown" -eq 1 ]; then
     printf 'unverified\n'
+  elif [ "$saw_match" -eq 0 ]; then
+    printf 'n/a\n'
   else
     printf 'ok\n'
   fi

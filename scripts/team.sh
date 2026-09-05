@@ -132,7 +132,7 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
-      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration ok
+      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a
     _emit_unfixable_actions no_local_registration
     return 0
   fi
