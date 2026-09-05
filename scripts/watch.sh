@@ -664,6 +664,28 @@ if [ -n "$ACTIVE_NAME" ]; then
   done <<< "$PAIRS"
 fi
 
+# Re-assert this pane's name (#1044). Naming is an invariant, not an assignment
+# made once at a chosen place: measured across the nine agent types, no single
+# entry point covers them all — `actas` is reached by every type but does not
+# always know the session id yet, SessionStart fires at launch on claude-code
+# and on the first turn on codex and not at all on grok, the watcher exists only
+# where `monitor=yes`, and the per-turn hook is absent on hermes. So every entry
+# point that knows the session id asserts it, idempotently, and whichever
+# arrives first wins. This is the watcher's turn.
+#
+# Outside the `ACTIVE_NAME` block above on purpose: a broad watcher knows the
+# session id and its pairs just as well, and the requirement is about the pane
+# having a name, not about which mode the watcher is in.
+#
+# No record is written: holding the seat is `actas`'s claim to make, and a
+# watcher can be running for a seat it did not claim.
+if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  while IFS=$'\t' read -r _nt _na; do
+    [ -z "$_nt" ] && continue
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" || true
+  done <<< "$PAIRS"
+fi
+
 # Pairs another session currently holds, so each departure and each return is
 # announced once instead of every cycle. Membership is not a decision -- the
 # lock is -- it only records what has already been said (#683).

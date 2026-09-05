@@ -38,6 +38,27 @@ teardown_test_env() {
   rm -rf "$TEST_SKILL_DIR"
 }
 
+# A fake `tmux` that logs its argv and produces the ids/text real tmux would.
+#
+# Shared because three suites drive the terminal layer now — the registry's own
+# tests, the watcher, and per-turn delivery (#1044 gave the last two a naming
+# call). Callers set FAKEBIN and ARGV_LOG first; nothing here reads them at
+# source time, so a suite that does not want a fake terminal is unaffected.
+agmsg_install_fake_tmux() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$1" in
+  new-window)   echo '@7' ;;
+  split-window) echo '%9' ;;
+  capture-pane) printf 'line one\nline two\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
 # behaviour that depends on POSIX process semantics agmsg does not yet support
 # there — watcher discovery/kill via ps/pgrep, and session liveness via kill -0

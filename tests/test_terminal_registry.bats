@@ -28,21 +28,9 @@ setup() {
 
 teardown() { teardown_test_env; }
 
-# A fake `tmux` that logs argv and produces the ids/text real tmux would.
-_install_fake_tmux() {
-  cat > "$FAKEBIN/tmux" <<EOF
-#!/usr/bin/env bash
-{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-case "\$1" in
-  new-window)   echo '@7' ;;
-  split-window) echo '%9' ;;
-  capture-pane) printf 'line one\nline two\n' ;;
-esac
-exit 0
-EOF
-  chmod +x "$FAKEBIN/tmux"
-  export PATH="$FAKEBIN:$PATH"
-}
+# One definition, in test_helper.bash: the watcher and delivery suites drive the
+# terminal layer too now (#1044).
+_install_fake_tmux() { agmsg_install_fake_tmux; }
 
 # A fake `herdr` that logs argv and returns canned JSON/text for session <sid>.
 _install_fake_herdr() {

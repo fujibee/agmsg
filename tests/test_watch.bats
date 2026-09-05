@@ -1197,4 +1197,35 @@ STUB
   [ "$st" -eq 75 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
+
+# --- the watcher re-asserts this pane's name (#1044) --------------------------
+#
+# Naming is an invariant re-asserted wherever the session id is known, not an
+# assignment made once at a chosen place: measured across the nine agent types,
+# no single entry point covers them all. The watcher is one of those places, and
+# it is the one that runs for the whole life of a monitor-mode session.
+#
+# Waits for the rename to appear rather than sleeping: a fixed sleep would encode
+# "the watcher is usually done by now", which is a claim about the machine — the
+# reason the helpers above exist.
+@test "watch: the watcher names this session's pane (#1044)" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"
+  : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+
+  local sid out found
+  sid="$(_iid sid-naming)"
+  out="$BATS_TEST_TMPDIR/watch.out"
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "$sid" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local pid=$!
+  _wait_for_file_contains "$ARGV_LOG" 'team:alice' "$pid"
+  found=$?
+  _stop_watcher "$pid"
+
+  [ "$found" -eq 0 ]
+  # The key, specifically — the thing peek/poke resolve through, not just any
+  # tmux call.
+  grep -Fq '[@agmsg_agent] [team:alice]' "$ARGV_LOG"
 }

@@ -222,6 +222,42 @@ agmsg_storage_load
 # When there are messages to hand over the status is 0 and the text says the
 # poll was partial; only when there is nothing to deliver does the status carry
 # the failure.
+# Re-assert this pane's name (#1044), once per invocation, before any delivery.
+#
+# This entry point is the only one some types ever reach: `grok-build` has no
+# SessionStart hook and `monitor=yes` holds on two of the nine, so for the rest
+# the per-turn hook is where a hand-started pane first gets named. Idempotent by
+# construction — the driver sets the same two names again — and quiet when there
+# is no session id to resolve with, exactly as `join` is.
+#
+# Cost, stated rather than waved away: this adds one terminal resolution plus
+# the driver's rename calls per turn, per team. It is not cached, because the
+# only cheap thing to cache on is the session id, and a pane can be rearranged
+# under a session id that has not changed.
+#
+# No record is written: the seat's placement is `actas`'s claim, and a delivery
+# hook is not a claim of anything.
+#
+# The source carries the errexit lift: on bash 3.2 a failure inside a sourced
+# file fires THIS script's `set -e`, and nothing here may fail a delivery.
+_agmsg_tr_rc=0; _agmsg_tr_e=0
+case $- in *e*) _agmsg_tr_e=1 ;; esac
+set +e
+# shellcheck disable=SC1091
+[ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
+_agmsg_tr_rc=$?
+[ "$_agmsg_tr_e" = 1 ] && set -e
+if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
+  # Guarded expansion, the form this file already uses above: bash 3.2 treats
+  # "${TEAM_LIST[@]}" on an empty array as unbound under `set -u` (measured). An
+  # early exit above makes the list non-empty here today, and this does not
+  # depend on that staying true.
+  for _nteam in ${TEAM_LIST[@]+"${TEAM_LIST[@]}"}; do
+    [ -n "$_nteam" ] || continue
+    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" || true
+  done
+fi
+
 OUTPUT=""
 # Ids that have been FORMATTED but not yet written out: one "team<TAB>id id id"
 # entry per team. They become read only after the payload leaves this process.
