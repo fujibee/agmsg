@@ -411,6 +411,11 @@ if [ "$_msys_cmd_prefix" = "/" ]; then
   MSYS_GUARD="MSYS2_ARG_CONV_EXCL=/${_msys_cmd_name} "
 fi
 
+# Presence sentinel for this launch (see agmsg_boot_pid_path, lib/actas-lock.sh):
+# the boot script records its own pid here before exec'ing the CLI and clears
+# it right after, independent of whatever the CLI/model does or doesn't reach.
+BOOT_PID_PATH="$(agmsg_boot_pid_path "$TEAM" "$NAME")"
+
 BOOT_DIR="${TMPDIR:-/tmp}/agmsg-spawn"
 mkdir -p "$BOOT_DIR" 2>/dev/null || true
 # Best-effort GC of boot scripts left behind by spawns whose window was closed
@@ -433,6 +438,20 @@ esac
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
+  # Record boot-process presence before the CLI runs (see agmsg_boot_pid_path):
+  # $$ here is the boot script's own shell pid, not spawn.sh's -- it stays
+  # alive for exactly as long as the CLI below runs (foreground, not exec'd),
+  # so a liveness check on this pid tracks the CLI's lifetime even if the
+  # CLI/model never reaches its own watcher-registration step. A consumer
+  # always validates via kill(pid, 0) (same contract as every other sentinel
+  # here), so a stale file is harmless -- but the trap below still clears it
+  # on the common abnormal-exit paths (closed window/tab -> HUP, killed pane
+  # -> TERM, Ctrl-C -> INT) so it doesn't needlessly linger; only a SIGKILL
+  # (untrappable) leaves it behind for the next liveness check to invalidate.
+  printf 'mkdir -p %q 2>/dev/null || true\n' "$(_actas_lock_dir)"
+  printf 'AGMSG_BOOT_PID_PATH=%q\n' "$BOOT_PID_PATH"
+  printf 'echo $$ > "$AGMSG_BOOT_PID_PATH" 2>/dev/null || true\n'
+  printf 'trap '\''rm -f "$AGMSG_BOOT_PID_PATH" 2>/dev/null'\'' EXIT HUP TERM INT\n'
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
   if [ -n "$SPAWN_UNSET_VARS" ]; then
     printf 'unset %s\n' "$SPAWN_UNSET_VARS"
@@ -477,6 +496,8 @@ esac
     agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
     printf '\n'
   fi
+  echo 'trap - EXIT HUP TERM INT'  # CLI returned normally -- the explicit rm below covers it, not the trap
+  echo 'rm -f "$AGMSG_BOOT_PID_PATH" 2>/dev/null'  # presence over
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
 } > "$BOOT"
