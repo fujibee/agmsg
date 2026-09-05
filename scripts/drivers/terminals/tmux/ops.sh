@@ -160,10 +160,14 @@ terminal_poke() {
 # select-pane -T sets the human-visible title as a copy. Canonical separator is
 # ':' (both team and agent commonly contain '-'). Idempotent (safe to re-apply on
 # SessionStart).
+# <mode> is `key` or absent — see the herdr driver for the split. Here the
+# `@agmsg_agent` pane option is the resolvable one and the window name / pane
+# title is the decoration, so `key` sets the option and stops.
 terminal_name() {
-  local id="$1" team="$2" name="$3" label
+  local id="$1" team="$2" name="$3" mode="${4:-}" label
   label="$team:$name"
   tmux set-option -p -t "$id" @agmsg_agent "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  if [ "$mode" = key ]; then echo ok; return 0; fi
   case "$id" in
     @*) tmux rename-window -t "$id" "$label" >/dev/null 2>&1 || true ;;
     *)  tmux select-pane  -t "$id" -T "$label" >/dev/null 2>&1 || true ;;

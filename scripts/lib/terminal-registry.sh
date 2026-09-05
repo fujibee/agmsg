@@ -27,7 +27,14 @@
 #   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
 #                                       parsed). unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
-#   terminal_name <id> <team> <name>    control op: set the human pane name; idempotent
+#   terminal_name <id> <team> <name> [mode]
+#                                       control op: set the pane's names; idempotent.
+#                                       Two names, not one: the label a person
+#                                       reads and the key peek/poke resolve
+#                                       through. `mode=key` sets only the key
+#                                       (AGMSG_TERMINAL_NAMING=off); absent sets
+#                                       both. A driver that has only one name
+#                                       treats it as the key.
 #                                       (safe to re-apply on SessionStart).
 #
 # Detection is a driver FUNCTION (not a manifest datum like the types axis's
@@ -476,9 +483,23 @@ agmsg_terminal_name_self() {
 
   agmsg_terminal_load "$terminal" || return 1
 
+  # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
+  # key stays, always, because it is addressing rather than decoration: dropping
+  # it makes the member unreachable to peek and poke, which is the defect #1044
+  # is about, re-created on request. A caller that genuinely wants no terminal
+  # writes at all is describing the `plain` terminal.
+  #
+  # The env var is read HERE and handed to the driver as a mode, so the policy
+  # has one home and each driver only carries it out. Read at call time, not
+  # cached: a value cached at source time is a value nobody can change.
+  local name_mode=""
+  case "${AGMSG_TERMINAL_NAMING:-}" in
+    off) name_mode=key ;;
+  esac
+
   local out=""
   rc=0
-  out="$(terminal_name "$id" "$team" "$agent")" || rc=$?
+  out="$(terminal_name "$id" "$team" "$agent" "$name_mode")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "agmsg: could not name this $terminal pane for $team:$agent${out:+ ($out)}" >&2
     return "$rc"

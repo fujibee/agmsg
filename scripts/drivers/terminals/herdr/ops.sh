@@ -523,12 +523,29 @@ _herdr_internal_key() {
 #               failed agent rename (a live-name collision, or no SHA-256 tool to
 #               derive the key) is non-fatal — the pane id in the record still
 #               resolves.
+# <mode> is `key` or absent. Absent means both names; `key` means the resolvable
+# one only, and the caller has already decided that (the registry reads the env
+# var, so the policy lives in one place and this only carries it out).
+#
+# Which of the two is which matters: `pane rename` is the label a person reads,
+# `agent rename` is what `peek`/`poke` resolve the member through. So under
+# `key` the addressing is still established and only the decoration is skipped —
+# and a key that cannot be set is an error there, because nothing else happened.
 terminal_name() {
-  local id="$1" team="$2" name="$3" label key
+  local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$team:$name"
-  herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  if [ "$mode" != key ]; then
+    herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  fi
   if key="$(_herdr_internal_key "$team" "$name")"; then
-    herdr agent rename "$id" "$key" >/dev/null 2>&1 || true
+    if ! herdr agent rename "$id" "$key" >/dev/null 2>&1; then
+      if [ "$mode" = key ]; then echo runtime_error; return 13; fi
+    fi
+  elif [ "$mode" = key ]; then
+    # Nothing was attempted at all: reporting ok would say the member is
+    # addressable when no key was set.
+    echo runtime_error
+    return 13
   fi
   echo ok
   return 0

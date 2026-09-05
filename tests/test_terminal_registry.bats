@@ -1273,3 +1273,66 @@ M
   grep -q '%HELD' "$rec"
   grep -q '/proj/OLD' "$rec"
 }
+
+# --- AGMSG_TERMINAL_NAMING=off drops the label and keeps the key (#1044) ------
+#
+# Two names, and only one of them is optional. The key is what peek/poke resolve
+# a member through, so turning it off would make the member unreachable — which
+# is the defect #1044 is about, re-created on request. A caller that wants no
+# terminal writes at all is describing `plain`.
+#
+# Both drivers are exercised because the split is not the same shape in each:
+# herdr has two commands (`pane rename` / `agent rename`), tmux has a pane option
+# and a title. "Same idea, so same result" is not a measurement.
+@test "naming off (tmux): the pane option is set and the title is not (#1044)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "" offteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+
+  # The key: still set, because it is addressing.
+  grep -Fq 'tmux [set-option] [-p] [-t] [%1] [@agmsg_agent] [offteam:alice]' "$ARGV_LOG"
+  # The decoration: not set.
+  refute grep -Fq 'select-pane' "$ARGV_LOG"
+  refute grep -Fq 'rename-window' "$ARGV_LOG"
+}
+
+@test "naming ON by default (tmux): both the option and the title (#1044)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "" onteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+  grep -Fq '[@agmsg_agent] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq 'select-pane' "$ARGV_LOG"
+}
+
+@test "naming off (herdr): agent rename happens, pane rename does not (#1044)" {
+  _install_fake_herdr "sess-off"
+  export HERDR_ENV=1
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "sess-off" offteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+
+  # The key: still set.
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  # The visible label: not set.
+  refute grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+}
+
+@test "naming ON by default (herdr): both renames (#1044)" {
+  _install_fake_herdr "sess-on"
+  export HERDR_ENV=1
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-on" onteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
