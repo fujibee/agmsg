@@ -15,7 +15,7 @@ teardown() {
 }
 
 # --- default scope: no filters = the whole installation -------------------
-#     (koit's round-2 call: other doctor-style commands -- claude/codex/brew/
+#     (settled in round 2: other doctor-style commands -- claude/codex/brew/
 #     flutter -- all default to "everything", so this one now does too. The
 #     old <project> <type>-required positional form is dropped, not kept for
 #     compatibility -- see doctor.sh's header comment.) ----------------------
@@ -122,7 +122,7 @@ teardown() {
 #     must never turn into a warning. Running the pre-fix version against a
 #     healthy real installation returned "9 team(s), 56 registration(s), 5
 #     warning(s)" purely from this -- an exit-code-contract violation caught
-#     by koit running doctor against real data, not by any of these fixtures,
+#     by running doctor against real data, not by any of these fixtures,
 #     which is exactly why real-data verification was asked for. -----------
 
 @test "doctor: a type with delivery_modes=off only is never queried against delivery.sh and never warns" {

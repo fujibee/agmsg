@@ -456,7 +456,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
 - Adaptive catch-up so a backlog doesn't crawl at 100/5s
-- Add team-list.sh (agmsg team list --json, koit-approved)
+- Add team-list.sh (agmsg team list --json)
 - Add status --json and pending list/abort (ADR 0007 addendum)
 - Consume connected team credentials
 - Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007

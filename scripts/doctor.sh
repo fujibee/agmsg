@@ -10,10 +10,10 @@ set -euo pipefail
 # every type. --project / --type / --team narrow it and combine freely. This
 # matches how claude/codex/brew/flutter doctor all behave (no scope argument,
 # default to everything) rather than requiring a cross-section up front --
-# koit's call, made explicit because the earlier <project> <type>-required
+# Made explicit here because the earlier <project> <type>-required
 # form had it backwards: a reporter who doesn't already know which project/type
 # to name can't use a doctor that demands one. Positional <project> <type> is
-# not kept for compatibility -- koit judged it not worth carrying (see PR/report
+# not kept for compatibility -- it was judged not worth carrying (see PR/report
 # history for round 2), and a stale positional form alongside flags that mean
 # something different by default would be its own source of confusion.
 #
@@ -342,9 +342,9 @@ _redact_text() {
 # --- scan one (project, type) pair, buffer its block ------------------------
 #
 # Buffered into REPORT_BLOCKS rather than printed inline: the summary line
-# koit asked for has to come FIRST on screen ("撃った人が最初に見るのはそ
-# こ"), but its counts (teams/registrations/warnings) aren't known until
-# every pair in the scope has been scanned. Nothing here is large enough for
+# has to come FIRST on screen -- it is the first thing the person who ran
+# the command looks at -- but its counts (teams/registrations/warnings)
+# aren't known until every pair in the scope has been scanned. Nothing here is large enough for
 # buffering to matter -- even the whole install across every team is a
 # handful of KB.
 REPORT_BLOCKS=""
@@ -506,7 +506,7 @@ _doctor_scan_pair() {
           # Only when the lock itself is legitimately live: a stale lock
           # having no watcher is unremarkable (already covered above), but
           # an alive lock with no watcher means the role claims exclusivity
-          # and isn't receiving -- the shape #605 and koit's own example
+          # and isn't receiving -- the shape #605 and the reported example
           # both were.
           if [ "$alive_word" = "alive" ]; then
             _redact_project "$project"

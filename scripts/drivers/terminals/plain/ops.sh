@@ -105,7 +105,7 @@ _plain_unsupported() {
   printf 'unsupported: plain terminal has no addressable pane (%s)\n' "$1" >&2
   return 13
 }
-# poke — and ONLY poke — gets the third value (koit's design): still non-zero,
+# poke — and ONLY poke — gets the third value, by design: still non-zero,
 # because as a terminal answer "no pane" is correct and stays, but the refusal
 # must not end the conversation: the member's agent TYPE may have a native
 # channel (Claude Code's SendMessage), and the type template is where that

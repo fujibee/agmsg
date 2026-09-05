@@ -6,7 +6,7 @@
 #
 # FACT BOUNDARY — what is measured vs still asserted (keep this honest):
 #   MEASURED on the real machine (seat 0, 2026-08-29; and live by utildev on
-#   koit's machine, herdr 0.8.0, 2026-09-02/03 — the resolver run against the real
+#   a real workstation, herdr 0.8.0, 2026-09-02/03 — the resolver run against the real
 #   `agent list`, with positive controls):
 #     - `herdr agent list` is JSON; agent_session in the list is an OBJECT and the
 #       session id is at .value (inherited HERDR_PANE_ID is NOT trusted).
