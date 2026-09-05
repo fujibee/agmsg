@@ -37,6 +37,15 @@
 #                                       `gone` alone, and `terminal_despawn`
 #                                       cannot answer this (it collapses "already
 #                                       closed" and "could not close" into 13).
+#   terminal_where <id>                 READ op: print the id's container (tmux window /
+#                                       herdr tab). Existence is NOT answered here:
+#                                       terminal_pane_state is the only op allowed to say
+#                                       `gone`; a present-then-missing race is unknown/10.
+#   terminal_arrange <source-id> <intent> <target-id>
+#                                       control op: declaratively place source below/right
+#                                       of target. Prints moved / unchanged. It reads layout
+#                                       before mutating because the native moves are not
+#                                       idempotent. Ambiguous layout -> token + non-zero.
 #   terminal_name <id> <team> <name> [mode]
 #                                       control op: set the pane's names; idempotent.
 #                                       Two names, not one: the label a person
@@ -126,7 +135,7 @@ agmsg_terminal_has() {
 # verifies it. Naming the set here (not relying on each driver being complete) is
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
-_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_name"
+_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
 
 # Wipe every terminal_* ABI function from the current shell. Called before each
 # source so a driver that is switched to cannot inherit the previous driver's ops
@@ -185,6 +194,41 @@ agmsg_terminal_load() {
     return 1
   fi
   _AGMSG_TERMINAL_LOADED="$name"
+}
+
+# Join the two terminal observations needed by team.sh after a driver is loaded.
+# Prints exactly two TAB-separated fields: <container> <live>. Neither is ever
+# empty. Existence has ONE authority: terminal_pane_state. terminal_where only
+# runs after present/0 and can make the container unknown, but can never revise
+# live to `gone`.
+agmsg_terminal_location_loaded() {
+  local id="$1" state="" container="" rc=0 reason
+  declare -F terminal_pane_state >/dev/null 2>&1 \
+    || { printf 'unknown:pane_state_unavailable\tunknown:pane_state_unavailable\n'; return 0; }
+  declare -F terminal_where >/dev/null 2>&1 \
+    || { printf 'unknown:where_unavailable\tunknown:where_unavailable\n'; return 0; }
+  state="$(terminal_pane_state "$id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$state" = unknown ]; then
+    reason="pane_state_rc_${rc}"
+    printf 'unknown:%s\tunknown:%s\n' "$reason" "$reason"
+    return 0
+  fi
+  if [ "$state" = gone ]; then
+    printf 'n/a:pane_gone\tgone\n'
+    return 0
+  fi
+  if [ "$state" != present ]; then
+    printf 'unknown:unexpected_pane_state\tunknown:unexpected_pane_state\n'
+    return 0
+  fi
+  rc=0
+  container="$(terminal_where "$id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$container" ] || [ "$container" = unknown ]; then
+    printf 'unknown:present_then_location_rc_%s\tpresent\n' "$rc"
+    return 0
+  fi
+  printf '%s\tpresent\n' "$container"
+  return 0
 }
 
 # Run <name>'s terminal_detect for <session_id> in a SUBSHELL so its terminal_*

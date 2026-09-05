@@ -44,7 +44,11 @@ terminal_check() {
 terminal_describe() {
   printf 'name=herdr\n'
   printf 'backend=herdr pane\n'
-  printf 'capabilities=spawn despawn peek poke name\n'
+  printf 'capabilities=spawn despawn peek poke where arrange name\n'
+  printf 'syntax_help=herdr --help\n'
+  printf 'skill_help=herdr --skill\n'
+  printf 'intent.place_below=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split down --target-pane TARGET\n'
+  printf 'intent.place_right=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split right --target-pane TARGET\n'
 }
 
 # Extract the pane id whose agent_session == <sid> from `herdr agent list` JSON.
@@ -463,6 +467,145 @@ terminal_despawn() {
   local id="$1"
   herdr pane close "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
+  return 0
+}
+
+# Ask herdr where a pane is. Existence is deliberately outside this op:
+# terminal_pane_state is the only function allowed to say `gone`. A successful
+# layout query that no longer contains the pane is the present-then-missing race,
+# so it is unknown/10 with its own reason.
+terminal_where() {
+  local id="$1" json rc=0 esc container present
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
+  _herdr_pane_id_ok "$id" || { echo unsupported; return 13; }
+  json="$(herdr pane layout --pane "$id" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$json" ] || { echo unknown; return 10; }
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$id" | sed "s/'/''/g")'" 2>/dev/null)" \
+    || { echo unknown; return 10; }
+  container="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.layout.tab_id')" 2>/dev/null)" \
+    || { echo unknown; return 10; }
+  if [ "$present" != 1 ] || [ -z "$container" ]; then
+    echo unknown
+    echo "herdr: pane '$id' was present immediately before location lookup, but its tab could not be resolved" >&2
+    return 10
+  fi
+  printf '%s\n' "$container"
+  return 0
+}
+
+# Classify the requested terminal relationship from one pane-layout response.
+# Output: unchanged, different, ambiguous_layout, or runtime_error.
+_herdr_arrange_state() {
+  local json="$1" source="$2" intent="$3" target="$4" esc sesc tesc dir result rc=0
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sesc="$(printf '%s' "$source" | sed "s/'/''/g")"
+  tesc="$(printf '%s' "$target" | sed "s/'/''/g")"
+  case "$intent" in place_below) dir=down ;; place_right) dir=right ;; *) echo runtime_error; return 13 ;; esac
+  # A candidate split must contain both panes, have the requested direction,
+  # and agree with their rectangle order. Among those, the smallest area is the
+  # LCA equivalent. Equal-area candidates really occur in degenerate layouts
+  # (measured with a zero-height child); if more than one remains, fail closed.
+  result="$(sqlite3 :memory: "
+    WITH p AS (
+      SELECT json_extract(value,'\$.pane_id') id,
+             json_extract(value,'\$.rect.x') x, json_extract(value,'\$.rect.y') y,
+             json_extract(value,'\$.rect.width') w, json_extract(value,'\$.rect.height') h
+      FROM json_each('$esc','\$.result.layout.panes')
+    ), src AS (SELECT * FROM p WHERE id='$sesc'), tgt AS (SELECT * FROM p WHERE id='$tesc'),
+    candidates AS (
+      SELECT json_extract(s.value,'\$.rect.width') * json_extract(s.value,'\$.rect.height') area
+      FROM json_each('$esc','\$.result.layout.splits') s, src, tgt
+      WHERE json_extract(s.value,'\$.direction')='$dir'
+        AND src.x >= json_extract(s.value,'\$.rect.x')
+        AND src.y >= json_extract(s.value,'\$.rect.y')
+        AND src.x + src.w <= json_extract(s.value,'\$.rect.x') + json_extract(s.value,'\$.rect.width')
+        AND src.y + src.h <= json_extract(s.value,'\$.rect.y') + json_extract(s.value,'\$.rect.height')
+        AND tgt.x >= json_extract(s.value,'\$.rect.x')
+        AND tgt.y >= json_extract(s.value,'\$.rect.y')
+        AND tgt.x + tgt.w <= json_extract(s.value,'\$.rect.x') + json_extract(s.value,'\$.rect.width')
+        AND tgt.y + tgt.h <= json_extract(s.value,'\$.rect.y') + json_extract(s.value,'\$.rect.height')
+        AND (('$dir'='down' AND src.y = tgt.y + tgt.h AND src.x = tgt.x AND src.w = tgt.w)
+          OR ('$dir'='right' AND src.x = tgt.x + tgt.w AND src.y = tgt.y AND src.h = tgt.h))
+    ), m AS (SELECT min(area) area FROM candidates)
+    SELECT CASE
+      WHEN (SELECT count(*) FROM tgt) != 1 OR (SELECT count(*) FROM src) > 1 THEN 'unknown'
+      WHEN (SELECT count(*) FROM src) = 0 THEN 'source_missing'
+      WHEN (SELECT count(*) FROM candidates c,m WHERE c.area=m.area) > 1 THEN 'ambiguous_layout'
+      WHEN (SELECT count(*) FROM candidates) > 0 THEN 'unchanged'
+      ELSE 'different' END;" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$result" ] || { echo runtime_error; return 10; }
+  printf '%s\n' "$result"
+}
+
+_herdr_move_changed() {
+  local json="$1" esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  [ "$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.changed')" 2>/dev/null)" = 1 ]
+}
+
+_herdr_move_created_tab() {
+  local json="$1" esc
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sqlite3 :memory: "SELECT json_extract('$esc','\$.result.move_result.created_tab.tab_id')" 2>/dev/null
+}
+
+_herdr_layout_has_pane() {
+  local json="$1" id="$2" esc iesc count
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  count="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id')='$iesc'" 2>/dev/null)" \
+    || return 1
+  [ "$count" = 1 ]
+}
+
+terminal_arrange() {
+  local source="$1" intent="$2" target="$3" layout source_layout state rc=0 tab first second temporary_tab
+  command -v herdr >/dev/null 2>&1 || { echo runtime_error; return 10; }
+  _herdr_pane_id_ok "$source" && _herdr_pane_id_ok "$target" || { echo unsupported; return 13; }
+  case "$intent" in place_below|place_right) : ;; *) echo unsupported; return 13 ;; esac
+  layout="$(herdr pane layout --pane "$target" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$layout" ] || { echo runtime_error; return 10; }
+  rc=0
+  state="$(_herdr_arrange_state "$layout" "$source" "$intent" "$target")" || rc=$?
+  case "$state" in
+    unchanged) echo unchanged; return 0 ;;
+    ambiguous_layout) echo ambiguous_layout; return 12 ;;
+    different) : ;;
+    source_missing)
+      # `pane layout --pane TARGET` only describes TARGET's tab. A source in a
+      # different tab is therefore absent from that response, but is still a
+      # valid move candidate. Ask the source itself before treating absence as
+      # "different"; an unanswered or malformed lookup remains unknown.
+      rc=0
+      source_layout="$(herdr pane layout --pane "$source" 2>/dev/null)" || rc=$?
+      [ "$rc" -eq 0 ] && [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$source" \
+        || { echo unknown; return 10; }
+      ;;
+    unknown) echo unknown; return 10 ;;
+    *) echo runtime_error; [ "$rc" -ne 0 ] && return "$rc"; return 10 ;;
+  esac
+  tab="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$layout" | sed "s/'/''/g")','\$.result.layout.tab_id')" 2>/dev/null)" \
+    || { echo runtime_error; return 10; }
+  [ -n "$tab" ] || { echo runtime_error; return 10; }
+  first="$(herdr pane move "$source" --new-tab --no-focus 2>/dev/null)" || { echo runtime_error; echo "herdr: failed before moving '$source' to a temporary tab" >&2; return 12; }
+  _herdr_move_changed "$first" || { echo runtime_error; echo "herdr: the temporary-tab move for '$source' did not report changed=true" >&2; return 12; }
+  temporary_tab="$(_herdr_move_created_tab "$first")" || temporary_tab=""
+  [ -n "$temporary_tab" ] || temporary_tab='<new tab id unavailable>'
+  case "$intent" in
+    place_below) second="$(herdr pane move "$source" --tab "$tab" --split down --target-pane "$target" --no-focus 2>/dev/null)" ;;
+    place_right) second="$(herdr pane move "$source" --tab "$tab" --split right --target-pane "$target" --no-focus 2>/dev/null)" ;;
+  esac || {
+    echo runtime_error
+    echo "herdr: '$source' is left in temporary tab '$temporary_tab': placing it back in tab '$tab' relative to '$target' failed" >&2
+    return 12
+  }
+  _herdr_move_changed "$second" || {
+    echo runtime_error
+    echo "herdr: '$source' may be left in temporary tab '$temporary_tab': the move back to tab '$tab' did not report changed=true" >&2
+    return 12
+  }
+  echo moved
   return 0
 }
 

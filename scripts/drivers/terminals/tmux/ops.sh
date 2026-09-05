@@ -16,7 +16,82 @@ terminal_check() {
 terminal_describe() {
   printf 'name=tmux\n'
   printf 'backend=tmux pane/window\n'
-  printf 'capabilities=spawn despawn peek poke name\n'
+  printf 'capabilities=spawn despawn peek poke where arrange name\n'
+  printf 'syntax_help=tmux list-commands\n'
+  printf 'intent.place_below=tmux move-pane -s SOURCE -t TARGET -v\n'
+  printf 'intent.place_right=tmux move-pane -s SOURCE -t TARGET -h\n'
+}
+
+# READ op: print the window containing <id>. This answers WHERE only. In
+# particular it must never print `gone`: terminal_pane_state is the sole
+# authority for existence, and a pane that vanishes after that positive check is
+# an unanswered location query, not a second proof of absence.
+terminal_where() {
+  local id="$1" bare out container
+  command -v tmux >/dev/null 2>&1 || { echo unknown; return 10; }
+  bare="$(_tmux_bare_of "$id")"
+  # A window placement (@N) is its own container. Public where has already
+  # established presence through terminal_pane_state before asking this op.
+  case "$bare" in @*) printf '%s\n' "$bare"; return 0 ;; %*) : ;; *) echo unsupported; return 13 ;; esac
+  out="$(_tmux_do "$id" list-panes -a -F '#{pane_id}|#{window_id}' 2>/dev/null)" \
+    || { echo unknown; return 10; }
+  container="$(printf '%s\n' "$out" | awk -F '|' -v id="$bare" '$1 == id { print $2; exit }')"
+  if [ -z "$container" ]; then
+    echo unknown
+    echo "tmux: pane '$id' was present immediately before location lookup, but its window could not be resolved" >&2
+    return 10
+  fi
+  printf '%s\n' "$container"
+  return 0
+}
+
+# True iff source already occupies the exact split that the native move would
+# create. tmux exposes geometry, not a split tree, so this is intentionally a
+# visible-rectangle predicate. The +1 is tmux's separator cell.
+_tmux_arranged() {
+  local intent="$1" st="$2" sl="$3" sw="$4" sh="$5" tt="$6" tl="$7" tw="$8" th="$9"
+  case "$intent" in
+    place_below) [ "$sl" -eq "$tl" ] && [ "$sw" -eq "$tw" ] && [ "$st" -eq $((tt + th + 1)) ] ;;
+    place_right) [ "$st" -eq "$tt" ] && [ "$sh" -eq "$th" ] && [ "$sl" -eq $((tl + tw + 1)) ] ;;
+    *) return 2 ;;
+  esac
+}
+
+_tmux_layout_numbers_ok() {
+  local value
+  for value in "$@"; do case "$value" in ''|*[!0-9]*) return 1 ;; esac; done
+  return 0
+}
+
+terminal_arrange() {
+  local source="$1" intent="$2" target="$3" out srow trow
+  local source_sock target_sock source_bare target_bare
+  local sid swin st sl sw sh tid twin tt tl tw th
+  command -v tmux >/dev/null 2>&1 || { echo runtime_error; return 10; }
+  source_sock="$(_tmux_sock_of "$source")"
+  target_sock="$(_tmux_sock_of "$target")"
+  source_bare="$(_tmux_bare_of "$source")"
+  target_bare="$(_tmux_bare_of "$target")"
+  [ "$source_sock" = "$target_sock" ] || { echo unsupported; return 13; }
+  case "$source_bare:$target_bare" in %*:%*) : ;; *) echo unsupported; return 13 ;; esac
+  case "$intent" in place_below|place_right) : ;; *) echo unsupported; return 13 ;; esac
+  out="$(_tmux_do "$source" list-panes -a -F '#{pane_id}|#{window_id}|#{pane_top}|#{pane_left}|#{pane_width}|#{pane_height}' 2>/dev/null)" \
+    || { echo runtime_error; return 10; }
+  srow="$(printf '%s\n' "$out" | awk -F '|' -v id="$source_bare" '$1 == id { print; exit }')"
+  trow="$(printf '%s\n' "$out" | awk -F '|' -v id="$target_bare" '$1 == id { print; exit }')"
+  [ -n "$srow" ] && [ -n "$trow" ] || { echo unknown; return 10; }
+  IFS='|' read -r sid swin st sl sw sh <<< "$srow"
+  IFS='|' read -r tid twin tt tl tw th <<< "$trow"
+  _tmux_layout_numbers_ok "$st" "$sl" "$sw" "$sh" "$tt" "$tl" "$tw" "$th" \
+    || { echo runtime_error; return 10; }
+  [ "$swin" = "$twin" ] && _tmux_arranged "$intent" "$st" "$sl" "$sw" "$sh" "$tt" "$tl" "$tw" "$th" \
+    && { echo unchanged; return 0; }
+  case "$intent" in
+    place_below) _tmux_do "$source" move-pane -s "$source_bare" -t "$target_bare" -v >/dev/null 2>&1 ;;
+    place_right) _tmux_do "$source" move-pane -s "$source_bare" -t "$target_bare" -h >/dev/null 2>&1 ;;
+  esac || { echo runtime_error; return 12; }
+  echo moved
+  return 0
 }
 
 # record op: report TWO facts and decide nothing (tl 2026-08-31). PRESENCE — are

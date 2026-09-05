@@ -160,6 +160,11 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
    - description: `agmsg inbox stream`
 5. Tell the user: "Dropped role `<name>` from this project."
 
+If argument starts with "arrange" (e.g. "arrange alice place_below bob"):
+1. Parse `<agent> <place_below|place_right> <anchor-agent>` and determine their shared team.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/arrange.sh <team> <agent> <intent> <anchor-agent>`.
+3. Show the script output. Report `moved` as a performed move and `unchanged` as already in the requested arrangement; do not collapse the two. `ambiguous_layout` means the layout must be simplified before retrying, `runtime_error` means inspect the terminal, and `unsupported` means the terminal/placement cannot be arranged (`tmux:@N` window placements included).
+
 If argument starts with "peek" (e.g. "peek reviewer", "peek alice --lines 80"):
 1. Parse `<name>` and an optional `--lines N` (how many of the pane's visible lines to return).
 2. Determine which team `<name>` belongs to (as with `send`), then run:

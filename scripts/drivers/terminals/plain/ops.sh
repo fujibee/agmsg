@@ -19,6 +19,18 @@ terminal_describe() {
   printf 'capabilities=spawn despawn\n'
 }
 
+terminal_where() {
+  echo unsupported
+  echo "plain: no addressable pane has a container" >&2
+  return 13
+}
+
+terminal_arrange() {
+  echo unsupported
+  echo "plain: no addressable panes can be arranged" >&2
+  return 13
+}
+
 # record op: the fallback always "matches" but has no addressable pane, so the
 # self id is '-'. Detection order puts plain last.
 terminal_detect() { printf '%s\n' '-'; return 0; }
