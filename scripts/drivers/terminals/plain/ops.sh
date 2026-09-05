@@ -99,6 +99,11 @@ terminal_spawn() {
 # is '-'), so there is nothing to kill from here — it closes when its process
 # exits, exactly as before the axis (OS-terminal members were never force-
 # killable). Report ok (nothing to tear down) rather than a spurious error.
+# plain has no addressable pane, so it cannot be asked whether one is still
+# there. 13 is that answer, and it is a real answer rather than a failure — the
+# caller must not read it as "closed".
+terminal_pane_state() { echo unknown; return 13; }
+
 terminal_despawn() { echo ok; return 0; }
 
 _plain_unsupported() {

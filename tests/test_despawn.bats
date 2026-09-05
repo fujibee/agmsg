@@ -314,13 +314,18 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
 
   AGMSG_WATCH_INTERVAL=1 PATH="$bindir:$PATH" env "$@" \
     bash "$SCRIPTS/watch.sh" sess-m "$PROJ" claude-code alice \
-    >/dev/null 2>"$RUN/watch.err" 3>&- &
+    >"$RUN/watch.out" 2>"$RUN/watch.err" 3>&- &
   WPID=$!
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do [ -e "$RUN/ready.team__alice" ] && break; sleep 0.5; done
   [ -e "$RUN/ready.team__alice" ]
 
-  bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10 >/dev/null 2>&1 || true
+  # The stub is the terminal for the CALLER too, not only for the watcher. The
+  # caller asks the terminal whether the pane is still there (#1051), and without
+  # this it asks whatever tmux happens to be on the machine — which answered
+  # `gone` about a pane id it had never heard of, and the record was deleted on
+  # that. Measured here before it was noticed anywhere else.
+  PATH="$bindir:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10 >/dev/null 2>&1 || true
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$WPID" 2>/dev/null || break; sleep 0.5; done
   kill "$WPID" 2>/dev/null || true; wait "$WPID" 2>/dev/null || true
 }
@@ -385,4 +390,81 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
     refute grep -Fq 'kill-pane -t %9' "$bin/tmux.log"
   fi
   grep -Fq 'belongs to someone else' "$RUN/watch.err"
+}
+
+# --- #1051: a teardown that did not fold the pane does not report success -----
+#
+# The dogfood that produced #1051: graceful despawn said `status=ok`, the pane
+# stayed open with the agent running, and `--force` then refused because the
+# graceful path had already deleted the record it works from. Three things had to
+# line up, and each gets a control here.
+#
+# The one that made it unrecoverable is the caller's: it treated "the actas lock
+# went free" as proof the pane was folded. The lock goes free when the watcher
+# lets go of it — before it tries to close anything, and also when its owner
+# simply died. Proof of one event was read as proof of another.
+
+# A `tmux` stub whose pane LIST still contains the pane after a kill: the shape
+# of "the close did not take". The kill is recorded so the test can prove it was
+# attempted, and the list is what `terminal_pane_state` reads.
+_stub_tmux_close_fails() {
+  local bin="$1"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$bin/tmux.log"
+case "\$1" in
+  list-panes)   echo '%1' ;;   # still there, whatever we were asked to close
+  kill-pane)    exit 1 ;;
+  capture-pane) echo 'x' ;;
+esac
+exit 0
+EOF
+  chmod +x "$bin/tmux"
+}
+
+@test "despawn: graceful does not report ok when the pane is still open (#1051)" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux_close_fails "$bin"
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%1
+
+  # Positive control: the teardown really did try to close it. Without this the
+  # assertions below also pass for a run that never got that far.
+  grep -Fq 'kill-pane' "$bin/tmux.log"
+
+  # 1. The record — the only thing --force can work from — is KEPT.
+  [ -f "$rec" ]
+
+  # 2. The failure reached the channel an operator actually has. watch_log writes
+  #    to stderr and the shipped launcher runs the watcher with fd2 on /dev/null
+  #    (#691), so stderr alone is nowhere.
+  grep -Fq 'did not close pane' "$RUN/watch.out"
+}
+
+# NOTE ON WHICH BRANCH THIS COVERS. With no watcher the lock is free from the
+# start, so this exits through the PRE-EXISTING "no live actas lock, but a record
+# remains" branch and never reaches the post-teardown check added by #1051 —
+# measured: forcing that check to answer `gone` leaves this test green. It is a
+# control for the branch it does reach (the record survives a graceful attempt
+# that confirmed nothing), and the test above is the one that covers the new
+# code. Saying so because a name that implies the other branch is how a test gets
+# counted as coverage it does not provide.
+@test "despawn: a free lock with a record still reports needs-force (#1051, pre-existing branch)" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux_close_fails "$bin"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  # No watcher at all: the lock is free from the start, which is exactly the
+  # state the caller used to read as "torn down". The pane, per the stub, is not.
+  run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -Fq 'needs-force'
+  [ -f "$rec" ]
 }

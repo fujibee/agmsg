@@ -161,9 +161,26 @@ esac
 # Pairs already reported as storeless, so the notice is once per process.
 NO_STORE_REPORTED=""
 
+# Two front doors onto one log.
+#
+# `watch_log` announces on stderr, which is right for a diagnostic nobody has to
+# act on. `watch_report` announces on STDOUT, for the ones an operator must see:
+# the shipped launcher runs the watcher with fd2 on /dev/null (#691, measured
+# while fixing #1045), so a teardown that failed and said so on stderr said so
+# nowhere. Same log file either way — the difference is only which channel the
+# person watching gets it on.
+watch_report() {
+  printf 'agmsg watch: %s\n' "$*"
+  _watch_log_file "$*"
+}
+
 watch_log() {
+  printf 'agmsg watch: %s\n' "$*" >&2
+  _watch_log_file "$*"
+}
+
+_watch_log_file() {
   local msg="$*" record size=0 bytes
-  printf 'agmsg watch: %s\n' "$msg" >&2
   mkdir -p "$RUN_DIR" 2>/dev/null || return 0
   # Built first, so the rotation decision can weigh what is actually going to
   # be appended rather than only what is already there.
@@ -225,6 +242,23 @@ watch_log() {
 # Silence is never the answer here: a pane that should have closed and did not
 # is exactly the state an operator cannot see. Every path that declines says
 # why, on stderr and in the watcher log.
+# Fold this session's own pane, and SAY WHICH of three things happened:
+#
+#   0  closed            the driver confirmed the pane is folded
+#   1  could-not-close   a pane was placed for this seat and this call did not
+#                        fold it — it may still be open
+#   2  nothing-to-close  nothing of ours was ever placed here (no record, or the
+#                        record names another session's pane)
+#
+# The channel follows the same split, and that is the rule rather than a habit:
+# 1 goes to STDOUT (`watch_report`) because an operator has a window to deal
+# with and the shipped launcher discards stderr (#691); 2 goes to stderr, because
+# there is nothing for anyone to do.
+#
+# Every branch used to `return 0`, including the one where the driver refused —
+# so the caller could not tell a folded pane from an open one, and reported
+# success either way (#1051). The failures also announced themselves only on
+# stderr, which the shipped launcher discards (#691), so they reached nobody.
 close_own_placement() {
   local team="$1" name="$2"
   local rec ref rec_term rec_id mine my_term my_id
@@ -236,17 +270,17 @@ close_own_placement() {
     # nothing here to close. Say so rather than exiting quietly, because the
     # same silence would also cover "the record was lost".
     watch_log "despawned '$name' (role dropped); no placement record for '$team/$name', so there is no pane to close from here — if a window remains it was not placed by agmsg; close it directly"
-    return 0
+    return 2
   fi
   IFS=$'\t' read -r ref _ _ < "$rec"
   if [ -z "$ref" ]; then
-    watch_log "despawned '$name' (role dropped); the placement record at $rec is empty, so the pane cannot be identified — close this window manually"
-    return 0
+    watch_report "despawned '$name' (role dropped); the placement record at $rec is empty, so the pane cannot be identified — close this window manually"
+    return 1
   fi
 
   if ! declare -F agmsg_terminal_ref_terminal >/dev/null 2>&1; then
-    watch_log "despawned '$name' (role dropped); the terminal registry is not available in this install, so the recorded pane cannot be closed — close this window manually"
-    return 0
+    watch_report "despawned '$name' (role dropped); the terminal registry is not available in this install, so the recorded pane cannot be closed — close this window manually"
+    return 1
   fi
 
   # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. A bare
@@ -258,8 +292,8 @@ close_own_placement() {
   rec_term="$(agmsg_terminal_ref_terminal "$ref")" || rec_term=""
   rec_id="$(agmsg_terminal_ref_id "$ref")" || rec_id=""
   if [ -z "$rec_term" ] || [ -z "$rec_id" ]; then
-    watch_log "despawned '$name' (role dropped); the placement record's pane ref ($ref) did not resolve to a terminal and pane id, so the pane cannot be identified — close this window manually"
-    return 0
+    watch_report "despawned '$name' (role dropped); the placement record's pane ref ($ref) did not resolve to a terminal and pane id, so the pane cannot be identified — close this window manually"
+    return 1
   fi
 
   # Which pane is THIS process in, right now. resolve-for-name is the strict
@@ -285,26 +319,44 @@ close_own_placement() {
     mine="$(agmsg_terminal_resolve_name "$bare_sid" 2>/dev/null || true)"
   fi
   if [ -z "$mine" ]; then
-    watch_log "despawned '$name' (role dropped); this session cannot identify its own pane, so the recorded placement ($ref) is not provably ours and was left alone — close this window manually"
-    return 0
+    watch_report "despawned '$name' (role dropped); this session cannot identify its own pane, so the recorded placement ($ref) is not provably ours and was left alone — close this window manually"
+    return 1
   fi
   my_term="${mine%%	*}"
   my_id="${mine#*	}"
 
-  if [ "$my_term" != "$rec_term" ] || [ "$my_id" != "$rec_id" ]; then
+  # Compare at the precision BOTH sides have. A record written before refs
+  # carried the tmux socket says `%9`; this session now resolves itself as
+  # `<socket>:%9`, and a literal comparison calls its own pane someone else's —
+  # measured: the member stopped being able to fold itself. So when either side
+  # is missing the socket, compare the bare ids.
+  #
+  # That is the legacy ambiguity, not a new one: a bare `%9` cannot name a server
+  # (two servers can both hold it), and this is the same assumption the record
+  # has always carried. New records carry the socket and compare at full
+  # precision.
+  local _my_cmp="$my_id" _rec_cmp="$rec_id"
+  case "$my_id:$rec_id" in
+    *:*)
+      if [ "${my_id#*:}" = "$my_id" ] || [ "${rec_id#*:}" = "$rec_id" ]; then
+        _my_cmp="${my_id##*:}"; _rec_cmp="${rec_id##*:}"
+      fi ;;
+  esac
+  if [ "$my_term" != "$rec_term" ] || [ "$_my_cmp" != "$_rec_cmp" ]; then
     watch_log "despawned '$name' (role dropped); the placement record names $rec_term:$rec_id but this session is in $my_term:$my_id, so that pane belongs to someone else and was left alone — close this window manually"
-    return 0
+    return 2
   fi
 
   if ! agmsg_terminal_load "$rec_term" 2>/dev/null; then
-    watch_log "despawned '$name' (role dropped); the '$rec_term' terminal driver would not load, so the pane could not be closed — close this window manually"
-    return 0
+    watch_report "despawned '$name' (role dropped); the '$rec_term' terminal driver would not load, so the pane could not be closed — close this window manually"
+    return 1
   fi
   if ! terminal_despawn "$rec_id" >/dev/null 2>&1; then
     # 13 is the drivers' "unsupported" — plain has no addressable pane, so there
     # is genuinely nothing to close and the member must be told, not left with a
     # window it thinks was folded.
-    watch_log "despawned '$name' (role dropped); the '$rec_term' terminal did not close pane $rec_id — close this window manually"
+    watch_report "despawned '$name' (role dropped); the '$rec_term' terminal did not close pane $rec_id — close this window manually"
+    return 1
   fi
   return 0
 }
@@ -749,6 +801,11 @@ STUCK_THRESHOLD=3
 # delivery broke" can be told from "never started"; the value matters only that
 # it is non-zero and stable, which the tests pin.
 _AGMSG_EXIT_DELIVERY_UNHEALTHY=75
+# The watcher was told to fold itself, released its role, and the pane is STILL
+# THERE. Distinct from 75 (delivery is unhealthy) because the operator's next
+# move is different: the placement record is deliberately left in place and
+# `despawn --force` works from it.
+_AGMSG_EXIT_TEARDOWN_INCOMPLETE=76
 # Per-pair tracker state and its map operations (_stuck_get/_stuck_set/
 # _stuck_drop). Kept in a sourced lib so the record framing -- which broke for
 # names with spaces once and must not again -- can be unit-tested away from this
@@ -1017,7 +1074,14 @@ while true; do
     fi
     if [ -n "$DESPAWN_TARGET" ]; then
       "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$DESPAWN_TARGET" "$SESSION_ID" >/dev/null 2>&1 || true
-      close_own_placement "$pair_team" "$DESPAWN_TARGET"
+      # The status is used, not discarded: 1 means a pane of ours is still open.
+      # Nothing here deletes the placement record — that is what `--force` works
+      # from, and the caller now reads its presence rather than assuming.
+      _close_rc=0
+      close_own_placement "$pair_team" "$DESPAWN_TARGET" || _close_rc=$?
+      if [ "$_close_rc" -eq 1 ]; then
+        exit "$_AGMSG_EXIT_TEARDOWN_INCOMPLETE"
+      fi
       exit 0
     fi
     fi
