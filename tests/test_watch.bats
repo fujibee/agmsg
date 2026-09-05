@@ -1011,3 +1011,49 @@ _record_handover_events() {
   # must NOT reach the "belongs to someone else" fallthrough with an empty recorded side
   refute grep -q "belongs to someone else" "$WLOG"
 }
+
+@test "watch: a backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Same exposure as inbox: the pending batch interpolated into one argv element
+  # exceeds ARG_MAX and the delivery call fails; on stdin it does not. Send past 1 MB.
+  local big i
+  big="$(head -c 200000 /dev/zero | tr '\0' x)"       # 200 KB body
+  for i in 1 2 3 4 5 6; do
+    bash "$SCRIPTS/send.sh" team bob alice "WMSG${i}-${big}-WEND${i}" >/dev/null
+  done                                                 # ~1.2 MB backlog, past ARG_MAX
+  run_watcher_until "sess-wbig" "$TEST_SKILL_DIR/wbig.log" "WEND6"
+  grep -q "WMSG1-" "$TEST_SKILL_DIR/wbig.log"
+  grep -q "WEND6" "$TEST_SKILL_DIR/wbig.log"
+}
+
+@test "watch: a cursor stuck N cycles with pending rows reports on stdout and exits (#1045)" {
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  # Force the delivery query -- the ONLY sqlite call in the loop whose last arg is
+  # ':memory:' (SQL on stdin) -- to return nothing, while the store queries (a real DB
+  # file as the last arg) keep working. So OUT stays non-empty, ROWS is empty, the
+  # cursor never advances, and the SAME batch returns every cycle: the exact silent
+  # self-lock. The stuck guard must notice after STUCK_THRESHOLD cycles, say why on
+  # STDOUT (stderr is /dev/null here), and EXIT rather than loop in silence.
+  local realsqlite; realsqlite="$(command -v sqlite3)"
+  local stub="$TEST_SKILL_DIR/sqstub"; mkdir -p "$stub"
+  cat > "$stub/sqlite3" <<STUB
+#!/usr/bin/env bash
+if [ "\${@: -1}" = ":memory:" ]; then cat >/dev/null 2>&1; exit 0; fi
+exec "$realsqlite" "\$@"
+STUB
+  chmod +x "$stub/sqlite3"
+  bash "$SCRIPTS/send.sh" team bob alice "STUCKMSG" >/dev/null   # pending; delivery will fail
+  local out="$TEST_SKILL_DIR/stuck.log"
+  AGMSG_WATCH_INTERVAL=1 env PATH="$stub:$PATH" bash "$SCRIPTS/watch.sh" \
+    sess-stuck "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
+  local w=$!
+  # (1) the report must appear...
+  if ! _wait_for_file_contains "$out" "is STUCK"; then kill "$w" 2>/dev/null || true; false; fi
+  # (2) ...and the watcher must EXIT on its own, not keep looping.
+  local i alive=1
+  for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+  [ "$alive" -eq 0 ]
+  # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
+  grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
+}

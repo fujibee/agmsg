@@ -409,3 +409,20 @@ _codex_proj() {
   grep -q 'additive' <<<"$output"
   [ "$(pair_unread_count ctm alice)" -eq 0 ]
 }
+
+@test "inbox: an unread backlog past the argv ceiling still delivers (#1045/#777, stdin)" {
+  # The old inline-SQL path handed the whole backlog to sqlite3 as ONE argv element;
+  # once it exceeded ARG_MAX the call failed and the backlog could never clear itself.
+  # Building the statement into a temp file and passing it on stdin removes the ceiling.
+  local big i
+  big="$(head -c 200000 /dev/zero | tr '\0' x)"      # 200 KB body
+  for i in 1 2 3 4 5 6; do
+    bash "$SCRIPTS/send.sh" testteam bob alice "MSG${i}-${big}-END${i}" >/dev/null
+  done                                                # ~1.2 MB backlog, past ARG_MAX (1 MB)
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  [ "$status" -eq 0 ]
+  grep -q "6 new message(s):" <<<"$output"
+  # the first and last actually came through -- not a truncated or empty head
+  grep -q "MSG1-" <<<"$output"
+  grep -q "END6" <<<"$output"
+}

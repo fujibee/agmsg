@@ -699,6 +699,25 @@ _held_elsewhere_without() {
   printf '%s' "$out"
 }
 
+# fix 2 (#1045): a pair whose read cursor never advances while it still has pending
+# rows is STUCK -- delivery is failing every cycle and the failure is INVISIBLE: ps
+# shows a healthy process, the cursor is frozen, and stdout is silent. The symptom this
+# fixes is not "not delivered" but "not knowing it is not delivered". So count, per pair,
+# the number of CONSECUTIVE poll cycles the cursor stayed at the same value while a
+# pending batch waited -- an EVENT count, not elapsed time, which fires the same on a
+# slow and a fast machine (time would misfire on one and never fire on the other). At
+# the threshold, print WHY and exit. The report goes to STDOUT deliberately: the
+# watcher's stderr is /dev/null in every launcher we ship (#691) and the Monitor tool
+# surfaces only stdout as an event, so a reason on stderr would share the fate of the
+# delivery it reports on -- exactly the invisibility being fixed. It is a plain
+# "agmsg watch:" line, NOT the "ts | team | from -> to | body" delivery shape, so a
+# reader does not mistake it for a message. Exiting (rather than looping) makes "the
+# monitor stopped" visible; a watcher that ends without a reason cannot be told from a
+# crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
+# would silently disable the very guard against silence.
+STUCK_THRESHOLD=3
+STUCK_MAP=""   # space-separated entries "<pair><US><cursor><US><count>" (US = \x1f)
+
 while true; do
   # The installation changed under us (#684). Say it on STDOUT, not stderr:
   # stdout is the delivery channel the session is reading, and this watcher's
@@ -810,6 +829,40 @@ while true; do
     READ_CURSOR="$(storage_read_cursor_get "$pair_team" "$pair_agent" 2>/dev/null || true)"
     [ -n "$READ_CURSOR" ] || READ_CURSOR=0
     OUT="$(storage_watch_after "$READ_CURSOR" "$pair_team:$pair_agent" 2>/dev/null || true)"
+    # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
+    # before the loop). When OUT is non-empty the pair has pending rows; if READ_CURSOR
+    # is UNCHANGED from the previous cycle, delivery did not advance it -- count that.
+    # At the threshold, say why on stdout and exit. When OUT is empty the pair is caught
+    # up, so drop its tracker and a future backlog starts a fresh count.
+    _agmsg_pair_key="$pair_team:$pair_agent"
+    if [ -n "$OUT" ]; then
+      _agmsg_prev_c=""; _agmsg_prev_n=0; _agmsg_rest=""
+      for _agmsg_e in $STUCK_MAP; do
+        case "$_agmsg_e" in
+          "$_agmsg_pair_key"$'\x1f'*) IFS=$'\x1f' read -r _ _agmsg_prev_c _agmsg_prev_n <<< "$_agmsg_e" ;;
+          *) _agmsg_rest="${_agmsg_rest:+$_agmsg_rest }$_agmsg_e" ;;
+        esac
+      done
+      if [ "$_agmsg_prev_c" = "$READ_CURSOR" ]; then
+        _agmsg_n=$((_agmsg_prev_n + 1))
+      else
+        _agmsg_n=1
+      fi
+      if [ "$_agmsg_n" -ge "$STUCK_THRESHOLD" ]; then
+        _agmsg_bytes="$(printf '%s' "$OUT" | wc -c | tr -d ' ')"
+        printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
+          "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
+        cleanup
+        exit 0
+      fi
+      STUCK_MAP="${_agmsg_rest:+$_agmsg_rest }$(printf '%s\x1f%s\x1f%s' "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n")"
+    else
+      _agmsg_rest=""
+      for _agmsg_e in $STUCK_MAP; do
+        case "$_agmsg_e" in "$_agmsg_pair_key"$'\x1f'*) ;; *) _agmsg_rest="${_agmsg_rest:+$_agmsg_rest }$_agmsg_e" ;; esac
+      done
+      STUCK_MAP="$_agmsg_rest"
+    fi
     if [ -n "$OUT" ]; then
     # The quote is held in a variable, never written as \' in the pattern: bash 3.2
     # (macOS /bin/bash) keeps the backslash of a \' REPLACEMENT, so the inline form
@@ -817,17 +870,34 @@ while true; do
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
     _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
-    ROWS="$(agmsg_sqlite ':memory:' "
-      SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.id'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.at'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.team'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.from'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.to'),'') || char(31) ||
-             replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||
-             COALESCE(json_extract(value,'\$.cursor'),'')
-      FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
-    " 2>/dev/null || true)"
+    # #777/#1045: build the statement into a temp file and pass it on STDIN, the way
+    # history.sh (#899) already does. Interpolating the pending batch into the SQL and
+    # handing the whole string to sqlite3 as ONE argv element exceeds the per-argument
+    # length ceiling once a backlog (or a single long body) grows past it; the call then
+    # fails, and because the failure was swallowed here the cursor never advanced and the
+    # SAME oversized batch came back every cycle -- a silent, self-locking outage. The
+    # temp file is removed inline (no EXIT trap, which would displace the watcher's own
+    # cleanup trap); the stuck-cursor guard below is the backstop for any OTHER cause.
+    _agmsg_watch_sql="$(mktemp "${TMPDIR:-/tmp}/agmsg-watch-rows.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$_agmsg_watch_sql" ]; then
+      {
+        printf "%s\n" "SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.id'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.at'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.team'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.from'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.to'),'') || char(31) ||"
+        printf "%s\n" "       replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.cursor'),'')"
+        printf "FROM json_each('"
+        printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
+        printf "');\n"
+      } > "$_agmsg_watch_sql"
+      ROWS="$(agmsg_sqlite ':memory:' < "$_agmsg_watch_sql" 2>/dev/null || true)"
+      rm -f "$_agmsg_watch_sql"
+    else
+      ROWS=""
+    fi
 
     FINAL_CURSOR=""
     DELIVERED_IDS=()
