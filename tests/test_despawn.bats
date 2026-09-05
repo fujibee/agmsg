@@ -325,7 +325,12 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
   # this it asks whatever tmux happens to be on the machine — which answered
   # `gone` about a pane id it had never heard of, and the record was deleted on
   # that. Measured here before it was noticed anywhere else.
-  PATH="$bindir:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --timeout 10 >/dev/null 2>&1 || true
+  # DESPAWN_BIN (optional) is prepended for the CALLER only, never for the
+  # watcher: a stub that has to break one of despawn's own syscalls must not also
+  # break the watcher's unrelated cleanup, or the test measures two things.
+  DESPAWN_RC=0
+  PATH="${DESPAWN_BIN:+$DESPAWN_BIN:}$bindir:$PATH" bash "$SCRIPTS/despawn.sh" \
+    team leader alice --timeout 10 >"$RUN/despawn.out" 2>"$RUN/despawn.err" || DESPAWN_RC=$?
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$WPID" 2>/dev/null || break; sleep 0.5; done
   kill "$WPID" 2>/dev/null || true; wait "$WPID" 2>/dev/null || true
 }
@@ -452,6 +457,39 @@ EOF
 # that confirmed nothing), and the test above is the one that covers the new
 # code. Saying so because a name that implies the other branch is how a test gets
 # counted as coverage it does not provide.
+@test "despawn: a settled 'gone' that could not delete the record is NOT ok (#1051)" {
+  # Whether the record MAY go and whether it WENT are different questions, and
+  # this branch answered only the first: `rm -f ... || true`, then status=ok. A
+  # record that outlives the pane it names is exactly what --force then acts on,
+  # so reporting success here hands the next caller a wrong authority — the same
+  # shape as the bug this whole change is about, one layer further out.
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux "$bin"                       # list-panes prints nothing -> settled `gone`
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:/tmp/fake-tmux-socket:%%9\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  # Break the deletion itself, for the caller only. The fix asserts the STATE of
+  # the record rather than rm's exit code, so a stub that exits non-zero AND one
+  # that lies with exit 0 are both caught — this one does both at once.
+  local dbin="$BATS_TEST_TMPDIR/dbin"; mkdir -p "$dbin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dbin/rm"      # succeeds, removes nothing
+  chmod +x "$dbin/rm"
+
+  DESPAWN_BIN="$dbin" _despawn_member_with_env "$bin" \
+    TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%9
+
+  # Positive control: the terminal really was asked, so `gone` is the settled
+  # answer and this test is exercising the delete branch, not an earlier refusal.
+  grep -Fq 'list-panes' "$bin/tmux.log"
+  # The record did survive — the premise of the assertions below.
+  [ -f "$rec" ]
+
+  refute grep -q 'status=ok' "$RUN/despawn.out"
+  grep -q 'note=record-not-removed' "$RUN/despawn.out"
+  [ "$DESPAWN_RC" -ne 0 ]
+}
+
 @test "despawn: a free lock with a record still reports needs-force (#1051, pre-existing branch)" {
   local bin="$BATS_TEST_TMPDIR/bin"
   _stub_tmux_close_fails "$bin"

@@ -439,23 +439,64 @@ terminal_pane_state() {
   [ "$vrc" -eq 0 ] || { echo unknown; return 10; }
   [ "$valid" = 1 ] || { echo unknown; return 10; }
 
-  local iesc q jtype jtrc hit hrc
+  # `gone` is the ONLY answer that deletes a placement record, so it has to be
+  # earned the same way `_herdr_pane_for_session` earns "not among": the claim is
+  # about the WHOLE set, so it is honest only when EVERY entry's membership is
+  # DECIDABLE. An array whose entries were never inspected proves nothing — a
+  # target hiding in an entry this driver cannot read is exactly the case that
+  # must not come back as `gone`.
+  #
+  # DECIDABLE here, for a pane_id question (narrower than the session question,
+  # which also has to recognize a session-less pane by structure): the entry is an
+  # object, carries a pane_id in the MEASURED grammar, and carries the fixed
+  # identity anchor that positively marks it a real herdr pane. Both known kinds —
+  # a session entry and a bare pane — satisfy this, because both carry a pane_id;
+  # anything else (a non-object entry, a missing/ungrammatical pane_id, an
+  # unanchored shape) is drift, and drift is `unknown`, never `gone`.
+  #
+  # `hit` is deliberately LOOSER than `det`: an exact pane_id match is evidence the
+  # pane exists whatever else the entry looks like, and `present` keeps the record.
+  # The asymmetry is the point — the cheap answer is permissive, the destructive
+  # one is not.
+  local iesc q jtype jtrc out orc alen det hit
   iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
   for q in '$.result.agents' '$' '$.agents' '$.result'; do
     jtrc=0
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
     [ "$jtrc" -eq 0 ] || { echo unknown; return 10; }
     [ "$jtype" = array ] || continue
-    hrc=0
-    hit="$(sqlite3 :memory: "
-      SELECT EXISTS(
-        SELECT 1 FROM json_each('$jesc', '$q')
-         WHERE json_extract(value, '\$.pane_id') = '$iesc'
-      );" 2>/dev/null)" || hrc=$?
-    [ "$hrc" -eq 0 ] || { echo unknown; return 10; }
-    if [ "$hit" = 1 ]; then echo present; return 0; fi
-    echo gone
-    return 0
+    orc=0
+    out="$(sqlite3 :memory: "
+      WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           -- ALIASED (e) so the correlated json_each in the anchor test binds
+           -- e.value per row; a bare json_each(value) does not correlate.
+           tagged(pane_ok, anchor_ok, pid) AS (
+             SELECT
+               CASE WHEN json_type(e.value,'\$.pane_id') = 'text'
+                 AND json_extract(e.value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               THEN 1 ELSE 0 END,
+               CASE WHEN json_type(e.value,'\$.agent') IS NOT NULL
+                 AND json_type(e.value,'\$.terminal_id') IS NOT NULL
+                 AND json_type(e.value,'\$.tab_id') IS NOT NULL
+                 AND json_type(e.value,'\$.workspace_id') IS NOT NULL
+               THEN 1 ELSE 0 END,
+               json_extract(e.value,'\$.pane_id')
+             FROM entries e WHERE json_type(e.value) = 'object'),
+           det(x) AS (SELECT 1 FROM tagged WHERE pane_ok = 1 AND anchor_ok = 1),
+           hit(x) AS (SELECT 1 FROM tagged WHERE pid = '$iesc' LIMIT 1)
+      SELECT (SELECT count(*) FROM entries),
+             (SELECT count(*) FROM det),
+             (SELECT count(*) FROM hit)" 2>/dev/null)" || orc=$?
+    [ "$orc" -eq 0 ] || { echo unknown; return 10; }
+    IFS='|' read -r alen det hit <<< "$out"
+    if [ "${hit:-0}" -gt 0 ]; then echo present; return 0; fi
+    # No match. Not-present is honest only if every entry was decidable.
+    # Empty array: det == alen == 0 -> gone, which is correct (no panes at all).
+    if [ "${det:-0}" -eq "${alen:-0}" ]; then echo gone; return 0; fi
+    echo unknown
+    return 10
   done
   # No array at any candidate path: the list was readable JSON but not a shape
   # this driver knows, which is "could not answer", not "not in it".

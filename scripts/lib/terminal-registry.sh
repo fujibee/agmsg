@@ -372,8 +372,13 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
       case "$id" in
         *:*) _sock="${id%:*}"; id="${id##*:}"
              [ -n "$_sock" ] || return 1
-             # No whitespace or control bytes in the path we would hand to `-S`.
-             case "$_sock" in *[[:space:]]*) return 1 ;; esac ;;
+             # What breaks a record is a TAB or a newline — it is one TAB-separated
+             # line — not an ordinary space, and socket paths under a home
+             # directory containing a space are perfectly normal. So reject the
+             # CONTROL bytes (TAB 0x09, LF, CR and the rest) and let 0x20 through:
+             # [[:cntrl:]] is exactly that split, where [[:space:]] also swallows
+             # the space and would refuse a legitimate path.
+             case "$_sock" in *[[:cntrl:]]*) return 1 ;; esac ;;
       esac
       case "$id" in %*|@*) : ;; *) return 1 ;; esac
       rest="${id#?}"

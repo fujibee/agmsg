@@ -184,6 +184,18 @@ _pane_state="$(recorded_pane_state)"
 case "$_pane_state" in
   no-record|gone)
     rm -f "$SPAWN_REC" 2>/dev/null || true
+    # Asking whether the record MAY go and checking that it WENT are two
+    # different questions, and this branch used to answer only the first. A
+    # record left behind (a read-only run dir, a permission failure) outlives
+    # the pane it names, and the next `--force` reads it as a live placement and
+    # tries to tear down a pane that is already gone — the same "reported
+    # success, left the caller a wrong authority" shape this whole change is
+    # about. So assert the STATE, not `rm`'s exit code.
+    if [ -e "$SPAWN_REC" ]; then
+      echo "despawn: '$NAME' was torn down, but its placement record at $SPAWN_REC could not be removed. The record now names a pane that is gone, and --force would act on it; delete it by hand." >&2
+      echo "status=error name=$NAME team=$TEAM note=record-not-removed after=${waited}s"
+      exit 1
+    fi
     echo "status=ok name=$NAME team=$TEAM after=${waited}s"
     ;;
   present)

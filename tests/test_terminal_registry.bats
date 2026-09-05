@@ -1824,3 +1824,89 @@ EOF
   [ "$status" -eq 13 ]
   [ "$output" = unknown ]
 }
+
+# --- herdr pane_state: `gone` is a claim about the WHOLE list (#1051) ---------
+#
+# The first version asked only "is the container an array?" and then read "no
+# entry matched" as absence. An array whose entries were never inspected proves
+# nothing: a target sitting in an entry this driver cannot read came back as
+# `gone`, and `gone` is the answer that deletes the record. Aligned with
+# `_herdr_pane_for_session`, which only says not-among when EVERY entry is
+# decidable.
+#
+# A herdr `agent list` carrying the two MEASURED decidable entries plus one raw
+# caller-supplied entry, so a test can add exactly one undecidable entry and
+# nothing else. The two fixed entries both carry a grammatical pane_id and the
+# identity anchor (agent/terminal_id/tab_id/workspace_id), so on their own the
+# list is fully decidable.
+_fake_herdr_list_anchored_plus() {
+  local raw="$1"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '"'"'{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"w1:p4","terminal_id":"tm0","tab_id":"t0","workspace_id":"w0"},{"agent":"codex","agent_status":"working","tab_id":"t1","terminal_id":"tm1","workspace_id":"w1","pane_id":"w5:p3"}%s]}}'"'"'; exit 0; }\nexit 0\n' "$raw" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "pane_state (herdr): the pane is in the list -> present (#1051)" {
+  _fake_herdr_list_anchored_plus ""
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w5:p3"
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+}
+
+@test "pane_state (herdr): every entry decidable and no match -> gone (#1051)" {
+  # The positive control for the one below: with the SAME two entries and nothing
+  # added, an absent pane is honestly gone. Without this, the `unknown` test
+  # cannot tell "the extra entry made it undecidable" from "this driver can never
+  # say gone".
+  _fake_herdr_list_anchored_plus ""
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w9:p9"
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "pane_state (herdr): ONE undecidable entry and no match -> unknown, not gone (#1051)" {
+  # Differs from the control above by exactly one array element: an object with a
+  # grammatical pane_id but no identity anchor, so this driver cannot say it is a
+  # herdr pane at all. The target could be that entry under a shape we do not
+  # read, so absence is not established — and `gone` here would delete a live
+  # member's record.
+  _fake_herdr_list_anchored_plus ',{"pane_id":"w2:p2"}'
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w9:p9"
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "pane_state (herdr): an undecidable entry does not hide a MATCH (#1051)" {
+  # `hit` is deliberately looser than the decidability test: an exact pane_id
+  # match is evidence the pane exists whatever else the list looks like, and
+  # `present` keeps the record. Being permissive toward the cheap answer is not
+  # the same mistake as being permissive toward the destructive one.
+  _fake_herdr_list_anchored_plus ',{"pane_id":"w2:p2"}'
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w2:p2"
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+}
+
+# --- a socket path may contain a space (#1051) --------------------------------
+#
+# The record is one TAB-separated line, so what breaks it is a TAB or a newline.
+# An ordinary space does not, and a socket under a home directory with a space in
+# it is perfectly normal — refusing 0x20 would reject a legitimate ref.
+@test "ref grammar: a tmux socket path containing a SPACE is accepted (#1051)" {
+  [ "$(agmsg_terminal_ref_terminal 'tmux:/Users/A B/tmp/s:%3')" = 'tmux' ]
+  [ "$(agmsg_terminal_ref_id 'tmux:/Users/A B/tmp/s:%3')" = '/Users/A B/tmp/s:%3' ]
+}
+
+@test "ref grammar: a tmux socket path containing a TAB or newline is refused (#1051)" {
+  # These are the bytes that actually corrupt the record's framing — it is one
+  # TAB-separated line — and they are the only ones that need refusing.
+  local bad
+  for bad in "$(printf 'tmux:/tmp/a\tb:%%3')" "$(printf 'tmux:/tmp/a\nb:%%3')"; do
+    run agmsg_terminal_ref_terminal "$bad"
+    [ "$status" -ne 0 ] || { echo "FAIL: control byte accepted in '$bad'"; return 1; }
+    [ -z "$output" ]    || { echo "FAIL: printed '$output'"; return 1; }
+  done
+}
