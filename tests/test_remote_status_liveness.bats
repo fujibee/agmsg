@@ -715,7 +715,7 @@ write_windows_spelling_fixtures() {
 
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
-    bash "$SCRIPTS/remote.sh" sync start testteam
+    AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not become ready"* ]]
   [ ! -e "$TEST_SKILL_DIR/run/remote-sync.testteam.pid" ]
@@ -771,7 +771,7 @@ write_unownable_ps_fixture() {
 
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
-    bash "$SCRIPTS/remote.sh" sync start testteam
+    AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
 
   child_pid="$(cat "$child_pid_file")"

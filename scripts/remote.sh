@@ -2074,6 +2074,36 @@ _remote_sync_engine_status() {
   fi
 }
 
+# How many turns the readiness poll takes before giving up.
+#
+# THE SHIPPED VALUE IS 1600 AND THIS DOES NOT CHANGE IT. The number is lifted out
+# of the loop so a test can ask for it without running it, and so the regression
+# suites can reach the give-up path without paying for the full ceiling -- five
+# of them were spending 12 minutes of a 25-minute CI shard on a wait whose length
+# none of them are about.
+#
+# `AGMSG_TEST_SYNC_READY_TURNS` is a test seam. A value that is not a positive
+# integer falls back to the shipped number rather than to zero: a resolver that
+# quietly answered nothing would turn every one of those suites back into a full
+# ceiling run, which is the failure this exists to remove.
+_remote_sync_ready_turns() {
+  local want="${AGMSG_TEST_SYNC_READY_TURNS:-}"
+  # Unset, or not written in digits at all.
+  case "$want" in
+    ''|*[!0-9]*) printf '1600'; return ;;
+  esac
+  # AND ZERO IS NOT A CEILING. `0` is digits-only, so a guard that only rejects
+  # non-digits accepts it and the poll ends before it begins -- every suite that
+  # drives the give-up path would then reach its assertions without the engine
+  # having been waited on at all, and stay green while measuring nothing. That is
+  # the failure this fallback is described as preventing, and the description was
+  # true of `oops` and false of `0` until review caught it. `00` counts too.
+  case "$want" in
+    *[1-9]*) printf '%s' "$want" ;;
+    *)       printf '1600' ;;
+  esac
+}
+
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
@@ -2871,7 +2901,9 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  local ready_turns
+  ready_turns="$(_remote_sync_ready_turns)"
+  while [ "$i" -lt "$ready_turns" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
