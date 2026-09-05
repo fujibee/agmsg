@@ -51,6 +51,8 @@ elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
   printf 'herdr visible text\n'
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  exit "\${HERDR_PANE_RENAME_RC:-0}"
 elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
   # The key rename. Failable per test (HERDR_AGENT_RENAME_RC), because "does it
   # fire when it should" and "does it answer ok when it failed" are different
@@ -1350,8 +1352,9 @@ M
   [ "$status" -ne 0 ]
 
   # It really did get as far as trying, rather than failing earlier for some
-  # other reason: the label was set first, and the key was attempted.
-  grep -Fq 'herdr [pane] [rename] [wC:p4] [keyteam:alice]' "$ARGV_LOG"
+  # other reason. The evidence used to be "the label was set first" — that was an
+  # artefact of the old order, and the key now goes first precisely so a failed
+  # label cannot take addressing down with it.
   grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
 }
 
@@ -1376,4 +1379,58 @@ M
 
   run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
   [ "$status" -eq 0 ]
+}
+
+# --- the label is decoration: its failure must not cost the addressing (#1044) -
+#
+# Reported by a reviewer against the previous revision: with the label renamed
+# first and its failure fatal, a failed decoration returned 13 before the key was
+# ever attempted. The requirement — a member's pane is never without a name —
+# broke through a second door, and the fix for the first door (the key's failure
+# no longer swallowed) did not touch it.
+@test "a failed LABEL rename still leaves the member addressable (#1044)" {
+  _install_fake_herdr "sess-l"
+  export HERDR_ENV=1
+  export HERDR_PANE_RENAME_RC=1     # the decoration fails
+  export HERDR_AGENT_RENAME_RC=0    # the key would succeed, if it is reached
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-l" labelteam alice /proj/A claude-code
+  # Not fatal: the caller writes the placement record only on 0, and that record
+  # is the other half of addressing — so failing here would throw away exactly
+  # what this test is about.
+  [ "$status" -eq 0 ]
+
+  # The key was set. This is the assertion the previous revision could not pass.
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+  # ...and the label really was attempted and really did fail, or the line above
+  # proves nothing about this scenario.
+  grep -Fq 'herdr [pane] [rename]' "$ARGV_LOG"
+}
+
+# --- a key that cannot be DERIVED is a failure, not an ok (#1044) -------------
+#
+# The commit that made the key fatal claimed this branch in a comment and left it
+# unguarded: a reviewer's mutation that returned ok for an underivable key failed
+# no test. A comment is not a check.
+#
+# `_herdr_internal_key` can fail three ways — the lib directory not resolving,
+# `hash.sh` missing, and the hash itself failing. This drives the third: a
+# `agmsg_sha256` that is present and returns non-zero. The other two are the same
+# `return 1` one line apart and are not separately exercised.
+@test "a key that cannot be derived fails the naming (#1044)" {
+  _install_fake_herdr "sess-h"
+  export HERDR_ENV=1
+  unset AGMSG_TERMINAL_NAMING
+
+  # Present, so the `command -v` guard passes, and failing, so the hash does not.
+  agmsg_sha256() { return 1; }
+  export -f agmsg_sha256 2>/dev/null || true
+
+  run agmsg_terminal_name_self "sess-h" hashteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+
+  # Nothing was renamed: no key could be built, so the member is not addressable
+  # and saying `ok` would have claimed that it was.
+  refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
 }

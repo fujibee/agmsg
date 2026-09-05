@@ -534,22 +534,24 @@ _herdr_internal_key() {
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$team:$name"
-  if [ "$mode" != key ]; then
-    herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
-  fi
-  # The key is not optional, in either mode. It is what peek/poke resolve the
-  # member through, so failing to set it IS the member becoming unreachable —
-  # the defect this issue is about. This used to be `|| true`, which made the
-  # severities exactly backwards: the decoration was fatal and the addressing was
-  # swallowed, so the "a name is never absent" requirement held strictly in the
-  # reduced mode and not in the default one everybody uses.
-  #
-  # A key that cannot be DERIVED is treated the same way, and that is a change on
-  # a real condition: `_herdr_internal_key` returns non-zero when no SHA-256 tool
-  # is available. Reporting ok there would say the member is addressable when no
-  # key was set — the same lie by a different route.
+
+  # THE KEY FIRST, and its failure is fatal. It is what `peek` and `poke` resolve
+  # the member through; the label is what a person reads. Ordering the label
+  # first meant a failed decoration returned 13 before the key was ever
+  # attempted, so the requirement this driver is here to serve — a member's pane
+  # is never without a name — broke through the other door. tmux has always had
+  # this order; herdr was the one driver that put the ornament in front.
   key="$(_herdr_internal_key "$team" "$name")" || { echo runtime_error; return 13; }
   herdr agent rename "$id" "$key" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+
+  # The label, and its failure is deliberately NOT fatal — the same shape tmux
+  # has. Not merely for symmetry: the caller writes the placement record only
+  # when this returns 0, and that record is the other half of addressing. A
+  # non-zero here would therefore throw away the very thing the reordering above
+  # exists to protect, for a decoration.
+  if [ "$mode" != key ]; then
+    herdr pane rename "$id" "$label" >/dev/null 2>&1 || true
+  fi
   echo ok
   return 0
 }
