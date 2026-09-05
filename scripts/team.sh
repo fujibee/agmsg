@@ -35,16 +35,11 @@ if [ ! -f "$CONFIG" ]; then
   exit 1
 fi
 
-# Where each member's pane is, when we know. A pane with no name is invisible
-# from inside agmsg -- the #1044 dogfood found one by reading the terminal's own
-# JSON, because nothing here reported it -- and that is also why there was no way
-# to assert the naming requirement. This column is what makes it checkable.
-#
-# What is printed is the PLACEMENT RECORD, which is a recorded fact: the terminal
-# and the pane id that peek/poke resolve a member through. The visible label is
-# NOT printed, because reading it back means asking the terminal and no read op
-# for it exists; inferring it from the record would report a claim as an
-# observation, and under AGMSG_TERMINAL_NAMING=off it would be wrong.
+# Placement starts from the recorded terminal and pane that peek/poke resolve.
+# The team status layer then asks that terminal for its current location,
+# activity, and independently observable identity fields. Recorded and observed
+# facts stay separate so a missing pane or disabled visible naming cannot be
+# presented as a match inferred from configuration.
 #
 # The source carries the errexit lift: a failure inside a sourced file fires this
 # script's `set -e` on bash 3.2, and a roster must still list its members on a

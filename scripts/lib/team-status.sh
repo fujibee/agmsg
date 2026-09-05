@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Pure rendering helpers for team.sh. Collection stays in team.sh and the
-# terminal drivers; these functions only turn already-observed fields into the
-# human-facing compact form.
+# Collection, comparison, repair, and rendering helpers for team.sh. Terminal-
+# specific observation and readiness proofs stay in the drivers; this layer
+# joins them into one backend-neutral roster status.
 
 # Resolve a recorded terminal/pane through the terminal driver's location read.
 # Output is always three TAB-separated, non-empty fields: terminal, pane, and
