@@ -416,7 +416,7 @@ _doctor_scan_pair() {
   # delivery.sh's status wording knows to check.
   local delivery_status=0 delivery_output="" mode_line="" mode="off"
   if [ "$type_has_delivery" -eq 1 ]; then
-    delivery_output="$(bash "$SCRIPT_DIR/delivery.sh" status "$type" "$project" 2>&1)" || delivery_status=$?
+    delivery_output="$(bash "$SCRIPT_DIR/delivery.sh" status "$type" "$project" "$FILTER_TEAM" 2>&1)" || delivery_status=$?
     mode_line="$(printf '%s\n' "$delivery_output" | head -1)"
     mode="${mode_line#mode: }"
 
@@ -557,10 +557,19 @@ _doctor_scan_pair() {
   # worth a look). On a real installation this was 27 of the report's
   # groups, each spending 6 lines to say "nothing here" -- unreadable at
   # real scale even once the exit-code bug above stops making them warnings.
+  #
+  # A per-identity "Watcher: team/agent not running" line (grok-build,
+  # claude-code, ...) is the same kind of nothing -- it's the terminal,
+  # idle branch of agmsg_delivery_print_watcher_status, mutually exclusive
+  # with the "alive" and "no exclusive receiver (broad watcher alive, ...)"
+  # lines that ARE worth a look. Excluded from the count here only, same as
+  # the global watch-processes line above; the full block below still shows
+  # it when this pair isn't boring for some other reason.
   local _warn_count_after
   _warn_count_after="$(printf '%s\n' "$WARNINGS" | grep -c . || true)"
   local _delivery_line_count
-  _delivery_line_count="$(printf '%s\n' "$delivery_output" | grep -c . || true)"
+  _delivery_line_count="$(printf '%s\n' "$delivery_output" \
+    | grep -v -E '^Watcher: .+ not running$' | grep -c . || true)"
   local _boring=0
   if [ "$_any_owner" -eq 0 ] \
     && [ "$_warn_count_after" -eq "$_warn_count_before" ] \
