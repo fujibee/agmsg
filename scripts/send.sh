@@ -1,15 +1,141 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: send.sh <team> <from> <to> <message> [--force]
+# Usage: send.sh <team> <from> <to> --stdin [--force]
+#    or: send.sh <team> <from> <to> <message> [--force]   (deprecated)
+#
+# #378: a message body passed positionally goes through the SENDER's shell
+# before it ever reaches this script — an unescaped `$(...)` in a quoted
+# body can execute, and backticks can be silently evaluated/emptied. On
+# Windows/MSYS a positional body is additionally routed through MSYS's
+# argv-conversion path (build_argv -> globify), which truncates silently at
+# exactly 8186 bytes (fixed MAXPATHLEN 8192 buffer in glob.cc). --stdin reads
+# the body verbatim from a file descriptor instead of argv, so a body sent
+# that way meets neither hazard — no shell re-interpretation, no argv size
+# limit.
+#
+# That makes --stdin the canonical way to send; it does not remove the
+# hazard, because the positional form still exists and still carries both.
+# The positional form is DEPRECATED: it keeps working for now, but a body
+# composed by an agent must not use it. Retiring it is a later, breaking
+# stage of #378 — this stage only moves every first-party example onto the
+# safe path.
+#
+# Three literal bodies DO break here, and `--` is their migration syntax:
+# `--` and `--stdin` are now consumed as a terminator or a mode selector, and
+# `--force` is now rejected outright (it used to arrive as the body, because
+# only argument 5 was checked for the flag). Send any of them — or any other
+# body that happens to start with `--` — as
+# `send.sh <team> <from> <to> -- <body>` — including `-- --`. Every other
+# positional body is unaffected.
 
-TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
+USAGE="Usage: send.sh <team> <from> <to> --stdin [--force]
+   or: send.sh <team> <from> <to> <message> [--force]   (deprecated, see #378)"
+
+TEAM="${1:?$USAGE}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
-BODY="${4:?Missing message body}"
+shift 3
+
+MODE="positional"
+BODY=""
 FORCE=0
-if [ "${5:-}" = "--force" ]; then
+
+if [ $# -eq 0 ]; then
+  echo "Error: missing message body. Provide it positionally or via --stdin." >&2
+  exit 1
+fi
+
+case "$1" in
+  --)
+    # Option terminator: everything after it is the body, verbatim. Without
+    # this, adding --stdin silently broke a body that happens to BE the
+    # literal string "--stdin" (or "--force"), which was a perfectly valid
+    # positional body before this change. `--` is the standard escape hatch
+    # and keeps that case working.
+    shift
+    if [ $# -eq 0 ]; then
+      echo "Error: missing message body after '--'." >&2
+      exit 1
+    fi
+    BODY="$1"
+    shift
+    ;;
+  --stdin)
+    MODE="stdin"
+    shift
+    ;;
+  --force)
+    echo "Error: missing message body before --force. Provide it positionally or via --stdin." >&2
+    exit 1
+    ;;
+  *)
+    # A positional body that starts with '--' but isn't a mode this script
+    # recognizes (e.g. a misspelled --stdinn, or a future flag typo) used
+    # to be stored literally as the message — silently accepting whatever the
+    # caller typed instead of failing loudly on the likely mistake. Fail
+    # closed instead: require the explicit '--' separator for any body that
+    # looks like an option. A body that legitimately IS an option-like
+    # string still works via `-- <body>`, same as the recognized flags
+    # above.
+    case "$1" in
+      --*)
+        echo "option-like body: use -- separator" >&2
+        exit 1
+        ;;
+    esac
+    BODY="$1"
+    shift
+    ;;
+esac
+
+# Reject combining two input modes instead of silently picking one — e.g. a
+# positional body followed by --stdin.
+if [ "${1:-}" = "--stdin" ]; then
+  echo "Error: the message body was already given (positional argument or --stdin) — cannot also pass $1. Provide the body exactly one way." >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--force" ]; then
   FORCE=1
+  shift
+fi
+
+if [ $# -gt 0 ]; then
+  echo "Error: unexpected extra argument(s) after the message: $*" >&2
+  exit 1
+fi
+
+if [ "$MODE" = "positional" ] && [ -z "$BODY" ]; then
+  echo "Error: missing message body." >&2
+  exit 1
+fi
+
+# Read the body verbatim (no word-splitting, no glob expansion). `IFS= read
+# -r -d ''` slurps to EOF without stripping leading or trailing
+# whitespace/newlines — deliberately: whatever bytes are on stdin land in the
+# message exactly as given, including any trailing newline(s). If you don't
+# want a trailing newline in the sent message, don't put one in the input.
+#
+# The exit status is load-bearing, so it is checked rather than discarded:
+# `read` exits 0 only when it actually found its -d delimiter — which here
+# is NUL — and non-zero when it reached EOF without one. EOF is the normal,
+# complete read. A zero exit therefore means exactly one thing: the input
+# carries a NUL byte, and BODY already stops there, because a bash string
+# cannot hold one. Storing that shortened value and exiting 0 would tell the
+# caller the whole body was sent when it was not, so a NUL-bearing body is
+# refused instead. (A positional <message> cannot hit this: argv strings
+# cannot carry NUL either, so such a body never reaches this script intact
+# in the first place.)
+if [ "$MODE" = "stdin" ]; then
+  if IFS= read -r -d '' BODY; then
+    echo "Error: --stdin input contains a NUL byte; a message body must be text, and everything from that byte on would be lost. Nothing was sent." >&2
+    exit 1
+  fi
+  if [ -z "$BODY" ]; then
+    echo "Error: --stdin was given but no data was read from standard input." >&2
+    exit 1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

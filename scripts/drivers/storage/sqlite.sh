@@ -304,7 +304,14 @@ _sqlite_message_sent_sql() {
   local team="$1" from="$2" to="$3" body="$4" id="$5" at="$6"
   local tl fl ol bl il al
   tl="$(_sqlite_lit "$team")"; fl="$(_sqlite_lit "$from")"; ol="$(_sqlite_lit "$to")"
-  bl="$(_sqlite_lit "$body")"; il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
+  # #378: command substitution eats ALL trailing newlines of what it captures.
+  # team/from/to/id/at can never end in one (validate.sh / generated values),
+  # but body legitimately can — --stdin reads it verbatim. Append a
+  # non-newline sentinel before escaping so the trailing newline(s) sit mid-
+  # capture, then strip the sentinel — the jsonl driver already preserves them
+  # (jq --arg), so without this the two drivers disagree about the same send.
+  bl="$(_sqlite_lit "${body}X")"; bl="${bl%X}"
+  il="$(_sqlite_lit "$id")"; al="$(_sqlite_lit "$at")"
   printf '%s\n' "
     BEGIN IMMEDIATE;
     INSERT INTO messages (team,from_agent,to_agent,body,created_at)
