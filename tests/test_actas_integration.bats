@@ -243,9 +243,9 @@ fake_session() {
   # Assert the observation itself. The loop above cannot fail: exhausted and
   # satisfied leave identical state.
   run cat "$BATS_TEST_TMPDIR/old.err"
-  [[ "$output" == *"T/alice"* ]]
-  [[ "$output" == *"sid-new"* ]]
-  [[ "$output" == *"no longer owns that role"* ]]
+  [[ "$output" == *"T/alice"* ]] || return 1
+  [[ "$output" == *"sid-new"* ]] || return 1
+  [[ "$output" == *"no longer owns that role"* ]] || return 1
 
   # And it must actually stop. A watcher that logs the reason and keeps running
   # is what consumes the next message.
@@ -261,7 +261,7 @@ fake_session() {
   bash "$SKILL_DIR/scripts/send.sh" T bob alice "after the handover" >/dev/null
 
   run cat "$BATS_TEST_TMPDIR/old.out"
-  [[ "$output" != *"after the handover"* ]]
+  [[ "$output" != *"after the handover"* ]] || return 1
 
   # Still unread, so the session that now owns the role is offered it. Without
   # this, "did not print it" would also pass for a watcher that consumed the row
