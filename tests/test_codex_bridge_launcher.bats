@@ -173,6 +173,17 @@ run_launcher() {
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
 
+@test "launcher: the bridge attaches to the TUI's load of the recorded thread, not a resume of its own" {
+  # codex-monitor.sh opens the TUI on the recorded thread; the bridge must wait
+  # for that load and attach to it rather than thread/resume the thread itself
+  # (the bridge-side resume is how bridge and operator end up on different
+  # copies of one conversation, #350, and the "active writer" collision, #906).
+  put_record team alice rec-thread-1 "$PROJ" codex
+  run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q -- "--thread rec-thread-1 --wait-for-tui-thread" "$CAPTURE"
+}
+
 @test "launcher: passes the active storage override as a workspace root" {
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store"
   put_record team alice rec-thread-1 "$PROJ" codex

@@ -58,6 +58,10 @@ Options:
                           CODEX_THREAD_ID; "loaded" discovers the live TUI thread
                           via thread/loaded/list (codex 0.141+, see #170).
   --loaded-timeout <ms>   Max wait for a loaded thread to appear (default: 30000).
+  --wait-for-tui-thread   With an explicit --thread: wait (up to --loaded-timeout)
+                          until the live TUI has that thread loaded, then attach
+                          to it WITHOUT a thread/resume of our own. The TUI owns
+                          the thread; the bridge only starts turns on it.
   --turn-timeout <sec>    Idle watchdog: assume a turn ended after this many
                           seconds with no app-server activity for it at all
                           (default: 60; 0 disables). Re-armed on any
@@ -199,6 +203,7 @@ function parseArgs(argv) {
     pairs: [],
     workspaceRoots: [],
     turnTimeout: Number(process.env.AGMSG_CODEX_BRIDGE_TURN_TIMEOUT || 60),
+    waitForTuiThread: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -245,6 +250,8 @@ function parseArgs(argv) {
       opts.threadId = argv[++i];
     } else if (arg === "--loaded-timeout") {
       opts.loadedTimeout = Number(argv[++i]);
+    } else if (arg === "--wait-for-tui-thread") {
+      opts.waitForTuiThread = true;
     } else if (arg === "--inline-inbox") {
       opts.inlineInbox = true;
     } else {
@@ -1207,10 +1214,46 @@ class CodexBridge {
     }
   }
 
+  // Attach to a thread the live TUI has loaded, without resuming it ourselves.
+  //
+  // The launcher binds this bridge to the role's recorded thread, and
+  // codex-monitor.sh now opens the TUI on that same thread. Two clients on one
+  // thread is the point -- the operator sees the turns the bridge starts. The
+  // TUI is that thread's writer, and the bridge needs no resume of its own:
+  // turn/start takes only the id, which is what the no-rollout fallback below
+  // has relied on since #276. A bridge-side thread/resume is therefore at best
+  // redundant and at worst a competing writer ("already has an active writer"
+  // against Codex Desktop, #906). So: ask thread/loaded/list until the TUI's
+  // load shows up, then proceed exactly as that fallback does (idle, no
+  // resume). Give up when the TUI has not loaded it in time -- a bridge that
+  // cannot see its TUI on the thread must not deliver into a thread no one is
+  // looking at (#350's failure, by another road), and the launcher relaunches
+  // it once the TUI is there.
+  async waitForTuiThread() {
+    const deadline = Date.now() + (this.opts.loadedTimeout || 30000);
+    for (;;) {
+      const response = await this.client.request("thread/loaded/list", {});
+      const ids = response && Array.isArray(response.data) ? response.data : [];
+      if (ids.includes(this.threadId)) {
+        console.error(`codex-bridge: TUI loaded thread ${this.threadId}; attaching without a competing resume`);
+        this.threadIdle = true;
+        this.turnActive = false;
+        return;
+      }
+      if (Date.now() >= deadline) {
+        die(`TUI did not load recorded thread ${this.threadId} within the configured timeout`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
   async ensureThread() {
     if (this.threadId === "loaded") {
       this.threadId = await this.resolveLoadedThread();
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
+    } else if (this.threadId && this.opts.waitForTuiThread) {
+      await this.waitForTuiThread();
+      return;
     }
     if (this.threadId) {
       let response;

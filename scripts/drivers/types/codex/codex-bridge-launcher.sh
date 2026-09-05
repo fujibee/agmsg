@@ -757,6 +757,14 @@ EOF
   # the new ones, so no gate can bail out between the wipe and the rewrite.
   rm -f "$pidfile" "$appserver_file" "$thread_file"
 
+  # --wait-for-tui-thread: the thread is this role's recorded seat, and
+  # codex-monitor.sh opens the TUI on it. The bridge attaches once the TUI has
+  # it loaded rather than resuming it on its own: the TUI is the writer, a
+  # turn/start needs only the id, and a bridge-side resume is the "already has
+  # an active writer" collision against Codex Desktop (#906). A bridge that
+  # never sees the TUI on its thread exits instead of delivering into a thread
+  # no one is looking at (#350). A legacy request-file thread takes the same
+  # path: it too names a thread a live TUI has opened.
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
     --workspace-root "$STORAGE_DIR" \
@@ -765,6 +773,7 @@ EOF
     --type "$TYPE" \
     "${bridge_pairs[@]}" \
     --thread "$thread_id" \
+    --wait-for-tui-thread \
     --app-server "$req_app_server" \
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
