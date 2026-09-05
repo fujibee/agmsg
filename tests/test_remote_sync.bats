@@ -22,6 +22,21 @@ prepare_push() {
   printf '%s\n' "$PREPARE" | storage_sync_prepare_push demo "$SERVER_ID" "$TEAM_ID" 1 "${1:-100}"
 }
 
+# `_sqlite_sync_apply_fail` closes fd 3 with `exec 3<&- 2>/dev/null`. `exec` with
+# no command word runs nothing -- it applies its redirections to the shell
+# itself, and they outlive the statement. So every later write to stderr in that
+# shell went to /dev/null, and the first thing written after it is
+# `_sqlite_sync_why`: the line #911 exists to print. The two messages emitted
+# *before* the close still arrived, so the output looked almost right.
+@test "sync contract: a failed apply still names the check that returned 13 (#911)" {
+  local rc=0
+  printf 'not json at all\n' |
+    storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 \
+      >/dev/null 2>"$BATS_TEST_TMPDIR/apply.err" || rc=$?
+  [ "$rc" -eq 13 ]
+  grep -q 'storage_sync_apply_pull failed at' "$BATS_TEST_TMPDIR/apply.err"
+}
+
 @test "sync contract: the builtin quote and the forking quote agree on adversarial input (#908)" {
   # storage_sync_apply_pull quotes its eleven per-message fields through
   # _sqlite_sync_lit_into (a bash expansion) where it used to fork
@@ -48,28 +63,160 @@ prepare_push() {
   [ "$_SQLITE_SYNC_LIT" = "a''b''''c" ]
 }
 
-@test "sync contract: a field containing U+0000 is refused by name, not stored mangled (#940)" {
-  # The old pipeline reported success for a body holding U+0000 and stored
-  # DIFFERENT bytes (the NUL re-spelled by jq -r and the shell's own
-  # NUL-stripping on the way to the store). A value the store cannot hold
-  # verbatim is refused now, with the record and the field named, and the
-  # page commits nothing.
-  local nul_body page db
-  nul_body=$(jq -nc '"x" + ([0]|implode) + "y"')
-  page=$(jq -nc --argjson b "$nul_body" '
-    {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440040",
+@test "sync contract: a page with one U+0000 record quarantines it and applies the rest (#940)" {
+  # #940's fix made a body holding U+0000 refuse the whole PAGE (error() in
+  # the framing jq aborts the stream mid-read, so nothing downstream of the
+  # bad record -- however many good records follow it -- ever lands). One
+  # dirty record made a team impossible to clone. This is the replacement:
+  # the record is named and quarantined, the other two apply, and the page
+  # commits (exit 0), not exit 13.
+  local nul_body clean1 dirty clean2 page result db
+  nul_body=$(jq -nc '"before" + ([0]|implode) + "after"')
+  clean1=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440050",
      server_received_at:"2026-07-20T13:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"one",created_at:"2026-07-20T13:00:00.000000Z",
+        from_agent:"alice",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"one",created_at:"2026-07-20T13:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  dirty=$(jq -nc --argjson b "$nul_body" '
+    {type:"sync_pull_message",server_seq:"2",id:"550e8400-e29b-41d4-a716-446655440051",
+     server_received_at:"2026-07-20T13:00:01.000000Z",
      envelope:{v:1,cipher:"none",key_id:null,blob:($b|@base64)},
      status:"importable",policy_revision:"0",local_security_revision:"0",
-     projection:{body:$b,created_at:"2026-07-20T13:00:00.000000Z",
+     projection:{body:$b,created_at:"2026-07-20T13:00:01.000000Z",
                  from_agent:"alice",to_agent:"bob"}}')
+  clean2=$(jq -nc '
+    {type:"sync_pull_message",server_seq:"3",id:"550e8400-e29b-41d4-a716-446655440052",
+     server_received_at:"2026-07-20T13:00:02.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"three",created_at:"2026-07-20T13:00:02.000000Z",
+        from_agent:"alice",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"three",created_at:"2026-07-20T13:00:02.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n%s\n%s\n' "$clean1" "$dirty" "$clean2" \
+    '{"type":"sync_pull_cursor","next_after":"3"}')
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page"
+  [ "$status" -eq 0 ]
+  result="$output"
+  # The page committed: the cursor advanced past the quarantined record too
+  # (#940 does not ask the caller to re-fetch the same page forever).
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].transport_cursor')" = 3 ]
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].corrupt_count')" -eq 1 ]
+  [ "$(printf '%s\n' "$result" | jq -sr \
+    '[.[]|select(.id=="550e8400-e29b-41d4-a716-446655440051")][0].status')" = corrupt_state ]
+  # The other two land; the dirty one's ID is in neither table.
+  [ "$(storage_history demo | jq -s 'length')" -eq 2 ]
+  [ "$(storage_history demo | jq -s '[.[]|select(.body=="one" or .body=="three")]|length')" -eq 2 ]
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status,reason FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440051';" \
+    | tr -d '\r')" = "corrupt_state|body contains U+0000" ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT COUNT(*) FROM sync_messages WHERE wire_id='550e8400-e29b-41d4-a716-446655440051';" \
+    | tr -d '\r')" -eq 0 ]
+  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM events WHERE body LIKE '%before%';" \
+    | tr -d '\r')" -eq 0 ]
+}
+
+@test "sync contract: U+0000 in from_agent quarantines the record the same as in body (#940)" {
+  # #940's guard checked every one of the eighteen fields, not just body.
+  # The per-record replacement must too: the field that carried the NUL is
+  # not the thing being tested here, only that ANY field having it routes
+  # the whole record to quarantine rather than erroring the page.
+  local nul_from page result db
+  nul_from=$(jq -nc '"alice" + ([0]|implode)')
+  page=$(jq -nc --argjson from "$nul_from" '
+    {type:"sync_pull_message",server_seq:"1",id:"550e8400-e29b-41d4-a716-446655440053",
+     server_received_at:"2026-07-20T13:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"hello",created_at:"2026-07-20T13:00:00.000000Z",
+        from_agent:$from,to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"hello",created_at:"2026-07-20T13:00:00.000000Z",
+                 from_agent:$from,to_agent:"bob"}}')
   run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 \
     <<<"$(printf '%s\n%s\n' "$page" '{"type":"sync_pull_cursor","next_after":"1"}')"
-  [ "$status" -eq 13 ]
-  printf '%s\n' "$output" | grep -q 'record 1: field projection.body contains U+0000'
+  [ "$status" -eq 0 ]
+  result="$output"
+  [ "$(printf '%s\n' "$result" | jq -sr '.[0].corrupt_count')" -eq 1 ]
   db=$(agmsg_db_path demo)
-  [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM messages;" | tr -d '\r')" -eq 0 ]
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status,reason FROM sync_quarantine WHERE wire_id='550e8400-e29b-41d4-a716-446655440053';" \
+    | tr -d '\r')" = "corrupt_state|body contains U+0000" ]
+  [ "$(storage_history demo | jq -s 'length')" -eq 0 ]
+}
+
+@test "sync contract: a line that is not one JSON value still fails the whole page (#940)" {
+  # Per-record quarantine is scoped to values that fromjson CAN parse but the
+  # store cannot hold. A line that is not parseable JSON at all names no
+  # record to quarantine, so it stays exit 13 for the page, unchanged from
+  # before this change.
+  local page db
+  page=$(printf '%s\n%s\n' 'not json at all' '{"type":"sync_pull_cursor","next_after":"1"}')
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 1: not one JSON value on its line'
+  db=$(agmsg_db_path demo)
   [ "$(agmsg_sqlite "$db" "SELECT COUNT(*) FROM sync_quarantine;" | tr -d '\r')" -eq 0 ]
+}
+
+@test "sync contract: U+0000 in an identity field fails the page, not just the record (identifier poisoning, review finding)" {
+  # A record's own id/wire is never stripped and quarantined: a corrupt id
+  # or server_seq cannot be trusted to name itself, let alone anything else.
+  # The concrete danger this guards against: id/wire is the WHERE key every
+  # UPDATE in this function uses. If it were stripped instead of refused, a
+  # value like "<good-uuid>" + U+0000 would strip down to an existing wire
+  # id that belongs to a DIFFERENT, legitimate record already imported --
+  # and this record's corrupt_state UPDATE would land on that unrelated row
+  # instead of failing to identify anything. Proven both ways: the page
+  # fails outright, AND the prior legitimate record it could have collided
+  # with is untouched.
+  local prior_wire='550e8400-e29b-41d4-a716-446655440060'
+  local prior page db
+  prior=$(jq -nc --arg id "$prior_wire" '
+    {type:"sync_pull_message",server_seq:"1",id:$id,
+     server_received_at:"2026-07-20T13:00:00.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"legitimate prior message",created_at:"2026-07-20T13:00:00.000000Z",
+        from_agent:"alice",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"legitimate prior message",created_at:"2026-07-20T13:00:00.000000Z",
+                 from_agent:"alice",to_agent:"bob"}}')
+  page=$(printf '%s\n%s\n' "$prior" '{"type":"sync_pull_cursor","next_after":"1"}')
+  printf '%s\n' "$page" | storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 >/dev/null
+  db=$(agmsg_db_path demo)
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+
+  # Now a second page: one record whose id is the SAME UUID with a trailing
+  # U+0000 appended -- the exact string that, if stripped rather than
+  # refused, becomes $prior_wire.
+  local poisoned_id
+  poisoned_id=$(jq -nc --arg u "$prior_wire" '$u + ([0]|implode)')
+  local poisoned
+  poisoned=$(jq -nc --argjson id "$poisoned_id" '
+    {type:"sync_pull_message",server_seq:"2",id:$id,
+     server_received_at:"2026-07-20T13:00:01.000000Z",
+     envelope:{v:1,cipher:"none",key_id:null,blob:(
+       {body:"attacker record",created_at:"2026-07-20T13:00:01.000000Z",
+        from_agent:"carol",to_agent:"bob"}|tojson|@base64)},
+     status:"importable",policy_revision:"0",local_security_revision:"0",
+     projection:{body:"attacker record",created_at:"2026-07-20T13:00:01.000000Z",
+                 from_agent:"carol",to_agent:"bob"}}')
+  local page2
+  page2=$(printf '%s\n%s\n' "$poisoned" '{"type":"sync_pull_cursor","next_after":"2"}')
+  run storage_sync_apply_pull demo "$SERVER_ID" "$TEAM_ID" 1 <<<"$page2"
+  [ "$status" -eq 13 ]
+  printf '%s\n' "$output" | grep -q 'record 1: field id contains U+0000'
+  # The prior, legitimate record is untouched -- not quarantined, not
+  # overwritten, still imported under its real wire id.
+  [ "$(agmsg_sqlite "$db" \
+    "SELECT status FROM sync_quarantine WHERE wire_id='$prior_wire';" | tr -d '\r')" = imported ]
+  [ "$(storage_history demo | jq -s '[.[]|select(.body=="legitimate prior message")]|length')" -eq 1 ]
 }
 
 @test "sync contract: apply refuses a wire id that is not a canonical UUIDv4 (#908)" {
