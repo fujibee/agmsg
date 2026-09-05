@@ -98,14 +98,16 @@ EOF
   [[ "$output" =~ "2 member" ]]
 }
 
-@test "join: re-join with same name adds registration instead of duplicate agent" {
+@test "join: re-join shows one row per registration without duplicating the member count" {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-b
   run bash "$SCRIPTS/team.sh" myteam
   [ "$status" -eq 0 ]
   [[ "$output" =~ "alice" ]]
   [[ "$output" =~ "1 member" ]]
-  [[ "$output" =~ "+1 more" ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^  alice (claude-code)')" -eq 2 ]
+  [[ "$output" =~ "/tmp/proj-a" ]]
+  [[ "$output" =~ "/tmp/proj-b" ]]
 }
 
 @test "join: concurrent joins to the same team do not lose registrations (#141)" {

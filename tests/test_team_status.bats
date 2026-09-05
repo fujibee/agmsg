@@ -8,6 +8,38 @@ setup() {
   source "$SCRIPTS/lib/team-status.sh"
 }
 
+agmsg_terminal_load() { return 0; }
+
+@test "team location preserves a confirmed present answer" {
+  agmsg_terminal_location_loaded() { printf 'w2:t1\tpresent\n'; }
+  run agmsg_team_location herdr w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'herdr\tw2:p3\tw2:t1\tpresent' ]
+}
+
+@test "team location preserves confirmed gone without inventing a container" {
+  agmsg_terminal_location_loaded() { printf 'n/a:pane_gone\tgone\n'; }
+  run agmsg_team_location tmux '%3'
+  [ "$status" -eq 0 ]
+  [ "$output" = $'tmux\t%3\tn/a:pane_gone\tgone' ]
+}
+
+@test "team location keeps a present-then-missing race present" {
+  agmsg_terminal_location_loaded() {
+    printf 'unknown:present_then_location_rc_10\tpresent\n'
+  }
+  run agmsg_team_location herdr w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'herdr\tw2:p3\tunknown:present_then_location_rc_10\tpresent' ]
+}
+
+@test "team location reports a malformed contract without empty fields" {
+  agmsg_terminal_location_loaded() { printf '\tpresent\n'; }
+  run agmsg_team_location herdr w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'herdr\tw2:p3\tunknown:location_contract_malformed\tunknown:location_contract_malformed' ]
+}
+
 @test "identity consistency treats expected n/a as verified" {
   run agmsg_identity_consistency \
     'n/a:no_independent_field' \

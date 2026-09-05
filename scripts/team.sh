@@ -71,6 +71,7 @@ echo "Team: $TEAM"
 echo ""
 
 COUNT=0
+LAST_NAME=""
 # CONFIG_ESCAPED is spliced as a genuine SQL string literal below, NOT bound
 # via `.param set`: the sqlite3 shell's dot-command tokenizer does not
 # honour SQL '' escaping (unlike a real SQL statement's string literals), so
@@ -80,18 +81,19 @@ COUNT=0
 # (#87 cluster; see resolve-project.sh's `resolve_team` for the same
 # caveat).
 CONFIG_ESCAPED=$(sed "s/'/''/g" "$CONFIG")
-while IFS='	' read -r name types project registrations; do
-  if [ "${registrations:-0}" -eq 0 ]; then
+while IFS='	' read -r name type project registered; do
+  if [ "$name" != "$LAST_NAME" ]; then
+    COUNT=$((COUNT + 1))
+    LAST_NAME="$name"
+  fi
+  if [ "${registered:-0}" -eq 0 ]; then
     # A member this machine has never registered locally: pulled with the team,
     # real, and correctly without registrations. Saying so beats printing an
     # empty type and a "?" project, which reads as damage.
     echo "  $name (remote — no local registration)"
-  elif [ "$registrations" -gt 1 ]; then
-    echo "  $name ($types) — $project (+$((registrations - 1)) more)   [$(_member_placement "$TEAM" "$name")]"
   else
-    echo "  $name ($types) — $project   [$(_member_placement "$TEAM" "$name")]"
+    echo "  $name ($type) — $project   [$(_member_placement "$TEAM" "$name")]"
   fi
-  COUNT=$((COUNT + 1))
 # tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
 # the `registrations` field "N\r" and trip the integer test in the loop (#130).
 done < <(sqlite3 -separator '	' :memory: \
@@ -106,20 +108,15 @@ done < <(sqlite3 -separator '	' :memory: \
    )
    SELECT
      name,
-     group_concat(DISTINCT json_extract(r.value, '\$.type')),
-     COALESCE((
-       SELECT json_extract(r2.value, '\$.project')
-       FROM json_each(agents.registrations) AS r2
-       ORDER BY CAST(r2.key AS INTEGER) DESC
-       LIMIT 1
-     ), '?'),
-     json_array_length(registrations)
+     COALESCE(json_extract(r.value, '\$.type'), ''),
+     COALESCE(json_extract(r.value, '\$.project'), '?'),
+     CASE WHEN r.value IS NULL THEN 0 ELSE 1 END
    -- LEFT JOIN, not a comma join: a member whose registrations array is empty
    -- produces no rows from json_each, so an inner join dropped them from the
    -- listing entirely and from the count with it. That is the normal state on
    -- a machine that pulled the team rather than joining it.
    FROM agents LEFT JOIN json_each(agents.registrations) AS r
-   GROUP BY name, registrations;" | tr -d '\r')
+   ORDER BY name, CAST(r.key AS INTEGER);" | tr -d '\r')
 
 echo ""
 echo "$COUNT member(s)"
