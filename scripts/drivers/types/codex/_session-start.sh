@@ -25,7 +25,17 @@
 # portable compat_file_mtime, since `find -printf` is GNU-only (no
 # `-printf` on macOS/BSD find, which this repo also has to support). See #416.
 agmsg_newest_rollout_files() {
-  local dir="$1" limit="$2" f mtime
+  local dir="$1" limit="$2"
+  # Batch the mtime lookup (compat_files_mtime_0) instead of running
+  # `mtime=$(compat_file_mtime "$f")` in a per-file loop: that substitution
+  # forks a subshell + uname + stat for EVERY rollout, and on Windows/MSYS2
+  # -- where process creation is orders of magnitude costlier than a Linux
+  # fork -- the scan measured ~12 minutes against 2582 accumulated rollouts.
+  # This function runs inside the synchronous SessionStart hook, and
+  # agmsg_resolve_codex_thread calls it up to 3 times, so the per-file form
+  # blocks Codex startup for tens of minutes once a machine has real rollout
+  # history. One stat per argv batch resolves the same list in seconds.
+  #
   # `head -n "$limit"` here would close its read end after $limit lines while
   # `sort` may still be writing -- under this caller's `set -euo pipefail`,
   # that SIGPIPEs `sort` (status 141) and pipefail surfaces it as the whole
@@ -36,18 +46,15 @@ agmsg_newest_rollout_files() {
   # different mechanism. awk reads its input through to EOF regardless of
   # `n` (only *printing* stops early), so `sort` is always fully drained and
   # never SIGPIPEd.
-  # `|| true` on the mtime lookup: under set -e, a plain `var=$(cmd)`
-  # assignment DOES abort on cmd's failure (unlike a substitution used inside
-  # a test/conditional). A rollout that `find` listed but that Codex deletes
-  # or rotates before `stat` runs on it (a real possibility across the ~1-2s
-  # this loop can take with hundreds of files) would otherwise abort this
-  # whole while-loop subshell -- another way to reintroduce the "no
-  # candidate found" failure the ${mtime:-0} fallback below already exists to
-  # avoid.
-  find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | while IFS= read -r f; do
-    mtime=$(compat_file_mtime "$f" || true)
-    printf '%s\t%s\n' "${mtime:-0}" "$f"
-  done | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
+  #
+  # A rollout that `find` listed but that Codex deletes or rotates before
+  # the stat batch reaches it no longer needs special handling here:
+  # compat_files_mtime_0 suppresses the per-file error and still prints
+  # every surviving file, so a dead file can't starve the caller of the
+  # whole candidate list.
+  find "$dir" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null \
+    | compat_files_mtime_0 \
+    | sort -t "$(printf '\t')" -k1,1rn | awk -F'\t' -v n="$limit" 'NR<=n { sub(/^[^\t]*\t/, ""); print }'
 }
 
 # Resolve the current Codex thread id. CODEX_THREAD_ID is only exported on the
