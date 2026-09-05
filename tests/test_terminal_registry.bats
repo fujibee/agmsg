@@ -263,11 +263,40 @@ _fake_herdr_list_scalar_session() {
 # --- conf reader ------------------------------------------------------------
 
 @test "conf: get reads a key, has tests membership, absent key returns default" {
-  [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke name" ]
+  [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke where arrange name" ]
   agmsg_terminal_has tmux capabilities peek
   refute agmsg_terminal_has tmux capabilities nonesuch
   [ "$(agmsg_terminal_get plain capabilities)" = "spawn despawn" ]
   [ "$(agmsg_terminal_get plain nonesuch DEFLT)" = "DEFLT" ]
+}
+
+@test "tmux hint syntax_help: executes tmux list-commands" {
+  _install_fake_tmux
+  agmsg_terminal_load tmux
+  run terminal_describe
+  grep -q '^syntax_help=tmux list-commands$' <<<"$output"
+  grep -q '^intent.place_below=' <<<"$output"
+  grep -q '^intent.place_right=' <<<"$output"
+  tmux list-commands >/dev/null
+  grep -q '^tmux \[list-commands\]$' "$ARGV_LOG"
+}
+
+@test "herdr hint syntax_help: executes herdr --help" {
+  _install_fake_herdr 'sess-help'
+  agmsg_terminal_load herdr
+  run terminal_describe
+  grep -q '^syntax_help=herdr --help$' <<<"$output"
+  herdr --help >/dev/null
+  grep -q '^herdr \[--help\]$' "$ARGV_LOG"
+}
+
+@test "herdr hint skill_help: executes herdr --skill" {
+  _install_fake_herdr 'sess-help'
+  agmsg_terminal_load herdr
+  run terminal_describe
+  grep -q '^skill_help=herdr --skill$' <<<"$output"
+  herdr --skill >/dev/null
+  grep -q '^herdr \[--skill\]$' "$ARGV_LOG"
 }
 
 # --- plain driver -----------------------------------------------------------
@@ -421,6 +450,74 @@ EOF
   grep -q '\[rename-window\] \[-t\] \[@7\] \[teamx:alice\]' "$ARGV_LOG"
 }
 
+_install_fake_tmux_layout() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = list-panes ]; then printf '%s\n' "\${TMUX_LAYOUT:-}"; fi
+exit "\${TMUX_RC:-0}"
+EOF
+  chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "tmux: where answers the window only; a missing-after-present id is unknown, never gone" {
+  _install_fake_tmux_layout
+  export TMUX_LAYOUT='%1|@7|0|0|80|10'
+  agmsg_terminal_load tmux
+  run terminal_where '%1'
+  [ "$status" -eq 0 ]
+  [ "$output" = '@7' ]
+  run terminal_where '@7'
+  [ "$status" -eq 0 ]
+  [ "$output" = '@7' ]
+  run terminal_where '%9'
+  [ "$status" -eq 10 ]
+  printf '%s\n' "$output" | grep -q '^unknown'
+  refute grep -q '^gone$' <<<"$output"
+}
+
+@test "tmux hint place_below: gates the non-idempotent move, then executes move-pane -v" {
+  _install_fake_tmux_layout
+  agmsg_terminal_load tmux
+  terminal_describe | grep -q '^intent.place_below=tmux move-pane -s SOURCE -t TARGET -v$'
+  export TMUX_LAYOUT=$'%1|@7|11|0|80|10\n%2|@7|0|0|80|10'
+  run terminal_arrange '%1' place_below '%2'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  refute grep -q '\[move-pane\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|12|0|40|10'
+  run terminal_arrange '%1' place_below '%2'
+  [ "$output" = moved ]
+  grep -q '\[move-pane\] \[-s\] \[%1\] \[-t\] \[%2\] \[-v\]' "$ARGV_LOG"
+}
+
+@test "tmux hint place_right: gates the non-idempotent move, then executes move-pane -h" {
+  _install_fake_tmux_layout
+  agmsg_terminal_load tmux
+  terminal_describe | grep -q '^intent.place_right=tmux move-pane -s SOURCE -t TARGET -h$'
+  export TMUX_LAYOUT=$'%1|@7|0|41|39|23\n%2|@7|0|0|40|23'
+  run terminal_arrange '%1' place_right '%2'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  refute grep -q '\[move-pane\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  export TMUX_LAYOUT=$'%1|@7|12|0|40|10\n%2|@7|0|0|40|10'
+  run terminal_arrange '%1' place_right '%2'
+  [ "$output" = moved ]
+  grep -q '\[move-pane\] \[-s\] \[%1\] \[-t\] \[%2\] \[-h\]' "$ARGV_LOG"
+}
+
+@test "tmux: arrange cannot locate a listed pane -> unknown/10, not runtime_error" {
+  _install_fake_tmux_layout
+  agmsg_terminal_load tmux
+  export TMUX_LAYOUT='%2|@7|0|0|80|10'
+  run terminal_arrange '%1' place_below '%2'
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+  refute grep -q '\[move-pane\]' "$ARGV_LOG"
+}
+
 # --- herdr driver ops (fake herdr argv; live-verified argv flagged) ---------
 
 @test "herdr: detect resolves the pane for the session id via agent list" {
@@ -527,6 +624,145 @@ EOF
   # herdr's [a-z][a-z0-9_-]{0,31} regex. (Exact value is asserted for distinctness
   # in the injectivity test below, not pinned here.)
   grep -qE '\[agent\] \[rename\] \[wC:p9\] \[a[0-9a-f]{24}\]' "$ARGV_LOG"
+}
+
+_install_fake_herdr_layout() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1 \$2" = 'pane layout' ]; then
+  if [ -n "\${HERDR_SOURCE_LAYOUT:-}" ] && [ "\${4:-}" = 'wA:p1' ]; then printf '%s\n' "\$HERDR_SOURCE_LAYOUT"
+  else printf '%s\n' "\$HERDR_LAYOUT"
+  fi
+elif [ "\$1 \$2" = 'pane move' ]; then
+  case " \$* " in *' --tab '*) [ "\${HERDR_SECOND_RC:-0}" -eq 0 ] || exit "\$HERDR_SECOND_RC" ;; esac
+  case " \$* " in
+    *' --new-tab '*) printf '%s\n' '{"result":{"move_result":{"changed":true,"created_tab":{"tab_id":"wA:t9"}}}}' ;;
+    *) printf '%s\n' '{"result":{"move_result":{"changed":true}}}' ;;
+  esac
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "herdr: where answers the tab only and never becomes a second gone authority" {
+  _install_fake_herdr_layout
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t2","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":10,"height":10}}],"splits":[]}}}'
+  agmsg_terminal_load herdr
+  run terminal_where 'wA:p1'
+  [ "$status" -eq 0 ]
+  [ "$output" = 'wA:t2' ]
+  run terminal_where 'wA:p9'
+  [ "$status" -eq 10 ]
+  printf '%s\n' "$output" | grep -q '^unknown'
+  refute grep -q '^gone$' <<<"$output"
+}
+
+@test "herdr hint place_below: gates the move, then executes new-tab and split down" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  terminal_describe | grep -q '^intent.place_below=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split down --target-pane TARGET$'
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":10,"width":20,"height":10}},{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":20,"height":10}}],"splits":[{"id":"opaque","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  refute grep -q '\[pane\] \[move\]' "$ARGV_LOG"
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":10,"height":20}},{"pane_id":"wA:p2","rect":{"x":10,"y":0,"width":10,"height":20}}],"splits":[{"id":"opaque","direction":"right","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  : > "$ARGV_LOG"
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$output" = moved ]
+  grep -q '\[pane\] \[move\] \[wA:p1\] \[--new-tab\] \[--no-focus\]' "$ARGV_LOG"
+  grep -q '\[--tab\] \[wA:t1\] \[--split\] \[down\] \[--target-pane\] \[wA:p2\]' "$ARGV_LOG"
+}
+
+@test "herdr hint place_right: gates the move, then executes new-tab and split right" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  terminal_describe | grep -q '^intent.place_right=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split right --target-pane TARGET$'
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":10,"y":0,"width":10,"height":20}},{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":10,"height":20}}],"splits":[{"id":"opaque","direction":"right","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  run terminal_arrange 'wA:p1' place_right 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  refute grep -q '\[pane\] \[move\]' "$ARGV_LOG"
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":20,"height":10}},{"pane_id":"wA:p2","rect":{"x":0,"y":10,"width":20,"height":10}}],"splits":[{"id":"opaque","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  : > "$ARGV_LOG"
+  run terminal_arrange 'wA:p1' place_right 'wA:p2'
+  [ "$output" = moved ]
+  grep -q '\[pane\] \[move\] \[wA:p1\] \[--new-tab\] \[--no-focus\]' "$ARGV_LOG"
+  grep -q '\[--split\] \[right\]' "$ARGV_LOG"
+}
+
+@test "herdr: equal-area direction-compatible split candidates fail closed" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":1,"width":10,"height":1}},{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":10,"height":1}}],"splits":[{"id":"opaque-a","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":10,"height":2}},{"id":"opaque-b","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":10,"height":2}}]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 12 ]
+  [ "$output" = ambiguous_layout ]
+  refute grep -q '\[pane\] \[move\]' "$ARGV_LOG"
+}
+
+@test "herdr: a pane below an intervening pane is different, not directly place_below" {
+  agmsg_terminal_load herdr
+  local layout='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":20,"width":20,"height":10}},{"pane_id":"wA:pX","rect":{"x":0,"y":10,"width":20,"height":10}},{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":20,"height":10}}],"splits":[{"id":"outer","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":30}},{"id":"inner","direction":"down","ratio":0.5,"rect":{"x":0,"y":10,"width":20,"height":20}}]}}}'
+  run _herdr_arrange_state "$layout" 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = different ]
+}
+
+@test "herdr: second arrange step failure says the source may be stranded in a temporary tab" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_SECOND_RC=1
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":10,"height":20}},{"pane_id":"wA:p2","rect":{"x":10,"y":0,"width":10,"height":20}}],"splits":[{"id":"opaque","direction":"right","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":20}}]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 12 ]
+  printf '%s\n' "$output" | grep -q '^runtime_error'
+  printf '%s\n' "$output" | grep -q "left in temporary tab 'wA:t9'"
+  printf '%s\n' "$output" | grep -q "placing it back in tab 'wA:t1'"
+}
+
+@test "herdr: arrange cannot locate a layout pane -> unknown/10, not runtime_error" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":20,"height":20}}],"splits":[]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+  refute grep -q '\[pane\] \[move\]' "$ARGV_LOG"
+}
+
+@test "herdr: arrange moves a source proven present in a different tab" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":20,"height":20}}],"splits":[]}}}'
+  export HERDR_SOURCE_LAYOUT='{"result":{"layout":{"tab_id":"wA:t2","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":20,"height":20}}],"splits":[]}}}'
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  [ "$(grep -c '\[pane\] \[layout\]' "$ARGV_LOG")" -eq 2 ]
+  grep -q '\[pane\] \[move\] \[wA:p1\] \[--new-tab\]' "$ARGV_LOG"
+  grep -q '\[--tab\] \[wA:t1\] \[--split\] \[down\] \[--target-pane\] \[wA:p2\]' "$ARGV_LOG"
+}
+
+@test "arrange meaning: both tmux and herdr move when another pane separates source from target" {
+  _install_fake_tmux_layout
+  agmsg_terminal_load tmux
+  export TMUX_LAYOUT=$'%1|@7|22|0|80|10\n%X|@7|11|0|80|10\n%2|@7|0|0|80|10'
+  run terminal_arrange '%1' place_below '%2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '\[move-pane\]' "$ARGV_LOG"
+
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":20,"width":20,"height":10}},{"pane_id":"wA:pX","rect":{"x":0,"y":10,"width":20,"height":10}},{"pane_id":"wA:p2","rect":{"x":0,"y":0,"width":20,"height":10}}],"splits":[{"id":"outer","direction":"down","ratio":0.5,"rect":{"x":0,"y":0,"width":20,"height":30}},{"id":"inner","direction":"down","ratio":0.5,"rect":{"x":0,"y":10,"width":20,"height":20}}]}}}'
+  : > "$ARGV_LOG"
+  run terminal_arrange 'wA:p1' place_below 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '\[pane\] \[move\]' "$ARGV_LOG"
 }
 
 @test "herdr peek: an error body is NOT returned as content, and the single 13 is split (tl/co1)" {

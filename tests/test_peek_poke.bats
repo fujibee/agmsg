@@ -44,6 +44,13 @@ _write_record() {
   printf '%s\t/tmp/project-a\tclaude-code' "$ref" > "$path"
 }
 
+_write_named_record() {
+  local name="$1" ref="$2" path
+  path="$(bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; agmsg_spawn_path testteam "$1"' _ "$name")"
+  [ -n "$path" ]
+  printf '%s\t/tmp/project-a\tclaude-code' "$ref" > "$path"
+}
+
 _install_fake_tmux() {
   cat > "$FAKEBIN/tmux" <<EOF
 #!/usr/bin/env bash
@@ -464,4 +471,46 @@ EOF
   run env HERDR_ENV=1 bash "$SCRIPTS/poke.sh" testteam alice "hi"
   [ "$status" -eq 12 ]
   _out_has "could not poke 'testteam/alice'"
+}
+
+# --- arrange ---------------------------------------------------------------
+
+_install_fake_tmux_arrange() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = list-panes ]; then printf '%s\n' "\$TMUX_LAYOUT"; fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "arrange: a missing source record remains the final reason" {
+  _write_named_record bob 'tmux:%2'
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  [ "$status" -ne 0 ]
+  [ "$output" = "arrange: no placement record for 'testteam/alice'" ]
+  refute _out_has "terminal '' cannot arrange"
+}
+
+@test "arrange: public identity join rejects different recorded terminals" {
+  _write_named_record alice 'tmux:%1'
+  _write_named_record bob 'herdr:wA:p2'
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  [ "$status" -ne 0 ]
+  _out_has "members are in different terminals"
+}
+
+@test "arrange: public entry preserves unchanged and moved from the driver" {
+  _install_fake_tmux_arrange
+  _write_named_record alice 'tmux:%1'
+  _write_named_record bob 'tmux:%2'
+  export TMUX_LAYOUT=$'%1|@7|11|0|80|10\n%2|@7|0|0|80|10'
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|12|0|40|10'
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
 }

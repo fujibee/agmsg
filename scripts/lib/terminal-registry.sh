@@ -27,6 +27,14 @@
 #   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
 #                                       parsed). unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
+#   terminal_where <id>                 READ op: print the id's container (tmux window /
+#                                       herdr tab). Existence is not answered here;
+#                                       a missing id is unknown/10, never `gone`.
+#   terminal_arrange <source-id> <intent> <target-id>
+#                                       control op: declaratively place source below/right
+#                                       of target. Prints moved / unchanged. It reads layout
+#                                       before mutating because the native moves are not
+#                                       idempotent. Ambiguous layout -> token + non-zero.
 #   terminal_name <id> <team> <name> [mode]
 #                                       control op: set the pane's names; idempotent.
 #                                       Two names, not one: the label a person
@@ -116,7 +124,7 @@ agmsg_terminal_has() {
 # verifies it. Naming the set here (not relying on each driver being complete) is
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
-_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_peek terminal_poke terminal_name"
+_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
 
 # Wipe every terminal_* ABI function from the current shell. Called before each
 # source so a driver that is switched to cannot inherit the previous driver's ops
