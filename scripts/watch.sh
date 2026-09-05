@@ -716,6 +716,17 @@ _held_elsewhere_without() {
 # crash (#983). The threshold is FIXED, not an env knob -- an empty/0/non-numeric knob
 # would silently disable the very guard against silence.
 STUCK_THRESHOLD=3
+# Exit status for a watcher that STOPS because delivery is unhealthy -- the store
+# read failed, or a cursor is wedged behind a pending batch. These print a reason
+# and exit, but the exit must not read as success: a supervisor or launcher that
+# only sees the process end would otherwise treat an unhealthy watcher as a clean
+# shutdown, indistinguishable from the intentional exits (install-changed,
+# session-ended, role-moved) that DO mean "done, nothing wrong". A defined
+# non-zero keeps "visible failure" visible at the process contract too. Distinct
+# from the startup exit 1 (usage / DB path / DB-open, #197) so "started, then
+# delivery broke" can be told from "never started"; the value matters only that
+# it is non-zero and stable, which the tests pin.
+_AGMSG_EXIT_DELIVERY_UNHEALTHY=75
 # Per-pair tracker state and its map operations (_stuck_get/_stuck_set/
 # _stuck_drop). Kept in a sourced lib so the record framing -- which broke for
 # names with spaces once and must not again -- can be unit-tested away from this
@@ -856,7 +867,7 @@ while true; do
       printf 'agmsg watch: cannot read delivery state for %s — the store read failed, so whether messages are waiting is unknown. Treating "unknown" as "no messages" would leave this watcher alive and silent, so it is exiting instead; restart this session (or run /%s actas <name>) to resume delivery (#1045/#777).\n' \
         "$pair_team:$pair_agent" "$(basename "$SKILL_DIR")"
       cleanup
-      exit 0
+      exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
     fi
     # fix 2 (#1045): update this pair's stuck-cursor tracker (see the block comment
     # before the loop). "Pending" here means real undelivered MESSAGE rows -- not a
@@ -887,7 +898,7 @@ while true; do
           printf 'agmsg watch: delivery for %s is STUCK — its read cursor (%s) has not advanced for %s poll cycles while %s bytes of messages wait behind it, so nothing is being delivered and nothing is being marked read. This watcher is exiting rather than looping in silence; restart this session (or run /%s actas <name>) to resume delivery. If it recurs, the pending batch may be hitting a system limit (#1045/#777).\n' \
             "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n" "$_agmsg_bytes" "$(basename "$SKILL_DIR")"
           cleanup
-          exit 0
+          exit "$_AGMSG_EXIT_DELIVERY_UNHEALTHY"
         fi
         _stuck_set "$_agmsg_pair_key" "$READ_CURSOR" "$_agmsg_n"
         ;;

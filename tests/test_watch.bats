@@ -1073,8 +1073,12 @@ STUB
   # (2) ...and the watcher must EXIT on its own, not keep looping.
   local i alive=1
   for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
-  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
-  [ "$alive" -eq 0 ]
+  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
+  # (3) ...and it must report FAILURE at the process contract (the defined
+  # unhealthy code, 75), not exit 0 -- a supervisor must not read a wedged
+  # watcher as a clean shutdown. Reverting the arm to `exit 0` turns this red.
+  local st=0; wait "$w" || st=$?
+  [ "$st" -eq 75 ]
   # the report is a plain "agmsg watch:" line, never mistaken for a "team | from → to" message
   grep -q "agmsg watch: delivery for team:alice is STUCK" "$out"
 }
@@ -1185,8 +1189,12 @@ STUB
   # `|| true` makes the message never appear and the watcher never exit -> red.)
   local i alive=1
   for i in $(seq 1 60); do kill -0 "$w" 2>/dev/null || { alive=0; break; }; sleep 0.1; done
-  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
-  [ "$alive" -eq 0 ]
+  if [ "$alive" -ne 0 ]; then kill "$w" 2>/dev/null || true; false; fi
+  # ...with the defined unhealthy exit code (75), not exit 0: a failed store read
+  # is unhealthy, and the process contract must say so. Reverting the arm to
+  # `exit 0` turns this red.
+  local st=0; wait "$w" || st=$?
+  [ "$st" -eq 75 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
 }
