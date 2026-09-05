@@ -341,6 +341,8 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
+Terminal identity has a different number of observable names on each backend. Herdr exposes three independent values: the visible pane label, its internal agent key, and the CLI session name. tmux exposes two: the `@agmsg_agent` pane option is the internal key, while the CLI owns `pane_title`, so there is no independent pane-label field after the CLI starts. `team.sh` reports that tmux field as `n/a` rather than treating an unavailable concept as a mismatch.
+
 `send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
 
 ## FAQ / Design notes

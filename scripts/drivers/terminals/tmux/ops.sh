@@ -199,11 +199,12 @@ terminal_peek() {
 # tmux has no pane-label field independent of the CLI-owned terminal title.
 # The resolvable key is the pane-local @agmsg_agent user option.
 terminal_team_observe() {
-  local id="$1" key title
+  local id="$1" bare key title
   command -v tmux >/dev/null 2>&1 || return 10
-  case "$id" in @*|%*) : ;; *) return 13 ;; esac
-  key="$(tmux show-options -p -v -t "$id" @agmsg_agent 2>/dev/null)" || key=""
-  title="$(tmux display-message -p -t "$id" '#{pane_title}' 2>/dev/null)" || return 10
+  bare="$(_tmux_bare_of "$id")"
+  case "$bare" in @*|%*) : ;; *) return 13 ;; esac
+  key="$(_tmux_do "$id" show-options -p -v -t "$bare" @agmsg_agent 2>/dev/null)" || key=""
+  title="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_title}' 2>/dev/null)" || return 10
   [ -n "$key" ] || key=unknown:agent_key_missing
   [ -n "$title" ] || title=unknown:terminal_title_missing
   case "$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac

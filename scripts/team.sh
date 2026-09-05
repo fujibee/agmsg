@@ -4,7 +4,18 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-TEAM="${1:?Usage: team.sh <team>}"
+TEAM="${1:?Usage: team.sh <team> [--json] [--fix]}"
+shift
+OUTPUT_MODE=human
+FIX=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) OUTPUT_MODE=json ;;
+    --fix) FIX=1 ;;
+    *) echo "Usage: team.sh <team> [--json] [--fix]" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -60,49 +71,81 @@ _member_delivery() {
   case "$first" in mode:\ *) printf '%s' "${first#mode: }" ;; *) printf 'unknown:delivery_status_malformed' ;; esac
 }
 
+JSON_FIRST=1
+_emit_row() {
+  local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
+  local container="$6" live="$7" activity="$8" delivery="$9"
+  shift 9
+  local label_cell="$1" label_expected="$2" label_actual="$3"
+  local key_cell="$4" key_expected="$5" key_actual="$6"
+  local session_cell="$7" session_expected="$8" session_actual="$9"
+  shift 9
+  local consistency="$1"
+  if [ "$OUTPUT_MODE" = json ]; then
+    [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
+    JSON_FIRST=0
+    agmsg_team_render_json_row "$member" "$type" "$project" "$terminal" "$pane" \
+      "$container" "$live" "$activity" "$delivery" \
+      "$label_cell" "$label_expected" "$label_actual" \
+      "$key_cell" "$key_expected" "$key_actual" \
+      "$session_cell" "$session_expected" "$session_actual" "$consistency"
+  else
+    agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
+      "$container" "$live" "$activity" "$delivery" \
+      "$label_cell" "$key_cell" "$session_cell" "$consistency"
+  fi
+}
+
+_emit_unknown_row() {
+  local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
+  local container="$6" live="$7" activity="$8" delivery="$9" reason="${10}"
+  local cell="unknown:$reason"
+  _emit_row "$member" "$type" "$project" "$terminal" "$pane" "$container" \
+    "$live" "$activity" "$delivery" \
+    "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified
+}
+
 _member_status() {
   local team="$1" agent="$2" type="$3" project="$4" registered="$5"
   local rec ref terminal pane location container live delivery identity
   local activity pane_label agent_key cli_session consistency reason
+  local _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session
   if [ "$registered" -eq 0 ]; then
-    agmsg_team_render_human_row "$agent" remote n/a:remote_registration \
+    _emit_row "$agent" remote n/a:remote_registration \
       n/a:remote n/a:no_local_registration n/a:no_local_registration \
-      unknown:no_local_registration n/a:no_local_registration \
-      n/a:no_local_registration n/a:no_local_registration \
-      n/a:no_local_registration n/a:no_local_registration ok
+      unknown:no_local_registration n/a:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration ok
     return 0
   fi
   delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
     reason=terminal_support_not_loaded
-    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     return 0
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
   if [ -z "$rec" ] || [ ! -f "$rec" ]; then
     reason=no_placement_record
-    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     return 0
   fi
   IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
   if [ -z "$ref" ]; then
     reason=empty_placement_record
-    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     return 0
   fi
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
   pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || pane=""
   if [ -z "$terminal" ] || [ -z "$pane" ]; then
     reason=invalid_placement_record
-    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
-      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     return 0
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
@@ -111,22 +154,31 @@ $location
 EOF
   if [ "$live" = present ] && agmsg_terminal_load "$terminal" >/dev/null 2>&1; then
     identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
-    IFS="$(printf '\t')" read -r activity pane_label agent_key cli_session consistency <<EOF
+    IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
 EOF
   else
     reason="live_${live}"
     activity="unknown:$reason"; pane_label="unknown:$reason"
     agent_key="unknown:$reason"; cli_session="unknown:$reason"
+    _actual_label="$pane_label"; _expected_label="$team:$agent"
+    _actual_key="$agent_key"; _expected_key="$agent_key"
+    _actual_session="$cli_session"; _expected_session="$team-$agent"
     consistency=unverified
   fi
-  agmsg_team_render_human_row "$agent" "$type" "$project" "$terminal" "$pane" \
-    "$container" "$live" "$activity" "$delivery" "$pane_label" "$agent_key" \
-    "$cli_session" "$consistency"
+  _emit_row "$agent" "$type" "$project" "$terminal" "$pane" "$container" \
+    "$live" "$activity" "$delivery" \
+    "$pane_label" "$_expected_label" "$_actual_label" \
+    "$agent_key" "$_expected_key" "$_actual_key" \
+    "$cli_session" "$_expected_session" "$_actual_session" "$consistency"
 }
 
-echo "Team: $TEAM"
-echo ""
+if [ "$OUTPUT_MODE" = json ]; then
+  printf '[\n'
+else
+  echo "Team: $TEAM"
+  echo ""
+fi
 
 COUNT=0
 LAST_NAME=""
@@ -176,5 +228,9 @@ done < <(sqlite3 -separator '	' :memory: \
    FROM agents LEFT JOIN json_each(agents.registrations) AS r
    ORDER BY name, CAST(r.key AS INTEGER);" | tr -d '\r')
 
-echo ""
-echo "$COUNT member(s)"
+if [ "$OUTPUT_MODE" = json ]; then
+  printf '\n]\n'
+else
+  echo ""
+  echo "$COUNT member(s)"
+fi

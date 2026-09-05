@@ -205,6 +205,17 @@ EOF
   [ "$(echo "$output" | grep -c "$agent")" -eq 1 ]
 }
 
+@test "team --json emits one full object per registration" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj-a
+  bash "$SCRIPTS/join.sh" myteam alice codex /tmp/proj-b
+  run bash "$SCRIPTS/team.sh" myteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite_mem "SELECT json_valid('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 1 ]
+  [ "$(sqlite_mem "SELECT json_array_length('$(printf '%s' "$output" | sed "s/'/''/g")');")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_extract(value,'\$.member')='alice';")" -eq 2 ]
+  [ "$(sqlite_mem "SELECT count(*) FROM json_each('$(printf '%s' "$output" | sed "s/'/''/g")') WHERE json_type(value,'\$.pane_label')='object';")" -eq 2 ]
+}
+
 # --- whoami.sh ---
 
 @test "whoami: returns agent identity" {

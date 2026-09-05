@@ -77,7 +77,7 @@ agmsg_identity_cell() {
 agmsg_team_identity_loaded() {
   local team="$1" agent="$2" type="$3" terminal="$4" pane="$5"
   local raw activity actual_label actual_key title expected_label expected_key
-  local expected_session pane_cell key_cell session_cell consistency name_arg
+  local actual_session expected_session pane_cell key_cell session_cell consistency name_arg
   raw="$(agmsg_team_observe_loaded "$pane")"
   IFS="$(printf '\t')" read -r activity actual_label actual_key title <<EOF
 $raw
@@ -97,6 +97,7 @@ EOF
     *) expected_key=unknown:terminal_key_contract_unknown ;;
   esac
   if [ "${AGMSG_TERMINAL_NAMING:-}" = off ]; then
+    actual_label=n/a:disabled_by_policy
     pane_cell=n/a:disabled_by_policy
   else
     pane_cell="$(agmsg_identity_cell "$expected_label" "$actual_label")"
@@ -107,17 +108,24 @@ EOF
   esac
   name_arg="$(agmsg_type_get "$type" name_arg 2>/dev/null || true)"
   if [ -z "$name_arg" ]; then
+    expected_session=n/a:no_session_name
+    actual_session=n/a:no_session_name
     session_cell=n/a:no_session_name
   else
     expected_session="$team-$agent"
     case "$title" in
-      n/a:*|unknown:*) session_cell="$title" ;;
-      *) session_cell="$(agmsg_identity_cell "$expected_session" "$(agmsg_cli_session_from_title "$title")")" ;;
+      n/a:*|unknown:*) actual_session="$title"; session_cell="$title" ;;
+      *)
+        actual_session="$(agmsg_cli_session_from_title "$title")"
+        session_cell="$(agmsg_identity_cell "$expected_session" "$actual_session")"
+        ;;
     esac
   fi
   consistency="$(agmsg_identity_consistency "$pane_cell" "$key_cell" "$session_cell")"
-  printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$activity" "$pane_cell" "$key_cell" "$session_cell" "$consistency"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$activity" "$actual_label" "$expected_label" "$actual_key" "$expected_key" \
+    "$actual_session" "$expected_session" \
+    "$pane_cell" "$key_cell" "$session_cell" "$consistency"
 }
 
 agmsg_identity_consistency() {
@@ -165,6 +173,58 @@ _agmsg_team_identity_detail() {
   case "$cell" in
     mismatch\(*\)|unknown:*) printf '    %s=%s\n' "$field" "$cell" ;;
   esac
+}
+
+_agmsg_team_json_quote() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed "s/'/''/g")"
+  sqlite3 :memory: "SELECT json_quote('$escaped');"
+}
+
+agmsg_team_identity_json() {
+  local cell="$1" expected="$2" actual="$3" status reason
+  case "$cell" in
+    ok\(*\))
+      printf '{"status":"ok","actual":%s}' "$(_agmsg_team_json_quote "$actual")"
+      ;;
+    mismatch\(*\))
+      printf '{"status":"mismatch","expected":%s,"actual":%s}' \
+        "$(_agmsg_team_json_quote "$expected")" "$(_agmsg_team_json_quote "$actual")"
+      ;;
+    n/a:*)
+      reason="${cell#n/a:}"
+      printf '{"status":"n/a","reason":%s}' "$(_agmsg_team_json_quote "$reason")"
+      ;;
+    unknown:*)
+      reason="${cell#unknown:}"
+      printf '{"status":"unknown","reason":%s}' "$(_agmsg_team_json_quote "$reason")"
+      ;;
+    *)
+      status=invalid_identity_cell
+      printf '{"status":"unknown","reason":%s}' "$(_agmsg_team_json_quote "$status")"
+      ;;
+  esac
+}
+
+agmsg_team_render_json_row() {
+  local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
+  local container="$6" live="$7" activity="$8" delivery="$9"
+  shift 9
+  local label_cell="$1" label_expected="$2" label_actual="$3"
+  local key_cell="$4" key_expected="$5" key_actual="$6"
+  local session_cell="$7" session_expected="$8" session_actual="$9"
+  shift 9
+  local consistency="$1"
+  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"live":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s}' \
+    "$(_agmsg_team_json_quote "$member")" "$(_agmsg_team_json_quote "$type")" \
+    "$(_agmsg_team_json_quote "$project")" "$(_agmsg_team_json_quote "$terminal")" \
+    "$(_agmsg_team_json_quote "$pane")" "$(_agmsg_team_json_quote "$container")" \
+    "$(_agmsg_team_json_quote "$live")" "$(_agmsg_team_json_quote "$activity")" \
+    "$(_agmsg_team_json_quote "$delivery")" \
+    "$(agmsg_team_identity_json "$label_cell" "$label_expected" "$label_actual")" \
+    "$(agmsg_team_identity_json "$key_cell" "$key_expected" "$key_actual")" \
+    "$(agmsg_team_identity_json "$session_cell" "$session_expected" "$session_actual")" \
+    "$(_agmsg_team_json_quote "$consistency")"
 }
 
 agmsg_team_render_human_row() {
