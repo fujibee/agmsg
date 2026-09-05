@@ -52,7 +52,12 @@ _member_placement() {
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
   if [ -z "$rec" ] || [ ! -f "$rec" ]; then
-    printf 'no pane recorded — not named yet'; return 0
+    # This reads the PLACEMENT RECORD (agmsg_spawn_path), which only spawn writes
+    # -- not the pane's name. A member started by hand has no record, but its pane
+    # label (<team>:<name>) is still set automatically (#1047). Reporting the
+    # record's absence as "not named yet" conflated the two: koit read it as
+    # "naming is broken" while the label td-dogfood:alice was in fact present.
+    printf 'no placement record (not spawned through agmsg)'; return 0
   fi
   IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
   if [ -z "$ref" ]; then
