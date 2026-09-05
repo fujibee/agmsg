@@ -72,6 +72,50 @@ agmsg_identity_cell() {
   esac
 }
 
+# Compare one terminal observation with the naming contract for this
+# registration. Output: activity, three identity cells, aggregate consistency.
+agmsg_team_identity_loaded() {
+  local team="$1" agent="$2" type="$3" terminal="$4" pane="$5"
+  local raw activity actual_label actual_key title expected_label expected_key
+  local expected_session pane_cell key_cell session_cell consistency name_arg
+  raw="$(agmsg_team_observe_loaded "$pane")"
+  IFS="$(printf '\t')" read -r activity actual_label actual_key title <<EOF
+$raw
+EOF
+  expected_label="$team:$agent"
+  case "$terminal" in
+    herdr)
+      if declare -F _herdr_internal_key >/dev/null 2>&1; then
+        expected_key="$(_herdr_internal_key "$team" "$agent" 2>/dev/null)" \
+          || expected_key=unknown:key_derivation_failed
+      else
+        expected_key=unknown:key_derivation_unavailable
+      fi
+      ;;
+    tmux) expected_key="$expected_label" ;;
+    plain) expected_key=n/a:no_addressable_pane ;;
+    *) expected_key=unknown:terminal_key_contract_unknown ;;
+  esac
+  pane_cell="$(agmsg_identity_cell "$expected_label" "$actual_label")"
+  case "$expected_key" in
+    n/a:*|unknown:*) key_cell="$expected_key" ;;
+    *) key_cell="$(agmsg_identity_cell "$expected_key" "$actual_key")" ;;
+  esac
+  name_arg="$(agmsg_type_get "$type" name_arg 2>/dev/null || true)"
+  if [ -z "$name_arg" ]; then
+    session_cell=n/a:no_session_name
+  else
+    expected_session="$team-$agent"
+    case "$title" in
+      n/a:*|unknown:*) session_cell="$title" ;;
+      *) session_cell="$(agmsg_identity_cell "$expected_session" "$(agmsg_cli_session_from_title "$title")")" ;;
+    esac
+  fi
+  consistency="$(agmsg_identity_consistency "$pane_cell" "$key_cell" "$session_cell")"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$activity" "$pane_cell" "$key_cell" "$session_cell" "$consistency"
+}
+
 agmsg_identity_consistency() {
   local cell saw_unknown=0
   for cell in "$@"; do

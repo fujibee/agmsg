@@ -67,6 +67,27 @@ agmsg_terminal_load() { return 0; }
   [ "$output" = 'mismatch(expected=team:alice,actual=team:bob)' ]
 }
 
+@test "tmux identity treats its shared pane label as n/a and still verifies" {
+  terminal_team_observe() {
+    printf 'n/a:unsupported\tn/a:no_independent_field\tteam:alice\t✳ team-alice\n'
+  }
+  agmsg_type_get() { [ "$2" = name_arg ] && printf '%s\n' -n; }
+  run agmsg_team_identity_loaded team alice claude-code tmux '%3'
+  [ "$status" -eq 0 ]
+  [ "$output" = $'n/a:unsupported\tn/a:no_independent_field\tok(actual=team:alice)\tok(actual=team-alice)\tok' ]
+}
+
+@test "a type without name_arg makes CLI session expected n/a" {
+  terminal_team_observe() {
+    printf 'idle\tteam:alice\ta123\ttransient title\n'
+  }
+  _herdr_internal_key() { printf 'a123\n'; }
+  agmsg_type_get() { return 0; }
+  run agmsg_team_identity_loaded team alice codex herdr w2:p3
+  [ "$status" -eq 0 ]
+  [ "$output" = $'idle\tok(actual=team:alice)\tok(actual=a123)\tn/a:no_session_name\tok' ]
+}
+
 @test "identity consistency treats expected n/a as verified" {
   run agmsg_identity_consistency \
     'n/a:no_independent_field' \

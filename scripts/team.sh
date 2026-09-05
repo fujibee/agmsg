@@ -43,28 +43,85 @@ set +e
   && [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_pl_rc=$?
 [ "$_agmsg_pl_e" = 1 ] && set -e
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/lib/team-status.sh"
 
-# "<terminal> <pane>" for <team>/<agent>, or a reason nobody has to guess at.
-_member_placement() {
-  local team="$1" agent="$2" rec ref t id
+# Delivery belongs to a registration (type + project), not merely a member.
+_member_delivery() {
+  local type="$1" project="$2" first rc=0
+  first="$(bash "$SCRIPT_DIR/delivery.sh" status "$type" "$project" 2>/dev/null | head -1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$first" ]; then
+    printf 'unknown:delivery_status_rc_%s' "$rc"
+    return 0
+  fi
+  case "$first" in mode:\ *) printf '%s' "${first#mode: }" ;; *) printf 'unknown:delivery_status_malformed' ;; esac
+}
+
+_member_status() {
+  local team="$1" agent="$2" type="$3" project="$4" registered="$5"
+  local rec ref terminal pane location container live delivery identity
+  local activity pane_label agent_key cli_session consistency reason
+  if [ "$registered" -eq 0 ]; then
+    agmsg_team_render_human_row "$agent" remote n/a:remote_registration \
+      n/a:remote n/a:no_local_registration n/a:no_local_registration \
+      unknown:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration \
+      n/a:no_local_registration n/a:no_local_registration ok
+    return 0
+  fi
+  delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
-    printf 'placement unavailable — terminal support not loaded'; return 0
+    reason=terminal_support_not_loaded
+    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    return 0
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
   if [ -z "$rec" ] || [ ! -f "$rec" ]; then
-    printf 'no pane recorded — not named yet'; return 0
+    reason=no_placement_record
+    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    return 0
   fi
   IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
   if [ -z "$ref" ]; then
-    printf 'placement record is empty'; return 0
+    reason=empty_placement_record
+    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    return 0
   fi
-  t=""; id=""
-  t="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || t=""
-  id="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || id=""
-  if [ -z "$t" ] || [ -z "$id" ]; then
-    printf 'placement record unreadable (%s)' "$ref"; return 0
+  terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
+  pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || pane=""
+  if [ -z "$terminal" ] || [ -z "$pane" ]; then
+    reason=invalid_placement_record
+    agmsg_team_render_human_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" "$delivery" \
+      "unknown:$reason" "unknown:$reason" "unknown:$reason" unverified
+    return 0
   fi
-  printf '%s %s' "$t" "$id"
+  location="$(agmsg_team_location "$terminal" "$pane")"
+  IFS="$(printf '\t')" read -r terminal pane container live <<EOF
+$location
+EOF
+  if [ "$live" = present ] && agmsg_terminal_load "$terminal" >/dev/null 2>&1; then
+    identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
+    IFS="$(printf '\t')" read -r activity pane_label agent_key cli_session consistency <<EOF
+$identity
+EOF
+  else
+    reason="live_${live}"
+    activity="unknown:$reason"; pane_label="unknown:$reason"
+    agent_key="unknown:$reason"; cli_session="unknown:$reason"
+    consistency=unverified
+  fi
+  agmsg_team_render_human_row "$agent" "$type" "$project" "$terminal" "$pane" \
+    "$container" "$live" "$activity" "$delivery" "$pane_label" "$agent_key" \
+    "$cli_session" "$consistency"
 }
 
 echo "Team: $TEAM"
@@ -90,9 +147,9 @@ while IFS='	' read -r name type project registered; do
     # A member this machine has never registered locally: pulled with the team,
     # real, and correctly without registrations. Saying so beats printing an
     # empty type and a "?" project, which reads as damage.
-    echo "  $name (remote — no local registration)"
+    _member_status "$TEAM" "$name" "" "" 0
   else
-    echo "  $name ($type) — $project   [$(_member_placement "$TEAM" "$name")]"
+    _member_status "$TEAM" "$name" "$type" "$project" 1
   fi
 # tr -d '\r': sqlite3.exe on Windows emits CRLF rows; the trailing CR would make
 # the `registrations` field "N\r" and trip the integer test in the loop (#130).

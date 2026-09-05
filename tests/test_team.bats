@@ -926,7 +926,7 @@ JSON
   # And the count agrees with the roster rather than with the join.
   [[ "$output" == *"3 member(s)"* ]]
   # The absence is described, not left blank.
-  [[ "$output" == *"no local registration"* ]]
+  [[ "$output" == *"n/a:no_local_registration"* ]]
 }
 
 @test "team: a locally registered member still lists its type and project" {
