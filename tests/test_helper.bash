@@ -34,60 +34,77 @@ setup_test_env() {
   mkdir -p "$HOME"
 }
 
-# When the removal fails, say WHO is still holding the directory (#1036).
+# When the removal fails, report what is known about it (#1036).
 #
-# Three windows-latest failures reported nothing but `rm: cannot remove
-# '/tmp/tmp.XXXXXXXXXX': Directory not empty`, on a job whose every test passed.
-# That message names the directory and not the holder, so each red cost a rerun
-# and taught nobody anything. POSIX unlinks a directory whose files are open, so
-# this only ever fires on Windows -- which is also the only place the answer is
-# needed.
+# Three windows-latest jobs failed with `rm: cannot remove …: Directory not
+# empty` on runs where every test passed. That message names the directory and
+# not the holder, so each red cost a rerun and taught the next one nothing.
 #
-# The probe reports and does NOT repair: the removal's own status is returned
-# unchanged, so a failure stays a failure. Every probe is allowed to fail and
-# none of them can turn a green teardown red -- a dump is worth nothing if it
-# becomes a second thing to debug. `head` is avoided in the pipelines for the
-# reason the workflow's forensics step gives: it closes the pipe early and
-# SIGPIPEs whatever was writing.
+# WHAT THIS ESTABLISHES, and what it does not. It records the pids this teardown
+# actually killed and waited for, and whether each is still alive at the moment
+# the removal failed, alongside a process inventory taken at that same moment.
+# It does NOT identify the holder: nothing here binds an open handle to the
+# remaining path, and neither `ps` nor `tasklist` can. The pids and the
+# inventory are correlation material for whoever reads the next red — the
+# holder's identity stays unproven until something can name it.
 #
-# What it prints is chosen to answer ONE question, the one nobody could answer
-# from three reds: is the pid teardown killed and waited for the same pid that
-# is still holding the directory? The pid files record the wrapper that
-# codex-monitor backgrounded; the handle may belong to a CHILD of that wrapper,
-# which no wait on the parent covers.
+# The pid set is captured BEFORE the removal, not scanned after it. A recursive
+# delete can unlink some of the tree before it fails, so the pid files may be
+# gone by the time the report runs; a reporter that re-scanned them would then
+# print nothing at exactly the moment its output was wanted.
+#
+# Reports, never repairs: the removal's own status is returned unchanged, so a
+# failure stays a failure. The probe body runs in a SUBSHELL so its `set +e`
+# cannot leak into the caller — a report-only probe must not alter the state the
+# framework runs in afterwards. `head` is avoided in the pipelines, as the
+# workflow's forensics step does, because it SIGPIPEs whatever was writing.
 _teardown_forensics() {
-  local dir="$1" pf pid
-  set +e
-  {
+  local dir="$1" waited="$2"
+  (
+    set +e
+    set +o pipefail 2>/dev/null || true
     echo "##### teardown could not remove $dir (#1036)"
     echo "##### what is still there:"
     ls -laR "$dir" 2>/dev/null
-    echo "##### pids teardown knew about, and whether they are still alive:"
-    for pf in "$dir"/run/*.pid; do
-      [ -f "$pf" ] || continue
-      pid="$(cat "$pf" 2>/dev/null)"
-      [ -n "$pid" ] || continue
-      if kill -0 "$pid" 2>/dev/null; then
-        echo "  $pf -> $pid STILL ALIVE (teardown waited for this one)"
-      else
-        echo "  $pf -> $pid exited"
-      fi
-    done
-    echo "##### every process this runner can see (the holder is in here):"
+    echo "##### pids this teardown killed and waited for, captured BEFORE the rm:"
+    if [ -z "$waited" ]; then
+      echo "  (none — no pid file existed when the removal started)"
+    else
+      local pid
+      for pid in $waited; do
+        if kill -0 "$pid" 2>/dev/null; then
+          echo "  $pid STILL ALIVE at the moment the removal failed"
+        else
+          echo "  $pid exited"
+        fi
+      done
+    fi
+    echo "##### process inventory at that same moment (correlation only —"
+    echo "##### this does NOT say which of these holds the directory):"
     ps -ef 2>/dev/null || ps 2>/dev/null
-    # Native Windows processes do not appear in the MSYS ps at all, and the
-    # holder is exactly the kind that would not: a node started by a wrapper.
+    # A native Windows process is absent from the MSYS ps entirely, and the
+    # suspected holder — a node started by a wrapper — is exactly that kind.
     command -v tasklist >/dev/null 2>&1 && tasklist 2>/dev/null
-  } >&2
+  ) >&2
   return 0
 }
 
 teardown_test_env() {
-  local rc=0
+  local rc=0 waited="" pf pid
+  # Snapshot BEFORE the removal (see above). AGMSG_TEARDOWN_WAITED_PIDS lets a
+  # file-level teardown hand over the pids it actually signalled, which is
+  # stronger than anything inferable from the files still on disk.
+  for pf in "$TEST_SKILL_DIR"/run/*.pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null)"
+    [ -n "$pid" ] && waited="$waited $pid"
+  done
+  waited="${AGMSG_TEARDOWN_WAITED_PIDS:-}$waited"
   rm -rf "$TEST_SKILL_DIR" || rc=$?
-  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR"
+  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR" "$waited"
   return "$rc"
 }
+
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
 # behaviour that depends on POSIX process semantics agmsg does not yet support

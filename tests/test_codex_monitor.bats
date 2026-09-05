@@ -71,7 +71,13 @@ teardown() {
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
     wait_for_pid_exit "$pid" || true
+    # Hand the pid to the shared teardown's reporter (#1036). What matters when
+    # the removal then fails is the set this teardown ACTED on, which is not
+    # recoverable from disk afterwards: the recursive delete can unlink these
+    # very files before it fails.
+    AGMSG_TEARDOWN_WAITED_PIDS="${AGMSG_TEARDOWN_WAITED_PIDS:-} $pid"
   done
+  export AGMSG_TEARDOWN_WAITED_PIDS
   rm -rf "$TEST_PROJECT"
   teardown_test_env
 }
