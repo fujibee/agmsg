@@ -966,7 +966,9 @@ storage_sync_apply_pull() {
   _AGMSG_SYNC_JQ_ERR=""
   trap 'case "${_AGMSG_SYNC_SQL_FILE:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-sql.*) rm -f "$_AGMSG_SYNC_SQL_FILE" ;; esac
         case "${_AGMSG_SYNC_JQ_ERR:-}" in "${TMPDIR:-/tmp}"/agmsg-sync-jq.*) rm -f "$_AGMSG_SYNC_JQ_ERR" ;; esac' EXIT INT TERM HUP
-  printf '%s\n' 'BEGIN IMMEDIATE;' > "$sql_file"
+  printf '%s\n' 'BEGIN IMMEDIATE;
+    CREATE TEMP TABLE sync_apply_envelope(blob TEXT);
+    INSERT INTO temp.sync_apply_envelope VALUES(NULL);' > "$sql_file"
 
   # ONE jq FOR THE WHOLE PAGE, AND NO eval AT ALL (#908 item 3, #940).
   #
@@ -1098,12 +1100,13 @@ storage_sync_apply_pull() {
     _sqlite_sync_lit_into "$at"; at_q="$_SQLITE_SYNC_LIT"
     q="'$key_id_q'"; [ -n "$key_id" ] || q=NULL
     printf "%s\n" "
+      UPDATE temp.sync_apply_envelope SET blob='$blob_q';
       INSERT OR IGNORE INTO sync_conflicts
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'server sequence maps to another wire id',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1119,7 +1122,7 @@ storage_sync_apply_pull() {
          driver_generation,server_seq,wire_id,envelope_v,cipher,key_id,blob,
          reason,observed_at)
       SELECT '$tl','$server','$remote',$protocol,'$generation','$seq','$wire',$v,
-             '$cipher_q',$q,'$blob_q',
+             '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),
              'wire id maps to another sequence or envelope',
              strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE EXISTS(SELECT 1 FROM sync_quarantine qx
@@ -1128,21 +1131,21 @@ storage_sync_apply_pull() {
           AND (qx.server_seq<>'$seq' OR qx.envelope_v<>$v
             OR qx.cipher<>'$cipher_q'
             OR COALESCE(qx.key_id,'')<>'$key_id_q'
-            OR qx.blob<>'$blob_q'))
+            OR qx.blob<>(SELECT blob FROM temp.sync_apply_envelope)))
          OR EXISTS(SELECT 1 FROM sync_messages mx
         WHERE mx.server_instance_id='$server' AND mx.remote_team_id='$remote'
           AND mx.protocol_version=$protocol AND mx.wire_id='$wire'
           AND (mx.server_seq IS NOT NULL AND mx.server_seq<>'$seq'
             OR mx.envelope_v<>$v OR mx.cipher<>'$cipher_q'
             OR COALESCE(mx.key_id,'')<>'$key_id_q'
-            OR mx.blob<>'$blob_q'));
+            OR mx.blob<>(SELECT blob FROM temp.sync_apply_envelope)));
       INSERT OR IGNORE INTO sync_quarantine
         (local_team,server_instance_id,remote_team_id,protocol_version,
          driver_generation,server_seq,wire_id,server_received_at,envelope_v,
          cipher,key_id,blob,status,policy_revision,local_security_revision,reason)
       VALUES('$tl','$server','$remote',$protocol,'$generation','$seq','$wire',
         '$received_q',$v,'$cipher_q',$q,
-        '$blob_q','$status','$policy_q',
+        (SELECT blob FROM temp.sync_apply_envelope),'$status','$policy_q',
         '$local_rev_q','$reason_q');
       UPDATE sync_quarantine SET status='$status',
           policy_revision='$policy_q',
@@ -1153,14 +1156,14 @@ storage_sync_apply_pull() {
          AND server_seq='$seq' AND envelope_v=$v
          AND cipher='$cipher_q'
          AND COALESCE(key_id,'')='$key_id_q'
-         AND blob='$blob_q'
+         AND blob=(SELECT blob FROM temp.sync_apply_envelope)
          AND status NOT IN ('corrupt_state','imported','reconciled');
       UPDATE sync_quarantine SET status='corrupt_state',reason='wire envelope mismatch'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
          AND (server_seq<>'$seq' OR envelope_v<>$v OR cipher<>'$cipher_q'
               OR COALESCE(key_id,'')<>'$key_id_q'
-              OR blob<>'$blob_q');
+              OR blob<>(SELECT blob FROM temp.sync_apply_envelope));
       UPDATE sync_quarantine SET status='corrupt_state',reason='binding sequence conflict'
        WHERE server_instance_id='$server' AND remote_team_id='$remote'
          AND protocol_version=$protocol AND wire_id='$wire'
@@ -1174,13 +1177,13 @@ storage_sync_apply_pull() {
              AND m.remote_team_id='$remote' AND m.protocol_version=$protocol
              AND m.wire_id='$wire' AND (m.envelope_v<>$v OR m.cipher<>'$cipher_q'
                OR COALESCE(m.key_id,'')<>'$key_id_q'
-               OR m.blob<>'$blob_q'
+               OR m.blob<>(SELECT blob FROM temp.sync_apply_envelope)
                OR (m.server_seq IS NOT NULL AND m.server_seq<>'$seq')));
       UPDATE sync_messages SET server_seq='$seq' WHERE server_instance_id='$server'
         AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'
         AND envelope_v=$v AND cipher='$cipher_q'
         AND COALESCE(key_id,'')='$key_id_q'
-        AND blob='$blob_q' AND (server_seq IS NULL OR server_seq='$seq')
+        AND blob=(SELECT blob FROM temp.sync_apply_envelope) AND (server_seq IS NULL OR server_seq='$seq')
         AND EXISTS(SELECT 1 FROM sync_quarantine qx
           WHERE qx.server_instance_id='$server' AND qx.remote_team_id='$remote'
             AND qx.protocol_version=$protocol AND qx.wire_id='$wire'
@@ -1249,7 +1252,7 @@ storage_sync_apply_pull() {
            driver_generation,local_position,local_id,wire_id,envelope_v,cipher,
            key_id,blob,server_seq,direction)
         SELECT '$tl','$server','$remote',$protocol,'$generation',seq,id,'$wire',$v,
-               '$cipher_q',$q,'$blob_q','$seq','pull'
+               '$cipher_q',$q,(SELECT blob FROM temp.sync_apply_envelope),'$seq','pull'
           FROM events WHERE id='$local_id';
         UPDATE sync_quarantine SET status='imported' WHERE server_instance_id='$server'
           AND remote_team_id='$remote' AND protocol_version=$protocol AND wire_id='$wire'

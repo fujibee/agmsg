@@ -60,6 +60,26 @@ The mock serves it through the same paging as the reference server (the fixture 
 
 The `push` scenario seeds its local team through the sqlite driver's own `_sqlite_message_sent_sql` (the INSERT `storage_send` issues, with placeholders filled per row), then verifies the count through `storage_history` before connecting. The seeding is a fixture and is reported separately (`seed`); it is not part of any measured stage.
 
+## Isolating ciphertext duplication in apply (#957)
+
+```sh
+python3 tests/perf/apply-blob.py --baseline /path/to/baseline-checkout --out /tmp/apply-blob-run
+```
+
+This narrower benchmark copies both versions' scripts into private installs and creates synthetic SQLite stores through the baseline driver. It seeds 1,000 imported messages with 4,096-byte blobs and 100 pending messages, then applies the already-evaluated pending page at blob widths of 120, 4,096, and 16,384 bytes. Incoming projections remain 120 bytes, so only the incoming ciphertext width changes. These are storage fixtures, not valid age ciphertext; use the `unlock` scenario above for real encryption/decryption coverage. No operator store or key is read.
+
+Five repetitions alternate before/after order. Each starts with a fresh backup of the same seed and verifies exact stored blobs, import counts, legacy mirrors, and idempotent replay. `apply_ms_per_message` times the unwrapped production adapter, including shell/JQ processing and SQLite. A separate, untimed wrapper captures the emitted SQL and counts copies of the first message's unique blob. `sqlite_batch_ms_per_message` replays that captured batch through the real `sqlite3 -bail` on another fresh backup: it includes process startup, parsing, statement execution, and commit, **not parsing alone**. Fixture construction, capture, replay verification, and idempotency checks are outside both reported timers. `metadata.json`, `results.jsonl`, the SQL batches, and all databases remain under `--out`.
+
+Use `--messages`, `--preloaded`, `--blob-bytes`, and `--repetitions` to change the fixture. Run measurements without other local test/harness jobs; absolute times on a shared machine remain noisy. This measures post-decryption apply, not end-to-end reprocess or the production store's unexplained latency.
+
+For an optional compilation/execution split of the captured SQL:
+
+```sh
+python3 tests/perf/profile-apply-sql.py --run /tmp/apply-blob-run --library /path/to/libsqlite3.so --out /tmp/apply-sql-profile
+```
+
+Supply a shared library matching the measured CLI's SQLite version; a version mismatch is refused. Record the source ID and any build differences as well: matching versions do not guarantee identical builds, and a CLI can link SQLite statically. This runs each captured statement in order on a fresh seed backup, separately timing the C API calls to [`sqlite3_prepare_v2`](https://www.sqlite.org/c3ref/prepare.html), `sqlite3_step`, and `sqlite3_finalize`, through Python `ctypes`. Preparation includes parsing, query planning, and bytecode generation, not just tokenization. Execution includes the commit. Timers include the foreign-function call overhead but exclude the surrounding Python loop, file reads, connection open/close, and fixture setup. These are library-call measurements, **not a profile of the running production shell**, and cannot replace the adapter and CLI measurements above. The default 20 repetitions alternate variant order and verify imported counts and matching quarantine/mapping blobs.
+
 ## Reading a result
 
 From the comparison on one machine (macOS, 2026-08-21), `join`, 50 vs 400 messages:
