@@ -32,6 +32,10 @@ source "$SCRIPT_DIR/lib/roster-journal.sh"
 # cluster — '.', '/', '\', '"', '[', ']' all have path meaning to json1).
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validate.sh"
+# The advisory role->session record is torn down here too (#1041); it keys on the
+# same (team, agent) as the actas lock released below, via _actas_lock_encode.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/role-session.sh"
 # Escape as a SQL string literal (parity with join.sh/rename.sh/leave.sh):
 # concatenated into JSON paths below as `'$.agents.' || '<escaped>'` rather
 # than spliced into the path text, so a single quote can't break the
@@ -201,6 +205,13 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   if [ -n "$SESSION_ID" ]; then
     actas_lock_release "$TEAM_NAME" "$TARGET_AGENT" "$SESSION_ID" 2>/dev/null || true
   fi
+  # Remove the advisory role->session record for this seat (#1041). Nothing else
+  # deleted it, so it outlived every despawn -- graceful AND --force -- leaving one
+  # stale seat record (session uuid, name, team, type, project) per member ever
+  # spawned, which internal/resurrect-panes.sh reads. NOT gated on SESSION_ID:
+  # --force calls reset.sh with none, and the record must go on both paths.
+  _agmsg_role_session_path_into "$TEAM_NAME" "$TARGET_AGENT"
+  rm -f "$_AGMSG_ROLE_SESSION_PATH" 2>/dev/null || true
 done
 
 if [ "$REMOVED" -eq 0 ]; then
