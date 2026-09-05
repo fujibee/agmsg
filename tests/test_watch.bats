@@ -1197,6 +1197,7 @@ STUB
   [ "$st" -eq 75 ]
   # Non-delivery-shaped diagnostic (a plain "agmsg watch:" line, not "ts | team | from → to | body").
   grep -q "agmsg watch: cannot read delivery state for team:alice" "$out"
+}
 
 # --- the watcher re-asserts this pane's name (#1044) --------------------------
 #
