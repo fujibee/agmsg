@@ -123,13 +123,17 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Copilot CLI / Antigravity / OpenCode) so it picks up the new skill.
 
-### Windows: Git Bash & Codex
+### Windows: Git Bash
 
 agmsg's implementation is the Bash script set under `scripts/`, so on Windows the
 scripts run through **Git Bash** (Git for Windows, with `sqlite3` available on the
 Git Bash PATH). There is no PowerShell reimplementation.
 
-- In Windows environments, Claude Code naturally works with Bash/Git Bash for
+- In Windows environments, Claude Code monitor delivery is verified through
+  Git Bash. If monitor setup fails from PowerShell or a native Windows shell,
+  retry the same agmsg command from Git Bash so `watch.sh` runs in the expected
+  Bash environment.
+- Claude Code normally works with Bash/Git Bash for
   these script calls, but native Windows Codex commands and hooks often start
   from PowerShell. Keep the actual agmsg execution path pinned to Git Bash so
   all agents share the same `$HOME` and SQLite database.
@@ -265,6 +269,26 @@ How incoming messages reach your agent. Pick one at first join via the prompt, o
 Settings are per-project. Each `<project>/.claude/settings.local.json` gets exactly the hooks the chosen mode needs — repeated `set` calls are idempotent.
 
 **Monitor priming**: in `monitor` mode, the receiving agent doesn't react to its first inbound message until it has taken at least one turn this session. If you've just started a fresh session and a teammate has already sent something, nudge the agent with any short message ("hi") to prime it — subsequent messages stream in real time.
+
+### Claude Code monitor verification
+
+`delivery.sh status claude-code <project>` showing `mode: monitor` means the project is configured for monitor delivery. It does **not** prove that Claude Code has started the runtime Monitor task in the current session.
+
+For real-time delivery, verify the Claude Code runtime state:
+
+1. `ToolSearch select:Monitor` finds Claude Code's generic `Monitor` tool.
+2. The session starts `Monitor(agmsg inbox stream)` with the `watch.sh ... claude-code` command from the `AGMSG-DIRECTIVE`.
+3. The Claude Code footer shows `1 monitor`.
+4. The transcript contains `Monitor event: "agmsg inbox stream"` when messages arrive.
+
+These are failure states, even if `delivery.sh status` says `mode: monitor`:
+
+- The footer shows `1 shell`.
+- `watch.sh` is running only as a Bash/background/nohup shell process.
+- Tool search finds Azure Monitor, an MCP monitor, or any other monitor-branded tool instead of Claude Code's generic `Monitor` tool.
+- `ToolSearch select:Monitor` cannot find a generic `Monitor` tool.
+
+If the Monitor tool is unavailable, use `turn` delivery or manual `/agmsg` inbox checks as a fallback. Those modes still deliver queued messages, but they are not real-time monitor delivery.
 
 ### Migrating from legacy `hook on/off`
 
