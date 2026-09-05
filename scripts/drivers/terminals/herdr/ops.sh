@@ -537,16 +537,19 @@ terminal_name() {
   if [ "$mode" != key ]; then
     herdr pane rename "$id" "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   fi
-  if key="$(_herdr_internal_key "$team" "$name")"; then
-    if ! herdr agent rename "$id" "$key" >/dev/null 2>&1; then
-      if [ "$mode" = key ]; then echo runtime_error; return 13; fi
-    fi
-  elif [ "$mode" = key ]; then
-    # Nothing was attempted at all: reporting ok would say the member is
-    # addressable when no key was set.
-    echo runtime_error
-    return 13
-  fi
+  # The key is not optional, in either mode. It is what peek/poke resolve the
+  # member through, so failing to set it IS the member becoming unreachable —
+  # the defect this issue is about. This used to be `|| true`, which made the
+  # severities exactly backwards: the decoration was fatal and the addressing was
+  # swallowed, so the "a name is never absent" requirement held strictly in the
+  # reduced mode and not in the default one everybody uses.
+  #
+  # A key that cannot be DERIVED is treated the same way, and that is a change on
+  # a real condition: `_herdr_internal_key` returns non-zero when no SHA-256 tool
+  # is available. Reporting ok there would say the member is addressable when no
+  # key was set — the same lie by a different route.
+  key="$(_herdr_internal_key "$team" "$name")" || { echo runtime_error; return 13; }
+  herdr agent rename "$id" "$key" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
   return 0
 }

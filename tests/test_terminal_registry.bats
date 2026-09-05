@@ -51,6 +51,11 @@ elif [ "\$1" = tab ] && [ "\$2" = create ]; then
   echo '{"result":{"root_pane":{"pane_id":"wD:p1"}}}'
 elif [ "\$1" = pane ] && [ "\$2" = read ]; then
   printf 'herdr visible text\n'
+elif [ "\$1" = agent ] && [ "\$2" = rename ]; then
+  # The key rename. Failable per test (HERDR_AGENT_RENAME_RC), because "does it
+  # fire when it should" and "does it answer ok when it failed" are different
+  # questions and only the first one had a control.
+  exit "\${HERDR_AGENT_RENAME_RC:-0}"
 elif [ "\$1" = pane ] && [ "\$2" = process-info ]; then
   # requirement 1 gate: a READY pane (foreground pgid == shell pid) so terminal_spawn
   # proceeds to type. Overridable per test via HERDR_PROCESS_INFO_RESPONSE.
@@ -1323,4 +1328,52 @@ M
   [ "$status" -eq 0 ]
   grep -Fq 'herdr [pane] [rename] [wC:p4] [onteam:alice]' "$ARGV_LOG"
   grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+# --- a failed KEY is a failure, in the mode everybody uses (#1044) ------------
+#
+# The severities were backwards: the label's failure was fatal and the key's was
+# swallowed with `|| true`, so "a member's name is never absent" held strictly in
+# the reduced mode and not in the default one. Measured by a reviewer, not
+# reasoned about: with the key rename failing, default mode returned rc=0 and
+# printed `ok`.
+#
+# Both modes are asserted, because "it goes red under `off`" is not evidence
+# about the default — that split is exactly what hid this.
+@test "a failed key rename fails the naming, in DEFAULT mode (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=1
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+
+  # It really did get as far as trying, rather than failing earlier for some
+  # other reason: the label was set first, and the key was attempted.
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [keyteam:alice]' "$ARGV_LOG"
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+@test "a failed key rename fails the naming, in KEY-ONLY mode too (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=1
+  export AGMSG_TERMINAL_NAMING=off
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -ne 0 ]
+  grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+# And the paired positive: the same setup with the rename succeeding must pass,
+# or the two tests above are satisfied by naming being broken outright.
+@test "the same setup with the key rename succeeding is green (#1044)" {
+  _install_fake_herdr "sess-k"
+  export HERDR_ENV=1
+  export HERDR_AGENT_RENAME_RC=0
+  unset AGMSG_TERMINAL_NAMING
+
+  run agmsg_terminal_name_self "sess-k" keyteam alice /proj/A claude-code
+  [ "$status" -eq 0 ]
 }
