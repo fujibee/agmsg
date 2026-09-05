@@ -3306,3 +3306,109 @@ JSON
   run bash -c "printf '%s\n' \"\$1\" | grep -q 'taken by the watcher'" _ "$output"
   [ "$status" -ne 0 ] || { echo "the hook re-offered a consumed message" >&2; return 1; }
 }
+
+# --- #677: the rows are consumed only after the payload is written ------------
+#
+# The hook formatted its messages into a variable, marked them read, and only
+# then wrote them out. Anything that went wrong in between consumed the rows and
+# showed the user nothing — the message still in `history.sh`, gone from
+# `inbox.sh`, looking exactly like a delivery failure.
+#
+# The pair below is the whole claim: identical setup, the only difference being
+# whether the write can succeed.
+@test "check-inbox: a message whose payload was written is consumed (#677)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "written and consumed"
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  # `grep -Fq`, not `[[ =~ ]]`: a non-final [[ ]] cannot fail a test on bash 3.2
+  # (#670), and this is the assertion that watches the whole change -- a payload
+  # that lost its message body while the mark still succeeded would otherwise sit
+  # green next to the "No new messages" below.
+  printf '%s' "$output" | grep -Fq "written and consumed"
+
+  # Consumed: a second look offers nothing.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "No new messages"
+}
+
+@test "check-inbox: a message whose payload could not be written stays unread (#677)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "must survive an unwritable stdout"
+
+  # stdout CLOSED, so the write of the payload fails. Everything else is the same
+  # as the test above — which is what makes this a comparison and not a smoke
+  # test.
+  #
+  # The barrier variable names a prefix, not a wait: `.release` is created first
+  # so the run never blocks on it. What it buys is two markers the run leaves
+  # behind — `.reached` when the rows are formatted and `.emitted` when the emit
+  # has been attempted — because a run whose stdout is closed cannot tell the
+  # test anything through the payload, and "the message is unread" is equally
+  # true of a run that did nothing at all.
+  local barrier="$BATS_TEST_TMPDIR/mark-barrier"
+  : > "$barrier.release"
+  AGMSG_TEST_MARK_BARRIER="$barrier" \
+    run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT' >&-"
+
+  # THE control, and it is taken inside the run that failed: `.emitted` is
+  # written immediately after the emit, so its existence says THIS run reached
+  # the write, and the status it carries says the write is what failed.
+  #
+  # Two weaker forms were tried and both are recorded here because each looks
+  # sufficient. A barrier before the mark proves only that the rows were
+  # FORMATTED. Re-running the hook with a writable stdout proves that a
+  # DIFFERENT process reached the write — a separate run succeeding is not
+  # evidence about this one. Neither excludes the case this test exists to
+  # exclude: an early exit that leaves the message unread for a reason that has
+  # nothing to do with the write.
+  [ -e "$barrier.emitted" ]
+  # Not just "it got there" — it got there and FAILED. Without this the happy
+  # path satisfies the line above.
+  [ "$(cat "$barrier.emitted")" != "0" ]
+
+  # Implied by `.emitted` (the emit sits inside `if [ -n "$OUTPUT" ]`), kept
+  # because it fails nearer the cause when the run stops before formatting.
+  [ -e "$barrier.reached" ]
+
+  # And the row itself survived intact — still deliverable, with its body. This
+  # is a claim about the ROW, not about the failed run. Asserted BEFORE any
+  # `inbox.sh`: inbox displays AND consumes, so reading it first would take the
+  # row away and leave this measuring its own side effect. (Measured — that is
+  # exactly what the first draft of this test did.)
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT'"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -Fq "must survive an unwritable stdout"
+
+  # ...and now it is consumed, by the run that could write it.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "No new messages"
+}
+
+# The fact the emit guards lean on: mid-turn delivery shows a message but does
+# not consume it, so the PostToolUse branch reaches the consume loop with nothing
+# pending. Unpinned, that stops being true the moment someone makes PostToolUse
+# mark read — and the guard comments would then be describing a tree that no
+# longer exists (#1003/#677).
+@test "check-inbox (PostToolUse): shows a message without consuming it (#1003)" {
+  bash "$SCRIPTS/join.sh" testteam alice codex "$TEST_PROJECT"
+  bash "$SCRIPTS/join.sh" testteam bob   codex "$TEST_PROJECT"
+  bash "$SCRIPTS/config.sh" set delivery.turn.check_interval 0 >/dev/null
+  bash "$SCRIPTS/send.sh" testteam bob alice "mid-turn, still unread"
+
+  run bash -c "echo '{}' | bash '$SCRIPTS/check-inbox.sh' codex '$TEST_PROJECT' PostToolUse"
+  [ "$status" -eq 0 ]
+  # Positive control: it really did deliver. Without this, the assertion below
+  # also passes when the hook did nothing at all.
+  printf '%s' "$output" | grep -Fq "mid-turn, still unread"
+  printf '%s' "$output" | grep -Fq "hookSpecificOutput"
+
+  # ...and the row is still there for Stop to deliver and consume.
+  run bash "$SCRIPTS/inbox.sh" testteam alice
+  printf '%s' "$output" | grep -Fq "mid-turn, still unread"
+}
