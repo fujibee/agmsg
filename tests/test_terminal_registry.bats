@@ -1853,6 +1853,112 @@ _fake_herdr_list_anchored_plus() {
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
+# --- every id-taking tmux op honours BOTH ref forms (#1051, co2/tl) ----------
+#
+# Putting the socket in the ref made the WRITERS emit `<socket>:%N`; the READERS
+# were not counted at the same time, and four of them pattern-matched a bare
+# `%`/`@` and called an ambient `tmux`. Those are TWO defects per site, not one:
+# a ref stripped but not routed reaches whatever server is ambient, where the
+# same pane id is a DIFFERENT pane — which is where #1051 started.
+#
+# The op list is DERIVED, not typed: the ABI minus the ops that take no pane id.
+# A new id-taking op therefore fails this test until it is covered, instead of
+# quietly inheriting the old assumption (the fixture-enumeration mistake, again).
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn"
+
+# op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
+_tmux_op_args() {
+  case "$1" in
+    terminal_arrange) printf '%s place_below %s' "$2" "$2" ;;
+    terminal_poke)    printf '%s hello' "$2" ;;
+    terminal_name)    printf '%s k label' "$2" ;;
+    terminal_team_input_ready) printf '%s claude' "$2" ;;
+    *)                printf '%s' "$2" ;;
+  esac
+}
+
+@test "every id-taking tmux op derives from the ABI and is covered here (#1051)" {
+  # The guard for the table above: if the ABI grows an id-taking op, this fails
+  # until _tmux_op_args and the two tests below have seen it. Without this the
+  # coverage claim is only as current as the day it was typed.
+  local op uncovered=""
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    grep -q "^${op}() {" scripts/drivers/terminals/tmux/ops.sh || uncovered="$uncovered $op(missing)"
+  done
+  [ -z "$uncovered" ] || { echo "not implemented by the tmux driver:$uncovered"; return 1; }
+  # And the exclusion list is not a place to hide an op: every name in it must be
+  # a real ABI op, or a typo silently drops a reader from the sweep.
+  for op in $_TMUX_NO_ID_OPS; do
+    case " $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL " in
+      *" $op "*) : ;;
+      *) echo "exclusion names a non-op: $op"; return 1 ;;
+    esac
+  done
+}
+
+@test "a socket-qualified ref reaches the OWNING server, with a bare -t (#1051)" {
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  local op args n=0 want=0
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    want=$((want + 1))
+    : > "$ARGV_LOG"
+    # shellcheck disable=SC2046
+    run $op $(_tmux_op_args "$op" '/tmp/fake-sock:%1')
+    # Not asserting success: some ops legitimately answer unsupported/unknown
+    # against a stub. What must hold is HOW they asked.
+    if [ -s "$ARGV_LOG" ]; then
+      n=$((n + 1))
+      grep -Fq '[-S] [/tmp/fake-sock]' "$ARGV_LOG" \
+        || { echo "$op: did not select the owning server"; cat "$ARGV_LOG"; return 1; }
+      refute grep -Fq '[/tmp/fake-sock:%1]' "$ARGV_LOG" \
+        || { echo "$op: passed the socket-qualified id through as a target"; cat "$ARGV_LOG"; return 1; }
+    fi
+  done
+  # Positive control. Every assertion above is inside `if [ -s ... ]`, so an op
+  # that stops invoking tmux is checked by nothing and the sweep shrinks in
+  # silence — "0 findings" and "never ran" would look identical. Measured: all
+  # of them invoke tmux today, so anything less is a real change to explain.
+  [ "$n" -eq "$want" ] || { echo "only $n of $want id-taking ops reached tmux"; return 1; }
+}
+
+@test "a LEGACY bare ref still works and selects no server (#1051)" {
+  # Without this half, making every op REQUIRE a socket would pass the test
+  # above. Legacy bare refs are real input: agmsg_terminal_ref_terminal accepts
+  # a schemeless bare tmux id on purpose, and records written before the socket
+  # axis carry exactly that.
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  local op silent=""
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    : > "$ARGV_LOG"
+    # shellcheck disable=SC2046
+    run $op $(_tmux_op_args "$op" '%1')
+    if [ -s "$ARGV_LOG" ]; then
+      refute grep -Fq '[-S]' "$ARGV_LOG" \
+        || { echo "$op: selected a server for a ref that names none"; cat "$ARGV_LOG"; return 1; }
+      continue
+    fi
+    silent="$silent $op"
+    # An op that invoked nothing asserted nothing, so name why it is allowed to.
+    # `pane_state` is the ONE deliberate abstainer: a bare id names no server, so
+    # there is nobody to ask, and `gone` here would delete a live member's
+    # record. It must say so — unknown/10 — rather than merely doing nothing.
+    [ "$op" = terminal_pane_state ] \
+      || { echo "$op invoked no tmux for a legacy bare ref (silently refused?)"; return 1; }
+    [ "$status" -eq 10 ] && [ "$output" = unknown ] \
+      || { echo "pane_state abstained without saying unknown/10: status=$status out=$output"; return 1; }
+  done
+  # The abstainer list is pinned, not counted: a second op going quiet would keep
+  # any >=N count green while its half of the sweep asserted nothing, and
+  # "everything now requires a socket" would read as a pass.
+  [ "$silent" = " terminal_pane_state" ] \
+    || { echo "unexpected set of ops invoking nothing:$silent"; return 1; }
+}
+
 @test "pane_state (herdr): the pane is in the list -> present (#1051)" {
   _fake_herdr_list_anchored_plus ""
   agmsg_terminal_load herdr
