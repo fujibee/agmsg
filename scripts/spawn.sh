@@ -239,6 +239,32 @@ elif [ -z "$SPAWN_LAUNCHER" ]; then
   die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
 fi
 
+# --- Optional launch wrapper (manifest `spawn_wrapper=`) ---
+# A type may name a script, relative to its own driver directory, that the boot
+# script runs INSTEAD of the bare `cli=` executable. codex needs this (#1063):
+# its monitor bridge is entered through codex-shim.sh, which is installed on
+# purpose as an interactive-shell FUNCTION (PR #193) — so it is not exported
+# and does not exist in the non-interactive shell that runs a boot script,
+# where `command -v codex` resolves the REAL binary and the spawned seat starts
+# without --remote (measured 2026-09-06: the bridge then restarts every few
+# seconds against a thread it cannot own, and no message is ever delivered).
+# The function form stays; what spawn needs is a resolution that works from a
+# non-interactive shell, so the wrapper is addressed by its bundled path —
+# never through PATH or function lookup. A wrapper that is declared but
+# missing or not executable is a REFUSAL: launching the bare CLI instead would
+# recreate the bypass with no signal, and the symptom is a seat that looks
+# spawned and never says a word. The `cli=` check above still applies, because
+# the wrapper needs the real binary too.
+SPAWN_WRAPPER=""
+_spawn_wrapper_rel="$(agmsg_type_get "$AGENT_TYPE" spawn_wrapper)"
+if [ -n "$_spawn_wrapper_rel" ]; then
+  _spawn_type_dir="$(agmsg_type_dir "$AGENT_TYPE")" \
+    || die "agent type '$AGENT_TYPE' declares spawn_wrapper but its driver directory could not be resolved"
+  SPAWN_WRAPPER="$_spawn_type_dir/$_spawn_wrapper_rel"
+  [ -x "$SPAWN_WRAPPER" ] \
+    || die "agent type '$AGENT_TYPE' declares a launch wrapper that is missing or not executable: $SPAWN_WRAPPER — refusing to launch the bare '$CLI_BIN_EXE' in its place (bypassing the wrapper is exactly what it exists to prevent)"
+fi
+
 # --model is pass-through: the model id is handed to the CLI unchecked (the CLI
 # rejects an unknown id), so agmsg never has to track each vendor's model list.
 # The flag SPELLING differs per CLI, so it comes from the manifest `model_arg=`
@@ -491,7 +517,15 @@ esac
     # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
     # MSYS_GUARD (#336) prefixes the CLI line as a command-local env assignment;
     # emitted with %s (not %q) so it stays an assignment, not a single token.
-    printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
+    # With a manifest spawn_wrapper, the wrapper's bundled path replaces the
+    # cli's FIRST word (the executable); any fixed-prefix tokens after it are
+    # kept, since the wrapper forwards its argv to the real binary.
+    if [ -n "$SPAWN_WRAPPER" ]; then
+      printf '%s%q' "$MSYS_GUARD" "$SPAWN_WRAPPER"
+      case "$CLI_BIN" in *' '*) printf ' %s' "${CLI_BIN#* }" ;; esac
+    else
+      printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
+    fi
     agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do

@@ -289,8 +289,9 @@ seed_resumable() {
   run bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"; run cat "$boot"
-  # Subcommand shape: `codex resume cx-uuid-1 ...` -- resume token right after cli.
-  [[ "$output" == *"codex resume cx-uuid-1"* ]]
+  # Subcommand shape: `<shim> resume cx-uuid-1 ...` -- resume token right after
+  # the executable (the bundled codex-shim.sh, which forwards argv to codex).
+  [[ "$output" == *"codex-shim.sh resume cx-uuid-1"* ]]
   [[ "$output" == *"actas"* ]]
   # codex has no name_arg, so no -n.
   [[ "$output" != *" -n "* ]]
@@ -379,7 +380,7 @@ seed_resumable() {
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
   run cat "$boot"
-  [[ "$output" == *"codex -m gpt-5"* ]]
+  [[ "$output" == *"codex-shim.sh -m gpt-5"* ]]
 }
 
 @test "spawn --model: grok-build launch uses its --model flag" {
@@ -1376,4 +1377,124 @@ T
   [ "$status" -eq 0 ]
   refute grep -qx -- '-' <<<"$output"          # no line that is just the protocol '-'
   grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
+}
+
+# --- codex launches through the bundled shim, by path (spawn_wrapper=) ---------
+# A person's shell reaches codex-shim.sh as a function or a PATH entry; the
+# non-interactive shell that runs a boot script has neither, so a bare `codex`
+# there is the real binary and the seat starts without --remote (measured: the
+# bridge restarts every few seconds against a thread it cannot own). The
+# manifest names the shim relative to the type directory and spawn addresses it
+# by that bundled path.
+
+# The executable of a boot script's CLI line: the first word that is not a
+# leading VAR=value assignment (the MSYS argv guard, #336, prefixes every line).
+_boot_line_executable() {
+  printf '%s\n' "$1" | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /=/) { print $i; exit } }'
+}
+
+@test "spawn: codex is launched through the bundled shim by its absolute path, not a bare cli" {
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  [ -f "$boot" ]
+  # The CLI line's first word is the shim inside THIS skill dir -- not `codex`,
+  # not something found on PATH.
+  local shim; shim="$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+  grep -qF "$shim" "$boot"
+  # And it is the executable of the actas line (the token before the prompt).
+  local line; line="$(grep -F 'actas' "$boot" | head -1)"
+  echo "actas line: $line"
+  [ "$(_boot_line_executable "$line")" = "$shim" ]
+  # The bare cli must not be launched anywhere in the script.
+  [ "$(grep -cE '^codex |^[A-Z_]+=[^ ]* codex ' "$boot")" -eq 0 ]
+}
+
+@test "spawn: a declared wrapper that is missing is a refusal, never a silent bare-cli launch" {
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  # Break the bundled shim (the type manifest still declares it).
+  chmod -x "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF 'launch wrapper'
+  printf '%s\n' "$output" | grep -qF 'codex-shim.sh'
+  # Nothing was placed or launched: no boot script was handed to the terminal.
+  [ ! -s "$CAPTURE" ]
+  chmod +x "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-shim.sh"
+}
+
+@test "spawn: a type without spawn_wrapper still launches its bare cli (claude-code)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  # The actas line's executable is the bare `claude` (resolved by the pane's
+  # PATH), with no wrapper in front of it.
+  local line; line="$(grep -F 'actas' "$boot" | head -1)"
+  echo "actas line: $line"
+  [ "$(_boot_line_executable "$line")" = claude ]
+  [ "$(grep -c 'codex-shim' "$boot")" -eq 0 ]
+}
+
+@test "spawn: a spawned codex reaches the real binary WITH --remote (argv read from the boot script's launch)" {
+  # End to end: run the boot script spawn wrote. Its shim resolves the real
+  # codex on PATH (a fake that records argv and can bring up an app-server),
+  # enters codex-monitor because the project is in monitor mode, and execs the
+  # real binary with --remote. The argv the fake recorded is the evidence.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  export CALL_LOG="$TEST_SKILL_DIR/codex-calls.log"
+  cat > "$STUB_BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "codex-cli 0.142.2"; exit 0 ;;
+  app-server)
+    python3 - <<'PY'
+import socket, sys, os
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.2)
+print("codex app-server (WebSockets)")
+print("  listening on: ws://127.0.0.1:%d" % s.getsockname()[1]); sys.stdout.flush()
+ppid = os.getppid()
+while True:
+    if os.getppid() != ppid:
+        break
+    try:
+        c, _ = s.accept(); c.close()
+    except Exception:
+        pass
+PY
+    ;;
+  *)
+    printf 'real-codex' >> "$CALL_LOG"
+    for a in "$@"; do printf ' <%s>' "$a" >> "$CALL_LOG"; done
+    printf '\n' >> "$CALL_LOG"
+    ;;
+esac
+FAKE
+  chmod +x "$STUB_BIN/codex"
+  # The bridge launcher is detached and Node-based; stand in for it.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/fake-launcher.sh"; chmod +x "$STUB_BIN/fake-launcher.sh"
+  # The boot script ends with `exec "$SHELL" -i`; give it a shell that just exits.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"; chmod +x "$STUB_BIN/noshell"
+
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" bash "$boot"
+  [ -f "$CALL_LOG" ]
+  # The real binary was reached exactly once, with the bridge flag and the actas prompt.
+  [ "$(grep -c '^real-codex' "$CALL_LOG")" -eq 1 ]
+  grep -q '^real-codex <--remote> <ws://127\.0\.0\.1:[0-9][0-9]*>' "$CALL_LOG"
+  grep -q 'actas' "$CALL_LOG"
+  grep -q 'reviewer' "$CALL_LOG"
+  # Clean up the fake app-server the shim brought up.
+  local pf pid
+  for pf in "$TEST_SKILL_DIR"/run/codex-app-server.*.pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+  done
 }
