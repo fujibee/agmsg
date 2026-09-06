@@ -1448,7 +1448,7 @@ _boot_line_executable() {
   run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" bash "$boot"
+  run env SHELL="$STUB_BIN/noshell" bash "$boot"
   _assert_bridged_argv
 }
 
@@ -1465,14 +1465,21 @@ _boot_line_executable() {
   run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  # The guard sits BEFORE the act: the unset line precedes the wrapper line.
-  local unset_ln cli_ln
-  unset_ln="$(grep -n '^unset .*AGMSG_CODEX_BRIDGE' "$boot" | head -1 | cut -d: -f1)"
+  # The guard sits BEFORE the act: the namespace-clearing line (every
+  # AGMSG_CODEX_* exported variable, enumerated at boot time) and the literal
+  # unset both precede the wrapper line. One assertion per line, on purpose: an
+  # `a && b && c` list does not fail the test when `a` fails.
+  local ns_ln lit_ln cli_ln
+  ns_ln="$(grep -n 'for _v in $(env | sed .*AGMSG_CODEX_' "$boot" | head -1 | cut -d: -f1)"
+  lit_ln="$(grep -n '^unset .*CODEX_THREAD_ID' "$boot" | head -1 | cut -d: -f1)"
   cli_ln="$(grep -n 'codex-shim.sh' "$boot" | head -1 | cut -d: -f1)"
-  [ -n "$unset_ln" ] && [ -n "$cli_ln" ] && [ "$unset_ln" -lt "$cli_ln" ]
-  grep -q '^unset .*AGMSG_CODEX_SHIM_DISABLE' "$boot"
-  grep -q '^unset .*CODEX_THREAD_ID' "$boot"
-  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" \
+  [ -n "$ns_ln" ]
+  [ -n "$lit_ln" ]
+  [ -n "$cli_ln" ]
+  [ "$ns_ln" -lt "$cli_ln" ]
+  [ "$lit_ln" -lt "$cli_ln" ]
+  grep -q '^unset .*AGMSG_REAL_CODEX' "$boot"
+  run env SHELL="$STUB_BIN/noshell" \
     AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1" AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
     CODEX_THREAD_ID=parent-thread bash "$boot"
   _assert_bridged_argv
@@ -1487,7 +1494,7 @@ _boot_line_executable() {
   run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" \
+  run env SHELL="$STUB_BIN/noshell" \
     AGMSG_CODEX_SHIM_DISABLE=1 bash "$boot"
   _assert_bridged_argv
 }
@@ -1527,8 +1534,11 @@ PY
 esac
 FAKE
   chmod +x "$STUB_BIN/codex"
-  # The bridge launcher is detached and Node-based; stand in for it.
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/fake-launcher.sh"; chmod +x "$STUB_BIN/fake-launcher.sh"
+  # The bridge launcher is detached and Node-based; stand in for it BY FILE in
+  # this test copy of the skill, not through AGMSG_CODEX_BRIDGE_LAUNCHER_CMD:
+  # the boot script unsets every shim-stack override, so an env hook set by the
+  # test would be cleared before the wrapper runs (which is the point).
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_SKILL_DIR/scripts/drivers/types/codex/codex-bridge-launcher.sh"
   # The boot script ends with `exec "$SHELL" -i`; give it a shell that just exits.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"; chmod +x "$STUB_BIN/noshell"
 }
@@ -1549,4 +1559,117 @@ _assert_bridged_argv() {
     pid="$(cat "$pf" 2>/dev/null)"; [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
   done
+}
+
+@test "spawn: an inherited PATH-wrapper install (AGMSG_CODEX_SHIM_WRAPPER/SCRIPT_DIR) cannot repoint the bundled shim" {
+  # The installed ~/.agents/bin wrapper exports AGMSG_CODEX_SHIM_WRAPPER=1 and
+  # AGMSG_CODEX_SHIM_SCRIPT_DIR before starting the bundled shim; a codex started
+  # through it passes both to anything it spawns. Inherited, the bundled shim
+  # would take the PARENT's script dir as its own (codex-shim.sh, the WRAPPER
+  # branch) -- here a stale directory with no delivery.sh, which the shim reads
+  # as "not a monitor project" and passes straight to the real binary (found in
+  # review). Seeded with exactly that, the seat must still arrive bridged.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  local stale; stale="$TEST_SKILL_DIR/stale-install"; mkdir -p "$stale"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_CODEX_SHIM_WRAPPER=1 AGMSG_CODEX_SHIM_SCRIPT_DIR="$stale" AGMSG_CODEX_SHIM_TARGET="$stale/codex" bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: inherited resolution overrides (real binary, monitor, launcher) do not steer a spawned codex seat" {
+  # The remaining shim-stack inputs: a parent's AGMSG_REAL_CODEX,
+  # AGMSG_CODEX_MONITOR_CMD and the launcher command overrides. Seeded with paths
+  # that do not exist, the seat must still resolve everything from its own
+  # install and arrive bridged; if any of them leaked through, the launch would
+  # fail or go plain, and the argv below would not be recorded.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" \
+    AGMSG_REAL_CODEX=/nonexistent/parent-codex AGMSG_CODEX_MONITOR_CMD=/nonexistent/parent-monitor \
+    AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/nonexistent/parent-launcher AGMSG_CODEX_BRIDGE_CMD=/nonexistent/parent-bridge \
+    bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: every environment variable the codex shim stack reads is cleared for a spawned seat (reader inventory)" {
+  # The list in type.conf is only as good as its coverage. This pins it to the
+  # readers: every ${AGMSG_CODEX_*} / ${AGMSG_REAL_CODEX} the shim, monitor and
+  # launcher consult must be in spawn_unset_env, so the next control variable
+  # added to the stack cannot be inherited by a spawned seat unnoticed. The
+  # spawn marker itself is the one exception -- it is what the seat is.
+  # Derivation: every `$VAR`/`${VAR` in the stack's bash files and every
+  # `process.env.VAR` in the bridge, for VAR matching AGMSG_* or CODEX_*.
+  # Each such name must be covered by spawn_unset_env — literally, or by a
+  # namespace entry (`PREFIX*`) — unless it is on the short, reasoned keep list
+  # below. A new reader outside the namespace fails here, which is the only way
+  # a deny rule can say "we would notice".
+  local dir="$SCRIPTS/drivers/types/codex" v listed entry covered
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/type-registry.sh"
+  listed="$(agmsg_type_get codex spawn_unset_env)"
+  # Kept on purpose (each with its reason in type.conf): the seat's own marker;
+  # agmsg-wide configuration the CLI's actas flow legitimately inherits; test
+  # hooks that only bats sets; and names that are script-local variables
+  # assigned inside the stack before they are read, never environment inputs
+  # (role-session lookup results, codex-monitor's parsed command/args/version,
+  # the doc URL constant from delivery.sh).
+  local keep=" AGMSG_SPAWNED AGMSG_BASH AGMSG_WATCH_ONCE_INTERVAL AGMSG_WATCH_ONCE_TIMEOUT AGMSG_TEST_DISPATCHER_STALE_BARRIER AGMSG_TEST_ASSUME_CODEX_SOCKET AGMSG_ROLE_SESSION_UUID AGMSG_ROLE_SESSION_PROJECT CODEX_ARGS CODEX_COMMAND CODEX_VERSION CODEX_MONITOR_DOC_URL "
+  local inventory missing=""
+  inventory="$( { grep -ohE '\$\{?(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-shim.sh "$dir"/codex-monitor.sh "$dir"/_app-server.sh "$dir"/codex-bridge-launcher.sh "$dir"/codex-record-session.sh "$dir"/_session-start.sh "$dir"/codex-shim-install.sh "$dir"/_delivery.sh | sed -E 's/^\$\{?//'; grep -ohE 'process\.env\.(AGMSG_[A-Z0-9_]+|CODEX_[A-Z0-9_]+)' "$dir"/codex-bridge.js | sed 's/process\.env\.//'; } | sort -u )"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    case "$keep" in *" $v "*) continue ;; esac
+    covered=0
+    for entry in $listed; do
+      case "$entry" in
+        *\*) case "$v" in "${entry%\*}"*) covered=1 ;; esac ;;
+        *)   [ "$v" = "$entry" ] && covered=1 ;;
+      esac
+    done
+    [ "$covered" -eq 1 ] || missing="$missing $v"
+  done <<LIST
+$inventory
+LIST
+  echo "inventory: $(printf '%s\n' "$inventory" | wc -l | tr -d ' ') names; not covered:$missing"
+  [ -z "$missing" ]
+  # Positive controls for the extractor: the inventory must contain the names
+  # the two review rounds found, or an empty scan would pass vacuously.
+  printf '%s\n' "$inventory" | grep -qx 'AGMSG_CODEX_SHIM_SCRIPT_DIR'
+  printf '%s\n' "$inventory" | grep -qx 'AGMSG_CODEX_BRIDGE'
+  printf '%s\n' "$inventory" | grep -qx 'CODEX_THREAD_ID'
+}
+
+@test "spawn: a shim-stack control variable that does not exist yet is still cleared (namespace, not list)" {
+  # The deny-list failed twice in review, each time by one name. The boot
+  # script therefore clears the whole AGMSG_CODEX_* namespace as enumerated from
+  # the environment at boot time. Seed a name no code reads today and dump the
+  # environment the real binary actually receives: the seeded name is gone,
+  # while an ordinary variable survives (positive control: the dump is real and
+  # the clearing is not "unset everything").
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  # Extend the fake: on the bridged launch, also dump its environment.
+  sed -i.bak 's|    printf .real-codex. >> "\$CALL_LOG"|    env > "$CALL_LOG.env"\n&|' "$STUB_BIN/codex"; rm -f "$STUB_BIN/codex.bak"
+  grep -q 'env > "\$CALL_LOG.env"' "$STUB_BIN/codex"
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_FUTURE_KNOB=1 SPAWN_TEST_CANARY=alive bash "$boot"
+  _assert_bridged_argv
+  [ -f "$CALL_LOG.env" ]
+  grep -q '^SPAWN_TEST_CANARY=alive$' "$CALL_LOG.env"
+  [ "$(grep -c '^AGMSG_CODEX_FUTURE_KNOB=' "$CALL_LOG.env")" -eq 0 ]
+  # And the seat's own marker is NOT cleared by the namespace rule.
+  grep -q '^AGMSG_SPAWNED=1$' "$CALL_LOG.env"
 }

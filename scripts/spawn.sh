@@ -487,8 +487,27 @@ esac
   # suppresses the "rename this session" tip meant for hand-started sessions.
   echo 'export AGMSG_SPAWNED=1'
   # Drop inherited same-type session-identity vars before exec'ing the CLI (#294).
+  # An entry ending in `*` is a NAMESPACE: every exported variable whose name
+  # starts with that prefix is unset, enumerated from `env` at boot time, so a
+  # control variable the type's runtime adds later is cleared without anyone
+  # remembering to list it (#1063: the codex shim stack keeps all of its runtime
+  # controls under AGMSG_CODEX_*, and two review rounds each found one more name
+  # a deny-list had missed). Names without `*` are unset literally.
   if [ -n "$SPAWN_UNSET_VARS" ]; then
-    printf 'unset %s\n' "$SPAWN_UNSET_VARS"
+    _unset_literal=""
+    for _v in $SPAWN_UNSET_VARS; do
+      case "$_v" in
+        *\*)
+          # `sed -e … -e …`, not `sed -n`: the emitted line must not contain a
+          # bare ` -n `, which is also claude-code's name flag and is asserted
+          # absent from a codex boot script.
+          _prefix="${_v%\*}"
+          printf 'for _v in $(env | sed -e '"'"'/^%s[A-Za-z0-9_]*=/!d'"'"' -e '"'"'s/=.*//'"'"'); do unset "$_v"; done\n' "$_prefix"
+          ;;
+        *) _unset_literal="$_unset_literal $_v" ;;
+      esac
+    done
+    [ -n "$_unset_literal" ] && printf 'unset%s\n' "$_unset_literal"
   fi
   if [ -n "$SPAWN_AGENT" ]; then
     # Node-launcher path: pass the universal agmsg context + the actas prompt.
