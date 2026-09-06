@@ -85,6 +85,8 @@ TAB="$(printf '\t')"
 # over the app-server's "loaded" thread (see the thread-resolution block below).
 # shellcheck source=../../../lib/role-session.sh
 source "$SCRIPT_DIR/../../../lib/role-session.sh"
+# shellcheck source=_home.sh
+source "$SCRIPT_DIR/_home.sh"
 # shellcheck source=../../../lib/resolve-project.sh
 source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # Canonicalize once so the record's project (stored from the codex actas flow's
@@ -298,7 +300,7 @@ build_safety_state() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
+    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER$TAB$AGMSG_ROLE_SESSION_CODEX_HOME"
   done <<< "$identity"
 }
 
@@ -414,12 +416,13 @@ while IFS="$TAB" read -r candidate_team candidate_name; do
   candidate_thread="$AGMSG_ROLE_SESSION_UUID"
   if [ -n "$candidate_thread" ]; then
     candidate_project="$AGMSG_ROLE_SESSION_PROJECT"
+    candidate_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
     candidate_project_phys="$(agmsg_canonical_path "$candidate_project" 2>/dev/null || printf '%s' "$candidate_project")"
     # A record for another project proves this role's current seat is elsewhere:
     # never consume its unread rows from this project. A lone same-project role keeps #350's legacy recorded-thread affinity even
     # before a concrete request thread is available; multiplexed roles require
     # proof and are excluded while the hint is only `loaded`.
-    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ]; then
+    if [ "$candidate_project_phys" != "$PROJECT_PHYS" ] || ! agmsg_codex_role_home_matches "$candidate_home"; then
       continue
     fi
   else
@@ -951,8 +954,10 @@ EOF
   rec_thread="$AGMSG_ROLE_SESSION_UUID"
   rec_project="$AGMSG_ROLE_SESSION_PROJECT"
   rec_owner="$AGMSG_ROLE_SESSION_OWNER"
+  rec_home="$AGMSG_ROLE_SESSION_CODEX_HOME"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ] \
+    || ! agmsg_codex_role_home_matches "$rec_home" \
     || [ "$rec_thread" != "${_rthread:-}" ]; then
     # A role with no record (or one seated in another project) stays
     # deliberately unsubscribed (#150) and waits for a record to appear. That

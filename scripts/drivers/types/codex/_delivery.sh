@@ -9,6 +9,9 @@
 # in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
+# shellcheck source=_home.sh
+. "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
+
 agmsg_delivery_on_enable() {
   echo "Codex monitor is enabled."
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
@@ -161,12 +164,18 @@ _agmsg_codex_unseated_count() {
 # reason nothing is running. When the seat is missing, the loaded-thread count is
 # what decides whether the next session can seed one, so report that too (#579).
 agmsg_codex_report_missing_bridge() {
-  local team="$1" name="$2" project="$3" seat
+  local team="$1" name="$2" project="$3" seat seat_home
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/role-session.sh"
   seat="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
   if [ -n "$seat" ]; then
-    echo "Codex bridge: $team/$name not running (seat recorded: $seat)"
+    seat_home="$(agmsg_role_session_get "$team" "$name" codex_home 2>/dev/null || true)"
+    if agmsg_codex_role_home_matches "$seat_home"; then
+      echo "Codex bridge: $team/$name not running (seat recorded: $seat)"
+    else
+      echo "Codex bridge: $team/$name not running (seat belongs to another CODEX_HOME)"
+      echo "  Start Codex with the intended AGMSG_CODEX_HOME and run agmsg actas again."
+    fi
     return 0
   fi
 

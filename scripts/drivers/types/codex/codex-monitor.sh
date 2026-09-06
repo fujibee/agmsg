@@ -26,6 +26,8 @@ source "$SCRIPT_DIR/../../../lib/instance-id.sh"
 # _agmsg_codex_seat_key_new / _agmsg_codex_seat_record_write and friends.
 # shellcheck source=./_seat-key.sh
 source "$SCRIPT_DIR/_seat-key.sh"
+# shellcheck source=_home.sh
+source "$SCRIPT_DIR/_home.sh"
 
 PROJECT="$(pwd)"
 SOCKET_PATH=""
@@ -85,6 +87,19 @@ case "$CODEX_COMMAND" in
 esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
+
+if [ -n "${AGMSG_CODEX_HOME:-}" ]; then
+  case "$AGMSG_CODEX_HOME" in /*) ;; *) echo "codex-monitor: AGMSG_CODEX_HOME must be an absolute path" >&2; exit 1 ;; esac
+  case "$AGMSG_CODEX_HOME" in *$'\n'*|*$'\r'*) echo "codex-monitor: AGMSG_CODEX_HOME must not contain newlines" >&2; exit 1 ;; esac
+  [ "$AGMSG_CODEX_HOME" != "/" ] || { echo "codex-monitor: AGMSG_CODEX_HOME must not be /" >&2; exit 1; }
+  if [ ! -e "$AGMSG_CODEX_HOME" ]; then (umask 077; mkdir -p "$AGMSG_CODEX_HOME"); fi
+  [ -d "$AGMSG_CODEX_HOME" ] || { echo "codex-monitor: AGMSG_CODEX_HOME is not a directory" >&2; exit 1; }
+  AGMSG_CODEX_HOME="$(cd "$AGMSG_CODEX_HOME" 2>/dev/null && pwd)"
+  export AGMSG_CODEX_HOME
+fi
+CODEX_HOME="$(agmsg_codex_effective_home)"
+[ -n "$CODEX_HOME" ] || { echo "codex-monitor: cannot resolve CODEX_HOME" >&2; exit 1; }
+export CODEX_HOME
 
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the

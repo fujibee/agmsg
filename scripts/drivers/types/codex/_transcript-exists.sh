@@ -16,11 +16,14 @@
 #
 # Defines: agmsg_transcript_exists <uuid> <project> -> 0 if a rollout exists.
 
+# shellcheck source=_home.sh
+source "$SKILL_DIR/scripts/drivers/types/codex/_home.sh"
+
 agmsg_transcript_exists() {
   local uuid="$1" sessions_dir
   [ -n "$uuid" ] || return 1
-  [ -n "${HOME:-}" ] || return 1
-  sessions_dir="$HOME/.codex/sessions"
+  sessions_dir="$(agmsg_codex_sessions_dir)"
+  [ -n "$sessions_dir" ] || return 1
   [ -d "$sessions_dir" ] || return 1
   find "$sessions_dir" -type f -name "rollout-*-$uuid.jsonl" 2>/dev/null | grep -q .
 }

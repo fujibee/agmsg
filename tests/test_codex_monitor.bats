@@ -18,6 +18,7 @@ setup() {
   export FAKE_CODEX="$TEST_PROJECT/real-codex"
   cat > "$FAKE_CODEX" <<'EOF'
 #!/usr/bin/env bash
+[ -n "${CODEX_HOME_LOG:-}" ] && printf '%s\t%s\n' "${1:-}" "${CODEX_HOME:-}" >> "$CODEX_HOME_LOG"
 case "${1:-}" in
   --version)
     echo "codex-cli ${FAKE_CODEX_VERSION:-0.142.2}"
@@ -144,6 +145,55 @@ teardown() {
   # The first seat's own server is untouched by the second launch.
   kill -0 "$first_pid"
   kill -0 "$second_pid"
+}
+
+@test "codex-monitor: isolates app-server and remote TUI in AGMSG_CODEX_HOME" {
+  skip_on_windows "uses POSIX absolute paths and process replacement"
+  local isolated="$TEST_PROJECT/codex-home"
+  local home_log="$TEST_PROJECT/codex-home.log"
+
+  run env AGMSG_CODEX_HOME="$isolated" CODEX_HOME_LOG="$home_log" \
+    AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  [ -d "$isolated" ]
+  grep -q $'^app-server\t'"$isolated"'$' "$home_log"
+  grep -q $'^--remote\t'"$isolated"'$' "$home_log"
+  local homef; homef="$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.home)"
+  [ "$(cat "$homef")" = "$isolated" ]
+}
+
+@test "codex-monitor: never reuses an app-server from a different CODEX_HOME" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  local pidf first_pid isolated
+  pidf="$(ls "$TEST_SKILL_DIR"/run/codex-app-server.*.pid)"
+  first_pid="$(cat "$pidf")"
+  isolated="$TEST_PROJECT/isolated-home"
+
+  run env AGMSG_CODEX_HOME="$isolated" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -eq 0 ]
+  [ "$(cat "$pidf")" != "$first_pid" ]
+  ! kill -0 "$first_pid" 2>/dev/null
+  [ "$(cat "${pidf%.pid}.home")" = "$isolated" ]
+}
+
+@test "codex-monitor: rejects a relative AGMSG_CODEX_HOME before launch" {
+  run env AGMSG_CODEX_HOME="relative/codex-home" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be an absolute path"* ]]
+  [ ! -e "$TEST_PROJECT/relative" ]
+}
+
+@test "codex-monitor: rejects filesystem root as AGMSG_CODEX_HOME" {
+  run env AGMSG_CODEX_HOME="/" AGMSG_REAL_CODEX="$FAKE_CODEX" \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" --codex-command codex --
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must not be /"* ]]
 }
 
 # --- port discovery vs colorized banner (codex 0.144+) ---

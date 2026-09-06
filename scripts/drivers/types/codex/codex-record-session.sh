@@ -55,6 +55,8 @@ export SKILL_DIR
 . "$SCRIPT_DIR/_seat-key.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/_app-server.sh"
+# shellcheck source=_home.sh
+. "$SCRIPT_DIR/_home.sh"
 
 # Poison-record guard (best-effort bias: record nothing when unsure). A mangled
 # <project> argument -- e.g. the lone `\` a PowerShell-parsed \"$PWD\" collapses
@@ -85,7 +87,8 @@ fi
 # by the session itself or passed by the bridge with the thread the app-server
 # confirmed, which is exactly how a seeded seat gets corrected after arming.
 if [ -z "$thread" ] && [ -n "$(agmsg_role_session_uuid "$TEAM" "$AGENT" 2>/dev/null || true)" ]; then
-  exit 0
+  recorded_home="$(agmsg_role_session_get "$TEAM" "$AGENT" codex_home 2>/dev/null || true)"
+  agmsg_codex_role_home_matches "$recorded_home" && exit 0
 fi
 
 # Ask the app-server which threads it has loaded, and subtract the ones a role
@@ -162,8 +165,8 @@ if [ -z "$thread" ]; then
   #
   # ${HOME:-} so an unset HOME under `set -u` is a silent no-op (empty -> the
   # dir check below fails -> fresh), not an unbound-variable abort (nit).
-  sessions_dir="${HOME:-}/.codex/sessions"
-  if [ -n "${HOME:-}" ] && [ -d "$sessions_dir" ]; then
+  sessions_dir="$(agmsg_codex_sessions_dir)"
+  if [ -n "$sessions_dir" ] && [ -d "$sessions_dir" ]; then
     # Distinct thread ids whose session_meta cwd (canonicalized -- codex records
     # the physical cwd while agmsg may hold a symlinked path, #160) matches the
     # project, among the most recent rollouts. Exactly one => unambiguously ours.
@@ -205,7 +208,7 @@ fi
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
 agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" "$(agmsg_codex_effective_home)" || true
 
 # The Codex actas flow reaches this script instead of actas-claim.sh. Publish
 # the same seat request here so a resumed seat's dispatcher has an authority

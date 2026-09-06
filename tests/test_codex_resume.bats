@@ -50,6 +50,17 @@ make_rollout() {
   agmsg_transcript_exists "deep-uuid" "/anything"   # project is not part of the lookup
 }
 
+@test "codex transcript_exists: AGMSG_CODEX_HOME selects the isolated sessions tree" {
+  local isolated="$TEST_SKILL_DIR/isolated-codex"
+  local old_sessions="$CODEX_SESSIONS"
+  export CODEX_SESSIONS="$isolated/sessions"
+  make_rollout "isolated-uuid" "/proj"
+  export CODEX_SESSIONS="$old_sessions"
+  source "$TYPES/codex/_transcript-exists.sh"
+  AGMSG_CODEX_HOME="$isolated" agmsg_transcript_exists "isolated-uuid" "/proj"
+  ! agmsg_transcript_exists "isolated-uuid" "/proj"
+}
+
 @test "codex transcript_exists: empty uuid / unset HOME are not found" {
   # shellcheck disable=SC1090
   source "$TYPES/codex/_transcript-exists.sh"
@@ -83,6 +94,23 @@ recorded_uuid() {
   make_rollout "fallback-uuid" "$proj"
   ( unset CODEX_THREAD_ID; bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
   [ "$(recorded_uuid team alice)" = "fallback-uuid" ]
+}
+
+@test "codex record: isolated home may replace a seat recorded in the default home" {
+  local proj isolated
+  proj="$(mktemp -d)"
+  isolated="$TEST_SKILL_DIR/isolated-codex"
+  source "$SKILL_DIR/scripts/lib/role-session.sh"
+  agmsg_role_session_record team alice old-thread "$proj" codex "$HOME/.codex"
+  local old_sessions="$CODEX_SESSIONS"
+  export CODEX_SESSIONS="$isolated/sessions"
+  make_rollout "isolated-thread" "$proj"
+  export CODEX_SESSIONS="$old_sessions"
+
+  AGMSG_CODEX_HOME="$isolated" env -u CODEX_THREAD_ID \
+    bash "$TYPES/codex/codex-record-session.sh" team alice "$proj"
+  [ "$(recorded_uuid team alice)" = "isolated-thread" ]
+  [ "$(agmsg_role_session_get team alice codex_home)" = "$isolated" ]
 }
 
 @test "codex record: records NOTHING when two recent rollouts share the cwd (ambiguous)" {
