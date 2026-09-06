@@ -706,7 +706,21 @@ terminal_team_observe() {
   activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
   label="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.label'),'unknown:pane_label_missing')" 2>/dev/null)" || return 10
   title="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.terminal_title'),'unknown:terminal_title_missing')" 2>/dev/null)" || return 10
-  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT json_extract(value,'\$.name') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:agent_key_missing')" 2>/dev/null)" || return 10
+  # Two different facts were collapsed into one value here, and the one this
+  # exists to repair travelled the ambiguous half. The agent list was already
+  # fetched successfully above (`|| return 10`), so reaching this point means the
+  # list was READ — what remains undecided is only which case produced no name:
+  #
+  #   no entry for this pane_id   -> the pane could not be located in the list.
+  #                                  Undecided: `unknown:` (team --fix skips it).
+  #   entry present, no `.name`   -> the list answered ABOUT this pane and it
+  #                                  carries no key. Decided: `absent:`, which
+  #                                  reaches team --fix as a mismatch. This is
+  #                                  the measured codex case.
+  #
+  # The nesting does the split: the inner COALESCE fires only when a row matched,
+  # the outer one only when none did.
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(json_extract(value,'\$.name'),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
   case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }

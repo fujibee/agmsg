@@ -313,7 +313,7 @@ terminal_peek() {
 # tmux has no pane-label field independent of the CLI-owned terminal title.
 # The resolvable key is the pane-local @agmsg_agent user option.
 terminal_team_observe() {
-  local id="$1" key title bare
+  local id="$1" key title bare facts seen_id
   command -v tmux >/dev/null 2>&1 || return 10
   # Two separate things, and doing only one of them is worse than doing neither:
   # STRIP the socket so the kind test and `-t` see a bare id, and USE that socket
@@ -323,8 +323,28 @@ terminal_team_observe() {
   bare="$(_tmux_bare_of "$id")"
   case "$bare" in @*|%*) : ;; *) return 13 ;; esac
   key="$(_tmux_do "$id" show-options -p -v -t "$bare" @agmsg_agent 2>/dev/null)" || key=""
-  title="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_title}' 2>/dev/null)" || return 10
-  [ -n "$key" ] || key=unknown:agent_key_missing
+  # Co-observe the pane id we asked about, in the SAME query as the title. An
+  # empty `@agmsg_agent` only means "unset" if the pane was actually reached, and
+  # nothing here proved that: MEASURED on tmux 3.5, `display-message -p -t %999`
+  # exits 0 with EMPTY output for a pane that does not exist, so the `|| return`
+  # guard below never fires for it. Without the co-observation, a missing pane
+  # and an unset option produced the identical answer — and that answer decides
+  # whether `team --fix` overwrites the key.
+  #
+  # `#{pane_id}` is the canary: its value is known before the call (it is the
+  # target), so it separates "the server answered about THIS pane" from "the
+  # server answered about nothing". Same move as `terminal_pane_state` (#1051).
+  facts="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_id}|#{pane_title}' 2>/dev/null)" || return 10
+  seen_id="${facts%%|*}"
+  title="${facts#*|}"
+  # Not the pane we asked about (or no pane at all) -> the observation did not
+  # happen. 10 is "could not be reached", the same answer a dead server gets:
+  # `unknown` on a field would be a claim about the pane, and we have none.
+  [ "$seen_id" = "$bare" ] || return 10
+  # The pane IS proven reachable now, so an empty key is a decided fact, not a
+  # failed read. It is NOT `unknown:` — that prefix is the marker `team --fix`
+  # skips on, and skipping is what left every codex seat unnamed.
+  [ -n "$key" ] || key=absent:agent_key_unset
   [ -n "$title" ] || title=unknown:terminal_title_missing
   case "$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf 'n/a:unsupported\tn/a:no_independent_field\t%s\t%s\n' "$key" "$title"
