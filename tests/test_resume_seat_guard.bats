@@ -149,7 +149,7 @@ _run_session_start() {
 }
 
 @test "resume, narrowed to bob: the emitted watcher consumes bob's mail only, not alice's" {
-  # The strongest guard (tl's ask): run the directive AS EMITTED and check which
+  # The strongest guard: run the directive AS EMITTED and check which
   # pairs it actually consumes. A watcher that ignored its 4th arg — or a
   # regression that emitted the generic one — would advance alice's cursor too.
   _mark_sid_alive "sid-bob"

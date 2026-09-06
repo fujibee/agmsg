@@ -52,7 +52,7 @@ test("an injected name is found where it abuts CJK", () => {
 
 test("a hyphenated base is a seat, and neither detector may drop it", () => {
   // The hole that ended the no-double-report idea. A base can contain hyphens,
-  // and with a base of `[a-z][a-z0-9]*` the shape matched `<a>-<b>-cc1` from
+  // and with a base of `[a-z][a-z0-9]*` the shape matched `<a>-<b>-cc<n>` from
   // neither end -- not from `<a>` (`-<b>` is not a role) and not from `<b>` (the
   // preceding hyphen is refused). The bare-name detector then suppressed itself
   // too, on the theory that the shape had it. Nothing reported it.
@@ -83,6 +83,68 @@ test("a name hyphenated to an ordinary word is still the name", () => {
   // against the real tree.
   const found = scan(`# ${A}-approved interface, see ${A}-code`, "scripts/x.sh", named(A));
   assert.deepEqual(found.map((f) => f.name), [A, A]);
+});
+
+test("a name used as a shell variable is code, and each context is refused on its own", () => {
+  // Measured on the tree: a two-letter handle is also a storage driver's local
+  // variable. Each line below is one syntactic context; a guard that covered
+  // "anything near a dollar sign" would also have to explain why it did not
+  // cover the next one, so they are pinned separately.
+  // Each case is scanned ALONE. Joined into one text, a declaration on the
+  // first line would be the only guard ever exercised if the others were
+  // broken (found in review); separate scans make each guard load-bearing.
+  const T = ["t", "l"].join("");
+  const cases = {
+    declaration: `  local db ${T} generation table_count`,
+    "declaration after a VAR= prefix": `  IFS='|' read -r tid twin tt ${T} tw th <<< "$row"`,
+    assignment: `  ${T}="$(_sqlite_lit "$team")"`,
+    reference: `  sqlite3 "$db" "SELECT * FROM t WHERE team=$${T}"`,
+    "braced reference": `  printf '%s' "\${${T}}"`,
+    arithmetic: `  [ "$sl" -eq $((${T} + tw + 1)) ]`,
+  };
+  for (const [context, line] of Object.entries(cases)) {
+    assert.deepEqual(scan(line, "scripts/x.sh", named(T)), [], context);
+  }
+});
+
+test("a declaration on one line cannot hide an attribution on the next", () => {
+  // The pattern is exported without the `m` flag, so `^`, `\s` and `[^#]`
+  // would all walk across a newline if the declaration guard let them. Run the
+  // raw pattern on a two-line string — NOT through scan(), which splits lines
+  // and would pass regardless.
+  const T = ["t", "l"].join("");
+  const text = `local x\nprintf 'review by ${T}'`;
+  const pattern = injectedPattern([T]);
+  assert.deepEqual([...text.matchAll(pattern)].map((m) => m[0]), [T]);
+});
+
+test("the identifier guards do not reach the prose forms attribution takes", () => {
+  const T = ["t", "l"].join("");
+  const prose = [
+    `# report TWO facts and decide nothing (${T} 2026-08-31). PRESENCE`,
+    `# would CANCEL that guidance (${T}). So on 13, let the driver's reason stand`,
+    `# ${T}'s load-bearing case: real herdr with the lookup broken`,
+    `# ORDER (${T} 2026-09-01, from someone's nested measurement)`,
+    `@test "the single 13 is split (${T}/reviewer)" {`,
+    `  local x  # ${T} asked for this`,   // a comment on a declaration line is still prose
+    `# ${T}: assert with the measured value.`,
+  ].join("\n");
+  const found = scan(prose, "scripts/x.sh", named(T));
+  assert.equal(found.length, 7, found.map((f) => f.text).join("\n"));
+});
+
+test("a data URI's base64 payload is opaque, and the text after it is not", () => {
+  // Measured: an SVG embedding a PNG happened to contain a two-letter handle
+  // between two base64 punctuation characters. The guard stops at the quote
+  // that ends the URI, so a name written after it is still found.
+  // The payload copy is capitalised differently from the prose copy, so the
+  // reported name says which one was found: the match is case-insensitive and
+  // a failed guard would report the payload's spelling.
+  const T = ["t", "l"].join("");
+  const inPayload = ["t", "L"].join("");
+  const line = `<image href="data:image/png;base64,iVBORw0K+${inPayload}/AAA=" /><!-- ask ${T} -->`;
+  const found = scan(line, "docs/x.svg", named(T));
+  assert.deepEqual(found.map((f) => f.name), [T]);
 });
 
 test("a supplied name cannot widen itself through regex metacharacters", () => {

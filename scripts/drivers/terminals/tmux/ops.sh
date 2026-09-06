@@ -84,7 +84,7 @@ terminal_arrange() {
   return 0
 }
 
-# record op: report TWO facts and decide nothing (tl 2026-08-31). PRESENCE — are
+# record op: report TWO facts and decide nothing (2026-08-31). PRESENCE — are
 # we under tmux — is the exit code: 0 iff $TMUX is set (we ARE in tmux, whether or
 # not we can name our own pane). SELF-ID is stdout: $TMUX_PANE, which may be EMPTY
 # — that is the third value "could not resolve", NOT "not tmux"; the reason goes
@@ -139,7 +139,7 @@ terminal_spawn() {
       # $TMUX_PANE is the caller's pane (tmux sets it in every pane; the tmux
       # equivalent of herdr's $HERDR_PANE_ID). Require it and target it EXPLICITLY —
       # not observing the caller's pane is NOT evidence the ambient target is the
-      # caller, so fail closed rather than guess (positive-proof; co1). A window
+      # caller, so fail closed rather than guess (positive-proof). A window
       # target does not need it and is handled above.
       [ -n "${TMUX_PANE:-}" ] \
         || { printf 'unsupported: a tmux split needs $TMUX_PANE to target the caller pane (#990)\n' >&2; return 13; }
@@ -178,7 +178,7 @@ terminal_peek() {
   done
   case "$lines" in ''|*[!0-9]*) lines="" ;; esac
   # peek exit taxonomy, SHARED with herdr so the template reads one meaning across
-  # every peek-capable driver (co1): the terminal being UNREACHABLE (tmux not on
+  # every peek-capable driver: the terminal being UNREACHABLE (tmux not on
   # PATH — no server to talk to) is 10; an answered-but-no-content failure (the pane
   # is gone / capture failed) is 12. 13 is reserved for a driver with no peek path at
   # all (plain's permanent "no addressable pane") — a different message to the user,
@@ -247,7 +247,7 @@ EOF
 # — no env seam.
 terminal_poke() {
   local id="$1" text="$2"
-  # Same exit taxonomy as peek (tl/co1): tmux not on PATH (unreachable) is 10; a
+  # Same exit taxonomy as peek: tmux not on PATH (unreachable) is 10; a
   # send-keys failure (the pane is gone) is 12. 13 stays reserved for a driver with no
   # poke path at all (plain) — a tmux pane's transient loss must not borrow it.
   command -v tmux >/dev/null 2>&1 \

@@ -227,7 +227,7 @@ EOF
 }
 
 # --- peek exit taxonomy: UNREACHABLE (10) vs pane-gone (12) vs unsupported (13) ---
-# co1: 13 must mean ONE thing to the template — a driver with no peek path at all
+# The value 13 must mean ONE thing to the template — a driver with no peek path at all
 # (plain). A terminal that is momentarily unreachable (its CLI not on PATH) is 10;
 # an answered-but-no-content failure (the pane is gone) is 12. Both peek-capable
 # backends (tmux, herdr) must answer with the SAME taxonomy, so the two failures
@@ -312,7 +312,7 @@ EOF
   grep -q "could not read pane 'w1:p4'" "$errf"
 }
 
-# --- peek READ contract: content reaches stdout VERBATIM (co1) --------------
+# --- peek READ contract: content reaches stdout VERBATIM --------------
 # herdr's content is captured to a temp file and cat'd, NOT round-tripped through a
 # command substitution (which strips every trailing newline) + printf '%s\n' (which
 # invents exactly one back). Assert the BYTES, since `run`/$output would itself hide
@@ -388,7 +388,7 @@ EOF
 
 # --- poke exit taxonomy: UNREACHABLE (10) vs no-live-agent / pane-gone (12) vs
 #     unsupported (13) --------------------------------------------------------
-# tl found the same 13-conflation co1 caught in peek, still in poke: a herdr pane
+# The same 13-conflation caught in peek was still in poke: a herdr pane
 # whose agent has EXITED returned 13, which the template reads as plain's permanent
 # "no addressable pane". poke now uses the SAME taxonomy as peek across both backends.
 # This also makes the peek/poke asymmetry concrete: peek reads a pane with no live
@@ -451,7 +451,7 @@ EOF
 }
 
 # --- poke entry: on `unsupported` (13) the driver's guidance is the LAST line ----
-# tl: for plain, the driver says "not a dead end — the type template says which native
+# For plain, the driver says "not a dead end — the type template says which native
 # channel"; poke.sh must not cover that with a generic "could not poke", which would be
 # the last line the operator reads. Only 13 (unsupported) suppresses the entry line;
 # a real delivery failure (12) still gets it.

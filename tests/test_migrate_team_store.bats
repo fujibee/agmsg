@@ -48,7 +48,7 @@ stored_types() {
 #
 # The values here come from send.sh, so this is a statement about the
 # product's own write path, not about a literal this test inserted. That
-# distinction is the whole point (tl ruling): a typeof() check on a value the
+# distinction is the whole point: a typeof() check on a value the
 # test wrote proves the test can write an integer.
 #
 # read_cursors is NOT here. A text AFFINITY on that column turns the 1005/999

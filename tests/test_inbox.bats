@@ -339,7 +339,7 @@ delivered_to_operator() {
 
 # --- #1003: codex mid-turn delivery via PostToolUse emits the shape 0.149.1 wants ---
 #
-# These guard the "broken but green" tl named: a test that only checks a
+# These guard the "broken but green" case: a test that only checks a
 # PostToolUse hook entry EXISTS stays green even if check-inbox emits the wrong
 # shape. So they assert the SHAPE check-inbox actually emits, per event. (Whether
 # the model then receives it is unobserved — see the PR; measured here is only the
