@@ -34,9 +34,99 @@ setup_test_env() {
   mkdir -p "$HOME"
 }
 
-teardown_test_env() {
-  rm -rf "$TEST_SKILL_DIR"
+# When the removal fails, report what is known about it (#1036).
+#
+# Three windows-latest jobs failed with `rm: cannot remove …: Directory not
+# empty` on runs where every test passed. That message names the directory and
+# not the holder, so each red cost a rerun and taught the next one nothing.
+#
+# WHAT THIS ESTABLISHES, and what it does not. It records pids and their
+# liveness at the moment the removal failed, alongside a process inventory taken
+# at that same moment. It does NOT identify the holder: nothing here binds an
+# open handle to the remaining path, and neither `ps` nor `tasklist` can. All of
+# it is correlation material for whoever reads the next red.
+#
+# TWO SETS, KEPT APART, because they are not the same claim:
+#
+#   acted   pids a file-level teardown CALLED `kill` and a wait on, handed over
+#           before the removal ran. Not "killed": the producer discards both
+#           statuses (`kill … || true`, `wait_for_pid_exit … || true`), so a pid
+#           that was already gone, and one whose wait timed out, are both in
+#           here. Read as intent, not as outcome — the STILL ALIVE marker
+#           beside each pid is the outcome, and it is measured here.
+#   seen    pid FILES that merely existed before the removal. Nothing here
+#           signalled them. Printing them in the first column would say
+#           something untrue about them — the same label-wider-than-its-content
+#           defect that an earlier draft of this had, one layer along.
+#
+# Both are captured BEFORE the removal: a recursive delete can unlink part of
+# the tree before it fails, so a reporter that scanned afterwards would print
+# nothing at exactly the moment its output was wanted.
+#
+# Reports, never repairs: the removal's own status is returned unchanged. The
+# probe body is a SUBSHELL so its `set +e` cannot leak into the state the
+# framework runs in afterwards. `head` is avoided in the pipelines, as the
+# workflow's forensics step does, because it SIGPIPEs whatever was writing.
+_teardown_forensics() {
+  local dir="$1" acted="$2" seen="$3"
+  (
+    set +e
+    set +o pipefail 2>/dev/null || true
+    echo "##### teardown could not remove $dir (#1036)"
+    echo "##### what is still there:"
+    ls -laR "$dir" 2>/dev/null
+    _teardown_report_pids "pids a teardown CALLED kill AND wait ON (captured before the rm)" "$acted"
+    _teardown_report_pids "pid FILES present before the rm — NOT known to have been signalled" "$seen"
+    echo "##### process inventory at that same moment (correlation only —"
+    echo "##### this does NOT say which of these holds the directory):"
+    ps -ef 2>/dev/null || ps 2>/dev/null
+    # A native Windows process is absent from the MSYS ps entirely, and the
+    # suspected holder — a node started by a wrapper — is exactly that kind.
+    command -v tasklist >/dev/null 2>&1 && tasklist 2>/dev/null
+  ) >&2
+  return 0
 }
+
+_teardown_report_pids() {
+  local heading="$1" pids="$2" pid
+  echo "##### $heading:"
+  if [ -z "${pids// /}" ]; then
+    echo "  (none)"
+    return 0
+  fi
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  $pid STILL ALIVE at the moment the removal failed"
+    else
+      echo "  $pid exited"
+    fi
+  done
+}
+
+# Deduplicate a whitespace-separated pid list, order preserved.
+_teardown_uniq_pids() {
+  local seen=" " out="" p
+  for p in $1; do
+    case "$seen" in *" $p "*) continue ;; esac
+    seen="$seen$p "; out="$out $p"
+  done
+  printf '%s' "${out# }"
+}
+
+teardown_test_env() {
+  local rc=0 acted seen="" pf pid
+  acted="$(_teardown_uniq_pids "${AGMSG_TEARDOWN_WAITED_PIDS:-}")"
+  for pf in "$TEST_SKILL_DIR"/run/*.pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null)"
+    [ -n "$pid" ] && case " $acted " in *" $pid "*) : ;; *) seen="$seen $pid" ;; esac
+  done
+  seen="$(_teardown_uniq_pids "$seen")"
+  rm -rf "$TEST_SKILL_DIR" || rc=$?
+  [ "$rc" -eq 0 ] || _teardown_forensics "$TEST_SKILL_DIR" "$acted" "$seen"
+  return "$rc"
+}
+
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
 # behaviour that depends on POSIX process semantics agmsg does not yet support

@@ -56,6 +56,21 @@ PY
 esac
 EOF
   chmod +x "$FAKE_CODEX"
+
+  # Stub the bridge launcher (#1049 CI race). codex-monitor.sh spawns
+  # codex-bridge-launcher.sh DETACHED, and it "outlives this script" -- it
+  # resolves its own SKILL_DIR from its script path, which under test is
+  # TEST_SKILL_DIR, so it writes into TEST_SKILL_DIR/run (temp files, a bridge
+  # pidfile, and mkdir -p run/ that RECREATES the dir). teardown kills only the
+  # codex-app-server.*.pid set, never this launcher, so under load it is still
+  # writing run/ when teardown_test_env removes the tree -> "rm: Directory not
+  # empty". None of these tests exercise the bridge (they assert on app-server
+  # pid handling and the codex handoff in CALL_LOG), so a no-op launcher removes
+  # the racer without changing what is tested.
+  local noop="$TEST_PROJECT/noop-bridge-launcher"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$noop"
+  chmod +x "$noop"
+  export AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$noop"
 }
 
 teardown() {
@@ -71,7 +86,15 @@ teardown() {
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
     wait_for_pid_exit "$pid" || true
+    # Hand the pid to the shared teardown's reporter (#1036). What matters when
+    # the removal then fails is the set this teardown called kill and wait on,
+    # which is not recoverable from disk afterwards: the recursive delete can
+    # unlink these very files before it fails. Both statuses above are
+    # discarded, so this records the attempt, not a confirmed exit — the
+    # reporter labels it that way.
+    AGMSG_TEARDOWN_WAITED_PIDS="${AGMSG_TEARDOWN_WAITED_PIDS:-} $pid"
   done
+  export AGMSG_TEARDOWN_WAITED_PIDS
   rm -rf "$TEST_PROJECT"
   teardown_test_env
 }
