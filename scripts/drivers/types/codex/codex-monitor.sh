@@ -101,6 +101,16 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 # otherwise message receipt stops silently. The earlier echoes give the specific
 # reason + log path; this prints the one-line summary just before handoff.
 exec_plain_codex() {
+  # Fail-open is for a PERSON at the keyboard, who reads the banner and keeps a
+  # working codex. A seat spawned by agmsg (spawn.sh exports AGMSG_SPAWNED=1)
+  # has nobody at its pane: a plain codex there never receives a message, and
+  # the banner is read by no one — the outcome looks exactly like the shim
+  # bypass this launch path was built to close. So a spawned seat fails CLOSED:
+  # say why, leave the pane's shell for whoever comes to look, start nothing.
+  if [ "${AGMSG_SPAWNED:-}" = "1" ]; then
+    echo "agmsg: Codex monitor bridge unavailable, and this session was spawned by agmsg (AGMSG_SPAWNED=1). Refusing to start a plain Codex: a spawned seat has no person at the pane to read this, and without the bridge it would never receive a message. The reason is printed above; see the app-server log for details." >&2
+    exit 1
+  fi
   echo "agmsg: Codex monitor bridge unavailable - launching plain Codex. Real-time agmsg delivery is OFF this session (messages still queue; check your inbox manually). Likely cause: the Codex app-server interface changed in 0.142+. Fix in progress." >&2
   cd "$PROJECT" 2>/dev/null || true
   case "$CODEX_COMMAND" in
