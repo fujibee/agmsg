@@ -1007,6 +1007,7 @@ _record_handover_events() {
   {
     printf '%s\n' 'set -u'
     printf '%s\n' 'watch_log() { printf "%s\n" "$*" >> "$WLOG"; }'
+    printf '%s\n' 'watch_report() { printf "%s\n" "$*" >> "$WREPORT"; }'
     printf '%s\n' '. "$SCRIPTS/lib/actas-lock.sh"'
     printf '%s\n' '. "$SCRIPTS/lib/terminal-registry.sh"'
     awk '/^close_own_placement\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPTS/watch.sh"
@@ -1019,11 +1020,19 @@ _record_handover_events() {
   printf 'bogus:xyz\t/tmp/p\tclaude-code' > "$rec"
 
   export WLOG="$TEST_SKILL_DIR/wlog"; : > "$WLOG"
+  export WREPORT="$TEST_SKILL_DIR/wreport"; : > "$WREPORT"
   # SESSION_ID is referenced only past the ref guard; the guard returns before it.
-  SESSION_ID=irrelevant bash -c '. "'"$shim"'"; close_own_placement wt carol'
-  grep -q "did not resolve to a terminal and pane id" "$WLOG"
+  run env SESSION_ID=irrelevant bash -c '. "'"$shim"'"; close_own_placement wt carol'
+  # A pane that may still be open is the operator's problem, so it is a REPORT
+  # (stdout), not a log (stderr): the shipped launcher runs the watcher with fd2
+  # on /dev/null (#691), so this text on stderr would be text nobody ever sees.
+  # 1 = "a placed pane may still be open", distinct from 2 = "nothing of ours".
+  [ "$status" -eq 1 ]
+  grep -q "did not resolve to a terminal and pane id" "$WREPORT"
+  refute grep -q "did not resolve to a terminal and pane id" "$WLOG"
   # must NOT reach the "belongs to someone else" fallthrough with an empty recorded side
   refute grep -q "belongs to someone else" "$WLOG"
+  refute grep -q "belongs to someone else" "$WREPORT"
 }
 
 @test "watch: a backlog past the argv ceiling still delivers (#1045/#777, stdin)" {

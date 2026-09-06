@@ -66,6 +66,37 @@ SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 # possibility for tmux and herdr) means the pane may STILL be alive, and the caller
 # must keep the record rather than delete the one retry authority. Returns 0 on a
 # confirmed teardown, non-zero otherwise (no side effects here beyond the kill call).
+# What does the terminal say about the recorded pane, RIGHT NOW? Read only —
+# nothing is closed here.
+#
+# Prints one of: no-record / gone / present / unknown.
+#
+# It resolves the record the same way kill_recorded_placement does, and stops
+# short of the kill. `terminal_despawn` cannot be used for this: measured on a
+# throwaway tmux server, `kill-pane` returns non-zero both for a pane that is
+# already gone and for one it could not close, and the driver maps both to 13.
+# Asking with it would make a graceful teardown that WORKED report needs-force.
+recorded_pane_state() {
+  [ -f "$SPAWN_REC" ] || { printf 'no-record'; return 0; }
+  local id _proj _type _term _bare _out _rc=0
+  IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
+  [ -n "$id" ] || { printf 'unknown'; return 0; }
+  _term="$(agmsg_terminal_ref_terminal "$id")" || { printf 'unknown'; return 0; }
+  _bare="$(agmsg_terminal_ref_id "$id")"       || { printf 'unknown'; return 0; }
+  agmsg_terminal_load "$_term" 2>/dev/null     || { printf 'unknown'; return 0; }
+  declare -F terminal_pane_state >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  _out="$(terminal_pane_state "$_bare" 2>/dev/null)" || _rc=$?
+  # The token is the answer and the code says whether it is a settled one. A
+  # non-zero (13 unsupported, 10 unreachable) is NOT an answer about the pane,
+  # whatever was printed.
+  [ "$_rc" -eq 0 ] || { printf 'unknown'; return 0; }
+  case "$_out" in
+    gone|present) printf '%s' "$_out" ;;
+    *)            printf 'unknown' ;;
+  esac
+  return 0
+}
+
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
   local id _proj _type _term _bare
@@ -140,5 +171,43 @@ while true; do
   waited=$((waited + 1))
 done
 
-rm -f "$SPAWN_REC" 2>/dev/null || true
-echo "status=ok name=$NAME team=$TEAM after=${waited}s"
+# The lock going free means the watcher let go of it. It does NOT mean the pane
+# was closed: the watcher releases the lock (via reset.sh) BEFORE it tries to
+# close anything, and a lock whose owner has died reads as free too. Deleting the
+# record on that signal is what made #1051 unrecoverable — the record is the only
+# thing `--force` can work from, and it was gone before anyone knew the pane was
+# still open.
+#
+# So ask the terminal. The record is deleted, and success reported, only when the
+# answer is a settled `gone`.
+_pane_state="$(recorded_pane_state)"
+case "$_pane_state" in
+  no-record|gone)
+    rm -f "$SPAWN_REC" 2>/dev/null || true
+    # Asking whether the record MAY go and checking that it WENT are two
+    # different questions, and this branch used to answer only the first. A
+    # record left behind (a read-only run dir, a permission failure) outlives
+    # the pane it names, and the next `--force` reads it as a live placement and
+    # tries to tear down a pane that is already gone — the same "reported
+    # success, left the caller a wrong authority" shape this whole change is
+    # about. So assert the STATE, not `rm`'s exit code.
+    if [ -e "$SPAWN_REC" ]; then
+      echo "despawn: '$NAME' was torn down, but its placement record at $SPAWN_REC could not be removed. The record now names a pane that is gone, and --force would act on it; delete it by hand." >&2
+      echo "status=error name=$NAME team=$TEAM note=record-not-removed after=${waited}s"
+      exit 1
+    fi
+    echo "status=ok name=$NAME team=$TEAM after=${waited}s"
+    ;;
+  present)
+    echo "despawn: '$NAME' released its lock but the recorded pane is STILL OPEN — the teardown did not fold the window. The placement record is kept; retry with --force to tear it down through it." >&2
+    echo "status=needs-force name=$NAME team=$TEAM note=pane-still-open after=${waited}s"
+    exit 1
+    ;;
+  *)
+    # Deliberately a different sentence from `present`: the operator's next move
+    # differs. "Still open" says close it; "could not check" says look.
+    echo "despawn: '$NAME' released its lock, but this terminal could not be asked whether the pane closed, so the teardown is unconfirmed. The placement record is kept; check the window, and use --force if it is still there." >&2
+    echo "status=needs-force name=$NAME team=$TEAM note=teardown-unverified after=${waited}s"
+    exit 1
+    ;;
+esac

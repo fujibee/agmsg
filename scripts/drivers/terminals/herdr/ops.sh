@@ -407,6 +407,103 @@ terminal_spawn() {
 }
 
 # control op: close the herdr pane named by the bare id.
+# Is the recorded pane still there? READ ONLY — `agent list` and nothing else.
+#
+# Same reason as the tmux driver's: `terminal_despawn` collapses "already closed"
+# and "could not close" into 13, so it cannot tell a caller whether a graceful
+# teardown worked.
+#
+#   present / 0    the id appears in the list
+#   gone    / 0    the list answered, validly, and the id is not in it
+#   unknown / 10   herdr could not be reached, or answered something unreadable
+#
+# `gone` is a claim about the WHOLE list, so it is only made after the list has
+# been PROVEN readable — exit-0 bytes are not proof. Anything short of that is
+# `unknown`, because the caller deletes the placement record on `gone` alone.
+#
+# The read-and-validate preamble is deliberately the same shape as
+# `_herdr_pane_for_session` above and is NOT yet factored out of it: that
+# function is under review for a release block. Two copies of a preamble is a
+# thing to fix, not to leave unnamed — noted here so the next reader knows it is
+# known rather than accidental.
+terminal_pane_state() {
+  local id="$1" json rc=0
+  command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
+  json="$(herdr agent list 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || { echo unknown; return 10; }
+  [ -n "$json" ] || { echo unknown; return 10; }
+
+  local jesc valid vrc=0
+  jesc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  valid="$(sqlite3 :memory: "SELECT json_valid('$jesc')" 2>/dev/null)" || vrc=$?
+  [ "$vrc" -eq 0 ] || { echo unknown; return 10; }
+  [ "$valid" = 1 ] || { echo unknown; return 10; }
+
+  # `gone` is the ONLY answer that deletes a placement record, so it has to be
+  # earned the same way `_herdr_pane_for_session` earns "not among": the claim is
+  # about the WHOLE set, so it is honest only when EVERY entry's membership is
+  # DECIDABLE. An array whose entries were never inspected proves nothing — a
+  # target hiding in an entry this driver cannot read is exactly the case that
+  # must not come back as `gone`.
+  #
+  # DECIDABLE here, for a pane_id question (narrower than the session question,
+  # which also has to recognize a session-less pane by structure): the entry is an
+  # object, carries a pane_id in the MEASURED grammar, and carries the fixed
+  # identity anchor that positively marks it a real herdr pane. Both known kinds —
+  # a session entry and a bare pane — satisfy this, because both carry a pane_id;
+  # anything else (a non-object entry, a missing/ungrammatical pane_id, an
+  # unanchored shape) is drift, and drift is `unknown`, never `gone`.
+  #
+  # `hit` is deliberately LOOSER than `det`: an exact pane_id match is evidence the
+  # pane exists whatever else the entry looks like, and `present` keeps the record.
+  # The asymmetry is the point — the cheap answer is permissive, the destructive
+  # one is not.
+  local iesc q jtype jtrc out orc alen det hit
+  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  for q in '$.result.agents' '$' '$.agents' '$.result'; do
+    jtrc=0
+    jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
+    [ "$jtrc" -eq 0 ] || { echo unknown; return 10; }
+    [ "$jtype" = array ] || continue
+    orc=0
+    out="$(sqlite3 :memory: "
+      WITH entries(value) AS (SELECT value FROM json_each('$jesc', '$q')),
+           -- ALIASED (e) so the correlated json_each in the anchor test binds
+           -- e.value per row; a bare json_each(value) does not correlate.
+           tagged(pane_ok, anchor_ok, pid) AS (
+             SELECT
+               CASE WHEN json_type(e.value,'\$.pane_id') = 'text'
+                 AND json_extract(e.value,'\$.pane_id') GLOB 'w[0-9A-Za-z]*:p[0-9A-Za-z]*'
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*:*:*')
+                 AND NOT (json_extract(e.value,'\$.pane_id') GLOB '*[^0-9A-Za-z:]*')
+               THEN 1 ELSE 0 END,
+               CASE WHEN json_type(e.value,'\$.agent') IS NOT NULL
+                 AND json_type(e.value,'\$.terminal_id') IS NOT NULL
+                 AND json_type(e.value,'\$.tab_id') IS NOT NULL
+                 AND json_type(e.value,'\$.workspace_id') IS NOT NULL
+               THEN 1 ELSE 0 END,
+               json_extract(e.value,'\$.pane_id')
+             FROM entries e WHERE json_type(e.value) = 'object'),
+           det(x) AS (SELECT 1 FROM tagged WHERE pane_ok = 1 AND anchor_ok = 1),
+           hit(x) AS (SELECT 1 FROM tagged WHERE pid = '$iesc' LIMIT 1)
+      SELECT (SELECT count(*) FROM entries),
+             (SELECT count(*) FROM det),
+             (SELECT count(*) FROM hit)" 2>/dev/null)" || orc=$?
+    [ "$orc" -eq 0 ] || { echo unknown; return 10; }
+    IFS='|' read -r alen det hit <<< "$out"
+    if [ "${hit:-0}" -gt 0 ]; then echo present; return 0; fi
+    # No match. Not-present is honest only if every entry was decidable.
+    # Empty array: det == alen == 0 -> gone, which is correct (no panes at all).
+    if [ "${det:-0}" -eq "${alen:-0}" ]; then echo gone; return 0; fi
+    echo unknown
+    return 10
+  done
+  # No array at any candidate path: the list was readable JSON but not a shape
+  # this driver knows, which is "could not answer", not "not in it".
+  echo unknown
+  return 10
+}
+
 terminal_despawn() {
   local id="$1"
   herdr pane close "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; }

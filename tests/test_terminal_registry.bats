@@ -170,12 +170,17 @@ _fake_herdr_list_scalar_session() {
   [ "$output" = "$(printf 'plain\t-')" ]
 }
 
-@test "resolve: picks tmux from \$TMUX and returns \$TMUX_PANE as the self id" {
+# The self id carries the SERVER, not just the pane: `<socket>:%N`. A pane id is
+# not unique across tmux servers (measured — two servers both holding %0), so an
+# id without its socket cannot be asked "are you still there?" of the right
+# authority, and a wrong answer deletes a live member's placement record (#1051).
+# $TMUX is "<socket-path>,<pid>,<session>"; the first field is the socket.
+@test "resolve: picks tmux from \$TMUX and returns socket-qualified \$TMUX_PANE (#1051)" {
   _install_fake_tmux
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
   run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'tmux\t%%4')" ]
+  [ "$output" = "$(printf 'tmux\t/tmp/sock:%%4')" ]
 }
 
 @test "resolve: picks herdr from HERDR_ENV and resolves the pane from the session id" {
@@ -1333,7 +1338,7 @@ M
   export TMUX="/tmp/s,1,0" TMUX_PANE="%0"      # tmux present, has a pane
   run agmsg_terminal_resolve_name "sess-x"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'tmux\t%%0')" ]
+  [ "$output" = "$(printf 'tmux\t/tmp/s:%%0')" ]
 }
 
 @test "resolve order: herdr broken AND no tmux pane -> FATAL with BOTH reasons, not silent plain" {
@@ -1390,7 +1395,7 @@ M
 
   # Positive control first: the pane WAS named, so a green result below cannot be
   # "the call did nothing".
-  grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
+  grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
 
   # `cmp`, not a captured string: command substitution strips trailing newlines,
   # so the string form cannot see a rewrite that changes only that. The sibling
@@ -1409,7 +1414,7 @@ M
   run agmsg_terminal_name_self "" seatteam bob /proj/B claude-code record
   [ "$status" -eq 0 ]
   [ -f "$rec" ]
-  grep -q 'tmux:%1' "$rec"
+  grep -q 'tmux:/tmp/fake:%1' "$rec"
 }
 
 @test "terminal_name_self: a failed record re-write leaves the EXISTING correct record intact (atomic)" {
@@ -1508,7 +1513,7 @@ M
   # Positive control FIRST: join reached the naming step and the pane really was
   # named. Without it a join that skipped naming altogether also leaves the record
   # alone, and this test would read that as the property holding.
-  grep -q 'tmux \[select-pane\]' "$ARGV_LOG" || grep -q 'tmux \[set-option\]' "$ARGV_LOG"
+  grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
 
   # The seat's placement is not join's to take. `cmp`, not `[ "$(cat …)" = … ]`:
   # command substitution strips every trailing newline, so the string form is
@@ -1542,7 +1547,12 @@ M
   [ "$status" -eq 0 ]
 
   # The key: still set, because it is addressing.
-  grep -Fq 'tmux [set-option] [-p] [-t] [%1] [@agmsg_agent] [offteam:alice]' "$ARGV_LOG"
+  # The op and its arguments. The line now leads with `[-S] [<socket>]` — every
+  # call is aimed at the server that owns the pane (#1051) — so anchoring on
+  # `tmux [set-option]` would be asserting the absence of that fix.
+  grep -Fq '[set-option] [-p] [-t] [%1] [@agmsg_agent] [offteam:alice]' "$ARGV_LOG"
+  # And the aim itself, which is the new behaviour worth pinning.
+  grep -Fq '[-S] [/tmp/fake]' "$ARGV_LOG"
   # The decoration: not set.
   refute grep -Fq 'select-pane' "$ARGV_LOG"
   refute grep -Fq 'rename-window' "$ARGV_LOG"
@@ -1686,4 +1696,331 @@ M
   # Nothing was renamed: no key could be built, so the member is not addressable
   # and saying `ok` would have claimed that it was.
   refute grep -Fq 'herdr [agent] [rename]' "$ARGV_LOG"
+}
+
+# --- a driver that is missing a required op does not load (#1051) -------------
+#
+# The registry has always refused a driver missing an ABI function; what it did
+# not have is anything that NOTICES when the required set grows. #1051 adds
+# `terminal_pane_state`, and the failure mode named when it was approved is
+# "someone adds an op and forgets to add it to `_AGMSG_TERMINAL_REQUIRED`" — a
+# hole that leaves the op optional in practice while the contract says otherwise.
+#
+# So this asserts the coupling in both directions:
+#   a driver missing the NEW op is refused  — the required set really includes it
+#   the refusal names the missing function  — an operator can act on it
+#   the shipped drivers all satisfy it      — the requirement is not vacuous
+@test "a driver missing terminal_pane_state is refused, by name (#1051)" {
+  local d="$TEST_SKILL_DIR/scripts/drivers/terminals/stubby"
+  mkdir -p "$d"
+  printf 'name=stubby\ncapabilities=\n' > "$d/terminal.conf"
+  # DERIVE the set from the registry, minus the one op under test. An enumerated
+  # list here silently falls behind the moment another op joins the required set:
+  # the stub is then missing two ops, the loader names whichever it finds first,
+  # and the positive control below cannot load at all. (Measured — terminal_where
+  # and terminal_arrange landed on the base and did exactly that.)
+  local fn
+  : > "$d/ops.sh"
+  for fn in $_AGMSG_TERMINAL_REQUIRED; do
+    [ "$fn" = terminal_pane_state ] && continue
+    printf '%s() { return 0; }\n' "$fn" >> "$d/ops.sh"
+  done
+  # The derivation is only meaningful if it actually left the op out, and only
+  # honest if it wrote the others.
+  refute grep -q 'terminal_pane_state' "$d/ops.sh"
+  [ "$(grep -c '() { return 0; }' "$d/ops.sh")" -ge 8 ]
+
+  run agmsg_terminal_load stubby
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -Fq 'terminal_pane_state'
+
+  # Positive control: the same driver WITH the op loads. Without it, this test
+  # also passes when `agmsg_terminal_load` is broken for every input.
+  printf 'terminal_pane_state() { echo unknown; return 13; }\n' >> "$d/ops.sh"
+  run agmsg_terminal_load stubby
+  [ "$status" -eq 0 ]
+}
+
+@test "every shipped driver implements the required set (#1051)" {
+  local drv
+  for drv in tmux herdr plain; do
+    run agmsg_terminal_load "$drv"
+    [ "$status" -eq 0 ] || { echo "driver $drv failed to load: $output"; return 1; }
+  done
+}
+
+# --- terminal_pane_state: the three answers, and what earns each one (#1051) --
+#
+# `terminal_despawn` cannot answer "is that pane still there?": measured on a
+# throwaway server, `kill-pane` returns non-zero both for a pane already gone and
+# for one it could not close, and the driver maps both to 13. So a graceful
+# teardown that WORKED would have had to report needs-force.
+#
+# The answers are not symmetric in cost. `present` and `unknown` keep the
+# placement record; `gone` DELETES it, and that is the only irreversible one — so
+# `gone` has to be earned, and every uncertainty resolves to `unknown`.
+_fake_tmux_server() {   # <mode: alive|empty|noserver|broken>
+  local mode="$1"
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+# Skip the server selector the driver puts first, the way real tmux does.
+if [ "\$1" = -S ]; then shift 2; fi
+case "$mode" in
+  alive)    [ "\$1" = list-panes ] && echo '%1'; exit 0 ;;
+  empty)    [ "\$1" = list-panes ] && exit 0; exit 0 ;;
+  noserver) echo "no server running on /tmp/fake-sock" >&2; exit 1 ;;
+  broken)   echo "some other tmux failure" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+@test "pane_state: the pane is in its server's list -> present (#1051)" {
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  run terminal_pane_state "/tmp/fake-sock:%1"
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+  # Asked the server the ref names, not whichever one was reachable.
+  grep -Fq '[-S] [/tmp/fake-sock]' "$ARGV_LOG"
+}
+
+@test "pane_state: the server answers and the pane is not in it -> gone (#1051)" {
+  _fake_tmux_server empty
+  agmsg_terminal_load tmux
+  run terminal_pane_state "/tmp/fake-sock:%1"
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "pane_state: the server is no longer running -> gone (#1051)" {
+  # The ordinary case for a member that had its own window: closing the last pane
+  # ends the server. Measured — without this the answer was `unknown` exactly
+  # when the teardown had worked. The discriminator is tmux SAYING so; the socket
+  # file survives the server's exit and proves nothing.
+  _fake_tmux_server noserver
+  agmsg_terminal_load tmux
+  run terminal_pane_state "/tmp/fake-sock:%1"
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "pane_state: any OTHER failure is unknown, not gone (#1051)" {
+  _fake_tmux_server broken
+  agmsg_terminal_load tmux
+  run terminal_pane_state "/tmp/fake-sock:%1"
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "pane_state: an id with no socket cannot name an authority -> unknown (#1051)" {
+  # A record written before refs carried the server. Two servers can both hold
+  # `%1`, so there is no one to ask — and answering `gone` here is what deletes a
+  # live member's record.
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  run terminal_pane_state "%1"
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "pane_state: plain says it cannot be asked, and that is not 'gone' (#1051)" {
+  agmsg_terminal_load plain
+  run terminal_pane_state "-"
+  [ "$status" -eq 13 ]
+  [ "$output" = unknown ]
+}
+
+# --- herdr pane_state: `gone` is a claim about the WHOLE list (#1051) ---------
+#
+# The first version asked only "is the container an array?" and then read "no
+# entry matched" as absence. An array whose entries were never inspected proves
+# nothing: a target sitting in an entry this driver cannot read came back as
+# `gone`, and `gone` is the answer that deletes the record. Aligned with
+# `_herdr_pane_for_session`, which only says not-among when EVERY entry is
+# decidable.
+#
+# A herdr `agent list` carrying the two MEASURED decidable entries plus one raw
+# caller-supplied entry, so a test can add exactly one undecidable entry and
+# nothing else. The two fixed entries both carry a grammatical pane_id and the
+# identity anchor (agent/terminal_id/tab_id/workspace_id), so on their own the
+# list is fully decidable.
+_fake_herdr_list_anchored_plus() {
+  local raw="$1"
+  printf '#!/usr/bin/env bash\n[ "$1" = agent ] && [ "$2" = list ] && { echo '"'"'{"id":"1","result":{"type":"list","agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-OTHER"},"pane_id":"w1:p4","terminal_id":"tm0","tab_id":"t0","workspace_id":"w0"},{"agent":"codex","agent_status":"working","tab_id":"t1","terminal_id":"tm1","workspace_id":"w1","pane_id":"w5:p3"}%s]}}'"'"'; exit 0; }\nexit 0\n' "$raw" > "$FAKEBIN/herdr"
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+# --- every id-taking tmux op honours BOTH ref forms (#1051, co2/tl) ----------
+#
+# Putting the socket in the ref made the WRITERS emit `<socket>:%N`; the READERS
+# were not counted at the same time, and four of them pattern-matched a bare
+# `%`/`@` and called an ambient `tmux`. Those are TWO defects per site, not one:
+# a ref stripped but not routed reaches whatever server is ambient, where the
+# same pane id is a DIFFERENT pane — which is where #1051 started.
+#
+# The op list is DERIVED, not typed: the ABI minus the ops that take no pane id.
+# A new id-taking op therefore fails this test until it is covered, instead of
+# quietly inheriting the old assumption (the fixture-enumeration mistake, again).
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn"
+
+# op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
+_tmux_op_args() {
+  case "$1" in
+    terminal_arrange) printf '%s place_below %s' "$2" "$2" ;;
+    terminal_poke)    printf '%s hello' "$2" ;;
+    terminal_name)    printf '%s k label' "$2" ;;
+    terminal_team_input_ready) printf '%s claude' "$2" ;;
+    *)                printf '%s' "$2" ;;
+  esac
+}
+
+@test "every id-taking tmux op derives from the ABI and is covered here (#1051)" {
+  # The guard for the table above: if the ABI grows an id-taking op, this fails
+  # until _tmux_op_args and the two tests below have seen it. Without this the
+  # coverage claim is only as current as the day it was typed.
+  local op uncovered=""
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    grep -q "^${op}() {" scripts/drivers/terminals/tmux/ops.sh || uncovered="$uncovered $op(missing)"
+  done
+  [ -z "$uncovered" ] || { echo "not implemented by the tmux driver:$uncovered"; return 1; }
+  # And the exclusion list is not a place to hide an op: every name in it must be
+  # a real ABI op, or a typo silently drops a reader from the sweep.
+  for op in $_TMUX_NO_ID_OPS; do
+    case " $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL " in
+      *" $op "*) : ;;
+      *) echo "exclusion names a non-op: $op"; return 1 ;;
+    esac
+  done
+}
+
+@test "a socket-qualified ref reaches the OWNING server, with a bare -t (#1051)" {
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  local op args n=0 want=0
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    want=$((want + 1))
+    : > "$ARGV_LOG"
+    # shellcheck disable=SC2046
+    run $op $(_tmux_op_args "$op" '/tmp/fake-sock:%1')
+    # Not asserting success: some ops legitimately answer unsupported/unknown
+    # against a stub. What must hold is HOW they asked.
+    if [ -s "$ARGV_LOG" ]; then
+      n=$((n + 1))
+      grep -Fq '[-S] [/tmp/fake-sock]' "$ARGV_LOG" \
+        || { echo "$op: did not select the owning server"; cat "$ARGV_LOG"; return 1; }
+      refute grep -Fq '[/tmp/fake-sock:%1]' "$ARGV_LOG" \
+        || { echo "$op: passed the socket-qualified id through as a target"; cat "$ARGV_LOG"; return 1; }
+    fi
+  done
+  # Positive control. Every assertion above is inside `if [ -s ... ]`, so an op
+  # that stops invoking tmux is checked by nothing and the sweep shrinks in
+  # silence — "0 findings" and "never ran" would look identical. Measured: all
+  # of them invoke tmux today, so anything less is a real change to explain.
+  [ "$n" -eq "$want" ] || { echo "only $n of $want id-taking ops reached tmux"; return 1; }
+}
+
+@test "a LEGACY bare ref still works and selects no server (#1051)" {
+  # Without this half, making every op REQUIRE a socket would pass the test
+  # above. Legacy bare refs are real input: agmsg_terminal_ref_terminal accepts
+  # a schemeless bare tmux id on purpose, and records written before the socket
+  # axis carry exactly that.
+  _fake_tmux_server alive
+  agmsg_terminal_load tmux
+  local op silent=""
+  for op in $_AGMSG_TERMINAL_REQUIRED $_AGMSG_TERMINAL_OPTIONAL; do
+    case " $_TMUX_NO_ID_OPS " in *" $op "*) continue ;; esac
+    : > "$ARGV_LOG"
+    # shellcheck disable=SC2046
+    run $op $(_tmux_op_args "$op" '%1')
+    if [ -s "$ARGV_LOG" ]; then
+      refute grep -Fq '[-S]' "$ARGV_LOG" \
+        || { echo "$op: selected a server for a ref that names none"; cat "$ARGV_LOG"; return 1; }
+      continue
+    fi
+    silent="$silent $op"
+    # An op that invoked nothing asserted nothing, so name why it is allowed to.
+    # `pane_state` is the ONE deliberate abstainer: a bare id names no server, so
+    # there is nobody to ask, and `gone` here would delete a live member's
+    # record. It must say so — unknown/10 — rather than merely doing nothing.
+    [ "$op" = terminal_pane_state ] \
+      || { echo "$op invoked no tmux for a legacy bare ref (silently refused?)"; return 1; }
+    [ "$status" -eq 10 ] && [ "$output" = unknown ] \
+      || { echo "pane_state abstained without saying unknown/10: status=$status out=$output"; return 1; }
+  done
+  # The abstainer list is pinned, not counted: a second op going quiet would keep
+  # any >=N count green while its half of the sweep asserted nothing, and
+  # "everything now requires a socket" would read as a pass.
+  [ "$silent" = " terminal_pane_state" ] \
+    || { echo "unexpected set of ops invoking nothing:$silent"; return 1; }
+}
+
+@test "pane_state (herdr): the pane is in the list -> present (#1051)" {
+  _fake_herdr_list_anchored_plus ""
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w5:p3"
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+}
+
+@test "pane_state (herdr): every entry decidable and no match -> gone (#1051)" {
+  # The positive control for the one below: with the SAME two entries and nothing
+  # added, an absent pane is honestly gone. Without this, the `unknown` test
+  # cannot tell "the extra entry made it undecidable" from "this driver can never
+  # say gone".
+  _fake_herdr_list_anchored_plus ""
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w9:p9"
+  [ "$status" -eq 0 ]
+  [ "$output" = gone ]
+}
+
+@test "pane_state (herdr): ONE undecidable entry and no match -> unknown, not gone (#1051)" {
+  # Differs from the control above by exactly one array element: an object with a
+  # grammatical pane_id but no identity anchor, so this driver cannot say it is a
+  # herdr pane at all. The target could be that entry under a shape we do not
+  # read, so absence is not established — and `gone` here would delete a live
+  # member's record.
+  _fake_herdr_list_anchored_plus ',{"pane_id":"w2:p2"}'
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w9:p9"
+  [ "$status" -eq 10 ]
+  [ "$output" = unknown ]
+}
+
+@test "pane_state (herdr): an undecidable entry does not hide a MATCH (#1051)" {
+  # `hit` is deliberately looser than the decidability test: an exact pane_id
+  # match is evidence the pane exists whatever else the list looks like, and
+  # `present` keeps the record. Being permissive toward the cheap answer is not
+  # the same mistake as being permissive toward the destructive one.
+  _fake_herdr_list_anchored_plus ',{"pane_id":"w2:p2"}'
+  agmsg_terminal_load herdr
+  run terminal_pane_state "w2:p2"
+  [ "$status" -eq 0 ]
+  [ "$output" = present ]
+}
+
+# --- a socket path may contain a space (#1051) --------------------------------
+#
+# The record is one TAB-separated line, so what breaks it is a TAB or a newline.
+# An ordinary space does not, and a socket under a home directory with a space in
+# it is perfectly normal — refusing 0x20 would reject a legitimate ref.
+@test "ref grammar: a tmux socket path containing a SPACE is accepted (#1051)" {
+  [ "$(agmsg_terminal_ref_terminal 'tmux:/Users/A B/tmp/s:%3')" = 'tmux' ]
+  [ "$(agmsg_terminal_ref_id 'tmux:/Users/A B/tmp/s:%3')" = '/Users/A B/tmp/s:%3' ]
+}
+
+@test "ref grammar: a tmux socket path containing a TAB or newline is refused (#1051)" {
+  # These are the bytes that actually corrupt the record's framing — it is one
+  # TAB-separated line — and they are the only ones that need refusing.
+  local bad
+  for bad in "$(printf 'tmux:/tmp/a\tb:%%3')" "$(printf 'tmux:/tmp/a\nb:%%3')"; do
+    run agmsg_terminal_ref_terminal "$bad"
+    [ "$status" -ne 0 ] || { echo "FAIL: control byte accepted in '$bad'"; return 1; }
+    [ -z "$output" ]    || { echo "FAIL: printed '$output'"; return 1; }
+  done
 }

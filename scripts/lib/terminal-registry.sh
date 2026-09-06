@@ -27,6 +27,16 @@
 #   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
 #                                       parsed). unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
+#   terminal_pane_state <id>            READ ONLY: is that pane still there?
+#                                       Prints gone / present / unknown and
+#                                       returns 0 for a settled answer, 13 when
+#                                       this terminal has no addressable pane to
+#                                       ask about, 10 when it could not be
+#                                       reached. "Could not ask" never returns 0:
+#                                       a caller deletes the placement record on
+#                                       `gone` alone, and `terminal_despawn`
+#                                       cannot answer this (it collapses "already
+#                                       closed" and "could not close" into 13).
 #   terminal_where <id>                 READ op: print the id's container (tmux window /
 #                                       herdr tab). Existence is not answered here;
 #                                       a missing id is unknown/10, never `gone`.
@@ -124,7 +134,7 @@ agmsg_terminal_has() {
 # verifies it. Naming the set here (not relying on each driver being complete) is
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
-_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
+_AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
 _AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
 
 # Wipe every terminal_* ABI function from the current shell. Called before each
@@ -350,6 +360,26 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
   local id="$2" rest
   case "$1" in
     tmux)
+      # Two accepted forms, and the older one is accepted on purpose:
+      #   <socket-path>:%N / <socket-path>:@N   written since refs carry the server
+      #   %N / @N                               a record written before they did
+      # A pane id is not unique across tmux servers (measured: two servers both
+      # holding %0), so the socket is what makes a ref answerable. The legacy form
+      # still resolves — it just cannot be asked "is it still there?" (#1051).
+      #
+      # Split on the LAST colon: a socket path may contain one.
+      local _sock=""
+      case "$id" in
+        *:*) _sock="${id%:*}"; id="${id##*:}"
+             [ -n "$_sock" ] || return 1
+             # What breaks a record is a TAB or a newline — it is one TAB-separated
+             # line — not an ordinary space, and socket paths under a home
+             # directory containing a space are perfectly normal. So reject the
+             # CONTROL bytes (TAB 0x09, LF, CR and the rest) and let 0x20 through:
+             # [[:cntrl:]] is exactly that split, where [[:space:]] also swallows
+             # the space and would refuse a legitimate path.
+             case "$_sock" in *[[:cntrl:]]*) return 1 ;; esac ;;
+      esac
       case "$id" in %*|@*) : ;; *) return 1 ;; esac
       rest="${id#?}"
       case "$rest" in ''|*[!0-9]*) return 1 ;; esac
