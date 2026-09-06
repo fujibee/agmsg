@@ -5,6 +5,11 @@ set -euo pipefail
 # Shows unread messages and marks them as read.
 # --quiet: only output if there are unread messages (for hooks)
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/fast-dispatch.sh"
+agmsg_fast_dispatch inbox "$@"
+
 TEAM="${1:?Usage: inbox.sh <team> <agent_id> [--quiet]}"
 AGENT="${2:?Missing agent_id}"
 QUIET=false
@@ -12,7 +17,6 @@ if [ "${3:-}" = "--quiet" ]; then
   QUIET=true
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 

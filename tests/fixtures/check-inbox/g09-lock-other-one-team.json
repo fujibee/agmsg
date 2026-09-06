@@ -1,0 +1,99 @@
+{
+  "name": "g09-lock-other-one-team",
+  "description": "actas lock held by other live session on one team: that team skipped (unread kept), other delivered",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [
+      {
+        "team": "mes",
+        "agent": "Codex",
+        "owner": "other-session",
+        "alive": true
+      }
+    ],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ops",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "locked-away",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    },
+    {
+      "id": 2,
+      "team": "ops",
+      "from": "claude",
+      "to": "Codex",
+      "body": "deliver-me",
+      "created_at": "2026-07-20T10:01:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "ops",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "deliver-me",
+              "created_at": "2026-07-20T10:01:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [
+      1
+    ],
+    "readIds": [
+      2
+    ],
+    "markerTouched": true
+  }
+}

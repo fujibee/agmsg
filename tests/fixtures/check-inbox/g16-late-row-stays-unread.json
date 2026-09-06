@@ -1,0 +1,83 @@
+{
+  "name": "g16-late-row-stays-unread",
+  "description": "row inserted after the SELECT stays unread: Node marks only displayed ids (intentional divergence from bash 1.1.6 which would mark it read)",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "displayed",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    }
+  ],
+  "injectDuringRun": {
+    "afterSelect": [
+      {
+        "id": 2,
+        "team": "mes",
+        "from": "claude",
+        "to": "Codex",
+        "body": "late-arrival",
+        "created_at": "2026-07-20T10:01:00Z",
+        "read_at": null
+      }
+    ]
+  },
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "displayed",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [
+      2
+    ],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true,
+    "note": "bash 1.1.6 would also mark id 2 read without displaying it (known race, upstream-fixed in 1.1.10); Node path is deliberately displayed-ids-only"
+  }
+}
