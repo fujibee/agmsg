@@ -234,7 +234,23 @@ EOF
   fi
   case "$expected_key" in
     n/a:*|unknown:*) key_cell="$expected_key" ;;
-    *) key_cell="$(agmsg_identity_cell "$expected_key" "$actual_key")" ;;
+    *)
+      # `unknown:agent_key_missing` is NOT a read failure: terminal_team_observe
+      # SUCCEEDED and reported the pane genuinely carries no agent key (herdr's
+      # `agent list` had no entry for this pane; tmux's @agmsg_agent is unset).
+      # With a real expected_key in hand that is a MISMATCH to repair — the key is
+      # expected to exist and was observed ABSENT — not an unknown to skip. This is
+      # the case a codex seat lands in: its self-naming paths never run (all five
+      # are Claude-Code-only), so the spawner-set key is its only key, and when
+      # that is missing `team` must report mismatch and `--fix` must set it. Feed a
+      # non-unknown `absent` marker so agmsg_identity_cell classifies it as the
+      # mismatch it is. EVERY other unknown:/n/a: actual is a genuine read failure
+      # (terminal unreachable, observe errored) and keeps its pass-through form —
+      # couldn't-read stays skip; read-as-absent becomes fix's target.
+      local _actual_key="$actual_key"
+      [ "$_actual_key" = unknown:agent_key_missing ] && _actual_key=absent
+      key_cell="$(agmsg_identity_cell "$expected_key" "$_actual_key")"
+      ;;
   esac
   name_arg="$(agmsg_type_get "$type" name_arg 2>/dev/null || true)"
   if [ -z "$name_arg" ]; then
