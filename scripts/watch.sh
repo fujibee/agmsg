@@ -253,7 +253,7 @@ close_own_placement() {
   # assignment would leave rec_term/rec_id empty and fall through to the "belongs to
   # someone else" branch with an empty recorded side — a misleading message, and
   # under a caller's `set -e` it would take the watcher down with no log at all.
-  # Give the unresolvable ref its OWN contract, in the sibling guards' shape (co1).
+  # Give the unresolvable ref its OWN contract, in the sibling guards' shape.
   rec_term=""; rec_id=""
   rec_term="$(agmsg_terminal_ref_terminal "$ref")" || rec_term=""
   rec_id="$(agmsg_terminal_ref_id "$ref")" || rec_id=""

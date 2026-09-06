@@ -995,7 +995,7 @@ _record_handover_events() {
 }
 
 # --- close_own_placement: an unresolvable pane ref gets its OWN logged branch ---
-# co1 (3): the ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref.
+# The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref.
 # A bare `rec_term="$(...)"` left rec_term/rec_id empty and fell through to the
 # "belongs to someone else" branch with an EMPTY recorded side (a misleading log),
 # and under a caller's set -e it would take the watcher down with no log at all.

@@ -59,7 +59,7 @@ case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout must be a whole number of seconds
 SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 
 # Tear down the recorded placement through the terminal-driver registry, and PROVE
-# it (co1, full-head review). The record ref is <terminal>:<id> or a legacy bare
+# it (full-head review). The record ref is <terminal>:<id> or a legacy bare
 # %N/@N; an unknown/corrupt ref does NOT resolve (agmsg_terminal_ref_terminal fails
 # closed). The teardown counts as confirmed only if the ref resolved, the driver
 # loaded, AND terminal_despawn exited 0 — a driver reporting runtime_error/13 (a real

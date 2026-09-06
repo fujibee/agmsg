@@ -125,7 +125,7 @@ _fake_herdr_list_numeric_pane() {
 # must be not-among — NOT did-not-answer.
 _fake_herdr_list_bare_pane() {
   local sid="${1:-sess-OTHER}"
-  # The MEASURED session-less pane (utildev, live herdr, raw JSON): the agent_session
+  # The MEASURED session-less pane (live herdr, raw JSON): the agent_session
   # KEY is ABSENT entirely. B recognizes it by STRUCTURE, not by agent_status's value:
   # the pane carries the herdr-pane identity anchor (agent, terminal_id, tab_id,
   # workspace_id — measured always-present) and every field is a SCALAR. agent_status
@@ -236,7 +236,7 @@ _fake_herdr_list_scalar_session() {
   [ "$(agmsg_terminal_ref_id '%3')" = "%3" ]
 }
 
-@test "record: an unknown or CORRUPT ref FAILS CLOSED — validates the ID, not just the scheme (co1)" {
+@test "record: an unknown or CORRUPT ref FAILS CLOSED — validates the ID, not just the scheme" {
   # A ref is handed to a terminal as a TARGET (peek/poke/despawn). A KNOWN scheme is
   # not enough — the id after it must be a well-formed id for that terminal, or a
   # corrupt id (tmux:%9;kill, tmux:alice -> a real session, herdr:junk, plain:any)
@@ -347,7 +347,7 @@ _fake_herdr_list_scalar_session() {
 
 @test "tmux: spawn --split FAILS CLOSED when \$TMUX_PANE is unset (no ambient guess, #990)" {
   # Not observing the caller's pane is not evidence the ambient target is the caller
-  # (co1). A pane split must fail closed (13) rather than let tmux pick the attached
+  # A pane split must fail closed (13) rather than let tmux pick the attached
   # client's active window — and it must not call split-window at all.
   _install_fake_tmux
   agmsg_terminal_load tmux
@@ -543,7 +543,7 @@ EOF
 }
 
 @test "herdr: terminal_spawn reaches the readiness arms under a NON-conditional set -e caller" {
-  # co1 (1): the readiness classifier returns non-zero for NOT-READY/UNKNOWN; a bare
+  # The readiness classifier returns non-zero for NOT-READY/UNKNOWN; a bare
   # `classifier; ready_rc=$?` takes a set -e caller down BEFORE the arms classify. The
   # spawn.sh tests call terminal_spawn inside `$(...)`, where errexit is masked — so
   # prove the fix from a NON-conditional set -e caller (terminal_spawn called directly).
@@ -582,7 +582,7 @@ EOF
 }
 
 @test "herdr: the pane-id grammar shell authority agrees with the resolver on boundary values" {
-  # co1: the resolver (SQL GLOB) and the spawn side (_herdr_pane_id_ok, bash) express
+  # The resolver (SQL GLOB) and the spawn side (_herdr_pane_id_ok, bash) express
   # the SAME grammar; a drift between them would let one accept what the other rejects.
   # Cross-check both on the boundary set: the shell authority and a resolver lookup
   # (via a one-entry list whose pane_id is the value) must agree on accept/reject.
@@ -781,7 +781,7 @@ EOF
   grep -q '\[pane\] \[move\]' "$ARGV_LOG"
 }
 
-@test "herdr peek: an error body is NOT returned as content, and the single 13 is split (tl/co1)" {
+@test "herdr peek: an error body is NOT returned as content, and the single 13 is split" {
   agmsg_terminal_load herdr
   # (1) herdr answers but the pane is GONE: it exits non-zero AND writes an error JSON
   # to STDOUT. peek must NOT hand that back as the pane content (stdout empty), and it
@@ -805,9 +805,9 @@ _last_agent_rename_key() {
 }
 
 @test "herdr naming: the internal key avoids the known fold/join collisions ('-' and ':')" {
-  # tl/cc1/co1 2026-09-01: the old fold (':' and non-regex chars -> '-') and ANY
+  # 2026-09-01: the old fold (':' and non-regex chars -> '-') and ANY
   # literal separator have a STRUCTURAL (deterministic, reachable) collision, because
-  # the separator is legal inside a name. cc1's example:
+  # the separator is legal inside a name. Example:
   #     ("a-b","c") and ("a","b-c")   both fold to  a-b-c
   # and the same holds for the ':' the spec proposed as the join char:
   #     ("a:b","c") and ("a","b:c")   both join to  a:b:c
@@ -831,10 +831,10 @@ _last_agent_rename_key() {
   [ "$k3" != "$k4" ]
 }
 
-# --- ABI completeness + structural clobber-proofing (co1 #1014 review) -------
+# --- ABI completeness + structural clobber-proofing (#1014 review) -------
 
 @test "abi: every driver defines every required terminal_* function" {
-  # The declaration/implementation match co1 flagged: an ops.sh missing a verb
+  # The declaration/implementation match flagged in review: an ops.sh missing a verb
   # would, after a prior load, silently run the previous driver's same-named
   # function. agmsg_terminal_load verifies the full set; loading each driver must
   # therefore succeed (a missing verb fails the load loudly).
@@ -897,7 +897,7 @@ OPS
   refute declare -F terminal_poke
 }
 
-# --- fail-closed resolution (co1 #1014 review) ------------------------------
+# --- fail-closed resolution (#1014 review) ------------------------------
 
 @test "detect: tmux with an empty \$TMUX_PANE still PLACES in tmux (presence)" {
   # For placement, being in tmux is enough — spawn records the pane it CREATES,
@@ -911,7 +911,7 @@ OPS
 
 @test "detect: tmux with an empty \$TMUX_PANE is FATAL for naming, with a reason" {
   # For naming, we must identify the pane. Present-but-no-id is fatal: say why,
-  # non-zero — better than naming nothing (co1's fail-closed lives on this side).
+  # non-zero — better than naming nothing (the fail-closed rule lives on this side).
   export TMUX="/tmp/sock,1,0"
   unset TMUX_PANE
   run agmsg_terminal_resolve_name "sess-x"
@@ -961,7 +961,7 @@ OPS
   [ "$output" = "ok" ]
 }
 
-@test "plain: spawn ISOLATES backend stdout — the record-op result is exactly '-' (co1)" {
+@test "plain: spawn ISOLATES backend stdout — the record-op result is exactly '-'" {
   # spawn is a record op: its stdout must be the id ('-') and nothing else. A backend
   # (here a {cmd} template) that writes to stdout must not pollute the captured result
   # — otherwise the caller reads '<noise>\n-' as the placement id. Capture stdout
@@ -977,7 +977,7 @@ OPS
   [ "$out" = "-" ]                       # exactly '-', the backend noise did not leak
 }
 
-# --- load failure cleanup: source failure, like missing-function, leaves nothing (co1 rd2) ---
+# --- load failure cleanup: source failure, like missing-function, leaves nothing (review round 2) ---
 
 @test "load: a driver whose ops.sh fails to source leaves no partial functions behind" {
   local pdir="$TEST_SKILL_DIR/plugins/terminals/halfsource"
@@ -1006,7 +1006,7 @@ OPS
   [ -z "$_AGMSG_TERMINAL_LOADED" ]
 }
 
-# --- herdr spawn target validation (co1 rd2) --------------------------------
+# --- herdr spawn target validation (review round 2) --------------------------------
 
 @test "herdr: spawn rejects an unknown target instead of defaulting" {
   _install_fake_herdr "s"
@@ -1030,7 +1030,7 @@ OPS
   refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
 }
 
-# --- co1 round-5: presence vs binary availability; errexit-safe reason read ---
+# --- Review round 5: presence vs binary availability; errexit-safe reason read ---
 
 @test "herdr: HERDR_ENV=1 with NO herdr binary still PLACES in herdr (presence != binary)" {
   # Restrict PATH so `herdr` is genuinely absent (this machine has a real one),
@@ -1046,7 +1046,7 @@ OPS
 
 @test "herdr naming: 'agent list' cannot answer -> fatal, reason 'did not answer'" {
   # herdr present (HERDR_ENV=1) but its list errors: resolve-for-name is fatal and
-  # the driver's reason reaches the error (co1: the reason reaches A). A real herdr
+  # The driver's reason reaches the error (the reason reaches A). A real herdr
   # is on PATH here, so shadow it with a failing fake.
   _fake_herdr_list_fails
   export HERDR_ENV=1
@@ -1069,7 +1069,7 @@ OPS
   # POSITIVE PROOF the json_valid gate discriminates: a herdr that exits 0 with
   # non-JSON bytes must be "could not answer" (return 2), not silently downgraded to
   # "answered, this session is not among the agents". The two reasons are the two
-  # sides co1 named: garbage -> did-not-answer; empty valid array -> not-among.
+  # sides named in review: garbage -> did-not-answer; empty valid array -> not-among.
   _fake_herdr_list_garbage
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-x"
@@ -1079,7 +1079,7 @@ OPS
 }
 
 @test "resolve_name: no set -e leak; a BARE call still reaches and PRINTS the verdict line" {
-  # co1 round-6: the old control wrapped the call in `|| rc=$?`, which disables set -e
+  # Review round 6: the old control wrapped the call in `|| rc=$?`, which disables set -e
   # for the ENTIRE function body — so an internal errexit leak could not be observed.
   # This is a BARE call under `set -e`: two leak-prone sites run before the verdict —
   #   (1) the loop's `id="$(_detect_one herdr ...)"` returns non-zero (HERDR_ENV unset)
@@ -1100,7 +1100,7 @@ M
 }
 
 @test "herdr naming: valid JSON, UNKNOWN schema ({}) -> did-not-answer, NOT 'no match'" {
-  # co1/tl 2026-09-01: a SUCCESSFUL json_each is not proof of a recognized list.
+  # 2026-09-01: a SUCCESSFUL json_each is not proof of a recognized list.
   # json_each on {} returns 0 rows and succeeds, which without the json_type gate
   # would misclassify an unknown schema as "answered, session not present". Only a
   # real ARRAY at a candidate path counts as answered. This is the OTHER side of the
@@ -1126,7 +1126,7 @@ M
 }
 
 @test "herdr naming: entry-shape drift (SCALAR agent_session) is did-not-answer, NOT not-among" {
-  # co1/tl 2026-09-01 (3rd instance of the shape): the answer depends on the session
+  # 2026-09-01 (3rd instance of the shape): the answer depends on the session
   # id being COMPARED against a real entry, so schema drift is NOT a positive proof
   # of absence. A non-empty array whose entries are the OLD scalar-agent_session
   # shape has 0 expected-shape entries -> did-not-answer (return 2), not "answered,
@@ -1154,7 +1154,7 @@ M
 }
 
 @test "herdr naming: a BARE PANE (no agent_session) is decidable — absent target is not-among" {
-  # utildev live-measured: the real machine has a session-less pane among the agents.
+  # Live-measured: the real machine has a session-less pane among the agents.
   # A bare pane definitely is not the target, so it does NOT block a not-among answer
   # (the earlier well==alen rule treated it as unreadable, making not-among
   # unreachable — every absent session wrongly returned did-not-answer).
@@ -1175,7 +1175,7 @@ M
 }
 
 @test "herdr naming: the bare-pane arm is POSITIVE by STRUCTURE — an unresolvable entry is did-not-answer" {
-  # B recognizes a session-less pane by structure (co1/tl 2026-09-04), not by a value
+  # B recognizes a session-less pane by structure (2026-09-04), not by a value
   # or a key-name set — both drift while a pane lives. An entry is did-not-answer, never
   # a silent not-among, unless it is provably a bare pane: agent_session key absent, a
   # valid pane_id, the fixed identity anchor present, and NO field object/array-valued.
@@ -1213,7 +1213,7 @@ M
   #   - working / idle / done: the live-changing value must NOT gate the answer.
   #   - an unknown SCALAR extension key: herdr adding a scalar field must not break it.
   #   - name + display_agent (a NAMED bare pane): DEFENSIVE — this state (name present,
-  #     agent_session absent) was NOT observed as of 2026-09-04 (utildev); display_agent
+  #     agent_session absent) was NOT observed as of 2026-09-04 (live measurement); display_agent
   #     was a string in one 2026-09-04 agent list. Kept so naming (this driver's own job)
   #     cannot silently make a member unresolvable.
   export HERDR_ENV=1
@@ -1233,7 +1233,7 @@ M
 }
 
 @test "herdr naming: target session with a MISSING/null pane_id -> did-not-answer (unaddressable)" {
-  # co1 round 10: pane_ok must be a definite 0/1, not a boolean that goes NULL when
+  # Review round 10: pane_ok must be a definite 0/1, not a boolean that goes NULL when
   # pane_id is absent — else a target session with no pane_id falls into neither hit
   # (AND pane_ok) nor badhit (AND NOT pane_ok) and, if it is the only decidable
   # entry, reads as not-among though the target is present-but-unaddressable. Both a
@@ -1251,7 +1251,7 @@ M
 }
 
 @test "herdr naming: MIXED array, target ABSENT -> did-not-answer (cannot rule out the malformed entry)" {
-  # co1/tl one layer further: >=1 well-formed entry proves some entries are readable,
+  # One layer further: >=1 well-formed entry proves some entries are readable,
   # NOT that the target is not hiding in a malformed sibling. Here alen=2 (a
   # well-formed other-session entry + a malformed one) and well=1; the searched
   # session is in neither well-formed slot. Absence is NOT provable — the target
@@ -1275,7 +1275,7 @@ M
 }
 
 @test "herdr naming: a pane_id containing '|' is NOT well-formed -> did-not-answer (framing-safe)" {
-  # co1/tl: json text can contain the '|' this function frames on. 'w1:p|4' passes
+  # JSON text can contain the '|' this function frames on. 'w1:p|4' passes
   # the skeleton but the '|' is caught by the safety class, so it exercises that
   # guard (not just the skeleton). Its entry is not well-formed -> the sole entry is
   # ill-formed -> did-not-answer, and no truncated/garbled pane is resolved.
@@ -1298,7 +1298,7 @@ M
 }
 
 @test "herdr naming: the MEASURED real pane-id form (w1:p4) still RESOLVES (not over-narrowed)" {
-  # tl: assert with the measured value that narrowing did not reject the real form.
+  # Assert with the measured value that narrowing did not reject the real form.
   # Real herdr 0.8.0 on this machine emits w<n>:p<x> (w1:p4, w1:pB, w5:p3).
   _fake_herdr_list_one_pane "sess-mine" 'w1:p4'
   export HERDR_ENV=1
@@ -1308,7 +1308,7 @@ M
 }
 
 @test "herdr naming: the SEARCH predicate == the well-formed predicate (no numeric pane_id find)" {
-  # co1: the search must not be weaker than the count. A malformed entry that carries
+  # The search must not be weaker than the count. A malformed entry that carries
   # the target agent_session.value but a NUMERIC pane_id is NOT well-formed; the
   # search must skip it (not return pane 123), and with a well-formed sibling present
   # the set is not fully comparable -> did-not-answer. A search predicate of only
@@ -1323,7 +1323,7 @@ M
 }
 
 @test "resolve order: NESTED herdr-in-tmux — tmux (produces %0) wins over herdr (present, no id)" {
-  # tl 2026-09-01: a nested herdr-in-tmux inherits HERDR_* into a tmux server it
+  # 2026-09-01: a nested herdr-in-tmux inherits HERDR_* into a tmux server it
   # spawned. herdr says 'present' but resolves no pane; tmux CAN produce %0. The
   # id-producer must win (record tmux:%0 — the pane really is a tmux pane), not the
   # first-present. herdr is tried first in declaration order, so this proves the
@@ -1337,7 +1337,7 @@ M
 }
 
 @test "resolve order: herdr broken AND no tmux pane -> FATAL with BOTH reasons, not silent plain" {
-  # tl's load-bearing case: real herdr with the lookup broken, and $TMUX_PANE empty.
+  # The load-bearing case: real herdr with the lookup broken, and $TMUX_PANE empty.
   # No candidate produces a nameable id. This must fail LOUDLY with EVERY present
   # candidate's reason (not one), rather than fall through to plain's '-' and succeed
   # silently. 'noisy wrong' beats 'silent wrong'.
@@ -1413,7 +1413,7 @@ M
 }
 
 @test "terminal_name_self: a failed record re-write leaves the EXISTING correct record intact (atomic)" {
-  # co1: SessionStart / actas re-name a pane that ALREADY has a correct record. A raw
+  # SessionStart / actas re-name a pane that ALREADY has a correct record. A raw
   # `>` truncates it at open, so a write that then fails (ENOSPC / permission) has
   # destroyed the authority peek/poke/despawn depend on BEFORE it can report the
   # failure. agmsg_write_atomic writes a temp beside the record and renames, so a

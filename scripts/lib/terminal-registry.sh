@@ -129,7 +129,7 @@ _AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
 
 # Wipe every terminal_* ABI function from the current shell. Called before each
 # source so a driver that is switched to cannot inherit the previous driver's ops
-# — the clobber co1 flagged: "no function" fails loudly (command not found), but a
+# — the clobber flagged in review: "no function" fails loudly (command not found), but a
 # LEFTOVER function of a different driver succeeds and runs the wrong backend.
 _agmsg_terminal_unset_ops() {
   local fn
@@ -210,7 +210,7 @@ _agmsg_terminal_detect_one() {
   )
 }
 
-# Detection has TWO callers with different needs (tl 2026-08-31); detect itself
+# Detection has TWO callers with different needs (2026-08-31); detect itself
 # decides nothing — these do.
 #
 # Precedence for both: an explicit override (AGMSG_TERMINAL_DRIVER, or arg 2) wins
@@ -221,7 +221,7 @@ _agmsg_terminal_detect_one() {
 # member (despawn/peek/poke) read the terminal from the placement record, never
 # the env. The override env is AGMSG_TERMINAL_DRIVER (flag --terminal-driver,
 # wired in spawn's arg parsing) — a NEW name, because --terminal / AGMSG_TERMINAL
-# are the OS-terminal command template and stay unchanged (tl 2026-08-31).
+# are the OS-terminal command template and stay unchanged (2026-08-31).
 
 # resolve-for-PLACEMENT (spawn): which terminal are we under? Prints the terminal
 # NAME, exit 0. Uses PRESENCE only — it does NOT need the caller's own pane id
@@ -249,7 +249,7 @@ agmsg_terminal_resolve_placement() {
 }
 
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
-# and exit 0. ORDER (tl 2026-09-01, from cc1's nested measurement): prefer a
+# and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
 # declaration order (herdr > tmux > plain) is the tiebreak AMONG id-producers.
 #
@@ -378,7 +378,7 @@ agmsg_terminal_ref_terminal() {
   # A KNOWN scheme is not enough: the id after it is still handed to the terminal as a
   # TARGET, so a corrupt id (tmux:%9;kill, tmux:alice, herdr:<newline>, plain:any)
   # must not fall through. Validate it against the terminal's grammar; fail closed
-  # otherwise (co1: the container is not the contents).
+  # otherwise (the container is not the contents).
   _agmsg_terminal_id_ok "$term" "$id" || return 1
   printf '%s\n' "$term"
 }

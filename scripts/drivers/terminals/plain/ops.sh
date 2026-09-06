@@ -53,7 +53,7 @@ terminal_spawn() {
   # can write to stdout — a custom template especially — and that would be captured
   # by the caller as the placement id. So each backend's STDOUT is redirected to
   # stderr (kept as a diagnostic, not swallowed), leaving only the '-' this function
-  # prints on stdout (co1).
+  # prints on stdout.
   if [ -n "$tmpl" ] && _plain_has_template "$tmpl"; then
     local q_boot; q_boot="$(printf '%q' "$boot")"
     local cmd="${tmpl//\{cmd\}/$q_boot}"

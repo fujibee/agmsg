@@ -817,7 +817,7 @@ EOF
 }
 
 @test "spawn: --no-wait on a monitor=YES type still reports launched-unconfirmed (no post-input confirmation)" {
-  # co1 full-head: --no-wait skips the readiness handshake by request, so startup is
+  # Full-head review: --no-wait skips the readiness handshake by request, so startup is
   # NOT confirmed — exactly like monitor=no. Both no-confirmation paths must report
   # status=launched-unconfirmed (a distinct note keeps the reasons apart). A monitor=YES
   # type (claude-code) with --no-wait is the arm that was silently falling through both
@@ -853,7 +853,7 @@ EOF
 }
 
 @test "spawn: a no-handshake type (monitor=no) reports startup UNCONFIRMED, not a bare success" {
-  # tl hit "spawned" printed while the agent had not started (a startup shell prompt
+  # Observed live: "spawned" printed while the agent had not started (a startup shell prompt
   # ate the first keystroke of the boot command). A type with no readiness handshake
   # cannot confirm startup, so spawn must say so DISTINCTLY — status=launched-unconfirmed
   # with an explanation — instead of letting the placement line stand as success.
@@ -872,7 +872,7 @@ EOF
 @test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from monitor=no's" {
   # The placement word is 'launched', never 'spawned', on the --no-wait path too; and
   # the two no-confirmation reasons read apart — --no-wait carries note=no-wait, a
-  # monitor=no type carries note=no-readiness-handshake (utildev: distinct wording).
+  # monitor=no type carries note=no-readiness-handshake (distinct wording).
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
@@ -1251,7 +1251,7 @@ _spawn_recorded_id() {
 }
 
 @test "spawn req1: a numeric-STRING pid is UNKNOWN on BOTH arms and either field (json_type must be integer)" {
-  # co1/tl (3): json_extract turns a JSON string "5" into 5, which would pass a digit
+  # json_extract turns a JSON string "5" into 5, which would pass a digit
   # check; the classifier requires json_type=integer on BOTH fields. Each case below
   # must be UNKNOWN -> type + BEFORE-typing warning, NOT the NOT-READY 5s-wait/fail and
   # NOT a silent ready. The cases pin the drift a one-sided control would miss:
@@ -1295,7 +1295,7 @@ _spawn_recorded_id() {
 }
 
 @test "spawn req1: arm-3 (pre-input) and launched-unconfirmed (post-input) are DISTINCT messages" {
-  # utildev: the two 'unconfirmed' reasons must read apart. A monitor=no type spawned
+  # The two 'unconfirmed' reasons must read apart. A monitor=no type spawned
   # through herdr with UNKNOWN readiness shows BOTH, worded differently.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   _setup_fake_herdr
@@ -1331,7 +1331,7 @@ _spawn_recorded_id() {
 }
 
 @test "spawn: --terminal-driver validates EARLY — before team resolution or any state change" {
-  # co1: an unknown driver is a deterministic arg typo, so it must fail before spawn
+  # An unknown driver is a deterministic arg typo, so it must fail before spawn
   # registers a role or writes a boot file, and before an unrelated 'no team' can mask
   # it. With NO team registered for the project, a bogus driver must STILL error with
   # 'unknown terminal driver' (not 'no team') — proving the check runs at parse time.

@@ -90,7 +90,7 @@ teardown() {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
   # Distinct per-install sentinels, not just each install's VERSION (which is
   # the same source-derived string for both and would not distinguish "one of
-  # them got silently updated" from "neither did" -- co2 review, #659).
+  # them got silently updated" from "neither did" -- review of #659).
   echo "agmsg sentinel" > "$FAKE_HOME/.agents/skills/agmsg/SKILL.md"
   echo "agmsg-second sentinel" > "$FAKE_HOME/.agents/skills/agmsg-second/SKILL.md"
 
@@ -111,7 +111,7 @@ teardown() {
   # exclude nothing on a real machine, while remaining broad enough to
   # collide with a legitimately chosen --cmd name (--cmd has no reserved-name
   # validation: "agmsg.bak-tool" installs today with no error). Two rounds of
-  # narrowing hit that same collision from co2 review on #659; the fix is to
+  # narrowing hit that same collision from the #659 review; the fix is to
   # not special-case names at all. A directory that still carries the .agmsg
   # marker is just another candidate, and more than one candidate is exactly
   # the ambiguity this fix already refuses to guess through.

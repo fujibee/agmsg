@@ -297,7 +297,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   # reserved-name validation, so any pattern that would catch a real backup
   # (e.g. "agmsg.bak-20260731") can equally match a legitimately chosen
   # install name (e.g. "agmsg.bak-tool") -- there is no substring that is
-  # guaranteed to mean "not a real install" (co2 review, #659). A leftover
+  # guaranteed to mean "not a real install" (review of #659). A leftover
   # backup directory that still carries the .agmsg marker is therefore just
   # another candidate: it makes the set ambiguous, and ambiguous is exactly
   # what this fix already refuses to guess through, below.

@@ -200,7 +200,7 @@ def split_statements(text):
         # `#` opens a comment when it STARTS A WORD -- at the beginning of a
         # statement or after whitespace. Requiring the statement to be empty
         # was not merely incomplete, it was actively dangerous: a TRAILING
-        # comment stayed in the text, and the apostrophe in one (`co1's`) read
+        # comment stayed in the text, and the apostrophe in one (`review's`) read
         # as an opening single quote and swallowed everything to the next one.
         # That silently disabled the sql_bare control several functions later,
         # so the file reported three findings instead of four and still looked
@@ -374,7 +374,7 @@ sql_guarded_case() {     # the false positive that cost a workaround — must NO
     LIMIT 1;" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
 }
-source_continued_case() { # co1's second hole — a source split across a
+source_continued_case() { # the review's second hole — a source split across a
                           # backslash-newline. MUST be reported: this is a
                           # single-line source with a line break in it, and a
                           # splitter that breaks there reports nothing while

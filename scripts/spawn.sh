@@ -178,7 +178,7 @@ done
 case "$SPLIT" in h|v) ;; *) die "--split must be 'h' or 'v'" ;; esac
 case "$READY_TIMEOUT" in ''|*[!0-9]*) die "--ready-timeout must be a whole number of seconds" ;; esac
 
-# Validate the terminal-driver override HERE, before any state change (co1): it is a
+# Validate the terminal-driver override HERE, before any state change: it is a
 # deterministic argument typo, so it must fail like --split does — before the role is
 # registered and a boot file is written (place_and_launch runs after both), and
 # before an unrelated "no team" error can mask it. The accepted set is EXACTLY the
@@ -516,7 +516,7 @@ chmod +x "$BOOT"
 # Write the placement record, and REPORT if the write itself failed. The record is
 # the ONLY authority peek / poke / despawn --force have over a spawned member, so a
 # live pane with no record (disk full, permission) is a distinct, worse state than a
-# clean spawn — not a success (co1/tl, full-head review). We cannot un-spawn the pane
+# clean spawn — not a success (full-head review). We cannot un-spawn the pane
 # that already exists, so we do not roll back; we set a flag the main flow turns into
 # `status=spawned-but-unrecorded` (a DIFFERENT word from `spawned`) with the pane id,
 # and a non-zero exit, so the operator knows a window exists it cannot address.
@@ -630,7 +630,7 @@ launch_in_herdr() {
 }
 
 _launch_os_terminal() {
-  # Place THROUGH the plain terminal driver (tl 2026-09-02: the driver claims
+  # Place THROUGH the plain terminal driver (2026-09-02: the driver claims
   # capabilities=spawn despawn, so production must actually go through it, not a
   # duplicate). plain's terminal_spawn does the OS-terminal launch — a {cmd} template
   # on any OS, else the current macOS terminal (`open -g -a`) / a Linux emulator /
@@ -646,12 +646,12 @@ _launch_os_terminal() {
     || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
   [ "$_plain_id" = '-' ] \
     || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected '-' (an OS terminal has no addressable pane)"
-  # "launched", NOT "spawned" (tl): every placement line below states only that the
+  # "launched", NOT "spawned": every placement line below states only that the
   # pane was created and the boot typed into it — a PLACEMENT fact. It is deliberately
   # not the word "spawned", because whether the agent actually STARTED is answered
   # later and separately by the status= line (status=ready = a positive observation
   # that its watcher attached; status=launched-unconfirmed = a type with no handshake,
-  # so startup cannot be confirmed here). tl hit "spawned" printed while the agent had
+  # so startup cannot be confirmed here). Observed live: "spawned" printed while the agent had
   # not started (a shell prompt ate the first keystroke of the boot command).
   # The message keeps the two shapes the tests and users know: a custom template vs a
   # plain new window.
@@ -664,8 +664,8 @@ _launch_os_terminal() {
 
 place_and_launch() {
   # --terminal-driver / AGMSG_TERMINAL_DRIVER forces WHICH axis places the member,
-  # bypassing detection. It is a spawn/name PREFERENCE on a NEW surface (tl
-  # 2026-08-31); tmux/herdr each still require their own environment (a forced tmux
+  # bypassing detection. It is a spawn/name PREFERENCE on a NEW surface
+  # (2026-08-31); tmux/herdr each still require their own environment (a forced tmux
   # split needs to be inside tmux, a forced herdr split needs HERDR_PANE_ID), so an
   # impossible force fails in the launcher with that launcher's own error.
   if [ -n "$TERMINAL_DRIVER" ]; then
@@ -681,7 +681,7 @@ place_and_launch() {
   fi
 
   # No override: PRESERVE the detection order — $TMUX (tmux-inside-herdr backward
-  # compat) → herdr → OS terminal. tl deferred the nested spawn-placement decision to
+  # compat) → herdr → OS terminal. The nested spawn-placement decision is deferred to
   # the live matrix, so this does NOT switch to the registry's herdr-first resolver.
   if [ -n "${TMUX:-}" ]; then
     launch_in_tmux
@@ -725,7 +725,7 @@ place_and_launch
 # requirement 1 arm 3 (herdr): the boot was typed, but the pane's pre-input readiness
 # could not be verified. Say so with the BEFORE-typing reason — deliberately worded
 # apart from the AFTER-typing "launched-unconfirmed" below, so an operator can tell
-# which check was blind (utildev). Per co1's priority this is only a WARNING: the final
+# which check was blind (live measurement). By design this is only a WARNING: the final
 # startup verdict is still the post-input one — a watcher that then attaches makes the
 # status ready, and a monitor=no type still reports launched-unconfirmed on its own.
 if [ "$SPAWN_READINESS_UNVERIFIED" = "1" ]; then
@@ -734,7 +734,7 @@ fi
 
 # The pane was placed. If its placement record could not be written, the member is
 # running but unaddressable by peek/poke/despawn --force — report that distinctly and
-# fail, rather than let a normal `status=ready` imply everything is fine (co1/tl).
+# fail, rather than let a normal `status=ready` imply everything is fine.
 if [ "$SPAWN_UNRECORDED" = "1" ]; then
   echo "status=spawned-but-unrecorded name=${NAME} team=${TEAM} ref=${SPAWN_UNREC_REF}"
   echo "spawn: '${NAME}' launched, but its placement record could not be written (disk full or a permission error) — peek/poke/despawn --force cannot reach it. The pane is ${SPAWN_UNREC_REF}; close it manually if needed." >&2
@@ -759,13 +759,13 @@ elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
   # "spawned in <terminal>" placement log stand as success: a boot that never ran
   # (measured — a shell that prompts at startup eats the FIRST keystroke of the boot
   # command, so `/var/…/boot` becomes `var/…/boot: no such file or directory`) would
-  # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly (tl).
+  # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly.
   echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-readiness-handshake"
   echo "spawn: '${NAME}' was launched, but this type has no readiness handshake so its STARTUP IS UNCONFIRMED. If it does not appear, read its pane — a shell that prompts at startup (e.g. an update prompt) can eat the first keystroke of the boot command, and the failure then looks like a slow start." >&2
 else
   # Explicit --no-wait (WAIT_READY cleared by the flag, not by a monitor=no type): the
   # caller opted OUT of the readiness handshake, so — exactly like monitor=no — startup
-  # is not confirmed here, only that the boot was placed/typed. co1: both no-confirmation
+  # is not confirmed here, only that the boot was placed/typed. Both no-confirmation
   # paths report launched-unconfirmed, so this arm must exist too; a distinct note keeps
   # the two reasons legible. Silence (a bare `launched …` at rc 0) would imply success.
   echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-wait"
