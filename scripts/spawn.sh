@@ -597,6 +597,57 @@ _record_placement() {   # <terminal> <id>
   return 0
 }
 
+# Spawn-side naming: the SPAWNER names the pane's agent key right after creating
+# it, because the spawned SIDE cannot. The five self-naming call sites of
+# agmsg_terminal_name_self are all Claude-Code paths (SessionStart, watcher, turn
+# delivery, join, actas), so a codex member (reached through its bridge, not the
+# watcher) never names itself and stays keyless -- `team` reads that as
+# identity=mismatch. spawn holds team+name+pane and the driver is already loaded,
+# so it can name ANY type's pane here; the five self-naming paths stay as-is (the
+# seat re-asserts the same value later -- this only ensures it is set from the
+# start).
+#
+# Naming failure is NOT fatal, deliberately: peek / poke / despawn --force resolve
+# a member through the placement record's pane id, NOT this key (the herdr driver
+# reads its internal key nowhere else), so a keyless member is still fully
+# reachable -- only `team`'s consistency view shows the mismatch. Unlike an
+# unrecorded placement (which DOES break reachability, hence its exit 1), a naming
+# miss leaves a working, addressable pane. So we do not die: set a flag the main
+# flow turns into `status=spawned-but-unnamed` (a DIFFERENT word from `spawned`)
+# in place of the normal ready/launched-confirmed status line, and leave the pane up.
+SPAWN_UNNAMED=0
+SPAWN_UNNAMED_REF=""
+_name_pane() {   # <terminal> <id> -> 0 named (or terminal has no name capability); 1 naming FAILED
+  local term="$1" id="$2" caps mode="" obs key
+  # A terminal without the `name` capability (plain: no addressable pane) never
+  # could name -- that is not a failure. Skip it, the way agmsg_terminal_name_self
+  # does when the capability is absent.
+  caps="$(agmsg_terminal_get "$term" capabilities 2>/dev/null)" || caps=""
+  case " $caps " in *" name "*) ;; *) return 0 ;; esac
+  # Self-contained, exactly as agmsg_terminal_name_self does (registry:528): load
+  # the driver so terminal_name / terminal_team_observe are THIS terminal's ops,
+  # not whichever driver happened to be loaded last. Idempotent — the caller loaded
+  # it a few lines up; a failed (re)load is a real failure to name.
+  agmsg_terminal_load "$term" || return 1
+  # AGMSG_TERMINAL_NAMING=off suppresses the visible LABEL only; the key is
+  # addressing and is set regardless -- the same policy agmsg_terminal_name_self
+  # hands the driver.
+  case "${AGMSG_TERMINAL_NAMING:-}" in off) mode=key ;; esac
+  # Record the ref (same <terminal>:<id> form _record_placement writes) so the
+  # caller's status line can name the pane on any failure below; only READ when
+  # SPAWN_UNNAMED gets set, so setting it before the attempt is harmless.
+  SPAWN_UNNAMED_REF="$(agmsg_terminal_ref "$term" "$id" 2>/dev/null || printf '%s:%s' "$term" "$id")"
+  terminal_name "$id" "$TEAM" "$NAME" "$mode" >/dev/null 2>&1 || return 1
+  # Write, then READ BACK -- do not claim named on the write's exit status alone
+  # (the team --fix shape). terminal_team_observe prints activity\tlabel\tkey\ttitle;
+  # a key that reads back present (not empty / unknown: / n/a: / absent) is our
+  # write confirmed, since nothing else set it in this instant.
+  obs="$(terminal_team_observe "$id" 2>/dev/null)" || return 1
+  key="$(printf '%s\n' "$obs" | awk -F'\t' 'NR==1{print $3}')"
+  case "$key" in ''|unknown:*|n/a:*|absent) return 1 ;; esac
+  return 0
+}
+
 launch_in_tmux() {
   # $TMUX is set (we are inside a tmux pane), but the `tmux` client binary
   # still has to be on PATH for split-window/new-window to work. In a
@@ -635,6 +686,11 @@ launch_in_tmux() {
   # Record placement as <terminal>:<id> so despawn --force (and peek/poke) read the
   # terminal from the record; despawn still tolerates the pre-axis bare %N/@N. See #109.
   _record_placement tmux "$target_id" || true
+
+  # Name the pane's agent key from the spawner (see _name_pane's note): the spawned
+  # side's self-naming paths are Claude-Code-only, so a codex member would otherwise
+  # stay keyless. Non-fatal — a miss becomes status=spawned-but-unnamed, not a failure.
+  _name_pane tmux "$target_id" || SPAWN_UNNAMED=1
 }
 
 # The OS-terminal launchers (macOS `open -g -a`, Linux emulators, Windows Terminal,
@@ -680,6 +736,10 @@ launch_in_herdr() {
   # Record placement as <terminal>:<id>. despawn reads the terminal from the record
   # (herdr pane ids contain ':', preserved by the first-colon ref split).
   _record_placement herdr "$new_id" || true
+  # Name the pane's agent key from the spawner (see _name_pane). This is the case
+  # that matters: a codex member is reached through its bridge, not the watcher, so
+  # without this it stays keyless and `team` reports identity=mismatch. Non-fatal.
+  _name_pane herdr "$new_id" || SPAWN_UNNAMED=1
 }
 
 _launch_os_terminal() {
@@ -792,6 +852,21 @@ if [ "$SPAWN_UNRECORDED" = "1" ]; then
   echo "status=spawned-but-unrecorded name=${NAME} team=${TEAM} ref=${SPAWN_UNREC_REF}"
   echo "spawn: '${NAME}' launched, but its placement record could not be written (disk full or a permission error) — peek/poke/despawn --force cannot reach it. The pane is ${SPAWN_UNREC_REF}; close it manually if needed." >&2
   exit 1
+fi
+
+# Spawn-side naming: the pane was placed and recorded, but its terminal agent key
+# could not be set/confirmed (the driver's rename or read-back did not answer). The
+# member is still fully reachable — peek/poke/despawn --force resolve it through the
+# placement record, not this key — so this is NOT a failed spawn. But it is NOT a
+# ready/launched-confirmed status either (koit: do not report ready when the name did
+# not take), so report a DISTINCT status BEFORE the readiness wait, and exit 0 rather
+# than die: a leader can use the seat now, `team` will show its identity as mismatch
+# until a self-naming path or `team --fix` sets the key. Unlike the unrecorded case
+# above the member is not lost, so failing the spawn would be the worse outcome.
+if [ "$SPAWN_UNNAMED" = "1" ]; then
+  echo "status=spawned-but-unnamed name=${NAME} team=${TEAM} ref=${SPAWN_UNNAMED_REF}"
+  echo "spawn: '${NAME}' launched and recorded, but its terminal agent key could not be set (the driver's rename/observe did not confirm it). The seat IS reachable — peek/poke/despawn --force work via the placement record; only \`team\` identity is affected. It self-heals when the agent next names itself, or run \`team --fix\`." >&2
+  exit 0
 fi
 
 if [ "$WAIT_READY" = "1" ]; then
