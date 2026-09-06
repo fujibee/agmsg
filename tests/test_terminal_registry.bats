@@ -1714,13 +1714,21 @@ M
   local d="$TEST_SKILL_DIR/scripts/drivers/terminals/stubby"
   mkdir -p "$d"
   printf 'name=stubby\ncapabilities=\n' > "$d/terminal.conf"
-  # Every required op except the new one.
-  {
-    for fn in terminal_check terminal_describe terminal_detect terminal_spawn \
-              terminal_despawn terminal_peek terminal_poke terminal_name; do
-      printf '%s() { return 0; }\n' "$fn"
-    done
-  } > "$d/ops.sh"
+  # DERIVE the set from the registry, minus the one op under test. An enumerated
+  # list here silently falls behind the moment another op joins the required set:
+  # the stub is then missing two ops, the loader names whichever it finds first,
+  # and the positive control below cannot load at all. (Measured — terminal_where
+  # and terminal_arrange landed on the base and did exactly that.)
+  local fn
+  : > "$d/ops.sh"
+  for fn in $_AGMSG_TERMINAL_REQUIRED; do
+    [ "$fn" = terminal_pane_state ] && continue
+    printf '%s() { return 0; }\n' "$fn" >> "$d/ops.sh"
+  done
+  # The derivation is only meaningful if it actually left the op out, and only
+  # honest if it wrote the others.
+  refute grep -q 'terminal_pane_state' "$d/ops.sh"
+  [ "$(grep -c '() { return 0; }' "$d/ops.sh")" -ge 8 ]
 
   run agmsg_terminal_load stubby
   [ "$status" -ne 0 ]
