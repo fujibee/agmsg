@@ -89,9 +89,16 @@ const NAME_AFTER = "(?![A-Za-z0-9])";
  */
 const NOT_IN_DATA_URI = "(?<!base64,[^\"'\\s]*)";
 const NOT_VARIABLE_REF = "(?<!\\$\\{?)";
-const NOT_IN_ARITHMETIC = "(?<!\\(\\([^)]*)";
+const NOT_IN_ARITHMETIC = "(?<!\\(\\([^)\\r\\n]*)";
+// Closed within ONE line on purpose: the pattern has no `m` flag, so `^` is the
+// start of whatever string it is run on, and `\s` / `[^#]` would both walk
+// across a newline. scan() feeds it one line at a time, but the pattern is
+// exported and must not depend on that: a declaration on line 1 could otherwise
+// hide an attribution on line 2 (measured with the pattern applied to a
+// two-line string). Space and tab only, and the run before the name stops at a
+// `#` OR a line break.
 const NOT_DECLARED =
-  "(?<!^\\s*(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*(?:local|declare|typeset|export|readonly|unset|read)\\s[^#]*)";
+  "(?<!^[ \\t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \\t\\r\\n]*[ \\t]+)*(?:local|declare|typeset|export|readonly|unset|read)[ \\t][^#\\r\\n]*)";
 const NOT_ASSIGNED = "(?!=)";
 
 /**

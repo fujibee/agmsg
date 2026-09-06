@@ -90,16 +90,32 @@ test("a name used as a shell variable is code, and each context is refused on it
   // variable. Each line below is one syntactic context; a guard that covered
   // "anything near a dollar sign" would also have to explain why it did not
   // cover the next one, so they are pinned separately.
+  // Each case is scanned ALONE. Joined into one text, a declaration on the
+  // first line would be the only guard ever exercised if the others were
+  // broken (found in review); separate scans make each guard load-bearing.
   const T = ["t", "l"].join("");
-  const code = [
-    `  local db ${T} generation table_count`,           // declaration
-    `  IFS='|' read -r tid twin tt ${T} tw th <<< "$row"`, // declaration after a VAR= prefix
-    `  ${T}="$(_sqlite_lit "$team")"`,                     // assignment
-    `  sqlite3 "$db" "SELECT * FROM t WHERE team=$${T}"`, // reference
-    `  printf '%s' "\${${T}}"`,                            // braced reference
-    `  [ "$sl" -eq $((${T} + tw + 1)) ]`,                  // arithmetic
-  ].join("\n");
-  assert.deepEqual(scan(code, "scripts/x.sh", named(T)), []);
+  const cases = {
+    declaration: `  local db ${T} generation table_count`,
+    "declaration after a VAR= prefix": `  IFS='|' read -r tid twin tt ${T} tw th <<< "$row"`,
+    assignment: `  ${T}="$(_sqlite_lit "$team")"`,
+    reference: `  sqlite3 "$db" "SELECT * FROM t WHERE team=$${T}"`,
+    "braced reference": `  printf '%s' "\${${T}}"`,
+    arithmetic: `  [ "$sl" -eq $((${T} + tw + 1)) ]`,
+  };
+  for (const [context, line] of Object.entries(cases)) {
+    assert.deepEqual(scan(line, "scripts/x.sh", named(T)), [], context);
+  }
+});
+
+test("a declaration on one line cannot hide an attribution on the next", () => {
+  // The pattern is exported without the `m` flag, so `^`, `\s` and `[^#]`
+  // would all walk across a newline if the declaration guard let them. Run the
+  // raw pattern on a two-line string — NOT through scan(), which splits lines
+  // and would pass regardless.
+  const T = ["t", "l"].join("");
+  const text = `local x\nprintf 'review by ${T}'`;
+  const pattern = injectedPattern([T]);
+  assert.deepEqual([...text.matchAll(pattern)].map((m) => m[0]), [T]);
 });
 
 test("the identifier guards do not reach the prose forms attribution takes", () => {
