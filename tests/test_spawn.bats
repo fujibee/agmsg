@@ -1444,6 +1444,58 @@ _boot_line_executable() {
   # real binary with --remote. The argv the fake recorded is the evidence.
   bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
   bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: a codex seat spawned FROM a bridged codex seat still reaches the real binary WITH --remote" {
+  # codex-monitor exports AGMSG_CODEX_BRIDGE=1 right before it execs the bridged
+  # TUI, so a seat spawned from inside that session inherits it, and the shim
+  # passes straight to the real binary when it sees it -- ahead of any guard in
+  # codex-monitor (found in review). The boot script must unset the inherited
+  # bridge/opt-out state BEFORE the wrapper runs; this seeds all of it and reads
+  # the argv that arrives.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  # The guard sits BEFORE the act: the unset line precedes the wrapper line.
+  local unset_ln cli_ln
+  unset_ln="$(grep -n '^unset .*AGMSG_CODEX_BRIDGE' "$boot" | head -1 | cut -d: -f1)"
+  cli_ln="$(grep -n 'codex-shim.sh' "$boot" | head -1 | cut -d: -f1)"
+  [ -n "$unset_ln" ] && [ -n "$cli_ln" ] && [ "$unset_ln" -lt "$cli_ln" ]
+  grep -q '^unset .*AGMSG_CODEX_SHIM_DISABLE' "$boot"
+  grep -q '^unset .*CODEX_THREAD_ID' "$boot"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" \
+    AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_APP_SERVER="ws://127.0.0.1:1" AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    CODEX_THREAD_ID=parent-thread bash "$boot"
+  _assert_bridged_argv
+}
+
+@test "spawn: an inherited AGMSG_CODEX_SHIM_DISABLE=1 does not make a spawned codex seat bypass the shim" {
+  # The shim's other early exit. Seeded ALONE, so this variable is proven
+  # handled on its own and not only in the company of the bridge one.
+  bash "$SCRIPTS/join.sh" myteam existing codex "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$PROJ" >/dev/null
+  _install_fake_codex_bridge_stack
+  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+  boot="$(cat "$CAPTURE")"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" \
+    AGMSG_CODEX_SHIM_DISABLE=1 bash "$boot"
+  _assert_bridged_argv
+}
+
+# Fake codex + bridge stack for the end-to-end launches: a `codex` on PATH that
+# records its argv and can serve a fake app-server, a stub bridge launcher, and a
+# stand-in for the shell the boot script execs into at the end.
+_install_fake_codex_bridge_stack() {
   export CALL_LOG="$TEST_SKILL_DIR/codex-calls.log"
   cat > "$STUB_BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
@@ -1479,11 +1531,11 @@ FAKE
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/fake-launcher.sh"; chmod +x "$STUB_BIN/fake-launcher.sh"
   # The boot script ends with `exec "$SHELL" -i`; give it a shell that just exits.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/noshell"; chmod +x "$STUB_BIN/noshell"
+}
 
-  run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
-  [ "$status" -eq 0 ]
-  boot="$(cat "$CAPTURE")"
-  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD="$STUB_BIN/fake-launcher.sh" bash "$boot"
+# The evidence both end-to-end tests read: the real binary was reached exactly
+# once, bridged, with the actas prompt. Then the fake app-server is put down.
+_assert_bridged_argv() {
   [ -f "$CALL_LOG" ]
   # The real binary was reached exactly once, with the bridge flag and the actas prompt.
   [ "$(grep -c '^real-codex' "$CALL_LOG")" -eq 1 ]
