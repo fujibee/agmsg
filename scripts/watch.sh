@@ -259,6 +259,31 @@ _watch_log_file() {
 # so the caller could not tell a folded pane from an open one, and reported
 # success either way (#1051). The failures also announced themselves only on
 # stderr, which the shipped launcher discards (#691), so they reached nobody.
+# Re-verify, at the act, that this pair is still in the state the turn read it
+# in. #983: the lock is read once per pair per turn (`pair_state=`), and the
+# irreversible acts happen ~200 lines later; a claim landing in between made this
+# watcher deliver, consume and even fold on behalf of a role it no longer held.
+#
+# The comparison is against the state we READ, not against "is it ours": the gate
+# serves a pair that is `free` as well as one that is `mine` (a broad watcher
+# holds no lock at all), so demanding `mine` here would stop the ordinary case.
+# What must not happen is the state CHANGING under us — `free`/`mine` becoming
+# `other:<sid>` — and equality catches that without needing to know which of the
+# two we started from.
+#
+# LIMIT, stated rather than left to be discovered: this NARROWS the window to the
+# distance between this re-read and the syscall after it. It does not make
+# read-and-act atomic, and it cannot see an ABA (the same instance id releasing
+# and reclaiming) — unreachable in practice because the id carries the pid, but
+# not impossible. Closing it means holding the actas lock across the turn, which
+# needs a critical-section protocol the lock does not have today; that is its own
+# issue, deliberately not smuggled in here.
+_pair_unchanged_since_read() {   # <team> <agent> <state-as-read-this-turn>
+  local _now
+  _now="$(actas_lock_state "$1" "$2" "$SESSION_ID" 2>/dev/null || echo free)"
+  [ "$_now" = "$3" ]
+}
+
 close_own_placement() {
   local team="$1" name="$2"
   local rec ref rec_term rec_id mine my_term my_id
@@ -862,6 +887,26 @@ while true; do
     # pair is the half a running process can detect for the price of a file
     # read. Gaining one is the caller's job, at the point it creates the team.
     pair_state="$(actas_lock_state "$pair_team" "$pair_agent" "$SESSION_ID" 2>/dev/null || echo free)"
+    # Test seam: a two-file barrier that parks the watcher immediately AFTER the
+    # lock read, so the race regression test can land a claim inside the window
+    # deterministically instead of guessing a sleep wide enough to hit it. Same
+    # shape as inbox.sh's AGMSG_TEST_MARK_BARRIER; no-op unless set.
+    if [ -n "${AGMSG_TEST_CLAIM_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_CLAIM_BARRIER.reached"
+      _agmsg_claim_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_CLAIM_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_claim_barrier_waited=$((_agmsg_claim_barrier_waited + 1))
+        # 60s cap. Deliberately much longer than the time a test waits to NOTICE
+        # `.reached`: the two are a race, and if the cap is the same order as the
+        # test's wait, a loaded machine releases the watcher before the test has
+        # acted and the window the barrier exists to hold is simply gone. Measured
+        # — four of these back to back under load never saw `.reached` at a 10s
+        # cap, and each passed alone. The cap only bounds a wedged test; it costs
+        # nothing in production, where the variable is unset and none of this runs.
+        [ "$_agmsg_claim_barrier_waited" -ge 1200 ] && break
+      done
+    fi
     # actas-fatal: a watcher that exists to serve exactly this one role, and no
     # longer owns it, stops -- and says so on stderr (the only place a reason
     # survives; a watcher that ends without one is indistinguishable from a
@@ -1021,6 +1066,17 @@ while true; do
       ROWS=""
     fi
 
+    # Deliver (#983): re-verify at the act, like the two below. Checked ONCE here
+    # rather than per row, and that is a deliberate trade rather than an oversight:
+    # the loop's harm is a stranger's message appearing on this session's stdout,
+    # which is visible and leaves the row unread — recoverable, unlike consuming it
+    # or folding on it. A lock read per row would buy a narrower window at a file
+    # read per message; the two acts whose damage is permanent get their own check
+    # immediately before them.
+    if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
+      echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; not delivering its messages here." >&2
+      continue
+    fi
     FINAL_CURSOR=""
     DELIVERED_IDS=()
     DESPAWN_TARGET=""
@@ -1060,7 +1116,32 @@ while true; do
       fi
       DELIVERED_IDS+=("$id")
     done <<< "$ROWS"
+    # Second test seam, parked BETWEEN delivery and consume. One barrier cannot
+    # reach the consume guard: the deliver check runs first and `continue`s, so a
+    # claim landing before delivery never gets as far as the consume. That is not
+    # the consume guard being dead — it covers a claim landing DURING the delivery
+    # loop, a narrower window the first seam cannot express — but it does mean the
+    # guard needs its own seam to be provable. Measured: with only the first
+    # barrier, deleting the consume guard left every test green.
+    if [ -n "${AGMSG_TEST_CONSUME_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_CONSUME_BARRIER.reached"
+      _agmsg_consume_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_CONSUME_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_consume_barrier_waited=$((_agmsg_consume_barrier_waited + 1))
+        [ "$_agmsg_consume_barrier_waited" -ge 1200 ] && break   # 60s, see above
+      done
+    fi
     if [ -n "$FINAL_CURSOR" ]; then
+      # Consume (#983): the permanent one. Advancing the read frontier removes
+      # these rows from the RIGHTFUL owner's unread set for good — there is no
+      # "unread again". So the pair is re-verified immediately before it, and a
+      # pair that changed hands is left entirely alone: no consume, no cursor
+      # advance, so the session that now owns it still sees everything.
+      if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
+        echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; leaving its messages unread for the session that claimed it." >&2
+        continue
+      fi
       # Bash 3 with `set -u` treats an empty array expansion as unbound. A
       # cursor-only page is valid, so advance it without optional IDs in that
       # case (and preserve exact delivered IDs when there are any).
@@ -1072,7 +1153,34 @@ while true; do
           >/dev/null 2>&1 || true
       fi
     fi
+    # Third test seam, parked between consume and the fold. Seams follow GUARDS,
+    # not acts: a guard for act N is only exercised by a scenario that passes
+    # N-1's guard and stops at N's, so the interference has to land BETWEEN them.
+    # Measured, twice: with one seam the consume guard never ran; with two, the
+    # fold guard never ran either — the deliver guard `continue`s first, so a
+    # claim landing before delivery reaches neither. Deleting the fold guard left
+    # its own test green.
+    if [ -n "${AGMSG_TEST_FOLD_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_FOLD_BARRIER.reached"
+      _agmsg_fold_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_FOLD_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_fold_barrier_waited=$((_agmsg_fold_barrier_waited + 1))
+        [ "$_agmsg_fold_barrier_waited" -ge 1200 ] && break   # 60s, see above
+      done
+    fi
     if [ -n "$DESPAWN_TARGET" ]; then
+      # The hardest act to undo, so it is verified last-moment (#983). A
+      # `ctrl:despawn` is sent at exactly the moment a role changes hands, which
+      # is precisely when the state read at the top of this turn is most likely to
+      # be stale — folding on a stranger's instruction would drop OUR role and
+      # close OUR pane. Say why on stderr and keep running: the pair is simply not
+      # ours any more, which the gate will act on next turn.
+      if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
+        echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; not acting on its ctrl:despawn." >&2
+        DESPAWN_TARGET=""
+        continue
+      fi
       "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$DESPAWN_TARGET" "$SESSION_ID" >/dev/null 2>&1 || true
       # The status is used, not discarded: 1 means a pane of ours is still open.
       # Nothing here deletes the placement record — that is what `--force` works
