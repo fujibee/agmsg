@@ -1293,7 +1293,10 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   # for this project, which is what the new owner is relying on.
   bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | grep -q "alice"
   # ...and the watcher said why, on the channel a reason survives on.
-  grep -q 'changed hands' "$err"
+  # The reason goes to STDOUT: the shipped launcher runs the watcher with fd2 on
+  # /dev/null (#691), so a refusal on stderr is one nobody can read.
+  grep -q 'changed hands' "$out"
+  refute grep -q 'changed hands' "$err"
 }
 
 @test "watch: with NO claim in the window a ctrl:despawn is still obeyed (#983)" {
@@ -1318,7 +1321,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   for i in $(seq 1 40); do kill -0 "$w" 2>/dev/null || break; sleep 0.25; done
   kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
 
-  refute grep -q 'changed hands' "$err"
+  refute grep -q 'changed hands' "$out"
   # The role WAS dropped — reset.sh removed alice's registration for this project.
   local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
   # Canary: the listing is readable and still names the OTHER role, so an absent
@@ -1429,7 +1432,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   # the session that now owns the role still has it.
   local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
   grep -q 'MID-983' <<<"$ib"
-  grep -q 'leaving its messages unread' "$err"
+  grep -q 'marking them read' "$out"
 }
 
 @test "watch: a claim landing between consume and the fold is not obeyed (#983)" {
@@ -1467,10 +1470,79 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   refute kill -0 "$w" 2>/dev/null
   wait "$w" 2>/dev/null || true
 
-  grep -q 'not acting on its ctrl:despawn' "$err"
+  grep -q 'its ctrl:despawn' "$out"
   # The role survived: reset.sh never ran, so the session that claimed it keeps
   # the registration it is relying on.
   local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
   grep -q 'leader' <<<"$ids"      # canary: the listing is readable
   grep -q 'alice' <<<"$ids"
+}
+
+@test "watch: a lock that cannot be READ stops the act, it does not read as free (#983)" {
+  # The guard's own fail-open, found by co3. Two layers turn "could not read the
+  # lock" into "the lock is free" — actas_lock_owner answers empty for both a
+  # missing file and a failed read, and actas_lock_state maps an empty owner to
+  # `free` at rc 0. With a `|| echo free` on top, an UNREADABLE lock compared
+  # equal to a pair read as free, and the permanent act went ahead precisely when
+  # least was known. Refusing costs one poll cycle; consuming does not come back.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local cb="$BATS_TEST_TMPDIR/unreadbar" out="$BATS_TEST_TMPDIR/w7.out" err="$BATS_TEST_TMPDIR/w7.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "UNREADABLE-983" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CONSUME_BARRIER="$cb" \
+    bash "$SCRIPTS/watch.sh" sess-983g "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$cb.reached" ] && break; sleep 0.25; done
+  [ -e "$cb.reached" ]
+  grep -q 'UNREADABLE-983' "$out"          # past delivery, before consume
+
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  [ -f "$lock" ]                           # canary: there IS a lock to make unreadable
+  chmod 000 "$lock"
+  : > "$cb.release"
+  sleep 2
+  chmod 644 "$lock" 2>/dev/null || true     # restore before any teardown reads it
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  # Not consumed: the row is still there for whoever does own the role.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'UNREADABLE-983' <<<"$ib"
+}
+
+@test "watch: an unreadable lock also stops the ctrl:despawn teardown (#983)" {
+  # co3's control (2): the same fail-closed rule on the act that cannot be undone
+  # at all. Refusing costs one poll cycle; dropping the role and closing the pane
+  # under an unknown lock state does not come back.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local fb="$BATS_TEST_TMPDIR/unreadfold" out="$BATS_TEST_TMPDIR/w8.out" err="$BATS_TEST_TMPDIR/w8.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "ctrl:despawn" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_FOLD_BARRIER="$fb" \
+    bash "$SCRIPTS/watch.sh" sess-983h "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$fb.reached" ] && break; sleep 0.25; done
+  [ -e "$fb.reached" ]
+
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  [ -f "$lock" ]
+  chmod 000 "$lock"
+  : > "$fb.release"
+  sleep 2
+  chmod 644 "$lock" 2>/dev/null || true
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  grep -q 'could not verify who holds this role' "$out"
+  local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
+  grep -q 'leader' <<<"$ids"      # canary: the listing is readable
+  grep -q 'alice' <<<"$ids"       # the role was NOT dropped
 }
