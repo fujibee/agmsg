@@ -270,6 +270,62 @@ _herdr_observe_stub() {   # <entries-json>
   }"
 }
 
+# --- the observation vocabulary is one list, and it is DERIVED, not retyped -----
+
+@test "agmsg_observation_has_value accepts a value and rejects every reason prefix" {
+  # The single question a read-back judge asks. Driven from the SET, so a prefix
+  # added there is exercised here without editing this test.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  local p n=0
+  for p in $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES; do
+    n=$((n + 1))
+    refute agmsg_observation_has_value "${p}whatever" \
+      || { echo "$p was accepted as a value"; return 1; }
+  done
+  [ "$n" -ge 3 ] || { echo "the prefix set is suspiciously small: $n"; return 1; }
+  refute agmsg_observation_has_value ''
+  agmsg_observation_has_value 'team:alice'
+}
+
+@test "the prefix set covers every reason the shipped drivers actually emit" {
+  # DERIVED both ways: the set is one side, and the other is scraped out of the
+  # drivers rather than retyped here. A driver that gains a new reason prefix
+  # fails this until the set names it — the failure the spawn-side judge hit by
+  # hand-listing a bare `absent` while the driver emitted `absent:`.
+  #
+  # Scoped to the terminal_team_observe BODY on purpose: `not_ready:` belongs to
+  # terminal_team_input_ready, a different question with its own vocabulary, and
+  # pane-id globs elsewhere in the file contain colons that are not prefixes at
+  # all. A wider scrape reported seven "missing" prefixes, none of them real.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  local d emitted="" missing="" p
+  for d in "$SCRIPTS"/drivers/terminals/*/ops.sh; do
+    # Comment lines are dropped first: prose contains colons ("canary:", "split:")
+    # and a scrape that reads them reports seven prefixes that no driver emits.
+    # The reason word after the colon is required for the same reason.
+    emitted="$emitted $(awk '/^terminal_team_observe\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$d" \
+      | grep -v '^[[:space:]]*#' \
+      | sed 's/\\t/ /g' \
+      | grep -oE "[a-z][a-z_]*(\/[a-z])?:[a-z_]+" \
+      | sed 's/:.*/:/' | sort -u | tr '\n' ' ')"
+  done
+  emitted="$(printf '%s\n' $emitted | sort -u)"
+  # Canary: the scrape must find what we know is there, or "nothing missing"
+  # would only mean "nothing was scraped".
+  printf '%s\n' "$emitted" | grep -qx 'unknown:' || { echo "scrape found no unknown: — the search is broken"; return 1; }
+  printf '%s\n' "$emitted" | grep -qx 'absent:'  || { echo "scrape found no absent: — the search is broken"; return 1; }
+  printf '%s\n' "$emitted" | grep -qx 'n/a:'     || { echo "scrape found no n/a: — the search is broken"; return 1; }
+  for p in $emitted; do
+    case " $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES " in
+      *" $p "*) : ;;
+      *) missing="$missing $p" ;;
+    esac
+  done
+  [ -z "$missing" ] || { echo "drivers emit prefixes the set does not name:$missing"; return 1; }
+}
+
 @test "herdr observation: an entry with no name is a DECIDED absence" {
   _herdr_observe_stub '[{"pane_id":"w2:p3","agent":"codex"}]'
   run terminal_team_observe 'w2:p3'
