@@ -163,11 +163,15 @@ _repo_with_commit() {   # <subject>
 @test "the footer blind spot is on the red side: a subject whose breaking mark is only in the body is red, and the script says why" {
   # Measured: git-cliff keeps `wip: ...` with a BREAKING CHANGE: footer under
   # protect_breaking_commits=true. The checker sees the subject only and
-  # cannot; by decision it reports red rather than guessing green.
+  # cannot; by decision it reports red rather than guessing green. The blind
+  # spot changes the answer only for a subject that matches nothing but the
+  # catch-all: a skip-rule subject is green with or without a footer.
   grep -q 'BREAKING CHANGE' "$CHECK"
   grep -q 'blind spot' "$CHECK"
   run bash "$CHECK" --subject 'wip: footer breaking, subject shows nothing'
   [ "$status" -eq 1 ]
+  run bash "$CHECK" --subject 'chore: footer breaking, but a skip rule matches'
+  [ "$status" -eq 0 ]
 }
 
 @test "the catch-all is not a decision: a subject only it matches is red, one an explicit skip rule matches is green" {

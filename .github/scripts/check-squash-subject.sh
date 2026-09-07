@@ -64,15 +64,19 @@
 #                                                it is true, dropped when false
 #
 # This checker reads the subject line only. The body's `BREAKING CHANGE:`
-# footer is not visible to it, so a subject that hits a skip rule (or only
-# the catch-all) and is breaking only in its body comes back red -- git-cliff
-# keeps it, but that cannot be detected here. The blind spot is deliberately
-# on the red side, so that it never produces a false green: a false red is
-# seen by a person, who fixes one line or waives it; a false green is seen
-# by nobody until the notes are missing an entry. The body is not taken as
-# input because at PR time the squash body is not yet fixed, and judging
-# something that can still change is how a "passed, then dropped" happens.
-# If such a subject must pass, put the `!` in the subject, or a person decides.
+# footer is not visible to it. That changes the answer in exactly one case:
+# a subject that matches only the catch-all and is breaking only in its body
+# comes back red -- git-cliff keeps it (measured), but that cannot be
+# detected here. A subject a skip rule matches is green whether or not its
+# body is breaking (the three answers above do not depend on the footer);
+# only the stated reason may differ from what git-cliff does. The blind spot
+# is deliberately on the red side, so that it never produces a false green:
+# a false red is seen by a person, who fixes one line or waives it; a false
+# green is seen by nobody until the notes are missing an entry. The body is
+# not taken as input because at PR time the squash body is not yet fixed,
+# and judging something that can still change is how a "passed, then
+# dropped" happens. If such a subject must pass, put the `!` in the subject,
+# or a person decides.
 #
 # The rules are DERIVED from cliff.toml at run time, never retyped here; a
 # rule added there is honoured by the next run.
