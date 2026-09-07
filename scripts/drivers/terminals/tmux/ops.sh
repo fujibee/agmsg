@@ -310,10 +310,26 @@ terminal_peek() {
   return 0
 }
 
+# A tmux ref names one of two KINDS, and each kind has its own identity field.
+# The pair is the rule, not two branches: asking `#{pane_id}` about a window `@N`
+# returns the window's active PANE (measured: target @1 -> %1), so a pane-shaped
+# identity used on a window can never match and every window placement reads as
+# unobservable. Keeping the mapping in one place is what stops a third kind from
+# silently inheriting whichever field was written first — an unknown kind gets no
+# identity field and fails closed here rather than being compared against a
+# borrowed one.
+_tmux_identity_field() {   # <bare-id> -> the #{…} that reports THIS kind's own id
+  case "$1" in
+    %*) printf '#{pane_id}' ;;
+    @*) printf '#{window_id}' ;;
+    *)  return 1 ;;
+  esac
+}
+
 # tmux has no pane-label field independent of the CLI-owned terminal title.
 # The resolvable key is the pane-local @agmsg_agent user option.
 terminal_team_observe() {
-  local id="$1" key title bare facts seen_id
+  local id="$1" key title bare facts seen_id idfield
   command -v tmux >/dev/null 2>&1 || return 10
   # Two separate things, and doing only one of them is worse than doing neither:
   # STRIP the socket so the kind test and `-t` see a bare id, and USE that socket
@@ -331,10 +347,13 @@ terminal_team_observe() {
   # and an unset option produced the identical answer — and that answer decides
   # whether `team --fix` overwrites the key.
   #
-  # `#{pane_id}` is the canary: its value is known before the call (it is the
-  # target), so it separates "the server answered about THIS pane" from "the
-  # server answered about nothing". Same move as `terminal_pane_state` (#1051).
-  facts="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_id}|#{pane_title}' 2>/dev/null)" || return 10
+  # The identity field is the canary: its value is known before the call (it is
+  # the target), so it separates "the server answered about THIS ref" from "the
+  # server answered about nothing". Which field carries that identity depends on
+  # the ref KIND — see _tmux_identity_field. Same move as `terminal_pane_state`
+  # (#1051).
+  idfield="$(_tmux_identity_field "$bare")" || return 13
+  facts="$(_tmux_do "$id" display-message -p -t "$bare" "$idfield|#{pane_title}" 2>/dev/null)" || return 10
   seen_id="${facts%%|*}"
   title="${facts#*|}"
   # Not the pane we asked about (or no pane at all) -> the observation did not

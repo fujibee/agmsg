@@ -28,8 +28,16 @@ for arg in "$@"; do [ "$prev" = -t ] && target="$arg"; prev="$arg"; done
 case "$*" in
   *pane_in_mode*) printf '0|64066|/dev/ttys066\n' ;;
   *show-options*) [ -n "${TEAM_TMUX_KEY_UNSET:-}" ] || printf 'team:alice\n' ;;
-  *pane_id*pane_title*)
+  *window_id*pane_title*|*pane_id*pane_title*)
+    # tmux answers with the id of the thing it FOUND. A missing target yields an
+    # empty identity; a present one echoes back the id that was asked about --
+    # which is only true when the field matches the target's KIND, and that is
+    # exactly what these tests are here to pin.
     [ -n "${TEAM_TMUX_PANE_MISSING:-}" ] && { printf '|\n'; exit 0; }
+    case "$* " in
+      *'#{window_id}'*) [ "${target#@}" != "$target" ] || { printf '|\n'; exit 0; } ;;
+      *'#{pane_id}'*)   [ "${target#%}" != "$target" ] || { printf '|\n'; exit 0; } ;;
+    esac
     printf '%s|✳ team-alice\n' "$target" ;;
   *pane_title*) printf '✳ team-alice\n' ;;
 esac
@@ -441,6 +449,45 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
   # The title still reads, so this is a statement ABOUT a pane we reached.
   [ "$(printf '%s' "$output" | cut -f4)" = '✳ team-alice' ]
+}
+
+@test "tmux observation: a WINDOW placement is observed with the WINDOW's identity" {
+  # `spawn --window` records @N (new-window -P -F '#{window_id}'), and asking
+  # `#{pane_id}` about a window answers with its ACTIVE PANE — measured, target @1
+  # answers %1. A pane-shaped canary on a window can therefore never match, and
+  # every window-placed seat read as unobservable. The identity field is paired to
+  # the ref KIND, so this must observe exactly like the pane case.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '@3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+  grep -qF 'tmux [display-message] [-p] [-t] [@3] [#{window_id}|#{pane_title}]' "$TEAM_TMUX_LOG"
+}
+
+@test "tmux observation: a window that does not exist is NOT a decided absence" {
+  # The @-kind partner of the %-kind control: both kinds must fail closed, or the
+  # one that was never exercised is the one that ships broken.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1 TEAM_TMUX_PANE_MISSING=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '@3'
+  [ "$status" -eq 10 ]
+  refute grep -q 'absent:' <<<"$output"
+}
+
+@test "tmux observation: a PANE placement still asks for the pane identity" {
+  # The other half of the pairing, pinned by argv so the two kinds cannot both be
+  # served by whichever field was written first.
+  install_team_fake_tmux
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '%3'
+  [ "$status" -eq 0 ]
+  grep -qF 'tmux [display-message] [-p] [-t] [%3] [#{pane_id}|#{pane_title}]' "$TEAM_TMUX_LOG"
 }
 
 @test "tmux observation: a pane that does not exist is NOT a decided absence" {
