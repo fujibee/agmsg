@@ -279,9 +279,41 @@ _watch_log_file() {
 # needs a critical-section protocol the lock does not have today; that is its own
 # issue, deliberately not smuggled in here.
 _pair_unchanged_since_read() {   # <team> <agent> <state-as-read-this-turn>
-  local _now
-  _now="$(actas_lock_state "$1" "$2" "$SESSION_ID" 2>/dev/null || echo free)"
-  [ "$_now" = "$3" ]
+  local _now _rc=0
+  # FAIL CLOSED on a read we could not make. Two layers turn "could not read the
+  # lock" into "the lock is free", and this guard sits in front of acts that are
+  # permanent, so inheriting either of them would make the answer safest-looking
+  # exactly when least is known:
+  #   actas_lock_owner  answers EMPTY both for "no lock file" and for a failed
+  #                     read of one that exists (its own status is the only thing
+  #                     that separates them)
+  #   actas_lock_state  turns an empty owner into `free`, at rc 0
+  # So ask for the owner first, where the read's status is still visible, and
+  # treat a non-zero as "cannot verify". A `|| echo free` here — which this
+  # function had — completes the collapse: an unreadable lock then COMPARES EQUAL
+  # to a pair that was read as free, and the act proceeds. (Found by co3.)
+  #
+  # The owner value itself is not used; the call is made for its STATUS.
+  actas_lock_owner "$1" "$2" >/dev/null 2>&1 || return 2
+  _now="$(actas_lock_state "$1" "$2" "$SESSION_ID" 2>/dev/null)" || _rc=$?
+  [ "$_rc" -eq 0 ] || return 2
+  [ -n "$_now" ] || return 2
+  [ "$_now" = "$3" ] && return 0
+  return 1
+}
+
+# Say why an act was refused, on the channel a reason survives on. The three
+# refusals below use watch_report (stdout), NOT watch_log: the shipped launcher
+# runs the watcher with fd2 on /dev/null (#691), so a refusal on stderr is a
+# refusal nobody can see -- and this is the moment an operator most needs to know
+# why their message did not arrive. `unknown` is reported with different words
+# from `changed`: one says the role moved, the other says we could not tell, and
+# the operator's next step differs.
+_report_pair_refusal() {   # <verdict-rc> <team> <agent> <what-was-skipped>
+  case "$1" in
+    2) watch_report "${2}/${3}: could not verify who holds this role (the actas lock could not be read), so ${4} was skipped this cycle; it will be retried." ;;
+    *) watch_report "${2}/${3} changed hands while this turn was running; ${4} skipped, and its messages stay for the session that claimed it." ;;
+  esac
 }
 
 close_own_placement() {
@@ -1073,8 +1105,10 @@ while true; do
     # or folding on it. A lock read per row would buy a narrower window at a file
     # read per message; the two acts whose damage is permanent get their own check
     # immediately before them.
-    if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
-      echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; not delivering its messages here." >&2
+    _pair_verdict=0
+    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+    if [ "$_pair_verdict" -ne 0 ]; then
+      _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "delivery"
       continue
     fi
     FINAL_CURSOR=""
@@ -1138,8 +1172,10 @@ while true; do
       # "unread again". So the pair is re-verified immediately before it, and a
       # pair that changed hands is left entirely alone: no consume, no cursor
       # advance, so the session that now owns it still sees everything.
-      if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
-        echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; leaving its messages unread for the session that claimed it." >&2
+      _pair_verdict=0
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+      if [ "$_pair_verdict" -ne 0 ]; then
+        _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
         continue
       fi
       # Bash 3 with `set -u` treats an empty array expansion as unbound. A
@@ -1176,8 +1212,10 @@ while true; do
       # be stale — folding on a stranger's instruction would drop OUR role and
       # close OUR pane. Say why on stderr and keep running: the pair is simply not
       # ours any more, which the gate will act on next turn.
-      if ! _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state"; then
-        echo "agmsg watch: ${pair_team}/${pair_agent} changed hands while this turn was running; not acting on its ctrl:despawn." >&2
+      _pair_verdict=0
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+      if [ "$_pair_verdict" -ne 0 ]; then
+        _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "its ctrl:despawn"
         DESPAWN_TARGET=""
         continue
       fi
