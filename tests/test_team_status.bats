@@ -277,6 +277,21 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
 }
 
+@test "herdr observation: an EMPTY name is a decided absence, not a value" {
+  # `json_extract` answers SQL NULL for a missing key and for JSON null, but the
+  # EMPTY STRING for `"name":""` (measured) — so without NULLIF it slips past the
+  # COALESCE as if it were a key. It is not one, and an empty field makes the
+  # wrapper report `unknown:observe_malformed` for ALL FOUR fields, which --fix
+  # skips: the case this exists to repair, skipped again, taking the other three
+  # observations with it.
+  _herdr_observe_stub '[{"pane_id":"w2:p3","agent":"codex","name":""}]'
+  run terminal_team_observe 'w2:p3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+  # ...and the observation stays whole: the other fields are still readable.
+  [ "$(printf '%s' "$output" | cut -f1)" = 'idle' ]
+}
+
 @test "herdr observation: a pane absent from the list stays UNDECIDED" {
   # Differential partner: same call, same shape, only the pane_id differs, so the
   # difference in the answer can only come from membership. Without the split

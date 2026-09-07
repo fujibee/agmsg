@@ -718,9 +718,17 @@ terminal_team_observe() {
   #                                  reaches team --fix as a mismatch. This is
   #                                  the measured codex case.
   #
+  # NULLIF is load-bearing, not defensive: `json_extract` returns SQL NULL for a
+  # missing key and for JSON null, but the EMPTY STRING for `"name":""` (measured).
+  # An empty key is decidedly not a key, yet without NULLIF it slipped past the
+  # COALESCE as a value -- and an empty field makes the wrapper call the whole
+  # observation `unknown:observe_malformed`, which --fix skips. So the one case
+  # this exists to repair would have been skipped again, taking the other three
+  # fields' observations down with it.
+  #
   # The nesting does the split: the inner COALESCE fires only when a row matched,
   # the outer one only when none did.
-  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(json_extract(value,'\$.name'),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
   case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }
