@@ -640,11 +640,15 @@ _name_pane() {   # <terminal> <id> -> 0 named (or terminal has no name capabilit
   terminal_name "$id" "$TEAM" "$NAME" "$mode" >/dev/null 2>&1 || return 1
   # Write, then READ BACK -- do not claim named on the write's exit status alone
   # (the team --fix shape). terminal_team_observe prints activity\tlabel\tkey\ttitle;
-  # a key that reads back present (not empty / unknown: / n/a: / absent) is our
-  # write confirmed, since nothing else set it in this instant.
+  # field 3 is the key. `agmsg_observation_has_value` (terminal-registry.sh) is the
+  # single judge of "is this a real observed value or a reason marker": it rejects
+  # empty and every non-value prefix the drivers can emit
+  # (_AGMSG_OBSERVATION_NON_VALUE_PREFIXES = unknown:/n/a:/absent:), so a driver
+  # that decisively reports the key ABSENT (absent:*, added by the herdr/tmux
+  # observe fix) is caught here without this call site hand-listing the vocabulary.
   obs="$(terminal_team_observe "$id" 2>/dev/null)" || return 1
   key="$(printf '%s\n' "$obs" | awk -F'\t' 'NR==1{print $3}')"
-  case "$key" in ''|unknown:*|n/a:*|absent) return 1 ;; esac
+  agmsg_observation_has_value "$key" || return 1
   return 0
 }
 
@@ -855,19 +859,21 @@ if [ "$SPAWN_UNRECORDED" = "1" ]; then
 fi
 
 # Spawn-side naming: the pane was placed and recorded, but its terminal agent key
-# could not be set/confirmed (the driver's rename or read-back did not answer). The
-# member is still fully reachable — peek/poke/despawn --force resolve it through the
-# placement record, not this key — so this is NOT a failed spawn. But it is NOT a
-# ready/launched-confirmed status either (koit: do not report ready when the name did
-# not take), so report a DISTINCT status BEFORE the readiness wait, and exit 0 rather
-# than die: a leader can use the seat now, `team` will show its identity as mismatch
-# until a self-naming path or `team --fix` sets the key. Unlike the unrecorded case
-# above the member is not lost, so failing the spawn would be the worse outcome.
-if [ "$SPAWN_UNNAMED" = "1" ]; then
-  echo "status=spawned-but-unnamed name=${NAME} team=${TEAM} ref=${SPAWN_UNNAMED_REF}"
+# could not be set/confirmed. The member is still fully reachable — peek/poke/despawn
+# --force resolve it through the placement record, not this key — so this is NOT a
+# failed spawn (unlike the unrecorded case above, which loses the member). But it is
+# NOT ready/launched-confirmed either (koit: do not report ready when the name did not
+# take). Reported by the helper below, and — crucially — only AFTER readiness is
+# settled: naming and readiness are INDEPENDENT facts (a seat can be receiving yet
+# unnamed), so bailing out before the wait would hide whether the watcher attached.
+# Distinct word (spawned-but-unnamed, never ready), exit 0; `team` shows the identity
+# mismatch until self-naming or `team --fix` sets the key. $1 carries the readiness
+# detail (e.g. after=Ns) when there is one.
+_emit_spawned_but_unnamed() {
+  echo "status=spawned-but-unnamed name=${NAME} team=${TEAM} ref=${SPAWN_UNNAMED_REF}${1:+ $1}"
   echo "spawn: '${NAME}' launched and recorded, but its terminal agent key could not be set (the driver's rename/observe did not confirm it). The seat IS reachable — peek/poke/despawn --force work via the placement record; only \`team\` identity is affected. It self-heals when the agent next names itself, or run \`team --fix\`." >&2
   exit 0
-fi
+}
 
 if [ "$WAIT_READY" = "1" ]; then
   waited=0
@@ -880,6 +886,9 @@ if [ "$WAIT_READY" = "1" ]; then
     sleep 1
     waited=$((waited + 1))
   done
+  # Ready confirmed. Now report the naming result — the two are independent, so a
+  # seat that IS receiving but could not be named reports spawned-but-unnamed, not ready.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed "after=${waited}s"
   echo "status=ready name=${NAME} team=${TEAM} after=${waited}s"
 elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
   # monitor=no: there is no readiness handshake, so spawn CANNOT confirm the agent
@@ -888,6 +897,8 @@ elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
   # (measured — a shell that prompts at startup eats the FIRST keystroke of the boot
   # command, so `/var/…/boot` becomes `var/…/boot: no such file or directory`) would
   # otherwise read as a clean spawn. Report startup as UNCONFIRMED, distinctly.
+  # (No readiness handshake to wait on, so the naming result is reported now.)
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
   echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-readiness-handshake"
   echo "spawn: '${NAME}' was launched, but this type has no readiness handshake so its STARTUP IS UNCONFIRMED. If it does not appear, read its pane — a shell that prompts at startup (e.g. an update prompt) can eat the first keystroke of the boot command, and the failure then looks like a slow start." >&2
 else
@@ -896,6 +907,7 @@ else
   # is not confirmed here, only that the boot was placed/typed. Both no-confirmation
   # paths report launched-unconfirmed, so this arm must exist too; a distinct note keeps
   # the two reasons legible. Silence (a bare `launched …` at rc 0) would imply success.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
   echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-wait"
   echo "spawn: '${NAME}' was launched with --no-wait, so its STARTUP IS UNCONFIRMED (the readiness handshake was skipped by request). If it does not appear, read its pane." >&2
 fi
