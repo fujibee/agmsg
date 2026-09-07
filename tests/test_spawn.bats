@@ -1016,6 +1016,13 @@ EOF
 _setup_fake_herdr() {
   local herdr_stub="$STUB_BIN/herdr"
   export HERDR_CALL_LOG="$TEST_SKILL_DIR/herdr-calls.log"
+  # Spawn-side naming calls `herdr agent rename` then reads the key back via
+  # `herdr agent list` + `herdr pane get` (terminal_team_observe). Model that
+  # faithfully: rename records the (pane_id -> key) mapping in this DB, list
+  # replays it, so the read-back sees exactly the key spawn just wrote and the
+  # realistic herdr tests exercise the SUCCESSFUL naming path (not the fallback).
+  export HERDR_AGENT_DB="$TEST_SKILL_DIR/herdr-agents.db"
+  : > "$HERDR_AGENT_DB"
   cat > "$herdr_stub" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HERDR_CALL_LOG"
@@ -1047,6 +1054,31 @@ case "$1/$2" in
     ;;
   tab/close)
     echo '{"id":"cli:tab:close","result":{"type":"ok"}}'
+    ;;
+  agent/rename)
+    # `agent rename <pane_id> <key>` — record the mapping so `agent list` can
+    # replay it. $3=pane id, $4=key.
+    printf '%s\t%s\n' "$3" "$4" >> "$HERDR_AGENT_DB"
+    echo '{"id":"cli:agent:rename","result":{"type":"ok"}}'
+    ;;
+  agent/list)
+    # Replay the recorded (pane_id -> name) pairs as the agents array.
+    printf '{"result":{"agents":['
+    _first=1
+    if [ -f "$HERDR_AGENT_DB" ]; then
+      while IFS="$(printf '\t')" read -r _aid _akey; do
+        [ -n "$_aid" ] || continue
+        [ "$_first" -eq 1 ] || printf ','
+        printf '{"pane_id":"%s","name":"%s"}' "$_aid" "$_akey"
+        _first=0
+      done < "$HERDR_AGENT_DB"
+    fi
+    printf ']}}\n'
+    ;;
+  pane/get)
+    # Minimal valid pane document; the read-back only needs the agent key (from
+    # agent list), so label/status/title just need to parse. $3=pane id.
+    printf '{"result":{"pane":{"pane_id":"%s","label":"pane","agent_status":"idle","terminal_title":"t"}}}\n' "$3"
     ;;
   *)
     echo '{"error":"unknown stub call: '"$*"'}' >&2
@@ -1675,4 +1707,209 @@ LIST
   [ "$(grep -c '^AGMSG_CODEX_FUTURE_KNOB=' "$CALL_LOG.env")" -eq 0 ]
   # And the seat's own marker is NOT cleared by the namespace rule.
   grep -q '^AGMSG_SPAWNED=1$' "$CALL_LOG.env"
+}
+
+# ----------------------------------------------------------------------------
+# Spawn-side naming: the spawner sets the pane's agent key right after creating
+# it, so a codex member (whose self-naming paths never run — they are all
+# Claude-Code-only) is not left keyless and reported identity=mismatch by `team`.
+#
+# These drive a real spawn through a FAKE herdr driver: its terminal.conf still
+# advertises the `name` capability (so _name_pane proceeds), but its ops are
+# scripted so no real pane is opened and the naming write / read-back are
+# controllable. The driver is forced with --terminal-driver herdr (routed to
+# launch_in_herdr, which is where the codex case lives).
+_install_fake_naming_herdr() {
+  # Overwrite ONLY ops.sh in this test's throwaway skill copy; keep terminal.conf
+  # (its capabilities line carries `name`). FAKE_* env vars steer each control.
+  local ops="$TEST_SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
+  cat > "$ops" <<'OPS'
+# fake herdr ops for spawn-side naming tests — no real herdr calls.
+terminal_check()      { echo ok; return 0; }
+terminal_describe()   { printf 'capabilities=spawn despawn peek poke where arrange name\n'; }
+terminal_detect()     { return 0; }
+terminal_spawn() {
+  # Optionally drop the readiness sentinel spawn will wait on (set by the wait-path
+  # tests), simulating a watcher that attaches immediately so WAIT_READY completes
+  # fast. spawn clears the sentinel just before launching and calls this after, so
+  # the touch lands after the clear.
+  if [ -n "${FAKE_READY_TOUCH:-}" ]; then
+    mkdir -p "$(dirname "$FAKE_READY_TOUCH")" 2>/dev/null || true
+    : > "$FAKE_READY_TOUCH" 2>/dev/null || true
+  fi
+  printf '%s\n' "${FAKE_PANE_ID:-w0:p1}"; return 0
+}
+terminal_despawn()    { echo ok; return 0; }
+terminal_pane_state() { echo alive; return 0; }
+terminal_peek()       { printf ''; return 0; }
+terminal_poke()       { echo ok; return 0; }
+terminal_where()      { printf ''; return 0; }
+terminal_arrange()    { echo ok; return 0; }
+terminal_name() {
+  # Log every naming call (id team agent mode) so a control can prove the key was
+  # set with the right, type-independent (team, agent). Exit is FAKE_NAME_RC.
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$FAKE_NAME_LOG"
+  echo ok
+  return "${FAKE_NAME_RC:-0}"
+}
+terminal_team_observe() {
+  # activity \t label \t key \t title. Field 3 (key) is what _name_pane reads
+  # back; FAKE_OBSERVE_KEY forces it (a sentinel => naming looks unconfirmed).
+  printf 'idle\tt:a\t%s\ttitle\n' "${FAKE_OBSERVE_KEY:-a0123456789abcdef01234567}"
+}
+OPS
+}
+
+# Assertions here use `grep`/`refute`, never `[[ ]]`: a non-last `[[ ]]` cannot fail
+# a test on bash 3.2 (#670), and the enforced-assertions checker holds the tree at a
+# baseline. Name-log content is grepped from the FILE (not `run cat`, which would
+# swap $output and hide the spawn-output assertions).
+
+@test "spawn-side naming: a codex seat that never actas'd still gets its agent key set" {
+  # The whole point: codex reaches its bridge, not the watcher, so none of the
+  # five self-naming call sites ever run for it. Spawn must set the key itself.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  # spawn's OWN output (asserted while $output still holds it): naming succeeded,
+  # so this is NOT the unnamed status.
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+  # terminal_name was called for THIS pane with the seat's (team, agent) and the
+  # naming-on mode ("" — key AND label). Grep the log file directly.
+  local want; want="$(printf 'w0:p1\tcxteam\tbob\t')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+}
+
+@test "spawn-side naming: names a claude-code seat too, with the same key inputs a self-name would use" {
+  # Type-independence: spawn names claude-code with the identical (team, agent,
+  # mode) call agmsg_terminal_name_self makes, so the derived key is the same and
+  # a later self-naming re-asserts that value rather than changing it.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" ccteam existing claude-code "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  # Same call shape as the codex case (only team/agent differ) — type-independent.
+  local want; want="$(printf 'w0:p1\tccteam\talice\t')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+  # Exactly one naming call from spawn; a later self-name with the same inputs is a
+  # no-op on the value (idempotent), so spawn does not need to repeat it.
+  [ "$(grep -c 'w0:p1' "$FAKE_NAME_LOG")" -eq 1 ]
+}
+
+@test "spawn-side naming: AGMSG_TERMINAL_NAMING=off still sets the key (mode=key), only the label is suppressed" {
+  # The key is addressing and must always be set; off suppresses the visible label
+  # only. So the naming call must carry mode=key, not be skipped.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" AGMSG_TERMINAL_NAMING=off \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  local want; want="$(printf 'w0:p1\tcxteam\tbob\tkey')"
+  grep -qF -- "$want" "$FAKE_NAME_LOG"
+}
+
+@test "spawn-side naming: a naming that does not read back reports spawned-but-unnamed, NOT ready/launched" {
+  # The read-back is the point (koit: only say named after reading back ok, like
+  # team --fix). terminal_name SUCCEEDS here (rc 0) but the key reads back as a
+  # missing sentinel — so ONLY the read-back catches it. Dropping the read-back
+  # and trusting the write's exit would turn this control green (mutation guard).
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+    FAKE_OBSERVE_KEY="unknown:agent_key_missing" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  # Not fatal — the seat is reachable via the placement record — so exit 0.
+  [ "$status" -eq 0 ]
+  # A DISTINCT status, and crucially NOT a ready/launched-confirmed line.
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+  grep -qF "ref=herdr:w0:p1" <<<"$output"
+  refute grep -qF "status=ready" <<<"$output"
+  refute grep -qF "status=launched-unconfirmed" <<<"$output"
+}
+
+@test "spawn-side naming: EVERY driver non-value key prefix reads back as NOT named (seam with #1066 observe vocabulary)" {
+  # The read-back derives from the shared set (agmsg_observation_has_value /
+  # _AGMSG_OBSERVATION_NON_VALUE_PREFIXES), so any prefix a driver can put in the key
+  # field — including the decisive-absence `absent:*` #1066 added — must make spawn
+  # report NOT named. Iterating the set (rather than a hand-list) proves the
+  # derivation and auto-covers a future prefix. This is the #1065/#1066 seam.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  [ -n "$_AGMSG_OBSERVATION_NON_VALUE_PREFIXES" ]   # the set must exist (post-#1066)
+  local i=0 p nm
+  for p in $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES; do
+    i=$((i + 1)); nm="seam$i"
+    _install_fake_naming_herdr
+    bash "$SCRIPTS/join.sh" seamteam "$nm" codex "$PROJ"
+    export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+    run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+      FAKE_OBSERVE_KEY="${p}agent_key_unset" \
+      bash "$SCRIPTS/spawn.sh" codex "$nm" --project "$PROJ" --terminal-driver herdr --no-wait
+    [ "$status" -eq 0 ] || { echo "FAIL status=$status for prefix '$p'"; return 1; }
+    grep -qF "status=spawned-but-unnamed" <<<"$output" \
+      || { echo "FAIL prefix '$p' was not reported unnamed: $output"; return 1; }
+  done
+  # Mutation guard: a REAL value must read back as NAMED, else "answer everything
+  # unnamed" (e.g. dropping the read-back and always returning 1) also passes above.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" seamteam seamok codex "$PROJ"
+  : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=0 \
+    FAKE_OBSERVE_KEY="a0123456789abcdef01234567" \
+    bash "$SCRIPTS/spawn.sh" codex seamok --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: on the WAIT path a ready-but-unnamed seat reports spawned-but-unnamed AFTER the wait" {
+  # naming and readiness are independent facts: a seat can be receiving yet unnamed.
+  # The report must come AFTER the readiness wait (not bail before it), so the leader
+  # sees that the watcher attached. The `after=` field is emitted ONLY by the wait
+  # branch, so its presence proves the wait ran before the naming report.
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" wtteam alice claude-code "$PROJ"
+  # actas-lock.sh needs SKILL_DIR; spawn computes it as scripts/.. = TEST_SKILL_DIR,
+  # so setting it to the same value makes agmsg_ready_path match spawn's own path.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/actas-lock.sh"
+  export FAKE_READY_TOUCH; FAKE_READY_TOUCH="$(agmsg_ready_path wtteam alice)"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_READY_TOUCH="$FAKE_READY_TOUCH" \
+    FAKE_NAME_RC=0 FAKE_OBSERVE_KEY="absent:agent_key_unset" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --ready-timeout 10
+  [ "$status" -eq 0 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+  grep -qF "after=" <<<"$output"                 # proves the wait branch, not the pre-wait bail
+  refute grep -qF "status=ready" <<<"$output"
+}
+
+@test "spawn-side naming: on the WAIT path a named seat that becomes ready reports status=ready" {
+  # Positive control for the wait branch: naming succeeds and the sentinel appears,
+  # so the terminal status is ready (not spawned-but-unnamed).
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" wtteam alice claude-code "$PROJ"
+  # actas-lock.sh needs SKILL_DIR; spawn computes it as scripts/.. = TEST_SKILL_DIR,
+  # so setting it to the same value makes agmsg_ready_path match spawn's own path.
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/actas-lock.sh"
+  export FAKE_READY_TOUCH; FAKE_READY_TOUCH="$(agmsg_ready_path wtteam alice)"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"; : > "$FAKE_NAME_LOG"
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_READY_TOUCH="$FAKE_READY_TOUCH" \
+    bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --terminal-driver herdr --ready-timeout 10
+  [ "$status" -eq 0 ]
+  grep -qF "status=ready" <<<"$output"
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
 }
