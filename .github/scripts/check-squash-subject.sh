@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 #
-# Fail when the subject a squash merge WILL write is one git-cliff would drop.
+# Fail when the subject a squash merge WILL write matches no cliff.toml rule.
 #
-# This checker decides KEEP or DROP -- what git-cliff does with the subject
-# under cliff.toml. It does not bind new subjects to the Conventional shape,
-# and the two must not be mixed: a Conventional subject can be dropped
-# (`chore:` hits a skip rule) and a non-Conventional one can be kept (the
-# legacy exceptions in cliff.toml), and a check on the shape gets both wrong.
+# This checker rejects a subject that matches none of cliff.toml's commit
+# parsers. Whether the matching rule keeps or skips is not the question:
+# a skip rule is a deliberate exclusion (`chore:`, `ci:`, `release:` do not
+# belong in the notes, and cliff.toml says so), so it passes. What fails is
+# the subject nobody decided about -- it falls to the trailing catch-all and
+# is dropped without anyone having chosen that. Three answers, then:
+#
+#   matches a keep rule        -> exit 0, it will be in the notes
+#   matches a skip rule        -> exit 0, it is left out on purpose
+#   matches only the catch-all -> exit 1, it is lost by accident
+#
+# The checker does not bind new subjects to the Conventional shape either:
+# a Conventional subject can be excluded (`chore:`) and a non-Conventional
+# one kept (the legacy rules in cliff.toml), so a check on the shape answers
+# a different question.
 #
 # The repository squashes every PR (allow_merge_commit=false,
 # allow_rebase_merge=false) with squash_merge_commit_title=COMMIT_OR_PR_TITLE.
@@ -35,9 +45,34 @@
 #     LINE only, because that line is what the notes show and what a reviewer
 #     reads; the divergence is confined to cliff.toml's unanchored legacy
 #     rules, and it errs towards red;
-#   - with `filter_unconventional` absent, git-cliff's default drops every
-#     non-Conventional commit before the parsers run; this cliff.toml sets it
-#     to false explicitly, and the script honours whichever it finds.
+#   - three [git] keys change the answer, and each is read from cliff.toml
+#     with git-cliff's own default (measured) used only when the key is
+#     absent -- and the output says which were defaulted:
+#       conventional_commits     (default true)  breaking marks are only parsed
+#                                                on Conventional subjects
+#       filter_unconventional    (default true)  drops every non-Conventional
+#                                                commit before the rules run;
+#                                                this cliff.toml sets it false,
+#                                                which is what lets its legacy
+#                                                non-Conventional keep rules
+#                                                be reached at all
+#       protect_breaking_commits (default false) a breaking commit is kept
+#                                                even when a skip rule -- or
+#                                                the catch-all -- matches it
+#                                                first: `chore!:`, `release!:`
+#                                                and `wip!:` are all kept when
+#                                                it is true, dropped when false
+#
+# This checker reads the subject line only. The body's `BREAKING CHANGE:`
+# footer is not visible to it, so a subject that hits a skip rule (or only
+# the catch-all) and is breaking only in its body comes back red -- git-cliff
+# keeps it, but that cannot be detected here. The blind spot is deliberately
+# on the red side, so that it never produces a false green: a false red is
+# seen by a person, who fixes one line or waives it; a false green is seen
+# by nobody until the notes are missing an entry. The body is not taken as
+# input because at PR time the squash body is not yet fixed, and judging
+# something that can still change is how a "passed, then dropped" happens.
+# If such a subject must pass, put the `!` in the subject, or a person decides.
 #
 # The rules are DERIVED from cliff.toml at run time, never retyped here; a
 # rule added there is honoured by the next run.
@@ -48,8 +83,9 @@
 #      a checker that cannot derive its rule has nothing to be green about.
 #   2. There is a subject to check. No subject, no commit count, an unreadable
 #      head: exit 2, not 0. Scanning nothing is not a pass.
-#   3. The first cliff.toml rule matching the subject has a `group`: exit 0.
-#      A skip rule, or no rule at all: exit 1, naming the rule and the subject.
+#   3. The first cliff.toml rule matching the subject is a keep rule or a
+#      skip rule written for it: exit 0, naming the rule. Only the catch-all
+#      (a skip rule that matches everything, `.*`), or nothing: exit 1.
 #
 # Usage (CI passes the first form; the second is for a pre-PR check by hand):
 #   check-squash-subject.sh --title "<PR title>" --commits <N> --head <sha> [--repo <dir>]
@@ -97,12 +133,13 @@ done
 # Reads the `commit_parsers = [ ... ]` array of the [git] table line by line:
 # one `{ message = "<regex>", group = "..." }` or `{ ..., skip = true }` per
 # line, as the file is written. No TOML library, so it runs on any python3.
-# Also reads `filter_unconventional` (git-cliff's default when absent: true,
-# measured) and `conventional_commits`.
+# Also reads the three flags above, each with its measured git-cliff default
+# and a note of whether the file or the default supplied it.
 #
-# Prints, one per line:  <index>\t<keep|skip>\t<pattern>   and, first, a
-# header line  filter_unconventional=<true|false>. Exits 2 when the file has
-# no usable rules.
+# Prints, first, one header line
+#   config: conventional_commits=<bool>(file|default) filter_unconventional=... protect_breaking_commits=...
+# then one rule per line:  <index>\t<keep|skip>\t<pattern>.  Exits 2 when the
+# file has no usable rules.
 derive_rules() {
   python3 - "$1" <<'PY'
 import re, sys, pathlib
@@ -116,8 +153,14 @@ m = re.search(r'^\[git\]\s*$(.*?)(?=^\[|\Z)', text, re.S | re.M)
 git = m.group(1) if m else ''
 def flag(name, default):
     mm = re.search(r'^\s*' + name + r'\s*=\s*(true|false)\b', git, re.M)
-    return (mm.group(1) == 'true') if mm else default
-filter_unconventional = flag('filter_unconventional', True)
+    if mm:
+        return (mm.group(1) == 'true'), 'file'
+    return default, 'default'
+# git-cliff's defaults, measured 2.10.1: conventional_commits true,
+# filter_unconventional true, protect_breaking_commits false.
+flags = [(n, *flag(n, d)) for n, d in (('conventional_commits', True),
+                                       ('filter_unconventional', True),
+                                       ('protect_breaking_commits', False))]
 # The parsers array: everything between `commit_parsers = [` and the closing `]`
 # that starts a line.
 a = re.search(r'^\s*commit_parsers\s*=\s*\[(.*?)^\s*\]', git, re.S | re.M)
@@ -149,7 +192,7 @@ for k, pat in rules:
         re.compile(pat)
     except re.error as e:
         print(f"{p}: cannot compile parser pattern {pat!r}: {e}", file=sys.stderr); sys.exit(2)
-print(f"filter_unconventional={'true' if filter_unconventional else 'false'}")
+print("config: " + " ".join(f"{n}={'true' if v else 'false'}({src})" for n, v, src in flags))
 for i, (k, pat) in enumerate(rules, 1):
     print(f"{i}\t{k}\t{pat}")
 PY
@@ -197,52 +240,82 @@ fi
 
 # --- 3. what git-cliff would do with it ------------------------------------------
 #
-# Prints one line:  keep|drop <TAB> <reason>   -- the first matching rule in
-# file order decides, as measured. The rules travel in the environment: the
-# python program itself is what `python3 -` reads from stdin. (A function, not
-# an inline `$( ... <<'PY' )`: bash 3.2 mis-parses a heredoc with an unbalanced
-# parenthesis inside command substitution.)
+# Prints one line:  keep|skip|lost <TAB> <reason>   -- the first matching rule
+# in file order decides, as measured. A skip rule that matches EVERYTHING (the
+# trailing `.*`, recognised as any pattern that matches the empty string) is
+# the catch-all, not a decision about this subject: landing there is `lost`.
+# The rules travel in the environment: the python program itself is what
+# `python3 -` reads from stdin. (A function, not an inline `$( ... <<'PY' )`:
+# bash 3.2 mis-parses a heredoc with an unbalanced parenthesis inside command
+# substitution.)
 judge_subject() {   # $1 = subject; RULES in the environment
   python3 - "$1" <<'PY'
 import os, re, sys
 subject = sys.argv[1]
 lines = os.environ['RULES'].splitlines()
-filter_unconventional = lines[0].split('=', 1)[1] == 'true'
+cfg = dict(re.findall(r'(\w+)=(true|false)\(', lines[0]))
+conventional = cfg['conventional_commits'] == 'true'
+filter_unconventional = cfg['filter_unconventional'] == 'true'
+protect_breaking = cfg['protect_breaking_commits'] == 'true'
 rules = [l.split('\t', 2) for l in lines[1:]]
+# The Conventional shape git-cliff parses:  <type>(<scope>)?!?: <description>.
+# Both flags below only mean anything for a Conventional subject (measured:
+# with conventional_commits=false a `chore!:` is not protected).
+conv = re.match(r'^[A-Za-z][A-Za-z0-9_-]*(\([^()]*\))?(!)?: \S', subject) if conventional else None
 # git-cliff's `filter_unconventional` drops a non-Conventional commit before
-# any parser runs. The shape it parses is  <type>(<scope>)?!?: <description>.
-if filter_unconventional and not re.match(r'^[A-Za-z][A-Za-z0-9_-]*(\([^()]*\))?!?: \S', subject):
-    print("drop\tcliff.toml has filter_unconventional=true (git-cliff's default when absent), "
-          "and this subject is not of the form <type>(<scope>)?!?: <description>, so it is dropped before any parser runs")
+# any parser runs. No rule was written for the subject: a loss, not an exclusion.
+if filter_unconventional and not conv:
+    print("lost\tfilter_unconventional is true, and this subject is not of the form "
+          "<type>(<scope>)?!?: <description>, so it is dropped before any parser runs")
+    sys.exit(0)
+# A breaking commit is kept regardless of which rule matches -- skip rules and
+# the catch-all included (measured: `chore!:`, `release!:`, `wip!:` all kept).
+# Only the subject's `!` is visible here; a footer-only BREAKING CHANGE is the
+# documented blind spot and falls through to the rules, i.e. towards red.
+if protect_breaking and conv and conv.group(2):
+    print("keep\ta breaking change (`!` in the subject), which protect_breaking_commits keeps whatever rule matches")
     sys.exit(0)
 for i, kind, pat in rules:
     if re.search(pat, subject):
         if kind == 'keep':
             print(f"keep\tkept by parser {i} `{pat}`")
+        elif re.search(pat, ''):
+            print(f"lost\tmatches no rule but the catch-all (parser {i} `{pat}`), so it is dropped without anyone having decided that")
         else:
-            print(f"drop\tdropped by parser {i} `{pat}` (skip = true)")
+            print(f"skip\tleft out of the notes on purpose by parser {i} `{pat}` (skip = true)")
         sys.exit(0)
-print("drop\tmatches none of cliff.toml's parsers")
+print("lost\tmatches none of cliff.toml's parsers, so it is dropped without anyone having decided that")
 PY
 }
 verdict="$(RULES="$rules" judge_subject "$subject")"
 decision="${verdict%%	*}"
 reason="${verdict#*	}"
 
+config="$(printf '%s\n' "$rules" | head -1)"
+
 case "$decision" in
   keep)
     echo "$ME: ok -- git-cliff keeps it ($reason). Checked $subject_source:"
     echo "  $subject"
+    echo "  $config"
     exit 0 ;;
-  drop)
-    echo "$ME: this subject would be dropped from the release notes: $reason." >&2
+  skip)
+    echo "$ME: ok -- git-cliff excludes it deliberately ($reason). Checked $subject_source:"
+    echo "  $subject"
+    echo "  $config"
+    exit 0 ;;
+  lost)
+    echo "$ME: this subject would be lost from the release notes: $reason." >&2
     echo >&2
     echo "  $subject" >&2
+    echo "  $config" >&2
     echo >&2
     echo "Checked: $subject_source." >&2
     echo "The rules are cliff.toml's commit_parsers, first match wins; \`$0 --parsers\`" >&2
-    echo "prints them as derived. Retitle the PR, or for a one-commit PR reword that" >&2
-    echo "commit (or add a second commit so the PR title is what lands)." >&2
+    echo "prints them as derived. A subject a keep rule matches goes into the notes; one" >&2
+    echo "a skip rule matches is left out on purpose and passes too. Retitle the PR, or" >&2
+    echo "for a one-commit PR reword that commit (or add a second commit so the PR title" >&2
+    echo "is what lands)." >&2
     exit 1 ;;
   *)
     echo "$ME: internal error: no verdict for the subject." >&2

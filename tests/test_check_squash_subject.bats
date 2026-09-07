@@ -1,15 +1,18 @@
 #!/usr/bin/env bats
 #
 # .github/scripts/check-squash-subject.sh: the subject a squash merge will
-# write must be one git-cliff KEEPS under cliff.toml, or it is silently absent
-# from the release notes. The checker decides keep/drop; it does not bind new
-# subjects to the Conventional shape, and this file pins both directions of
-# that distinction. Four things are pinned, each with a control the other way:
+# write must match a cliff.toml rule, or it falls to the catch-all and is lost
+# from the release notes without anyone having decided that. Three answers:
+# a keep rule (green, in the notes), a skip rule (green, excluded on purpose),
+# only the catch-all (red, lost). The checker does not bind new subjects to
+# the Conventional shape, and this file pins all three answers, each with a
+# control the other way:
 #
 #   - the RULE, against what git-cliff itself does (measured, and re-measured
 #     here whenever git-cliff is installed): subjects that already landed and
-#     were dropped are red, kept ones are green, a skip rule reddens a
-#     Conventional subject and a legacy group rule greens a non-Conventional one;
+#     were lost are red; kept ones are green; `chore(ci):` and `release:` hit
+#     skip rules and are green although git-cliff drops them; a legacy group
+#     rule greens a non-Conventional subject; the catch-all alone is red;
 #   - the DERIVATION: the rules the script reads out of cliff.toml agree with
 #     an independent scrape, in order and in kind;
 #   - the SELECTION: a one-commit PR is judged by its commit's subject, a larger
@@ -25,10 +28,11 @@ setup() {
   export AGMSG_CLIFF_CONFIG="$REPO_ROOT/cliff.toml"
 }
 
-# The subjects this file judges, with git-cliff's own verdict for each under
-# the real cliff.toml (measured with git-cliff 2.10.1, 2026-09-07). One table,
-# read by the rule tests AND by the git-cliff cross-check, so the two cannot
-# drift apart.
+# The subjects this file judges, with the answer for each under the real
+# cliff.toml: `keep` and `skip` are what git-cliff does (measured with
+# git-cliff 2.10.1, 2026-09-07 -- `skip` rows are dropped by git-cliff, on
+# purpose), `lost` is a subject only the catch-all matches. One table, read by
+# the rule tests AND by the git-cliff cross-check, so the two cannot drift.
 _subject_table() {
   cat <<'EOF'
 keep|feat(spawn): set the pane's agent key at spawn so codex seats are not left nameless
@@ -38,16 +42,20 @@ keep|feat!: drop the legacy index
 keep|Add native Windows support for the launcher
 keep|Role-to-session affinity: pin the seat
 keep|feature-flag: kept by the ^feat rule, Conventional or not
-drop|Naming is an invariant every entry point re-asserts, and the roster can see it (#1044)
-drop|Remove internal handles from the published tree, and check for them by identifier context
-drop|spawn: launch codex through the bundled monitor shim, and refuse a bare fallback
-drop|Reduce repeated ciphertext literals in pull apply
-drop|chore(ci): pin the runner image
-drop|release: 1.3.0
-drop|ci: a Conventional subject that a skip rule drops
-drop|chore: native windows bits
-drop|Feat: capitalised
-drop|Something unrelated in the subject
+keep|chore!: a breaking change that a skip rule matches first
+keep|release!: a breaking release
+keep|chore(ci)!: a breaking change with a scope
+keep|wip!: a breaking change that only the catch-all matches
+skip|chore(ci): pin the runner image
+skip|release: 1.3.0
+skip|ci: a Conventional subject that a skip rule excludes on purpose
+skip|chore: native windows bits
+lost|Naming is an invariant every entry point re-asserts, and the roster can see it (#1044)
+lost|Remove internal handles from the published tree, and check for them by identifier context
+lost|spawn: launch codex through the bundled monitor shim, and refuse a bare fallback
+lost|Reduce repeated ciphertext literals in pull apply
+lost|Feat: capitalised
+lost|Something unrelated in the subject
 EOF
 }
 
@@ -82,25 +90,99 @@ _repo_with_commit() {   # <subject>
 
 # --- the rule, both directions ------------------------------------------------------
 
-@test "every subject in the table gets git-cliff's measured verdict: kept is green, dropped is red" {
-  local exp s rc
+@test "every subject in the table gets its answer: kept is green, skipped on purpose is green, lost is red" {
+  local exp s rc word
   while IFS='|' read -r exp s; do
     run bash "$CHECK" --subject "$s"
-    case "$exp" in keep) rc=0 ;; drop) rc=1 ;; esac
+    case "$exp" in keep) rc=0; word='git-cliff keeps it' ;; skip) rc=0; word='excludes it deliberately' ;; lost) rc=1; word='would be lost' ;; esac
     [ "$status" -eq "$rc" ] || { echo "expected $exp (exit $rc), got exit $status for: $s"; echo "$output"; return 1; }
+    grep -qF "$word" <<<"$output" || { echo "expected the verdict to say '$word' for: $s"; echo "$output"; return 1; }
   done < <(_subject_table)
 }
 
-@test "the table itself has both directions and both distinctions" {
-  # A table with only one direction would make the test above vacuous. It must
-  # hold a Conventional subject that is DROPPED (skip rule) and a
-  # non-Conventional one that is KEPT (legacy group rule).
-  _subject_table | grep -q '^drop|chore(ci):'
-  _subject_table | grep -q '^drop|release:'
-  _subject_table | grep -q '^keep|Add native Windows'
-  _subject_table | grep -q '^keep|Role-to-session affinity'
+@test "the table itself has all three answers and both distinctions" {
+  # A table missing an answer would make the test above vacuous. It must hold
+  # a Conventional subject a skip rule EXCLUDES (green although git-cliff
+  # drops it), a non-Conventional one a legacy group rule KEEPS, and subjects
+  # only the catch-all matches.
+  # Fixed strings: a `|` in a basic-regex grep is literal, but say so.
+  _subject_table | grep -Fq 'skip|chore(ci):'
+  _subject_table | grep -Fq 'skip|release:'
+  _subject_table | grep -Fq 'keep|Add native Windows'
+  _subject_table | grep -Fq 'keep|Role-to-session affinity'
+  _subject_table | grep -Fq 'keep|chore!:'
+  _subject_table | grep -Fq 'keep|wip!:'
+  _subject_table | grep -Fq 'lost|spawn:'
   [ "$(_subject_table | grep -c '^keep|')" -ge 5 ]
-  [ "$(_subject_table | grep -c '^drop|')" -ge 5 ]
+  [ "$(_subject_table | grep -c '^skip|')" -ge 3 ]
+  [ "$(_subject_table | grep -c '^lost|')" -ge 5 ]
+}
+
+@test "protect_breaking_commits: a breaking subject is kept past a skip rule and past the catch-all, and only when the flag says so" {
+  # Measured with git-cliff 2.10.1: true keeps `chore!:` and `wip!:`, false
+  # drops both; absent means false. Differential on one config, one key.
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture $'conventional_commits = true\nfilter_unconventional = false\nprotect_breaking_commits = true' 'skip:^chore' 'keep:^feat' 'skip:.*')"
+  run bash "$CHECK" --subject 'chore!: breaking past a skip rule'
+  [ "$status" -eq 0 ]
+  grep -q 'a breaking change' <<<"$output"
+  run bash "$CHECK" --subject 'wip!: breaking past the catch-all'
+  [ "$status" -eq 0 ]
+  grep -q 'a breaking change' <<<"$output"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture $'conventional_commits = true\nfilter_unconventional = false\nprotect_breaking_commits = false' 'skip:^chore' 'keep:^feat' 'skip:.*')"
+  run bash "$CHECK" --subject 'chore!: breaking past a skip rule'
+  [ "$status" -eq 0 ]
+  grep -q 'excludes it deliberately' <<<"$output"
+  run bash "$CHECK" --subject 'wip!: breaking past the catch-all'
+  [ "$status" -eq 1 ]
+}
+
+@test "a flag absent from cliff.toml takes git-cliff's default, and the output says it was defaulted" {
+  # Measured defaults: conventional_commits true, filter_unconventional true,
+  # protect_breaking_commits false. A default that is used silently is a
+  # model nobody can check against the file.
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'skip:^chore' 'keep:^feat' 'skip:.*')"
+  run bash "$CHECK" --subject 'wip!: breaking, but the flag is absent'
+  [ "$status" -eq 1 ]
+  grep -q 'protect_breaking_commits=false(default)' <<<"$output"
+  grep -q 'conventional_commits=true(default)' <<<"$output"
+  grep -q 'filter_unconventional=false(file)' <<<"$output"
+  run bash "$CHECK" --parsers
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = 'config: conventional_commits=true(default) filter_unconventional=false(file) protect_breaking_commits=false(default)' ]
+}
+
+@test "conventional_commits=false switches breaking protection off, as measured" {
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture $'conventional_commits = false\nfilter_unconventional = false\nprotect_breaking_commits = true' 'skip:^chore' 'keep:^feat' 'skip:.*')"
+  run bash "$CHECK" --subject 'wip!: not parsed as breaking when Conventional parsing is off'
+  [ "$status" -eq 1 ]
+}
+
+@test "the footer blind spot is on the red side: a subject whose breaking mark is only in the body is red, and the script says why" {
+  # Measured: git-cliff keeps `wip: ...` with a BREAKING CHANGE: footer under
+  # protect_breaking_commits=true. The checker sees the subject only and
+  # cannot; by decision it reports red rather than guessing green.
+  grep -q 'BREAKING CHANGE' "$CHECK"
+  grep -q 'blind spot' "$CHECK"
+  run bash "$CHECK" --subject 'wip: footer breaking, subject shows nothing'
+  [ "$status" -eq 1 ]
+}
+
+@test "the catch-all is not a decision: a subject only it matches is red, one an explicit skip rule matches is green" {
+  # Differential pair on one subject; only one explicit skip rule differs.
+  # Without this distinction the trailing `.*` skip rule would turn every
+  # lost subject green.
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:^feat' 'skip:.*')"
+  run bash "$CHECK" --subject 'wip: not decided by anyone'
+  [ "$status" -eq 1 ]
+  grep -q 'no rule but the catch-all' <<<"$output"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:^feat' 'skip:^wip' 'skip:.*')"
+  run bash "$CHECK" --subject 'wip: not decided by anyone'
+  [ "$status" -eq 0 ]
+  grep -q 'excludes it deliberately' <<<"$output"
 }
 
 @test "the table agrees with git-cliff itself when git-cliff is installed" {
@@ -128,24 +210,29 @@ _repo_with_commit() {   # <subject>
   done < <(_subject_table)
   kept="$(cd "$d" && git-cliff --config "$cfg" --unreleased --strip all 2>/dev/null | grep -E '^[0-9a-f]{40}$')"
   [ -n "$kept" ] || { echo "git-cliff listed nothing; the fixture or the template is broken"; return 1; }
+  # git-cliff lists exactly the `keep` rows; `skip` and `lost` are both absent
+  # from its output -- the difference between them is whether cliff.toml
+  # decided it, which is what the checker adds.
   while IFS='|' read -r sha exp s; do
     n=$((n + 1))
     if grep -qx "$sha" <<<"$kept"; then
-      [ "$exp" = keep ] || { echo "git-cliff KEPT a subject the table says drop: $s"; return 1; }
+      [ "$exp" = keep ] || { echo "git-cliff KEPT a subject the table says $exp: $s"; return 1; }
     else
-      [ "$exp" = drop ] || { echo "git-cliff DROPPED a subject the table says keep: $s"; return 1; }
+      [ "$exp" != keep ] || { echo "git-cliff DROPPED a subject the table says keep: $s"; return 1; }
     fi
   done < "$BATS_TEST_TMPDIR/rows"
   [ "$n" -eq "$(_subject_table | wc -l | tr -d ' ')" ]
 }
 
-@test "first match wins: a skip rule before a keep rule drops, and the reverse keeps" {
+@test "first match wins: a skip rule before a keep rule excludes, and the reverse keeps" {
   # Differential pair on one subject; only the order of the two rules differs.
+  # Both are green, and the verdict must name which rule decided -- a
+  # first-match bug would show up as the wrong rule number.
   export AGMSG_CLIFF_CONFIG
   AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'skip:^chore' 'keep:(?i)native windows' 'skip:.*')"
   run bash "$CHECK" --subject 'chore: native windows bits'
-  [ "$status" -eq 1 ]
-  grep -q 'dropped by parser 1' <<<"$output"
+  [ "$status" -eq 0 ]
+  grep -q 'on purpose by parser 1' <<<"$output"
   AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:(?i)native windows' 'skip:^chore' 'skip:.*')"
   run bash "$CHECK" --subject 'chore: native windows bits'
   [ "$status" -eq 0 ]
@@ -160,7 +247,8 @@ _repo_with_commit() {   # <subject>
   AGMSG_CLIFF_CONFIG="$(_cliff_fixture '' 'keep:(?i)native windows' 'skip:.*')"
   run bash "$CHECK" --subject 'Add native Windows support'
   [ "$status" -eq 1 ]
-  grep -q 'filter_unconventional=true' <<<"$output"
+  grep -q 'filter_unconventional is true' <<<"$output"
+  grep -q 'filter_unconventional=true(default)' <<<"$output"
   AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:(?i)native windows' 'skip:.*')"
   run bash "$CHECK" --subject 'Add native Windows support'
   [ "$status" -eq 0 ]
@@ -200,7 +288,8 @@ _repo_with_commit() {   # <subject>
   grep -qE $'\tkeep\t\\^feat$' <<<"$got"
   grep -qF $'\tkeep\t(?i)native windows' <<<"$got"
   [ "$(tail -1 <<<"$got")" = "$(printf '%s\tskip\t.*' "$(wc -l <<<"$got" | tr -d ' ')")" ]
-  [ "$(bash "$CHECK" --parsers | head -1)" = 'filter_unconventional=false' ]
+  # The three flags as the real file sets them, each marked as read from it.
+  [ "$(bash "$CHECK" --parsers | head -1)" = 'config: conventional_commits=true(file) filter_unconventional=false(file) protect_breaking_commits=true(file)' ]
 }
 
 # --- the selection: which subject would land ------------------------------------
@@ -235,17 +324,21 @@ _repo_with_commit() {   # <subject>
   grep -q 'the PR title' <<<"$output"
 }
 
-@test "the verdict names what it checked and which rule decided, in both directions" {
+@test "the verdict names what it checked and which rule decided, in all three answers" {
   # A green that does not say which subject it read is indistinguishable from
-  # a green that read nothing.
+  # a green that read nothing; and the two greens must say which they are.
   run bash "$CHECK" --subject 'fix: something'
   [ "$status" -eq 0 ]
   grep -q 'Checked the subject given on the command line' <<<"$output"
   grep -q 'kept by parser' <<<"$output"
+  run bash "$CHECK" --subject 'chore: something'
+  [ "$status" -eq 0 ]
+  grep -q 'Checked the subject given on the command line' <<<"$output"
+  grep -q 'on purpose by parser' <<<"$output"
   run bash "$CHECK" --subject 'something'
   [ "$status" -eq 1 ]
   grep -q '^Checked: the subject given on the command line' <<<"$output"
-  grep -q 'dropped by parser' <<<"$output"
+  grep -q 'no rule but the catch-all' <<<"$output"
 }
 
 # --- zero targets are not a pass --------------------------------------------------
