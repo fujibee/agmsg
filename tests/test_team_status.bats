@@ -18,9 +18,27 @@ install_team_fake_tmux() {
 printf 'tmux' >> "$TEAM_TMUX_LOG"
 for arg in "$@"; do printf ' [%s]' "$arg" >> "$TEAM_TMUX_LOG"; done
 printf '\n' >> "$TEAM_TMUX_LOG"
+# Faithful to the MEASURED tmux 3.5 behaviour these tests depend on:
+#   - `display-message` for a pane that does NOT exist exits 0 with EMPTY output;
+#     it does not fail. That is why the driver co-observes #{pane_id}.
+#   - `show-options` for an UNSET option prints nothing.
+# Knobs: TEAM_TMUX_PANE_MISSING=1 (the pane is gone), TEAM_TMUX_KEY_UNSET=1.
+target=""; prev=""
+for arg in "$@"; do [ "$prev" = -t ] && target="$arg"; prev="$arg"; done
 case "$*" in
   *pane_in_mode*) printf '0|64066|/dev/ttys066\n' ;;
-  *show-options*) printf 'team:alice\n' ;;
+  *show-options*) [ -n "${TEAM_TMUX_KEY_UNSET:-}" ] || printf 'team:alice\n' ;;
+  *window_id*pane_title*|*pane_id*pane_title*)
+    # tmux answers with the id of the thing it FOUND. A missing target yields an
+    # empty identity; a present one echoes back the id that was asked about --
+    # which is only true when the field matches the target's KIND, and that is
+    # exactly what these tests are here to pin.
+    [ -n "${TEAM_TMUX_PANE_MISSING:-}" ] && { printf '|\n'; exit 0; }
+    case "$* " in
+      *'#{window_id}'*) [ "${target#@}" != "$target" ] || { printf '|\n'; exit 0; } ;;
+      *'#{pane_id}'*)   [ "${target#%}" != "$target" ] || { printf '|\n'; exit 0; } ;;
+    esac
+    printf '%s|✳ team-alice\n' "$target" ;;
   *pane_title*) printf '✳ team-alice\n' ;;
 esac
 EOF
@@ -234,6 +252,162 @@ EOF
   [ ! -e "$BATS_TEST_TMPDIR/poke" ]
 }
 
+# --- herdr observation: "not in the list" is not "has no key" -------------------
+#
+# The measured codex case. `agent list` is fetched successfully before this point,
+# so what stayed undecided was only WHICH no-name case applied — and both landed
+# on the same `unknown:` value, which `team --fix` skips. The nesting splits them:
+# an entry that matched but carries no `.name` is a DECIDED absence.
+_herdr_observe_stub() {   # <entries-json>
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
+  _herdr_pane_id_ok() { return 0; }
+  eval "herdr() {
+    case \"\$1 \$2\" in
+      'pane get')   printf '%s\n' '{\"result\":{\"pane\":{\"agent_status\":\"idle\",\"label\":\"team:alice\",\"terminal_title\":\"x\"}}}' ;;
+      'agent list') printf '%s\n' '{\"result\":{\"agents\":$1}}' ;;
+    esac
+  }"
+}
+
+# --- the observation vocabulary is one list, and it is DERIVED, not retyped -----
+
+@test "agmsg_observation_has_value accepts a value and rejects every reason prefix" {
+  # The single question a read-back judge asks. Driven from the SET, so a prefix
+  # added there is exercised here without editing this test.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  local p n=0
+  for p in $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES; do
+    n=$((n + 1))
+    refute agmsg_observation_has_value "${p}whatever" \
+      || { echo "$p was accepted as a value"; return 1; }
+  done
+  [ "$n" -ge 3 ] || { echo "the prefix set is suspiciously small: $n"; return 1; }
+  refute agmsg_observation_has_value ''
+  agmsg_observation_has_value 'team:alice'
+}
+
+@test "the prefix set covers every reason the shipped drivers actually emit" {
+  # DERIVED both ways: the set is one side, and the other is scraped out of the
+  # drivers rather than retyped here. A driver that gains a new reason prefix
+  # fails this until the set names it — the failure the spawn-side judge hit by
+  # hand-listing a bare `absent` while the driver emitted `absent:`.
+  #
+  # Scoped to the terminal_team_observe BODY on purpose: `not_ready:` belongs to
+  # terminal_team_input_ready, a different question with its own vocabulary, and
+  # pane-id globs elsewhere in the file contain colons that are not prefixes at
+  # all. A wider scrape reported seven "missing" prefixes, none of them real.
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  local d emitted="" missing="" p
+  for d in "$SCRIPTS"/drivers/terminals/*/ops.sh; do
+    # Comment lines are dropped first: prose contains colons ("canary:", "split:")
+    # and a scrape that reads them reports seven prefixes that no driver emits.
+    # The reason word after the colon is required for the same reason.
+    emitted="$emitted $(awk '/^terminal_team_observe\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$d" \
+      | grep -v '^[[:space:]]*#' \
+      | sed 's/\\t/ /g' \
+      | grep -oE "[a-z][a-z_]*(\/[a-z])?:[a-z_]+" \
+      | sed 's/:.*/:/' | sort -u | tr '\n' ' ')"
+  done
+  emitted="$(printf '%s\n' $emitted | sort -u)"
+  # Canary: the scrape must find what we know is there, or "nothing missing"
+  # would only mean "nothing was scraped".
+  printf '%s\n' "$emitted" | grep -qx 'unknown:' || { echo "scrape found no unknown: — the search is broken"; return 1; }
+  printf '%s\n' "$emitted" | grep -qx 'absent:'  || { echo "scrape found no absent: — the search is broken"; return 1; }
+  printf '%s\n' "$emitted" | grep -qx 'n/a:'     || { echo "scrape found no n/a: — the search is broken"; return 1; }
+  for p in $emitted; do
+    case " $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES " in
+      *" $p "*) : ;;
+      *) missing="$missing $p" ;;
+    esac
+  done
+  [ -z "$missing" ] || { echo "drivers emit prefixes the set does not name:$missing"; return 1; }
+}
+
+@test "herdr observation: an entry with no name is a DECIDED absence" {
+  _herdr_observe_stub '[{"pane_id":"w2:p3","agent":"codex"}]'
+  run terminal_team_observe 'w2:p3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+}
+
+@test "herdr observation: an EMPTY name is a decided absence, not a value" {
+  # `json_extract` answers SQL NULL for a missing key and for JSON null, but the
+  # EMPTY STRING for `"name":""` (measured) — so without NULLIF it slips past the
+  # COALESCE as if it were a key. It is not one, and an empty field makes the
+  # wrapper report `unknown:observe_malformed` for ALL FOUR fields, which --fix
+  # skips: the case this exists to repair, skipped again, taking the other three
+  # observations with it.
+  _herdr_observe_stub '[{"pane_id":"w2:p3","agent":"codex","name":""}]'
+  run terminal_team_observe 'w2:p3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+  # ...and the observation stays whole: the other fields are still readable.
+  [ "$(printf '%s' "$output" | cut -f1)" = 'idle' ]
+}
+
+@test "herdr observation: a pane absent from the list stays UNDECIDED" {
+  # Differential partner: same call, same shape, only the pane_id differs, so the
+  # difference in the answer can only come from membership. Without the split
+  # this returned the same value as the test above and --fix skipped both.
+  _herdr_observe_stub '[{"pane_id":"w9:p9","agent":"codex","name":"team:bob"}]'
+  run terminal_team_observe 'w2:p3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'unknown:pane_not_in_agent_list' ]
+}
+
+@test "herdr observation: a named entry still reads its key (no regression)" {
+  _herdr_observe_stub '[{"pane_id":"w2:p3","agent":"codex","name":"team:alice"}]'
+  run terminal_team_observe 'w2:p3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'team:alice' ]
+}
+
+# --- the decided absence must reach --fix, and the undecided one must not -------
+
+@test "a decided absence becomes a mismatch cell, an undecided one does not" {
+  # This is the whole point of the vocabulary: agmsg_identity_cell passes
+  # `unknown:`/`n/a:` through untouched (the marker --fix skips on) and turns
+  # anything else into a mismatch. So the split in the drivers is what makes the
+  # key repairable, with no change to any reader.
+  [ "$(agmsg_identity_cell 'team:alice' 'absent:agent_key_unset')" \
+    = 'mismatch(expected=team:alice,actual=absent:agent_key_unset)' ]
+  [ "$(agmsg_identity_cell 'team:alice' 'unknown:pane_not_in_agent_list')" \
+    = 'unknown:pane_not_in_agent_list' ]
+}
+
+@test "identity fix repairs a key that was decidedly absent, and verifies it" {
+  # The behaviour tl asked for: --fix must actually set the key on a seat that
+  # never had one, and must only say `changed` after reading it back.
+  agmsg_type_get() { printf '\n'; }
+  _herdr_internal_key() { printf 'a123\n'; }
+  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_team_observe() { printf 'idle\tteam:alice\ta123\tx\n'; }   # read-back: now present
+  run agmsg_team_fix_identity_loaded team alice codex herdr w2:p3 \
+    'ok(actual=team:alice)' \
+    'mismatch(expected=a123,actual=absent:agent_key_unset)' \
+    'n/a:no_session_name'
+  [ "$status" -eq 0 ]
+  [ "${lines[1]}" = $'agent_key\tchanged\trenamed_and_verified' ]
+  grep -qx 'key' "$BATS_TEST_TMPDIR/names"
+}
+
+@test "identity fix still skips a key it could not read" {
+  # The half that stops this from becoming "overwrite everything": an undecided
+  # observation must remain skipped, and must not be reported as changed.
+  agmsg_type_get() { printf '\n'; }
+  terminal_name() { printf 'called\n' > "$BATS_TEST_TMPDIR/names"; }
+  run agmsg_team_fix_identity_loaded team alice codex herdr w2:p3 \
+    'ok(actual=team:alice)' \
+    'unknown:pane_not_in_agent_list' \
+    'n/a:no_session_name'
+  [ "$status" -eq 0 ]
+  [ "${lines[1]}" = $'agent_key\tskipped\tpane_not_in_agent_list' ]
+  [ ! -e "$BATS_TEST_TMPDIR/names" ]
+}
+
 @test "herdr readiness positively identifies the expected live agent" {
   # shellcheck disable=SC1090
   source "$SCRIPTS/drivers/terminals/herdr/ops.sh"
@@ -329,5 +503,74 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = $'n/a:unsupported\tn/a:no_independent_field\tteam:alice\t✳ team-alice' ]
   grep -qF 'tmux [show-options] [-p] [-v] [-t] [%3] [@agmsg_agent]' "$TEAM_TMUX_LOG"
-  grep -qF 'tmux [display-message] [-p] [-t] [%3] [#{pane_title}]' "$TEAM_TMUX_LOG"
+  # The title query now carries its own canary: #{pane_id} is asked for in the
+  # SAME call, so the answer can be tied to the pane it was asked about.
+  grep -qF 'tmux [display-message] [-p] [-t] [%3] [#{pane_id}|#{pane_title}]' "$TEAM_TMUX_LOG"
+}
+
+@test "tmux observation: the pane is reachable and the key is UNSET -> decided absence" {
+  # The case every codex seat is in. `unknown:` here is what made `team --fix`
+  # skip it forever, so the value must NOT carry that prefix.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '%3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+  # The title still reads, so this is a statement ABOUT a pane we reached.
+  [ "$(printf '%s' "$output" | cut -f4)" = '✳ team-alice' ]
+}
+
+@test "tmux observation: a WINDOW placement is observed with the WINDOW's identity" {
+  # `spawn --window` records @N (new-window -P -F '#{window_id}'), and asking
+  # `#{pane_id}` about a window answers with its ACTIVE PANE — measured, target @1
+  # answers %1. A pane-shaped canary on a window can therefore never match, and
+  # every window-placed seat read as unobservable. The identity field is paired to
+  # the ref KIND, so this must observe exactly like the pane case.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '@3'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f3)" = 'absent:agent_key_unset' ]
+  grep -qF 'tmux [display-message] [-p] [-t] [@3] [#{window_id}|#{pane_title}]' "$TEAM_TMUX_LOG"
+}
+
+@test "tmux observation: a window that does not exist is NOT a decided absence" {
+  # The @-kind partner of the %-kind control: both kinds must fail closed, or the
+  # one that was never exercised is the one that ships broken.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1 TEAM_TMUX_PANE_MISSING=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '@3'
+  [ "$status" -eq 10 ]
+  refute grep -q 'absent:' <<<"$output"
+}
+
+@test "tmux observation: a PANE placement still asks for the pane identity" {
+  # The other half of the pairing, pinned by argv so the two kinds cannot both be
+  # served by whichever field was written first.
+  install_team_fake_tmux
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '%3'
+  [ "$status" -eq 0 ]
+  grep -qF 'tmux [display-message] [-p] [-t] [%3] [#{pane_id}|#{pane_title}]' "$TEAM_TMUX_LOG"
+}
+
+@test "tmux observation: a pane that does not exist is NOT a decided absence" {
+  # The differential partner of the test above: MEASURED, display-message exits 0
+  # with empty output for a missing pane, so without the co-observed #{pane_id}
+  # this case returned the exact same answer as an unset option — and `--fix`
+  # would then overwrite a key on a pane nobody could find.
+  install_team_fake_tmux
+  export TEAM_TMUX_KEY_UNSET=1 TEAM_TMUX_PANE_MISSING=1
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/drivers/terminals/tmux/ops.sh"
+  run terminal_team_observe '%3'
+  [ "$status" -eq 10 ]
+  refute grep -q 'absent:' <<<"$output"
 }
