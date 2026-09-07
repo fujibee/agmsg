@@ -137,6 +137,40 @@ agmsg_terminal_has() {
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
 _AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
 
+# A driver's observation fields carry EITHER an observed value or one of these
+# prefixes, which say why there is no value. They are listed here, once, because
+# two sides need the same list and neither owns it: the drivers emit them, and
+# anything judging an observation ("is this a key I can trust?") has to recognise
+# every one. A judge that enumerates them by hand goes stale the moment a driver
+# gains a case — which is exactly what happened between the spawn-side read-back
+# and this file's `absent:` (the judge tested a BARE `absent`, so a prefixed value
+# read as a usable key and a nameless pane was reported as named).
+#
+# The prefix form is load-bearing: a value is disqualified by its PREFIX, never by
+# equality with a whole token, so a driver may make a reason more specific without
+# any judge changing. Do not mix bare sentinels into this set.
+#
+#   unknown:  the observation could not be made           (nothing was learned)
+#   n/a:      this terminal has no such thing to observe  (nothing to learn)
+#   absent:   it was observed, and there is nothing there (a decided fact)
+#
+# The three are NOT interchangeable further up: `agmsg_identity_cell` passes
+# `unknown:`/`n/a:` through as skip markers and turns `absent:` into a mismatch a
+# repair can act on. They are alike only in the one respect this set is for —
+# none of them is an observed value.
+_AGMSG_OBSERVATION_NON_VALUE_PREFIXES="unknown: n/a: absent:"
+
+# 0 when the field carries a real observed value, 1 when it carries a reason (or
+# nothing). The single question a read-back judge should be asking.
+agmsg_observation_has_value() {   # <field>
+  local v="$1" p
+  [ -n "$v" ] || return 1
+  for p in $_AGMSG_OBSERVATION_NON_VALUE_PREFIXES; do
+    case "$v" in "$p"*) return 1 ;; esac
+  done
+  return 0
+}
+
 # Wipe every terminal_* ABI function from the current shell. Called before each
 # source so a driver that is switched to cannot inherit the previous driver's ops
 # — the clobber flagged in review: "no function" fails loudly (command not found), but a
