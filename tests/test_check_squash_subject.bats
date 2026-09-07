@@ -1,17 +1,22 @@
 #!/usr/bin/env bats
 #
 # .github/scripts/check-squash-subject.sh: the subject a squash merge will
-# write must carry a type cliff.toml classifies, or git-cliff drops it from the
-# release notes. Three things are pinned here, each with a control in the
-# other direction:
+# write must be one git-cliff KEEPS under cliff.toml, or it is silently absent
+# from the release notes. The checker decides keep/drop; it does not bind new
+# subjects to the Conventional shape, and this file pins both directions of
+# that distinction. Four things are pinned, each with a control the other way:
 #
-#   - the RULE: which subjects pass, including the ones that already landed
-#     wrong (they must be red -- a checker that accepts the very cases it was
-#     written for has never fired);
+#   - the RULE, against what git-cliff itself does (measured, and re-measured
+#     here whenever git-cliff is installed): subjects that already landed and
+#     were dropped are red, kept ones are green, a skip rule reddens a
+#     Conventional subject and a legacy group rule greens a non-Conventional one;
+#   - the DERIVATION: the rules the script reads out of cliff.toml agree with
+#     an independent scrape, in order and in kind;
 #   - the SELECTION: a one-commit PR is judged by its commit's subject, a larger
 #     PR by its title (measured on merged PRs, see the script header);
 #   - the ZERO-TARGET answer: no subject, no commit count, an unreadable head,
-#     or a cliff.toml the derivation cannot read must be exit 2, never 0.
+#     an option without a value, or a cliff.toml the derivation cannot read
+#     must be exit 2, never 0.
 
 setup() {
   load 'test_helper'
@@ -20,15 +25,48 @@ setup() {
   export AGMSG_CLIFF_CONFIG="$REPO_ROOT/cliff.toml"
 }
 
-# A one-line cliff.toml fixture with exactly the parsers given, so the
-# derivation can be pointed at a file whose contents the test controls.
-_cliff_fixture() {   # <parser message patterns...>
-  local f="$BATS_TEST_TMPDIR/cliff.toml" p
+# The subjects this file judges, with git-cliff's own verdict for each under
+# the real cliff.toml (measured with git-cliff 2.10.1, 2026-09-07). One table,
+# read by the rule tests AND by the git-cliff cross-check, so the two cannot
+# drift apart.
+_subject_table() {
+  cat <<'EOF'
+keep|feat(spawn): set the pane's agent key at spawn so codex seats are not left nameless
+keep|fix: refuse a non-string envelope.blob
+keep|perf(sync): check a pulled wire id without a process
+keep|feat!: drop the legacy index
+keep|Add native Windows support for the launcher
+keep|Role-to-session affinity: pin the seat
+keep|feature-flag: kept by the ^feat rule, Conventional or not
+drop|Naming is an invariant every entry point re-asserts, and the roster can see it (#1044)
+drop|Remove internal handles from the published tree, and check for them by identifier context
+drop|spawn: launch codex through the bundled monitor shim, and refuse a bare fallback
+drop|Reduce repeated ciphertext literals in pull apply
+drop|chore(ci): pin the runner image
+drop|release: 1.3.0
+drop|ci: a Conventional subject that a skip rule drops
+drop|chore: native windows bits
+drop|Feat: capitalised
+drop|Something unrelated in the subject
+EOF
+}
+
+# A one-line cliff.toml fixture with exactly the parsers given (`skip:<re>` or
+# `keep:<re>`), preceded by any extra [git] lines, so the derivation can be
+# pointed at a file whose contents the test controls.
+_cliff_fixture() {   # <extra-git-lines> <rule>...
+  local f="$BATS_TEST_TMPDIR/cliff-$RANDOM.toml" extra="$1" r
+  shift
   {
     echo '[git]'
+    [ -z "$extra" ] || printf '%s\n' "$extra"
     echo 'commit_parsers = ['
-    for p in "$@"; do printf '  { message = "%s", group = "x" },\n' "$p"; done
-    echo '  { message = ".*", skip = true },'
+    for r in "$@"; do
+      case "$r" in
+        skip:*) printf '  { message = "%s", skip = true },\n' "${r#skip:}" ;;
+        keep:*) printf '  { message = "%s", group = "x" },\n' "${r#keep:}" ;;
+      esac
+    done
     echo ']'
   } > "$f"
   printf '%s' "$f"
@@ -42,81 +80,134 @@ _repo_with_commit() {   # <subject>
   git -C "$d" rev-parse HEAD
 }
 
-# --- the rule ---------------------------------------------------------------------
+# --- the rule, both directions ------------------------------------------------------
 
-@test "each subject that already landed prefix-less is red" {
-  # The cases this exists for. Measured on integration/terminal-driver-v1 and
-  # main (2026-09-07); `spawn:` has the shape of a type and is not one.
-  local s
-  while IFS= read -r s; do
+@test "every subject in the table gets git-cliff's measured verdict: kept is green, dropped is red" {
+  local exp s rc
+  while IFS='|' read -r exp s; do
     run bash "$CHECK" --subject "$s"
-    [ "$status" -eq 1 ] || { echo "accepted: $s"; return 1; }
-    grep -q 'dropped from the release notes' <<<"$output" || { echo "no reason for: $s"; return 1; }
-  done <<'EOF'
-Naming is an invariant every entry point re-asserts, and the roster can see it (#1044)
-Remove internal handles from the published tree, and check for them by identifier context
-spawn: launch codex through the bundled monitor shim, and refuse a bare fallback
-Reduce repeated ciphertext literals in pull apply
-EOF
+    case "$exp" in keep) rc=0 ;; drop) rc=1 ;; esac
+    [ "$status" -eq "$rc" ] || { echo "expected $exp (exit $rc), got exit $status for: $s"; echo "$output"; return 1; }
+  done < <(_subject_table)
 }
 
-@test "a subject with a type cliff.toml keeps is green, scope and bang included" {
-  local s
-  while IFS= read -r s; do
-    run bash "$CHECK" --subject "$s"
-    [ "$status" -eq 0 ] || { echo "rejected: $s -- $output"; return 1; }
-  done <<'EOF'
-feat(spawn): set the pane's agent key at spawn so codex seats are not left nameless
-fix: refuse a non-string envelope.blob
-perf(sync): check a pulled wire id without a process
-release: 1.3.0
-chore(ci): pin the runner image
-feat!: drop the legacy index
-EOF
+@test "the table itself has both directions and both distinctions" {
+  # A table with only one direction would make the test above vacuous. It must
+  # hold a Conventional subject that is DROPPED (skip rule) and a
+  # non-Conventional one that is KEPT (legacy group rule).
+  _subject_table | grep -q '^drop|chore(ci):'
+  _subject_table | grep -q '^drop|release:'
+  _subject_table | grep -q '^keep|Add native Windows'
+  _subject_table | grep -q '^keep|Role-to-session affinity'
+  [ "$(_subject_table | grep -c '^keep|')" -ge 5 ]
+  [ "$(_subject_table | grep -c '^drop|')" -ge 5 ]
 }
 
-@test "the shape is exact: unknown type, missing space, wrong case are red" {
-  local s
-  while IFS= read -r s; do
-    run bash "$CHECK" --subject "$s"
-    [ "$status" -eq 1 ] || { echo "accepted: $s"; return 1; }
-  done <<'EOF'
-feature-flag: gate the new path
-feat:no space after the colon
-Feat: capitalised type
-feat (spawn): space before the scope
-EOF
+@test "the table agrees with git-cliff itself when git-cliff is installed" {
+  # The strongest control: the same subjects as commits in a fixture repo, the
+  # real cliff.toml, and git-cliff's own --unreleased output. Skipped, visibly,
+  # where git-cliff is absent (CI runners do not ship it).
+  command -v git-cliff >/dev/null 2>&1 || skip "git-cliff not installed; the table is the measured record"
+  local d="$BATS_TEST_TMPDIR/cliffrepo" cfg="$BATS_TEST_TMPDIR/cliff-ids.toml" exp s sha kept n=0
+  # The real [git] section, verbatim -- the rules are used, not copied -- under
+  # a template that prints commit ids, because the real template renders the
+  # description with the type stripped and capitalised, which is not
+  # comparable to a subject.
+  {
+    printf '[changelog]\nbody = """\n{%% for commit in commits %%}{{ commit.id }}\n{%% endfor %%}"""\n'
+    awk '/^\[git\]/{f=1} f' "$REPO_ROOT/cliff.toml"
+  } > "$cfg"
+  grep -q '^commit_parsers' "$cfg" || { echo "the [git] section did not carry over"; return 1; }
+  git init -q "$d"
+  git -C "$d" -c user.name=t -c user.email=t@x commit -q --allow-empty -m 'chore: init'
+  git -C "$d" tag v0.0.1
+  : > "$BATS_TEST_TMPDIR/rows"
+  while IFS='|' read -r exp s; do
+    git -C "$d" -c user.name=t -c user.email=t@x commit -q --allow-empty -m "$s"
+    printf '%s|%s|%s\n' "$(git -C "$d" rev-parse HEAD)" "$exp" "$s" >> "$BATS_TEST_TMPDIR/rows"
+  done < <(_subject_table)
+  kept="$(cd "$d" && git-cliff --config "$cfg" --unreleased --strip all 2>/dev/null | grep -E '^[0-9a-f]{40}$')"
+  [ -n "$kept" ] || { echo "git-cliff listed nothing; the fixture or the template is broken"; return 1; }
+  while IFS='|' read -r sha exp s; do
+    n=$((n + 1))
+    if grep -qx "$sha" <<<"$kept"; then
+      [ "$exp" = keep ] || { echo "git-cliff KEPT a subject the table says drop: $s"; return 1; }
+    else
+      [ "$exp" = drop ] || { echo "git-cliff DROPPED a subject the table says keep: $s"; return 1; }
+    fi
+  done < "$BATS_TEST_TMPDIR/rows"
+  [ "$n" -eq "$(_subject_table | wc -l | tr -d ' ')" ]
 }
 
-@test "the type set is derived from cliff.toml, not retyped: a new type is accepted without editing the script" {
-  # Differential pair on the same subject; only the fixture differs.
+@test "first match wins: a skip rule before a keep rule drops, and the reverse keeps" {
+  # Differential pair on one subject; only the order of the two rules differs.
   export AGMSG_CLIFF_CONFIG
-  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '^feat' '^fix')"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'skip:^chore' 'keep:(?i)native windows' 'skip:.*')"
+  run bash "$CHECK" --subject 'chore: native windows bits'
+  [ "$status" -eq 1 ]
+  grep -q 'dropped by parser 1' <<<"$output"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:(?i)native windows' 'skip:^chore' 'skip:.*')"
+  run bash "$CHECK" --subject 'chore: native windows bits'
+  [ "$status" -eq 0 ]
+  grep -q 'kept by parser 1' <<<"$output"
+}
+
+@test "filter_unconventional absent means git-cliff's default, which drops a non-Conventional subject before any rule" {
+  # Measured: with the key absent, a subject that matches a keep rule is still
+  # dropped unless it has the <type>: shape. Differential pair: same rules,
+  # same subject, only the key differs.
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '' 'keep:(?i)native windows' 'skip:.*')"
+  run bash "$CHECK" --subject 'Add native Windows support'
+  [ "$status" -eq 1 ]
+  grep -q 'filter_unconventional=true' <<<"$output"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:(?i)native windows' 'skip:.*')"
+  run bash "$CHECK" --subject 'Add native Windows support'
+  [ "$status" -eq 0 ]
+}
+
+@test "the checker judges the subject line only (a body that would rescue it is out of scope, and says so)" {
+  # Measured divergence, pinned so a change is deliberate: git-cliff also
+  # searches the body with unanchored rules. The checker reads one line.
+  grep -q 'judges the SUBJECT' "$CHECK"
+  run bash "$CHECK" --subject 'Body rescue test subject'
+  [ "$status" -eq 1 ]
+}
+
+# --- the derivation ---------------------------------------------------------------
+
+@test "the rules are derived from cliff.toml, not retyped: a rule added there is honoured without editing the script" {
+  export AGMSG_CLIFF_CONFIG
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:^feat' 'skip:.*')"
   run bash "$CHECK" --subject 'wibble: a subject of a type nobody has yet'
   [ "$status" -eq 1 ]
-  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '^feat' '^fix' '^(wibble|wobble)')"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture 'filter_unconventional = false' 'keep:^feat' 'keep:^(wibble|wobble)' 'skip:.*')"
   run bash "$CHECK" --subject 'wibble: a subject of a type nobody has yet'
   [ "$status" -eq 0 ]
 }
 
-@test "the derivation reads the real cliff.toml the same way an independent scrape does" {
-  # Canary for the sed in the script: a second, cruder scrape of the same file
-  # must agree, and both must find a type that lives only in an alternation
-  # (`chore`) and one that is skipped rather than grouped (`release`).
+@test "--parsers agrees with an independent scrape of the real cliff.toml, in order and in kind" {
+  # Canary for the parser in the script: a second, cruder scrape of the same
+  # file must produce the same list. Both must see a skip rule, a keep rule,
+  # an unanchored legacy rule and the trailing catch-all.
   local expected got
-  expected="$(grep -oE 'message *= *"\^[a-z(][a-z|)]*' "$REPO_ROOT/cliff.toml" \
-    | sed -E 's/.*"\^//; s/[()]//g' | tr '|' '\n' | sort -u)"
-  got="$(bash "$CHECK" --subject 'not: a real one' 2>&1 >/dev/null | grep -A1 'derived from cliff.toml' | tail -1 | tr ' ' '\n' | sed '/^$/d' | sort -u)"
-  [ "$got" = "$expected" ]
-  grep -qx chore <<<"$got"
-  grep -qx release <<<"$got"
+  expected="$(awk '/^commit_parsers *= *\[/{f=1; next} f && /^\]/{exit} f' "$REPO_ROOT/cliff.toml" \
+    | grep -oE 'message *= *"[^"]*".*' \
+    | awk -F'"' '{ kind = ($0 ~ /skip *= *true/) ? "skip" : "keep"; printf "%d\t%s\t%s\n", NR, kind, $2 }')"
+  got="$(bash "$CHECK" --parsers | tail -n +2)"
+  [ "$got" = "$expected" ] || { echo "script:"; echo "$got"; echo "scrape:"; echo "$expected"; return 1; }
+  grep -qE $'\tskip\t\\^\\(chore' <<<"$got"
+  grep -qE $'\tkeep\t\\^feat$' <<<"$got"
+  grep -qF $'\tkeep\t(?i)native windows' <<<"$got"
+  [ "$(tail -1 <<<"$got")" = "$(printf '%s\tskip\t.*' "$(wc -l <<<"$got" | tr -d ' ')")" ]
+  [ "$(bash "$CHECK" --parsers | head -1)" = 'filter_unconventional=false' ]
 }
 
 # --- the selection: which subject would land ------------------------------------
 
 @test "a one-commit PR is judged by its commit subject, even when the PR title is fine" {
   # The asymmetric case that a title-only check gets wrong: #1043 landed
-  # prefix-less under a fine-looking review, because the commit is what lands.
+  # dropped under a fine-looking review, because the commit is what lands.
   local sha
   sha="$(_repo_with_commit 'Reduce repeated ciphertext literals in pull apply')"
   run bash "$CHECK" --title 'fix(sync): reduce repeated ciphertext literals' --commits 1 --head "$sha" --repo "$BATS_TEST_TMPDIR/repo"
@@ -144,15 +235,17 @@ EOF
   grep -q 'the PR title' <<<"$output"
 }
 
-@test "the verdict names what it checked, in both directions" {
+@test "the verdict names what it checked and which rule decided, in both directions" {
   # A green that does not say which subject it read is indistinguishable from
   # a green that read nothing.
   run bash "$CHECK" --subject 'fix: something'
   [ "$status" -eq 0 ]
-  grep -q 'checked the subject given on the command line' <<<"$output"
+  grep -q 'Checked the subject given on the command line' <<<"$output"
+  grep -q 'kept by parser' <<<"$output"
   run bash "$CHECK" --subject 'something'
   [ "$status" -eq 1 ]
   grep -q '^Checked: the subject given on the command line' <<<"$output"
+  grep -q 'dropped by parser' <<<"$output"
 }
 
 # --- zero targets are not a pass --------------------------------------------------
@@ -161,6 +254,27 @@ EOF
   run bash "$CHECK"
   [ "$status" -eq 2 ]
   grep -q 'nothing to check is not a pass' <<<"$output"
+}
+
+@test "an option without its value is exit 2 and does not loop" {
+  # `shift 2` with one argument left fails WITHOUT shifting; with no errexit
+  # the loop would spin on the same argument forever. Bounded wait, so a
+  # regression here is a red, not a hung suite.
+  local pid i
+  bash "$CHECK" --title >"$BATS_TEST_TMPDIR/out" 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    echo "still running after 5s: the option loop did not terminate"
+    return 1
+  fi
+  wait "$pid" && return 1
+  [ $? -eq 2 ]
+  grep -q 'needs a value' "$BATS_TEST_TMPDIR/out"
 }
 
 @test "a missing or non-numeric commit count is exit 2" {
@@ -188,17 +302,20 @@ EOF
 }
 
 @test "a cliff.toml the derivation cannot read is exit 2 even for a good subject" {
-  # Differential pair on one good subject: only the config differs. The first
-  # has no parsers at all; the second has parsers but not the canaries.
+  # Differential set on one good subject: only the config differs. Missing
+  # file; parsers but no keep rule; parsers but no skip rule; then a usable one.
   export AGMSG_CLIFF_CONFIG
   AGMSG_CLIFF_CONFIG="$BATS_TEST_TMPDIR/missing.toml"
   run bash "$CHECK" --subject 'feat: fine'
   [ "$status" -eq 2 ]
-  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '^(chore|ci)')"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '' 'skip:^chore' 'skip:.*')"
   run bash "$CHECK" --subject 'feat: fine'
   [ "$status" -eq 2 ]
-  grep -q "do not include 'feat'" <<<"$output"
-  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '^feat' '^fix')"
+  grep -q 'no usable commit_parsers' <<<"$output"
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '' 'keep:^feat')"
+  run bash "$CHECK" --subject 'feat: fine'
+  [ "$status" -eq 2 ]
+  AGMSG_CLIFF_CONFIG="$(_cliff_fixture '' 'keep:^feat' 'skip:.*')"
   run bash "$CHECK" --subject 'feat: fine'
   [ "$status" -eq 0 ]
 }
