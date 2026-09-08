@@ -565,3 +565,14 @@ EOF
   [ "$output" = moved ]
   grep -q '^tmux \[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]$' "$ARGV_LOG"
 }
+
+@test "arrange: legacy bare tmux anchor references remain accepted" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  _install_fake_tmux_arrange
+  _write_named_record alice 'tmux:%1'
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|0|41|40|10'
+  run bash "$SCRIPTS/arrange.sh" testteam alice swap %2
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '^tmux \[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]$' "$ARGV_LOG"
+}
