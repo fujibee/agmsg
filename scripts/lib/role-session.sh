@@ -141,9 +141,16 @@ agmsg_role_session_load() {
 agmsg_role_session_record() {
   local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
-  local path dir tmp ts
+  local path dir tmp ts named_ref="" named_epoch="" named_at=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
+  # The naming mark (named_ref / named_at, see agmsg_role_session_mark_named)
+  # survives a re-record: this function rewrites the session fields, and the
+  # mark is a fact about the PANE, not about the session. Dropping it here
+  # would cost one terminal round trip on the seat's next action for nothing.
+  named_ref="$(_agmsg_role_session_field "$path" named_ref)"
+  named_epoch="$(_agmsg_role_session_field "$path" named_epoch)"
+  named_at="$(_agmsg_role_session_field "$path" named_at)"
   dir="$(_actas_lock_dir)"
   mkdir -p "$dir" 2>/dev/null || true
   tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
@@ -156,9 +163,77 @@ agmsg_role_session_record() {
     printf 'type=%s\n' "$type"
     printf 'project=%s\n' "$project"
     printf 'updated_at=%s\n' "$ts"
+    [ -z "$named_ref" ] || printf 'named_ref=%s\n' "$named_ref"
+    [ -z "$named_ref" ] || printf 'named_epoch=%s\n' "$named_epoch"
+    [ -z "$named_at" ] || printf 'named_at=%s\n' "$named_at"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
   mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   return 0
+}
+
+# The naming mark: "agmsg named the pane <ref> for this (team, agent)". It is a
+# record of what agmsg DID, not a guarantee of what the terminal shows now --
+# a pane can be closed and reused by another seat, and a terminal can restart
+# and forget the name while the mark survives. So a reader compares named_ref
+# with the pane it is in NOW (see agmsg_self_name_on_action) and treats any
+# difference as "not named"; a reference that carries the terminal server's
+# identity (tmux: $TMUX, with the server pid inside) invalidates itself on a
+# restart, one that does not (herdr: the pane id alone) cannot, and that case
+# is named as a blind spot where the hook is documented.
+#
+# Every other field of the record is preserved; a record that does not exist
+# yet (a seat that never went through actas/session-start, e.g. one started by
+# hand) is created with the identity fields and no session line -- every
+# reader of this file is fail-open on a missing field.
+#
+#   agmsg_role_session_mark_named <team> <agent> <ref> <epoch> [<project>] [<type>]
+#
+# <epoch> is the terminal server's generation as the environment shows it
+# (tmux: the server pid inside $TMUX; herdr: inode and ctime of the socket at
+# $HERDR_SOCKET_PATH, which the server recreates when it starts). A restarted
+# server changes it, so a mark made against the old server no longer matches
+# even when the pane reference is reused unchanged.
+agmsg_role_session_mark_named() {
+  local team="$1" agent="$2" ref="$3" epoch="${4:-}" project="${5:-}" type="${6:-}"
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$ref" ] || return 0
+  local path dir tmp ts line
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  dir="$(_actas_lock_dir)"
+  mkdir -p "$dir" 2>/dev/null || true
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  {
+    if [ -f "$path" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in named_ref=*|named_epoch=*|named_at=*) ;; *) printf '%s\n' "$line" ;; esac
+      done < "$path"
+    else
+      printf 'name=%s-%s\n' "$team" "$agent"
+      printf 'team=%s\n' "$team"
+      printf 'agent=%s\n' "$agent"
+      printf 'type=%s\n' "$type"
+      printf 'project=%s\n' "$project"
+      printf 'updated_at=%s\n' "$ts"
+    fi
+    printf 'named_ref=%s\n' "$ref"
+    printf 'named_epoch=%s\n' "$epoch"
+    printf 'named_at=%s\n' "$ts"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# The mark as "<ref>\t<epoch>", or empty when there is none. One file read;
+# this is the common-case cost of "am I named?" (measured 0.22 ms), which is
+# what lets a seat ask on every action.
+agmsg_role_session_named() {
+  local team="$1" agent="$2" ref epoch
+  _agmsg_role_session_path_into "$team" "$agent"
+  ref="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" named_ref)"
+  [ -n "$ref" ] || return 0
+  epoch="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" named_epoch)"
+  printf '%s\t%s\n' "$ref" "$epoch"
 }
 
 # Read a single field from a role's record by (team, agent). Empty if absent.

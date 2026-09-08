@@ -381,6 +381,55 @@ agmsg_terminal_ref() {
   printf '%s:%s\n' "$1" "$2"
 }
 
+# The terminal server's generation, as the ENVIRONMENT shows it -- no call to
+# the terminal. This is what lets a naming mark (role-session named_epoch)
+# notice that the server it was made against has been restarted, the case in
+# which the pane reference can survive unchanged while the name it carried is
+# gone. Empty when the terminal offers nothing of the kind.
+#
+#   tmux   the server pid, the middle field of $TMUX ("socket,pid,index")
+#   herdr  inode and ctime of the socket at $HERDR_SOCKET_PATH: the server
+#          creates that file when it starts (measured: its ctime is the last
+#          server start), so a restart recreates it. stat's flags differ
+#          between BSD and GNU; both are tried, and no stat at all is "".
+#   plain  nothing to observe
+agmsg_terminal_epoch() {   # <terminal>
+  case "$1" in
+    tmux)
+      [ -n "${TMUX:-}" ] || return 0
+      local rest="${TMUX#*,}"
+      printf 'pid=%s\n' "${rest%%,*}" ;;
+    herdr)
+      [ -n "${HERDR_SOCKET_PATH:-}" ] || return 0
+      local s=""
+      s="$(stat -f '%i:%c' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
+        || s="$(stat -c '%i:%Z' "$HERDR_SOCKET_PATH" 2>/dev/null)" \
+        || s=""
+      [ -z "$s" ] || printf 'sock=%s\n' "$s" ;;
+  esac
+  return 0
+}
+
+# The pane this process is in, from the ENVIRONMENT alone: no driver loaded, no
+# terminal called. Prints "<terminal>\t<id>\t<epoch>" or nothing. This is the
+# fast half of self-naming on action: a seat that finds its mark equal to this
+# never touches the terminal (measured 0.22 ms for the file read). It answers
+# the same question as agmsg_terminal_resolve_name("") for tmux and herdr --
+# tmux from $TMUX/$TMUX_PANE (the driver's terminal_detect reads exactly those),
+# herdr from HERDR_PANE_ID (the driver's terminal_detect now prefers it too).
+# Under neither, nothing: plain has no pane to name.
+agmsg_terminal_self_env() {
+  if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+    printf 'tmux\t%s:%s\t%s\n' "${TMUX%%,*}" "$TMUX_PANE" "$(agmsg_terminal_epoch tmux)"
+    return 0
+  fi
+  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    printf 'herdr\t%s\t%s\n' "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
+    return 0
+  fi
+  return 0
+}
+
 # Print the terminal name of a record ref (stdout). Handles legacy bare ids.
 # Is <id> a well-formed id for <terminal>? The SINGLE authority for the per-terminal
 # bare-id grammar, shared by agmsg_terminal_ref_terminal (below) and the herdr
@@ -589,7 +638,26 @@ agmsg_terminal_name_self() {
     return "$rc"
   fi
 
-  # Named. Whether that ALSO makes this pane the seat's recorded placement is the
+  # Named. Leave the mark that says so -- "agmsg named pane <ref> of server
+  # generation <epoch> for this seat" -- in the seat's role-session record, so
+  # the next action reads one file instead of calling the terminal (see
+  # agmsg_self_name_on_action). Every path that names writes the same mark
+  # here, which is what makes "whichever path runs first" produce the same
+  # state. Best-effort: a mark that cannot be written costs one round trip on
+  # the next action, nothing else, and must never turn a successful naming
+  # into a failure.
+  if ! declare -F agmsg_role_session_mark_named >/dev/null 2>&1 \
+     && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/role-session.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || true
+  fi
+  if declare -F agmsg_role_session_mark_named >/dev/null 2>&1; then
+    agmsg_role_session_mark_named "$team" "$agent" \
+      "$(agmsg_terminal_ref "$terminal" "$id")" "$(agmsg_terminal_epoch "$terminal")" \
+      "$project" "$type" || true
+  fi
+
+  # Whether that ALSO makes this pane the seat's recorded placement is the
   # caller's claim to make, not this function's.
   [ "$write_record" = record ] || return 0
 

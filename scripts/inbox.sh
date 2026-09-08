@@ -16,6 +16,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
+# A seat that reads its inbox names its own pane if it is not named
+# (self-name.sh); see send.sh. Best-effort, never fails the read.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-name.sh"
+agmsg_self_name_on_action "$TEAM" "$AGENT"
+
 # An inbox check must not create the store, so a team that has never been
 # written to has no file yet. Since the stores split per team that is the
 # ORDINARY state of a freshly joined team, not a broken install — before the

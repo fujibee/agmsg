@@ -23,6 +23,14 @@ source "$SCRIPT_DIR/lib/validate.sh"
 # never bypass team-name path safety.
 agmsg_validate_team_name "$TEAM" || exit 1
 
+# A seat that sends names its own pane if it is not named (self-name.sh): the
+# 1.3.0 rule that every live seat's terminal id/name is right in any state,
+# tied to the action rather than to a CLI's boot path. Best-effort, never fails
+# the send; the common case is one file read.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-name.sh"
+agmsg_self_name_on_action "$TEAM" "$FROM"
+
 agmsg_storage_load
 DB="$(agmsg_db_path "$TEAM")"
 
