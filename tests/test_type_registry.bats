@@ -173,8 +173,9 @@ write_node_launcher_fixtures() {
 @test "every agent template exposes declarative arrange without adding a public where verb" {
   local template
   for template in "$SCRIPTS"/drivers/types/*/template.md; do
-    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-agent>' "$template"
+    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-ref>' "$template"
     grep -q '`moved` as a performed move and `unchanged`' "$template"
+    grep -q '`swap` is not' "$template"
     [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
   done
 }
