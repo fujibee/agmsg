@@ -114,6 +114,14 @@ _reap_test_skill_dir_procs() {
 }
 
 teardown_test_env() {
+  # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
+  # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
+  # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
+  # that dominates the runtime and pushes CI shards over their timeout. The race it fixes
+  # is rare (only the codex tests spawn the detached launcher), and it announces itself
+  # as a non-zero rm ("Directory not empty" / "Device or resource busy"), so pay the cost
+  # exactly there: on failure, reap the TEST_SKILL_DIR-scoped holders and retry.
+  rm -rf "$TEST_SKILL_DIR" 2>/dev/null && return 0
   _reap_test_skill_dir_procs
   rm -rf "$TEST_SKILL_DIR"
 }
