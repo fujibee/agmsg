@@ -377,12 +377,14 @@ PS1
   ! grep -q "__SKILL_NAME__" "$SK/SKILL.md"
 }
 
-# Regression guard for #83: the plugin's SKILL.md is consumed verbatim by the
-# Claude Code plugin install path, so it must not carry the install-time
-# __SKILL_NAME__ placeholder (which install.sh substitutes for the
-# generated-per-agent-type SKILL.md, but the plugin install does not).
-@test "plugin SKILL.md: repo SKILL.md has no unsubstituted __SKILL_NAME__ placeholder" {
-  ! grep -q "__SKILL_NAME__" "$REPO_ROOT/SKILL.md"
+# The root file is now a source template, so placeholders are expected there.
+# The renderer is the boundary that must remove them from every generated
+# artifact.
+@test "skill renderer substitutes every install-time placeholder" {
+  local rendered="$FAKE_HOME/rendered-codex.md"
+  run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill codex agmsg "$2"' _ "$REPO_ROOT" "$rendered"
+  [ "$status" -eq 0 ]
+  ! grep -q "__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__" "$rendered"
 }
 
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
@@ -1280,46 +1282,12 @@ CYG
   [ "$before" = "664" ]
 }
 
-# The repo's own SKILL.md is NOT what an install puts on disk: install.sh renders
-# `$SKILL_DIR/SKILL.md` from `scripts/drivers/types/<type>/template.md` (one sed
-# over __SKILL_NAME__). So an edit to the root SKILL.md alone ships nothing —
-# #1022 added a policy paragraph there, and all nine templates, and therefore
-# every installed skill, went out without it. The tests were green; the change
-# was inert.
-#
-# This asserts the slot rather than a list of remembered sentences: everything
-# between the "NEVER directly read" line and "**Shell requirement:**" must be
-# byte-identical in the root and in every template. A checked-in list of markers
-# would need someone to remember to extend it, which is the same failure one
-# level up; a slot comparison covers the next paragraph nobody has written yet.
 @test "policy paragraphs in SKILL.md reach every installed skill, not just the repo's own" {
-  local root="$BATS_TEST_DIRNAME/.."
-  local t out_root out_t n=0
-
-  extract() {
-    awk '
-      /There is NO register\.sh/        { grab = 1; next }
-      /\*\*Shell requirement:\*\*/      { grab = 0 }
-      grab                              { print }
-    ' "$1" | sed -e '/^[[:space:]]*$/d'
-  }
-
-  out_root="$(extract "$root/SKILL.md")"
-  # The slot is not empty — otherwise this test passes on two files that both
-  # lost the paragraph, which is exactly the state it exists to reject.
-  [ -n "$out_root" ]
-
-  for t in "$root"/scripts/drivers/types/*/template.md; do
-    [ -e "$t" ] || continue
-    n=$((n + 1))
-    out_t="$(extract "$t")"
-    if [ "$out_t" != "$out_root" ]; then
-      echo "template diverges from SKILL.md: $t" >&2
-      diff <(printf '%s\n' "$out_root") <(printf '%s\n' "$out_t") >&2 || true
-      return 1
-    fi
+  local type rendered
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    rendered="$FAKE_HOME/$type-policy.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$BATS_TEST_DIRNAME/.." "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    grep -Fq "There is NO register.sh" "$rendered"
   done
-
-  # And the loop actually ran over the templates rather than over nothing.
-  [ "$n" -ge 9 ]
 }

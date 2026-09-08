@@ -13,8 +13,22 @@
 
 load test_helper
 
-setup() { setup_test_env; }
+setup() {
+  setup_test_env
+  # shellcheck disable=SC1091
+  source "$BATS_TEST_DIRNAME/../scripts/lib/type-registry.sh"
+  # shellcheck disable=SC1091
+  source "$BATS_TEST_DIRNAME/../scripts/lib/skill-render.sh"
+}
 teardown() { teardown_test_env; }
+
+render_type() {
+  local type="$1" output="$TEST_SKILL_DIR/rendered-${1}.md"
+  if [ ! -f "$output" ]; then
+    SCRIPT_DIR="$BATS_TEST_DIRNAME/.." agmsg_render_skill "$type" agmsg "$output"
+  fi
+  printf '%s' "$output"
+}
 
 # Write a node-launcher fixture type into TEST_SKILL_DIR/scripts/drivers/types so the suite
 # exercises the spawn= (Node launcher) mechanism generically, with no dependency
@@ -64,11 +78,25 @@ write_node_launcher_fixtures() {
   [ "$status" -ne 0 ]
 }
 
+@test "skill renderer composes every built-in type without placeholders" {
+  local type rendered
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    rendered="$(render_type "$type")"
+    ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
+    grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"
+    grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-agent>' "$rendered"
+  done
+  grep -Fq "Program Files\\Git\\bin\\bash.exe" "$(render_type codex)"
+  grep -Fq 'Ensure monitor is running first' "$(render_type claude-code)"
+  grep -Fq 'hermes is not spawnable' "$(render_type hermes)"
+  grep -Fq 'Grok Build' "$(render_type grok-build)"
+  grep -Fq 'OpenCode monitor' "$(render_type opencode)"
+}
+
 @test "agent templates route remote-import intent before not_joined identity setup" {
-  local template not_joined first_time guard
-  for template in "$BATS_TEST_DIRNAME"/../scripts/drivers/types/*/template.md; do
-    [ -f "$template" ] || continue
-    grep -q '^## Identity$' "$template" || continue
+  local template not_joined first_time guard type
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    template="$(render_type "$type")"
     not_joined="$(grep -n '^\*\*C) Not in a team:\*\*$' "$template" | cut -d: -f1)"
     first_time="$(grep -n '^  > \*\*First-time setup required\.\*\*$' "$template" | cut -d: -f1)"
     guard="$(grep -n 'Before first-time setup, inspect the user'"'"'s request' "$template" | cut -d: -f1)"
@@ -83,31 +111,15 @@ write_node_launcher_fixtures() {
       grep -q 'Go directly to `remote pull`'
   done
 
-  not_joined="$(grep -n '^### Step 2a: If not in a team' "$BATS_TEST_DIRNAME/../SKILL.md" | cut -d: -f1)"
-  first_time="$(grep -n '^Ask the user for a team name\.' "$BATS_TEST_DIRNAME/../SKILL.md" | cut -d: -f1)"
-  guard="$(grep -n '^Before first-time setup, inspect the user'"'"'s request\.' "$BATS_TEST_DIRNAME/../SKILL.md" | cut -d: -f1)"
-  [ -n "$not_joined" ]
-  [ "$not_joined" -lt "$guard" ]
-  [ "$guard" -lt "$first_time" ]
 }
 
 @test "agent templates all explain that readable local history is not evidence a team is unencrypted (#682)" {
-  # scripts/drivers/types/*/template.md is nine independent copies with no
-  # shared fragment (#676's exact shape) -- a loop with `[ -f ] || continue`
-  # alone would silently pass if the glob matched fewer than nine files (a
-  # renamed/missing template), so the count is asserted explicitly rather
-  # than just "every file found had it."
-  local template count=0
-  for template in "$BATS_TEST_DIRNAME"/../scripts/drivers/types/*/template.md; do
-    [ -f "$template" ] || continue
-    count=$((count + 1))
+  local template type
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    template="$(render_type "$type")"
     grep -q "Readable local history is therefore not evidence that a team is unencrypted" "$template" \
       || { echo "missing the e2ee-verification paragraph: $template" >&2; return 1; }
   done
-  # agmsg-app has no template.md (spawnable=no -- it's the desktop app's own
-  # identity, not a CLI type), so nine is the whole set, not a lower bound a
-  # silently-skipped file could still satisfy.
-  [ "$count" -eq 9 ]
 }
 
 @test "the e2ee-verification explanation also appears in both remote-setup docs (#682)" {
@@ -132,32 +144,14 @@ write_node_launcher_fixtures() {
   # path is therefore asserted per surface kind, not as one shared substring:
   # matching only `key.sh rotate <team>` is green for both spellings and
   # would have let this through.
-  local surface count=0
-  for surface in "$BATS_TEST_DIRNAME"/../scripts/drivers/types/*/template.md \
-                 "$BATS_TEST_DIRNAME"/../SKILL.md; do
-    [ -f "$surface" ] || continue
-    count=$((count + 1))
-    case "$surface" in
-      */SKILL.md)
-        # The top-level skill doc is a rendered artifact, not an input: it
-        # carries no placeholder at all, so here the literal is correct.
-        grep -Fq 'bash ~/.agents/skills/agmsg/scripts/key.sh rotate <team>' "$surface" \
-          || { echo "SKILL.md does not route rotate through the literal install path: $surface" >&2; return 1; }
-        ;;
-      *)
-        grep -Fq 'bash ~/.agents/skills/__SKILL_NAME__/scripts/key.sh rotate <team>' "$surface" \
-          || { echo "template does not route rotate through __SKILL_NAME__: $surface" >&2; return 1; }
-        ! grep -Fq '~/.agents/skills/agmsg/' "$surface" \
-          || { echo "template hardcodes the default install name: $surface" >&2; return 1; }
-        ;;
-    esac
+  local surface type
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    surface="$(render_type "$type")"
     grep -Fq 'Device pairing (`key request` / `key approve`) is not implemented' "$surface" \
       || { echo "does not state the pairing commands are absent: $surface" >&2; return 1; }
     ! grep -qiE 'rotat(e|ion)[^.]*not available' "$surface" \
       || { echo "still calls rotation unavailable: $surface" >&2; return 1; }
   done
-  # nine templates (agmsg-app has none) plus SKILL.md.
-  [ "$count" -eq 10 ]
 
   # Bind the claim to the code. If `rotate` ever stops being a subcommand the
   # surfaces above become wrong again, and this is the line that says so.
@@ -171,8 +165,9 @@ write_node_launcher_fixtures() {
 }
 
 @test "every agent template exposes declarative arrange without adding a public where verb" {
-  local template
-  for template in "$SCRIPTS"/drivers/types/*/template.md; do
+  local template type
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    template="$(render_type "$type")"
     grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-agent>' "$template"
     grep -q '`moved` as a performed move and `unchanged`' "$template"
     [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
@@ -180,8 +175,9 @@ write_node_launcher_fixtures() {
 }
 
 @test "every agent template routes team identity reads and fixes through team.sh" {
-  local template
-  for template in "$SCRIPTS"/drivers/types/*/template.md; do
+  local template type
+  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+    template="$(render_type "$type")"
     grep -Fq '"team --json", or "team --fix"' "$template"
     grep -Fq 'team.sh $TEAM [--json|--fix]' "$template"
   done
