@@ -483,6 +483,7 @@ s.state={'supervisorPhase':'WAITING_FOR_RESULT','batch':{'receipt':'AGMSG_RECEIV
 s.update_human_input_state=lambda: None
 s.maybe_poll=lambda: None
 s.permission_input_ready=lambda: events == ['child']
+s.permission_input_rejection_reason=lambda: None if events == ['child'] else 'permission-before-child'
 def allowed():
     events.append('allowed')
     s.stopping=True
@@ -533,6 +534,7 @@ s.master=master_fd; s.screen=Screen(); s.last_output=0; s.buffer=''; s.result_bu
 s.state={'supervisorPhase':'WAITING_FOR_RESULT','batch':{'receipt':'AGMSG_RECEIVED:batch'}}
 s.update_human_input_state=lambda: None; s.maybe_poll=lambda: None
 s.permission_input_ready=lambda: s.screen.ready
+s.permission_input_rejection_reason=lambda: None if s.screen.ready else 'permission-after-redraw'
 def allowed(): events.append('allowed'); s.stopping=True
 s.allow_permission_input=allowed
 s.fail=lambda reason: (_ for _ in ()).throw(AssertionError(reason))
