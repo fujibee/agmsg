@@ -413,6 +413,18 @@ assert not s.permission_input_ready(), '生成中chromeと受信本文の語句�
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
 assert s.permission_input_ready(), 'Nav行を本文で供給できる合成画面は判定上modalと区別できない'
+s.screen = module.TerminalScreen(40, 154)
+s.screen.feed(('Command\\r\\n' +
+    'Requesting permission for:\\r\\n' +
+    '   ~/.agents/skills/agmsg/scripts/whoami.sh "$(pwd)" agy\\r\\n' +
+    'Do you want to proceed?\\r\\n' +
+    '> 1. Yes\\r\\n' +
+    '  2. Yes, and always allow in this conversation for commands that start with ~/.agents/skills/agmsg/scripts/whoami.sh "$(pwd)" agy\\r\\n' +
+    '  3. Yes, and always allow for commands that start with ~/.agents/skills/agmsg/scripts/whoami.sh "$(pwd)" agy (Persist to settings.json)\\r\\n' +
+    '  4. No\\r\\n' +
+    '  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\\r\\n' +
+    'esc to cancel  Gemini 3.8 Flash · high').encode())
+assert s.permission_input_ready(), 'Orca実画面の長いpermission選択肢も許可UIとして認識する'
 s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': True,
            'humanInputActive': False, 'humanInputSawNonIdle': False,
            'supervisorPhase': 'WAITING_FOR_RESULT'}

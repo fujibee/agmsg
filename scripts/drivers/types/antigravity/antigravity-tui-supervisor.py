@@ -486,13 +486,8 @@ class Supervisor:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
             r,_,_=select.select([sys.stdin.fileno(),self.master],[],[],0.2)
-            if sys.stdin.fileno() in r:
-                data=os.read(sys.stdin.fileno(),4096)
-                if not data: self.stopping=True; break
-                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
-                elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
-                else: self.pause_for_human_input()
-                os.write(self.master,data)
+            # child描画と親入力が同時にreadyなら、画面モデルを先に最新化する。
+            # permission UIの末尾が未反映のまま確認入力を通常入力と誤判定しない。
             if self.master in r:
                 data=os.read(self.master,65536)
                 if not data: self.fail('agy TUIが終了'); break
@@ -507,6 +502,13 @@ class Supervisor:
                         elif self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
                         elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
+            if sys.stdin.fileno() in r:
+                data=os.read(sys.stdin.fileno(),4096)
+                if not data: self.stopping=True; break
+                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
+                elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
+                else: self.pause_for_human_input()
+                os.write(self.master,data)
             self.update_human_input_state()
             self.maybe_poll()
     def run(self):
