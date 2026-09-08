@@ -125,8 +125,31 @@ _actas_lock_try_claim() {
     echo "ok"
     return 0
   fi
-  if [ -z "$existing" ] || ! actas_lock_sid_alive "$existing"; then
+  # `! actas_lock_sid_alive` was true for BOTH "positively dead" and "cannot
+  # tell", and this arm hands the lock to the caller — an undecidable liveness
+  # became a licence to take a role someone may still hold. Only a POSITIVE dead
+  # (rc 1) is stale; rc 2 says so and the caller can retry. (#983)
+  # An EMPTY owner is not "nobody holds it". The lock file is there; its contents
+  # are empty because the write is half-done, the file was truncated, or the read
+  # came back short — none of which is evidence the role is free. It used to reach
+  # the `stale` arm, which hands the lock over. (cc3's #1071 trigger: a torn write
+  # on a busy filesystem, where `head -1` returns empty from a file that exists.)
+  #
+  # Measured before this line existed: the steal did not actually happen, because
+  # the reclaim guard below refuses to `rm` an empty owner — but the VERDICT was
+  # still `stale`, which is a wrong answer that three retries then burn through
+  # and any future caller would believe.
+  if [ -z "$existing" ]; then
+    echo "unknown:owner_empty"
+    return 0
+  fi
+  _alive_rc=0; actas_lock_sid_alive "$existing" || _alive_rc=$?
+  if [ "$_alive_rc" -eq 1 ]; then
     echo "stale"
+    return 0
+  fi
+  if [ "$_alive_rc" -ne 0 ]; then
+    echo "unknown:liveness_undecidable"
     return 0
   fi
   printf 'held:%s\n' "$existing"
@@ -160,8 +183,13 @@ actas_lock_claim() {
         # snuck a live owner in between our stale decision and the mutex,
         # leave it — the next try_claim observes it as held.
         if mkdir "$reclaim_dir" 2>/dev/null; then
-          _owner="$(actas_lock_owner "$team" "$agent")"
-          if [ -z "$_owner" ] || ! actas_lock_sid_alive "$_owner"; then
+          # Reclaim DELETES, so it needs the owner read to have SUCCEEDED and
+          # the liveness to be positively dead. An empty owner can mean "could
+          # not read it"; rc 2 means "could not tell". Neither is evidence that
+          # the lock is abandoned. (#983)
+          _orc=0; _owner="$(actas_lock_owner "$team" "$agent")" || _orc=$?
+          _alive_rc=0; actas_lock_sid_alive "$_owner" || _alive_rc=$?
+          if [ "$_orc" -eq 0 ] && [ -n "$_owner" ] && [ "$_alive_rc" -eq 1 ]; then
             rm -f "$lock_path"
           fi
           rmdir "$reclaim_dir" 2>/dev/null
@@ -173,6 +201,14 @@ actas_lock_claim() {
         continue
         ;;
       held:*)
+        printf '%s\n' "$result"
+        return 1
+        ;;
+      # Same shape as held: report the verdict and refuse. Without this arm the
+      # value fell to the bare `return 1` below and printed NOTHING, so a caller
+      # reading the output could not tell an unverified claim from a plain
+      # failure — and the three call sites branch on that output. (#983)
+      unknown:*)
         printf '%s\n' "$result"
         return 1
         ;;
@@ -216,8 +252,15 @@ actas_lock_gc_stale() {
   local f owner count=0
   for f in "$dir"/actas.*.session; do
     [ -f "$f" ] || continue
-    owner="$(head -1 "$f" 2>/dev/null || true)"
-    if [ -z "$owner" ] || ! actas_lock_sid_alive "$owner"; then
+    # `|| true` discarded the read's status, so an unreadable lock became an
+    # empty owner, which read as "nobody owns it", which read as garbage — and
+    # this is a SWEEP, so one transient read problem did not lose a role, it lost
+    # every role in the directory. Delete only what is positively abandoned: the
+    # read worked, an owner is there, and its session is positively dead. (#983)
+    _orc=0; owner="$(head -1 "$f" 2>/dev/null)" || _orc=$?
+    if [ "$_orc" -ne 0 ] || [ -z "$owner" ]; then continue; fi
+    _alive_rc=0; actas_lock_sid_alive "$owner" || _alive_rc=$?
+    if [ "$_alive_rc" -eq 1 ]; then
       rm -f "$f"
       count=$((count + 1))
     fi
@@ -257,6 +300,22 @@ actas_lock_observe() {
   if ! owner="$(head -1 "$lock" 2>/dev/null)"; then
     # The read failed. Only now ask whether the file is even there: absent is a
     # fact ("free"), present-but-unreadable is not.
+    #
+    # `[ -e ]` alone cannot make that call. It is ALSO false when the parent
+    # directory lacks search permission — the file may be sitting right there and
+    # the test still says "no such thing", so an inaccessible lock directory
+    # reported `free`, which is the answer that makes callers act. (co3.) So the
+    # directory is checked first: if we cannot look inside it, "absent" is not a
+    # conclusion we are entitled to.
+    # The SAME distinction the file gets, applied to the directory: absent is a
+    # fact (nothing has ever been locked here → free), inaccessible is not.
+    # Collapsing them the other way is just as wrong and much louder — a missing
+    # lock directory is the ordinary state of a fresh install, and calling it
+    # `unknown` made spawn refuse to start anything at all (58 tests).
+    local _dir; _dir="${lock%/*}"
+    if [ -e "$_dir" ] && { [ ! -r "$_dir" ] || [ ! -x "$_dir" ]; }; then
+      printf 'unknown:lock_unreadable\t\n'; return 0
+    fi
     if [ -e "$lock" ]; then printf 'unknown:lock_unreadable\t\n'; return 0; fi
     printf 'free\t\n'; return 0
   fi

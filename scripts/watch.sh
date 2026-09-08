@@ -723,6 +723,12 @@ if [ -n "$PAIRS" ]; then
       # now.
       result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null || true)
       case "$result" in
+        # Not `held:` used to mean "we got it", so an unverified verdict would
+        # have subscribed us to a pair whose holder we could not determine. (#983)
+        unknown:*)
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:${result#unknown:})"
+          continue
+          ;;
         held:*)
           held="${held:+$held }${_team}/${_agent}(${result#held:})"
           continue

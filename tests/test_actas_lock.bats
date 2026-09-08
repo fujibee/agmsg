@@ -287,3 +287,98 @@ live_pid() { echo "$$"; }
   agmsg_instance_alive() { return 1; }     # positively dead
   [ "$(actas_lock_state T alice sid-me)" = free ]
 }
+
+@test "observe: a lock DIRECTORY we cannot search is unknown, not free" {
+  # `[ -e "$lock" ]` is false when the parent lacks search permission, so an
+  # inaccessible directory answered "absent" -> `free` -> callers act. The
+  # file-level chmod control does not reach this: there the directory is fine.
+  # (co3)
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  actas_lock_claim T alice sid-me
+  local lock dir; lock="$(actas_lock_path T alice)"; dir="${lock%/*}"
+  [ -f "$lock" ]                            # canary: the lock is really there
+  chmod 000 "$dir"
+  local st; st="$(actas_lock_state T alice sid-other)"
+  chmod 755 "$dir" 2>/dev/null || true
+  [ "$st" = "unknown:lock_unreadable" ]
+}
+
+# --- #983: the DESTRUCTIVE readers act only on a POSITIVE dead -----------------
+
+@test "gc_stale: an unreadable lock is not swept" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  actas_lock_claim T alice sid-ghost
+  local lock; lock="$(actas_lock_path T alice)"
+  chmod 000 "$lock"
+  local n; n="$(actas_lock_gc_stale)"
+  chmod 644 "$lock" 2>/dev/null || true
+  [ "$n" = 0 ]
+  [ -f "$lock" ]                     # still there
+}
+
+@test "gc_stale: a POSITIVELY dead owner is still swept" {
+  # The partner. Without it, "never sweep" passes the test above and stale locks
+  # accumulate forever.
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { return 1; }
+  local lock; lock="$(actas_lock_path T alice)"
+  [ "$(actas_lock_gc_stale)" = 1 ]
+  [ ! -f "$lock" ]
+}
+
+@test "gc_stale: an owner whose liveness cannot be judged is not swept" {
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { return 2; }
+  local lock; lock="$(actas_lock_path T alice)"
+  [ "$(actas_lock_gc_stale)" = 0 ]
+  [ -f "$lock" ]
+}
+
+@test "claim: an undecidable liveness does not read as stale" {
+  # try_claim's `stale` arm hands the lock over. Undecidable must not reach it.
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { return 2; }
+  local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
+  [ "$r" = "unknown:liveness_undecidable" ]
+  [ "$rc" -eq 1 ]                    # refused, not claimed
+  [ "$(actas_lock_owner T alice)" = sid-ghost ]   # and the lock was left alone
+}
+
+@test "claim: a POSITIVELY dead owner is still reclaimed" {
+  # The partner: a genuinely stale lock must still be takeable, or a crashed
+  # session wedges its role permanently.
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { [ "$1" = sid-me ]; }   # sid-ghost dead, sid-me alive
+  # Success prints nothing and returns 0 — the verdict is the exit status here,
+  # not the output. Assert what the function actually does, and that the lock
+  # really changed hands.
+  local rc=0; actas_lock_claim T alice sid-me >/dev/null || rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$(actas_lock_owner T alice)" = sid-me ]
+}
+
+@test "observe: a lock directory that does not exist yet is free, not unknown" {
+  # The partner to the inaccessible-directory control. A fresh install has no
+  # lock directory at all, and calling that `unknown` makes every caller refuse:
+  # measured, spawn stopped starting anything (58 tests red).
+  rm -rf "$(_actas_lock_dir)"
+  [ "$(actas_lock_state T nobody sid-me)" = free ]
+}
+
+@test "claim: an EMPTY lock file is not treated as free to steal" {
+  # A third case, distinct from "unreadable" and from "undecidable": the file is
+  # there and readable, and its contents are empty. That is not "nobody holds
+  # it" — it is a lock written by someone whose write we may be seeing halfway,
+  # or truncated. try_claim's `[ -z "$existing" ]` handed it over. (cc3)
+  actas_lock_claim T alice sid-me
+  : > "$(actas_lock_path T alice)"          # empty, still present
+  # Assert the VERDICT, not only the outcome. Measured before the fix: the steal
+  # did not happen, but only because the reclaim guard refused to rm an empty
+  # owner — try_claim still answered `stale`. A test that checks only "the lock
+  # survived" passes on a wrong verdict held up by a different mechanism.
+  [ "$(_actas_lock_try_claim T alice sid-other)" = 'unknown:owner_empty' ]
+  local r rc=0; r="$(actas_lock_claim T alice sid-other)" || rc=$?
+  [ "$rc" -ne 0 ]
+  refute grep -q '^ok$' <<<"$r"
+  [ -f "$(actas_lock_path T alice)" ]       # and it was not removed
+}

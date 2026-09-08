@@ -81,6 +81,18 @@ while IFS= read -r team; do
   [ -z "$team" ] && continue
   result=$(actas_lock_claim "$team" "$NAME" "$SESSION_ID" 2>/dev/null || true)
   case "$result" in
+    # A claim verdict this caller cannot act on. Everything that is not `held:`
+    # used to mean "claimed", so a new value would have been read as success —
+    # the same permissive default this whole change is about. Roll back like the
+    # held case and say which fact stopped us. (#983)
+    unknown:*)
+      while IFS= read -r c_team; do
+        [ -z "$c_team" ] && continue
+        actas_lock_release "$c_team" "$NAME" "$SESSION_ID" 2>/dev/null || true
+      done <<< "$claimed"
+      printf 'status=unverified team=%s reason=%s\n' "$team" "${result#unknown:}"
+      exit 1
+      ;;
     held:*)
       # Roll back any partial claims so the user can retry cleanly.
       while IFS= read -r c_team; do

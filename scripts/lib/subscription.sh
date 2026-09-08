@@ -71,6 +71,12 @@ agmsg_subscription_pairs() {
     if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
       result=$(actas_lock_claim "$team" "$agent" "$owner_id" 2>/dev/null || true)
       case "$result" in
+        # Same default, same fix: anything not `held:` was treated as a
+        # successful claim and the pair went into the subscribed set. (#983)
+        unknown:*)
+          skipped="${skipped:+$skipped }${team}/${agent}(unverified:${result#unknown:})"
+          continue
+          ;;
         held:*)
           held="${held:+$held }${team}/${agent}(${result#held:})"
           continue

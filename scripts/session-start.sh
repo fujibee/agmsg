@@ -218,8 +218,15 @@ AGENT_PID=$(agmsg_agent_pid "$TYPE" 2>/dev/null || true)
 # collect.
 for f in "$RUN_DIR"/ready.*; do
   [ -f "$f" ] || continue
-  rd_sid=$(cat "$f" 2>/dev/null || true)
-  { [ -n "$rd_sid" ] && actas_lock_sid_alive "$rd_sid"; } || rm -f "$f"
+  # Deleting a ready sentinel needs a positive reason. `|| true` on the read and a
+  # boolean liveness meant "could not read it" and "could not tell" both arrived
+  # as "its owner is gone", and this line then removed a LIVE watcher's sentinel.
+  # Remove only on a read that worked plus a positive dead. (#983)
+  _rd_rc=0; rd_sid=$(cat "$f" 2>/dev/null) || _rd_rc=$?
+  _rd_alive=0; actas_lock_sid_alive "$rd_sid" || _rd_alive=$?
+  if [ "$_rd_rc" -eq 0 ] && [ -n "$rd_sid" ] && [ "$_rd_alive" -eq 1 ]; then
+    rm -f "$f"
+  fi
 done
 
 
