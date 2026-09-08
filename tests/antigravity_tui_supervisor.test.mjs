@@ -206,6 +206,7 @@ spec.loader.exec_module(module)
 screen = module.TerminalScreen(24, 120)
 screen.feed(b'\\x1b[999z')
 assert screen.uncertain is True
+assert screen.uncertain_reason == 'unsupported-csi:999z'
 screen.feed(b'\\x1b[?1049h')
 assert screen.alternate_screen is True
 assert screen.uncertain is True, '切替は旧画面を消しても未知CSIの検知を消さない'
@@ -674,6 +675,7 @@ assert not screen.has_line(target)
 assert screen.resize(2, len(target))
 assert screen.has_line(target)
 assert screen.uncertain
+assert screen.uncertain_reason == 'resize'
 `);
 });
 
@@ -856,6 +858,10 @@ process.stdin.on('data', chunk => {
       unresolvedBeforeRecovery,
       'ID不一致による復旧拒否でstateを変更しない',
     );
+    const replayState = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
+    replayState.humanInputActive = true;
+    replayState.humanInputSawNonIdle = true;
+    fs.writeFileSync(path.join(install, 'run', stateFile), JSON.stringify(replayState));
     const replayCommand = 'stty rows 40 cols 120; exec ' + ['python3', supervisorPath, '--action', 'replay', '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake, '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id].map(quote).join(' ');
     const replay = spawn('script', ['-qefc', replayCommand, '/dev/null'], { env: { ...env, TEST_REPLAY_RECEIPT: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
     let replayOutput = '';
@@ -869,6 +875,9 @@ process.stdin.on('data', chunk => {
       await waitFor(() => replay.exitCode !== null);
     }
     assert.match(run('inbox.sh', ['fixture', 'worker']), /No new messages\./);
+    const afterReplay = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
+    assert.equal(afterReplay.humanInputActive, false, '明示replayは旧セッションの通常入力pauseを解除する');
+    assert.equal(afterReplay.humanInputSawNonIdle, false);
   } finally {
     if (child.exitCode === null) child.stdin.write('\x04');
     await Promise.race([once(child, 'close'), new Promise(resolve => setTimeout(resolve, 5000))]);

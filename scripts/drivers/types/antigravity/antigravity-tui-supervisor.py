@@ -22,7 +22,10 @@ class TerminalScreen:
     """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
     def __init__(self, rows, cols):
         self.rows=max(1,rows); self.cols=max(1,cols); self.cells=[[' ']*self.cols for _ in range(self.rows)]
-        self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False; self.alternate_screen=False
+        self.row=0; self.col=0; self.saved=(0,0); self.state='normal'; self.sequence=''; self.decoder=codecs.getincrementaldecoder('utf-8')('replace'); self.uncertain=False; self.uncertain_reason=None; self.alternate_screen=False
+    def mark_uncertain(self, reason):
+        self.uncertain=True
+        if self.uncertain_reason is None:self.uncertain_reason=reason
     def resize(self, rows, cols):
         rows=max(1,rows); cols=max(1,cols)
         if (rows,cols)==(self.rows,self.cols): return False
@@ -31,7 +34,7 @@ class TerminalScreen:
             for c in range(min(cols,self.cols)): new[r][c]=self.cells[r][c]
         self.rows=rows; self.cols=cols; self.cells=new; self.row=min(self.row,rows-1); self.col=min(self.col,cols-1)
         for r in range(self.rows): self._normalize_row(r)
-        self.uncertain=True
+        self.mark_uncertain('resize')
         return True
     def clear(self):
         self.cells=[[' ']*self.cols for _ in range(self.rows)]; self.row=0; self.col=0
@@ -123,7 +126,7 @@ class TerminalScreen:
             # DECST8C: tab stopを9列目から8列ごとへ戻す。上のCBT/HTの既定値と一致する。
             pass
         elif final in ('m','h','l','p','q','t','u','~'): pass
-        else:self.uncertain=True
+        else:self.mark_uncertain(f'unsupported-csi:{body}{final}')
     def feed(self, data):
         for ch in self.decoder.decode(data):
             if self.state=='osc':
@@ -144,7 +147,7 @@ class TerminalScreen:
                 elif ch=='M':self.row=max(0,self.row-1);self.state='normal'
                 elif ch=='c':self.clear();self.state='normal'
                 elif ch in ('=','>'):self.state='normal'
-                else:self.uncertain=True;self.state='normal'
+                else:self.mark_uncertain(f'unsupported-esc:{ord(ch):02x}');self.state='normal'
                 continue
             if self.state=='esc-one':
                 self.state='normal'
@@ -393,7 +396,7 @@ class Supervisor:
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
-        if getattr(self,'screen',None):self.screen.uncertain=False
+        if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
     def failure_signature(text):
@@ -506,7 +509,9 @@ class Supervisor:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
-                elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT': self.fail('受信turn中の人間入力を検知')
+                elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
+                    reason=getattr(self.screen,'uncertain_reason',None) or f'screen-state:{getattr(self.screen,"state","missing")}'
+                    self.fail(f'受信turn中の人間入力を検知（permission拒否理由={reason}）')
                 else: self.pause_for_human_input()
                 os.write(self.master,data)
             self.update_human_input_state()
@@ -552,6 +557,9 @@ def recover(a):
             s.state['batch']['phase']='completed'; s.state['supervisorPhase']='ACK_PENDING'; s.save(); s.ack()
             print('復旧ackを完了しました')
         else:
+            # replayは新しいagy子プロセスへ明示的に再投入する操作なので、終了した
+            # 旧セッションの通常入力pauseだけは持ち越さない。耐久manual pauseは別軸。
+            s.state['humanInputActive']=False; s.state['humanInputSawNonIdle']=False
             s.state['batch']['phase']='prepared'; s.state['supervisorPhase']='PREPARED'; s.save(); s.launch(); s.loop()
     finally:
         s.close()
