@@ -260,6 +260,31 @@ class Supervisor:
                     and '> Yes, I trust this folder' in tail):return None
             return 'trust-body-incomplete'
         return 'permission-footer-missing'
+    def permission_screen_diagnostic(self):
+        """許可UIの構造だけを返す。command本文など画面内容は記録しない。"""
+        screen=getattr(self,'screen',None)
+        if not screen:return 'screen=missing'
+        lines=screen.lines()
+        tokens={
+            'request':'Requesting permission for:',
+            'proceed':'Do you want to proceed?',
+            'yes':'> 1. Yes',
+            'navigate':'Navigate',
+            'amend':'Amend',
+            'footer':'esc to cancel',
+        }
+        positions={name:[i for i,line in enumerate(lines) if token in line]
+                   for name,token in tokens.items()}
+        footer=screen.tail_with_prefix('esc to cancel')
+        start=max(0,(footer[0] if footer else len(lines))-8)
+        end=min(len(lines),(footer[1]+1 if footer else len(lines)))
+        tail=[]
+        for i in range(start,end):
+            line=lines[i]
+            flags=''.join(name[0].upper() for name,token in tokens.items() if token in line) or '-'
+            tail.append(f'{i}:len={len(line)}:flags={flags}')
+        return (f'rows={screen.rows},cols={screen.cols},cursor={screen.row},{screen.col},'
+                f'positions={positions},tail=[{";".join(tail)}]')
     def permission_input_ready(self):
         """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
         return self.permission_input_rejection_reason() is None
@@ -530,7 +555,8 @@ class Supervisor:
                         and (permission_before_read or self.permission_input_ready())): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     reason=self.permission_input_rejection_reason()
-                    self.fail(f'受信turn中の人間入力を検知（permission拒否理由=before:{permission_before_reason}, after:{reason}）')
+                    diagnostic=self.permission_screen_diagnostic()
+                    self.fail(f'受信turn中の人間入力を検知（permission拒否理由=before:{permission_before_reason}, after:{reason}; screen={diagnostic}）')
                 else: self.pause_for_human_input()
                 os.write(self.master,data)
             self.update_human_input_state()

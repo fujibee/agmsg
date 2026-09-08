@@ -426,6 +426,11 @@ s.screen.feed(('Command\\r\\n' +
     '  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\\r\\n' +
     'esc to cancel  Gemini 3.8 Flash · high').encode())
 assert s.permission_input_ready(), 'Orca実画面の長いpermission選択肢も許可UIとして認識する'
+diagnostic = s.permission_screen_diagnostic()
+assert 'rows=40,cols=154' in diagnostic
+assert "'request': [1]" in diagnostic
+assert "'footer': [9]" in diagnostic
+assert 'whoami.sh' not in diagnostic, 'command本文を診断へ含めない'
 s.screen = module.TerminalScreen(40, 120)
 s.screen.feed(('Command\\r\\n' +
     'Requesting permission for:\\r\\n' +
