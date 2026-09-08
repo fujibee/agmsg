@@ -780,8 +780,22 @@ process.stdin.on('data', chunk => {
     assert.match(deadStatus.stdout, /runtime: worker tui-pty 停止\/要確認/);
     assert.match(stop.stdout, /停止要求を送信しました/);
     assert.match(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'), /"phase": "uncertain"|"phase":"uncertain"/);
+    const unresolvedBeforeRecovery = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
+    const restartRejected = spawnSync('python3', [supervisorPath, '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake], { env, encoding: 'utf8' });
+    assert.notEqual(restartRejected.status, 0);
+    assert.match(restartRejected.stderr, /未解決batch/);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')),
+      unresolvedBeforeRecovery,
+      '未解決batchによる通常起動拒否でstateを変更しない',
+    );
     const rejected = spawnSync('python3', [supervisorPath, '--action', 'ack', '--project', project, '--team', 'fixture', '--name', 'worker', '--batch', uncertain.batch.id, '--confirm-id', 'wrong-id'], { env, encoding: 'utf8' });
     assert.notEqual(rejected.status, 0);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')),
+      unresolvedBeforeRecovery,
+      'ID不一致による復旧拒否でstateを変更しない',
+    );
     const replayCommand = 'stty rows 40 cols 120; exec ' + ['python3', supervisorPath, '--action', 'replay', '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake, '--batch', uncertain.batch.id, '--confirm-id', uncertain.batch.messages[0].id].map(quote).join(' ');
     const replay = spawn('script', ['-qefc', replayCommand, '/dev/null'], { env: { ...env, TEST_REPLAY_RECEIPT: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
     let replayOutput = '';

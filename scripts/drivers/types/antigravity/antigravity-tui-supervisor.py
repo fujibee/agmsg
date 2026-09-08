@@ -211,7 +211,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -328,6 +328,7 @@ class Supervisor:
         self.violations.touch(mode=0o600,exist_ok=True); Path(str(self.violations)+'.lock').touch(mode=0o600,exist_ok=True)
         # bridge-read-guard は fd 3 から改行を除いた値をハッシュする。
         atomic(self.reservation,{'owner':self.owner,'pid':os.getpid(),'start':self.start,'state':str(self.state_file),'actas':str(self.actas),'violations':str(self.violations),'capHash':hashlib.sha256(self.cap.encode()).hexdigest(),'kind':'tui-pty'})
+        self.acquired=True
     def reset_guard(self):
         if not self.state_file.exists(): raise RuntimeError('復旧対象のstateがありません')
         state=self.migrate_state(json.loads(self.state_file.read_text()))
@@ -600,6 +601,11 @@ def main():
         return
     s=Supervisor(a)
     try:s.run()
-    except Exception as e: s.fail(str(e)); sys.exit(1)
+    except Exception as e:
+        # acquire前の拒否は既存supervisorのstateを所有していない。初期stateを
+        # fail() で保存すると、保全すべき未解決batchをbatch=Noneで上書きする。
+        if s.acquired:s.fail(str(e))
+        else:print(str(e),file=sys.stderr)
+        sys.exit(1)
     finally:s.close()
 if __name__=='__main__': main()
