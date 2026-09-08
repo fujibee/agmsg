@@ -441,6 +441,9 @@ assert s.permission_input_ready(), '長い引用付き選択肢の折返しが12
 s.screen = module.TerminalScreen(24, 120)
 s.screen.feed('Requesting permission for:\\r\\nDo you want to proceed?\\r\\n> 1. Yes\\r\\n  4. No\\r\\n↑/↓ Navigate · tab Amend\\r\\n▸ Generating...\\r\\n>\\r\\n────────────────────────────────\\r\\nesc to cancel'.encode())
 assert not s.permission_input_ready(), 'navとfooterの間に通常画面がある合成表示は許可しない'
+s.screen = module.TerminalScreen(24, 120)
+s.screen.feed('> 1. Yes\\r\\nRequesting permission for:\\r\\nDo you want to proceed?\\r\\n↑/↓ Navigate · tab Amend\\r\\nesc to cancel'.encode())
+assert not s.permission_input_ready(), '必須要素の並びが許可modalと異なる合成表示は許可しない'
 s.state = {'batch': {'id': 'batch', 'phase': 'sent'}, 'manualResumeRequired': True,
            'humanInputActive': False, 'humanInputSawNonIdle': False,
            'supervisorPhase': 'WAITING_FOR_RESULT'}
