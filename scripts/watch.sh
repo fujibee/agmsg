@@ -278,26 +278,34 @@ _watch_log_file() {
 # not impossible. Closing it means holding the actas lock across the turn, which
 # needs a critical-section protocol the lock does not have today; that is its own
 # issue, deliberately not smuggled in here.
-_pair_unchanged_since_read() {   # <team> <agent> <state-as-read-this-turn>
-  local _now _rc=0
-  # FAIL CLOSED on a read we could not make. Two layers turn "could not read the
-  # lock" into "the lock is free", and this guard sits in front of acts that are
-  # permanent, so inheriting either of them would make the answer safest-looking
-  # exactly when least is known:
-  #   actas_lock_owner  answers EMPTY both for "no lock file" and for a failed
-  #                     read of one that exists (its own status is the only thing
-  #                     that separates them)
-  #   actas_lock_state  turns an empty owner into `free`, at rc 0
-  # So ask for the owner first, where the read's status is still visible, and
-  # treat a non-zero as "cannot verify". A `|| echo free` here — which this
-  # function had — completes the collapse: an unreadable lock then COMPARES EQUAL
-  # to a pair that was read as free, and the act proceeds. (Found by co3.)
+_pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
+  # 0 unchanged | 1 changed | 2 unknown (unknown is refused, same as changed).
   #
-  # The owner value itself is not used; the call is made for its STATUS.
-  actas_lock_owner "$1" "$2" >/dev/null 2>&1 || return 2
-  _now="$(actas_lock_state "$1" "$2" "$SESSION_ID" 2>/dev/null)" || _rc=$?
-  [ "$_rc" -eq 0 ] || return 2
-  [ -n "$_now" ] || return 2
+  # ONE read, and the comparison is on the RAW owner. Two earlier shapes were both
+  # wrong, and the second is the subtler one:
+  #
+  #   `|| echo free`        turned an unreadable lock into "free", which COMPARED
+  #                         EQUAL to a pair read as free (co3, round 1).
+  #   probe then re-derive  checked the status of one read and then used a second
+  #                         one's answer: actas_lock_state does its own read and
+  #                         collapses ITS failure to free/rc0, so for a broad
+  #                         watcher (pair_state=free) the unknown was laundered
+  #                         back into unchanged (co3, round 2).
+  #
+  # Deriving `free`/`mine`/`other:` also drags in liveness, and
+  # actas_lock_sid_alive -> agmsg_instance_alive is a boolean with no "cannot
+  # tell": an unreadable run dir makes a live owner look dead, i.e. free again.
+  # None of that is needed to answer THIS question. "Did the pair move?" is
+  # answered by the owner string alone, so the guard reads it once, checks that
+  # read's own status, and compares bytes.
+  #
+  # A stale owner that dies mid-turn keeps the same string and is correctly
+  # `unchanged` — the role did not move to anyone. A lock removed mid-turn reads
+  # empty against a non-empty capture and is `changed`, which refuses; that is the
+  # conservative direction and costs one cycle.
+  local _now
+  _now="$(actas_lock_owner "$1" "$2" 2>/dev/null)" || return 2
+  [ "$3" = "__unreadable__" ] && return 2
   [ "$_now" = "$3" ] && return 0
   return 1
 }
@@ -919,6 +927,14 @@ while true; do
     # pair is the half a running process can detect for the price of a file
     # read. Gaining one is the caller's job, at the point it creates the team.
     pair_state="$(actas_lock_state "$pair_team" "$pair_agent" "$SESSION_ID" 2>/dev/null || echo free)"
+    # The RAW owner, captured in the same breath as the derived state, because the
+    # guards below compare owner-to-owner rather than state-to-state (#983). A
+    # failed read here becomes a sentinel that can never equal a successful one,
+    # so every guard this turn refuses rather than inheriting a "free" nobody
+    # established. `__unreadable__` cannot collide with a session id.
+    if pair_owner="$(actas_lock_owner "$pair_team" "$pair_agent" 2>/dev/null)"; then :; else
+      pair_owner="__unreadable__"
+    fi
     # Test seam: a two-file barrier that parks the watcher immediately AFTER the
     # lock read, so the race regression test can land a claim inside the window
     # deterministically instead of guessing a sleep wide enough to hit it. Same
@@ -1106,7 +1122,7 @@ while true; do
     # read per message; the two acts whose damage is permanent get their own check
     # immediately before them.
     _pair_verdict=0
-    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
     if [ "$_pair_verdict" -ne 0 ]; then
       _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "delivery"
       continue
@@ -1173,7 +1189,7 @@ while true; do
       # pair that changed hands is left entirely alone: no consume, no cursor
       # advance, so the session that now owns it still sees everything.
       _pair_verdict=0
-      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
       if [ "$_pair_verdict" -ne 0 ]; then
         _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
         continue
@@ -1213,7 +1229,7 @@ while true; do
       # close OUR pane. Say why on stderr and keep running: the pair is simply not
       # ours any more, which the gate will act on next turn.
       _pair_verdict=0
-      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_state" || _pair_verdict=$?
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
       if [ "$_pair_verdict" -ne 0 ]; then
         _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "its ctrl:despawn"
         DESPAWN_TARGET=""

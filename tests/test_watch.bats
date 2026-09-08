@@ -1546,3 +1546,23 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   grep -q 'leader' <<<"$ids"      # canary: the listing is readable
   grep -q 'alice' <<<"$ids"       # the role was NOT dropped
 }
+
+@test "watch: the re-verify makes exactly ONE lock read, and derives nothing (#983)" {
+  # co3's round-2 finding was not a wrong value, it was a wrong SHAPE: the helper
+  # checked the status of one read and then used a second read's answer, and the
+  # second one (inside actas_lock_state) collapses its own failure to free/rc0. No
+  # behavioural test can express "the second read failed but the first did not" —
+  # the window between them is not addressable from a test. So the property is
+  # pinned structurally: one read, of the raw owner, and no delegation to anything
+  # that reads again or classifies.
+  local body
+  body="$(awk '/^_pair_unchanged_since_read\(\) \{/{f=1} f{print} f&&/^\}/{exit}' \
+    "$SCRIPTS/watch.sh" | grep -v '^[[:space:]]*#')"
+  # Canary: the extraction found the function and its one read, so an absence
+  # below is a real absence rather than an empty string.
+  grep -q 'actas_lock_owner' <<<"$body"
+  [ "$(grep -c 'actas_lock_owner' <<<"$body")" -eq 1 ]
+  # Neither of these may appear: both read or classify a second time.
+  refute grep -q 'actas_lock_state' <<<"$body"
+  refute grep -q 'actas_lock_sid_alive' <<<"$body"
+}
