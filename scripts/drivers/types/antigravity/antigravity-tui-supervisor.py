@@ -214,7 +214,7 @@ class Supervisor:
         self.state_file=ROOT/'run'/f'antigravity-tui-pty.{key}.state.json'
         self.reservation=ROOT/'run'/f'antigravity-reservation.{key}.json'; self.violations=Path(str(self.reservation)+'.violations')
         self.state={'schemaVersion':2,'project':self.project,'team':args.team,'role':args.name,'owner':self.owner,'supervisorPhase':'STARTING','manualResumeRequired':False,'humanInputActive':False,'humanInputSawNonIdle':False,'durableAttention':False,'batch':None}
-        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
+        self.master=None; self.child=None; self.old=None; self.screen=None; self.stopping=False; self.stop_reason=None; self.buffer=''; self.result_buffer=''; self.permission_raw_window=''; self.last_poll=0; self.human_idle_since=None; self.human_input_restart_recovery=False; self.resume_requested=False; self.resize_requested=False; self.acquired=False
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGUSR1, self.request_resume)
@@ -275,6 +275,8 @@ class Supervisor:
         }
         positions={name:[i for i,line in enumerate(lines) if token in line]
                    for name,token in tokens.items()}
+        raw=getattr(self,'permission_raw_window','')
+        raw_seen={name:(token in raw) for name,token in tokens.items()}
         footer=screen.tail_with_prefix('esc to cancel')
         start=max(0,(footer[0] if footer else len(lines))-8)
         end=min(len(lines),(footer[1]+1 if footer else len(lines)))
@@ -284,7 +286,7 @@ class Supervisor:
             flags=''.join(name[0].upper() for name,token in tokens.items() if token in line) or '-'
             tail.append(f'{i}:len={len(line)}:flags={flags}')
         return (f'rows={screen.rows},cols={screen.cols},cursor={screen.row},{screen.col},'
-                f'positions={positions},tail=[{";".join(tail)}]')
+                f'positions={positions},raw_seen={raw_seen},tail=[{";".join(tail)}]')
     def permission_input_ready(self):
         """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
         return self.permission_input_rejection_reason() is None
@@ -435,6 +437,7 @@ class Supervisor:
         b['phase']='sent'; b['receipt']=f'AGMSG_RECEIVED:{b["id"]}'
         b['manualResumeAfterAck']=self.batch_contains_idle_signature(b)
         self.result_buffer=''
+        self.permission_raw_window=''
         if getattr(self,'screen',None):self.screen.uncertain=False;self.screen.uncertain_reason=None
         self.state['supervisorPhase']='INJECTED'; self.save(); self.state['supervisorPhase']='WAITING_FOR_RESULT'; self.save()
     @staticmethod
@@ -542,6 +545,7 @@ class Supervisor:
                 b=self.state.get('batch')
                 if b and self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     self.result_buffer=(self.result_buffer+text)[-16384:]
+                    self.permission_raw_window=(getattr(self,'permission_raw_window','')+text)[-65536:]
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
                         if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')

@@ -399,6 +399,7 @@ def screen(name):
     return value
 s = module.Supervisor.__new__(module.Supervisor)
 s.screen = screen('permission')
+s.permission_raw_window = fixtures['permission']['transcript']
 assert s.permission_input_ready()
 s.screen = screen('trust')
 assert s.permission_input_ready()
@@ -430,6 +431,7 @@ diagnostic = s.permission_screen_diagnostic()
 assert 'rows=40,cols=154' in diagnostic
 assert "'request': [1]" in diagnostic
 assert "'footer': [9]" in diagnostic
+assert "'navigate': True" in diagnostic
 assert 'whoami.sh' not in diagnostic, 'command本文を診断へ含めない'
 s.screen = module.TerminalScreen(40, 120)
 s.screen.feed(('Command\\r\\n' +
