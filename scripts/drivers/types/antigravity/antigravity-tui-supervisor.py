@@ -549,7 +549,7 @@ class Supervisor:
                     receipt_tail=self.screen.lines_after(b.get('receipt'))
                     if receipt_tail is not None:
                         if self.batch_contains_receipt(b): self.fail('受信本文にreceipt全体が含まれるためackしない')
-                        elif self.screen.uncertain:self.fail('未対応のterminal制御列をreceipt turn中に検知')
+                        elif self.screen.uncertain:self.fail(f'未対応のterminal制御列をreceipt turn中に検知（理由={self.screen.uncertain_reason or "unknown"}）')
                         elif self.failure_signature(receipt_tail): self.fail('TUI error/cancel/permission signatureを検知')
                         else: self.ack()
             if sys.stdin.fileno() in r:
