@@ -59,7 +59,7 @@ live_pid() { echo "$$"; }
 @test "claim: succeeds when lock file absent" {
   run actas_lock_claim "T" "alice" "sid-1"
   [ "$status" -eq 0 ]
-  [ "$(actas_lock_owner "T" "alice")" = "sid-1" ]
+  [ "$(_owner_only "T" "alice")" = "sid-1" ]
 }
 
 @test "claim: idempotent when caller already owns it" {
@@ -76,7 +76,7 @@ live_pid() { echo "$$"; }
   run actas_lock_claim "T" "alice" "sid-mine"
   [ "$status" -eq 1 ]
   [[ "$output" == "held:sid-other" ]]
-  [ "$(actas_lock_owner "T" "alice")" = "sid-other" ]
+  [ "$(_owner_only "T" "alice")" = "sid-other" ]
 }
 
 @test "claim: reclaims a stale lock whose owner is dead" {
@@ -85,7 +85,7 @@ live_pid() { echo "$$"; }
 
   run actas_lock_claim "T" "alice" "sid-mine"
   [ "$status" -eq 0 ]
-  [ "$(actas_lock_owner "T" "alice")" = "sid-mine" ]
+  [ "$(_owner_only "T" "alice")" = "sid-mine" ]
 }
 
 # Regression for #65 review finding 1, then re-review of 48339d8: a naive
@@ -109,7 +109,7 @@ live_pid() { echo "$$"; }
   run actas_lock_claim "T" "alice" "sid-B"
   [ "$status" -eq 1 ]
   [[ "$output" == "held:sid-A" ]]
-  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
+  [ "$(_owner_only "T" "alice")" = "sid-A" ]
 }
 
 # Case 2: simulates the exact race window flagged on re-review.
@@ -138,7 +138,7 @@ live_pid() { echo "$$"; }
 
   [ "$status" -eq 1 ]
   [[ "$output" == "held:sid-A" ]]
-  [ "$(actas_lock_owner "T" "alice")" = "sid-A" ]
+  [ "$(_owner_only "T" "alice")" = "sid-A" ]
 }
 
 # --- liveness ---
@@ -341,7 +341,7 @@ live_pid() { echo "$$"; }
   local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
   [ "$r" = "unknown:liveness_undecidable" ]
   [ "$rc" -eq 1 ]                    # refused, not claimed
-  [ "$(actas_lock_owner T alice)" = sid-ghost ]   # and the lock was left alone
+  [ "$(_owner_only T alice)" = sid-ghost ]   # and the lock was left alone
 }
 
 @test "claim: a POSITIVELY dead owner is still reclaimed" {
@@ -349,12 +349,11 @@ live_pid() { echo "$$"; }
   # session wedges its role permanently.
   actas_lock_claim T alice sid-ghost
   agmsg_instance_alive() { [ "$1" = sid-me ]; }   # sid-ghost dead, sid-me alive
-  # Success prints nothing and returns 0 — the verdict is the exit status here,
-  # not the output. Assert what the function actually does, and that the lock
-  # really changed hands.
+  # What this test is about is the exit status and the lock changing hands; the
+  # success verdict on stdout has its own control ("claim: says 'ok' out loud").
   local rc=0; actas_lock_claim T alice sid-me >/dev/null || rc=$?
   [ "$rc" -eq 0 ]
-  [ "$(actas_lock_owner T alice)" = sid-me ]
+  [ "$(_owner_only T alice)" = sid-me ]
 }
 
 @test "observe: a lock directory that does not exist yet is free, not unknown" {
@@ -381,4 +380,154 @@ live_pid() { echo "$$"; }
   [ "$rc" -ne 0 ]
   refute grep -q '^ok$' <<<"$r"
   [ -f "$(actas_lock_path T alice)" ]       # and it was not removed
+}
+
+# The tree deliberately has no owner-only reader any more (#983): every lock read
+# reports its own outcome next to the owner, so that no caller can mistake "could
+# not read it" for "nobody holds it". These assertions want the owner alone and
+# each compares it against a specific sid, so a read that failed shows up as a
+# failed assertion rather than as a passing empty string.
+_owner_only() {   # <team> <agent>
+  local _r; _r="$(actas_lock_read "$1" "$2")"
+  [ "${_r%%$'\t'*}" = "ok" ] || return 1
+  printf '%s' "${_r#*$'\t'}"
+}
+
+# --- #983 / #1071: one reader, one verdict, one answer per state ---------------
+
+@test "read: an absent lock is 'absent' and an unreadable one is 'unreadable'" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  local tab; tab="$(printf '\t')"
+  [ "$(actas_lock_read T nobody)" = "absent${tab}" ]
+  # The differential partner. The reader this replaced answered "" and rc 0 for
+  # BOTH of these, so no caller could tell "there is no lock" from "there is a
+  # lock I cannot open" — and four producers guessed the destructive way.
+  echo sid-x > "$(actas_lock_path T alice)"
+  chmod 000 "$(actas_lock_path T alice)"
+  local r; r="$(actas_lock_read T alice)"
+  chmod 644 "$(actas_lock_path T alice)"
+  [ "$r" = "unreadable${tab}" ]
+}
+
+@test "read: an EMPTY lock is 'ok' with an empty owner, which is not 'absent'" {
+  local tab; tab="$(printf '\t')"
+  : > "$(actas_lock_path T alice)"
+  # The third world the old reader folded into the same empty string. Here the
+  # read SUCCEEDED, and that is a fact about the file worth carrying: nothing in
+  # this tree writes an empty lock, so it is a torn write, not a free role.
+  [ "$(actas_lock_read T alice)" = "ok${tab}" ]
+  [ "$(actas_lock_read T nobody)" = "absent${tab}" ]
+}
+
+@test "read: an unsearchable lock DIRECTORY is unreadable, a missing one is absent" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  local tab; tab="$(printf '\t')"
+  # `[ -e ]` is false for both, so asking it alone reports "absent" for a
+  # directory we cannot look inside — the answer that makes callers act (co3).
+  echo sid-x > "$(actas_lock_path T alice)"
+  chmod 000 "$(_actas_lock_dir)"
+  local r; r="$(actas_lock_read T alice)"
+  chmod 755 "$(_actas_lock_dir)"
+  [ "$r" = "unreadable${tab}" ]
+  # The partner, in the other direction: a lock directory that was never created
+  # is the ordinary state of a fresh install. Calling THAT unknown is just as
+  # wrong and much louder — measured, it made spawn refuse to start anything
+  # (58 tests red in one run).
+  rm -rf "$(_actas_lock_dir)"
+  [ "$(actas_lock_read T alice)" = "absent${tab}" ]
+}
+
+@test "one state one answer: an empty lock is unknown:owner_empty on EVERY path" {
+  # co1 found the same file answered `free` by observe and `unknown:owner_empty`
+  # by try_claim. Both had been made three-valued — separately — so the tree held
+  # two answers for one state and nothing marked either wrong. The verdict now
+  # lives in one function and each producer translates it, which is what makes
+  # this assertion writable at all. (tl's axis 5.)
+  : > "$(actas_lock_path T alice)"
+  [ "$(actas_lock_state T alice sid-me)" = 'unknown:owner_empty' ]
+  [ "$(_actas_lock_try_claim T alice sid-me)" = 'unknown:owner_empty' ]
+  local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
+  [ "$rc" -eq 1 ]
+  [ "$r" = 'unknown:owner_empty' ]
+}
+
+@test "one state one answer: an unreadable lock is unknown:lock_unreadable on EVERY path" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  echo sid-x > "$(actas_lock_path T alice)"
+  chmod 000 "$(actas_lock_path T alice)"
+  local s v; s="$(actas_lock_state T alice sid-me)"; v="$(_actas_lock_try_claim T alice sid-me)"
+  chmod 644 "$(actas_lock_path T alice)"
+  [ "$s" = 'unknown:lock_unreadable' ]
+  [ "$v" = 'unknown:lock_unreadable' ]
+}
+
+@test "one state one answer: a POSITIVELY dead owner is still free/stale, not unknown" {
+  # The partner the two tests above need. Without it, a library that answered
+  # `unknown:` for everything would pass both of them, and the roles of every
+  # crashed session would wedge forever. The words differ because the producers'
+  # vocabularies differ — observe says `free`, try_claim says `stale` — but both
+  # come from the one shared verdict, which is the property axis 5 is about.
+  echo sid-dead > "$(actas_lock_path T alice)"
+  agmsg_instance_alive() { return 1; }
+  [ "$(actas_lock_state T alice sid-me)" = free ]
+  [ "$(_actas_lock_try_claim T alice sid-me)" = stale ]
+}
+
+@test "claim: says 'ok' out loud on success" {
+  # Success used to print NOTHING — and so did every failure the case did not
+  # name. The three call sites branch on this output, so silence read as "we got
+  # it" in both cases. Naming the success is what lets a caller refuse by default.
+  local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$r" = ok ]
+}
+
+@test "claim: a failure that learned nothing prints a verdict, not silence" {
+  # The partner. This claim fails BEFORE it can read anything: the lock directory
+  # is not writable, so mktemp cannot make its temp file. Nothing was claimed and
+  # no holder was established — and that used to be indistinguishable, on stdout,
+  # from a successful claim.
+  [ "$(id -u)" -eq 0 ] && skip "a read-only directory is ineffective as root"
+  chmod 500 "$(_actas_lock_dir)"
+  local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
+  chmod 755 "$(_actas_lock_dir)"
+  [ "$rc" -eq 1 ]
+  [ "$r" = 'unknown:claim_failed' ]
+}
+
+@test "release_all: keeps a lock it could not read, releases the one it could" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  actas_lock_claim T alice sid-me >/dev/null
+  actas_lock_claim T bob   sid-me >/dev/null
+  chmod 000 "$(actas_lock_path T alice)"
+  actas_lock_release_all sid-me
+  local kept=0; [ -f "$(actas_lock_path T alice)" ] && kept=1
+  chmod 644 "$(actas_lock_path T alice)"
+  # An unreadable lock is not one we can confirm we own, and release DELETES.
+  [ "$kept" -eq 1 ]
+  # The partner: the sweep still does its job on the locks it can read, or a
+  # session's roles would never be given back.
+  refute test -f "$(actas_lock_path T bob)"
+}
+
+@test "every actas_lock_claim consumer names its success and refuses by default" {
+  # A behavioural test can reach the two NAMED refusals. It cannot reach a
+  # verdict nobody has thought of yet — and that unnamed value is exactly what
+  # the old shape accepted as success. So this is pinned on the shape: an `ok`
+  # arm, and a `*)` arm so nothing falls through.
+  local f blk n=0
+  for f in "$SKILL_DIR/scripts/actas-claim.sh" "$SKILL_DIR/scripts/watch.sh" \
+           "$SKILL_DIR/scripts/lib/subscription.sh"; do
+    blk="$(awk 'index($0,"$(actas_lock_claim"){f=1} f{print} f&&/esac/{exit}' "$f")"
+    grep -qE '^[[:space:]]*ok\)' <<<"$blk"
+    # Anchored: `held:*)` and `unknown:*)` also END in `*)`, so an unanchored
+    # match was satisfied by the arms that were already there and the check
+    # passed with the default arm deleted. Measured — the mutation that removes
+    # it produced zero reds until this line was anchored.
+    grep -qE '^[[:space:]]*\*\)' <<<"$blk"
+    n=$((n + 1))
+  done
+  # Canary: every file was opened and every block was found, so the greps above
+  # ran three times rather than passing on an empty set.
+  [ "$n" -eq 3 ]
 }

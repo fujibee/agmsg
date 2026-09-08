@@ -1255,7 +1255,8 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
     # shellcheck disable=SC1090
     source "$SCRIPTS/lib/actas-lock.sh"
-    local owner; owner="$(actas_lock_owner "$1" "$2")"
+    local _r owner; _r="$(actas_lock_read "$1" "$2")"
+    owner=""; [ "${_r%%$'\t'*}" = "ok" ] && owner="${_r#*$'\t'}"
     [ -n "$owner" ] && actas_lock_release "$1" "$2" "$owner"
     actas_lock_claim "$1" "$2" "$3" )
   setup_live_owner "$TEST_SKILL_DIR/run" "$3"
@@ -1547,6 +1548,51 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   grep -q 'alice' <<<"$ids"       # the role was NOT dropped
 }
 
+@test "watch: a BROAD watcher refuses too when the lock stops being readable (#983)" {
+  # co3's exact scenario, and the one the actas-watcher tests above cannot reach.
+  # A broad watcher claims nothing, so its baseline owner is the EMPTY STRING —
+  # and a reader that folds "could not read" into "" compares equal to that
+  # baseline and calls the pair unchanged. Every unreadable-lock test we had used
+  # an actas watcher, whose baseline is its own sid: there the fold produces a
+  # MISMATCH, which refuses anyway, for the wrong reason. So the fold survived
+  # nine tests. Measured: deleting the `unreadable -> refuse` arm leaves the
+  # actas tests green and reddens only this one.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local cb="$BATS_TEST_TMPDIR/broadunread" out="$BATS_TEST_TMPDIR/w9.out" err="$BATS_TEST_TMPDIR/w9.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "BROAD-UNREADABLE-983" >/dev/null
+  # No 4th argument: broad subscription, no claim, so no lock file at all.
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CONSUME_BARRIER="$cb" \
+    bash "$SCRIPTS/watch.sh" sess-983j "$PROJ" claude-code >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$cb.reached" ] && break; sleep 0.25; done
+  [ -e "$cb.reached" ]
+  grep -q 'BROAD-UNREADABLE-983' "$out"     # past delivery, before consume
+
+  # Canary for the premise: there is NO lock, so the baseline really is empty —
+  # if a lock existed here the test would be measuring the actas case again.
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  refute test -f "$lock"
+
+  # With no file to chmod, the only way to make the read fail is to close the
+  # directory it would live in. That is also the case `[ -e ]` cannot judge.
+  chmod 000 "$TEST_SKILL_DIR/run"
+  : > "$cb.release"
+  sleep 2
+  chmod 755 "$TEST_SKILL_DIR/run" 2>/dev/null || true
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  grep -q 'could not verify who holds this role' "$out"
+  # Not consumed: the row is still there for whoever does own the role.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'BROAD-UNREADABLE-983' <<<"$ib"
+}
+
 @test "watch: the re-verify makes exactly ONE lock read, and derives nothing (#983)" {
   # co3's round-2 finding was not a wrong value, it was a wrong SHAPE: the helper
   # checked the status of one read and then used a second read's answer, and the
@@ -1560,9 +1606,23 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
     "$SCRIPTS/watch.sh" | grep -v '^[[:space:]]*#')"
   # Canary: the extraction found the function and its one read, so an absence
   # below is a real absence rather than an empty string.
-  grep -q 'actas_lock_owner' <<<"$body"
-  [ "$(grep -c 'actas_lock_owner' <<<"$body")" -eq 1 ]
+  grep -q 'actas_lock_read' <<<"$body"
+  [ "$(grep -c 'actas_lock_read' <<<"$body")" -eq 1 ]
   # Neither of these may appear: both read or classify a second time.
   refute grep -q 'actas_lock_state' <<<"$body"
   refute grep -q 'actas_lock_sid_alive' <<<"$body"
+  # And the folding reader may not come back anywhere in the tree. It answered
+  # "" and rc 0 for missing, unreadable and empty alike; keeping the guard here
+  # while leaving the function callable just moves the next defect one call site
+  # over. (tl: fix the fold, do not guard the caller.) Comment lines are dropped
+  # first -- several comments name it to say what it used to do, and a check that
+  # forbids naming a removed function is a check nobody can keep green.
+  local named live
+  named="$(grep -rn 'actas_lock_owner' "$SCRIPTS" --include='*.sh' || true)"
+  # Canary: the comments that explain the removal are still there, so an empty
+  # `live` below is a real absence and not a search that matched nothing at all.
+  grep -q 'actas_lock_owner' <<<"$named"
+  live="$(awk '{ l = $0; sub(/^[^:]*:[0-9]+:/, "", l); sub(/^[ \t]+/, "", l);
+                 if (l !~ /^#/) print }' <<<"$named")"
+  [ -z "$live" ]
 }

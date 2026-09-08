@@ -546,3 +546,39 @@ configured_off() {
   [[ "$output" != *"agmsg/advisor"* ]]
   [[ "$output" != *"$HOME"* ]]
 }
+
+@test "doctor: a lock it cannot READ is lock=unreadable, never lock=none (#983)" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf 'sometoken.%s\n' "$$" > "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  chmod 000 "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  chmod 644 "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  # `lock=none` is a claim about the world; this is a claim about us. An
+  # operator reads `none` as "nothing here to clean up" and acts on it. tl did
+  # exactly this today with a record he could not open: reported a seat dead,
+  # it was alive. (co1)
+  grep -q 'lock=unreadable' <<<"$output"
+  refute grep -q 'lock=none' <<<"$output"
+}
+
+@test "doctor: a present-but-EMPTY lock is lock=empty, never lock=none (#1071)" {
+  mkdir -p "$TEST_SKILL_DIR/run"
+  : > "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  # The third word. The file is there and readable, and nothing in the tree
+  # writes an empty lock, so this is a torn write — reporting it as `none` is
+  # what invites the cleanup #1071 is about.
+  grep -q 'lock=empty' <<<"$output"
+  refute grep -q 'lock=none' <<<"$output"
+}
+
+@test "doctor: with no lock at all it still says lock=none (#983)" {
+  # The partner both tests above need: without it, a doctor that never printed
+  # `lock=none` would pass them, and the ordinary "nothing is claimed here" case
+  # is the one an operator reads most often.
+  mkdir -p "$TEST_SKILL_DIR/run"
+  rm -f "$TEST_SKILL_DIR/run/actas.team__alice.session"
+  run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
+  grep -q 'lock=none' <<<"$output"
+}

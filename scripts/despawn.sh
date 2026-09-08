@@ -125,8 +125,14 @@ if [ "$FORCE" = "1" ]; then
   if [ -n "${_proj:-}" ] && [ -n "${_type:-}" ]; then
     "$SCRIPT_DIR/reset.sh" "$_proj" "$_type" "$NAME" >/dev/null 2>&1 || true
   fi
-  owner="$(actas_lock_owner "$TEAM" "$NAME")"
-  [ -n "$owner" ] && actas_lock_release "$TEAM" "$NAME" "$owner" 2>/dev/null || true
+  # Releasing needs an owner we actually READ. `actas_lock_owner` answered ""
+  # for "no lock", "unreadable" and "empty" alike, so this line could not tell
+  # which it had; it happened to be safe (release compares the owner to itself)
+  # but it is the same fold, and the next edit here would not be. (#983)
+  _own_r="$(actas_lock_read "$TEAM" "$NAME")"
+  if [ "${_own_r%%$'\t'*}" = "ok" ] && [ -n "${_own_r#*$'\t'}" ]; then
+    actas_lock_release "$TEAM" "$NAME" "${_own_r#*$'\t'}" 2>/dev/null || true
+  fi
   rm -f "$SPAWN_REC" 2>/dev/null || true
   echo "status=forced name=$NAME team=$TEAM"
   exit 0

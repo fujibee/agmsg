@@ -633,3 +633,28 @@ require_eperm_pid() {
   local rc=0; agmsg_instance_alive "some-token" || rc=$?
   [ "$rc" -eq 1 ]
 }
+
+@test "instance alive: an unstattable cc-instance is UNDECIDABLE for a composite token too" {
+  # The other direction of the same break (co1): `[ -f ]` is false for "absent"
+  # AND for "cannot stat", and that arm answers ALIVE — so an unreadable run/
+  # made every composite token look alive and blocked legitimate reclaim. The
+  # bare-token branch already returned 2 for the same condition, so one fact
+  # meant opposite things depending on the token shape.
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$SKILL_DIR/run"
+  local pid=$$                              # our own pid: alive by construction
+  : > "$SKILL_DIR/run/cc-instance.$pid"
+  chmod 000 "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "sid.$pid" || rc=$?
+  chmod 755 "$SKILL_DIR/run" 2>/dev/null || true
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a composite token with NO cc-instance file is still alive" {
+  # The partner: absent is deliberate here — the pid is alive and nothing
+  # contradicts it. Collapsing that into undecidable would stop every reclaim.
+  mkdir -p "$SKILL_DIR/run"
+  rm -f "$SKILL_DIR/run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive "sid.$$" || rc=$?
+  [ "$rc" -eq 0 ]
+}

@@ -427,6 +427,20 @@ agmsg_instance_alive() {
     _agmsg_pid_alive "$pid" || return 1
     local f s
     f="$SKILL_DIR/run/cc-instance.$pid"
+    # The OTHER direction of the same break, and just as wrong (co1). `[ -f ]` is
+    # false for "no such file" AND for "cannot stat it", and this arm answers
+    # ALIVE — so an unreadable run/ turned every composite token into "alive",
+    # which blocks a legitimate reclaim forever. The bare-token branch below
+    # returns 2 for the same condition; leaving this one at 0 made the same fact
+    # mean opposite things depending on the token shape.
+    #
+    # Absent is still alive-by-default and that is deliberate: the pid is alive
+    # and nothing contradicts it. Inaccessible is not absent.
+    if [ ! -e "$f" ]; then
+      local _d="$SKILL_DIR/run"
+      if [ -e "$_d" ] && { [ ! -r "$_d" ] || [ ! -x "$_d" ]; }; then return 2; fi
+      return 0
+    fi
     [ -f "$f" ] || return 0
     # The file is there; failing to read it is not evidence of anything.
     s="$(cat "$f" 2>/dev/null)" || return 2
