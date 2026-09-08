@@ -705,3 +705,59 @@ require_eperm_pid() {
   local rc=0; agmsg_instance_alive sid-live || rc=$?
   [ "$rc" -eq 1 ]
 }
+
+@test "instance alive: an EMPTY cc-instance marker is undecidable for a COMPOSITE token too" {
+  # Composite is the ordinary owner token, so this is the path that matters most
+  # -- and it is the one I left behind when fixing the bare branch. A torn marker
+  # read as a mismatch makes a live seat's lock reclaimable. (co1, co3)
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  : > "$run/cc-instance.$$"                 # live pid, marker not yet written
+  local rc=0; agmsg_instance_alive "sid-live.$$" || rc=$?
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a composite marker naming a DIFFERENT session is still dead" {
+  # The partner: a written marker that disagrees is a real mismatch, and must
+  # stay reclaimable or a crashed seat wedges its role forever.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else.%s\n' "$$" > "$run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive "sid-live.$$" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: bare and composite give the SAME answer to the same marker state" {
+  # The two branches disagreed about this file twice, in opposite directions, one
+  # review round apart: composite said ALIVE where bare said 2 (an inaccessible
+  # run/), then bare said 2 where composite said DEAD (an empty marker). Each fix
+  # moved the disagreement instead of removing it. Both now read through
+  # _agmsg_marker_read; this pins the agreement itself rather than the two
+  # answers separately, so the next edit to one branch cannot re-open the split.
+  [ "$(id -u)" -eq 0 ] && skip "directory permissions are ineffective as root"
+  local run="$SKILL_DIR/run" bare=0 comp=0
+  mkdir -p "$run"
+
+  # State 1: a live pid whose marker is present, readable and EMPTY.
+  : > "$run/cc-instance.$$"
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  [ "$bare" -eq 2 ]
+  [ "$comp" -eq 2 ]
+
+  # State 2: the run directory cannot be searched.
+  printf 'sid-live.%s\n' "$$" > "$run/cc-instance.$$"
+  chmod 0400 "$run"
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  chmod 0755 "$run"
+  [ "$bare" -eq 2 ]
+  [ "$comp" -eq 2 ]
+
+  # Canary/partner: with the same directory readable and the marker written, the
+  # pair agrees on a DECIDED answer too -- otherwise "both say 2 always" passes.
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  [ "$bare" -eq 0 ]
+  [ "$comp" -eq 0 ]
+}
