@@ -532,6 +532,21 @@ EOF
   [ "$output" = "arrange: anchor reference 'tmux:not-a-pane' did not resolve to a terminal and pane id" ]
 }
 
+@test "arrange: place intents reject the source pane as anchor before driver mutation" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  _install_fake_tmux_arrange
+  _write_named_record alice 'tmux:%1'
+  export TMUX_LAYOUT='%1|@7|0|0|40|10'
+  local intent
+  for intent in place_below place_right; do
+    : > "$ARGV_LOG"
+    run bash "$SCRIPTS/arrange.sh" testteam alice "$intent" tmux:%1
+    [ "$status" -ne 0 ]
+    [ "$output" = "arrange: source and anchor must be different panes" ]
+    [ ! -s "$ARGV_LOG" ]
+  done
+}
+
 @test "arrange: a terminal without arrange capability stays distinct from bad references" {
   bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
   _write_named_record alice 'plain:-'

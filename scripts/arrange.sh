@@ -62,6 +62,12 @@ ANCHOR_ID="$(agmsg_terminal_ref_id "$TARGET" 2>/dev/null)" || ANCHOR_ID=""
 
 [ "$SOURCE_TERMINAL" = "$ANCHOR_TERMINAL" ] \
   || die "source and anchor are in different terminals ('$SOURCE_TERMINAL' and '$ANCHOR_TERMINAL')"
+case "$INTENT" in
+  place_below|place_right)
+    [ "$SOURCE_ID" != "$ANCHOR_ID" ] \
+      || die "source and anchor must be different panes"
+    ;;
+esac
 agmsg_terminal_has "$SOURCE_TERMINAL" capabilities arrange \
   || die "terminal '$SOURCE_TERMINAL' cannot arrange panes"
 agmsg_terminal_load "$SOURCE_TERMINAL" \
