@@ -227,19 +227,61 @@ actas_lock_gc_stale() {
 
 # Classify a (team, agent) pair relative to the calling session.
 # Echoes one of: free | mine | other:<sid>
-actas_lock_state() {
+# ONE read of the lock, from which BOTH the classification and the raw owner are
+# produced. Prints "<state>\t<owner>"; the owner is empty when there is none to
+# report. State is one of:
+#
+#   free                            no lock, or a lock whose owner is POSITIVELY dead
+#   mine                            held by the calling session
+#   other:<sid>                     held by a session POSITIVELY alive
+#   unknown:lock_unreadable         the lock is there and could not be read
+#   unknown:liveness_undecidable    the owner is known, its liveness is not
+#
+# Two collapses lived here and both are gone (#983, found by co3):
+#
+#   an empty owner meant "free", and `actas_lock_owner` answers empty BOTH for a
+#   missing file and for a failed read of one that exists — so "could not read"
+#   arrived as "nobody holds it", and callers deleted, claimed and consumed on it.
+#
+#   liveness was a boolean, so "cannot tell" arrived as "dead", which this
+#   function then reported as `free` — the same lie by a second road.
+#
+# Returning the owner alongside matters as much as the values: callers that need a
+# baseline to compare against later were reading the state and then reading the
+# owner in a separate call, and a claim landing between the two produced a stale
+# state paired with a fresh owner. One read, both facts, no window.
+actas_lock_observe() {
   local team="$1" agent="$2" sid="$3"
-  local owner
-  owner="$(actas_lock_owner "$team" "$agent")"
-  if [ -z "$owner" ]; then
-    echo "free"; return 0
+  local lock owner
+  lock="$(actas_lock_path "$team" "$agent")"
+  if ! owner="$(head -1 "$lock" 2>/dev/null)"; then
+    # The read failed. Only now ask whether the file is even there: absent is a
+    # fact ("free"), present-but-unreadable is not.
+    if [ -e "$lock" ]; then printf 'unknown:lock_unreadable\t\n'; return 0; fi
+    printf 'free\t\n'; return 0
   fi
-  if [ "$owner" = "$sid" ]; then
-    echo "mine"; return 0
-  fi
-  if actas_lock_sid_alive "$owner"; then
-    printf 'other:%s\n' "$owner"
-  else
-    echo "free"  # stale owner — effectively free, GC will remove it later
-  fi
+  [ -n "$owner" ] || { printf 'free\t\n'; return 0; }
+  [ "$owner" = "$sid" ] && { printf 'mine\t%s\n' "$owner"; return 0; }
+  local arc=0
+  agmsg_instance_alive "$owner" || arc=$?
+  case "$arc" in
+    0) printf 'other:%s\t%s\n' "$owner" "$owner" ;;
+    1) printf 'free\t%s\n' "$owner" ;;
+    *) printf 'unknown:liveness_undecidable\t%s\n' "$owner" ;;
+  esac
+  return 0
+}
+
+# Classify a (team, agent) pair relative to the calling session. Thin wrapper over
+# actas_lock_observe so there is exactly one place that reads and one set of rules;
+# callers needing the owner as well should use actas_lock_observe and split, rather
+# than calling both (that pairing is what created the window described above).
+actas_lock_state() {
+  local _out
+  _out="$(actas_lock_observe "$1" "$2" "$3")" || return 1
+  # A REAL tab, not the two characters `\t`: `${var%%\t*}` strips nothing, and
+  # `actas_lock_state` then returned "free<TAB>" to every caller that compares it
+  # to `free`. Measured the moment it was written, which is the only reason it is
+  # not in the diff.
+  printf '%s\n' "${_out%%$'\t'*}"
 }

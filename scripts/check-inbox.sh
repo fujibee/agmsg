@@ -315,7 +315,13 @@ for team in "${TEAM_LIST[@]}"; do
     # The whole file failed to parse; every check-inbox test on macOS died with
     # "syntax error near unexpected token `;;'". Balancing the paren fixes it and
     # is identical under bash 5.
-    case "$state" in (other:*) exit 97 ;; esac
+    # `unknown:` joins `other:` here rather than falling through to delivery.
+    # The two are different facts — someone else holds it vs we could not find
+    # out — but the action is the same: this is not our inbox to hand out on an
+    # unverified state, and 97 is the ordinary "skip this team" status the caller
+    # already continues on. Falling through would deliver, which is the direction
+    # that cannot be undone (rows get marked read). (#983)
+    case "$state" in (other:*|unknown:*) exit 97 ;; esac
 
     # Unread via the storage facade (§2.1 storage_list_unread = events ∪ legacy),
     # JSONL parsed in one pass with sqlite's JSON funcs (no jq; cf. lib/hooks-json.sh).

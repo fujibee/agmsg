@@ -611,3 +611,25 @@ require_eperm_pid() {
     | grep -v ':[0-9]*: *#' || true)"
   [ -z "$offenders" ] || { echo "$offenders"; false; }
 }
+
+# --- #983: liveness has a third answer, and it is not "dead" -------------------
+
+@test "instance alive: an unreadable run dir is UNDECIDABLE, not dead" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$SKILL_DIR/run"
+  : > "$SKILL_DIR/run/cc-instance.1"        # canary: there is something to read
+  chmod 000 "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "some-token" || rc=$?
+  chmod 755 "$SKILL_DIR/run" 2>/dev/null || true
+  # 2, not 1: "dead" drives reclaim, lock deletion and the watcher's own exit, so
+  # a failed read must not arrive as one.
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: an ABSENT run dir is still dead" {
+  # The partner: absent is a fact (nothing ever registered). Collapsing it into
+  # undecidable would stop every reclaim forever.
+  rm -rf "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "some-token" || rc=$?
+  [ "$rc" -eq 1 ]
+}
