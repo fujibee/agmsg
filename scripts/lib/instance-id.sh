@@ -452,7 +452,14 @@ agmsg_instance_alive() {
   # Absent and unreadable are different facts: nothing ever registered (dead) vs
   # we cannot look (cannot tell).
   [ -e "$run" ] || return 1
-  { [ -d "$run" ] && [ -r "$run" ]; } || return 2
+  # -r and -x are DIFFERENT permissions and this branch needs both. -r lets the
+  # glob enumerate the directory; -x is what lets `[ -f ]` and `cat` reach the
+  # entries it enumerated. At mode 0400 the glob happily produces every
+  # cc-instance.* path and then every `[ -f "$f" ]` is false, so the loop skipped
+  # all of them and fell through to `return 1` -- a confident DEAD, produced by a
+  # scan that read nothing. The composite branch above already asked for both,
+  # which is the giveaway: one function, two paths, two answers. (co1)
+  { [ -d "$run" ] && [ -r "$run" ] && [ -x "$run" ]; } || return 2
   for f in "$run"/cc-instance.*; do
     [ -f "$f" ] || continue
     p=${f##*.}
@@ -463,6 +470,12 @@ agmsg_instance_alive() {
     # anywhere still answers alive — and only report "cannot tell" if we finish
     # without one.
     if ! s="$(cat "$f" 2>/dev/null)"; then undecided=1; continue; fi
+    # An EMPTY marker for a LIVE pid is the same torn write as an empty lock, and
+    # it deserves the same answer. Read as a plain mismatch it says "this live
+    # process is not you", and a scan of markers that are all half-written then
+    # reports a live owner as dead -- which is a licence to reclaim its role.
+    # (co3, alongside axis 6.)
+    if [ -z "$s" ]; then undecided=1; continue; fi
     [ "$s" = "$token" ] && return 0
     # upgrade compat: cc-instance stores "<sid>.<pid>" but the lock holds "<sid>"
     if agmsg_instance_is_composite "$s" && [ "${s%.*}" = "$token" ]; then

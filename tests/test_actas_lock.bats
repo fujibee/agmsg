@@ -531,3 +531,18 @@ _owner_only() {   # <team> <agent>
   # ran three times rather than passing on an empty set.
   [ "$n" -eq 3 ]
 }
+
+@test "claim: a lock whose contents did not land is never published (axis 6)" {
+  # The write half. printf's own status does not prove the bytes reached the
+  # disk, so try_claim reads the temp file back before linking it into place;
+  # this stubs that read to answer what a short write leaves behind (present,
+  # readable, empty). A lock published in that state is READ BY PEERS as
+  # unknown:owner_empty while the claimant believes it holds the role.
+  _actas_lock_read_path() { printf 'ok\t\n'; }
+  local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
+  [ "$rc" -eq 1 ]
+  [ "$r" = 'unknown:claim_failed' ]
+  # And nothing was published. This is the assertion that matters: refusing is
+  # only worth anything if the broken file did not become the lock.
+  refute test -f "$(actas_lock_path T alice)"
+}

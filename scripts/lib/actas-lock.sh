@@ -203,13 +203,34 @@ _actas_lock_verdict() {   # <sid> <read> <owner>
 # so this producer and actas_lock_observe cannot disagree about one file.
 _actas_lock_try_claim() {
   local team="$1" agent="$2" sid="$3"
-  local lock dir tmp _r _v verdict existing
+  local lock dir tmp _r _v _w verdict existing
   lock="$(actas_lock_path "$team" "$agent")"
   dir="$(_actas_lock_dir)"
   mkdir -p "$dir" 2>/dev/null || true
 
   tmp="$(mktemp "$dir/.actas-claim.XXXXXX" 2>/dev/null)" || return 1
-  printf '%s\n' "$sid" > "$tmp"
+
+  # The mirror of everything else in this change, and the worse half of it.
+  # Everything above is about not treating "could not READ" as a fact. This is
+  # not treating "could not WRITE" as one -- and a misread only misleads US,
+  # while a lock we failed to write is published to every OTHER seat as a valid
+  # one. A short write (a full filesystem under run/) leaves an empty or
+  # truncated file, `ln` publishes it without complaint, and the claimant then
+  # believes it holds a role that its peers read as unknown:owner_empty: held
+  # here, unclaimable there. So the write is checked, and then what actually
+  # landed is READ BACK before it is linked into place -- printf's status alone
+  # does not prove the bytes are on disk. Failing here returns 1, which
+  # actas_lock_claim already reports as unknown:claim_failed. (co3, co1; tl's
+  # axis 6.)
+  if ! printf '%s\n' "$sid" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  _w="$(_actas_lock_read_path "$tmp")"
+  if [ "${_w%%$'\t'*}" != "ok" ] || [ "${_w#*$'\t'}" != "$sid" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
 
   if ln "$tmp" "$lock" 2>/dev/null; then
     rm -f "$tmp"

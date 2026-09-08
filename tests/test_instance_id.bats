@@ -658,3 +658,50 @@ require_eperm_pid() {
   local rc=0; agmsg_instance_alive "sid.$$" || rc=$?
   [ "$rc" -eq 0 ]
 }
+
+@test "instance alive: a run dir that can be LISTED but not entered is undecidable" {
+  # mode 0400: -r is true, -x is false. The glob still enumerates every
+  # cc-instance.* path, and then nothing can stat them. The old guard asked only
+  # for -r, so the loop ran, matched nothing, and returned a confident DEAD from
+  # a scan that had read no file at all. (co1)
+  [ "$(id -u)" -eq 0 ] && skip "directory permissions are ineffective as root"
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-live\n' > "$run/cc-instance.$$"
+  chmod 0400 "$run"
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  chmod 0755 "$run"
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a listable AND enterable run dir still answers dead for an absent token" {
+  # The partner. Without it, a guard that returned 2 for every directory would
+  # pass the test above, and no stale lock would ever be reclaimed again.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else\n' > "$run/cc-instance.$$"
+  chmod 0755 "$run"
+  local rc=0; agmsg_instance_alive sid-not-here || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: an EMPTY cc-instance marker for a live pid is undecidable" {
+  # A half-written marker is not "this process is someone else". Read as a plain
+  # mismatch, a scan of torn markers reports a live owner as DEAD, and dead is
+  # what licences a reclaim. Same fact as an empty lock file. (co3)
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  : > "$run/cc-instance.$$"          # live pid, marker not yet written
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a WRITTEN cc-instance marker naming someone else is still dead" {
+  # The partner. Without it, answering 2 for every marker would pass the test
+  # above and no stale lock would ever be reclaimed.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else\n' > "$run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  [ "$rc" -eq 1 ]
+}
