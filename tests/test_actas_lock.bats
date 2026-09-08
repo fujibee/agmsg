@@ -244,3 +244,37 @@ live_pid() { echo "$$"; }
   run actas_lock_state "T" "alice" "sid-me"
   [ "$output" = "free" ]
 }
+
+# --- #1071: an unreadable (empty) owner must NOT be treated as stale/dead ---
+# A transient read failure (head -1 on a busy FS, a torn write) yields an empty owner.
+# The old `[ -z "$owner" ] || ! actas_lock_sid_alive` folded that into the stale branch
+# and DELETED / stole the lock — removing a possibly-LIVE seat's lock so another session
+# claimed the same role. Each control co-observes a genuinely dead-owner lock that IS
+# still reclaimed, so it proves the empty-owner guard, not a broken predicate.
+# Mutation: flip `_actas_owner_reclaimable`'s `[ -n "$owner" ] || return 1` to `return 0`
+# (empty → reclaimable) and both go red.
+
+@test "gc_stale: KEEPS a lock whose owner is empty/unreadable, still GCs a dead one (#1071)" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  printf '' > "$(actas_lock_path "T-empty" "alice")"      # empty owner (transient read)
+  echo "sid-dead" > "$(actas_lock_path "T-dead" "bob")"   # non-empty, no live cc-instance
+  run actas_lock_gc_stale
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]                                     # only the dead one was counted
+  [ -f "$(actas_lock_path "T-empty" "alice")" ]           # empty owner KEPT — the fix
+  [ ! -f "$(actas_lock_path "T-dead" "bob")" ]            # dead owner still reclaimed
+}
+
+@test "claim: does NOT steal a lock whose owner is empty/unreadable, but still reclaims a dead one (#1071)" {
+  skip_on_windows "actas live-session liveness under Git Bash (#182)"
+  # empty owner -> held, not stolen
+  printf '' > "$(actas_lock_path "T" "alice")"
+  run actas_lock_claim "T" "alice" "sid-mine"
+  [ "$status" -ne 0 ]
+  [ "$(actas_lock_owner "T" "alice")" != "sid-mine" ]    # not overwritten with our sid
+  # a genuinely dead owner is still reclaimable (existing behaviour preserved)
+  echo "sid-dead" > "$(actas_lock_path "T2" "bob")"
+  run actas_lock_claim "T2" "bob" "sid-mine2"
+  [ "$status" -eq 0 ]
+  [ "$(actas_lock_owner "T2" "bob")" = "sid-mine2" ]
+}

@@ -100,6 +100,28 @@ actas_lock_sid_alive() {
   agmsg_instance_alive "$1"
 }
 
+# Is <owner> a lock we are ALLOWED to reclaim/steal? Only when the owner reads back as a
+# real, non-empty token that is not alive. An EMPTY owner is the #1071 trigger: a
+# transient read failure (head -1 on a busy FS, a torn write) yields "", which the old
+# `[ -z "$owner" ] || ! alive` folded into "stale" and then DELETED — removing a LIVE
+# seat's lock so another session claimed the same role. An owner we cannot even read is
+# NOT evidence the seat is gone; keep it, exactly as actas_lock_release_all skips a file
+# whose owner it cannot read. So require the owner to be present before trusting the
+# liveness verdict. #1071.
+#
+# SCOPE: this closes the empty-owner half — the destructive one #1071 observed. The other
+# half ("liveness cannot be DETERMINED" for a present owner: actas_lock_sid_alive returns
+# "not alive" for a dead owner AND for an unreadable cc-instance) needs a 3-valued
+# liveness that distinguishes dead from indeterminate. That lives in agmsg_instance_alive
+# and is being made 3-valued on the integration branch (#996-era); wiring these sites to
+# it is a post-1.3.0 follow-up once it reaches main. Doing it here would duplicate that
+# work and break the bare-<sid> reclamation the existing tests depend on.
+_actas_owner_reclaimable() {   # <owner-token>
+  local owner="$1"
+  [ -n "$owner" ] || return 1
+  ! actas_lock_sid_alive "$owner"
+}
+
 # Internal: attempt one atomic claim. Echoes "ok" on success, "held:<sid>"
 # when another sid currently owns it, or "stale" when the existing lock's
 # owner is dead (caller should retry after removing).
@@ -125,7 +147,7 @@ _actas_lock_try_claim() {
     echo "ok"
     return 0
   fi
-  if [ -z "$existing" ] || ! actas_lock_sid_alive "$existing"; then
+  if _actas_owner_reclaimable "$existing"; then
     echo "stale"
     return 0
   fi
@@ -161,7 +183,7 @@ actas_lock_claim() {
         # leave it — the next try_claim observes it as held.
         if mkdir "$reclaim_dir" 2>/dev/null; then
           _owner="$(actas_lock_owner "$team" "$agent")"
-          if [ -z "$_owner" ] || ! actas_lock_sid_alive "$_owner"; then
+          if _actas_owner_reclaimable "$_owner"; then
             rm -f "$lock_path"
           fi
           rmdir "$reclaim_dir" 2>/dev/null
@@ -217,7 +239,7 @@ actas_lock_gc_stale() {
   for f in "$dir"/actas.*.session; do
     [ -f "$f" ] || continue
     owner="$(head -1 "$f" 2>/dev/null || true)"
-    if [ -z "$owner" ] || ! actas_lock_sid_alive "$owner"; then
+    if _actas_owner_reclaimable "$owner"; then
       rm -f "$f"
       count=$((count + 1))
     fi
