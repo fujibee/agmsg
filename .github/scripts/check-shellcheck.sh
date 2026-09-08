@@ -11,7 +11,8 @@
 #
 # Same shape as check-enforced-assertions: the baseline is a COUNT recorded in
 # the repository, it may only go down, and lowering it is the burn-down. All
-# severities count. Gating at `error` would hide every warning and note for
+# levels count -- error, warning, info and style, as shellcheck's structured
+# output names them (measured on main, 0.10.0: 7 / 39 / 100 / 13 = 159). Gating at `error` would hide every warning and note for
 # good, and that is where the real bash bugs in this tree live (unquoted
 # expansions, `$?` after a pipeline, `read` without `-r`). A rule broken on
 # purpose gets an inline `# shellcheck disable=SCxxxx` with a reason, not a
@@ -70,8 +71,13 @@ if [ "${1-}" = "--positive-control" ]; then
   rm -f "$tmp/broken.sh" "$tmp/baseline"
   rm -rf "$tmp/.git"
   rmdir "$tmp" 2>/dev/null || true
-  if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'broken.sh:3:6: '; then
-    echo "$ME: positive control fired -- a broken script against a zero baseline is exit 1, naming the finding."
+  # Three things, all required: the checker's own exit 1 (not merely a line
+  # of text), the finding named at its position, and its level spelled the
+  # way the tool spells it -- SC2086 is `info`, the level most easily lost.
+  # (A comment line must not begin with the tool's name followed by a word:
+  # that is parsed as a directive, and a malformed one is itself a finding.)
+  if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'broken.sh:3:6: info: .*\[SC2086\]'; then
+    echo "$ME: positive control fired -- a broken script against a zero baseline is exit 1, naming the info-level finding."
     exit 0
   fi
   echo "$ME: positive control did NOT fire (exit $rc); the checker cannot be trusted to go red." >&2
@@ -107,21 +113,46 @@ if [ "${#files[@]}" -eq 0 ]; then
 fi
 
 # --- the count ----------------------------------------------------------------------
-listing="$(cd "$ROOT" && "$SHELLCHECK" -f gcc "${files[@]}" 2>&1)"
+#
+# Counted from shellcheck's structured output, not from a regex over its text:
+# `-f json1` lists one comment per finding with its real level. The text
+# formatters rename levels (measured, 0.10.0: `-f gcc` prints both `info` and
+# `style` as `note`), so a hand-listed alternation of severity words is a
+# proxy that can silently miss a level the formatter spells differently. The
+# listing shown to a human is rendered from the same structure, with the real
+# level names, so an `info` finding is visible as `info`.
+raw="$(cd "$ROOT" && "$SHELLCHECK" -f json1 "${files[@]}" 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
   echo "$ME: shellcheck exited $rc, which is a tool failure, not a verdict:" >&2
-  printf '%s\n' "$listing" | head -20 | sed 's/^/  /' >&2
+  printf '%s\n' "$raw" | head -20 | sed 's/^/  /' >&2
   exit 2
 fi
-findings="$(printf '%s\n' "$listing" | grep -cE '^[^:]+:[0-9]+:[0-9]+: (error|warning|note|style): ')"
+if ! listing="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    comments = json.load(sys.stdin)["comments"]
+except (ValueError, KeyError) as e:
+    sys.stderr.write("not shellcheck json1 output: %s\n" % e); sys.exit(2)
+for c in comments:
+    print("%s:%d:%d: %s: %s [SC%d]" % (c["file"], c["line"], c["column"], c["level"], c["message"], c["code"]))
+')"; then
+  echo "$ME: could not read shellcheck's json1 output; no count, no verdict." >&2
+  printf '%s\n' "$raw" | head -5 | sed 's/^/  /' >&2
+  exit 2
+fi
+if [ -z "$listing" ]; then
+  findings=0
+else
+  findings="$(printf '%s\n' "$listing" | wc -l | tr -d '[:space:]')"
+fi
 
 echo "$ME: ${#files[@]} tracked .sh files, $findings findings, baseline $baseline (shellcheck $version)."
 
 if [ "$findings" -gt "$baseline" ]; then
   echo "$ME: $findings findings, above the baseline of $baseline." >&2
   echo >&2
-  printf '%s\n' "$listing" | grep -E '^[^:]+:[0-9]+:[0-9]+: (error|warning|note|style): ' | sed 's/^/  /' >&2
+  printf '%s\n' "$listing" | sed 's/^/  /' >&2
   echo >&2
   echo "Fix the new findings, or disable the rule inline with a reason (# shellcheck disable=SCxxxx)." >&2
   echo "The baseline in $BASELINE_FILE only goes down." >&2

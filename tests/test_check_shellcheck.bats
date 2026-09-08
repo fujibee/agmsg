@@ -54,13 +54,35 @@ CLEAN='#!/bin/bash\nfoo="$1"\necho "$foo"\n'
 
 # --- the ratchet --------------------------------------------------------------------
 
-@test "above the baseline is red and names the finding" {
+@test "above the baseline is red and names the finding with its real level" {
   _need_shellcheck
   local d; d="$(_tree "broken.sh=$BROKEN")"
   AGMSG_SHELLCHECK_ROOT="$d" AGMSG_SHELLCHECK_BASELINE="$(_baseline "$SC_VERSION" 0)" run bash "$CHECK"
   [ "$status" -eq 1 ]
   grep -q 'above the baseline' <<<"$output"
-  grep -q 'broken.sh:3:6: ' <<<"$output"
+  # SC2086 is an `info` finding: the level the text formatters rename (gcc
+  # prints it as `note`), and therefore the one a severity list loses first.
+  grep -q 'broken.sh:3:6: info: .*\[SC2086\]' <<<"$output"
+}
+
+@test "every level counts: the checker's count equals shellcheck's own json count over a tree with all four levels" {
+  # Derived, not listed: the expected count is what shellcheck's structured
+  # output reports for the same files, and the tree carries at least one
+  # finding of each level so a level dropped by the counter is a mismatch.
+  _need_shellcheck
+  local d expected got
+  d="$(_tree \
+    "err.sh=#!/bin/bash\na=1\nb=2\nif [ \"\$a\" \\\\> \"\$b\" ]; then :; fi\n" \
+    "warn.sh=#!/bin/bash\necho \"\$undefined_var\"\n" \
+    "info.sh=$BROKEN" \
+    "style.sh=#!/bin/bash\ncat file | grep x\n")"
+  expected="$(cd "$d" && "$SHELLCHECK" -f json1 err.sh warn.sh info.sh style.sh | python3 -c 'import json,sys; d=json.load(sys.stdin)["comments"]; print(len(d), " ".join(sorted(set(c["level"] for c in d))))')"
+  [ "${expected#* }" = "error info style warning" ] || { echo "fixture does not cover all four levels: $expected"; return 1; }
+  AGMSG_SHELLCHECK_ROOT="$d" AGMSG_SHELLCHECK_BASELINE="$(_baseline "$SC_VERSION" 0)" run bash "$CHECK"
+  [ "$status" -eq 1 ]
+  got="$(grep -oE '[0-9]+ findings, baseline' <<<"$output" | grep -oE '^[0-9]+')"
+  [ "$got" = "${expected%% *}" ] || { echo "checker counted $got, shellcheck json says ${expected%% *}"; echo "$output"; return 1; }
+  [ "$(grep -oE ': (error|warning|info|style): ' <<<"$output" | sort -u | wc -l | tr -d ' ')" -eq 4 ]
 }
 
 @test "at the baseline is green, and says how many files and which version" {
@@ -148,6 +170,7 @@ CLEAN='#!/bin/bash\nfoo="$1"\necho "$foo"\n'
   run bash "$CHECK" --positive-control
   [ "$status" -eq 0 ]
   grep -q 'positive control fired' <<<"$output"
+  grep -q 'info-level finding' <<<"$output"
   # Without a working tool the control must not report success either.
   SHELLCHECK=/nonexistent/shellcheck run bash "$CHECK" --positive-control
   [ "$status" -eq 2 ]
