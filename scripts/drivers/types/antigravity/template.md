@@ -62,7 +62,7 @@ Four possible outputs:
      - **Wait for the user's answer before proceeding.** Empty input means `1` (turn).
      - Map the chosen number to a mode (`1`→`turn`, `2`→`off`) and run:
        `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> antigravity "$(pwd)"`
-     - Antigravity has no Monitor tool, so `monitor` and `both` modes are not offered here.
+     - `monitor` は専用 headless bridge または `antigravity-tui-monitor.sh` を明示起動するモードです。TUI monitor中は bare `$__SKILL_NAME__`、`inbox.sh`、`check-inbox.sh` を呼ばず、supervisor が表示する保留状態を使ってください。
 
   6. Then check inbox for the newly joined team.
 
@@ -79,6 +79,8 @@ Four possible outputs:
 ## Execute
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.**
+
+まず `bash ~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh status --project <project> --team <team> --name <role>` を実行してください。出力が `runtime: tui-pty 未起動` なら通常の既定動作へ進んでください。それ以外に `tui-pty` を含む行があればAntigravityのTUI monitorが有効なので、以下の通常の既定動作を適用せず、bare `$__SKILL_NAME__`、`inbox.sh`、`check-inbox.sh` を実行しないでください。必要な状態確認はこのstatus（`tui-monitor status`）で行い、本文の再表示や既読化は行いません。TUI monitorへの受領確認は、envelope headerのbatch IDを使った `AGMSG_RECEIVED:<batch-id>` の一行です。
 
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
@@ -101,6 +103,12 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
 
+If argument is "resume":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/antigravity-resume.sh "$(pwd)"`
+2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
+
+If `agy-tui` stopped with `通常inboxによる既読試行を検知`, do not run bare `$__SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh` again. After confirming that no batch is pending, run `~/.agents/bin/agy-tui reset-guard --project "$(pwd)" --team <team> --name <role>` to clear only the read-denied guard; it does not read or ack messages.
+
 If argument is "config":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh show`
 2. Show the output to the user.
@@ -115,7 +123,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" antigravity` to see whether the role is already registered for this (project, type).
 3. If the name does not appear in the output, join under the existing team. For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> antigravity "$(pwd)"`. For multiple teams, ask the user which team to join the new role into.
 4. Set the session's active FROM to `<name>` for every `send.sh` call until another `actas`.
-5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. (Antigravity has no Monitor tool, so receive still covers all of your registered roles in this project.)"
+5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent. Headless monitor は別worker、TUI monitor は明示起動した同じTUIへ配信します。"
 
 If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
 1. Parse the role name.
@@ -128,7 +136,7 @@ If argument is "mode" (no further args):
 2. Show the output to the user.
 
 If argument starts with "mode" followed by a mode name (e.g. "mode turn"):
-1. Parse the mode. Antigravity supports only `turn` and `off` — reject `monitor` and `both` with: "Antigravity has no Monitor tool; only `turn` or `off` modes are supported."
+1. Parse the mode. Antigravity supports `monitor`, `turn`, and `off`; `both` is not supported. Monitor requires explicit `antigravity-monitor.sh` または `antigravity-tui-monitor.sh` startup.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> antigravity "$(pwd)"`
 
 If argument is "hook on" (legacy alias):
