@@ -508,6 +508,46 @@ assert events == ['child','allowed'], events
 `);
 });
 
+test('permission入力と同時の部分再描画でmodalが消えても直前画面で分類する', () => {
+  runPython(`
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+events=[]
+stdin_fd=sys.stdin.fileno(); master_fd=987655
+class Screen:
+    uncertain=False; uncertain_reason=None; state='normal'
+    class Decoder:
+        def getstate(self): return (b'',0)
+    decoder=Decoder()
+    ready=True
+    def feed(self, _data): self.ready=False; events.append('child-partial-redraw')
+    def lines_after(self, _receipt): return None
+
+s=module.Supervisor.__new__(module.Supervisor)
+s.stopping=False; s.resize_requested=False; s.resume_requested=False; s.stop_reason=None
+s.master=master_fd; s.screen=Screen(); s.last_output=0; s.buffer=''; s.result_buffer=''
+s.state={'supervisorPhase':'WAITING_FOR_RESULT','batch':{'receipt':'AGMSG_RECEIVED:batch'}}
+s.update_human_input_state=lambda: None; s.maybe_poll=lambda: None
+s.permission_input_ready=lambda: s.screen.ready
+def allowed(): events.append('allowed'); s.stopping=True
+s.allow_permission_input=allowed
+s.fail=lambda reason: (_ for _ in ()).throw(AssertionError(reason))
+
+original_select=module.select.select; original_read=module.os.read; original_write=module.os.write
+module.select.select=lambda *_args: ([stdin_fd,master_fd],[],[])
+module.os.read=lambda fd,_size: b'partial-redraw' if fd==master_fd else b'1'
+module.os.write=lambda fd,data: len(data)
+try: s.loop()
+finally:
+    module.select.select=original_select; module.os.read=original_read; module.os.write=original_write
+assert events == ['child-partial-redraw','allowed'], events
+`);
+});
+
 test('read-denied停止には安全な復旧案内を表示する', () => {
   runPython(`
 import contextlib

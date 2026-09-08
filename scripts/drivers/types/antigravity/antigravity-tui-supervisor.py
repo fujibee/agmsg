@@ -502,6 +502,8 @@ class Supervisor:
             if self.stop_reason:
                 if self.state.get('batch') and self.state['batch'].get('phase')!='completed': self.fail(self.stop_reason)
                 break
+            permission_before_read=(self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
+                                    and self.permission_input_ready())
             r,_,_=select.select([sys.stdin.fileno(),self.master],[],[],0.2)
             # child描画と親入力が同時にreadyなら、画面モデルを先に最新化する。
             # permission UIの末尾が未反映のまま確認入力を通常入力と誤判定しない。
@@ -522,7 +524,8 @@ class Supervisor:
             if sys.stdin.fileno() in r:
                 data=os.read(sys.stdin.fileno(),4096)
                 if not data: self.stopping=True; break
-                if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
+                if (self.state.get('supervisorPhase')=='WAITING_FOR_RESULT'
+                        and (permission_before_read or self.permission_input_ready())): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
                     reason=self.permission_input_rejection_reason()
                     self.fail(f'受信turn中の人間入力を検知（permission拒否理由={reason}）')
