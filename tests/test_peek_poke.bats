@@ -494,23 +494,59 @@ EOF
 }
 
 @test "arrange: public identity join rejects different recorded terminals" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
   _write_named_record alice 'tmux:%1'
-  _write_named_record bob 'herdr:wA:p2'
-  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below herdr:wA:p2
   [ "$status" -ne 0 ]
-  _out_has "members are in different terminals"
+  _out_has "source and anchor are in different terminals"
 }
 
 @test "arrange: public entry preserves unchanged and moved from the driver" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
   _install_fake_tmux_arrange
   _write_named_record alice 'tmux:%1'
-  _write_named_record bob 'tmux:%2'
   export TMUX_LAYOUT=$'%1|@7|11|0|80|10\n%2|@7|0|0|80|10'
-  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below tmux:%2
   [ "$status" -eq 0 ]
   [ "$output" = unchanged ]
   export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|12|0|40|10'
-  run bash "$SCRIPTS/arrange.sh" testteam alice place_below bob
+  run bash "$SCRIPTS/arrange.sh" testteam alice place_below tmux:%2
   [ "$status" -eq 0 ]
   [ "$output" = moved ]
+}
+
+@test "arrange: source must still be a roster member, anchor need not be one" {
+  _install_fake_tmux_arrange
+  _write_named_record alice 'tmux:%1'
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|12|0|40|10'
+  run bash "$SCRIPTS/arrange.sh" testteam alice swap tmux:%2
+  [ "$status" -ne 0 ]
+  [ "$output" = "arrange: source 'testteam/alice' is not a registered member" ]
+}
+
+@test "arrange: an invalid anchor reference is distinct from terminal and layout failures" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  _write_named_record alice 'tmux:%1'
+  run bash "$SCRIPTS/arrange.sh" testteam alice swap tmux:not-a-pane
+  [ "$status" -ne 0 ]
+  [ "$output" = "arrange: anchor reference 'tmux:not-a-pane' did not resolve to a terminal and pane id" ]
+}
+
+@test "arrange: a terminal without arrange capability stays distinct from bad references" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  _write_named_record alice 'plain:-'
+  run bash "$SCRIPTS/arrange.sh" testteam alice swap plain:-
+  [ "$status" -ne 0 ]
+  [ "$output" = "arrange: terminal 'plain' cannot arrange panes" ]
+}
+
+@test "arrange: swap accepts a non-member pane reference" {
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  _install_fake_tmux_arrange
+  _write_named_record alice 'tmux:%1'
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|0|41|40|10'
+  run bash "$SCRIPTS/arrange.sh" testteam alice swap tmux:%2
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '^tmux \[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]$' "$ARGV_LOG"
 }

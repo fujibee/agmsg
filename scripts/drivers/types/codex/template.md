@@ -166,10 +166,10 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
    - `--force`: skips the message and tears the member down from the placement recorded at spawn time — kills its tmux pane/window and drops its registration.
 3. Show the script's output.
 
-If argument starts with "arrange" (e.g. "arrange alice place_below bob"):
-1. Parse `<agent> <place_below|place_right> <anchor-agent>` and determine their shared team.
-2. Run `~/.agents/skills/__SKILL_NAME__/scripts/arrange.sh <team> <agent> <intent> <anchor-agent>`.
-3. Show the script output. Report `moved` as a performed move and `unchanged` as already in the requested arrangement; do not collapse the two. `ambiguous_layout` means the layout must be simplified before retrying, `runtime_error` means inspect the terminal, and `unsupported` means the terminal/placement cannot be arranged (`tmux:@N` window placements included).
+If argument starts with "arrange" (e.g. "arrange alice place_below tmux:%2"):
+1. Parse `<agent> <place_below|place_right|swap> <anchor-ref>` and determine the source agent's team.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/arrange.sh <team> <agent> <intent> <anchor-ref>`.
+3. Show the script output. Report `moved` as a performed move and `unchanged` as already in the requested arrangement; do not collapse the two. `place_below` and `place_right` are idempotent, but `swap` is not: calling `swap` twice swaps the panes back, so a native swap normally reports `moved`; `unchanged` is only possible when the driver explicitly reports `changed=false`. `ambiguous_layout` means the layout must be simplified before retrying, `runtime_error` means inspect the terminal, and `unsupported` means the terminal/placement cannot be arranged (`tmux:@N` window placements included).
 
 If argument starts with "peek" (e.g. "peek reviewer", "peek alice --lines 80"):
 1. Parse `<name>` and an optional `--lines N` (how many of the pane's visible lines to return).

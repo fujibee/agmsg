@@ -513,6 +513,22 @@ EOF
   grep -q '\[move-pane\] \[-s\] \[%1\] \[-t\] \[%2\] \[-h\]' "$ARGV_LOG"
 }
 
+@test "tmux hint swap: two calls both move occupied panes" {
+  _install_fake_tmux_layout
+  agmsg_terminal_load tmux
+  terminal_describe | grep -q '^intent.swap=tmux swap-pane -s SOURCE -t TARGET$'
+  export TMUX_LAYOUT=$'%1|@7|0|0|40|10\n%2|@7|0|41|40|10'
+  run terminal_arrange '%1' swap '%2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '\[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]' "$ARGV_LOG"
+  : > "$ARGV_LOG"
+  run terminal_arrange '%1' swap '%2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  grep -q '\[swap-pane\] \[-s\] \[%1\] \[-t\] \[%2\]' "$ARGV_LOG"
+}
+
 @test "tmux: arrange cannot locate a listed pane -> unknown/10, not runtime_error" {
   _install_fake_tmux_layout
   agmsg_terminal_load tmux
@@ -649,6 +665,12 @@ elif [ "\$1 \$2" = 'pane move' ]; then
       ;;
     *) printf '%s\n' '{"result":{"move_result":{"changed":true}}}' ;;
   esac
+elif [ "\$1 \$2" = 'pane swap' ]; then
+  if [ "\${HERDR_SWAP_CHANGED:-true}" = true ]; then
+    printf '%s\n' '{"result":{"swap_result":{"changed":true}}}'
+  else
+    printf '%s\n' '{"result":{"swap_result":{"changed":false}}}'
+  fi
 fi
 exit 0
 EOF
@@ -700,6 +722,29 @@ EOF
   [ "$output" = moved ]
   grep -q '\[pane\] \[move\] \[wA:p1\] \[--new-tab\] \[--no-focus\]' "$ARGV_LOG"
   grep -q '\[--split\] \[right\]' "$ARGV_LOG"
+}
+
+@test "herdr hint swap: two calls move, explicit changed=false is unchanged" {
+  _install_fake_herdr_layout
+  agmsg_terminal_load herdr
+  terminal_describe | grep -q '^intent.swap=herdr pane swap --source-pane SOURCE --target-pane TARGET$'
+  export HERDR_LAYOUT='{"result":{"layout":{"tab_id":"wA:t1","panes":[{"pane_id":"wA:p1","rect":{"x":0,"y":0,"width":10,"height":20}},{"pane_id":"wA:p2","rect":{"x":10,"y":0,"width":10,"height":20}}],"splits":[]}}}'
+  run terminal_arrange 'wA:p1' swap 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  [ "$(grep -c '\[pane\] \[layout\]' "$ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c '\[pane\] \[swap\]' "$ARGV_LOG")" -eq 1 ]
+  : > "$ARGV_LOG"
+  run terminal_arrange 'wA:p1' swap 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = moved ]
+  [ "$(grep -c '\[pane\] \[swap\]' "$ARGV_LOG")" -eq 1 ]
+  : > "$ARGV_LOG"
+  export HERDR_SWAP_CHANGED=false
+  run terminal_arrange 'wA:p1' swap 'wA:p2'
+  [ "$status" -eq 0 ]
+  [ "$output" = unchanged ]
+  grep -q '\[pane\] \[swap\] \[--source-pane\] \[wA:p1\] \[--target-pane\] \[wA:p2\]' "$ARGV_LOG"
 }
 
 @test "herdr: equal-area direction-compatible split candidates fail closed" {
