@@ -913,7 +913,15 @@ process.stdin.on('data', chunk => {
     const unresolvedBeforeRecovery = JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8'));
     const restartRejected = spawnSync('python3', [supervisorPath, '--project', project, '--team', 'fixture', '--name', 'worker', '--agy', fake], { env, encoding: 'utf8' });
     assert.notEqual(restartRejected.status, 0);
-    assert.match(restartRejected.stderr, /未解決batch/);
+    assert.match(restartRejected.stderr, /前回の受信を安全に既読確定できなかった/);
+    assert.match(restartRejected.stderr, new RegExp('batch: ' + uncertain.batch.id + ' phase=uncertain messages=1'));
+    assert.match(restartRejected.stderr, new RegExp('message IDs: ' + uncertain.batch.messages[0].id));
+    assert.match(restartRejected.stderr, /これは未処理とは限りません/);
+    assert.match(restartRejected.stderr, /agy-tui status --project/);
+    assert.match(restartRejected.stderr, /agy-tui ack --project/);
+    assert.match(restartRejected.stderr, /agy-tui replay --project/);
+    assert.match(restartRejected.stderr, /AGMSG_RECEIVED行と返信を確認済みの場合だけ/);
+    assert.match(restartRejected.stderr, /判断できない場合はackせず/);
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(install, 'run', stateFile), 'utf8')),
       unresolvedBeforeRecovery,

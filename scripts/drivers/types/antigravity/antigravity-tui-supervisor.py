@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Linux-only PTY owner for one Antigravity TUI and one agmsg role."""
-import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
+import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -348,6 +348,26 @@ class Supervisor:
         if self.actas.read_text().strip()!=self.owner: raise RuntimeError('actas所有権不一致')
         if self.violations.exists() and self.violations.read_text().strip(): raise RuntimeError('通常inboxによる既読試行を検知')
         if self.child and proc_start(self.child)!=self.state.get('childStart'): raise RuntimeError('agy child start token不一致')
+    def unresolved_batch_message(self, state):
+        batch=state['batch']; batch_id=str(batch.get('id','unknown'))
+        messages=batch.get('messages',[]); ids=[str(message.get('id','unknown')) for message in messages]
+        common=(f'--project {shlex.quote(self.project)} --team {shlex.quote(self.a.team)} '
+                f'--name {shlex.quote(self.a.name)}')
+        confirm=' '.join(f'--confirm-id {shlex.quote(message_id)}' for message_id in ids)
+        recovery=f'--batch {shlex.quote(batch_id)} {confirm}'.rstrip()
+        return '\n'.join([
+            '前回の受信を安全に既読確定できなかったため、新しいagy TUIを開始しません。',
+            f'batch: {batch_id} phase={batch.get("phase")} messages={len(messages)}',
+            f'message IDs: {", ".join(ids) if ids else "なし"}',
+            'これは未処理とは限りません。次の基準で復旧方法を選んでください。',
+            '1. 状態を確認:',
+            f'   agy-tui status {common}',
+            '2. agy画面で同じbatchのAGMSG_RECEIVED行と返信を確認済みの場合だけ既読確定:',
+            f'   agy-tui ack {common} {recovery}',
+            '3. agyがメッセージを受信していない場合は再配送（重複処理に注意）:',
+            f'   agy-tui replay {common} {recovery}',
+            '判断できない場合はackせず、statusの出力とagy画面を確認してください。',
+        ])
     def acquire(self):
         mode=Path(self.project)/'.agent/rules/agmsg.md'
         if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor設定が必要')
@@ -358,7 +378,7 @@ class Supervisor:
             except (FileNotFoundError,ProcessLookupError,ValueError): pass
             if self.state_file.exists():
                 old_state=json.loads(self.state_file.read_text())
-                if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError('未解決batchです。ack/replayで復旧してください')
+                if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError(self.unresolved_batch_message(old_state))
             self.reservation.unlink()
         if self.state_file.exists():
             saved=self.migrate_state(json.loads(self.state_file.read_text()))
