@@ -230,25 +230,39 @@ class Supervisor:
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=False; self.human_idle_since=None; self.save()
         if not already_paused:
             print('\r\n[agmsg] 人間の入力中は自動配送を保留します。空の入力待ちに戻れば自動再開します',file=sys.stderr)
-    def permission_input_ready(self):
-        """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
+    def permission_input_rejection_reason(self):
+        """許可UIならNone、そうでなければfail-closedな診断理由を返す。"""
         screen=getattr(self,'screen',None)
-        if not screen or screen.uncertain or screen.state!='normal' or screen.decoder.getstate()[0]: return False
+        if not screen:return 'screen-missing'
+        if screen.uncertain:return screen.uncertain_reason or 'screen-uncertain'
+        if screen.state!='normal':return f'screen-state:{screen.state}'
+        if screen.decoder.getstate()[0]:return 'decoder-pending'
         visible=[line.strip() for line in screen.lines() if line.strip()]
-        if not visible: return False
+        if not visible:return 'screen-empty'
         # 受信本文に同じ語句があっても誤認しないよう、modal footer と直近の選択肢を同時に要求する。
         footer=screen.tail_with_prefix('esc to cancel')
         if footer:
-            # 実機のpermission UIは選択肢が4行あり、見出しは末尾から11行目になる。
-            tail=visible[-12:]
-            return (screen.run_before_with_prefix(footer[0], '↑/↓ Navigate · tab Amend') is not None
-                    and 'Requesting permission for:' in tail and 'Do you want to proceed?' in tail
-                    and any(re.fullmatch(r'>\s*1\. Yes', line) for line in tail))
+            nav=screen.run_before_with_prefix(footer[0], '↑/↓ Navigate · tab Amend')
+            if nav is None:return 'permission-nav-missing'
+            # 長いcommand/選択肢は端末幅に応じて複数の物理行へ折り返される。
+            # footer直前のnavを終端に、最大16論理行相当だけを戻してmodal本文を復元する。
+            physical_budget=max(16,(1024+screen.cols-1)//screen.cols)
+            start=max(0,nav[0]-physical_budget)
+            modal=''.join(line.strip() for line in screen.lines()[start:nav[1]+1])
+            required=('Requesting permission for:','Do you want to proceed?','> 1. Yes')
+            positions=[modal.find(token) for token in required]
+            if any(position<0 for position in positions):return 'permission-body-incomplete'
+            if positions!=sorted(positions):return 'permission-body-order'
+            return None
         if screen.tail_with_prefix('↑/↓ Navigate · enter Confirm'):
             tail=visible[-8:]
-            return ('Do you trust the contents of this project?' in tail
-                    and '> Yes, I trust this folder' in tail)
-        return False
+            if ('Do you trust the contents of this project?' in tail
+                    and '> Yes, I trust this folder' in tail):return None
+            return 'trust-body-incomplete'
+        return 'permission-footer-missing'
+    def permission_input_ready(self):
+        """実測済みの許可UIだけは、人間の確認入力をrelayできる。"""
+        return self.permission_input_rejection_reason() is None
     def allow_permission_input(self):
         # 現在のbatchはreceiptを待つ。既存の耐久pauseは触らず、通常入力の一時保留だけを立てる。
         self.state['humanInputActive']=True; self.state['humanInputSawNonIdle']=True; self.human_idle_since=None; self.save()
@@ -510,7 +524,7 @@ class Supervisor:
                 if not data: self.stopping=True; break
                 if self.state.get('supervisorPhase')=='WAITING_FOR_RESULT' and self.permission_input_ready(): self.allow_permission_input()
                 elif self.state.get('supervisorPhase')=='WAITING_FOR_RESULT':
-                    reason=getattr(self.screen,'uncertain_reason',None) or f'screen-state:{getattr(self.screen,"state","missing")}'
+                    reason=self.permission_input_rejection_reason()
                     self.fail(f'受信turn中の人間入力を検知（permission拒否理由={reason}）')
                 else: self.pause_for_human_input()
                 os.write(self.master,data)
