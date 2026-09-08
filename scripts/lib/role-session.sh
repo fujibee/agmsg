@@ -224,9 +224,9 @@ agmsg_role_session_mark_named() {
   return 0
 }
 
-# The mark as "<ref>\t<epoch>", or empty when there is none. One file read;
-# this is the common-case cost of "am I named?" (measured 0.22 ms), which is
-# what lets a seat ask on every action.
+# The mark as "<ref>\t<epoch>", or empty when there is none. Two reads of one
+# small file, no process; this is the common-case cost of "am I named?"
+# (measured 0.22 ms), which is what lets a seat ask on every action.
 agmsg_role_session_named() {
   local team="$1" agent="$2" ref epoch
   _agmsg_role_session_path_into "$team" "$agent"

@@ -197,10 +197,43 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
   : > "$ARGV_LOG"
   agmsg_self_name_on_action team alice
   [ "$(_terminal_calls)" -eq 0 ]
-  # A restarted server recreates its socket: a new inode.
-  rm -f "$HERDR_SOCKET_PATH"; : > "$HERDR_SOCKET_PATH"
+  # A restarted server recreates its socket. The fingerprint is inode:ctime
+  # with ctime in whole seconds, and ext4 hands a just-freed inode straight
+  # back (measured on the ubuntu runner: recreate within the same second and
+  # the fingerprint did not move), so a recreation is only visible across a
+  # second boundary -- which a real server restart always crosses. Cross it.
+  rm -f "$HERDR_SOCKET_PATH"; sleep 1; : > "$HERDR_SOCKET_PATH"
   agmsg_self_name_on_action team alice
   [ "$(_name_calls)" -eq 1 ]
+}
+
+@test "herdr: a seat moved to another herdr session (a different socket path) is named again" {
+  # Not a restart: a different server altogether, whose socket is another
+  # file. The inode differs regardless of timing, so this holds on every
+  # filesystem; the restart case above is the one that needs the second.
+  _install_fake_herdr; _under_herdr w1:pB "$BATS_TEST_TMPDIR/herdr-a.sock"
+  agmsg_self_name_on_action team alice
+  : > "$ARGV_LOG"
+  _under_herdr w1:pB "$BATS_TEST_TMPDIR/herdr-b.sock"
+  agmsg_self_name_on_action team alice
+  [ "$(_name_calls)" -eq 1 ]
+}
+
+@test "setup_test_env strips the developer's terminal from the environment (regression guard)" {
+  # The tests in this file unset these themselves, so without this guard the
+  # helper's unset could be removed and nothing here would go red -- while a
+  # suite run from inside a real pane would name the developer's pane again.
+  run bash -c '
+    cd "$1" && load() { source "./test_helper.bash"; }; load
+    export TMUX="/tmp/s,1,0" TMUX_PANE="%1" HERDR_ENV=1 HERDR_PANE_ID="w1:p1" HERDR_SOCKET_PATH=/tmp/x
+    setup_test_env
+    rc=0
+    for v in TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH; do
+      [ -z "$(eval "printf %s \"\${$v:-}\"")" ] || { echo "still set: $v"; rc=1; }
+    done
+    teardown_test_env; exit $rc
+  ' _ "$BATS_TEST_DIRNAME"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "herdr driver: terminal_detect answers from HERDR_PANE_ID, falls back to the session lookup without it, and rejects a malformed value" {

@@ -392,6 +392,11 @@ agmsg_terminal_ref() {
 #          creates that file when it starts (measured: its ctime is the last
 #          server start), so a restart recreates it. stat's flags differ
 #          between BSD and GNU; both are tried, and no stat at all is "".
+#          Resolution is one second, and a filesystem may hand the freed
+#          inode straight back (ext4 does; measured on a Linux runner), so a
+#          recreation inside the same second is not visible -- a real restart
+#          takes longer than that, and the case falls into the stated blind
+#          spot rather than into a false detection.
 #   plain  nothing to observe
 agmsg_terminal_epoch() {   # <terminal>
   case "$1" in
