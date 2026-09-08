@@ -84,7 +84,7 @@ write_node_launcher_fixtures() {
     rendered="$(render_type "$type")"
     ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
     grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"
-    grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-agent>' "$rendered"
+    grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-ref>' "$rendered"
   done
   grep -Fq "Program Files\\Git\\bin\\bash.exe" "$(render_type codex)"
   grep -Fq 'Ensure monitor is running first' "$(render_type claude-code)"
@@ -168,7 +168,7 @@ write_node_launcher_fixtures() {
   local template type
   for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
     template="$(render_type "$type")"
-    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-agent>' "$template"
+    grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-ref>' "$template"
     grep -q '`moved` as a performed move and `unchanged`' "$template"
     [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
   done

@@ -20,7 +20,12 @@ terminal_describe() {
   printf 'syntax_help=tmux list-commands\n'
   printf 'intent.place_below=tmux move-pane -s SOURCE -t TARGET -v\n'
   printf 'intent.place_right=tmux move-pane -s SOURCE -t TARGET -h\n'
+  printf 'intent.swap=tmux swap-pane -s SOURCE -t TARGET\n'
 }
+
+# place_below/place_right are idempotent; swap is not — two swaps restore the
+# original occupants. The caller must therefore report a native swap as moved
+# unless the driver explicitly reports changed=false.
 
 # READ op: print the window containing <id>. This answers WHERE only and never
 # treats an unresolved location as proof that the pane is gone.
@@ -82,7 +87,7 @@ terminal_arrange() {
   # same reason: a bare id names no server, so "same server" is not a fact — and
   # unlike a read, this op MUTATES, so the unestablished case must not proceed.
   [ "$ssock" = "$tsock" ] || { echo unsupported; return 13 ;}
-  case "$intent" in place_below|place_right) : ;; *) echo unsupported; return 13 ;; esac
+  case "$intent" in place_below|place_right|swap) : ;; *) echo unsupported; return 13 ;; esac
   out="$(_tmux_do "$source" list-panes -a -F '#{pane_id}|#{window_id}|#{pane_top}|#{pane_left}|#{pane_width}|#{pane_height}' 2>/dev/null)" \
     || { echo runtime_error; return 10; }
   srow="$(printf '%s\n' "$out" | awk -F '|' -v id="$sbare" '$1 == id { print; exit }')"
@@ -92,6 +97,13 @@ terminal_arrange() {
   IFS='|' read -r tid twin tt tl tw th <<< "$trow"
   _tmux_layout_numbers_ok "$st" "$sl" "$sw" "$sh" "$tt" "$tl" "$tw" "$th" \
     || { echo runtime_error; return 10; }
+  if [ "$intent" = swap ]; then
+    [ "$sbare" != "$tbare" ] || { echo unsupported; return 13; }
+    _tmux_do "$source" swap-pane -s "$sbare" -t "$tbare" >/dev/null 2>&1 \
+      || { echo runtime_error; return 12; }
+    echo moved
+    return 0
+  fi
   [ "$swin" = "$twin" ] && _tmux_arranged "$intent" "$st" "$sl" "$sw" "$sh" "$tt" "$tl" "$tw" "$th" \
     && { echo unchanged; return 0; }
   case "$intent" in

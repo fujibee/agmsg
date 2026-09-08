@@ -49,7 +49,12 @@ terminal_describe() {
   printf 'skill_help=herdr --skill\n'
   printf 'intent.place_below=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split down --target-pane TARGET\n'
   printf 'intent.place_right=herdr pane move SOURCE --new-tab; herdr pane move SOURCE --tab CONTAINER --split right --target-pane TARGET\n'
+  printf 'intent.swap=herdr pane swap --source-pane SOURCE --target-pane TARGET\n'
 }
+
+# place_below/place_right are idempotent; swap is not — two swaps restore the
+# original occupants. The caller must therefore report a native swap as moved
+# unless the driver explicitly reports changed=false.
 
 # Extract the pane id whose agent_session == <sid> from `herdr agent list` JSON.
 # Uses sqlite3 JSON1 (the codebase's no-jq convention). ASSERTED field names
@@ -599,11 +604,45 @@ _herdr_layout_has_pane() {
   [ "$count" = 1 ]
 }
 
+_herdr_swap_changed() {
+  local json="$1" esc changed
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  changed="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.swap_result.changed')" 2>/dev/null)" \
+    || return 2
+  case "$changed" in
+    1|true) return 0 ;;
+    0|false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 terminal_arrange() {
-  local source="$1" intent="$2" target="$3" layout source_layout state rc=0 tab first second temporary_tab
+  local source="$1" intent="$2" target="$3" layout source_layout state rc=0 tab first second temporary_tab swap_result
   command -v herdr >/dev/null 2>&1 || { echo runtime_error; return 10; }
   _herdr_pane_id_ok "$source" && _herdr_pane_id_ok "$target" || { echo unsupported; return 13; }
-  case "$intent" in place_below|place_right) : ;; *) echo unsupported; return 13 ;; esac
+  case "$intent" in place_below|place_right|swap) : ;; *) echo unsupported; return 13 ;; esac
+  if [ "$intent" = swap ]; then
+    [ "$source" != "$target" ] || { echo unsupported; return 13; }
+    # Swap keeps both panes occupied, but the native command still needs a
+    # positive existence observation for each id. A layout response for one
+    # pane cannot establish the other when they live in different tabs.
+    layout="$(herdr pane layout --pane "$target" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$layout" ] && _herdr_layout_has_pane "$layout" "$target" \
+      || { echo unknown; return 10; }
+    source_layout="$(herdr pane layout --pane "$source" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$source" \
+      || { echo unknown; return 10; }
+    swap_result="$(herdr pane swap --source-pane "$source" --target-pane "$target" 2>/dev/null)" \
+      || { echo runtime_error; return 12; }
+    [ -n "$swap_result" ] || { echo runtime_error; return 12; }
+    rc=0
+    _herdr_swap_changed "$swap_result" || rc=$?
+    case "$rc" in
+      0) echo moved; return 0 ;;
+      1) echo unchanged; return 0 ;;
+      *) echo runtime_error; return 12 ;;
+    esac
+  fi
   layout="$(herdr pane layout --pane "$target" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$layout" ] || { echo runtime_error; return 10; }
   rc=0
