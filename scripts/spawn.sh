@@ -397,10 +397,17 @@ RESUME_UUID="$(agmsg_role_resume_uuid "$AGENT_TYPE" "$TEAM" "$NAME" "$PROJECT" "
 # --- Pre-flight: refuse if <name> is currently held by another live session ---
 # The child's actas flow would refuse anyway; failing here avoids launching a
 # process that immediately can't take its identity.
-STATE="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
+# No `|| echo free`: a failed classification is not "the role is free to take".
+# `unknown:` refuses alongside `other:` — spawning into a role whose holder we
+# could not determine is how two agents end up on one seat, and the caller can
+# simply try again. The two get different words because the operator's next move
+# differs: drop it over there, versus find out why the lock cannot be read. (#983)
+STATE="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null)" || STATE="unknown:state_call_failed"
 case "$STATE" in
   other:*)
     die "actas '$NAME' in team '$TEAM' is held by a live session (${STATE#other:}); drop it there first" ;;
+  unknown:*)
+    die "actas '$NAME' in team '$TEAM': could not determine who holds it (${STATE#unknown:}); not spawning into an unverified seat" ;;
 esac
 
 # --- Pre-join so the child's actas just claims (no interactive team prompt) ---

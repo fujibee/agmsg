@@ -77,6 +77,12 @@ _stuck_set() {
 _pair_gate() {
   case "$3" in
     other:*) _stuck_drop "$1:$2"; PAIR_VERDICT="held:${3#other:}"; return 0 ;;
+    # Everything that is not `other:` used to fall through to `serve`, so a state
+    # of `unknown:` — "we could not find out who holds this" — chose the one
+    # verdict that acts. It is not `held` either; the caller must be able to tell
+    # "someone else has it" from "we do not know", because the second is retried
+    # and the first is not. (#983)
+    unknown:*) _stuck_drop "$1:$2"; PAIR_VERDICT="unverified:${3#unknown:}"; return 0 ;;
   esac
   if ! storage_store_exists "$1"; then
     _stuck_drop "$1:$2"; PAIR_VERDICT="nostore"; return 0

@@ -38,6 +38,15 @@ agmsg_subscription_pairs() {
     [ -z "$team" ] && continue
     state=$(actas_lock_state "$team" "$agent" "$owner_id")
     case "$state" in
+      # `unknown:` is not "free to subscribe". Falling through would keep the
+      # pair in the filtered set AND claim it below, on a state nobody
+      # established — the permissive direction, and the one that puts two
+      # sessions on one role. Skipped like a held pair, with its own word so the
+      # reason is not reported as someone else holding it. (#983)
+      unknown:*)
+        skipped="${skipped:+$skipped }${team}/${agent}(unverified:${state#unknown:})"
+        continue
+        ;;
       other:*)
         if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
           held="${held:+$held }${team}/${agent}(${state#other:})"

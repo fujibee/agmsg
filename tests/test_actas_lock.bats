@@ -244,3 +244,46 @@ live_pid() { echo "$$"; }
   run actas_lock_state "T" "alice" "sid-me"
   [ "$output" = "free" ]
 }
+
+# --- #983: "could not read" is its own answer, not "nobody holds it" -----------
+
+@test "observe: an unreadable lock is unknown, not free" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  actas_lock_claim T alice sid-me
+  local lock; lock="$(actas_lock_path T alice)"
+  [ -f "$lock" ]                          # canary: there is a lock to make unreadable
+  chmod 000 "$lock"
+  local st; st="$(actas_lock_state T alice sid-other)"
+  chmod 644 "$lock" 2>/dev/null || true
+  [ "$st" = "unknown:lock_unreadable" ]
+}
+
+@test "observe: an ABSENT lock is still free" {
+  # The partner. Without it, returning `unknown:` for everything passes the test
+  # above, and every caller then refuses forever.
+  [ "$(actas_lock_state T nobody sid-me)" = free ]
+}
+
+@test "observe: returns the state and the raw owner from ONE read" {
+  # The pairing is the point: callers that need a baseline were reading the state
+  # and then reading the owner separately, and a claim landing between the two
+  # produced a stale state with a fresh owner.
+  actas_lock_claim T alice sid-me
+  local out; out="$(actas_lock_observe T alice sid-me)"
+  [ "$out" = "$(printf 'mine\tsid-me')" ]
+}
+
+@test "observe: a lock owned by a session that cannot be judged is unknown" {
+  # liveness undecidable -> unknown, not free. `free` here would mean "stale",
+  # and stale is what reclaim and gc act on.
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { return 2; }     # cannot tell
+  [ "$(actas_lock_state T alice sid-me)" = "unknown:liveness_undecidable" ]
+}
+
+@test "observe: a lock owned by a POSITIVELY dead session is still free" {
+  # The partner again: undecidable and dead must not collapse back together.
+  actas_lock_claim T alice sid-ghost
+  agmsg_instance_alive() { return 1; }     # positively dead
+  [ "$(actas_lock_state T alice sid-me)" = free ]
+}

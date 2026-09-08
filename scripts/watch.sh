@@ -692,6 +692,19 @@ if [ -n "$PAIRS" ]; then
     [ -z "$_team" ] && continue
     state=$(actas_lock_state "$_team" "$_agent" "$SESSION_ID")
     case "$state" in
+      # Startup: an unverified pair is not subscribed. Falling through would have
+      # this watcher take a role whose holder it could not determine, which is
+      # how two watchers end up serving one inbox. Reported with its own word, so
+      # "someone else has it" and "we could not find out" are not the same line
+      # in the startup summary. (#983)
+      unknown:*)
+        if [ -n "$ACTIVE_NAME" ]; then
+          held="${held:+$held }${_team}/${_agent}(unverified:${state#unknown:})"
+        else
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:${state#unknown:})"
+        fi
+        continue
+        ;;
       other:*)
         # If the caller is asking specifically for this name (actas flow),
         # treat the conflict as a hard failure. Otherwise (broad subscribe)
@@ -897,7 +910,14 @@ while true; do
   # composite instance id is portable (Git Bash falls back to tasklist; see
   # _agmsg_pid_alive). Gated on a composite id only: a bare id (degraded, no
   # resolved agent pid) keeps the prior behavior and is not liveness-gated.
-  if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
+  # Exit only on a POSITIVE dead (rc 1). `! agmsg_instance_alive` was true for
+  # rc 2 as well, and rc 2 is "could not find out" — an unreadable `run/` made
+  # every watcher on the machine decide it was dead and exit, which is the same
+  # fleet-wide stop as #684's install guard by a different road. Cannot-tell is
+  # not a reason to stop; the next cycle asks again. (#983)
+  _sid_alive_rc=0
+  agmsg_instance_alive "$SESSION_ID" || _sid_alive_rc=$?
+  if agmsg_instance_is_composite "$SESSION_ID" && [ "$_sid_alive_rc" -eq 1 ]; then
     # Say which condition fired and which token it decided about (#692). The
     # guard is right; the silence is what costs. A watcher that stops here, one
     # that was killed, one that crashed early and one that was never started
@@ -926,15 +946,16 @@ while true; do
     # Only the lock file is read here, not the whole subscription set: losing a
     # pair is the half a running process can detect for the price of a file
     # read. Gaining one is the caller's job, at the point it creates the team.
-    pair_state="$(actas_lock_state "$pair_team" "$pair_agent" "$SESSION_ID" 2>/dev/null || echo free)"
-    # The RAW owner, captured in the same breath as the derived state, because the
-    # guards below compare owner-to-owner rather than state-to-state (#983). A
-    # failed read here becomes a sentinel that can never equal a successful one,
-    # so every guard this turn refuses rather than inheriting a "free" nobody
-    # established. `__unreadable__` cannot collide with a session id.
-    if pair_owner="$(actas_lock_owner "$pair_team" "$pair_agent" 2>/dev/null)"; then :; else
-      pair_owner="__unreadable__"
-    fi
+    # ONE read, in the lock library, returning BOTH the classification and the raw
+    # owner (actas_lock_observe). Reading state and owner separately left a window
+    # between the two calls: a claim landing there produced a stale `free` state
+    # (so the gate chose serve) paired with a FRESH owner baseline (so the guard
+    # compared new-to-new and said unchanged), and the pair was served for a role
+    # someone else held. Found by co3; the fix belongs in the library, so every
+    # caller that needs both gets them from one observation. (#983)
+    IFS="$(printf '\t')" read -r pair_state pair_owner <<EOF
+$(actas_lock_observe "$pair_team" "$pair_agent" "$SESSION_ID")
+EOF
     # Test seam: a two-file barrier that parks the watcher immediately AFTER the
     # lock read, so the race regression test can land a claim inside the window
     # deterministically instead of guessing a sleep wide enough to hit it. Same
@@ -990,6 +1011,15 @@ while true; do
 }${pair_team}/${pair_agent}"
           echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${PAIR_VERDICT#held:}; not serving it while they hold it." >&2
         fi
+        continue
+        ;;
+      unverified:*)
+        # We could not establish who holds this pair. Neither serve nor stop:
+        # skip it this cycle and say why on the channel that survives (#691) —
+        # the next poll asks again and nothing is lost. Decided in _pair_gate
+        # rather than before it, so there is ONE place that turns a state into a
+        # verdict; a second decision here would be the arm that never runs.
+        watch_report "${pair_team}/${pair_agent}: ${PAIR_VERDICT#unverified:} — skipping this pair this cycle; it will be retried."
         continue
         ;;
       nostore)

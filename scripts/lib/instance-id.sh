@@ -408,6 +408,18 @@ EOF
 #                            a bare sid while cc-instance may already store the
 #                            composite, and we must not stale it out instantly.
 agmsg_instance_alive() {
+  # 0 alive | 1 dead | 2 CANNOT TELL.
+  #
+  # The third value is the point. This was a boolean, and every "could not find
+  # out" arrived as `dead` — which is the destructive direction for every caller:
+  # a dead owner gets its lock reclaimed and deleted, and the watcher's own
+  # self-check exits the process. An unreadable `run/` therefore did not degrade,
+  # it swept: locks removed, watchers gone, on nothing more than a read failure.
+  # (#983; the lock side of the same collapse is actas_lock_state.)
+  #
+  # The pid layer below is already conservative in the right direction —
+  # _agmsg_pid_alive_local treats EPERM and any unrecognised kill(2) error as
+  # ALIVE — so only this layer needed the extra value.
   local token="$1"
   [ -n "$token" ] || return 1
   if agmsg_instance_is_composite "$token"; then
@@ -416,24 +428,33 @@ agmsg_instance_alive() {
     local f s
     f="$SKILL_DIR/run/cc-instance.$pid"
     [ -f "$f" ] || return 0
-    s="$(cat "$f" 2>/dev/null || true)"
+    # The file is there; failing to read it is not evidence of anything.
+    s="$(cat "$f" 2>/dev/null)" || return 2
     [ "$s" = "$token" ] && return 0
     return 1
   fi
-  local run f p s
+  local run f p s undecided=0
   run="$SKILL_DIR/run"
-  [ -d "$run" ] || return 1
+  # Absent and unreadable are different facts: nothing ever registered (dead) vs
+  # we cannot look (cannot tell).
+  [ -e "$run" ] || return 1
+  { [ -d "$run" ] && [ -r "$run" ]; } || return 2
   for f in "$run"/cc-instance.*; do
     [ -f "$f" ] || continue
     p=${f##*.}
     case "$p" in ''|*[!0-9]*) continue ;; esac
     _agmsg_pid_alive "$p" || continue
-    s="$(cat "$f" 2>/dev/null || true)"
+    # One unreadable entry does not settle the question either way: the token may
+    # be exactly the one we could not read. Keep scanning — a positive match
+    # anywhere still answers alive — and only report "cannot tell" if we finish
+    # without one.
+    if ! s="$(cat "$f" 2>/dev/null)"; then undecided=1; continue; fi
     [ "$s" = "$token" ] && return 0
     # upgrade compat: cc-instance stores "<sid>.<pid>" but the lock holds "<sid>"
     if agmsg_instance_is_composite "$s" && [ "${s%.*}" = "$token" ]; then
       return 0
     fi
   done
+  [ "$undecided" -eq 1 ] && return 2
   return 1
 }

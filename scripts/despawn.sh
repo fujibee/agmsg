@@ -133,8 +133,17 @@ if [ "$FORCE" = "1" ]; then
 fi
 
 # --- Graceful ---
-state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
+# No `|| echo free`: a failed classification is not "the lock is free". This
+# branch decides whether to send a `ctrl:despawn` at all, and `free` is the arm
+# that concludes the member is already gone. `unknown:` must not reach it — an
+# unverified state is a reason to stop and say so, not to act. (#983)
+state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null)" || state="unknown:state_call_failed"
 case "$state" in
+  unknown:*)
+    echo "despawn: '$NAME' — could not determine who holds this role (${state#unknown:}); not sending ctrl:despawn. Check the lock and retry." >&2
+    echo "status=error name=$NAME team=$TEAM note=lock-state-unknown"
+    exit 1
+    ;;
   free)
     # #625: a free actas lock does NOT prove the member is gone. A monitor=no type
     # (cursor, codex) never runs a watcher and so NEVER holds a lock; a member whose
@@ -160,7 +169,11 @@ esac
 
 waited=0
 while true; do
-  state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null || echo free)"
+  # `free` here means "the watcher let go, teardown is progressing". An
+  # unverified state is NOT that, and `|| echo free` made every failed read look
+  # like success — the wait would end and despawn would report done. Keep
+  # waiting instead: the timeout below is the honest end of this loop. (#983)
+  state="$(actas_lock_state "$TEAM" "$NAME" "" 2>/dev/null)" || state="unknown:state_call_failed"
   [ "$state" = "free" ] && break
   if [ "$waited" -ge "$TIMEOUT" ]; then
     echo "status=timeout name=$NAME team=$TEAM after=${TIMEOUT}s"
