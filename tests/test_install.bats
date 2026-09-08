@@ -37,6 +37,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
@@ -45,12 +46,12 @@ teardown() {
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 0 ]
-  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
     --project /tmp/not-joined --team demo --name agy
   [ "$status" -eq 1 ]
-  [[ "$output" == *"復旧対象のstateがありません"* ]]
+  grep -qF '復旧対象のstateがありません' <<<"$output"
 
   run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" ack \
     --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
@@ -93,6 +94,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"

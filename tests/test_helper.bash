@@ -61,6 +61,17 @@ skip_unless_windows() {
   esac
 }
 
+# The Antigravity TUI monitor is documented as Linux-only in this first
+# version (docs/antigravity-monitor-beta.md): antigravity-tui-supervisor.py
+# reads /proc/<pid>/stat for every liveness check, including the read-only
+# `status`/`stop`/`resume`/`reset-guard` actions, and antigravity-tui-monitor.sh
+# refuses to even exec it elsewhere. Use for any test that actually invokes the
+# installed agy-tui shim; tests that only check install.sh's own file handling
+# (ownership, symlink replacement) do not need this.
+skip_unless_linux() {
+  [ "$(uname -s)" = Linux ] || skip "${1:-Antigravity TUI monitor is Linux-only}"
+}
+
 # In-memory sqlite for test ASSERTIONS, stripping CR. sqlite3.exe writes stdout
 # in text mode on Windows (\n -> \r\n); $(...) keeps the trailing \r, so a probe
 # like [ "$(sqlite3 :memory: 'SELECT json_valid(...)')" = "1" ] compares "1\r"
