@@ -359,7 +359,17 @@ if [ -z "$ROLE_NAME" ]; then
   _tab="$(printf '\t')"
   while IFS="$_tab" read -r _p_team _p_agent; do
     [ -n "$_p_team" ] && [ -n "$_p_agent" ] || continue
-    _owner="$(actas_lock_owner "$_p_team" "$_p_agent" 2>/dev/null || true)"
+    # A lock we could not READ is not a lock that isn't ours. Counting it as
+    # "not ours" can leave _narrow_n at exactly 1 from some other pair and
+    # re-seat this session onto the wrong role. Treating the whole narrowing as
+    # ambiguous is the fail-closed direction and costs an unfiltered-watcher
+    # refusal, which is the outcome this block already has for 2+. (#983)
+    _own_r="$(actas_lock_read "$_p_team" "$_p_agent" 2>/dev/null)" || _own_r="unreadable$_tab"
+    case "${_own_r%%"$_tab"*}" in
+      ok)         _owner="${_own_r#*"$_tab"}" ;;
+      absent)     continue ;;
+      *)          _narrow_n=2; break ;;
+    esac
     [ -n "$_owner" ] || continue
     _owner_bare="$(agmsg_instance_bare_sid "$_owner" 2>/dev/null || printf '%s' "$_owner")"
     if [ "$_owner_bare" = "$_bare_sid" ]; then

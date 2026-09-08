@@ -51,7 +51,7 @@ agmsg_subscription_pairs() {
         if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
           held="${held:+$held }${team}/${agent}(${state#other:})"
         else
-          skipped="${skipped:+$skipped }${team}/${agent}(${state#other:})"
+          skipped="${skipped:+$skipped }${team}/${agent}(${state#other:})"   # held by that session
           # The two facts #605 needs that the line above doesn't carry: the
           # lock file's real path (percent-encoded, not reconstructable by
           # hand) and whether cc-instance.<pid> backs a composite owner --
@@ -70,15 +70,21 @@ agmsg_subscription_pairs() {
 
     if [ -n "$active_name" ] && [ "$claim_mode" = "claim" ]; then
       result=$(actas_lock_claim "$team" "$agent" "$owner_id" 2>/dev/null || true)
+      # Same rule as watch.sh: only an explicit `ok` subscribes, and the default
+      # arm refuses. Listing the failures and defaulting to success is what let a
+      # claim that never happened put a pair into the subscribed set. (#983)
       case "$result" in
-        # Same default, same fix: anything not `held:` was treated as a
-        # successful claim and the pair went into the subscribed set. (#983)
+        ok) : ;;
+        held:*)
+          held="${held:+$held }${team}/${agent}(${result#held:})"
+          continue
+          ;;
         unknown:*)
           skipped="${skipped:+$skipped }${team}/${agent}(unverified:${result#unknown:})"
           continue
           ;;
-        held:*)
-          held="${held:+$held }${team}/${agent}(${result#held:})"
+        *)
+          skipped="${skipped:+$skipped }${team}/${agent}(unverified:claim_unrecognized)"
           continue
           ;;
       esac
@@ -88,7 +94,9 @@ agmsg_subscription_pairs() {
   done <<< "$pairs"
 
   if [ -n "$skipped" ]; then
-    echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
+    # Same as watch.sh: this list mixes pairs held by a live peer with pairs
+    # whose lock could not be read. Only the first kind has a holder. (#983)
+    echo "agmsg watch: not serving these pairs (held by another session, or unverified): $skipped" >&2
     # Only when the exclusion left nothing to subscribe to (#605) -- a busy
     # pair alongside others that still resolve stays quiet.
     if [ -z "$filtered" ]; then

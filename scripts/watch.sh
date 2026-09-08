@@ -303,8 +303,22 @@ _pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
   # `unchanged` — the role did not move to anyone. A lock removed mid-turn reads
   # empty against a non-empty capture and is `changed`, which refuses; that is the
   # conservative direction and costs one cycle.
-  local _now
-  _now="$(actas_lock_owner "$1" "$2" 2>/dev/null)" || return 2
+  #
+  # The reader is the three-valued one (#983, tl): `absent` and `unreadable` are
+  # NOT the same answer here. Absent means there is no owner, which compares
+  # equal to an empty baseline and is correctly `unchanged` -- that is the
+  # ordinary case for a broad watcher on a free pair. Unreadable means we cannot
+  # say, and cannot say is refused. `actas_lock_owner` returned "" and rc 0 for
+  # both, so a run directory that became unsearchable mid-turn matched the free
+  # baseline exactly and the guard waved the act through (co3/co1).
+  local _r _rd _now
+  _r="$(actas_lock_read "$1" "$2")" || return 2
+  _rd="${_r%%$'\t'*}"
+  case "$_rd" in
+    ok)     _now="${_r#*$'\t'}" ;;
+    absent) _now="" ;;
+    *)      return 2 ;;
+  esac
   [ "$3" = "__unreadable__" ] && return 2
   [ "$_now" = "$3" ] && return 0
   return 1
@@ -722,15 +736,25 @@ if [ -n "$PAIRS" ]; then
       # where state-check said free but a peer claimed it between then and
       # now.
       result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null || true)
+      # ONLY an explicit `ok` subscribes. Every other answer — named or not —
+      # skips. The previous shape listed the two refusals and let everything else
+      # fall through to success, so a claim that failed before it learned
+      # anything (mktemp, an uncreatable lock dir, three contended reclaim
+      # rounds) printed nothing and was read as "we got it". Naming the success
+      # instead of the failures is what makes an unanticipated answer safe.
+      # (#983, co3/co1)
       case "$result" in
-        # Not `held:` used to mean "we got it", so an unverified verdict would
-        # have subscribed us to a pair whose holder we could not determine. (#983)
+        ok) : ;;
+        held:*)
+          held="${held:+$held }${_team}/${_agent}(${result#held:})"
+          continue
+          ;;
         unknown:*)
           skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:${result#unknown:})"
           continue
           ;;
-        held:*)
-          held="${held:+$held }${_team}/${_agent}(${result#held:})"
+        *)
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:claim_unrecognized)"
           continue
           ;;
       esac
@@ -739,7 +763,11 @@ if [ -n "$PAIRS" ]; then
   done <<< "$PAIRS"
   PAIRS="$filtered"
   if [ -n "$skipped" ]; then
-    echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
+    # Not all of these are held: a pair whose lock could not be read is skipped
+    # too, and it is listed as (unverified:<reason>). Saying "held by other
+    # sessions" over that list asserts a holder we never established — the same
+    # invented certainty as doctor's `lock=none`. (#983)
+    echo "agmsg watch: not serving these pairs (held by another session, or unverified): $skipped" >&2
   fi
   if [ -n "$held" ]; then
     echo "agmsg watch: cannot claim (held by other sessions): $held" >&2
