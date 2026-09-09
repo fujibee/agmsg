@@ -8,17 +8,43 @@ agmsg_render_skill() {
   local agent_type="${1:?agent type required}"
   local skill_name="${2:?skill name required}"
   local output="${3:?output path required}"
+  local root="${SCRIPT_DIR:-}/SKILL.md"
   local fragment
   local cmd_prefix
+  local temp
+  local root_marker='<!-- agmsg:render-root -->'
+  local overlay_marker='<!-- agmsg:render-overlay'
+  local rendered_overlay_marker="<!-- agmsg:render-overlay ${agent_type} -->"
 
   fragment="$(agmsg_type_template_path "$agent_type")" || return 1
+  if [ ! -f "$root" ] || [ ! -r "$root" ] || [ ! -s "$root" ]; then
+    echo "agmsg: shared SKILL.md is missing, unreadable, or empty: $root" >&2
+    return 1
+  fi
+  if [ ! -f "$fragment" ] || [ ! -r "$fragment" ] || [ ! -s "$fragment" ]; then
+    echo "agmsg: agent-type overlay is missing, unreadable, or empty: $fragment" >&2
+    return 1
+  fi
+  if ! grep -Fq "$root_marker" "$root"; then
+    echo "agmsg: shared SKILL.md render marker is missing: $root" >&2
+    return 1
+  fi
+  if ! grep -Fq "$overlay_marker" "$fragment"; then
+    echo "agmsg: agent-type overlay render marker is missing: $fragment" >&2
+    return 1
+  fi
   cmd_prefix="$(agmsg_type_get "$agent_type" cmd_prefix 2>/dev/null || true)"
   cmd_prefix="${cmd_prefix:-/}"
 
-  awk -v fragment="$fragment" \
-      -v skill_name="$skill_name" \
-      -v agent_type="$agent_type" \
-      -v cmd_prefix="$cmd_prefix" '
+  if ! temp="$(mktemp "${output}.tmp.XXXXXX" 2>/dev/null)"; then
+    echo "agmsg: cannot create temporary rendered skill: $output" >&2
+    return 1
+  fi
+
+  if ! awk -v fragment="$fragment" \
+          -v skill_name="$skill_name" \
+          -v agent_type="$agent_type" \
+          -v cmd_prefix="$cmd_prefix" '
     function expand(line,    p) {
       while ((p = index(line, "__SKILL_NAME__")) > 0)
         line = substr(line, 1, p - 1) skill_name substr(line, p + 14)
@@ -75,5 +101,22 @@ agmsg_render_skill() {
       if (active == "")
         print expand($0)
     }
-  ' "$fragment" "$SCRIPT_DIR/SKILL.md" > "$output"
+  ' "$fragment" "$root" > "$temp"; then
+    rm -f "$temp"
+    echo "agmsg: skill rendering failed for $agent_type" >&2
+    return 1
+  fi
+
+  if [ ! -s "$temp" ] || ! grep -Fq "$root_marker" "$temp" || \
+     ! grep -Fq "$rendered_overlay_marker" "$temp"; then
+    rm -f "$temp"
+    echo "agmsg: rendered skill failed composition validation for $agent_type" >&2
+    return 1
+  fi
+  chmod 644 "$temp" || { rm -f "$temp"; return 1; }
+  if ! mv -f "$temp" "$output"; then
+    rm -f "$temp"
+    echo "agmsg: cannot install rendered skill: $output" >&2
+    return 1
+  fi
 }

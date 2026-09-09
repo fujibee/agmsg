@@ -1,6 +1,7 @@
 <!-- Claude Code overlay for the shared SKILL.md. -->
 
 <!-- agmsg:slot delivery -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, or `off` delivery. Empty input means `monitor`.
      Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow the printed `AGMSG-DIRECTIVE` block.
 <!-- /agmsg:slot delivery -->

@@ -83,6 +83,8 @@ write_node_launcher_fixtures() {
   for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
     rendered="$(render_type "$type")"
     ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
+    grep -Fq '<!-- agmsg:render-root -->' "$rendered"
+    grep -Fq "<!-- agmsg:render-overlay $type -->" "$rendered"
     grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"
     grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-ref>' "$rendered"
   done
@@ -91,6 +93,40 @@ write_node_launcher_fixtures() {
   grep -Fq 'hermes is not spawnable' "$(render_type hermes)"
   grep -Fq 'Grok Build' "$(render_type grok-build)"
   grep -Fq 'OpenCode monitor' "$(render_type opencode)"
+}
+
+renderer_failure_fixture() {
+  cp "$BATS_TEST_DIRNAME/../SKILL.md" "$SCRIPTS/SKILL.md"
+  printf 'existing rendered skill\n' > "$TEST_SKILL_DIR/rendered.md"
+}
+
+run_renderer_fixture() {
+  run env -i PATH="$PATH" SCRIPT_DIR="$SCRIPTS" bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/skill-render.sh'; agmsg_render_skill codex agmsg '$TEST_SKILL_DIR/rendered.md'"
+}
+
+@test "skill renderer rejects a missing overlay without replacing the output" {
+  renderer_failure_fixture
+  rm "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects an unreadable overlay without replacing the output" {
+  renderer_failure_fixture
+  chmod 000 "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects an empty overlay without replacing the output" {
+  renderer_failure_fixture
+  : > "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
 }
 
 @test "agent templates route remote-import intent before not_joined identity setup" {

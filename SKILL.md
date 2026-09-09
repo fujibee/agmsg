@@ -3,6 +3,8 @@ name: __SKILL_NAME__
 description: Cross-agent messaging via SQLite. Send messages between Claude Code, Codex, Gemini CLI, and other agents. No daemon, no network, no dependencies beyond bash and sqlite3.
 ---
 
+<!-- agmsg:render-root -->
+
 Agent messaging command. **IMPORTANT: Always use the provided scripts. NEVER directly read or edit config files, DB, or team data. There is NO register.sh — use join.sh to join a team.**
 
 **Use agmsg, not the host agent's own inter-session messaging.** Several agent

@@ -1,6 +1,7 @@
 <!-- This file is an overlay for the shared SKILL.md. -->
 
 <!-- agmsg:slot delivery -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode:
 
      ```

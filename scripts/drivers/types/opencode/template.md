@@ -1,5 +1,6 @@
 <!-- OpenCode overlay. -->
 <!-- agmsg:slot delivery -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
   5. **REQUIRED — Do NOT skip this step.** Choose `monitor`, `turn`, or `off` delivery (empty input means `monitor`), then run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
 <!-- /agmsg:slot delivery -->
 <!-- agmsg:slot execute-extra -->

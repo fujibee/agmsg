@@ -1,5 +1,6 @@
 <!-- Grok Build overlay. -->
 <!-- agmsg:slot delivery -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
   5. **REQUIRED — Do NOT skip this step.** Choose `turn`, `monitor`, or `off` delivery (empty input means `turn`), then run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
 <!-- /agmsg:slot delivery -->
 <!-- agmsg:slot execute-extra -->
