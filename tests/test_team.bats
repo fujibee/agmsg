@@ -1079,8 +1079,10 @@ STUB
 @test "team.sh with no argument prints the option block as separate lines" {
   run bash "$SCRIPTS/team.sh"
   [ "$status" -eq 2 ]
-  # The shell's own diagnostic prefix must not be there.
-  ! grep -q 'line [0-9]*: 1:' <<<"$output"
+  # The shell's own diagnostic prefix must not be there. `refute`, not `! cmd`:
+  # a negated command cannot fail a bats test anywhere (#670), so `! grep -q`
+  # here would have asserted nothing at all.
+  refute grep -q 'line [0-9]*: 1:' <<<"$output"
   # Each option is on a line of its own, anchored at line start.
   grep -qE '^Usage: team\.sh ' <<<"$output"
   grep -qE '^  --fix-pane-names ' <<<"$output"
