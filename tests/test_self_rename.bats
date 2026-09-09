@@ -151,3 +151,21 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   terminal_peek() { return 1; }
   [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:screen_unreadable' ]
 }
+
+# The header line begins with the prefix, but the rest of it is still screen text
+# (#1102 review, tl follow-up). A real session name is short and has no control
+# bytes; a value carrying a TAB would corrupt the TAB-separated records this feeds,
+# so a control byte reads malformed rather than being passed through as the name.
+@test "codex screen parse: a value with a control byte is malformed, not a name (#1102)" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  terminal_peek() { printf 'Thread name: bad\tname\nmore\n'; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_malformed' ]
+}
+
+# A screen line far longer than any session name is not a name we can trust.
+@test "codex screen parse: an over-long value is malformed, not a name (#1102)" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  local long; printf -v long 'x%.0s' {1..200}
+  terminal_peek() { printf 'Thread name: %s\n' "$long"; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_malformed' ]
+}

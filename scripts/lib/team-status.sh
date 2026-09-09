@@ -369,6 +369,13 @@ agmsg_cli_session_observed() {   # <type> <title> <pane>
       while [ "${name# }" != "$name" ]; do name="${name# }"; done      # lead ws
       while [ "${name% }" != "$name" ]; do name="${name% }"; done      # trail ws
       [ -n "$name" ] || { printf 'unknown:name_not_visible\n'; return 0; }
+      # The header line is real, but everything after the prefix is still screen
+      # text (#1102 review). A session name is short and has no control bytes;
+      # anything else is not a name we can trust to compare or mark, so it reads
+      # malformed rather than being passed through. A TAB especially would corrupt
+      # the TAB-separated records this feeds.
+      case "$name" in *[[:cntrl:]]*) printf 'unknown:name_malformed\n'; return 0 ;; esac
+      [ "${#name}" -le 128 ] || { printf 'unknown:name_malformed\n'; return 0; }
       printf '%s\n' "$name"
       ;;
     *) printf 'unknown:session_name_source_unrecognized\n' ;;
