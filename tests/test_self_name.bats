@@ -322,3 +322,18 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
   [ "$(agmsg_role_session_get team carol type)" = codex ]
   [ -z "$(agmsg_role_session_uuid team carol)" ]
 }
+
+@test "AGMSG_SELF_NAME=off turns the boot path off too, not only the hook (#1096)" {
+  # spawn runs join.sh in the caller's process for the new member; join's boot
+  # path calls agmsg_terminal_name_self directly, so the switch has to be
+  # honoured THERE, or the caller's pane is named after the new member.
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
+  AGMSG_SELF_NAME=off agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
+  [ "$(_name_calls)" -eq 0 ]
+  [ -z "$(_mark team alice)" ]
+  # Control: the same call with the switch at its default names once.
+  agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
+  [ "$(_name_calls)" -eq 1 ]
+}

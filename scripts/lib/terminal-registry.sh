@@ -566,6 +566,17 @@ agmsg_terminal_name_self() {
     echo "agmsg: terminal_name_self needs <team> and <agent>" >&2; return 1
   }
 
+  # AGMSG_SELF_NAME=off: this process must NOT name its pane, whatever pair it
+  # is handed. Checked HERE, in the one function every self-naming path ends in
+  # (join at boot, actas, the action hook), not only in the action hook -- a
+  # switch honoured by one path out of several is not a switch. The case that
+  # needs it (#1096): spawn runs join.sh in the CALLER's process on behalf of
+  # the new member; "self" below resolves through the caller's environment
+  # (HERDR_PANE_ID, $TMUX/$TMUX_PANE), so without this the caller's pane is
+  # renamed to the new member's label and key. spawn sets it on that one
+  # subprocess; a seat joining by hand keeps naming itself.
+  [ "${AGMSG_SELF_NAME:-on}" != off ] || return 0
+
   # The BARE sid, whatever the caller had. A terminal knows the id the CLI
   # published; the composite "<sid>.<pid>" exists only inside agmsg, and handing
   # it over asks a question no terminal can answer -- the answer comes back as
