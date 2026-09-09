@@ -965,3 +965,107 @@ JSON
   [[ "$output" == *"1 member(s)"* ]]
   [[ "$output" != *"no local registration"* ]]
 }
+
+# --- #1110: team --fix / --fix-pane-names / --rename-sessions -----------------------
+#
+# Two members on herdr, every identity cell mismatching, both panes ready. A fake
+# herdr on PATH logs EVERY call, so "nothing was typed into any pane" is a fact
+# about the log (no `agent prompt` line for any pane id), not about a label.
+
+_install_team_fix_fixture() {   # two claude-code members placed on herdr panes
+  export TEAM_HERDR_LOG="$BATS_TEST_TMPDIR/herdr.log"; : > "$TEAM_HERDR_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEAM_HERDR_LOG"
+case "\$1/\$2" in
+  pane/get)   printf '{"result":{"pane":{"pane_id":"%s","label":"wrong","agent_status":"idle","terminal_title":"✳ wrong"}}}\n' "\$3" ;;
+  agent/list) echo '{"result":{"agents":[{"pane_id":"w1:p1","name":"old"},{"pane_id":"w1:p2","name":"old"}]}}' ;;
+  agent/get)  echo '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  *)          echo '{"result":{"type":"ok"}}' ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  bash "$SCRIPTS/join.sh" fixteam bob claude-code /tmp/proj >/dev/null
+  local rec
+  rec="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  mkdir -p "$(dirname "$rec")"
+  printf 'herdr:w1:p1\t-\t-\n' > "$rec"
+  rec="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam bob' _ "$SCRIPTS")"
+  printf 'herdr:w1:p2\t-\t-\n' > "$rec"
+}
+
+@test "team --fix-pane-names types into no pane, and writes both names on both panes (#1110)" {
+  _install_team_fix_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # The fake saw the observation calls (the log is live) ...
+  grep -q '^pane get w1:p1$' "$TEAM_HERDR_LOG"
+  grep -q '^pane get w1:p2$' "$TEAM_HERDR_LOG"
+  # ... the name writes for both panes ...
+  grep -q '^agent rename w1:p1 ' "$TEAM_HERDR_LOG"
+  grep -q '^agent rename w1:p2 ' "$TEAM_HERDR_LOG"
+  grep -q '^pane rename w1:p1 fixteam:alice$' "$TEAM_HERDR_LOG"
+  grep -q '^pane rename w1:p2 fixteam:bob$' "$TEAM_HERDR_LOG"
+  # ... and NOT ONE keystroke, into any pane.
+  refute grep -q '^agent prompt ' "$TEAM_HERDR_LOG"
+  # The report names only the cells this flag covers.
+  printf '%s\n' "$output" | grep -q 'fix.pane_label='
+  printf '%s\n' "$output" | grep -q 'fix.agent_key='
+  refute grep -q 'fix.cli_session=' <<<"$output"
+}
+
+@test "team --rename-sessions types the rename into each ready pane and writes no name (#1110)" {
+  _install_team_fix_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --rename-sessions
+  [ "$status" -eq 0 ]
+  grep -q '^agent prompt w1:p1 /rename fixteam-alice$' "$TEAM_HERDR_LOG"
+  grep -q '^agent prompt w1:p2 /rename fixteam-bob$' "$TEAM_HERDR_LOG"
+  refute grep -qE '^(agent|pane) rename ' "$TEAM_HERDR_LOG"
+  printf '%s\n' "$output" | grep -q 'fix.cli_session='
+  refute grep -qE 'fix.(pane_label|agent_key)=' <<<"$output"
+}
+
+@test "team --fix does both, and the report says which cell each result belongs to (#1110)" {
+  _install_team_fix_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix
+  [ "$status" -eq 0 ]
+  grep -q '^agent rename w1:p1 ' "$TEAM_HERDR_LOG"
+  grep -q '^pane rename w1:p2 fixteam:bob$' "$TEAM_HERDR_LOG"
+  grep -q '^agent prompt w1:p1 /rename fixteam-alice$' "$TEAM_HERDR_LOG"
+  grep -q '^agent prompt w1:p2 /rename fixteam-bob$' "$TEAM_HERDR_LOG"
+  # One line per cell per member, each naming its cell.
+  [ "$(grep -c 'fix.pane_label=' <<<"$output")" -eq 2 ]
+  [ "$(grep -c 'fix.agent_key=' <<<"$output")" -eq 2 ]
+  [ "$(grep -c 'fix.cli_session=' <<<"$output")" -eq 2 ]
+}
+
+@test "team: the skipped report covers only the requested cells (#1110)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF 'fix.pane_label=skipped(reason=no_placement_record)'
+  printf '%s\n' "$output" | grep -qF 'fix.agent_key=skipped(reason=no_placement_record)'
+  refute grep -qF 'fix.cli_session=' <<<"$output"
+  run bash "$SCRIPTS/team.sh" myteam --rename-sessions
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF 'fix.cli_session=skipped(reason=no_placement_record)'
+  refute grep -qE 'fix.(pane_label|agent_key)=' <<<"$output"
+}
+
+@test "team: --json refuses every repair flag, and the usage says which one types (#1110)" {
+  bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/proj
+  run bash "$SCRIPTS/team.sh" myteam --json --fix-pane-names
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF 'cannot be combined'
+  run bash "$SCRIPTS/team.sh" myteam --json --rename-sessions
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -qF 'cannot be combined'
+  run bash "$SCRIPTS/team.sh" myteam --bogus
+  [ "$status" -eq 2 ]
+  printf '%s\n' "$output" | grep -q -- '--fix-pane-names'
+  printf '%s\n' "$output" | grep -q -- '--rename-sessions'
+  printf '%s\n' "$output" | grep -qi 'typ'
+}

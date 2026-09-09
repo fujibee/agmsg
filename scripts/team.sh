@@ -4,20 +4,36 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-TEAM="${1:?Usage: team.sh <team> [--json] [--fix]}"
+USAGE='Usage: team.sh <team> [--json] [--fix | --fix-pane-names | --rename-sessions]
+  --fix              repair every identity cell: the pane names AND the CLI
+                     session name -- the latter by TYPING a rename command
+                     into the session
+  --fix-pane-names   repair the pane label and agent key only; never types
+                     into a session
+  --rename-sessions  repair the CLI session name only; TYPES the rename
+                     command into each session that is at a prompt'
+TEAM="${1:?$USAGE}"
 shift
 OUTPUT_MODE=human
-FIX=0
+# Two separable repairs (#1110): the pane names are written through the
+# terminal's API; the session name is typed into the session. --fix is the
+# unconditional umbrella and does both; the specific flags pick one half.
+FIX_PANE_NAMES=0
+FIX_SESSIONS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) OUTPUT_MODE=json ;;
-    --fix) FIX=1 ;;
-    *) echo "Usage: team.sh <team> [--json] [--fix]" >&2; exit 2 ;;
+    --fix) FIX_PANE_NAMES=1; FIX_SESSIONS=1 ;;
+    --fix-pane-names) FIX_PANE_NAMES=1 ;;
+    --rename-sessions) FIX_SESSIONS=1 ;;
+    *) echo "$USAGE" >&2; exit 2 ;;
   esac
   shift
 done
+FIX=0
+if [ "$FIX_PANE_NAMES" -eq 1 ] || [ "$FIX_SESSIONS" -eq 1 ]; then FIX=1; fi
 if [ "$FIX" -eq 1 ] && [ "$OUTPUT_MODE" = json ]; then
-  echo "Usage: team.sh <team> [--json] [--fix] (--json and --fix cannot be combined)" >&2
+  echo "Usage: team.sh <team> [--json] [--fix | --fix-pane-names | --rename-sessions] (--json and a repair flag cannot be combined)" >&2
   exit 2
 fi
 
@@ -114,10 +130,16 @@ $actions
 EOF
 }
 
+# The skipped lines for a member no repair can reach -- only the cells the
+# requested flags cover, so the report never mentions a cell it was not asked
+# to touch.
 _emit_unfixable_actions() {
-  local reason="$1"
+  local reason="$1" actions=""
   [ "$FIX" -eq 1 ] || return 0
-  _emit_fix_actions "$(printf 'pane_label\tskipped\t%s\nagent_key\tskipped\t%s\ncli_session\tskipped\t%s\n' "$reason" "$reason" "$reason")"
+  [ "$FIX_PANE_NAMES" -eq 1 ] && actions="$(printf 'pane_label\tskipped\t%s\nagent_key\tskipped\t%s\n' "$reason" "$reason")"
+  [ "$FIX_SESSIONS" -eq 1 ] && actions="${actions:+$actions
+}$(printf 'cli_session\tskipped\t%s\n' "$reason")"
+  _emit_fix_actions "$actions"
 }
 
 _member_status() {
@@ -179,8 +201,17 @@ EOF
 $identity
 EOF
     if [ "$FIX" -eq 1 ]; then
-      fix_actions="$(agmsg_team_fix_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane" \
-        "$pane_label" "$agent_key" "$cli_session")"
+      # Each half only when its flag asked for it. The pane-names half never
+      # types into the pane; the session half is the one that does (#1110).
+      fix_actions=""
+      if [ "$FIX_PANE_NAMES" -eq 1 ]; then
+        fix_actions="$(agmsg_team_fix_pane_names_loaded "$team" "$agent" "$type" "$terminal" "$pane" \
+          "$pane_label" "$agent_key")"
+      fi
+      if [ "$FIX_SESSIONS" -eq 1 ]; then
+        fix_actions="${fix_actions:+$fix_actions
+}$(agmsg_team_rename_session_loaded "$team" "$agent" "$type" "$terminal" "$pane" "$cli_session")"
+      fi
       identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
       IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity

@@ -109,10 +109,21 @@ EOF
 # Each field gets an explicit changed/skipped/failed action; no write is
 # attempted unless its observed cell is a mismatch, and CLI input additionally
 # requires a positive readiness proof.
-agmsg_team_fix_identity_loaded() {
+#
+# Two halves, because they are two kinds of act (#1110): the pane names (label
+# and key) are attributes written through the terminal's own API; the CLI
+# session name is repaired by TYPING a rename command into the pane. The halves
+# are separable work and a caller may want only one -- so each is its own
+# function, and `agmsg_team_fix_identity_loaded` is their union. The pane-names
+# half never calls terminal_poke; that is its contract, not an accident of the
+# cells it is handed.
+
+# <team> <agent> <type> <terminal> <pane> <pane_cell> <key_cell>
+#   -> pane_label and agent_key actions. Never types into the pane.
+agmsg_team_fix_pane_names_loaded() {
   local team="$1" agent="$2" type="$3" terminal="$4" pane="$5"
-  local pane_cell="$6" key_cell="$7" session_cell="$8"
-  local expected_session="$team-$agent" readiness state reason rc=0 observed title tries
+  local pane_cell="$6" key_cell="$7"
+  local reason rc=0
 
   case "$pane_cell" in
     mismatch\(*)
@@ -150,6 +161,19 @@ agmsg_team_fix_identity_loaded() {
     n/a:*) _agmsg_team_fix_result agent_key skipped "${key_cell#n/a:}" ;;
     *) _agmsg_team_fix_result agent_key skipped "${key_cell#unknown:}" ;;
   esac
+}
+
+# <team> <agent> <type> <terminal> <pane> <session_cell>
+#   -> the cli_session action. This is the half that TYPES into the pane
+#   (`<rename_cmd> <team>-<agent>`), behind three gates: the cell is a mismatch,
+#   the type declares a rename command, and the pane reports ready.
+agmsg_team_rename_session_loaded() {
+  # $4 (terminal) is accepted for a signature parallel to the pane-names half;
+  # the rename goes through the loaded driver's terminal_poke and needs no name.
+  local team="$1" agent="$2" type="$3" pane="$5"
+  local session_cell="$6"
+  local expected_session="$team-$agent" readiness state reason rc=0 observed title tries
+  local rename_cmd session_src
 
   case "$session_cell" in
     mismatch\(*)
@@ -200,6 +224,13 @@ EOF
     n/a:*) _agmsg_team_fix_result cli_session skipped "${session_cell#n/a:}" ;;
     *) _agmsg_team_fix_result cli_session skipped "${session_cell#unknown:}" ;;
   esac
+}
+
+# <team> <agent> <type> <terminal> <pane> <pane_cell> <key_cell> <session_cell>
+#   -> all three actions: the pane names, then the session rename (`team --fix`).
+agmsg_team_fix_identity_loaded() {
+  agmsg_team_fix_pane_names_loaded "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+  agmsg_team_rename_session_loaded "$1" "$2" "$3" "$4" "$5" "$8"
 }
 
 agmsg_identity_cell() {

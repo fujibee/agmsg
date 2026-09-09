@@ -240,8 +240,12 @@ EOF
   grep -qxF 'claude-code' <<<"$renderable_types"
   while IFS= read -r type; do
     template="$(render_type "$type")"
-    grep -Fq '"team --json", or "team --fix"' "$template"
-    grep -Fq 'team.sh $TEAM [--json|--fix]' "$template"
+    grep -Fq '"team --json", "team --fix", "team --fix-pane-names", or "team --rename-sessions"' "$template"
+    grep -Fq 'team.sh $TEAM [--json|--fix|--fix-pane-names|--rename-sessions]' "$template"
+    # The flag list itself says which repair types into a session (#1110).
+    grep -Fq -- '--fix-pane-names' "$template"
+    grep -Fq -- '--rename-sessions' "$template"
+    grep -Fiq 'types' "$template"
   done <<<"$renderable_types"
 }
 

@@ -574,3 +574,45 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$status" -eq 10 ]
   refute grep -q 'absent:' <<<"$output"
 }
+
+# --- #1110: the two halves of the repair are two kinds of act -----------------------
+#
+# The pane names are written through the terminal's API; the session name is
+# TYPED into the pane. Each half is its own function, and the pane-names half
+# must never call terminal_poke -- asserted on the poke fake, not on the cells.
+
+@test "pane-names repair never pokes, even with every cell mismatching and the pane ready" {
+  agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
+  _herdr_internal_key() { printf 'a123\n'; }
+  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_poke() { printf 'called %s\n' "$*" >> "$BATS_TEST_TMPDIR/poke"; }
+  terminal_team_observe() { printf 'idle\tteam:alice\ta123\t✳ team-alice\n'; }
+  run agmsg_team_fix_pane_names_loaded team alice claude-code herdr w2:p3 \
+    'mismatch(expected=team:alice,actual=alice)' \
+    'mismatch(expected=a123,actual=old)'
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[0]}" = $'pane_label\tchanged\trenamed_and_verified' ]
+  [ "${lines[1]}" = $'agent_key\tchanged\trenamed_and_verified' ]
+  # The names were written (two terminal_name calls: the label call logs an
+  # empty mode, the key call logs "key") and nothing was typed.
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/names")" -eq 2 ]
+  grep -qx key "$BATS_TEST_TMPDIR/names"
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}
+
+@test "session rename does only the session: one poke, no name write" {
+  agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
+  terminal_name() { printf 'called\n' >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }
+  terminal_team_observe() { printf 'idle\tteam:alice\ta123\t✳ team-alice\n'; }
+  run agmsg_team_rename_session_loaded team alice claude-code herdr w2:p3 \
+    'mismatch(expected=team-alice,actual=alice)'
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [ "${lines[0]}" = $'cli_session\tchanged\trenamed_and_verified' ]
+  [ "$(< "$BATS_TEST_TMPDIR/poke")" = '/rename team-alice' ]
+  [ ! -e "$BATS_TEST_TMPDIR/names" ]
+}

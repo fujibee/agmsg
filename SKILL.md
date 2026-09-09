@@ -99,8 +99,11 @@ If argument starts with "team list" (e.g. "team list", "team list --json", "team
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh <the rest of the args after "team list", unchanged>`
 2. This is a distinct command from bare "team" below — check for "team list" FIRST so "list" is never mistaken for a team name.
 
-If argument is "team", "team --json", or "team --fix":
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM [--json|--fix]`, preserving the option when present. `--json` returns every observed field; `--fix` repairs writable identity mismatches and reports changed, skipped, and failed actions.
+If argument is "team", "team --json", "team --fix", "team --fix-pane-names", or "team --rename-sessions":
+1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM [--json|--fix|--fix-pane-names|--rename-sessions]`, preserving the option when present. `--json` returns every observed field. The repair flags report changed, skipped, and failed actions per identity cell:
+   - `--fix-pane-names` repairs the pane label and agent key through the terminal's own API. It never types into a session.
+   - `--rename-sessions` repairs the CLI session name by **typing** the type's rename command (e.g. `/rename <team>-<agent>`) into each session whose name mismatches, is renamable, and is at a prompt; reported as `changed`, `poked_unverified`, `skipped`, or `failed`.
+   - `--fix` does both, unconditionally, including the keystroke.
 
 If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
