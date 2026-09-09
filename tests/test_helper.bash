@@ -47,6 +47,18 @@ teardown_test_env() {
   rm -rf "$TEST_SKILL_DIR"
 }
 
+# Print the renderable type set from the registry rather than duplicating the
+# list in each composition assertion. The optional root is useful for tests
+# that copy scripts into an isolated skill directory.
+agmsg_renderable_types() {
+  local root="${1:-$BATS_TEST_DIRNAME/..}"
+  (
+    # shellcheck disable=SC1091
+    source "$root/scripts/lib/type-registry.sh"
+    printf '%s\n' $AGMSG_RENDERABLE_SKILL_TYPES
+  )
+}
+
 # A fake `tmux` that logs its argv and produces the ids/text real tmux would.
 #
 # Shared because three suites drive the terminal layer now — the registry's own

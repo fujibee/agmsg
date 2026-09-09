@@ -26,6 +26,8 @@ AGENTS_DIR="$HOME/.agents"
 # helpers; safe to source.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/scripts/lib/type-registry.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/lib/skill-render.sh"
 
 # Resolve a provenance version for the source being installed, so an installed
 # copy is uniquely identifiable even between tagged releases (the canonical
@@ -93,17 +95,9 @@ UPDATE_ONLY=false
 INTERACTIVE=true
 AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
 
-# Types the installer renders their OWN shared SKILL.md for (their template.md
-# differs from codex's). Everything else -- codex itself, plus claude-code and
-# copilot, which keep separate dedicated copies elsewhere -- gets the codex-
-# typed shared SKILL.md. One list, read by three call sites below (fresh
-# install's template pick, --update's template pick, and --update's type
-# re-detection from the SKILL.md already on disk): before #846, the third site
-# hardcoded its own, narrower copy of this same set (missing opencode/hermes/
-# cursor) that had already drifted from the other two -- re-detecting one of
-# those three types as "codex" and then, via the template pick, overwriting
-# the SKILL.md the installer itself had written with the wrong flavor.
-AGMSG_SHARED_SKILL_TPL_TYPES="gemini antigravity opencode hermes cursor grok-build"
+# The registry derives this list from eligible manifests with template= keys.
+# It is shared by fresh install, --update selection, and --update re-detection;
+# adding a templated type therefore cannot silently fall back to the wrong flavor.
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
@@ -338,10 +332,10 @@ if [ "$UPDATE_ONLY" = true ]; then
     # from the whoami.sh line its own template prints (#846) -- every
     # renderable type's line is unambiguous against every other's; see the
     # cross-grep this list is built from, noted alongside
-    # AGMSG_SHARED_SKILL_TPL_TYPES above. codex is not grepped for: it is the
-    # default a match against this list falls back to.
+    # AGMSG_RENDERABLE_SKILL_TYPES above. codex remains the fallback when an
+    # older or hand-written SKILL.md has no recognizable whoami line.
     AGENT_TYPE="codex"
-    for _agmsg_t in $AGMSG_SHARED_SKILL_TPL_TYPES; do
+    for _agmsg_t in $AGMSG_RENDERABLE_SKILL_TYPES; do
       if grep -q "whoami.sh.*$_agmsg_t" "$SKILL_DIR/SKILL.md" 2>/dev/null; then
         AGENT_TYPE="$_agmsg_t"
         break
@@ -349,15 +343,13 @@ if [ "$UPDATE_ONLY" = true ]; then
     done
     unset _agmsg_t
   fi
-  # The shared SKILL.md uses the codex template by default; the types in
-  # AGMSG_SHARED_SKILL_TPL_TYPES get their own. (claude-code and copilot reuse
-  # the codex-typed shared SKILL.md; their dedicated copies are dropped
-  # separately below.)
+  # The shared SKILL.md is rendered for the detected type; codex is the safe
+  # default for an older install that cannot be identified.
   TPL_TYPE="codex"
-  case " $AGMSG_SHARED_SKILL_TPL_TYPES " in
+  case " $AGMSG_RENDERABLE_SKILL_TYPES " in
     *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
   esac
-  sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path "$TPL_TYPE")" > "$SKILL_DIR/SKILL.md"
+  agmsg_render_skill "$TPL_TYPE" "$SKILL_NAME" "$SKILL_DIR/SKILL.md"
   # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/)
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
@@ -375,7 +367,7 @@ if [ "$UPDATE_ONLY" = true ]; then
   # Refresh the Claude Code slash command file (was missed in earlier --update flows).
   CC_COMMANDS_DIR="$HOME/.claude/commands"
   if [ -d "$CC_COMMANDS_DIR" ] && [ -f "$CC_COMMANDS_DIR/$SKILL_NAME.md" ]; then
-    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path claude-code)" > "$CC_COMMANDS_DIR/$SKILL_NAME.md"
+    agmsg_render_skill claude-code "$SKILL_NAME" "$CC_COMMANDS_DIR/$SKILL_NAME.md"
   fi
   # Refresh / install the Copilot CLI skill (Copilot reads SKILL.md from its
   # own skills dir; the shared ~/.agents/skills/<name>/SKILL.md is
@@ -385,25 +377,25 @@ if [ "$UPDATE_ONLY" = true ]; then
   COPILOT_SKILL_DIR="$HOME/.copilot/skills/$SKILL_NAME"
   if [ -d "$HOME/.copilot" ]; then
     mkdir -p "$COPILOT_SKILL_DIR"
-    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path copilot)" > "$COPILOT_SKILL_DIR/SKILL.md"
+    agmsg_render_skill copilot "$SKILL_NAME" "$COPILOT_SKILL_DIR/SKILL.md"
   fi
   # Refresh / install the OpenCode skill (same reasoning as Copilot above).
   OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$SKILL_NAME"
   if [ -d "$HOME/.config/opencode" ]; then
     mkdir -p "$OPENCODE_SKILL_DIR"
-    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path opencode)" > "$OPENCODE_SKILL_DIR/SKILL.md"
+    agmsg_render_skill opencode "$SKILL_NAME" "$OPENCODE_SKILL_DIR/SKILL.md"
   fi
   # Refresh / install the Hermes Agent skill (same reasoning as Copilot above).
   HERMES_SKILL_DIR="$HOME/.hermes/skills/$SKILL_NAME"
   if [ -d "$HOME/.hermes" ]; then
     mkdir -p "$HERMES_SKILL_DIR"
-    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path hermes)" > "$HERMES_SKILL_DIR/SKILL.md"
+    agmsg_render_skill hermes "$SKILL_NAME" "$HERMES_SKILL_DIR/SKILL.md"
   fi
   # Refresh / install the Grok Build skill (same reasoning as Copilot above).
   GROK_SKILL_DIR="$HOME/.grok/skills/$SKILL_NAME"
   if [ -d "$HOME/.grok" ]; then
     mkdir -p "$GROK_SKILL_DIR"
-    sed "s/__SKILL_NAME__/$SKILL_NAME/g" "$(agmsg_type_template_path grok-build)" > "$GROK_SKILL_DIR/SKILL.md"
+    agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md"
   fi
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   # A team config written by an older release can be group- or world-writable,
@@ -570,14 +562,13 @@ SKILL_DIR="$AGENTS_DIR/skills/$CMD_NAME"
 echo "  Installing to ~/.agents/skills/$CMD_NAME/ ..."
 mkdir -p "$SKILL_DIR"/{scripts,types,db,agents}
 
-# SKILL.md is generated from the agent-specific command template, resolved from
-# the type manifest (scripts/drivers/types/<type>/template.md). The shared SKILL.md uses the
-# codex template by default; the types in AGMSG_SHARED_SKILL_TPL_TYPES get their own.
+# SKILL.md is composed from the shared root and the agent-specific overlay
+# resolved from the type manifest (scripts/drivers/types/<type>/template.md).
 TPL_TYPE="codex"
-case " $AGMSG_SHARED_SKILL_TPL_TYPES " in
+case " $AGMSG_RENDERABLE_SKILL_TYPES " in
   *" $AGENT_TYPE "*) TPL_TYPE="$AGENT_TYPE" ;;
 esac
-sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path "$TPL_TYPE")" > "$SKILL_DIR/SKILL.md"
+agmsg_render_skill "$TPL_TYPE" "$CMD_NAME" "$SKILL_DIR/SKILL.md"
 # Recursive copy so nested helper dirs (scripts/lib/, scripts/drivers/types/) ship
 # without enumerating files. The agent-type manifests and per-type runtimes live
 # under scripts/drivers/types/ now, so this single copy carries them too.
@@ -646,7 +637,7 @@ fi
 CC_COMMANDS_DIR="$HOME/.claude/commands"
 if [ -d "$HOME/.claude" ]; then
   mkdir -p "$CC_COMMANDS_DIR"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path claude-code)" > "$CC_COMMANDS_DIR/$CMD_NAME.md"
+  agmsg_render_skill claude-code "$CMD_NAME" "$CC_COMMANDS_DIR/$CMD_NAME.md"
   echo "  + installed /$CMD_NAME command to ~/.claude/commands/"
 fi
 
@@ -657,7 +648,7 @@ fi
 COPILOT_SKILL_DIR="$HOME/.copilot/skills/$CMD_NAME"
 if [ -d "$HOME/.copilot" ]; then
   mkdir -p "$COPILOT_SKILL_DIR"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path copilot)" > "$COPILOT_SKILL_DIR/SKILL.md"
+  agmsg_render_skill copilot "$CMD_NAME" "$COPILOT_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.copilot/skills/"
 fi
 
@@ -669,7 +660,7 @@ fi
 OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills/$CMD_NAME"
 if [ -d "$HOME/.config/opencode" ]; then
   mkdir -p "$OPENCODE_SKILL_DIR"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path opencode)" > "$OPENCODE_SKILL_DIR/SKILL.md"
+  agmsg_render_skill opencode "$CMD_NAME" "$OPENCODE_SKILL_DIR/SKILL.md"
   echo "  + installed \$$CMD_NAME skill to ~/.config/opencode/skills/"
 fi
 
@@ -681,7 +672,7 @@ fi
 HERMES_SKILL_DIR="$HOME/.hermes/skills/$CMD_NAME"
 if [ -d "$HOME/.hermes" ]; then
   mkdir -p "$HERMES_SKILL_DIR"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path hermes)" > "$HERMES_SKILL_DIR/SKILL.md"
+  agmsg_render_skill hermes "$CMD_NAME" "$HERMES_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.hermes/skills/"
 fi
 
@@ -694,7 +685,7 @@ fi
 GROK_SKILL_DIR="$HOME/.grok/skills/$CMD_NAME"
 if [ -d "$HOME/.grok" ]; then
   mkdir -p "$GROK_SKILL_DIR"
-  sed "s/__SKILL_NAME__/$CMD_NAME/g" "$(agmsg_type_template_path grok-build)" > "$GROK_SKILL_DIR/SKILL.md"
+  agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
 fi
 
