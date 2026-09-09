@@ -228,9 +228,19 @@ _herdr_pane_for_session() {
   return 2   # no candidate array path (unknown schema) -> could not answer
 }
 
-# record op: we are under herdr iff HERDR_ENV=1 and herdr is on PATH. Resolve
-# THIS session's pane from the session id via agent list (NOT inherited
-# HERDR_PANE_ID). Non-zero if not under herdr or the pane cannot be resolved.
+# record op: we are under herdr iff HERDR_ENV=1. Resolve THIS pane from the
+# environment first: herdr sets HERDR_PANE_ID in every pane's process tree, and
+# it is the pane the process is actually in -- MEASURED 2026-09-08 on the live
+# workstation (herdr 0.8.0): of every process carrying both HERDR_PANE_ID and
+# a CLI session id, 176 sat in exactly the pane `agent list` reported for that
+# session and 0 did not. An earlier note here said the inherited value was not
+# trusted; that was a caution written without a measurement, and the cost of
+# it was one `agent list` round trip per self-identification plus a hard
+# requirement for a session id, which a seat that acts (send, inbox) does not
+# have at hand -- so every codex seat stayed nameless. The session-id lookup
+# remains as the fallback for a caller with a session id and no pane in its
+# environment. Non-zero if not under herdr; empty stdout if the pane cannot
+# be resolved.
 terminal_detect() {
   local sid="${1:-}"
   # PRESENCE (exit code) is HERDR_ENV=1 ALONE: whether herdr is on PATH is a
@@ -242,8 +252,15 @@ terminal_detect() {
   # answered but we are not in it) goes to stderr for resolve-for-name's error;
   # resolve-for-placement uses only the exit code and needs no id.
   [ "${HERDR_ENV:-}" = 1 ] || return 1
+  # The pane we are in, from the environment: no round trip, no session id.
+  # Only a value of the measured pane-id grammar is taken; anything else
+  # falls through to the lookup rather than naming a pane that cannot exist.
+  if [ -n "${HERDR_PANE_ID:-}" ] && _herdr_pane_id_ok "${HERDR_PANE_ID}"; then
+    printf '%s\n' "${HERDR_PANE_ID}"
+    return 0
+  fi
   if [ -z "$sid" ]; then
-    echo "herdr: no session id to resolve this pane by" >&2
+    echo "herdr: no HERDR_PANE_ID in the environment and no session id to resolve this pane by" >&2
     return 0
   fi
   local pane hrc=0

@@ -17,6 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
+# A seat that reads history as itself names its own pane if it is not named
+# (self-name.sh); see send.sh. Only when an agent is given: without one this
+# is a team-wide read by nobody in particular.
+if [ -n "$AGENT" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-name.sh"
+  agmsg_self_name_on_action "$TEAM" "$AGENT"
+fi
+
 # A history read must not create a store, so a team that has never been written
 # to has no file yet. Since the stores split per team that is the ordinary state
 # of a freshly joined team rather than a broken install, and it reads out the

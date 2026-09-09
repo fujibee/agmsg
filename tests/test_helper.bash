@@ -2,6 +2,15 @@
 # Each test gets an isolated skill directory with its own DB and teams.
 
 setup_test_env() {
+  # A test never inherits the developer's terminal. The terminal drivers
+  # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:
+  # HERDR_PANE_ID, measured 2026-09-08), and join/send/inbox/history name the
+  # caller's pane through it -- so a suite run from inside a real tmux or herdr
+  # pane would otherwise write the fixture's team:agent onto the developer's
+  # own pane. Tests that want a terminal set these AFTER this call, against a
+  # fake on PATH. CI runners carry none of these, so nothing changes there.
+  unset TMUX TMUX_PANE
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
