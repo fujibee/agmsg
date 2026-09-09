@@ -86,6 +86,18 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
   agmsg_role_session_named "$1" "$2"
 }
 
+# The placement record's pane ref (its first field), or empty. This is the half
+# peek/poke/despawn/team/--fix resolve through -- the half #1109 was missing.
+_placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local rec r
+  rec="$(agmsg_spawn_path "$1" "$2")" || return 0
+  [ -f "$rec" ] || return 0
+  IFS=$'\t' read -r r _ < "$rec" || return 0
+  printf '%s' "$r"
+}
+
 # --- the three directions, tmux -----------------------------------------------------
 
 @test "no mark: the first action names the pane once and leaves a mark with the pane and the server pid" {
@@ -159,9 +171,14 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
-  agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
+  # A recording boot (SessionStart / actas both pass `record`): it leaves BOTH
+  # the mark and the placement record, so the action's fast half finds nothing to
+  # do. Without the record the action would rightly act to write it (see the
+  # hand-started #1109 test below) -- that is the point of checking both halves.
+  agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code record
   [ "$(_name_calls)" -eq 1 ]
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
   : > "$ARGV_LOG"
   agmsg_self_name_on_action team alice
   [ "$(_terminal_calls)" -eq 0 ]
@@ -176,6 +193,50 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
   source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
   agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
   [ "$(grep 'set-option' "$ARGV_LOG")" = "$first" ]
+}
+
+# --- #1109: the action records placement, so a hand-started seat is reachable -------
+
+@test "a hand-started seat: the action RECORDS its placement, not only the label (#1109)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  # No prior naming and no record -- a seat someone started by hand that has just
+  # sent its first message.
+  [ -z "$(_placement team alice)" ]
+  agmsg_self_name_on_action team alice
+  # The label was set AND the placement record now points at this pane -- the half
+  # peek/poke/despawn/team/--fix resolve through. A test on the label alone (the
+  # mark / _name_calls) passes without the fix; asserting the record is the point.
+  [ "$(_name_calls)" -eq 1 ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+}
+
+@test "named once but never recorded: the next action writes the missing record (#1109)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  # A mark-only prior naming (watch.sh names with five args, no record): the mark
+  # matches this pane, but no placement record exists. The old fast half trusted
+  # the mark alone and short-circuited past the write forever.
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
+  agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
+  [ -n "$(_mark team alice)" ]
+  [ -z "$(_placement team alice)" ]
+  : > "$ARGV_LOG"
+  agmsg_self_name_on_action team alice
+  # It did not short-circuit on the mark: it wrote the record. After this a
+  # further action fast-paths (the no-second-call test above proves that half).
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+}
+
+@test "no pane in the environment: nothing is recorded, so an un-named seat stays unreachable (#1109)" {
+  _install_fake_tmux                                                # a tmux binary exists, but
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH    # no pane in the environment
+  agmsg_self_name_on_action team codexapp
+  # self_env resolves nothing -> no name, no record. This is the codex-app / grok-cc
+  # contrast: a real seat that never named itself must keep reading as unreachable,
+  # not be made falsely addressable. Making everything reachable would turn "cannot
+  # reach" into "said it could and could not", which is worse.
+  [ "$(_terminal_calls)" -eq 0 ]
+  [ -z "$(_placement team codexapp)" ]
 }
 
 # --- herdr ---------------------------------------------------------------------------

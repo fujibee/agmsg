@@ -674,7 +674,17 @@ agmsg_terminal_name_self() {
   fi
 
   # Whether that ALSO makes this pane the seat's recorded placement is the
-  # caller's claim to make, not this function's.
+  # caller's claim to make, not this function's. The claim is legitimate because
+  # this function only ever names the CALLER'S OWN pane -- resolved from the
+  # caller's session id or, with an empty sid, its environment (above) -- so
+  # `record` asserts "the pane I just resolved as mine is where I live". The
+  # callers that pass it are exactly the self-locating ones: SessionStart and
+  # actas name the seat as it starts, and the action hook (self-name.sh) does the
+  # same on every action for a hand-started seat that was never recorded (#1109).
+  # A future path that names a pane it was HANDED -- batch relabeling of someone
+  # else's pane -- must NOT pass record: it is not that seat and cannot speak for
+  # its placement. (spawn records too, but writes the record itself for the CHILD
+  # pane it created; it does not reach this line.)
   [ "$write_record" = record ] || return 0
 
   # The record is what despawn/peek/poke resolve through, so it is written only

@@ -67,6 +67,16 @@ agmsg_self_name_on_action() {
   . "$SKILL_DIR/scripts/lib/terminal-registry.sh" 2>/dev/null || return 0
   # shellcheck disable=SC1091
   . "$SKILL_DIR/scripts/lib/role-session.sh" 2>/dev/null || return 0
+  # agmsg_spawn_path: to check (fast half) and, via the primitive, write (slow
+  # half) the placement record. A seat that names its pane but is never recorded
+  # looks correct and is unreachable (#1109); this hook is the one caller entitled
+  # to claim placement, because it runs AS the seat, IN its own pane, resolved from
+  # that process's own environment -- exactly the case the primitive's record
+  # comment (terminal-registry.sh) reserves for the caller to assert. Best-effort:
+  # if it will not source, the fast-half check below is skipped and the slow half's
+  # own lazy load writes the record, so naming still proceeds.
+  # shellcheck disable=SC1091
+  . "$SKILL_DIR/scripts/lib/actas-lock.sh" 2>/dev/null || true
 
   # Fast half: where am I (environment only), and does my mark say so?
   local here terminal id epoch have ref
@@ -76,14 +86,28 @@ agmsg_self_name_on_action() {
   id="${here%%	*}"; epoch="${here#*	}"
   ref="$(agmsg_terminal_ref "$terminal" "$id")"
   have="$(agmsg_role_session_named "$team" "$agent")"
-  if [ -n "$have" ] && [ "${have%%	*}" = "$ref" ] && [ "${have#*	}" = "$epoch" ]; then
-    return 0                                 # named, by a mark that matches where I am
+  # The fast half short-circuits only when BOTH halves are already in place: the
+  # naming mark matches this pane AND the placement record points here too. Before
+  # #1109 it trusted the mark alone, so a seat named once but never recorded (every
+  # hand-started seat) short-circuited past the write forever. Reading the record
+  # is one file read, the same order as the mark read.
+  local recorded="" rec=""
+  if declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null || true)"
+    [ -n "$rec" ] && [ -f "$rec" ] && IFS=$'\t' read -r recorded _ < "$rec" 2>/dev/null || true
+  fi
+  if [ -n "$have" ] && [ "${have%%	*}" = "$ref" ] && [ "${have#*	}" = "$epoch" ] \
+     && [ "$recorded" = "$ref" ]; then
+    return 0                                 # named AND recorded at where I am
   fi
 
-  # Slow half, once: name the pane through the same primitive every other
-  # path uses; it leaves the mark on success. An empty session id is right
-  # here: both drivers identify the pane from the environment now, and the
-  # acting commands have no session id at hand.
-  agmsg_terminal_name_self_safe "" "$team" "$agent" "$project" "$type" || true
+  # Slow half, once: name the pane through the same primitive every other path
+  # uses, and -- the #1109 fix -- record this pane as the seat's placement. The
+  # `record` claim is legitimate here and only here among the label writers (see
+  # the sourcing comment above); every other caller of the primitive still passes
+  # five args and only relabels. It leaves the mark on success. An empty session
+  # id is right here: both drivers identify the pane from the environment now, and
+  # the acting commands have no session id at hand.
+  agmsg_terminal_name_self_safe "" "$team" "$agent" "$project" "$type" record || true
   return 0
 }
