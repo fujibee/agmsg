@@ -21,6 +21,10 @@ agmsg_storage_load
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/self-name.sh"
 agmsg_self_name_on_action "$TEAM" "$AGENT"
+# Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-rename.sh"
+agmsg_self_rename_on_action "$TEAM" "$AGENT"
 
 # An inbox check must not create the store, so a team that has never been
 # written to has no file yet. Since the stores split per team that is the

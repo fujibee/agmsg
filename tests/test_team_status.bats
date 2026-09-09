@@ -223,7 +223,7 @@ EOF
 }
 
 @test "identity fix repairs names and verifies the CLI rename" {
-  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
   _herdr_internal_key() { printf 'a123\n'; }
   terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
   terminal_team_input_ready() { printf 'ready\n'; }
@@ -241,7 +241,7 @@ EOF
 }
 
 @test "identity fix never pokes a CLI without positive readiness" {
-  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
+  agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
   terminal_team_input_ready() { printf 'not_ready:agent_not_found\n'; return 1; }
   terminal_poke() { printf 'called\n' > "$BATS_TEST_TMPDIR/poke"; }
   run agmsg_team_fix_identity_loaded team alice claude-code herdr w2:p3 \

@@ -236,6 +236,58 @@ agmsg_role_session_named() {
   printf '%s\t%s\n' "$ref" "$epoch"
 }
 
+# The self-RENAME mark (#1081), separate from the naming mark above because it
+# records a different cell (the CLI session name) and, unlike naming, it MUST fire
+# at most once per (seat, pane, server generation): typing `/rename` into a live
+# session is invasive, so the mark is what stops a second attempt -- on the next
+# action AND in the next process, since it is persisted here. <result> is the
+# outcome the seat reached: attempted | ok | poked_unverified | failed |
+# skipped:<why>. <ref>/<epoch> key it to the pane+generation, so a reused pane or
+# a restarted server is a NEW attempt, exactly as the naming mark is.
+#   agmsg_role_session_mark_renamed <team> <agent> <ref> <epoch> <result> [project] [type]
+agmsg_role_session_mark_renamed() {
+  local team="$1" agent="$2" ref="$3" epoch="${4:-}" result="${5:-}" project="${6:-}" type="${7:-}"
+  [ -n "$team" ] && [ -n "$agent" ] && [ -n "$ref" ] || return 0
+  local path dir tmp ts line
+  _agmsg_role_session_path_into "$team" "$agent"
+  path="$_AGMSG_ROLE_SESSION_PATH"
+  dir="$(_actas_lock_dir)"
+  mkdir -p "$dir" 2>/dev/null || true
+  tmp="$(mktemp "$dir/.role-session.XXXXXX" 2>/dev/null)" || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  {
+    if [ -f "$path" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in renamed_ref=*|renamed_epoch=*|rename_result=*|renamed_at=*) ;; *) printf '%s\n' "$line" ;; esac
+      done < "$path"
+    else
+      printf 'name=%s-%s\n' "$team" "$agent"
+      printf 'team=%s\n' "$team"
+      printf 'agent=%s\n' "$agent"
+      printf 'type=%s\n' "$type"
+      printf 'project=%s\n' "$project"
+      printf 'updated_at=%s\n' "$ts"
+    fi
+    printf 'renamed_ref=%s\n' "$ref"
+    printf 'renamed_epoch=%s\n' "$epoch"
+    printf 'rename_result=%s\n' "$result"
+    printf 'renamed_at=%s\n' "$ts"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# The rename mark as "<ref>\t<epoch>\t<result>", or empty when there is none.
+agmsg_role_session_renamed() {
+  local team="$1" agent="$2" ref epoch result
+  _agmsg_role_session_path_into "$team" "$agent"
+  ref="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" renamed_ref)"
+  [ -n "$ref" ] || return 0
+  epoch="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" renamed_epoch)"
+  result="$(_agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" rename_result)"
+  printf '%s\t%s\t%s\n' "$ref" "$epoch" "$result"
+}
+
 # Read a single field from a role's record by (team, agent). Empty if absent.
 # Convenience getter used by consumers that need one field (e.g. the resurrect
 # hook reading `type`); mirrors agmsg_role_session_uuid's read of `session`.
