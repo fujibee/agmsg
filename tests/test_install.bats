@@ -387,6 +387,18 @@ PS1
   ! grep -q "__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__" "$rendered"
 }
 
+@test "skill renderer keeps terminal-driver guidance in every rendered artifact" {
+  local type rendered
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-terminal-driver.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$REPO_ROOT" "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    grep -Fq 'If argument is "version":' "$rendered"
+    grep -Fq 'If argument starts with "spawn"' "$rendered"
+    grep -Fq 'If argument starts with "despawn"' "$rendered"
+  done < <(agmsg_renderable_types "$REPO_ROOT")
+}
+
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
