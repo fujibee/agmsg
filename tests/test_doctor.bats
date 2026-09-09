@@ -528,22 +528,22 @@ configured_off() {
 @test "doctor: --redacted also redacts the embedded delivery-status block, not just its own formatting" {
   local home_proj="$HOME/embedded-leak-check"
   mkdir -p "$home_proj"
-  bash "$SCRIPTS/join.sh" agmsg advisor codex "$home_proj" >/dev/null
-  # A live codex bridge for agmsg/advisor, minimal enough for
+  bash "$SCRIPTS/join.sh" agmsg helper codex "$home_proj" >/dev/null
+  # A live codex bridge for agmsg/helper, minimal enough for
   # _delivery.sh's agmsg_delivery_runtime_status to report it "alive": a
   # pidfile naming a real (this test's own) pid, and a matching metafile.
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.pid"
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.pid"
   {
     echo "pid=$$"
     echo "project=$home_proj"
     echo "type=codex"
-  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.meta"
+  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.meta"
 
   run bash "$SCRIPTS/doctor.sh" --project "$home_proj" --type codex --redacted
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex bridge: team1/agent1 alive"* ]]
-  [[ "$output" != *"agmsg/advisor"* ]]
+  [[ "$output" != *"agmsg/helper"* ]]
   [[ "$output" != *"$HOME"* ]]
 }
 

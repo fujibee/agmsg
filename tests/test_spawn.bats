@@ -1818,7 +1818,7 @@ OPS
 }
 
 @test "spawn-side naming: a naming that does not read back reports spawned-but-unnamed, NOT ready/launched" {
-  # The read-back is the point (koit: only say named after reading back ok, like
+  # The read-back is the point (the rule: only say named after reading back ok, like
   # team --fix). terminal_name SUCCEEDS here (rc 0) but the key reads back as a
   # missing sentinel — so ONLY the read-back catches it. Dropping the read-back
   # and trusting the write's exit would turn this control green (mutation guard).

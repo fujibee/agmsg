@@ -193,7 +193,7 @@ stored_types() {
   [ -z "$called" ] || { echo "$called"; false; }
 }
 
-# The loss pm's advisory describes: a run interrupted after the config flipped
+# The loss the advisory describes: a run interrupted after the config flipped
 # leaves rows in BOTH stores, and re-running with the destination gone deletes
 # the shared copy on the strength of the flag alone.
 #
