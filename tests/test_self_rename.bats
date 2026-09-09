@@ -17,6 +17,13 @@ setup() {
   export FAKEBIN ARGV_LOG
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
   unset AGMSG_SELF_NAME AGMSG_SELF_RENAME
+  # self-rename.sh sources its deps lazily inside the hook, so make the registry
+  # and observation helpers available up front for the tests that call them
+  # directly (the codex screen-parse ones).
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/type-registry.sh"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-rename.sh"
 }
@@ -115,4 +122,32 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   agmsg_self_rename_on_action team alice claude-code      # confirm
   refute grep -q '\[send-keys\] \[-l\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = ok ]
+}
+
+# --- codex screen parse: only a line BEGINNING with "Thread name:" (#1102 review)
+# grep -F accepted the phrase anywhere on a line and read the rest of an unrelated
+# line as the name; the header is a line that STARTS with the prefix.
+
+@test "codex screen parse: a leading Thread name line yields the name" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  terminal_peek() { printf 'some banner\nThread name: team-alice\ntrailing output\n'; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'team-alice' ]
+}
+
+@test "codex screen parse: the phrase appearing mid-line is NOT the name -> unknown (#1102)" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  terminal_peek() { printf 'ordinary output Thread name: team-alice\nmore\n'; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_not_visible' ]
+}
+
+@test "codex screen parse: no header at all -> unknown" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  terminal_peek() { printf 'just some conversation\nno header here\n'; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_not_visible' ]
+}
+
+@test "codex screen parse: an unreadable screen -> unknown, not a name" {
+  source "$SKILL_DIR/scripts/lib/team-status.sh"
+  terminal_peek() { return 1; }
+  [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:screen_unreadable' ]
 }

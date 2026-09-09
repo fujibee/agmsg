@@ -358,11 +358,14 @@ agmsg_cli_session_observed() {   # <type> <title> <pane>
       prefix="${src#screen:}"
       screen="$(terminal_peek "$pane" 2>/dev/null)" || rc=$?
       [ "$rc" -eq 0 ] || { printf 'unknown:screen_unreadable\n'; return 0; }
-      # Only the FIRST line carrying the prefix; the rest of the screen is not
-      # judged. head -1 keeps a single line even if the phrase recurs later.
-      line="$(printf '%s\n' "$screen" | grep -F "$prefix" | head -1)"
+      # ONLY a line that BEGINS with the prefix -- the header, not a phrase that
+      # merely appears somewhere in the conversation. `index($0,p)==1` is a
+      # literal, line-start match (grep -F would accept "... Thread name: x" and
+      # read the rest of an unrelated line as the name, #1102 review). First such
+      # line wins; the rest of the screen is not judged.
+      line="$(printf '%s\n' "$screen" | awk -v p="$prefix" 'index($0,p)==1 { print; exit }')"
       [ -n "$line" ] || { printf 'unknown:name_not_visible\n'; return 0; }
-      name="${line#*"$prefix"}"
+      name="${line#"$prefix"}"
       while [ "${name# }" != "$name" ]; do name="${name# }"; done      # lead ws
       while [ "${name% }" != "$name" ]; do name="${name% }"; done      # trail ws
       [ -n "$name" ] || { printf 'unknown:name_not_visible\n'; return 0; }
