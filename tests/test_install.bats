@@ -37,6 +37,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
@@ -99,6 +100,7 @@ teardown() {
 }
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"

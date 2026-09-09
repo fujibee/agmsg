@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""PTY owner for one Antigravity TUI and one agmsg role.
+"""Linux-only PTY owner for one Antigravity TUI and one agmsg role.
 
-Linux is the verified platform. macOS runs the same code -- the only thing that
-was Linux-specific is proc_start below, and it now uses the platform rule this
-repo already had -- but it is NOT verified: nothing here has been exercised
-against a real Antigravity TUI on macOS. Treat a macOS failure as a bug to
-report, not as a supported path that broke. (#1073)
+Linux-only is a measured statement, not an untried one. Every control action --
+status, stop, resume, reset-guard -- goes through antigravity-mode.mjs, which
+reads /proc/<pid>/stat directly, and the headless sibling additionally spawns
+flock. Porting this file alone would give macOS a TUI that starts and cannot be
+stopped, which is worse than not offering it. (#1090 review; the mjs port is its
+own issue.)
 """
 import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
@@ -23,48 +24,43 @@ def atomic(path, value):
     os.replace(tmp, path)
 
 def proc_start(pid):
-    """The process's start token, tagged with how it was obtained.
+    """The process's start time, from /proc/<pid>/stat field 22 (clock ticks).
 
     A pid alone is not an identity: pids are recycled, and every comparison of
     this value in this file exists to separate "the same process" from "a
-    different process that inherited its number". The token is the process's
-    start time at the best precision the platform offers, and it carries its
-    SOURCE, because the two sources are not comparable with each other -- a
-    `proc` token and a `ps` token for one process are different strings, and a
-    comparison across them must FAIL rather than quietly match.
+    different process that inherited its number".
 
-        /proc/<pid>/stat field 22 (starttime, in clock ticks) -- lossless
-        ps -o lstart=                                         -- second precision
+    ONE source, deliberately. An earlier version of this function fell back to
+    `ps -o lstart=` whenever reading /proc raised, and tagged the result with its
+    source so the two could not be compared by accident. The tag was right; the
+    fallback made it fire. On Linux a single transient read error would return a
+    `ps` token for a process whose stored token came from /proc, the comparison
+    would correctly refuse to match, and a LIVE process would be reported as a
+    different one -- the same outcome as a pid-reuse false positive, from nothing
+    but one failed read. The function that documented "these two must not be
+    compared" was itself producing the mixture. (Found in review of #1090.)
 
-    Same two sources, same order, same tagging as _start_token in
-    scripts/drivers/types/codex/codex-bridge-launcher.sh. The repo already had
-    an answer to "how do I identify a process across platforms"; a second answer
-    here would give two halves of agmsg two ideas of process identity.
+    So a read that fails is a read that failed: raise, and say what could not be
+    read. "Could not determine" is not "a different process" -- the same split
+    this driver's inbox-transport makes between "someone else holds it" and "I
+    could not read the lock".
 
-    Raises FileNotFoundError when the start time cannot be determined --
-    including for a pid that is simply gone. The TYPE is load-bearing: recover()
-    and the status listing both do
+    FileNotFoundError specifically, and the type is load-bearing: recover() and
+    the status listing both do
 
         try: live=proc_start(...)==... ; except (FileNotFoundError,ValueError)
 
-    and a gone pid reaching /proc/<pid>/stat is exactly what used to raise it.
-    Raising anything else turns "that supervisor is no longer running" -- the
-    ordinary case those handlers exist for -- into a crash.
+    so the ordinary "that supervisor is no longer running" case is caught there
+    rather than crashing.
     """
     try:
         raw=Path(f'/proc/{pid}/stat').read_text()
-    except OSError:
-        raw=None
-    if raw is not None:
-        token=raw.split(') ',1)[1].split()[19]
-        if not token.isdigit(): raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc)')
-        return f'proc:{token}'
-    result=subprocess.run(['ps','-o','lstart=','-p',str(pid)],capture_output=True,text=True)
-    # ps pads the field; trim only surrounding whitespace so the internal spacing
-    # survives, exactly as the launcher's shell version does.
-    token=result.stdout.strip()
-    if result.returncode!=0 or not token: raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (ps)')
-    return f'ps:{token}'
+    except OSError as exc:
+        raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat: {exc.strerror})') from exc
+    token=raw.split(') ',1)[1].split()[19]
+    if not token.isdigit():
+        raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat の 22 番目が数値ではありません)')
+    return token
 
 class TerminalScreen:
     """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""

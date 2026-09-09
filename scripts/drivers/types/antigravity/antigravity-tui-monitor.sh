@@ -8,10 +8,12 @@ action=run
 case "${1:-}" in
   status|stop|resume|reset-guard|ack|replay) action="$1"; shift ;;
 esac
-# 同上(#1073)。macOS は未検証: 失敗したら issue を上げてください。
+# こちらも Linux 専用に戻します。supervisor(Python)は移植しましたが、status / stop / resume /
+# reset-guard の制御はどれも antigravity-mode.mjs を通り、そこが未移植の /proc 読みを持っています
+# ---- 起動はできて停止はできない状態になり、それは提供しないより悪い。(#1090 レビュー)
 case "$(uname -s)" in
-  Linux|Darwin) ;;
-  *) echo 'Antigravity TUI monitor は Linux / macOS のみです' >&2; exit 1 ;;
+  Linux) ;;
+  *) echo 'Antigravity TUI monitor は Linux 専用です（antigravity-mode.mjs が /proc に依存）' >&2; exit 1 ;;
 esac
 if [ "$action" = run ]; then
   [ -t 0 ] && [ -t 1 ] || { echo 'Antigravity TUI monitor は対話端末から起動してください' >&2; exit 1; }
