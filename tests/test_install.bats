@@ -388,14 +388,32 @@ PS1
 }
 
 @test "skill renderer keeps terminal-driver guidance in every rendered artifact" {
-  local type rendered
+  local type rendered required
   while IFS= read -r type; do
     rendered="$FAKE_HOME/$type-terminal-driver.md"
     run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$REPO_ROOT" "$type" "$rendered"
     [ "$status" -eq 0 ]
-    grep -Fq 'If argument is "version":' "$rendered"
-    grep -Fq 'If argument starts with "spawn"' "$rendered"
-    grep -Fq 'If argument starts with "despawn"' "$rendered"
+    for required in \
+      'If argument is "version":' \
+      'version.sh' \
+      'If argument starts with "spawn"' \
+      'spawn.sh <type> <name>' \
+      '--ready-timeout' \
+      'status=ready' \
+      '--no-wait' \
+      'already held' \
+      'target CLI is missing' \
+      'If argument starts with "despawn"' \
+      'despawn.sh <team> $AGENT <name>' \
+      'ctrl:despawn' \
+      'no watcher' \
+      '--force' \
+      '--timeout'; do
+      grep -Fq -- "$required" "$rendered" || {
+        echo "rendered $type is missing terminal-driver fact: $required" >&2
+        return 1
+      }
+    done
   done < <(agmsg_renderable_types "$REPO_ROOT")
 }
 
