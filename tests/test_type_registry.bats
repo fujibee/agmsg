@@ -234,12 +234,15 @@ EOF
 }
 
 @test "every agent template routes team identity reads and fixes through team.sh" {
-  local template type
+  local template type renderable_types
+  renderable_types="$(agmsg_renderable_types "$TEST_SKILL_DIR")"
+  [ -n "$renderable_types" ]
+  grep -qxF 'claude-code' <<<"$renderable_types"
   while IFS= read -r type; do
     template="$(render_type "$type")"
     grep -Fq '"team --json", or "team --fix"' "$template"
     grep -Fq 'team.sh $TEAM [--json|--fix]' "$template"
-  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
+  done <<<"$renderable_types"
 }
 
 @test "type-registry: spawnable set is exactly eight of the ten built-ins (#277, #279)" {
