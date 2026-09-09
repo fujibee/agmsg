@@ -23,6 +23,15 @@ def atomic(path, value):
         json.dump(value, f, ensure_ascii=False); f.write('\n'); f.flush(); os.fsync(f.fileno())
     os.replace(tmp, path)
 
+class StartTimeUnreadable(OSError):
+    """We could not find out when a pid started -- NOT that the pid is gone.
+
+    Deliberately not a subclass of FileNotFoundError: the three call sites that
+    displace a reservation catch FileNotFoundError to mean "gone", and this must
+    not land there. Being an OSError keeps it in the family a caller would
+    reasonably catch when it wants to handle every read problem itself.
+    """
+
 def proc_start(pid):
     """The process's start time, from /proc/<pid>/stat field 22 (clock ticks).
 
@@ -45,22 +54,51 @@ def proc_start(pid):
     this driver's inbox-transport makes between "someone else holds it" and "I
     could not read the lock".
 
-    FileNotFoundError specifically, and the type is load-bearing: recover() and
-    the status listing both do
+    TWO exception types, and the split is the whole point. Callers catch
+    FileNotFoundError to mean "that pid is gone" and then unlink a reservation,
+    reclaim it, or run a recovery. Only a genuine ENOENT may reach them. Anything
+    else -- EACCES on a hardened /proc, EIO, a /proc that is not mounted -- is
+    StartTimeUnreadable, which those handlers do NOT catch, so it propagates and
+    the act does not happen.
 
-        try: live=proc_start(...)==... ; except (FileNotFoundError,ValueError)
-
-    so the ordinary "that supervisor is no longer running" case is caught there
-    rather than crashing.
+    The first version of this raise mapped every OSError to FileNotFoundError,
+    and that fed "could not read" straight into three call sites' "is not there".
+    A live supervisor whose /proc was unreadable would have had its reservation
+    taken. Found in review; it is the third time in one day that this repo has
+    read "could not read it" as "it is not there" (actas_lock_owner, gc_stale,
+    here), and the answer is the same each time: they are different facts and
+    need different values.
     """
     try:
         raw=Path(f'/proc/{pid}/stat').read_text()
+    except FileNotFoundError as exc:
+        # ENOENT, and the only reading that means "gone" -- but only if /proc is
+        # actually there. On a system with no /proc at all, every pid looks
+        # absent, and that is a fact about the system, not about the process.
+        if not Path('/proc').is_dir():
+            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc がありません)') from exc
+        raise
     except OSError as exc:
-        raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat: {exc.strerror})') from exc
+        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat: {exc.strerror})') from exc
     token=raw.split(') ',1)[1].split()[19]
     if not token.isdigit():
-        raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat の 22 番目が数値ではありません)')
+        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (/proc/{pid}/stat の 22 番目が数値ではありません)')
     return token
+
+def process_still(pid, start):
+    """True if pid is the SAME process that token was taken from, False if it is
+    positively gone. Raises StartTimeUnreadable when we could not find out.
+
+    One place, deliberately. The three callers that use this are each about to
+    take something away from whoever holds the reservation, and each of them had
+    its own `except` clause. Three separate handlers is how the fourth one comes
+    out facing the other way -- the same reason inbox-transport.sh has a single
+    _owner_check. "Could not read" never reaches them as False.
+    """
+    try:
+        return proc_start(pid)==start
+    except FileNotFoundError:
+        return False
 
 class TerminalScreen:
     """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
@@ -417,9 +455,13 @@ class Supervisor:
         if not mode.exists() or '<!-- agmsg:antigravity:monitor -->' not in mode.read_text(): raise RuntimeError('monitor設定が必要')
         if self.reservation.exists():
             old=json.loads(self.reservation.read_text())
+            # ValueError stays here: it is about the RECORD (a pid that is not a
+            # number), not about the process. The "is it gone" question is
+            # process_still's, once, and an unreadable /proc propagates out of
+            # this block rather than being read as gone.
             try:
-                if proc_start(int(old['pid']))==old['start']: raise RuntimeError('既存Antigravity bridge/TUI supervisor が稼働中です')
-            except (FileNotFoundError,ProcessLookupError,ValueError): pass
+                if process_still(int(old['pid']),old['start']): raise RuntimeError('既存Antigravity bridge/TUI supervisor が稼働中です')
+            except (ProcessLookupError,ValueError): pass
             if self.state_file.exists():
                 old_state=json.loads(self.state_file.read_text())
                 if old_state.get('batch') and old_state['batch'].get('phase')!='completed': raise RuntimeError(self.unresolved_batch_message(old_state))
@@ -449,8 +491,8 @@ class Supervisor:
                 if reservation.get('state')!=str(self.state_file) or reservation.get('kind')!='tui-pty': raise RuntimeError('別の予約が存在します')
                 if 'pid' not in reservation or 'start' not in reservation: raise RuntimeError('予約情報が壊れています')
                 try:
-                    if proc_start(int(reservation['pid']))==reservation['start']: raise RuntimeError('TUI supervisorが稼働中です')
-                except (FileNotFoundError,ProcessLookupError,ValueError): pass
+                    if process_still(int(reservation['pid']),reservation['start']): raise RuntimeError('TUI supervisorが稼働中です')
+                except (ProcessLookupError,ValueError): pass
             self.violations.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             lock_path=Path(str(self.violations)+'.lock')
             with lock_path.open('a') as lock:
@@ -657,8 +699,8 @@ def recover(a):
     s=Supervisor(a)
     if not s.reservation.exists() or not s.state_file.exists(): raise RuntimeError('復旧対象の予約/stateがありません')
     reservation=json.loads(s.reservation.read_text()); state=s.migrate_state(json.loads(s.state_file.read_text())); batch=state.get('batch')
-    try: live=proc_start(int(reservation['pid']))==reservation['start']
-    except (FileNotFoundError,ValueError): live=False
+    try: live=process_still(int(reservation['pid']),reservation['start'])
+    except ValueError: live=False
     if live: raise RuntimeError('復旧対象のsupervisorが稼働中です')
     if not batch or batch.get('id')!=a.batch: raise RuntimeError('復旧batch IDが一致しません')
     expected=sorted(a.confirm_ids or []); actual=sorted(m['id'] for m in batch.get('messages',[]))
@@ -694,8 +736,8 @@ def main():
                 reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
                 if state.get('project')!=str(Path(a.project).resolve()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
                 live=False
-                try: live=proc_start(int(reservation['pid']))==reservation['start']
-                except (FileNotFoundError,ValueError): pass
+                try: live=process_still(int(reservation['pid']),reservation['start'])
+                except (ValueError,StartTimeUnreadable): pass
                 matches.append((file,reservation,state,live))
             except (OSError,KeyError,TypeError,ValueError,json.JSONDecodeError):
                 continue
