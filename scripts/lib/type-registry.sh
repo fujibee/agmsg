@@ -162,4 +162,8 @@ _agmsg_renderable_types() {
   done < <(agmsg_known_types | sort -u)
 }
 
-AGMSG_RENDERABLE_SKILL_TYPES="$(_agmsg_renderable_types | paste -sd' ' -)"
+# Discovery here is an internal source-time computation. Keep the public
+# `agmsg_known_types` warning on explicit calls, but do not leak an untrusted
+# plugin warning into callers that merely source the registry (or into their
+# captured command output).
+AGMSG_RENDERABLE_SKILL_TYPES="$(_agmsg_renderable_types 2>/dev/null | paste -sd' ' -)"
