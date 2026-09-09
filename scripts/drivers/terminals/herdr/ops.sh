@@ -374,7 +374,13 @@ _herdr_pane_input_ready() {
 # placement (tab create / pane split, then rename + run).
 terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
-  local boot="$*" json pane dir
+  local boot="$*" json pane dir label
+  # The label the pane is created with. The driver's spawn signature carries no
+  # team; the caller hands it in AGMSG_SPAWN_TEAM (spawn.sh sets it from the
+  # resolved team). With it the label is the one vocabulary `_herdr_label`
+  # defines -- the same string terminal_name writes -- without it the bare name.
+  label="$name"
+  [ -z "${AGMSG_SPAWN_TEAM:-}" ] || label="$(_herdr_label "$AGMSG_SPAWN_TEAM" "$name")"
   # Validate target explicitly — a typo must fail, not silently pick a default.
   case "$target" in
     window|pane-h|pane-v) : ;;
@@ -385,13 +391,20 @@ terminal_spawn() {
     # silently splitting a pane the caller did not ask for.
     [ -n "${HERDR_WORKSPACE_ID:-}" ] || {
       printf 'unsupported: window target needs HERDR_WORKSPACE_ID\n' >&2; return 13; }
-    json="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --label "$name" --cwd "$project" 2>/dev/null)" || return 13
+    json="$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --label "$label" --cwd "$project" 2>/dev/null)" || return 13
   else
     case "$target" in pane-h) dir=right ;; *) dir=down ;; esac
     json="$(herdr pane split "${HERDR_PANE_ID:-}" --direction "$dir" --no-focus --cwd "$project" 2>/dev/null)" || return 13
   fi
   pane="$(_herdr_new_pane_id "$json")" || return 13
-  herdr pane rename "$pane" "$name" >/dev/null 2>&1 || true
+  # The creation-time label is already the FINAL one (the same string
+  # terminal_name writes), not a bare name overwritten later. The bare name was
+  # the state a pane stayed in whenever the later naming failed (#1096: the key
+  # cannot be set until herdr has detected the agent, so the label write behind
+  # it never ran) -- there is no reason to create a state that only exists to
+  # be replaced. `pane rename` needs no agent detection; it works on a pane that
+  # is seconds old.
+  herdr pane rename "$pane" "$label" >/dev/null 2>&1 || true
   # requirement 1: wait (bounded) for the shell to reach its prompt, then act on the
   # THREE outcomes distinctly. Only NOT-READY(1) is retried — READY(0) and UNKNOWN(2)
   # are terminal. Every iteration uses the SAME classifier; UNKNOWN is never folded into
@@ -868,6 +881,12 @@ terminal_poke() {
 # 'a' + 24 hex = 25 chars, leading letter, all within the regex. Uses the store's
 # canonical agmsg_sha256 (lib/hash.sh); sourced context may not have it, so load it
 # relative to this driver file. Prints the key, or non-zero if no SHA-256 tool.
+# The visible label, in ONE place: terminal_name writes it, terminal_spawn
+# creates the pane with it (#1096), and a test that pins the string pins both.
+_herdr_label() {   # <team> <agent>
+  printf '%s:%s\n' "$1" "$2"
+}
+
 _herdr_internal_key() {
   local team="$1" agent="$2" hex
   if ! command -v agmsg_sha256 >/dev/null 2>&1; then
@@ -901,7 +920,7 @@ _herdr_internal_key() {
 # and a key that cannot be set is an error there, because nothing else happened.
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
-  label="$team:$name"
+  label="$(_herdr_label "$team" "$name")"
 
   # THE KEY FIRST, and its failure is fatal.
   #

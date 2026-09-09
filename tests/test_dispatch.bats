@@ -194,3 +194,41 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Team: demo"* ]]
 }
+
+# #1096 seam: spawn turns self-naming off for the pre-join it runs on behalf of
+# the NEW member (join.sh in the caller's process). The dispatcher's two join.sh
+# calls -- `join`, and the `actas` fallback -- join the seat ITSELF, from its own
+# pane, and must keep naming it. A stray AGMSG_SELF_NAME=off on either path turns
+# the matching half of this test red; the fake herdr logs every argv.
+@test "dispatch: join and the actas fallback name the seat's OWN pane (#1096)" {
+  local proj="$BATS_TEST_TMPDIR/project-naming" log="$BATS_TEST_TMPDIR/herdr.log"
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$proj" "$bin"
+  cat > "$bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+case "\$1/\$2" in
+  agent/list) echo '{"result":{"agents":[]}}' ;;
+  *) echo '{"result":{"type":"ok"}}' ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+  : > "$log"
+  # Under herdr: presence is HERDR_ENV=1, the pane is HERDR_PANE_ID.
+  export HERDR_ENV=1 HERDR_PANE_ID=wD:pSelf
+  unset AGMSG_TERMINAL
+
+  # join: the seat names its own pane with the key and the prefixed label.
+  run bash "$SCRIPTS/windows/dispatch.sh" --type claude-code --project "$proj" -- join demo carol
+  [ "$status" -eq 0 ]
+  grep -q '^agent rename wD:pSelf ' "$log"
+  grep -q '^pane rename wD:pSelf demo:carol$' "$log"
+
+  # actas fallback (name not registered yet -> join.sh): the same.
+  : > "$log"
+  run env CLAUDE_CODE_SESSION_ID=test-session bash "$SCRIPTS/windows/dispatch.sh" --type claude-code --project "$proj" -- actas dave
+  [ "$status" -eq 0 ]
+  grep -q '^agent rename wD:pSelf ' "$log"
+  grep -q '^pane rename wD:pSelf demo:dave$' "$log"
+}

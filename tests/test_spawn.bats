@@ -1023,6 +1023,10 @@ _setup_fake_herdr() {
   # realistic herdr tests exercise the SUCCESSFUL naming path (not the fallback).
   export HERDR_AGENT_DB="$TEST_SKILL_DIR/herdr-agents.db"
   : > "$HERDR_AGENT_DB"
+  # Same shape for labels: `pane rename` records (pane_id -> label), `pane get`
+  # replays the last one -- the caller pane's label is observable state (#1096).
+  export HERDR_LABEL_DB="$TEST_SKILL_DIR/herdr-labels.db"
+  : > "$HERDR_LABEL_DB"
   cat > "$herdr_stub" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HERDR_CALL_LOG"
@@ -1035,7 +1039,14 @@ case "$1/$2" in
   pane/split)
     printf '%s\n' "${HERDR_SPLIT_RESPONSE:-$DEFAULT_SPLIT}"
     ;;
-  pane/rename|pane/run|pane/close)
+  pane/rename)
+    # `pane rename <pane_id> <label>` -- record the mapping so `pane get` can
+    # replay it (#1096: the caller pane's label must be observable before and
+    # after a spawn, not just the argv). $3=pane id, $4=label.
+    printf '%s\t%s\n' "$3" "$4" >> "$HERDR_LABEL_DB"
+    echo '{"id":"cli:pane:rename","result":{"type":"ok"}}'
+    ;;
+  pane/run|pane/close)
     echo '{"id":"cli:pane:'"$2"'","result":{"type":"ok"}}'
     ;;
   pane/process-info)
@@ -1076,9 +1087,12 @@ case "$1/$2" in
     printf ']}}\n'
     ;;
   pane/get)
-    # Minimal valid pane document; the read-back only needs the agent key (from
-    # agent list), so label/status/title just need to parse. $3=pane id.
-    printf '{"result":{"pane":{"pane_id":"%s","label":"pane","agent_status":"idle","terminal_title":"t"}}}\n' "$3"
+    # Minimal valid pane document. The label is the LAST one `pane rename`
+    # recorded for this pane (so a test can read a pane's label back the way a
+    # person would), "pane" when none was. $3=pane id.
+    _label="$(awk -F'\t' -v id="$3" '$1==id{l=$2} END{print (l==""?"pane":l)}' "$HERDR_LABEL_DB" 2>/dev/null)"
+    [ -n "$_label" ] || _label=pane
+    printf '{"result":{"pane":{"pane_id":"%s","label":"%s","agent_status":"idle","terminal_title":"t"}}}\n' "$3" "$_label"
     ;;
   *)
     echo '{"error":"unknown stub call: '"$*"'}' >&2
@@ -1105,7 +1119,10 @@ STUB
 
   # herdr was called: pane split, pane rename, pane run.
   grep -q "pane split wT:pSelf --direction right --no-focus" "$HERDR_CALL_LOG"
-  grep -q "pane rename wT:pN alice" "$HERDR_CALL_LOG"
+  # The creation-time label is the final, team-prefixed one (#1096) -- the same
+  # string terminal_name writes -- never the bare name.
+  grep -q "^pane rename wT:pN myteam:alice$" "$HERDR_CALL_LOG"
+  refute grep -q "^pane rename wT:pN alice$" "$HERDR_CALL_LOG"
   grep -q "pane run wT:pN" "$HERDR_CALL_LOG"
 
   # Placement record uses herdr: scheme tag.
@@ -1129,7 +1146,8 @@ STUB
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait --window
   [ "$status" -eq 0 ]
-  grep -q "tab create --workspace wT --label alice" "$HERDR_CALL_LOG"
+  # The window is created with the final, team-prefixed label too (#1096).
+  grep -q "tab create --workspace wT --label myteam:alice" "$HERDR_CALL_LOG"
   grep -q "pane run wT:pR" "$HERDR_CALL_LOG"
 
   local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
@@ -1912,4 +1930,58 @@ OPS
   [ "$status" -eq 0 ]
   grep -qF "status=ready" <<<"$output"
   refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+# --- #1096: the caller's pane is not the new member's to name ------------------------
+#
+# spawn pre-joins the new member by running join.sh in the CALLER's process, and
+# join's boot-time self-naming resolves "self" through that environment -- the
+# caller's pane. Before the fix the caller's pane took the new member's label and
+# key, and the tests below only ever looked at the NEW pane, so they stayed green.
+# The caller assertion is the one that goes red on that tree.
+
+@test "spawn: herdr -- the caller's pane keeps its label and key byte-for-byte across a spawn (#1096)" {
+  _setup_fake_herdr
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  # The caller's pane as a person sees it before the spawn: a label and a key,
+  # written through the same fake so `pane get` / the agent DB replay them.
+  "$STUB_BIN/herdr" pane rename wT:pSelf 'myteam:existing' >/dev/null
+  "$STUB_BIN/herdr" agent rename wT:pSelf a1111111111111111111111111 >/dev/null
+  local before_label before_key after_label after_key
+  before_label="$("$STUB_BIN/herdr" pane get wT:pSelf | sed -n 's/.*"label":"\([^"]*\)".*/\1/p')"
+  before_key="$(awk -F'\t' '$1=="wT:pSelf"{k=$2} END{print k}' "$HERDR_AGENT_DB")"
+  [ "$before_label" = 'myteam:existing' ]
+  [ "$before_key" = a1111111111111111111111111 ]
+  : > "$HERDR_CALL_LOG"
+
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  # After: the same two values, read back the same way, and no rename argv ever
+  # targeted the caller's pane.
+  after_label="$("$STUB_BIN/herdr" pane get wT:pSelf | sed -n 's/.*"label":"\([^"]*\)".*/\1/p')"
+  after_key="$(awk -F'\t' '$1=="wT:pSelf"{k=$2} END{print k}' "$HERDR_AGENT_DB")"
+  [ "$after_label" = "$before_label" ]
+  [ "$after_key" = "$before_key" ]
+  refute grep -qE '^(pane|agent) rename wT:pSelf ' "$HERDR_CALL_LOG"
+
+  # The NEW pane is the one named: prefixed label at creation, then the key.
+  grep -q '^pane rename wT:pN myteam:alice$' "$HERDR_CALL_LOG"
+  refute grep -q '^pane rename wT:pN alice$' "$HERDR_CALL_LOG"
+  grep -q '^agent rename wT:pN ' "$HERDR_CALL_LOG"
+  refute grep -qF 'status=spawned-but-unnamed' <<<"$output"
+}
+
+@test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
+  _setup_fake_herdr
+  # Control: a seat joining from its own pane names it -- key and prefixed label.
+  bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"
+  grep -q '^agent rename wT:pSelf ' "$HERDR_CALL_LOG"
+  grep -q '^pane rename wT:pSelf myteam:bob$' "$HERDR_CALL_LOG"
+  : > "$HERDR_CALL_LOG"
+  # The switch spawn sets on its pre-join: the same join, no naming call at all.
+  AGMSG_SELF_NAME=off bash "$SCRIPTS/join.sh" myteam carol claude-code "$PROJ"
+  refute grep -q ' rename ' "$HERDR_CALL_LOG"
+  # ...and the join itself still happened: carol is registered for the project.
+  bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | grep -q 'carol'
 }

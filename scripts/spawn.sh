@@ -414,7 +414,18 @@ esac
 # PROJECT here is the explicit spawn target (--project / $PWD), which may not be
 # registered yet. Opt out of #92 pwd-resolution so join.sh registers exactly
 # this path rather than rewriting it to the spawning session's own project.
-AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
+# AGMSG_SELF_NAME=off: this join runs in THIS process on behalf of the member
+# being spawned, and join's boot-time self-naming resolves "self" through the
+# environment it runs in -- the caller's pane (#1096: the caller's pane was
+# renamed to the new member's label and key, and the new pane got neither).
+# The new member names its own pane from its own process (actas, the action
+# hook); the caller's pane is not this member's to name.
+AGMSG_SELF_NAME=off AGMSG_RESOLVE_PROJECT=0 "$SCRIPT_DIR/join.sh" "$TEAM" "$NAME" "$AGENT_TYPE" "$PROJECT" >/dev/null
+# The team the terminal driver labels the new pane with at creation (herdr
+# `terminal_spawn`, #1096). A shell variable, not exported: the driver runs in
+# this process, and the spawned CLI's environment must not carry it.
+# shellcheck disable=SC2034  # read by the driver function, sourced into this process
+AGMSG_SPAWN_TEAM="$TEAM"
 
 # --- Build the boot script the new agent will run ---
 # Rather than embed a multiply-escaped command string into each platform's
