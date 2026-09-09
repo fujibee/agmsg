@@ -150,7 +150,7 @@ teardown() {
 #     status emits scans the WHOLE run/ directory -- an installation-wide
 #     fact, not a (project, type) fact. Printing it inside every group that
 #     uses default runtime status repeats the identical line once per group;
-#     tl2 flagged this as duplication on the same real-installation run. ---
+#     review flagged this as duplication on the same real-installation run. ---
 
 @test "doctor: the install-wide 'watch processes' line appears once, not once per group" {
   # The line only appears when run/ exists (default runtime status guards
