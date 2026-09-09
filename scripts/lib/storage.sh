@@ -456,7 +456,9 @@ agmsg_storage_load() {
       continue
     fi
     # shellcheck disable=SC1090
-    . "$file"
+    . "$file" || return 1
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bridge-read-guard.sh" || return 1
+    agmsg_bridge_guard_install || return 1
     _AGMSG_STORAGE_LOADED="$name"
     return 0
   done < <(agmsg_driver_bases)

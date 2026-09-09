@@ -2453,14 +2453,16 @@ JSON
   [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
 }
 
-# #399: type.conf previously advertised delivery_modes=monitor turn both off,
-# but antigravity has no Monitor tool or bridge equivalent — the manifest must
-# match what the template actually offers (turn/off only, like cursor/gemini).
-@test "antigravity rejects monitor mode" {
+# #399 said antigravity had no Monitor tool or bridge equivalent, so
+# delivery_modes had to drop monitor to match (turn/off only, like
+# cursor/gemini). That has since changed: the Antigravity monitor driver (PTY
+# TUI supervisor + headless bridge) now exists, and type.conf advertises
+# delivery_modes=monitor turn off again — this asserts the current contract,
+# not #399's.
+@test "antigravity supports monitor mode: writes the monitor rule marker" {
   run bash "$SCRIPTS/delivery.sh" set monitor antigravity "$TEST_PROJECT"
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not supported" ]]
-  [ ! -f "$TEST_PROJECT/.agent/rules/agmsg.md" ]
+  [ "$status" -eq 0 ]
+  grep -qF '<!-- agmsg:antigravity:monitor -->' "$TEST_PROJECT/.agent/rules/agmsg.md"
 }
 
 @test "antigravity rejects both mode" {
