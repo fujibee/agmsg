@@ -113,6 +113,24 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   [ "$(_mark team alice | cut -f3)" = failed ]
 }
 
+@test "one attempt ACROSS PROCESSES: a fresh process reads the persisted mark, does not re-poke (#1081)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  agmsg_self_rename_on_action team alice claude-code      # phase 1: pokes, PERSISTS attempted
+  [ "$(grep -c '\[send-keys\] \[-l\]' "$ARGV_LOG")" -eq 1 ]
+  : > "$ARGV_LOG"
+  # A brand-new shell shares NO memory with the first call; only the on-disk
+  # role-session mark can carry "attempted" across. If the mark were held in a
+  # variable rather than persisted, this fresh process would poke a second time.
+  # (The stopping guarantee for an invasive auto-keystroke lives in the mark.)
+  FAKE_TITLE='wrong-name' bash -c '
+    source "$SKILL_DIR/scripts/lib/self-rename.sh"
+    agmsg_self_rename_on_action team alice claude-code
+  '
+  refute grep -q '\[send-keys\] \[-l\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = failed ]            # confirmed in the 2nd process
+}
+
 @test "the verify window: after a poke, the name took -> ok, still no second poke" {
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   export FAKE_TITLE='wrong-name'
