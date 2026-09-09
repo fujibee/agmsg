@@ -71,10 +71,10 @@ sequenceDiagram
   d->>DB: oracle: anything un-noticed for bob?
   DB-->>d: m17
   d->>d: gate: may I interrupt? (v1: yes)
-  d->>bob: notify: "[agmsg] alice: release gate - run /agmsg"
+  d->>bob: notify - alice: release gate, run /agmsg
   d->>DB: receipt (m17, bob): noticed
   bob->>DB: (when bob chooses) inbox fetch
-  DB-->>bob: full text; receipt: read
+  DB-->>bob: full text, receipt: read
 ```
 
 Note what is *not* in the loop: reading. Only bob's own inbox fetch marks m17 read. Today the watcher that displays a message also marks it read in the same breath — which is exactly how a broken watcher could consume messages nobody ever saw.

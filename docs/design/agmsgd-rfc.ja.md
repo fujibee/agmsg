@@ -71,10 +71,10 @@ sequenceDiagram
   d->>DB: oracle: bob に未 noticed は?
   DB-->>d: m17
   d->>d: gate: 割り込んでいい? (v1: yes)
-  d->>bob: notify: "[agmsg] alice: リリースゲート — /agmsg で確認"
+  d->>bob: notify - alice: リリースゲート、/agmsg で確認
   d->>DB: receipt (m17, bob): noticed
   bob->>DB: (bob が選んだとき) inbox 取得
-  DB-->>bob: 全文; receipt: read
+  DB-->>bob: 全文、receipt: read
 ```
 
 ループに**入っていない**ものに注目してほしい: 読むこと。m17 を既読にするのは bob 自身の inbox 取得だけだ。いまは表示した watcher が同じ手で既読も打つ — 壊れた watcher が誰も見ていないメッセージを消費できたのは、まさにそのせいだ。
