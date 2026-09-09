@@ -559,6 +559,43 @@ agmsg_terminal_ref_id() {
 # placement over.
 #
 #   agmsg_terminal_name_self <session_id> <team> <agent> <project> <type> [record]
+# Which OTHER seat's placement record already claims this pane reference, if any.
+# Prints "<team>__<agent>" as the record file spells it (percent-encoded, the form
+# on disk) and nothing when the pane is unclaimed.
+#
+# STOP-GAP (#1113). Delete this and its caller when #1112 lands.
+#
+# Since #1111 a seat records its own placement when it acts, resolving the pane
+# from its OWN environment. For codex that environment is not its own: those
+# seats arrive through one shared app-server daemon, so every seat under it
+# inherits the daemon's pane (measured: three codex seats all resolve
+# herdr:w1:p2, while they actually sit at w1:p2, w1:pN and w1:pP). Their records
+# are correct today only because spawn wrote them from outside; the next action
+# each one takes overwrites its own record with the daemon's pane, one seat at a
+# time.
+#
+# So until the environment is fixed, a seat does not take a pane another seat's
+# record already claims. This is first-writer-wins, which is NOT always right --
+# a stale record from a dead seat will squat a pane that a live seat has taken
+# over. That is why it is a stop-gap and not the fix: #1112 makes the resolution
+# correct, and then nothing needs to arbitrate.
+_agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
+  local ref="$1" mine="$2" dir f first
+  [ -n "$ref" ] || return 0
+  dir="$(dirname "$mine")"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/spawn.*; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$mine" ] && continue
+    IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
+    if [ "$first" = "$ref" ]; then
+      printf '%s' "${f##*/spawn.}"
+      return 0
+    fi
+  done
+  return 0
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}"
@@ -705,6 +742,19 @@ agmsg_terminal_name_self() {
   [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
+  # STOP-GAP (#1113, remove with #1112): do not take a pane another seat's record
+  # already claims. Naming SUCCEEDED -- the pane carries this seat's label -- so
+  # this returns 0; what is declined is the placement CLAIM, and the reason is
+  # said out loud rather than the write silently not happening. Without this, the
+  # first codex seat to act overwrites its own correct record with the shared
+  # daemon's pane, and the next one overwrites that.
+  local _claimed_by=""
+  _claimed_by="$(_agmsg_placement_claimed_by "$ref" "$rec")"
+  if [ -n "$_claimed_by" ]; then
+    echo "agmsg: named the pane but did NOT record it: this seat resolved $ref, and that pane is already recorded as $_claimed_by's. Keeping the existing record. (#1113 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+    return 0
+  fi
+
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
   # record. agmsg_write_atomic adds the trailing newline, so pass the row without.

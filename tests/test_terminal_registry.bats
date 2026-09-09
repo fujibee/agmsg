@@ -2069,3 +2069,86 @@ _tmux_op_args() {
     [ -z "$output" ]    || { echo "FAIL: printed '$output'"; return 1; }
   done
 }
+
+# --- #1113 stop-gap: a seat does not take a pane another seat already records ---
+#
+# Both directions, because the guard is only worth anything if it also gets out
+# of the way. Delete these two with the guard when #1112 lands.
+
+@test "terminal_name_self record: refuses a pane ANOTHER seat's record already claims (#1113)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  # A peer already records the very pane this seat is about to resolve. That is
+  # the codex shape: three seats inherit one daemon's environment, so all three
+  # resolve the same pane and each overwrite would take it from the last.
+  local peer; peer="$(agmsg_spawn_path seatteam peer)"
+  mkdir -p "$(dirname "$peer")"
+  # The ref carries the socket (#1051), so the fixture has to spell it the way
+  # resolution does -- `tmux:%1` claims a DIFFERENT pane and the guard would
+  # correctly not fire. (Measured: the first version of this test wrote the
+  # short form and passed for the wrong reason.)
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+  local peer_snapshot="$BATS_TEST_TMPDIR/peer.snapshot"
+  cp "$peer" "$peer_snapshot"
+
+  local mine; mine="$(agmsg_spawn_path seatteam taker)"
+  refute test -e "$mine"
+
+  run agmsg_terminal_name_self "" seatteam taker /proj/MINE claude-code record
+  # Naming succeeded; only the placement CLAIM was declined, so this is 0.
+  [ "$status" -eq 0 ]
+
+  # Positive control: the pane really was named, so the assertions below are not
+  # green because the call did nothing.
+  grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
+
+  # The reason is said, not swallowed -- and it names both sides.
+  grep -q 'did NOT record it' <<<"$output"
+  grep -q 'tmux:/tmp/fake:%1' <<<"$output"
+
+  # Nothing was taken and nothing was invented.
+  cmp -s "$peer" "$peer_snapshot"
+  refute test -e "$mine"
+}
+
+@test "terminal_name_self record: still records when no other seat claims the pane (#1113)" {
+  # The partner. Without it, a guard that refused every write would pass the test
+  # above, and #1111 -- the reason placement is recorded at all -- would be dead.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  # A peer exists, but on a DIFFERENT pane: the directory is not empty, so this
+  # also shows the scan distinguishes panes rather than merely finding files.
+  local peer; peer="$(agmsg_spawn_path seatteam elsewhere)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%OTHER\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam writer)"
+  run agmsg_terminal_name_self "" seatteam writer /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did NOT record it' <<<"$output"
+  grep -q '^tmux:/tmp/fake:%1	/proj/MINE	claude-code$' "$mine"
+}
+
+@test "terminal_name_self record: re-recording its OWN pane is not a conflict (#1113)" {
+  # The seat's own record names the same pane. The scan must skip the seat's own
+  # file, or every seat would refuse to refresh itself after the first write.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local mine; mine="$(agmsg_spawn_path seatteam again)"
+  mkdir -p "$(dirname "$mine")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/OLD\tclaude-code\n' > "$mine"
+
+  run agmsg_terminal_name_self "" seatteam again /proj/NEW claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did NOT record it' <<<"$output"
+  grep -q '^tmux:/tmp/fake:%1	/proj/NEW	claude-code$' "$mine"
+}
