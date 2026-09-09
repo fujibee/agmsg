@@ -12,7 +12,14 @@ USAGE='Usage: team.sh <team> [--json] [--fix | --fix-pane-names | --rename-sessi
                      into a session
   --rename-sessions  repair the CLI session name only; TYPES the rename
                      command into each session that is at a prompt'
-TEAM="${1:?$USAGE}"
+# Printed, not passed to ${1:?...}: the shell prefixes that form with its own
+# "line N: 1:" and renders the whole multi-line text as a single mangled line,
+# which is exactly the help for the options #1110 added.
+if [ $# -eq 0 ]; then
+  printf '%s\n' "$USAGE" >&2
+  exit 2
+fi
+TEAM="$1"
 shift
 OUTPUT_MODE=human
 # Two separable repairs (#1110): the pane names are written through the

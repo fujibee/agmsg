@@ -1069,3 +1069,20 @@ STUB
   printf '%s\n' "$output" | grep -q -- '--rename-sessions'
   printf '%s\n' "$output" | grep -qi 'typ'
 }
+
+# The multi-line usage #1110 added must reach the user AS the block it is. Passing
+# it through `${1:?...}` makes the shell prefix it with its own "line N: 1:" and
+# collapse the block into one line, which is unreadable exactly where the reader
+# is trying to learn which option types into a pane. Asserted on the SHAPE (a
+# later line still starting its own line), not on one word: a check for the word
+# "--fix" alone passes on the mangled single line too.
+@test "team.sh with no argument prints the option block as separate lines" {
+  run bash "$SCRIPTS/team.sh"
+  [ "$status" -eq 2 ]
+  # The shell's own diagnostic prefix must not be there.
+  ! grep -q 'line [0-9]*: 1:' <<<"$output"
+  # Each option is on a line of its own, anchored at line start.
+  grep -qE '^Usage: team\.sh ' <<<"$output"
+  grep -qE '^  --fix-pane-names ' <<<"$output"
+  grep -qE '^  --rename-sessions ' <<<"$output"
+}
