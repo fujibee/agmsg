@@ -163,17 +163,80 @@ agmsg_team_fix_pane_names_loaded() {
   esac
 }
 
+# Count the confirmation lines "<confirm_prefix> <expected>." currently visible in
+# a pane's scrollback. Used only by a rename_confirm type (codex): the line
+# PERSISTS after a rename and `--fix` runs repeatedly (and a person may have typed
+# /rename by hand), so a later run must not read an EARLIER line as its own. The
+# caller counts before and after its keystroke and requires an INCREASE; the
+# expected name is the same every run, so newness -- not the name -- is the only
+# thing that separates this rename from a prior one. Unreadable pane -> 0.
+_agmsg_rename_confirm_count() {   # <pane> <confirm_prefix> <expected>
+  local screen
+  screen="$(terminal_peek "$1" --lines 400 2>/dev/null)" || { printf '0\n'; return 0; }
+  printf '%s\n' "$screen" | grep -cF -- "$2 $3." || true
+}
+
 # <team> <agent> <type> <terminal> <pane> <session_cell>
 #   -> the cli_session action. This is the half that TYPES into the pane
-#   (`<rename_cmd> <team>-<agent>`), behind three gates: the cell is a mismatch,
-#   the type declares a rename command, and the pane reports ready.
+#   (`<rename_cmd> <team>-<agent>`). Two shapes, told apart by the manifest, not by
+#   the type name: a rename_confirm type (codex) cannot be pre-read, so it types
+#   UNCONDITIONALLY and confirms by a NEW announcement line; a readback type
+#   (claude-code) types only on a mismatch and re-reads the name. Both need the
+#   type to declare a rename command and the pane to report ready.
 agmsg_team_rename_session_loaded() {
   # $4 (terminal) is accepted for a signature parallel to the pane-names half;
   # the rename goes through the loaded driver's terminal_poke and needs no name.
   local team="$1" agent="$2" type="$3" pane="$5"
   local session_cell="$6"
   local expected_session="$team-$agent" readiness state reason rc=0 observed title tries
-  local rename_cmd session_src
+  local rename_cmd session_src rename_confirm before after
+
+  # A rename_confirm type (codex) has no dependable pre-read of its current name,
+  # so --fix does NOT gate the keystroke on the (unknown) pre-check: it types
+  # UNCONDITIONALLY and confirms by a NEW announcement line. "Cannot read the
+  # name" is not "cannot rename" (#1109 followup). Kept separate from the readback
+  # path below so a reader can see why codex behaves differently.
+  rename_confirm="$(agmsg_type_get "$type" rename_confirm 2>/dev/null || true)"
+  if [ -n "$rename_confirm" ]; then
+    rename_cmd="$(agmsg_type_get "$type" rename_cmd 2>/dev/null || true)"
+    if [ -z "$rename_cmd" ]; then
+      _agmsg_team_fix_result cli_session skipped no_rename_cmd
+      return 0
+    fi
+    readiness="$(agmsg_team_input_ready_loaded "$type" "$pane")"
+    IFS="$(printf '\t')" read -r state reason <<EOF
+$readiness
+EOF
+    if [ "$state" != ready ]; then
+      _agmsg_team_fix_result cli_session skipped "${state}_$reason"
+      return 0
+    fi
+    # Newness, not presence: count the confirmation line before and after, require
+    # an INCREASE. A pre-existing line (an earlier run, a hand-typed rename) is in
+    # `before`, so it cannot pass a keystroke that never landed.
+    before="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")"
+    rc=0
+    terminal_poke "$pane" "$rename_cmd $expected_session" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _agmsg_team_fix_result cli_session failed "terminal_poke_rc_$rc"
+      return 0
+    fi
+    tries=0
+    while [ "$tries" -lt 20 ]; do
+      after="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")"
+      if [ "$after" -gt "$before" ]; then
+        _agmsg_team_fix_result cli_session changed renamed_and_verified
+        return 0
+      fi
+      sleep 0.1 2>/dev/null || true
+      tries=$((tries + 1))
+    done
+    # Typed, but no NEW confirmation line. The line is the command's own immediate
+    # output, not a header that may already have scrolled off, so its absence is a
+    # real failure -- never poked_unverified.
+    _agmsg_team_fix_result cli_session failed rename_not_observed
+    return 0
+  fi
 
   case "$session_cell" in
     mismatch\(*)
