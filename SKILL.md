@@ -86,6 +86,13 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 # Message history
 ~/.agents/skills/agmsg/scripts/history.sh <team> [agent_id] [limit]
 
+# Resume one paused Antigravity TUI for the current project (fails closed when
+# zero or multiple paused instances are found)
+~/.agents/skills/agmsg/scripts/antigravity-resume.sh "$(pwd)"
+
+# Recover a stopped TUI after a read-denied guard (only when no batch is pending)
+~/.agents/bin/agy-tui reset-guard --project "$(pwd)" --team <team> --name <role>
+
 # Export a team's message history as JSONL — one message_sent record per line,
 # chronological. Default to stdout (pipeable); --out <file> writes a file.
 # --agent limits to one agent; --limit keeps the most recent N (omit = all

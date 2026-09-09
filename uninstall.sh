@@ -213,6 +213,21 @@ if [ "$REMOVED_SQLITE_SHIM" = true ] && [ -f "$SQLITE_SHIM_CACHE" ]; then
   REMOVED=true
 fi
 
+# Remove the Antigravity launcher only when it belongs to an installation
+# selected above. A same-named user file or another install's shim is retained.
+ANTIGRAVITY_TUI_SHIM="$AGENTS_DIR/bin/agy-tui"
+if [ -f "$ANTIGRAVITY_TUI_SHIM" ]; then
+  for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+    owner="# agmsg-shim-owner: $SKILL_DIR/scripts/drivers/types/antigravity/agy-tui.sh"
+    if grep -Fxq "$owner" "$ANTIGRAVITY_TUI_SHIM" 2>/dev/null; then
+      rm "$ANTIGRAVITY_TUI_SHIM"
+      echo "  - removed $ANTIGRAVITY_TUI_SHIM"
+      REMOVED=true
+      break
+    fi
+  done
+fi
+
 # --- 3. Remove skill directories ---
 for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   SKILL_NAME="$(basename "$SKILL_DIR")"

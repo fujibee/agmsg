@@ -36,6 +36,88 @@ teardown() {
   [[ "$output" =~ "hello from install" ]]
 }
 
+@test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -x "$shim" ]
+  grep -Fq "# agmsg-shim-owner: $SK/scripts/drivers/types/antigravity/agy-tui.sh" "$shim"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" status \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 0 ]
+  grep -qF 'runtime: tui-pty 未起動' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" reset-guard \
+    --project /tmp/not-joined --team demo --name agy
+  [ "$status" -eq 1 ]
+  grep -qF '復旧対象のstateがありません' <<<"$output"
+
+  run env HOME="$FAKE_HOME" PATH=/usr/bin:/bin "$shim" ack \
+    --project /tmp/not-joined --team demo --name agy --batch batch-1 --confirm-id message-1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"復旧対象の予約/stateがありません"* ]]
+}
+
+@test "install: Antigravity TUI shim preserves foreign files and refreshes its owner only" {
+  mkdir -p "$FAKE_HOME/.agents/bin"
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo user-owned' > "$shim"
+  local before; before="$(cat "$shim")"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ "$(cat "$shim")" = "$before" ]
+
+  rm "$shim"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  sed -i 's/exec bash /# stale\nexec bash /' "$shim"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  refute grep -q '^# stale$' "$shim"
+
+  local owned_before; owned_before="$(cat "$shim")"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg-second
+  [ "$(cat "$shim")" = "$owned_before" ]
+}
+
+@test "install: Antigravity TUI shim replaces its symlink without writing through it" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  local linked="$FAKE_HOME/linked-agy-tui"
+  cp "$shim" "$linked"
+  rm "$shim"
+  ln -s "$linked" "$shim"
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -L "$shim" ]
+  [ -x "$shim" ]
+  cmp "$shim" "$linked"
+}
+
+@test "install: Antigravity TUI launcher resolves one registered identity" {
+  skip_unless_linux
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local project="$FAKE_HOME/project"
+  local fake_agy="$FAKE_HOME/bin/agy"
+  mkdir -p "$project" "$(dirname "$fake_agy")"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fake_agy"
+  chmod +x "$fake_agy"
+  bash "$SK/scripts/join.sh" demo agy antigravity "$project"
+
+  run env HOME="$FAKE_HOME" PATH="$FAKE_HOME/bin:$PATH" \
+    "$FAKE_HOME/.agents/bin/agy-tui" status --project "$project"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runtime: tui-pty 未起動"* ]]
+}
+
+@test "uninstall: removes only the owned Antigravity TUI shim" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local shim="$FAKE_HOME/.agents/bin/agy-tui"
+  [ -f "$shim" ]
+
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$shim" ]
+}
+
 @test "install: Codex skill documents safe Git Bash quoting for Windows PowerShell" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type codex
 
