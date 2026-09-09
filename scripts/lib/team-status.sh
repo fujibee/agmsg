@@ -153,10 +153,15 @@ agmsg_team_fix_identity_loaded() {
 
   case "$session_cell" in
     mismatch\(*)
-      if [ "$type" != claude-code ]; then
-        _agmsg_team_fix_result cli_session skipped rename_unsupported
+      # The ability to rename is a manifest datum, not a type name (#1081): a type
+      # that declares rename_cmd can be renamed, one that does not is skipped with
+      # the reason naming the datum -- so a new renamable type needs no edit here.
+      rename_cmd="$(agmsg_type_get "$type" rename_cmd 2>/dev/null || true)"
+      if [ -z "$rename_cmd" ]; then
+        _agmsg_team_fix_result cli_session skipped no_rename_cmd
         return 0
       fi
+      session_src="$(_agmsg_cli_session_source "$type")"
       readiness="$(agmsg_team_input_ready_loaded "$type" "$pane")"
       IFS="$(printf '\t')" read -r state reason <<EOF
 $readiness
@@ -166,7 +171,7 @@ EOF
         return 0
       fi
       rc=0
-      terminal_poke "$pane" "/rename $expected_session" >/dev/null 2>&1 || rc=$?
+      terminal_poke "$pane" "$rename_cmd $expected_session" >/dev/null 2>&1 || rc=$?
       if [ "$rc" -ne 0 ]; then
         _agmsg_team_fix_result cli_session failed "terminal_poke_rc_$rc"
         return 0
@@ -177,15 +182,19 @@ EOF
         IFS="$(printf '\t')" read -r _ _ _ title <<EOF
 $observed
 EOF
-        case "$title" in
-          n/a:*|unknown:*) : ;;
-          *) [ "$(agmsg_cli_session_from_title "$title")" = "$expected_session" ] \
-               && { _agmsg_team_fix_result cli_session changed renamed_and_verified; return 0; } ;;
-        esac
+        [ "$(agmsg_cli_session_observed "$type" "$title" "$pane")" = "$expected_session" ] \
+          && { _agmsg_team_fix_result cli_session changed renamed_and_verified; return 0; }
         sleep 0.1 2>/dev/null || true
         tries=$((tries + 1))
       done
-      _agmsg_team_fix_result cli_session failed rename_not_observed
+      # Poked, never observed to take. A `title` name is authoritative -- still
+      # wrong after the rename is a real failure. A `screen` name that scrolls off
+      # is not observable, so there this is the third word: poked, could not
+      # confirm -- never "failed" on a screen we could not read (#1081).
+      case "$session_src" in
+        screen:*) _agmsg_team_fix_result cli_session poked_unverified rename_not_observed ;;
+        *)        _agmsg_team_fix_result cli_session failed rename_not_observed ;;
+      esac
       ;;
     ok\(*) _agmsg_team_fix_result cli_session skipped already_matches ;;
     n/a:*) _agmsg_team_fix_result cli_session skipped "${session_cell#n/a:}" ;;
@@ -207,7 +216,7 @@ agmsg_identity_cell() {
 agmsg_team_identity_loaded() {
   local team="$1" agent="$2" type="$3" terminal="$4" pane="$5"
   local raw activity actual_label actual_key title expected_label expected_key
-  local actual_session expected_session pane_cell key_cell session_cell consistency name_arg
+  local actual_session expected_session pane_cell key_cell session_cell consistency session_src
   raw="$(agmsg_team_observe_loaded "$pane")"
   IFS="$(printf '\t')" read -r activity actual_label actual_key title <<EOF
 $raw
@@ -236,19 +245,23 @@ EOF
     n/a:*|unknown:*) key_cell="$expected_key" ;;
     *) key_cell="$(agmsg_identity_cell "$expected_key" "$actual_key")" ;;
   esac
-  name_arg="$(agmsg_type_get "$type" name_arg 2>/dev/null || true)"
-  if [ -z "$name_arg" ]; then
+  # The session name is judged only when the type says how it can be OBSERVED
+  # (session_name_source), not by whether it has a launch flag (#1081): codex has
+  # no name_arg yet its name is readable early from the TUI header, so it must be
+  # judged too. A type with no source has no observable name (n/a). A source that
+  # cannot be read right now (TUI header scrolled off, screen unreadable) yields
+  # unknown, NOT mismatch -- unobservable is never "wrong".
+  session_src="$(_agmsg_cli_session_source "$type")"
+  if [ -z "$session_src" ]; then
     expected_session=n/a:no_session_name
     actual_session=n/a:no_session_name
     session_cell=n/a:no_session_name
   else
     expected_session="$team-$agent"
-    case "$title" in
-      n/a:*|unknown:*) actual_session="$title"; session_cell="$title" ;;
-      *)
-        actual_session="$(agmsg_cli_session_from_title "$title")"
-        session_cell="$(agmsg_identity_cell "$expected_session" "$actual_session")"
-        ;;
+    actual_session="$(agmsg_cli_session_observed "$type" "$title" "$pane")"
+    case "$actual_session" in
+      n/a:*|unknown:*) session_cell="$actual_session" ;;
+      *) session_cell="$(agmsg_identity_cell "$expected_session" "$actual_session")" ;;
     esac
   fi
   consistency="$(agmsg_identity_consistency "$pane_cell" "$key_cell" "$session_cell")"
@@ -299,6 +312,74 @@ agmsg_cli_session_from_title() {
       ;;
   esac
   printf '%s\n' "$title"
+}
+
+# Observe a type's CLI session name from OUTSIDE, per its `session_name_source`
+# manifest datum (#1081). One shared reader for both the cli_session cell and the
+# rename readback, so the two cannot disagree about what the name is.
+#   <title> the terminal title already observed for this pane (used by `title`)
+#   <pane>  the bare pane id (used by `screen:` to peek)
+# Prints the observed name, or a namespaced `unknown:<why>` / `n/a:<why>`.
+#
+# UNOBSERVABLE IS UNKNOWN, NEVER FAILURE. A type whose name lives only in a TUI
+# header that has scrolled off cannot be judged wrong, and a changed TUI layout
+# must read as "could not confirm", not "rename failed". Only a name we actually
+# read and that differs is a mismatch; anything we could not read is unknown.
+#   title           -> agmsg_cli_session_from_title of the terminal title
+#   screen:<prefix> -> peek the pane, take ONLY the line beginning with <prefix>,
+#                      and only its text after the prefix. The rest of the screen
+#                      is another process's output: reported, never trusted (the
+#                      peek posture SKILL.md states), so nothing else is read.
+#   (absent)        -> n/a:no_session_name (no observable name; not renamable)
+# The observation source for a type, resolved once: its session_name_source, or
+# `title` when it has a launch name flag (name_arg) but no explicit source -- a
+# name_arg type has always been read from the terminal title, so that stays true
+# without every such manifest having to also spell out session_name_source.
+_agmsg_cli_session_source() {   # <type>
+  local s; s="$(agmsg_type_get "$1" session_name_source 2>/dev/null || true)"
+  if [ -z "$s" ] && [ -n "$(agmsg_type_get "$1" name_arg 2>/dev/null || true)" ]; then
+    s=title
+  fi
+  printf '%s\n' "$s"
+}
+
+agmsg_cli_session_observed() {   # <type> <title> <pane>
+  local type="$1" title="$2" pane="$3" src prefix screen line name rc=0
+  src="$(_agmsg_cli_session_source "$type")"
+  case "$src" in
+    "") printf 'n/a:no_session_name\n' ;;
+    title)
+      case "$title" in
+        n/a:*|unknown:*) printf '%s\n' "$title" ;;
+        *) agmsg_cli_session_from_title "$title" ;;
+      esac
+      ;;
+    screen:*)
+      prefix="${src#screen:}"
+      screen="$(terminal_peek "$pane" 2>/dev/null)" || rc=$?
+      [ "$rc" -eq 0 ] || { printf 'unknown:screen_unreadable\n'; return 0; }
+      # ONLY a line that BEGINS with the prefix -- the header, not a phrase that
+      # merely appears somewhere in the conversation. `index($0,p)==1` is a
+      # literal, line-start match (grep -F would accept "... Thread name: x" and
+      # read the rest of an unrelated line as the name, #1102 review). First such
+      # line wins; the rest of the screen is not judged.
+      line="$(printf '%s\n' "$screen" | awk -v p="$prefix" 'index($0,p)==1 { print; exit }')"
+      [ -n "$line" ] || { printf 'unknown:name_not_visible\n'; return 0; }
+      name="${line#"$prefix"}"
+      while [ "${name# }" != "$name" ]; do name="${name# }"; done      # lead ws
+      while [ "${name% }" != "$name" ]; do name="${name% }"; done      # trail ws
+      [ -n "$name" ] || { printf 'unknown:name_not_visible\n'; return 0; }
+      # The header line is real, but everything after the prefix is still screen
+      # text (#1102 review). A session name is short and has no control bytes;
+      # anything else is not a name we can trust to compare or mark, so it reads
+      # malformed rather than being passed through. A TAB especially would corrupt
+      # the TAB-separated records this feeds.
+      case "$name" in *[[:cntrl:]]*) printf 'unknown:name_malformed\n'; return 0 ;; esac
+      [ "${#name}" -le 128 ] || { printf 'unknown:name_malformed\n'; return 0; }
+      printf '%s\n' "$name"
+      ;;
+    *) printf 'unknown:session_name_source_unrecognized\n' ;;
+  esac
 }
 
 _agmsg_team_identity_detail() {

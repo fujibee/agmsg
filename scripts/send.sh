@@ -30,6 +30,12 @@ agmsg_validate_team_name "$TEAM" || exit 1
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/self-name.sh"
 agmsg_self_name_on_action "$TEAM" "$FROM"
+# And, once and early, fix its own CLI session name by typing /rename into its own
+# pane (self-rename.sh, #1081). Best-effort, never fails the send; opt out with
+# AGMSG_SELF_RENAME=off (or the whole family with AGMSG_SELF_NAME=off).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/self-rename.sh"
+agmsg_self_rename_on_action "$TEAM" "$FROM"
 
 agmsg_storage_load
 DB="$(agmsg_db_path "$TEAM")"

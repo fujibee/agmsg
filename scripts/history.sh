@@ -24,6 +24,10 @@ if [ -n "$AGENT" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/lib/self-name.sh"
   agmsg_self_name_on_action "$TEAM" "$AGENT"
+  # Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-rename.sh"
+  agmsg_self_rename_on_action "$TEAM" "$AGENT"
 fi
 
 # A history read must not create a store, so a team that has never been written
