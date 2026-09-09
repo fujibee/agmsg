@@ -91,6 +91,8 @@ _mark() {   # <team> <agent> -> "ref<TAB>epoch" or empty
 _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
   local rec r
   rec="$(agmsg_spawn_path "$1" "$2")" || return 0
   [ -f "$rec" ] || return 0
@@ -398,4 +400,52 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # Control: the same call with the switch at its default names once.
   agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
   [ "$(_name_calls)" -eq 1 ]
+}
+
+# INTERIM guard for #1112. A codex session inherits its environment from a shared
+# app-server daemon, so it resolves the pane that daemon was started from -- and
+# every seat under it resolves the SAME one. Measured: three seats in three panes,
+# all three marks reading one reference. Recording that replaces a correct
+# placement (written by spawn, which knew the real pane) with an inherited one.
+#
+# Three directions. Two of them pass on a guard that is always on or always off;
+# the third is the one that breaks a working seat, so it is not optional.
+
+@test "a seat does not take a placement another seat's record already holds (#1112)" {
+  _install_fake_herdr; _under_herdr w1:p2
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local other; other="$(agmsg_spawn_path team seatA)"
+  mkdir -p "$(dirname "$other")"
+  printf 'herdr:w1:p2\t/proj\tcodex\n' > "$other"
+
+  agmsg_self_name_on_action team seatB /proj codex
+
+  [ ! -f "$(agmsg_spawn_path team seatB)" ]
+}
+
+@test "a seat does take a placement no other seat holds (#1112)" {
+  _install_fake_herdr; _under_herdr w1:pZ
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local other; other="$(agmsg_spawn_path team seatA)"
+  mkdir -p "$(dirname "$other")"
+  printf 'herdr:w1:p2\t/proj\tcodex\n' > "$other"
+
+  agmsg_self_name_on_action team seatB /proj codex
+
+  grep -q 'herdr:w1:pZ' "$(agmsg_spawn_path team seatB)"
+}
+
+@test "a seat rewriting its own placement is not blocked by its own row (#1112)" {
+  _install_fake_herdr; _under_herdr w1:pQ
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local mine; mine="$(agmsg_spawn_path team seatB)"
+  mkdir -p "$(dirname "$mine")"
+  printf 'herdr:w1:pQ\t/proj\tclaude-code\n' > "$mine"
+
+  agmsg_self_name_on_action team seatB /proj claude-code
+
+  grep -q 'herdr:w1:pQ' "$mine"
 }

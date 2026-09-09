@@ -705,6 +705,28 @@ agmsg_terminal_name_self() {
   [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
+  # INTERIM (#1112). A process that resolved this pane from its own environment
+  # is not always in it: a codex session inherits its environment from a shared
+  # app-server daemon, so every seat under that daemon resolves the SAME pane --
+  # the one the daemon was started from. Measured: three seats in three panes,
+  # all three marks reading the same reference.
+  #
+  # Until that is fixed at the source, refuse to take a reference another seat's
+  # record already holds. This keeps a correct record (written by spawn, which
+  # knew the real pane) from being replaced by an inherited one. It is first-writer-
+  # wins, which is NOT always right -- a stale record can squat -- so this is a
+  # stop-gap and should be removed when #1112 makes the resolution trustworthy.
+  local _owner_rec _owner_ref _other
+  for _owner_rec in "$(dirname "$rec")"/spawn."${team}"__*; do
+    [ -f "$_owner_rec" ] || continue
+    [ "$_owner_rec" = "$rec" ] && continue
+    _owner_ref="$(head -1 "$_owner_rec" 2>/dev/null | cut -f1)" || continue
+    [ "$_owner_ref" = "$ref" ] || continue
+    _other="$(basename "$_owner_rec")"; _other="${_other#spawn."${team}"__}"
+    echo "agmsg: named the pane but did not record it: $ref is already recorded for '$_other' (#1112 -- an inherited environment can name a pane this process is not in)" >&2
+    return 0
+  done
+
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
   # record. agmsg_write_atomic adds the trailing newline, so pass the row without.
