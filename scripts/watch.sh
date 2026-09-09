@@ -285,12 +285,12 @@ _pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
   # wrong, and the second is the subtler one:
   #
   #   `|| echo free`        turned an unreadable lock into "free", which COMPARED
-  #                         EQUAL to a pair read as free (co3, round 1).
+  #                         EQUAL to a pair read as free (review, round 1).
   #   probe then re-derive  checked the status of one read and then used a second
   #                         one's answer: actas_lock_state does its own read and
   #                         collapses ITS failure to free/rc0, so for a broad
   #                         watcher (pair_state=free) the unknown was laundered
-  #                         back into unchanged (co3, round 2).
+  #                         back into unchanged (review, round 2).
   #
   # Deriving `free`/`mine`/`other:` also drags in liveness, and
   # actas_lock_sid_alive -> agmsg_instance_alive is a boolean with no "cannot
@@ -304,13 +304,13 @@ _pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
   # empty against a non-empty capture and is `changed`, which refuses; that is the
   # conservative direction and costs one cycle.
   #
-  # The reader is the three-valued one (#983, tl): `absent` and `unreadable` are
+  # The reader is the three-valued one (#983): `absent` and `unreadable` are
   # NOT the same answer here. Absent means there is no owner, which compares
   # equal to an empty baseline and is correctly `unchanged` -- that is the
   # ordinary case for a broad watcher on a free pair. Unreadable means we cannot
   # say, and cannot say is refused. `actas_lock_owner` returned "" and rc 0 for
   # both, so a run directory that became unsearchable mid-turn matched the free
-  # baseline exactly and the guard waved the act through (co3/co1).
+  # baseline exactly and the guard waved the act through (review).
   local _r _rd _now
   _r="$(actas_lock_read "$1" "$2")" || return 2
   _rd="${_r%%$'\t'*}"
@@ -742,7 +742,7 @@ if [ -n "$PAIRS" ]; then
       # anything (mktemp, an uncreatable lock dir, three contended reclaim
       # rounds) printed nothing and was read as "we got it". Naming the success
       # instead of the failures is what makes an unanticipated answer safe.
-      # (#983, co3/co1)
+      # (#983, review)
       case "$result" in
         ok) : ;;
         held:*)
@@ -985,7 +985,7 @@ while true; do
     # between the two calls: a claim landing there produced a stale `free` state
     # (so the gate chose serve) paired with a FRESH owner baseline (so the guard
     # compared new-to-new and said unchanged), and the pair was served for a role
-    # someone else held. Found by co3; the fix belongs in the library, so every
+    # someone else held. Found in review; the fix belongs in the library, so every
     # caller that needs both gets them from one observation. (#983)
     IFS="$(printf '\t')" read -r pair_state pair_owner <<EOF
 $(actas_lock_observe "$pair_team" "$pair_agent" "$SESSION_ID")

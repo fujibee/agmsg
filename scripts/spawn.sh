@@ -869,7 +869,7 @@ fi
 # could not be set/confirmed. The member is still fully reachable — peek/poke/despawn
 # --force resolve it through the placement record, not this key — so this is NOT a
 # failed spawn (unlike the unrecorded case above, which loses the member). But it is
-# NOT ready/launched-confirmed either (koit: do not report ready when the name did not
+# NOT ready/launched-confirmed either (the rule: do not report ready when the name did not
 # take). Reported by the helper below, and — crucially — only AFTER readiness is
 # settled: naming and readiness are INDEPENDENT facts (a seat can be receiving yet
 # unnamed), so bailing out before the wait would hide whether the watcher attached.

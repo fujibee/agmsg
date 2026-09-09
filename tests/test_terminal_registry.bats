@@ -1898,7 +1898,7 @@ _fake_herdr_list_anchored_plus() {
   chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
 }
 
-# --- every id-taking tmux op honours BOTH ref forms (#1051, co2/tl) ----------
+# --- every id-taking tmux op honours BOTH ref forms (#1051, review) ----------
 #
 # Putting the socket in the ref made the WRITERS emit `<socket>:%N`; the READERS
 # were not counted at the same time, and four of them pattern-matched a bare
