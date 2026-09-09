@@ -34,16 +34,20 @@ teardown() {
 }
 
 @test "resume: paused なTUIが複数ならfail-closed" {
-  sed -i "s/runtime: beta tui-pty running/runtime: beta tui-pty paused/" \
-    "$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  # `sed -i` with no suffix is GNU-only; BSD sed (macOS) takes the next word as
+  # a backup extension. Write to a temp file and copy back instead. (#1073)
+  _mon="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  sed "s/runtime: beta tui-pty running/runtime: beta tui-pty paused/" "$_mon" > "$_mon.portable"
+  cat "$_mon.portable" > "$_mon"
   run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が複数"* ]]
 }
 
 @test "resume: paused なTUIがなければfail-closed" {
-  sed -i "s/runtime: alpha tui-pty paused/runtime: alpha tui-pty running/" \
-    "$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  _mon="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
+  sed "s/runtime: alpha tui-pty paused/runtime: alpha tui-pty running/" "$_mon" > "$_mon.portable"
+  cat "$_mon.portable" > "$_mon"
   run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が見つかりません"* ]]

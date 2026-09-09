@@ -37,7 +37,6 @@ teardown() {
 }
 
 @test "install: Antigravity TUI shim resolves installed launcher and forwards actions first" {
-  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local shim="$FAKE_HOME/.agents/bin/agy-tui"
   [ -x "$shim" ]
@@ -70,7 +69,13 @@ teardown() {
 
   rm "$shim"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
-  sed -i 's/exec bash /# stale\nexec bash /' "$shim"
+  # Not `sed -i`: BSD sed (macOS) reads the word after -i as a BACKUP SUFFIX, so
+  # the expression is taken as the filename and the whole call fails with
+  # "invalid command code". `\n` in a replacement is a GNU extension too. awk
+  # does both portably. (#1073)
+  awk '{ if ($0 ~ /exec bash /) print "# stale"; print }' "$shim" > "$shim.portable"
+  cat "$shim.portable" > "$shim"
+  rm -f "$shim.portable"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
   refute grep -q '^# stale$' "$shim"
 
@@ -94,7 +99,6 @@ teardown() {
 }
 
 @test "install: Antigravity TUI launcher resolves one registered identity" {
-  skip_unless_linux
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local project="$FAKE_HOME/project"
   local fake_agy="$FAKE_HOME/bin/agy"

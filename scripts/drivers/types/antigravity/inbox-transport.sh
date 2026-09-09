@@ -6,6 +6,22 @@ source "$SKILL_DIR/scripts/lib/storage.sh"
 source "$SKILL_DIR/scripts/lib/actas-lock.sh"
 source "$SKILL_DIR/scripts/lib/role-session.sh"
 command="${1:?}"; project="${2:?}"; team="${3:?}"; role="${4:?}"; owner="${5:-}"
+# Does this owner hold the role? 0 yes | 1 someone else's | 2 could not tell.
+#
+# `actas_lock_owner` is gone (#983). It answered the empty string, at status 0,
+# for a missing lock, an unreadable one and an empty one alike, so
+# `[ "$(actas_lock_owner …)" = "$owner" ]` could not tell "not yours" from "I
+# could not look" -- it happened to refuse in both cases, which is the safe
+# direction, but it then REPORTED the wrong one. The reader carries its own
+# outcome now, so the two stay apart all the way to the message the operator
+# reads.
+_owner_check() {   # <team> <role> <owner>
+  local _r; _r="$(actas_lock_read "$1" "$2")"
+  [ "${_r%%$'\t'*}" = "ok" ] || return 2
+  [ "${_r#*$'\t'}" = "$3" ] || return 1
+  return 0
+}
+
 case "$command" in
  paths)
    printf '%s\n' "$(actas_lock_path "$team" "$role")"
@@ -21,11 +37,22 @@ case "$command" in
      _n=$((_n + 1)); printf '%s\n' "$_n" > "${AGMSG_TEST_VERIFY_SIGNAL}.count"
      if [ "$_n" -ge 3 ]; then kill -TERM $$; fi
    fi
-   [ "$(actas_lock_owner "$team" "$role")" = "$owner" ]; exit ;;
+   # The supervisor reads this as a boolean "is it still mine". Both "no" and
+   # "cannot tell" must answer non-zero -- an unverifiable lock is not a held
+   # one -- and errexit carries that status out, as the old form did.
+   _owner_check "$team" "$role" "$owner"; exit ;;
  release) actas_lock_release "$team" "$role" "$owner"; exit ;;
  record) agmsg_role_session_record "$team" "$role" "${6:?}" "$project"; exit ;;
 esac
-[ "$(actas_lock_owner "$team" "$role")" = "$owner" ] || { echo '所有権不一致' >&2; exit 1; }
+# Both refuse, and they say different things: "someone else holds it" is a claim
+# about the world, "I could not read the lock" is a claim about us, and the
+# operator's next move differs. Reporting the second as the first is the same lie
+# doctor used to tell with `lock=none`. (#983)
+_own_rc=0; _owner_check "$team" "$role" "$owner" || _own_rc=$?
+case "$_own_rc" in
+  1) echo '所有権不一致' >&2; exit 1 ;;
+  2) echo 'actas lock を読めないため所有権を確認できません（未確認のまま先へは進みません）' >&2; exit 1 ;;
+esac
 agmsg_storage_load
 case "$command" in
  peek)

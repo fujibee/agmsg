@@ -8,7 +8,11 @@ action=run
 case "${1:-}" in
   status|stop|resume|reset-guard|ack|replay) action="$1"; shift ;;
 esac
-[ "$(uname -s)" = Linux ] || { echo 'Antigravity TUI monitor は初回対応ではLinux専用です' >&2; exit 1; }
+# 同上(#1073)。macOS は未検証: 失敗したら issue を上げてください。
+case "$(uname -s)" in
+  Linux|Darwin) ;;
+  *) echo 'Antigravity TUI monitor は Linux / macOS のみです' >&2; exit 1 ;;
+esac
 if [ "$action" = run ]; then
   [ -t 0 ] && [ -t 1 ] || { echo 'Antigravity TUI monitor は対話端末から起動してください' >&2; exit 1; }
 fi

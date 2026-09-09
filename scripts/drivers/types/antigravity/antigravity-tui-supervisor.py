@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Linux-only PTY owner for one Antigravity TUI and one agmsg role."""
+"""PTY owner for one Antigravity TUI and one agmsg role.
+
+Linux is the verified platform. macOS runs the same code -- the only thing that
+was Linux-specific is proc_start below, and it now uses the platform rule this
+repo already had -- but it is NOT verified: nothing here has been exercised
+against a real Antigravity TUI on macOS. Treat a macOS failure as a bug to
+report, not as a supported path that broke. (#1073)
+"""
 import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
@@ -16,7 +23,48 @@ def atomic(path, value):
     os.replace(tmp, path)
 
 def proc_start(pid):
-    return Path(f'/proc/{pid}/stat').read_text().split(') ',1)[1].split()[19]
+    """The process's start token, tagged with how it was obtained.
+
+    A pid alone is not an identity: pids are recycled, and every comparison of
+    this value in this file exists to separate "the same process" from "a
+    different process that inherited its number". The token is the process's
+    start time at the best precision the platform offers, and it carries its
+    SOURCE, because the two sources are not comparable with each other -- a
+    `proc` token and a `ps` token for one process are different strings, and a
+    comparison across them must FAIL rather than quietly match.
+
+        /proc/<pid>/stat field 22 (starttime, in clock ticks) -- lossless
+        ps -o lstart=                                         -- second precision
+
+    Same two sources, same order, same tagging as _start_token in
+    scripts/drivers/types/codex/codex-bridge-launcher.sh. The repo already had
+    an answer to "how do I identify a process across platforms"; a second answer
+    here would give two halves of agmsg two ideas of process identity.
+
+    Raises FileNotFoundError when the start time cannot be determined --
+    including for a pid that is simply gone. The TYPE is load-bearing: recover()
+    and the status listing both do
+
+        try: live=proc_start(...)==... ; except (FileNotFoundError,ValueError)
+
+    and a gone pid reaching /proc/<pid>/stat is exactly what used to raise it.
+    Raising anything else turns "that supervisor is no longer running" -- the
+    ordinary case those handlers exist for -- into a crash.
+    """
+    try:
+        raw=Path(f'/proc/{pid}/stat').read_text()
+    except OSError:
+        raw=None
+    if raw is not None:
+        token=raw.split(') ',1)[1].split()[19]
+        if not token.isdigit(): raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (/proc)')
+        return f'proc:{token}'
+    result=subprocess.run(['ps','-o','lstart=','-p',str(pid)],capture_output=True,text=True)
+    # ps pads the field; trim only surrounding whitespace so the internal spacing
+    # survives, exactly as the launcher's shell version does.
+    token=result.stdout.strip()
+    if result.returncode!=0 or not token: raise FileNotFoundError(f'pid {pid} の起動時刻を判定できません (ps)')
+    return f'ps:{token}'
 
 class TerminalScreen:
     """Receipt判定に必要な範囲だけを扱うfail-closedなVT画面モデル。"""
