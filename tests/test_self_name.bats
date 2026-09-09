@@ -11,7 +11,9 @@
 #   - mark present, name gone, nothing else changed -> NOT seen (blind spot,
 #                                         pinned as such)
 #   - no mark                          -> named once, mark written
-#   - another seat in the same pane    -> names it for itself
+#   - another seat in the same pane    -> NOT taken while the first seat's record
+#                                         claims it (#1114 stop-gap; was "names it
+#                                         for itself" and returns to that with #1112)
 #   - order independence: a boot path first, then the action; the action
 #     first, then a boot path -- same key, one terminal call in total
 #   - herdr identifies its pane from HERDR_PANE_ID with no session id
@@ -153,16 +155,29 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   grep -q 'BLIND SPOT' "$SKILL_DIR/scripts/lib/self-name.sh"
 }
 
-@test "another seat in the same pane names it for itself: its own record has no mark for that pane" {
+@test "another seat in the same pane does NOT take it while the first seat's record claims it (#1114 stop-gap)" {
+  # Before the #1114 stop-gap this test read "names it for itself": the second
+  # seat relabeled the pane and marked itself there. Under the stop-gap a pane
+  # another seat's record claims is neither named, marked, nor recorded -- that
+  # is the shape that stops co-located codex seats taking each other's pane, and
+  # a second role acting from the SAME pane is indistinguishable from it. The
+  # message says who holds the pane and how to release it (drop or despawn).
+  # Delete this test with the guard when #1112 lands and restore the old one.
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
   : > "$ARGV_LOG"
-  agmsg_self_name_on_action team bob
-  [ "$(_name_calls)" -eq 1 ]
-  grep -q '\[@agmsg_agent\] \[team:bob\]' "$ARGV_LOG"
-  [ "$(_mark team bob)" = $'tmux:/tmp/s:%3\tpid=4242' ]
-  # alice's mark still names %3; when alice acts from elsewhere she is renamed there.
+  run agmsg_self_name_on_action team bob
+  [ "$status" -eq 0 ]
+  [ "$(_name_calls)" -eq 0 ]
+  refute grep -q '\[team:bob\]' "$ARGV_LOG"
+  [ -z "$(_mark team bob)" ]
+  [ -z "$(_placement team bob)" ]
+  grep -q 'already recorded as team__alice' <<<"$output"
+  grep -q 'drop or despawn' <<<"$output"
+  # alice keeps everything.
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
 }
 
 # --- order independence with the existing paths -------------------------------------

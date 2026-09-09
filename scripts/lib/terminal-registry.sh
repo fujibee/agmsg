@@ -563,7 +563,14 @@ agmsg_terminal_ref_id() {
 # Prints "<team>__<agent>" as the record file spells it (percent-encoded, the form
 # on disk) and nothing when the pane is unclaimed.
 #
-# STOP-GAP (#1113). Delete this and its caller when #1112 lands.
+# STOP-GAP (#1114, guarding the regression #1111 exposed). Delete this and its
+# caller when #1112 lands.
+#
+# "Other seat" means another AGENT NAME, in any team. run/ is flat and one seat
+# registered in two teams has two records (spawn.<team1>__<x>, spawn.<team2>__<x>)
+# for the same pane; the second must not be blocked by the first, or a seat that
+# acts in its second team can never be recorded there (measured on this host,
+# where every seat is in two teams).
 #
 # Since #1111 a seat records its own placement when it acts, resolving the pane
 # from its OWN environment. For codex that environment is not its own: those
@@ -586,7 +593,10 @@ _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
   [ -d "$dir" ] || return 0
   for f in "$dir"/spawn.*; do
     [ -f "$f" ] || continue
-    [ "$f" = "$mine" ] && continue
+    # This seat's own records -- its own file, and the same seat under another
+    # team: the agent part of the file name is the seat, the team part is which
+    # roster it acted in. Neither is a rival claim. One rule, so one seam.
+    [ "${f##*__}" = "${mine##*__}" ] && continue
     IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
     if [ "$first" = "$ref" ]; then
       printf '%s' "${f##*/spawn.}"
@@ -678,6 +688,36 @@ agmsg_terminal_name_self() {
   # The env var is read HERE and handed to the driver as a mode, so the policy
   # has one home and each driver only carries it out. Read at call time, not
   # cached: a value cached at source time is a value nobody can change.
+  # STOP-GAP (#1114, remove with #1112): a pane another seat's record already
+  # claims is not this seat's to NAME, MARK, or RECORD. The check sits here,
+  # BEFORE the rename, because the rename is the act it exists to prevent: with
+  # the shared-daemon environment #1112 describes, three codex seats resolve one
+  # pane, and a check placed after the rename let each of them relabel and rekey
+  # that pane (another seat's) and mark itself as named there, sparing only the
+  # record. The resolved reference is known now, so the decision is made now.
+  #
+  # The claim scan needs agmsg_spawn_path (actas-lock.sh). When it cannot be
+  # loaded the scan is skipped -- a caller that asked for `record` fails on that
+  # below, with its own message; a caller that did not is not blocked by a
+  # library it never needed.
+  if ! declare -F agmsg_spawn_path >/dev/null 2>&1 \
+     && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/actas-lock.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    . "$SKILL_DIR/scripts/lib/actas-lock.sh" 2>/dev/null || true
+  fi
+  if declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    local _claim_rec="" _claim_ref="" _claimed_by=""
+    _claim_rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _claim_rec=""
+    _claim_ref="$(agmsg_terminal_ref "$terminal" "$id" 2>/dev/null)" || _claim_ref=""
+    if [ -n "$_claim_rec" ] && [ -n "$_claim_ref" ]; then
+      _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$_claim_rec")"
+      if [ -n "$_claimed_by" ]; then
+        echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+        return 0
+      fi
+    fi
+  fi
+
   local name_mode=""
   case "${AGMSG_TERMINAL_NAMING:-}" in
     off) name_mode=key ;;
@@ -742,18 +782,8 @@ agmsg_terminal_name_self() {
   [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
-  # STOP-GAP (#1113, remove with #1112): do not take a pane another seat's record
-  # already claims. Naming SUCCEEDED -- the pane carries this seat's label -- so
-  # this returns 0; what is declined is the placement CLAIM, and the reason is
-  # said out loud rather than the write silently not happening. Without this, the
-  # first codex seat to act overwrites its own correct record with the shared
-  # daemon's pane, and the next one overwrites that.
-  local _claimed_by=""
-  _claimed_by="$(_agmsg_placement_claimed_by "$ref" "$rec")"
-  if [ -n "$_claimed_by" ]; then
-    echo "agmsg: named the pane but did NOT record it: this seat resolved $ref, and that pane is already recorded as $_claimed_by's. Keeping the existing record. (#1113 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
-    return 0
-  fi
+  # The claim check that used to sit here now sits BEFORE the rename (above):
+  # a claimed pane is neither named nor marked nor recorded.
 
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
