@@ -492,6 +492,14 @@ agmsg_instance_alive() {
   # all of them and fell through to `return 1` -- a confident DEAD, produced by a
   # scan that read nothing. The composite branch above already asked for both,
   # which is the giveaway: one function, two paths, two answers. (co1)
+  #
+  # Measured after the shared reader landed, so the next reader is not misled
+  # about which line is load-bearing: this guard is now REDUNDANT. Deleting the
+  # -x from it produces no reds, because _agmsg_marker_read answers `unreadable`
+  # for every entry in an unsearchable directory and the loop then reports 2 on
+  # its own. It stays as the cheap early answer -- and because "we cannot search
+  # this directory" is the fact the branch rests on, which is not something to
+  # infer from what the per-entry reads happened to return.
   { [ -d "$run" ] && [ -r "$run" ] && [ -x "$run" ]; } || return 2
   local _m
   for f in "$run"/cc-instance.*; do
