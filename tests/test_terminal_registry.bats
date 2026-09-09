@@ -2105,9 +2105,13 @@ _tmux_op_args() {
   # green because the call did nothing.
   grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
 
-  # The reason is said, not swallowed -- and it names both sides.
+  # The reason is said, not swallowed -- and it names BOTH sides. The seat is
+  # asserted separately from the ref: without it, dropping $_claimed_by from the
+  # message leaves this green while the operator is told a pane is taken and not
+  # by whom (found in review).
   grep -q 'did NOT record it' <<<"$output"
   grep -q 'tmux:/tmp/fake:%1' <<<"$output"
+  grep -q 'seatteam__peer' <<<"$output"
 
   # Nothing was taken and nothing was invented.
   cmp -s "$peer" "$peer_snapshot"
@@ -2151,4 +2155,98 @@ _tmux_op_args() {
   [ "$status" -eq 0 ]
   refute grep -q 'did NOT record it' <<<"$output"
   grep -q '^tmux:/tmp/fake:%1	/proj/NEW	claude-code$' "$mine"
+}
+
+@test "terminal_name_self record: a LEGACY socket-less peer record still claims the pane (#1113)" {
+  # The record format accepts `%N` / `@N` from before refs carried the server
+  # (#1051), and those are the oldest records -- the ones most likely to belong
+  # to somebody else. Compared as strings, `%1` never matches `tmux:<sock>:%1`
+  # and the guard waves the write through exactly there. Compared as panes, it
+  # claims. (My first fixture in this file wrote the legacy form; the guard did
+  # not fire and I corrected the FIXTURE instead of asking why -- review caught
+  # what the test had already been telling me.)
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local peer; peer="$(agmsg_spawn_path seatteam legacypeer)"
+  mkdir -p "$(dirname "$peer")"
+  printf '%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam newcomer)"
+  run agmsg_terminal_name_self "" seatteam newcomer /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did NOT record it' <<<"$output"
+  grep -q 'seatteam__legacypeer' <<<"$output"
+  refute test -e "$mine"
+}
+
+@test "terminal_name_self record: a peer on a DIFFERENT tmux server is not a claim (#1113)" {
+  # The partner to the legacy rule, and the reason it is scoped rather than
+  # "same pane id wins": a pane id is not unique across tmux servers (#1051).
+  # When BOTH refs name a server and the servers differ, they are different
+  # panes and the write proceeds. Only an UNKNOWN server counts as a claim.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local peer; peer="$(agmsg_spawn_path seatteam otherserver)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/OTHERSOCK:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam sameid)"
+  run agmsg_terminal_name_self "" seatteam sameid /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did NOT record it' <<<"$output"
+  grep -q '^tmux:/tmp/fake:%1\t/proj/MINE\tclaude-code$' "$mine"
+}
+
+@test "terminal_name_self record: refuses while another seat holds the claim mutex (#1113)" {
+  # The scan and the write are one critical section: without it two seats can
+  # both find a pane unclaimed and both take it (found in review). A loser
+  # refuses rather than waits -- this runs on every action, so a wait here would
+  # sit in front of ordinary traffic.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local mine; mine="$(agmsg_spawn_path seatteam blocked)"
+  mkdir -p "$(dirname "$mine")"
+  mkdir "$(dirname "$mine")/.placement-claim.d"
+
+  run agmsg_terminal_name_self "" seatteam blocked /proj/MINE claude-code record
+  rmdir "$(dirname "$mine")/.placement-claim.d"
+  [ "$status" -eq 0 ]
+  grep -q 'another seat is claiming a pane right now' <<<"$output"
+  refute test -e "$mine"
+}
+
+@test "terminal_name_self record: a read-only run dir is NOT reported as contention (#1113)" {
+  # The claim mutex is taken with `mkdir`, and mkdir fails for more than one
+  # reason. Only "it already exists" is another seat claiming; a read-only run
+  # directory fails the same call, and treating that as contention says something
+  # false AND turns a failed write into a success. The sibling atomic-write test
+  # catches the status; this one catches the STORY, which is what an operator
+  # reads.
+  [ "$(id -u)" -eq 0 ] && skip "a read-only directory is ineffective as root"
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path seatteam ro)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:%%OLD\t/proj/OLD\tclaude-code\n' > "$rec"
+  chmod 500 "$(dirname "$rec")"
+
+  run agmsg_terminal_name_self "" seatteam ro /proj/NEW claude-code record
+  chmod 700 "$(dirname "$rec")"
+
+  [ "$status" -ne 0 ]
+  refute grep -q 'another seat is claiming' <<<"$output"
+  grep -q 'could not write its record' <<<"$output"
+  grep -q 'tmux:%OLD' "$rec"
 }

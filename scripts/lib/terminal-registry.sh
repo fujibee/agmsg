@@ -559,6 +559,40 @@ agmsg_terminal_ref_id() {
 # placement over.
 #
 #   agmsg_terminal_name_self <session_id> <team> <agent> <project> <type> [record]
+# Split a placement ref into terminal / pane id / socket, so two refs can be
+# compared as PANES rather than as strings. Sets _AGMSG_PS_TERM, _AGMSG_PS_ID
+# and _AGMSG_PS_SOCK (empty when the ref does not carry one); returns non-zero
+# for a ref it cannot parse.
+#
+# String equality is not enough here, and the review that found it is the reason
+# this exists: the record format accepts the legacy socket-less tmux forms (`%N`,
+# `@N`) alongside `tmux:<socket>:%N`, so a peer holding `%1` would not have
+# matched `tmux:/tmp/x:%1` and the guard would have waved the write through --
+# for exactly the records most likely to be old, which are the ones most likely
+# to be someone else's. (My own first fixture wrote the legacy form and the guard
+# did not fire; I corrected the fixture instead of asking why. #1113.)
+#
+# STOP-GAP (#1113). Goes with the guard when #1112 lands.
+_agmsg_placement_split() {   # <ref>
+  local ref="$1" term id
+  _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
+  case "$ref" in
+    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
+    herdr:*) term=herdr; id="${ref#herdr:}" ;;
+    plain:*) term=plain; id="${ref#plain:}" ;;
+    %*|@*)   term=tmux;  id="$ref" ;;        # legacy pre-axis bare tmux id
+    *)       return 1 ;;
+  esac
+  if [ "$term" = tmux ]; then
+    case "$id" in
+      *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
+    esac
+  fi
+  [ -n "$id" ] || return 1
+  _AGMSG_PS_TERM="$term"; _AGMSG_PS_ID="$id"
+  return 0
+}
+
 # Which OTHER seat's placement record already claims this pane reference, if any.
 # Prints "<team>__<agent>" as the record file spells it (percent-encoded, the form
 # on disk) and nothing when the pane is unclaimed.
@@ -584,14 +618,30 @@ _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
   [ -n "$ref" ] || return 0
   dir="$(dirname "$mine")"
   [ -d "$dir" ] || return 0
+  local want_term want_id want_sock
+  _agmsg_placement_split "$ref" || return 0
+  want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
   for f in "$dir"/spawn.*; do
     [ -f "$f" ] || continue
     [ "$f" = "$mine" ] && continue
     IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
-    if [ "$first" = "$ref" ]; then
-      printf '%s' "${f##*/spawn.}"
-      return 0
+    [ -n "$first" ] || continue
+    _agmsg_placement_split "$first" || continue
+    [ "$_AGMSG_PS_TERM" = "$want_term" ] || continue
+    [ "$_AGMSG_PS_ID" = "$want_id" ] || continue
+    # Same terminal, same pane id. The sockets decide whether that is the same
+    # PANE: a pane id is not unique across tmux servers (measured, #1051). But a
+    # record may be the legacy socket-less form (`%N` / `@N`), which this file
+    # still accepts on read -- and an unknown server cannot be shown to be a
+    # different one. Refusing there costs one action; taking a pane that turns
+    # out to be someone's is the damage this exists to prevent, so an unknown
+    # socket on EITHER side counts as a claim.
+    if [ -n "$_AGMSG_PS_SOCK" ] && [ -n "$want_sock" ] \
+       && [ "$_AGMSG_PS_SOCK" != "$want_sock" ]; then
+      continue                                # different servers, different panes
     fi
+    printf '%s' "${f##*/spawn.}"
+    return 0
   done
   return 0
 }
@@ -748,19 +798,50 @@ agmsg_terminal_name_self() {
   # said out loud rather than the write silently not happening. Without this, the
   # first codex seat to act overwrites its own correct record with the shared
   # daemon's pane, and the next one overwrites that.
+  #
+  # The scan and the write are one critical section. Without that they are a
+  # check-then-act: two seats resolving the same pane can both find it unclaimed
+  # and both write, which is exactly the state the guard exists to prevent
+  # (found in review). `mkdir` is the atomic primitive already used for the same
+  # job in actas-lock.sh's reclaim.
+  #
+  # A loser REFUSES rather than waits, deliberately. This runs on every action --
+  # send, inbox, history -- so a wait here would put a stall in front of ordinary
+  # traffic, and the team config lock (agmsg_lock_acquire, up to 10s) would put a
+  # much larger one there. Refusing costs one action: the seat is named, and the
+  # next action records it. Somebody holding this mutex means somebody is
+  # claiming a pane right now, which is the one case where not writing is right.
+  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
+  local _cs="$(dirname "$rec")/.placement-claim.d"
+  if ! mkdir "$_cs" 2>/dev/null; then
+    # WHY mkdir failed decides what this means, and only one reason is
+    # contention. A read-only run directory also fails here, and calling that
+    # "another seat is claiming" both says something false and turns a write
+    # failure into a success -- the same collapse of "could not" into "somebody
+    # did" that this guard exists to stop. (Caught by the existing atomic-write
+    # test, which chmods the directory 500 and requires a non-zero return.)
+    if [ -d "$_cs" ]; then
+      echo "agmsg: named the pane but did NOT record it: another seat is claiming a pane right now. Retrying on the next action. (#1113 stop-gap.)" >&2
+      return 0
+    fi
+    # Not contention. Leave the critical section unheld and let the write below
+    # fail on its own terms and report, exactly as it did before this guard.
+    _cs=""
+  fi
   local _claimed_by=""
   _claimed_by="$(_agmsg_placement_claimed_by "$ref" "$rec")"
   if [ -n "$_claimed_by" ]; then
+    [ -n "$_cs" ] && rmdir "$_cs" 2>/dev/null || true
     echo "agmsg: named the pane but did NOT record it: this seat resolved $ref, and that pane is already recorded as $_claimed_by's. Keeping the existing record. (#1113 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
     return 0
   fi
-
-  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
   # record. agmsg_write_atomic adds the trailing newline, so pass the row without.
   agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$project" "$type")" 2>/dev/null || {
+    [ -n "$_cs" ] && rmdir "$_cs" 2>/dev/null || true
     echo "agmsg: named the pane but could not write its record ($rec)" >&2; return 1
   }
+  [ -n "$_cs" ] && rmdir "$_cs" 2>/dev/null || true
   return 0
 }
 
