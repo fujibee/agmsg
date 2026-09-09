@@ -150,7 +150,7 @@ teardown() {
 #     status emits scans the WHOLE run/ directory -- an installation-wide
 #     fact, not a (project, type) fact. Printing it inside every group that
 #     uses default runtime status repeats the identical line once per group;
-#     tl2 flagged this as duplication on the same real-installation run. ---
+#     review flagged this as duplication on the same real-installation run. ---
 
 @test "doctor: the install-wide 'watch processes' line appears once, not once per group" {
   # The line only appears when run/ exists (default runtime status guards
@@ -528,22 +528,22 @@ configured_off() {
 @test "doctor: --redacted also redacts the embedded delivery-status block, not just its own formatting" {
   local home_proj="$HOME/embedded-leak-check"
   mkdir -p "$home_proj"
-  bash "$SCRIPTS/join.sh" agmsg advisor codex "$home_proj" >/dev/null
-  # A live codex bridge for agmsg/advisor, minimal enough for
+  bash "$SCRIPTS/join.sh" agmsg helper codex "$home_proj" >/dev/null
+  # A live codex bridge for agmsg/helper, minimal enough for
   # _delivery.sh's agmsg_delivery_runtime_status to report it "alive": a
   # pidfile naming a real (this test's own) pid, and a matching metafile.
   mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.pid"
+  printf '%s\n' "$$" > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.pid"
   {
     echo "pid=$$"
     echo "project=$home_proj"
     echo "type=codex"
-  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.advisor.meta"
+  } > "$TEST_SKILL_DIR/run/codex-bridge.agmsg.helper.meta"
 
   run bash "$SCRIPTS/doctor.sh" --project "$home_proj" --type codex --redacted
   [ "$status" -eq 0 ]
   [[ "$output" == *"Codex bridge: team1/agent1 alive"* ]]
-  [[ "$output" != *"agmsg/advisor"* ]]
+  [[ "$output" != *"agmsg/helper"* ]]
   [[ "$output" != *"$HOME"* ]]
 }
 
@@ -555,9 +555,9 @@ configured_off() {
   run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
   chmod 644 "$TEST_SKILL_DIR/run/actas.team__alice.session"
   # `lock=none` is a claim about the world; this is a claim about us. An
-  # operator reads `none` as "nothing here to clean up" and acts on it. tl did
+  # operator reads `none` as "nothing here to clean up" and acts on it. Someone did
   # exactly this today with a record he could not open: reported a seat dead,
-  # it was alive. (co1)
+  # it was alive. (Review.)
   grep -q 'lock=unreadable' <<<"$output"
   refute grep -q 'lock=none' <<<"$output"
 }

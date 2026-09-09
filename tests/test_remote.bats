@@ -2138,7 +2138,7 @@ PY_BIND
   [ "$status" -ne 0 ]
 }
 
-# unlock, with a start refusal injected (#730). advisor ruled this had to be
+# unlock, with a start refusal injected (#730). Review ruled this had to be
 # pinned rather than described: unlock is the only caller that discards the
 # helper's status with `|| true` and converts it, through
 # REMOTE_SYNC_ENGINE_PID and the readiness loop, into its own failure. A

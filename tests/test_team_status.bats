@@ -379,7 +379,7 @@ _herdr_observe_stub() {   # <entries-json>
 }
 
 @test "identity fix repairs a key that was decidedly absent, and verifies it" {
-  # The behaviour tl asked for: --fix must actually set the key on a seat that
+  # The behaviour asked for in review: --fix must actually set the key on a seat that
   # never had one, and must only say `changed` after reading it back.
   agmsg_type_get() { printf '\n'; }
   _herdr_internal_key() { printf 'a123\n'; }

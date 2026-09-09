@@ -464,7 +464,8 @@ _doctor_scan_pair() {
       # about us. The reader that fed this line answered "" for both, so doctor
       # printed "no lock" for a lock it could not read — which is exactly the
       # output an operator uses to conclude there is nothing here to clean up.
-      # (co1.) tl's instance today: he read a record he could not open, reported
+      # (Review.) A real instance the same day: someone read a record they could
+      # not open, reported
       # a seat as dead, and it was alive. A diagnostic that says `none` when it
       # means `could not look` makes people repeat that. Three reads, three
       # words. (#983)

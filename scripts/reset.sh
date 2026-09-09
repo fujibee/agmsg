@@ -205,7 +205,7 @@ for TEAM_CONFIG in "$TEAMS_DIR"/*/config.json; do
   # stale seat record (session uuid, name, team, type, project) per member ever
   # spawned, which internal/resurrect-panes.sh reads.
   #
-  # Two conditions the first cut got wrong (#1052 review, measured by utildev):
+  # Two conditions the first cut got wrong (#1052 review, measured):
   #  - ONLY when REMAINING is 0. The record is keyed on (team, agent) ALONE --
   #    project is a field inside it -- so a peer still registered under a DIFFERENT
   #    project shares this one file. Deleting it whenever any registration is
