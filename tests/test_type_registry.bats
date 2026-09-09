@@ -80,14 +80,14 @@ write_node_launcher_fixtures() {
 
 @test "skill renderer composes every built-in type without placeholders" {
   local type rendered
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     rendered="$(render_type "$type")"
     ! grep -q '__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__' "$rendered"
     grep -Fq '<!-- agmsg:render-root -->' "$rendered"
     grep -Fq "<!-- agmsg:render-overlay $type -->" "$rendered"
     grep -Fq "whoami.sh \"\$(pwd)\" $type" "$rendered"
     grep -Fq 'scripts/arrange.sh <team> <agent> <intent> <anchor-ref>' "$rendered"
-  done
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
   grep -Fq "Program Files\\Git\\bin\\bash.exe" "$(render_type codex)"
   grep -Fq 'Ensure monitor is running first' "$(render_type claude-code)"
   grep -Fq 'hermes is not spawnable' "$(render_type hermes)"
@@ -129,9 +129,32 @@ run_renderer_fixture() {
   [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
 }
 
+@test "skill renderer rejects a nonempty overlay without its input marker" {
+  renderer_failure_fixture
+  # Keep the output-side marker in the root fixture so disabling the input
+  # marker check alone cannot be masked by the final composition check.
+  printf '\n<!-- agmsg:render-overlay codex -->\n' >> "$SCRIPTS/SKILL.md"
+  printf 'valid overlay body\n' > "$SCRIPTS/drivers/types/codex/template.md"
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
+@test "skill renderer rejects a marker-valid overlay that renders no type marker" {
+  renderer_failure_fixture
+  cat > "$SCRIPTS/drivers/types/codex/template.md" <<'EOF'
+<!-- agmsg:slot unused -->
+<!-- agmsg:render-overlay __AGENT_TYPE__ -->
+<!-- /agmsg:slot unused -->
+EOF
+  run_renderer_fixture
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_SKILL_DIR/rendered.md")" = "existing rendered skill" ]
+}
+
 @test "agent templates route remote-import intent before not_joined identity setup" {
   local template not_joined first_time guard type
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     template="$(render_type "$type")"
     not_joined="$(grep -n '^\*\*C) Not in a team:\*\*$' "$template" | cut -d: -f1)"
     first_time="$(grep -n '^  > \*\*First-time setup required\.\*\*$' "$template" | cut -d: -f1)"
@@ -145,17 +168,17 @@ run_renderer_fixture() {
       grep -q 'team-list.sh --json --scope all'
     sed -n "${guard},$((first_time - 1))p" "$template" |
       grep -q 'Go directly to `remote pull`'
-  done
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
 
 }
 
 @test "agent templates all explain that readable local history is not evidence a team is unencrypted (#682)" {
   local template type
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     template="$(render_type "$type")"
     grep -q "Readable local history is therefore not evidence that a team is unencrypted" "$template" \
       || { echo "missing the e2ee-verification paragraph: $template" >&2; return 1; }
-  done
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
 }
 
 @test "the e2ee-verification explanation also appears in both remote-setup docs (#682)" {
@@ -181,13 +204,13 @@ run_renderer_fixture() {
   # matching only `key.sh rotate <team>` is green for both spellings and
   # would have let this through.
   local surface type
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     surface="$(render_type "$type")"
     grep -Fq 'Device pairing (`key request` / `key approve`) is not implemented' "$surface" \
       || { echo "does not state the pairing commands are absent: $surface" >&2; return 1; }
     ! grep -qiE 'rotat(e|ion)[^.]*not available' "$surface" \
       || { echo "still calls rotation unavailable: $surface" >&2; return 1; }
-  done
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
 
   # Bind the claim to the code. If `rotate` ever stops being a subcommand the
   # surfaces above become wrong again, and this is the line that says so.
@@ -202,12 +225,12 @@ run_renderer_fixture() {
 
 @test "every agent template exposes declarative arrange without adding a public where verb" {
   local template type
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     template="$(render_type "$type")"
     grep -q 'scripts/arrange\.sh <team> <agent> <intent> <anchor-ref>' "$template"
     grep -q '`moved` as a performed move and `unchanged`' "$template"
     [ "$(grep -c 'If argument starts with "where"' "$template" || true)" -eq 0 ]
-  done
+  done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
 }
 
 @test "every agent template routes team identity reads and fixes through team.sh" {

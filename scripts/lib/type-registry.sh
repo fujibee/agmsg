@@ -146,3 +146,20 @@ agmsg_type_has() {
   done
   return 1
 }
+
+# Space-separated names of eligible agent types that have a skill template.
+# Types such as agmsg-app remain in the registry but are not renderable because
+# they deliberately have no template= manifest key. Keep this derived from the
+# registry so adding a templated type cannot leave install/test composition
+# loops silently stale.
+_agmsg_renderable_types() {
+  local type
+  while IFS= read -r type; do
+    [ -n "$type" ] || continue
+    if [ -n "$(agmsg_type_get "$type" template)" ]; then
+      printf '%s\n' "$type"
+    fi
+  done < <(agmsg_known_types | sort -u)
+}
+
+AGMSG_RENDERABLE_SKILL_TYPES="$(_agmsg_renderable_types | paste -sd' ' -)"

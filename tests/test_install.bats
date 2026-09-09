@@ -1284,10 +1284,10 @@ CYG
 
 @test "policy paragraphs in SKILL.md reach every installed skill, not just the repo's own" {
   local type rendered
-  for type in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r type; do
     rendered="$FAKE_HOME/$type-policy.md"
     run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$BATS_TEST_DIRNAME/.." "$type" "$rendered"
     [ "$status" -eq 0 ]
     grep -Fq "There is NO register.sh" "$rendered"
-  done
+  done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
 }

@@ -95,11 +95,9 @@ UPDATE_ONLY=false
 INTERACTIVE=true
 AGENT_TYPE=""  # claude-code, codex, gemini, antigravity — passed via --agent-type, or empty for auto/default
 
-# All built-in CLI types are rendered from the shared root SKILL.md plus their
-# type-specific overlay. Keep this list in one place for fresh install,
-# --update selection, and --update re-detection; adding a type without a
-# template would otherwise silently fall back to the wrong flavor.
-AGMSG_RENDERABLE_SKILL_TYPES="antigravity claude-code codex copilot cursor gemini grok-build hermes opencode"
+# The registry derives this list from eligible manifests with template= keys.
+# It is shared by fresh install, --update selection, and --update re-detection;
+# adding a templated type therefore cannot silently fall back to the wrong flavor.
 
 # Put <src> at <dest>, then remove any leftover <src>. The arm is chosen by
 # <dest>, so the fix's scope matches the defect's (#747):
