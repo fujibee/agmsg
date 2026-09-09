@@ -115,6 +115,10 @@ If argument starts with "config set" (e.g. "config set hook.check_interval 30"):
 1. Parse key and value from the arguments.
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/config.sh set <key> <value>`
 
+If argument is "version":
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/version.sh`
+2. Show the output — the installed version (git-describe provenance recorded at install time).
+
 
 <!-- agmsg:slot actas -->
 If argument starts with "actas" followed by an agent name:
@@ -130,6 +134,21 @@ If argument starts with "drop" followed by an agent name:
 2. Clear the active role when it matches `<name>` and report the result.
 <!-- /agmsg:slot drop -->
 <!-- agmsg:slot spawn -->
+If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
+1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
+   - `spawn.sh` pre-joins `<name>`, then opens a tmux pane/window or a new OS terminal and launches the target CLI with `__CMD_PREFIX____SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt.
+   - By default it waits for a target watcher to attach and report `status=ready`; `--no-wait` returns immediately. Codex has no Monitor, so a Codex spawn skips that readiness wait.
+   - It refuses early when `<name>` is already held, the target CLI is missing, the project path is invalid, or no tmux/usable terminal is available.
+3. Show the script's output.
+
+If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
+1. Parse `<name>` and any options (`--force`, `--timeout <secs>`).
+2. Determine which team `<name>` belongs to, then run:
+   `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
+   - The default graceful path sends a `ctrl:despawn` message so the member's watcher drops its role and closes its spawned pane, then waits for the lock to release.
+   - If the member has no watcher, or graceful teardown times out, use `--force` to tear down the recorded placement and drop the registration directly.
+3. Show the script's output.
 <!-- /agmsg:slot spawn -->
 <!-- shared actas/drop guidance is supplied by the type overlay -->
 

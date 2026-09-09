@@ -63,7 +63,21 @@ If argument starts with "drop" followed by an agent name:
 <!-- /agmsg:slot drop -->
 
 <!-- agmsg:slot spawn -->
-If argument starts with "spawn": run `spawn.sh <type> <name> --project "$(pwd)" [options]`; it opens a pane and waits for a Claude Code watcher to attach. `despawn` sends `ctrl:despawn` and closes the spawned pane, or accepts `--force`.
+If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code alice --window"):
+1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
+2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
+   - `spawn.sh` pre-joins `<name>`, then opens a tmux pane/window or a new OS terminal and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt.
+   - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent has no Monitor and skips the readiness wait.
+   - It refuses early when `<name>` is already held by another live session, the target CLI is missing, the project path is invalid, or no tmux/usable terminal is available.
+3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor; spawn affects a separate agent.
+
+If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
+1. Parse `<name>` and any options (`--force`, `--timeout <secs>`). `despawn` tears down a member previously spawned by this session.
+2. Determine which team `<name>` belongs to, then run:
+   `~/.agents/skills/__SKILL_NAME__/scripts/despawn.sh <team> $AGENT <name> [--force] [--timeout <secs>]`
+   - The default graceful path sends a `ctrl:despawn` message; the member's watcher drops its role and closes its spawned pane, then `despawn` waits for the lock to release.
+   - If the member is Codex and has no watcher, or graceful teardown times out, use `--force` to tear down the recorded pane/window and drop the registration directly.
+3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor.
 <!-- /agmsg:slot spawn -->
 
 <!-- agmsg:slot mode -->

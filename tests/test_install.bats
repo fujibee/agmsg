@@ -387,6 +387,36 @@ PS1
   ! grep -q "__SKILL_NAME__\|__AGENT_TYPE__\|__CMD_PREFIX__" "$rendered"
 }
 
+@test "skill renderer keeps terminal-driver guidance in every rendered artifact" {
+  local type rendered required
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-terminal-driver.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$REPO_ROOT" "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    for required in \
+      'If argument is "version":' \
+      'version.sh' \
+      'If argument starts with "spawn"' \
+      'spawn.sh <type> <name>' \
+      '--ready-timeout' \
+      'status=ready' \
+      '--no-wait' \
+      'already held' \
+      'target CLI is missing' \
+      'If argument starts with "despawn"' \
+      'despawn.sh <team> $AGENT <name>' \
+      'ctrl:despawn' \
+      'no watcher' \
+      '--force' \
+      '--timeout'; do
+      grep -Fq -- "$required" "$rendered" || {
+        echo "rendered $type is missing terminal-driver fact: $required" >&2
+        return 1
+      }
+    done
+  done < <(agmsg_renderable_types "$REPO_ROOT")
+}
+
 @test "install: watch.sh self-cleans a prior watcher on re-invocation for the same sid" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   bash "$SK/scripts/join.sh" demo alice claude-code /tmp/install-projA
