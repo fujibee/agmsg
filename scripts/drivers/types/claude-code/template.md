@@ -48,7 +48,7 @@ The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Cod
 <!-- agmsg:slot actas -->
 If argument starts with "actas" followed by an agent name:
 1. Resolve the role and claim its actas lock with `actas-claim.sh`.
-2. Stop the old monitor task, then start `watch.sh` filtered to the new role when delivery is `monitor` or `both`.
+2. Stop the old monitor task, then start `watch.sh` filtered to the new role when delivery is `mode: monitor` or `mode: both`.
 3. Read `delivery.sh status` before reporting completion. If it returns `mode: off (no agmsg delivery hooks installed for this project)`, leave delivery stopped but tell the user that automatic delivery is not configured. Do not report `actas` as complete without saying this.
 4. If it returns `mode: off (unrecognized: ...)`, leave delivery stopped and tell the user that the project configuration could not be identified. Do not report `actas` as complete without saying this.
 5. Set the session's active FROM to the role and tell the user that receive is restricted to it.
@@ -57,7 +57,7 @@ If argument starts with "actas" followed by an agent name:
 <!-- agmsg:slot drop -->
 If argument starts with "drop" followed by an agent name:
 1. Run `reset.sh "$(pwd)" __AGENT_TYPE__ <name> "$CLAUDE_CODE_SESSION_ID"` to release the role and its lock.
-2. Run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`, then restart the default monitor subscription when the project is configured for `monitor` or `both`.
+2. Run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`, then restart the default monitor subscription when the project is configured for `mode: monitor` or `mode: both`.
 3. If it returns `mode: off (no agmsg delivery hooks installed for this project)`, leave delivery stopped but say so. Do not report the drop as complete without mentioning it.
 4. If it returns `mode: off (unrecognized: ...)`, leave delivery stopped and explain that the project configuration could not be identified. Do not report the drop as complete without mentioning it.
 <!-- /agmsg:slot drop -->

@@ -968,7 +968,7 @@ EOF
 # grepped for and was never broken -- it IS the fallback).
 @test "install: bare --update preserves every renderable type's SKILL.md flavor (#846)" {
   local t
-  for t in antigravity claude-code codex copilot cursor gemini grok-build hermes opencode; do
+  while IFS= read -r t; do
     local cmd="agmsg-$t"
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd "$cmd" --agent-type "$t"
     local skill_md="$FAKE_HOME/.agents/skills/$cmd/SKILL.md"
@@ -976,7 +976,7 @@ EOF
 
     HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update --cmd "$cmd"
     grep -q "whoami.sh \"\$(pwd)\" $t" "$skill_md"
-  done
+  done < <(agmsg_renderable_types "$REPO_ROOT")
 }
 
 # The Windows leg of the bats matrix selects by test NAME (filter "[Ww]indows"),
