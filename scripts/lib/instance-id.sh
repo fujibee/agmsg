@@ -407,7 +407,51 @@ EOF
 #                            "<sid>.<numeric>" counts — a pre-upgrade lock holds
 #                            a bare sid while cc-instance may already store the
 #                            composite, and we must not stale it out instantly.
+# Read one cc-instance marker. Prints "<read>\t<content>".
+#
+#   ok\t<content>   the file was read; an EMPTY content is a fact about the file
+#   absent\t        there is no such file, and its directory is searchable
+#   unreadable\t    it is there and unreadable, or its directory cannot be
+#                   searched, so absence is not something we can conclude
+#
+# The two branches of agmsg_instance_alive below both read this file, and they
+# kept disagreeing about it -- in BOTH directions, one round apart: the composite
+# branch answered ALIVE where bare answered 2 (an inaccessible run/), and then
+# bare answered 2 where composite answered DEAD (an empty marker). Each fix moved
+# the disagreement rather than removing it. So the read is here, once, and each
+# branch only decides what its own answer means. Same shape, and the same reason,
+# as _actas_lock_read_path. (co1, co3; tl's axis 5.)
+_agmsg_marker_read() {   # <path>
+  local f="$1" content _dir
+  if content="$(cat "$f" 2>/dev/null)"; then
+    printf 'ok\t%s\n' "$content"
+    return 0
+  fi
+  _dir="${f%/*}"
+  if [ -e "$_dir" ] && { [ ! -r "$_dir" ] || [ ! -x "$_dir" ]; }; then
+    printf 'unreadable\t\n'
+    return 0
+  fi
+  if [ -e "$f" ]; then
+    printf 'unreadable\t\n'
+    return 0
+  fi
+  printf 'absent\t\n'
+}
+
 agmsg_instance_alive() {
+  # 0 alive | 1 dead | 2 CANNOT TELL.
+  #
+  # The third value is the point. This was a boolean, and every "could not find
+  # out" arrived as `dead` — which is the destructive direction for every caller:
+  # a dead owner gets its lock reclaimed and deleted, and the watcher's own
+  # self-check exits the process. An unreadable `run/` therefore did not degrade,
+  # it swept: locks removed, watchers gone, on nothing more than a read failure.
+  # (#983; the lock side of the same collapse is actas_lock_state.)
+  #
+  # The pid layer below is already conservative in the right direction —
+  # _agmsg_pid_alive_local treats EPERM and any unrecognised kill(2) error as
+  # ALIVE — so only this layer needed the extra value.
   local token="$1"
   [ -n "$token" ] || return 1
   if agmsg_instance_is_composite "$token"; then
@@ -415,25 +459,63 @@ agmsg_instance_alive() {
     _agmsg_pid_alive "$pid" || return 1
     local f s
     f="$SKILL_DIR/run/cc-instance.$pid"
-    [ -f "$f" ] || return 0
-    s="$(cat "$f" 2>/dev/null || true)"
+    local _m
+    _m="$(_agmsg_marker_read "$f")"
+    case "${_m%%$'\t'*}" in
+      # Absent is alive-by-default and that is deliberate: the pid IS alive and
+      # nothing contradicts it. Inaccessible is not absent -- `[ -e ]` is false
+      # for both, and this arm used to answer ALIVE for the second one, which
+      # blocks a legitimate reclaim forever (co1).
+      absent)     return 0 ;;
+      unreadable) return 2 ;;
+    esac
+    s="${_m#*$'\t'}"
+    # An EMPTY marker is not a mismatch. It is a write that started and did not
+    # finish, and composite is the ORDINARY owner token, so reading it as "this
+    # live pid is not you" makes a live seat's lock reclaimable. Not `return 0`
+    # by analogy with absent above: absent means the marker was never written,
+    # and the pid is then the evidence; a half-written file says a writer WAS
+    # here and we do not know what it meant to say. (co1, co3.)
+    [ -n "$s" ] || return 2
     [ "$s" = "$token" ] && return 0
     return 1
   fi
-  local run f p s
+  local run f p s undecided=0
   run="$SKILL_DIR/run"
-  [ -d "$run" ] || return 1
+  # Absent and unreadable are different facts: nothing ever registered (dead) vs
+  # we cannot look (cannot tell).
+  [ -e "$run" ] || return 1
+  # -r and -x are DIFFERENT permissions and this branch needs both. -r lets the
+  # glob enumerate the directory; -x is what lets `[ -f ]` and `cat` reach the
+  # entries it enumerated. At mode 0400 the glob happily produces every
+  # cc-instance.* path and then every `[ -f "$f" ]` is false, so the loop skipped
+  # all of them and fell through to `return 1` -- a confident DEAD, produced by a
+  # scan that read nothing. The composite branch above already asked for both,
+  # which is the giveaway: one function, two paths, two answers. (co1)
+  { [ -d "$run" ] && [ -r "$run" ] && [ -x "$run" ]; } || return 2
+  local _m
   for f in "$run"/cc-instance.*; do
-    [ -f "$f" ] || continue
     p=${f##*.}
     case "$p" in ''|*[!0-9]*) continue ;; esac
     _agmsg_pid_alive "$p" || continue
-    s="$(cat "$f" 2>/dev/null || true)"
+    # Same reader as the composite branch. One unreadable or half-written entry
+    # does not settle the question either way -- the token may be exactly the one
+    # we could not read -- so keep scanning (a positive match anywhere still
+    # answers alive) and report "cannot tell" only if we finish without one. An
+    # EMPTY marker counts as unread here for the same reason it does above.
+    _m="$(_agmsg_marker_read "$f")"
+    case "${_m%%$'\t'*}" in
+      absent)     continue ;;
+      unreadable) undecided=1; continue ;;
+    esac
+    s="${_m#*$'\t'}"
+    if [ -z "$s" ]; then undecided=1; continue; fi
     [ "$s" = "$token" ] && return 0
     # upgrade compat: cc-instance stores "<sid>.<pid>" but the lock holds "<sid>"
     if agmsg_instance_is_composite "$s" && [ "${s%.*}" = "$token" ]; then
       return 0
     fi
   done
+  [ "$undecided" -eq 1 ] && return 2
   return 1
 }

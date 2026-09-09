@@ -460,21 +460,54 @@ _doctor_scan_pair() {
 
       _redact_team "$team"; dteam="$_REDACT_OUT"
       _redact_agent "$agent"; dagent="$_REDACT_OUT"
-      owner="$(actas_lock_owner "$team" "$agent")"
-
+      # `lock=none` is a claim about the world; an unreadable lock is a claim
+      # about us. The reader that fed this line answered "" for both, so doctor
+      # printed "no lock" for a lock it could not read — which is exactly the
+      # output an operator uses to conclude there is nothing here to clean up.
+      # (co1.) tl's instance today: he read a record he could not open, reported
+      # a seat as dead, and it was alive. A diagnostic that says `none` when it
+      # means `could not look` makes people repeat that. Three reads, three
+      # words. (#983)
+      _own_r="$(actas_lock_read "$team" "$agent")"
+      case "${_own_r%%$'\t'*}" in
+        unreadable)
+          reg_lines="${reg_lines}$(printf '  %-22s lock=unreadable' "$dteam/$dagent")"$'\n'
+          _redact_project "$project"
+          _warn "[$_REDACT_OUT] lock could not be read: $dteam/$dagent (not reported as absent)"
+          continue
+          ;;
+        absent)
+          reg_lines="${reg_lines}$(printf '  %-22s lock=none' "$dteam/$dagent")"$'\n'
+          continue
+          ;;
+      esac
+      owner="${_own_r#*$'\t'}"
+      # Read fine, and empty. A distinct fact from both of the above: the file is
+      # there and nothing in the tree ever writes it empty, so this is a torn
+      # write, not a free role. Saying `none` here would invite the cleanup that
+      # #1071 is about.
       if [ -z "$owner" ]; then
-        reg_lines="${reg_lines}$(printf '  %-22s lock=none' "$dteam/$dagent")"$'\n'
+        reg_lines="${reg_lines}$(printf '  %-22s lock=empty' "$dteam/$dagent")"$'\n'
+        _redact_project "$project"
+        _warn "[$_REDACT_OUT] lock file is present but empty: $dteam/$dagent (torn write; not reported as free)"
         continue
       fi
       _any_owner=1
 
-      if agmsg_instance_alive "$owner"; then
-        alive_word="alive"
-      else
-        alive_word="STALE"
-        _redact_project "$project"
-        _warn "[$_REDACT_OUT] stale lock: $dteam/$dagent (owner=$(_redact_owner "$owner"))"
-      fi
+      # Three-way: `alive` is a fact, `STALE` is a fact, and "could not find out"
+      # is neither. Reporting the third as STALE is a diagnostic that invents its
+      # own finding — and doctor's whole job is to be believed. (#983)
+      _alive_rc=0
+      agmsg_instance_alive "$owner" || _alive_rc=$?
+      case "$_alive_rc" in
+        0) alive_word="alive" ;;
+        1) alive_word="STALE"
+           _redact_project "$project"
+           _warn "[$_REDACT_OUT] stale lock: $dteam/$dagent (owner=$(_redact_owner "$owner"))" ;;
+        *) alive_word="unknown"
+           _redact_project "$project"
+           _warn "[$_REDACT_OUT] lock owner liveness could not be determined: $dteam/$dagent (owner=$(_redact_owner "$owner")); not treating it as stale" ;;
+      esac
 
       cc_note=""
       if agmsg_instance_is_composite "$owner"; then

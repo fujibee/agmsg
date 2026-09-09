@@ -259,6 +259,85 @@ _watch_log_file() {
 # so the caller could not tell a folded pane from an open one, and reported
 # success either way (#1051). The failures also announced themselves only on
 # stderr, which the shipped launcher discards (#691), so they reached nobody.
+# Re-verify, at the act, that this pair is still in the state the turn read it
+# in. #983: the lock is read once per pair per turn (`pair_state=`), and the
+# irreversible acts happen ~200 lines later; a claim landing in between made this
+# watcher deliver, consume and even fold on behalf of a role it no longer held.
+#
+# The comparison is against the state we READ, not against "is it ours": the gate
+# serves a pair that is `free` as well as one that is `mine` (a broad watcher
+# holds no lock at all), so demanding `mine` here would stop the ordinary case.
+# What must not happen is the state CHANGING under us — `free`/`mine` becoming
+# `other:<sid>` — and equality catches that without needing to know which of the
+# two we started from.
+#
+# LIMIT, stated rather than left to be discovered: this NARROWS the window to the
+# distance between this re-read and the syscall after it. It does not make
+# read-and-act atomic, and it cannot see an ABA (the same instance id releasing
+# and reclaiming) — unreachable in practice because the id carries the pid, but
+# not impossible. Closing it means holding the actas lock across the turn, which
+# needs a critical-section protocol the lock does not have today; that is its own
+# issue, deliberately not smuggled in here.
+_pair_unchanged_since_read() {   # <team> <agent> <owner-as-read-this-turn>
+  # 0 unchanged | 1 changed | 2 unknown (unknown is refused, same as changed).
+  #
+  # ONE read, and the comparison is on the RAW owner. Two earlier shapes were both
+  # wrong, and the second is the subtler one:
+  #
+  #   `|| echo free`        turned an unreadable lock into "free", which COMPARED
+  #                         EQUAL to a pair read as free (co3, round 1).
+  #   probe then re-derive  checked the status of one read and then used a second
+  #                         one's answer: actas_lock_state does its own read and
+  #                         collapses ITS failure to free/rc0, so for a broad
+  #                         watcher (pair_state=free) the unknown was laundered
+  #                         back into unchanged (co3, round 2).
+  #
+  # Deriving `free`/`mine`/`other:` also drags in liveness, and
+  # actas_lock_sid_alive -> agmsg_instance_alive is a boolean with no "cannot
+  # tell": an unreadable run dir makes a live owner look dead, i.e. free again.
+  # None of that is needed to answer THIS question. "Did the pair move?" is
+  # answered by the owner string alone, so the guard reads it once, checks that
+  # read's own status, and compares bytes.
+  #
+  # A stale owner that dies mid-turn keeps the same string and is correctly
+  # `unchanged` — the role did not move to anyone. A lock removed mid-turn reads
+  # empty against a non-empty capture and is `changed`, which refuses; that is the
+  # conservative direction and costs one cycle.
+  #
+  # The reader is the three-valued one (#983, tl): `absent` and `unreadable` are
+  # NOT the same answer here. Absent means there is no owner, which compares
+  # equal to an empty baseline and is correctly `unchanged` -- that is the
+  # ordinary case for a broad watcher on a free pair. Unreadable means we cannot
+  # say, and cannot say is refused. `actas_lock_owner` returned "" and rc 0 for
+  # both, so a run directory that became unsearchable mid-turn matched the free
+  # baseline exactly and the guard waved the act through (co3/co1).
+  local _r _rd _now
+  _r="$(actas_lock_read "$1" "$2")" || return 2
+  _rd="${_r%%$'\t'*}"
+  case "$_rd" in
+    ok)     _now="${_r#*$'\t'}" ;;
+    absent) _now="" ;;
+    *)      return 2 ;;
+  esac
+  [ "$3" = "__unreadable__" ] && return 2
+  [ "$_now" = "$3" ] && return 0
+  return 1
+}
+
+# Say why an act was refused, on the channel a reason survives on. The three
+# refusals below use watch_report (stdout), NOT watch_log: the shipped launcher
+# runs the watcher with fd2 on /dev/null (#691), so a refusal on stderr is a
+# refusal nobody can see -- and this is the moment an operator most needs to know
+# why their message did not arrive. `unknown` is reported with different words
+# from `changed`: one says the role moved, the other says we could not tell, and
+# the operator's next step differs.
+_report_pair_refusal() {   # <verdict-rc> <team> <agent> <what-was-skipped>
+  case "$1" in
+    2) watch_report "${2}/${3}: could not verify who holds this role (the actas lock could not be read), so ${4} was skipped this cycle; it will be retried." ;;
+    *) watch_report "${2}/${3} changed hands while this turn was running; ${4} skipped, and its messages stay for the session that claimed it." ;;
+  esac
+}
+
 close_own_placement() {
   local team="$1" name="$2"
   local rec ref rec_term rec_id mine my_term my_id
@@ -627,6 +706,19 @@ if [ -n "$PAIRS" ]; then
     [ -z "$_team" ] && continue
     state=$(actas_lock_state "$_team" "$_agent" "$SESSION_ID")
     case "$state" in
+      # Startup: an unverified pair is not subscribed. Falling through would have
+      # this watcher take a role whose holder it could not determine, which is
+      # how two watchers end up serving one inbox. Reported with its own word, so
+      # "someone else has it" and "we could not find out" are not the same line
+      # in the startup summary. (#983)
+      unknown:*)
+        if [ -n "$ACTIVE_NAME" ]; then
+          held="${held:+$held }${_team}/${_agent}(unverified:${state#unknown:})"
+        else
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:${state#unknown:})"
+        fi
+        continue
+        ;;
       other:*)
         # If the caller is asking specifically for this name (actas flow),
         # treat the conflict as a hard failure. Otherwise (broad subscribe)
@@ -644,9 +736,25 @@ if [ -n "$PAIRS" ]; then
       # where state-check said free but a peer claimed it between then and
       # now.
       result=$(actas_lock_claim "$_team" "$_agent" "$SESSION_ID" 2>/dev/null || true)
+      # ONLY an explicit `ok` subscribes. Every other answer — named or not —
+      # skips. The previous shape listed the two refusals and let everything else
+      # fall through to success, so a claim that failed before it learned
+      # anything (mktemp, an uncreatable lock dir, three contended reclaim
+      # rounds) printed nothing and was read as "we got it". Naming the success
+      # instead of the failures is what makes an unanticipated answer safe.
+      # (#983, co3/co1)
       case "$result" in
+        ok) : ;;
         held:*)
           held="${held:+$held }${_team}/${_agent}(${result#held:})"
+          continue
+          ;;
+        unknown:*)
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:${result#unknown:})"
+          continue
+          ;;
+        *)
+          skipped="${skipped:+$skipped }${_team}/${_agent}(unverified:claim_unrecognized)"
           continue
           ;;
       esac
@@ -655,7 +763,11 @@ if [ -n "$PAIRS" ]; then
   done <<< "$PAIRS"
   PAIRS="$filtered"
   if [ -n "$skipped" ]; then
-    echo "agmsg watch: skipping pairs held by other sessions: $skipped" >&2
+    # Not all of these are held: a pair whose lock could not be read is skipped
+    # too, and it is listed as (unverified:<reason>). Saying "held by other
+    # sessions" over that list asserts a holder we never established — the same
+    # invented certainty as doctor's `lock=none`. (#983)
+    echo "agmsg watch: not serving these pairs (held by another session, or unverified): $skipped" >&2
   fi
   if [ -n "$held" ]; then
     echo "agmsg watch: cannot claim (held by other sessions): $held" >&2
@@ -832,7 +944,14 @@ while true; do
   # composite instance id is portable (Git Bash falls back to tasklist; see
   # _agmsg_pid_alive). Gated on a composite id only: a bare id (degraded, no
   # resolved agent pid) keeps the prior behavior and is not liveness-gated.
-  if agmsg_instance_is_composite "$SESSION_ID" && ! agmsg_instance_alive "$SESSION_ID"; then
+  # Exit only on a POSITIVE dead (rc 1). `! agmsg_instance_alive` was true for
+  # rc 2 as well, and rc 2 is "could not find out" — an unreadable `run/` made
+  # every watcher on the machine decide it was dead and exit, which is the same
+  # fleet-wide stop as #684's install guard by a different road. Cannot-tell is
+  # not a reason to stop; the next cycle asks again. (#983)
+  _sid_alive_rc=0
+  agmsg_instance_alive "$SESSION_ID" || _sid_alive_rc=$?
+  if agmsg_instance_is_composite "$SESSION_ID" && [ "$_sid_alive_rc" -eq 1 ]; then
     # Say which condition fired and which token it decided about (#692). The
     # guard is right; the silence is what costs. A watcher that stops here, one
     # that was killed, one that crashed early and one that was never started
@@ -861,7 +980,36 @@ while true; do
     # Only the lock file is read here, not the whole subscription set: losing a
     # pair is the half a running process can detect for the price of a file
     # read. Gaining one is the caller's job, at the point it creates the team.
-    pair_state="$(actas_lock_state "$pair_team" "$pair_agent" "$SESSION_ID" 2>/dev/null || echo free)"
+    # ONE read, in the lock library, returning BOTH the classification and the raw
+    # owner (actas_lock_observe). Reading state and owner separately left a window
+    # between the two calls: a claim landing there produced a stale `free` state
+    # (so the gate chose serve) paired with a FRESH owner baseline (so the guard
+    # compared new-to-new and said unchanged), and the pair was served for a role
+    # someone else held. Found by co3; the fix belongs in the library, so every
+    # caller that needs both gets them from one observation. (#983)
+    IFS="$(printf '\t')" read -r pair_state pair_owner <<EOF
+$(actas_lock_observe "$pair_team" "$pair_agent" "$SESSION_ID")
+EOF
+    # Test seam: a two-file barrier that parks the watcher immediately AFTER the
+    # lock read, so the race regression test can land a claim inside the window
+    # deterministically instead of guessing a sleep wide enough to hit it. Same
+    # shape as inbox.sh's AGMSG_TEST_MARK_BARRIER; no-op unless set.
+    if [ -n "${AGMSG_TEST_CLAIM_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_CLAIM_BARRIER.reached"
+      _agmsg_claim_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_CLAIM_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_claim_barrier_waited=$((_agmsg_claim_barrier_waited + 1))
+        # 60s cap. Deliberately much longer than the time a test waits to NOTICE
+        # `.reached`: the two are a race, and if the cap is the same order as the
+        # test's wait, a loaded machine releases the watcher before the test has
+        # acted and the window the barrier exists to hold is simply gone. Measured
+        # — four of these back to back under load never saw `.reached` at a 10s
+        # cap, and each passed alone. The cap only bounds a wedged test; it costs
+        # nothing in production, where the variable is unset and none of this runs.
+        [ "$_agmsg_claim_barrier_waited" -ge 1200 ] && break
+      done
+    fi
     # actas-fatal: a watcher that exists to serve exactly this one role, and no
     # longer owns it, stops -- and says so on stderr (the only place a reason
     # survives; a watcher that ends without one is indistinguishable from a
@@ -897,6 +1045,15 @@ while true; do
 }${pair_team}/${pair_agent}"
           echo "agmsg watch: ${pair_team}/${pair_agent} was claimed by session ${PAIR_VERDICT#held:}; not serving it while they hold it." >&2
         fi
+        continue
+        ;;
+      unverified:*)
+        # We could not establish who holds this pair. Neither serve nor stop:
+        # skip it this cycle and say why on the channel that survives (#691) —
+        # the next poll asks again and nothing is lost. Decided in _pair_gate
+        # rather than before it, so there is ONE place that turns a state into a
+        # verdict; a second decision here would be the arm that never runs.
+        watch_report "${pair_team}/${pair_agent}: ${PAIR_VERDICT#unverified:} — skipping this pair this cycle; it will be retried."
         continue
         ;;
       nostore)
@@ -1021,6 +1178,19 @@ while true; do
       ROWS=""
     fi
 
+    # Deliver (#983): re-verify at the act, like the two below. Checked ONCE here
+    # rather than per row, and that is a deliberate trade rather than an oversight:
+    # the loop's harm is a stranger's message appearing on this session's stdout,
+    # which is visible and leaves the row unread — recoverable, unlike consuming it
+    # or folding on it. A lock read per row would buy a narrower window at a file
+    # read per message; the two acts whose damage is permanent get their own check
+    # immediately before them.
+    _pair_verdict=0
+    _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
+    if [ "$_pair_verdict" -ne 0 ]; then
+      _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "delivery"
+      continue
+    fi
     FINAL_CURSOR=""
     DELIVERED_IDS=()
     DESPAWN_TARGET=""
@@ -1060,7 +1230,34 @@ while true; do
       fi
       DELIVERED_IDS+=("$id")
     done <<< "$ROWS"
+    # Second test seam, parked BETWEEN delivery and consume. One barrier cannot
+    # reach the consume guard: the deliver check runs first and `continue`s, so a
+    # claim landing before delivery never gets as far as the consume. That is not
+    # the consume guard being dead — it covers a claim landing DURING the delivery
+    # loop, a narrower window the first seam cannot express — but it does mean the
+    # guard needs its own seam to be provable. Measured: with only the first
+    # barrier, deleting the consume guard left every test green.
+    if [ -n "${AGMSG_TEST_CONSUME_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_CONSUME_BARRIER.reached"
+      _agmsg_consume_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_CONSUME_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_consume_barrier_waited=$((_agmsg_consume_barrier_waited + 1))
+        [ "$_agmsg_consume_barrier_waited" -ge 1200 ] && break   # 60s, see above
+      done
+    fi
     if [ -n "$FINAL_CURSOR" ]; then
+      # Consume (#983): the permanent one. Advancing the read frontier removes
+      # these rows from the RIGHTFUL owner's unread set for good — there is no
+      # "unread again". So the pair is re-verified immediately before it, and a
+      # pair that changed hands is left entirely alone: no consume, no cursor
+      # advance, so the session that now owns it still sees everything.
+      _pair_verdict=0
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
+      if [ "$_pair_verdict" -ne 0 ]; then
+        _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
+        continue
+      fi
       # Bash 3 with `set -u` treats an empty array expansion as unbound. A
       # cursor-only page is valid, so advance it without optional IDs in that
       # case (and preserve exact delivered IDs when there are any).
@@ -1072,7 +1269,36 @@ while true; do
           >/dev/null 2>&1 || true
       fi
     fi
+    # Third test seam, parked between consume and the fold. Seams follow GUARDS,
+    # not acts: a guard for act N is only exercised by a scenario that passes
+    # N-1's guard and stops at N's, so the interference has to land BETWEEN them.
+    # Measured, twice: with one seam the consume guard never ran; with two, the
+    # fold guard never ran either — the deliver guard `continue`s first, so a
+    # claim landing before delivery reaches neither. Deleting the fold guard left
+    # its own test green.
+    if [ -n "${AGMSG_TEST_FOLD_BARRIER:-}" ]; then
+      : > "$AGMSG_TEST_FOLD_BARRIER.reached"
+      _agmsg_fold_barrier_waited=0
+      while [ ! -e "$AGMSG_TEST_FOLD_BARRIER.release" ]; do
+        sleep 0.05
+        _agmsg_fold_barrier_waited=$((_agmsg_fold_barrier_waited + 1))
+        [ "$_agmsg_fold_barrier_waited" -ge 1200 ] && break   # 60s, see above
+      done
+    fi
     if [ -n "$DESPAWN_TARGET" ]; then
+      # The hardest act to undo, so it is verified last-moment (#983). A
+      # `ctrl:despawn` is sent at exactly the moment a role changes hands, which
+      # is precisely when the state read at the top of this turn is most likely to
+      # be stale — folding on a stranger's instruction would drop OUR role and
+      # close OUR pane. Say why on stderr and keep running: the pair is simply not
+      # ours any more, which the gate will act on next turn.
+      _pair_verdict=0
+      _pair_unchanged_since_read "$pair_team" "$pair_agent" "$pair_owner" || _pair_verdict=$?
+      if [ "$_pair_verdict" -ne 0 ]; then
+        _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "its ctrl:despawn"
+        DESPAWN_TARGET=""
+        continue
+      fi
       "$SCRIPT_DIR/reset.sh" "$PROJECT_PATH" "$AGENT_TYPE" "$DESPAWN_TARGET" "$SESSION_ID" >/dev/null 2>&1 || true
       # The status is used, not discarded: 1 means a pane of ours is still open.
       # Nothing here deletes the placement record — that is what `--force` works

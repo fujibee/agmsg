@@ -141,3 +141,19 @@ _get() {
   _get "team:alice"; [ -z "$GN" ]
   _get "team:bob"; [ "$GC" = "99" ] && [ "$GN" = "2" ]
 }
+
+@test "pair gate: an unverified state is not served (#983)" {
+  # Everything that was not `other:` fell through to `serve`, so `unknown:` — the
+  # one state meaning "we could not find out who holds this" — chose the verdict
+  # that acts. It is not `held` either: held is not retried, unverified is.
+  storage_store_exists() { return 0; }
+  _pair_gate T alice 'unknown:lock_unreadable'
+  [ "$PAIR_VERDICT" = 'unverified:lock_unreadable' ]
+}
+
+@test "pair gate: a known-free state is still served (#983)" {
+  # The partner. Without it, returning `unverified` for everything passes.
+  storage_store_exists() { return 0; }
+  _pair_gate T alice free
+  [ "$PAIR_VERDICT" = serve ]
+}

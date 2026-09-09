@@ -51,7 +51,7 @@ fake_session() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "status=ok" ]]
   [[ "$output" =~ "team=T" ]]
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 }
 
 @test "actas-claim: status=held when role is held by another live session" {
@@ -65,7 +65,7 @@ fake_session() {
   [[ "$output" =~ "status=held" ]]
   [[ "$output" =~ "team=T" ]]
   [[ "$output" =~ "owner=sid-owner" ]]
-  [ "$(actas_lock_owner T alice)" = "sid-owner" ]   # not stolen
+  [ "$(_owner_only T alice)" = "sid-owner" ]   # not stolen
 }
 
 @test "actas-claim: status=not_registered when name is unknown" {
@@ -96,7 +96,7 @@ fake_session() {
   bash "$SKILL_DIR/scripts/reset.sh" /tmp/p1 claude-code alice >/dev/null
 
   [ -f "$(actas_lock_path T alice)" ]
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 }
 
 # --- session-end.sh releases all locks owned by the exiting session ---
@@ -152,8 +152,12 @@ fake_session() {
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
 
+  # The header no longer says "held by other sessions": the same list also
+  # carries pairs whose lock could not be READ, and those have no holder to name
+  # (#983). `grep -q` rather than a non-final `[[ ]]`, which cannot fail a test
+  # on the bash 3.2 CI runs on (#670).
+  grep -q 'not serving these pairs' "$BATS_TEST_TMPDIR/watch.err"
   run cat "$BATS_TEST_TMPDIR/watch.err"
-  [[ "$output" =~ "skipping pairs held by other sessions" ]]
   [[ "$output" =~ "T/alice" ]]
 }
 
@@ -168,7 +172,7 @@ fake_session() {
   [[ "$output" =~ "cannot claim" ]]
   [[ "$output" =~ "T/alice" ]]
   # Lock was not stolen.
-  [ "$(actas_lock_owner T alice)" = "sid-other" ]
+  [ "$(_owner_only T alice)" = "sid-other" ]
 }
 
 @test "watch: with active_name on a free pair, claims and continues" {
@@ -181,7 +185,7 @@ fake_session() {
   sleep 1
 
   # Should now own the lock.
-  [ "$(actas_lock_owner T alice)" = "sid-me" ]
+  [ "$(_owner_only T alice)" = "sid-me" ]
 
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
@@ -220,10 +224,10 @@ fake_session() {
   local old=$!
   local i
   for i in $(seq 1 50); do
-    [ "$(actas_lock_owner T alice)" = "sid-old" ] && break
+    [ "$(_owner_only T alice)" = "sid-old" ] && break
     sleep 0.1
   done
-  [ "$(actas_lock_owner T alice)" = "sid-old" ]
+  [ "$(_owner_only T alice)" = "sid-old" ]
 
   # A second session takes the role — what `/agmsg actas` does from a new
   # session. It needs to look ALIVE, or the lock reads as stale and free.
@@ -425,4 +429,15 @@ fake_session() {
 
   kill "$broad" 2>/dev/null || true
   wait "$broad" 2>/dev/null || true
+}
+
+# The tree deliberately has no owner-only reader any more (#983): every lock read
+# reports its own outcome next to the owner, so that no caller can mistake "could
+# not read it" for "nobody holds it". These assertions want the owner alone and
+# each compares it against a specific sid, so a read that failed shows up as a
+# failed assertion rather than as a passing empty string.
+_owner_only() {   # <team> <agent>
+  local _r; _r="$(actas_lock_read "$1" "$2")"
+  [ "${_r%%$'\t'*}" = "ok" ] || return 1
+  printf '%s' "${_r#*$'\t'}"
 }

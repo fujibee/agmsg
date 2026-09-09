@@ -1240,3 +1240,389 @@ STUB
   # through this; the assertion is about which of the two names was set.)
   grep -Fq '[@agmsg_agent] [team:alice]' "$ARGV_LOG"
 }
+
+# --- #983: the claim window between reading the lock and acting on it ----------
+#
+# The lock is read once per pair per turn; the irreversible acts happen ~200 lines
+# later. A claim landing in between made this watcher act for a role it no longer
+# held. `ctrl:despawn` is the worst of the three, and the likeliest to hit: it is
+# SENT at the moment a role changes hands.
+#
+# A sleep cannot place a message inside that window reliably — its width is a
+# guess. The barrier is decided by the test, and it is the shape this repo already
+# uses (inbox.sh's AGMSG_TEST_MARK_BARRIER).
+_claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
+  ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"
+    local _r owner; _r="$(actas_lock_read "$1" "$2")"
+    owner=""; [ "${_r%%$'\t'*}" = "ok" ] && owner="${_r#*$'\t'}"
+    [ -n "$owner" ] && actas_lock_release "$1" "$2" "$owner"
+    actas_lock_claim "$1" "$2" "$3" )
+  setup_live_owner "$TEST_SKILL_DIR/run" "$3"
+}
+
+@test "watch: a role claimed inside the window keeps its registration (#983, end-to-end)" {
+  # What this pins is the OUTCOME — the role survives and a reason is said — not
+  # any one guard. Measured: it stays green when any single guard is deleted,
+  # because whichever of the three fires first refuses and all three say
+  # "changed hands". Do not read it as the fold guard's control; that is the
+  # between-consume-and-fold test below, and each guard has exactly one control
+  # that reddens on its own.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local bar="$BATS_TEST_TMPDIR/claimbar" out="$BATS_TEST_TMPDIR/w.out" err="$BATS_TEST_TMPDIR/w.err"
+
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CLAIM_BARRIER="$bar" \
+    bash "$SCRIPTS/watch.sh" sess-983 "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$!
+  local i
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done   # 30s: starting under load, not the property under test
+  # CONTROL: the seam actually fired. A green from a barrier that was never
+  # reached is the standard way this kind of test lies.
+  [ -e "$bar.reached" ]
+
+  _claim_in_window team alice sid-new
+  bash "$SCRIPTS/send.sh" team leader alice "ctrl:despawn" >/dev/null
+  : > "$bar.release"
+
+  for i in $(seq 1 40); do kill -0 "$w" 2>/dev/null || break; sleep 0.25; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  # The role was NOT dropped: reset.sh would have removed alice's registration
+  # for this project, which is what the new owner is relying on.
+  bash "$SCRIPTS/identities.sh" "$PROJ" claude-code | grep -q "alice"
+  # ...and the watcher said why, on the channel a reason survives on.
+  # The reason goes to STDOUT: the shipped launcher runs the watcher with fd2 on
+  # /dev/null (#691), so a refusal on stderr is one nobody can read.
+  grep -q 'changed hands' "$out"
+  refute grep -q 'changed hands' "$err"
+}
+
+@test "watch: with NO claim in the window a ctrl:despawn is still obeyed (#983)" {
+  # The negative control. Without it, "never act on ctrl:despawn" passes the test
+  # above — and that would break every despawn in the product.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local bar="$BATS_TEST_TMPDIR/claimbar2" out="$BATS_TEST_TMPDIR/w2.out" err="$BATS_TEST_TMPDIR/w2.err"
+
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CLAIM_BARRIER="$bar" \
+    bash "$SCRIPTS/watch.sh" sess-983b "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$!
+  local i
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done   # 30s: starting under load, not the property under test
+  [ -e "$bar.reached" ]
+
+  # Same window, same barrier — only the claim is missing.
+  bash "$SCRIPTS/send.sh" team leader alice "ctrl:despawn" >/dev/null
+  : > "$bar.release"
+
+  for i in $(seq 1 40); do kill -0 "$w" 2>/dev/null || break; sleep 0.25; done
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  refute grep -q 'changed hands' "$out"
+  # The role WAS dropped — reset.sh removed alice's registration for this project.
+  local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
+  # Canary: the listing is readable and still names the OTHER role, so an absent
+  # `alice` is a real absence rather than an empty or failed listing.
+  grep -q 'leader' <<<"$ids"
+  refute grep -q 'alice' <<<"$ids"
+}
+
+@test "watch: a message for a role claimed inside the window is neither shown nor consumed (#983)" {
+  # The claim that discriminates is "STILL UNREAD afterwards". A count of 0-or-1
+  # proves nothing: the broken build and the negative control both end at 0, one
+  # because the row was wrongly consumed and one because it was rightly delivered.
+  # So the assertion is that the session which now owns the role can still read it.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local bar="$BATS_TEST_TMPDIR/cbar3" out="$BATS_TEST_TMPDIR/w3.out" err="$BATS_TEST_TMPDIR/w3.err"
+
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CLAIM_BARRIER="$bar" \
+    bash "$SCRIPTS/watch.sh" sess-983c "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done   # 30s: starting under load, not the property under test
+  [ -e "$bar.reached" ]                      # the seam fired
+
+  _claim_in_window team alice sid-new
+  bash "$SCRIPTS/send.sh" team leader alice "HELLO-983" >/dev/null
+  # The turn must COMPLETE before "it was not delivered" means anything: a watcher
+  # that simply has not got there yet leaves $out empty and the refute below
+  # passes for the wrong reason. Measured — deleting the deliver guard left this
+  # green on a loaded machine and red on a quiet one, which is the tell. `.reached`
+  # is written once per turn, so its reappearance is the turn boundary.
+  rm -f "$bar.reached"
+  : > "$bar.release"
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done
+  [ -e "$bar.reached" ]
+  : > "$bar.release"
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  # Not shown on the screen of the session that lost the role...
+  refute grep -q 'HELLO-983' "$out"
+  # ...and not consumed: the session that claimed it still has it unread.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'HELLO-983' <<<"$ib"
+}
+
+@test "watch: with NO claim in the window the message IS shown and consumed (#983)" {
+  # The negative partner. Without it, a watcher that delivers nothing at all
+  # passes the test above — and that is the whole product.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local bar="$BATS_TEST_TMPDIR/cbar4" out="$BATS_TEST_TMPDIR/w4.out" err="$BATS_TEST_TMPDIR/w4.err"
+
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CLAIM_BARRIER="$bar" \
+    bash "$SCRIPTS/watch.sh" sess-983d "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done   # 30s: starting under load, not the property under test
+  [ -e "$bar.reached" ]
+
+  bash "$SCRIPTS/send.sh" team leader alice "HELLO-OK" >/dev/null
+  : > "$bar.release"
+  for i in $(seq 1 120); do grep -q 'HELLO-OK' "$out" && break; sleep 0.25; done
+  grep -q 'HELLO-OK' "$out"
+
+  # Delivery and consume are separate steps, so killing the watcher the moment the
+  # body appears races the consume — measured: this passed alone and failed inside
+  # the full suite, having delivered but not yet consumed. Waiting a couple of
+  # seconds would just be a guess about load. `.reached` is written once per turn,
+  # so removing it and waiting for it to come back is a REAL event meaning "the
+  # previous turn finished", consume included.
+  rm -f "$bar.reached"
+  for i in $(seq 1 120); do [ -e "$bar.reached" ] && break; sleep 0.25; done
+  [ -e "$bar.reached" ]
+  : > "$bar.release"
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  refute grep -q 'HELLO-OK' <<<"$ib"
+}
+
+@test "watch: a claim landing DURING delivery still leaves the batch unread (#983)" {
+  # Isolates the consume guard, which the first barrier cannot reach: the deliver
+  # check runs before the loop and `continue`s, so a claim that lands before
+  # delivery never gets as far as consume. Measured — with only the first seam,
+  # deleting the consume guard left every test green. This parks the watcher
+  # BETWEEN delivering and consuming, which is the window that guard is for.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local cb="$BATS_TEST_TMPDIR/consbar" out="$BATS_TEST_TMPDIR/w5.out" err="$BATS_TEST_TMPDIR/w5.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "MID-983" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CONSUME_BARRIER="$cb" \
+    bash "$SCRIPTS/watch.sh" sess-983e "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$cb.reached" ] && break; sleep 0.25; done
+  [ -e "$cb.reached" ]                       # the seam fired
+  # It got past delivery — so this really is the delivered-but-not-yet-consumed
+  # point, not some earlier stop.
+  grep -q 'MID-983' "$out"
+
+  _claim_in_window team alice sid-mid
+  : > "$cb.release"
+  sleep 1
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  # Delivered to the old screen (already done, unavoidable) but NOT consumed:
+  # the session that now owns the role still has it.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'MID-983' <<<"$ib"
+  grep -q 'marking them read' "$out"
+}
+
+@test "watch: a claim landing between consume and the fold is not obeyed (#983)" {
+  # Reachability has TWO axes and this test has to satisfy both.
+  #   TIME    the claim must land between consume and the fold — seam 3. The two
+  #           earlier guards `continue`, so a claim landing before delivery or
+  #           before consume never reaches this one. Measured: with only the first
+  #           two seams, deleting the fold guard left its own test green.
+  #   CONTENT the batch must carry a `ctrl:despawn` addressed to the ACTIVE name,
+  #           or DESPAWN_TARGET is never set and the branch is not entered no
+  #           matter where the watcher is parked.
+  # `.reached` proves only the first: seam 3 fires every turn. The stderr line
+  # below proves both, because it is emitted only when a fold was pending AND the
+  # guard refused it.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local fb="$BATS_TEST_TMPDIR/foldbar" out="$BATS_TEST_TMPDIR/w6.out" err="$BATS_TEST_TMPDIR/w6.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "ctrl:despawn" >/dev/null   # CONTENT
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_FOLD_BARRIER="$fb" \
+    bash "$SCRIPTS/watch.sh" sess-983f "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$fb.reached" ] && break; sleep 0.25; done
+  [ -e "$fb.reached" ]                                                   # TIME
+
+  _claim_in_window team alice sid-fold
+  : > "$fb.release"
+  # Wait on the event this path actually produces, not on a duration and not on
+  # the next turn's barrier: having declined the fold, the watcher `continue`s,
+  # and on the NEXT turn the lock reads `other:` — so an exclusive watcher exits,
+  # by design. `.reached` never comes back, and waiting for it (as the delivery
+  # tests do) times out on correct behaviour. Its EXIT is the observable here.
+  for i in $(seq 1 120); do kill -0 "$w" 2>/dev/null || break; sleep 0.25; done
+  refute kill -0 "$w" 2>/dev/null
+  wait "$w" 2>/dev/null || true
+
+  grep -q 'its ctrl:despawn' "$out"
+  # The role survived: reset.sh never ran, so the session that claimed it keeps
+  # the registration it is relying on.
+  local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
+  grep -q 'leader' <<<"$ids"      # canary: the listing is readable
+  grep -q 'alice' <<<"$ids"
+}
+
+@test "watch: a lock that cannot be READ stops the act, it does not read as free (#983)" {
+  # The guard's own fail-open, found by co3. Two layers turn "could not read the
+  # lock" into "the lock is free" — actas_lock_owner answers empty for both a
+  # missing file and a failed read, and actas_lock_state maps an empty owner to
+  # `free` at rc 0. With a `|| echo free` on top, an UNREADABLE lock compared
+  # equal to a pair read as free, and the permanent act went ahead precisely when
+  # least was known. Refusing costs one poll cycle; consuming does not come back.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local cb="$BATS_TEST_TMPDIR/unreadbar" out="$BATS_TEST_TMPDIR/w7.out" err="$BATS_TEST_TMPDIR/w7.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "UNREADABLE-983" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CONSUME_BARRIER="$cb" \
+    bash "$SCRIPTS/watch.sh" sess-983g "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$cb.reached" ] && break; sleep 0.25; done
+  [ -e "$cb.reached" ]
+  grep -q 'UNREADABLE-983' "$out"          # past delivery, before consume
+
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  [ -f "$lock" ]                           # canary: there IS a lock to make unreadable
+  chmod 000 "$lock"
+  : > "$cb.release"
+  sleep 2
+  chmod 644 "$lock" 2>/dev/null || true     # restore before any teardown reads it
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  # Not consumed: the row is still there for whoever does own the role.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'UNREADABLE-983' <<<"$ib"
+}
+
+@test "watch: an unreadable lock also stops the ctrl:despawn teardown (#983)" {
+  # co3's control (2): the same fail-closed rule on the act that cannot be undone
+  # at all. Refusing costs one poll cycle; dropping the role and closing the pane
+  # under an unknown lock state does not come back.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local fb="$BATS_TEST_TMPDIR/unreadfold" out="$BATS_TEST_TMPDIR/w8.out" err="$BATS_TEST_TMPDIR/w8.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "ctrl:despawn" >/dev/null
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_FOLD_BARRIER="$fb" \
+    bash "$SCRIPTS/watch.sh" sess-983h "$PROJ" claude-code alice >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$fb.reached" ] && break; sleep 0.25; done
+  [ -e "$fb.reached" ]
+
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  [ -f "$lock" ]
+  chmod 000 "$lock"
+  : > "$fb.release"
+  sleep 2
+  chmod 644 "$lock" 2>/dev/null || true
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  grep -q 'could not verify who holds this role' "$out"
+  local ids; ids="$(bash "$SCRIPTS/identities.sh" "$PROJ" claude-code 2>/dev/null || true)"
+  grep -q 'leader' <<<"$ids"      # canary: the listing is readable
+  grep -q 'alice' <<<"$ids"       # the role was NOT dropped
+}
+
+@test "watch: a BROAD watcher refuses too when the lock stops being readable (#983)" {
+  # co3's exact scenario, and the one the actas-watcher tests above cannot reach.
+  # A broad watcher claims nothing, so its baseline owner is the EMPTY STRING —
+  # and a reader that folds "could not read" into "" compares equal to that
+  # baseline and calls the pair unchanged. Every unreadable-lock test we had used
+  # an actas watcher, whose baseline is its own sid: there the fold produces a
+  # MISMATCH, which refuses anyway, for the wrong reason. So the fold survived
+  # nine tests. Measured: deleting the `unreadable -> refuse` arm leaves the
+  # actas tests green and reddens only this one.
+  skip_on_windows "watcher background launch under Git Bash (#182)"
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
+  local cb="$BATS_TEST_TMPDIR/broadunread" out="$BATS_TEST_TMPDIR/w9.out" err="$BATS_TEST_TMPDIR/w9.err"
+
+  bash "$SCRIPTS/send.sh" team leader alice "BROAD-UNREADABLE-983" >/dev/null
+  # No 4th argument: broad subscription, no claim, so no lock file at all.
+  AGMSG_WATCH_INTERVAL=1 AGMSG_TEST_CONSUME_BARRIER="$cb" \
+    bash "$SCRIPTS/watch.sh" sess-983j "$PROJ" claude-code >"$out" 2>"$err" 3>&- 4>&- &
+  local w=$! i
+  for i in $(seq 1 120); do [ -e "$cb.reached" ] && break; sleep 0.25; done
+  [ -e "$cb.reached" ]
+  grep -q 'BROAD-UNREADABLE-983' "$out"     # past delivery, before consume
+
+  # Canary for the premise: there is NO lock, so the baseline really is empty —
+  # if a lock existed here the test would be measuring the actas case again.
+  local lock; lock="$( ( export SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$TEST_SKILL_DIR/run"
+    # shellcheck disable=SC1090
+    source "$SCRIPTS/lib/actas-lock.sh"; actas_lock_path team alice ) )"
+  refute test -f "$lock"
+
+  # With no file to chmod, the only way to make the read fail is to close the
+  # directory it would live in. That is also the case `[ -e ]` cannot judge.
+  chmod 000 "$TEST_SKILL_DIR/run"
+  : > "$cb.release"
+  sleep 2
+  chmod 755 "$TEST_SKILL_DIR/run" 2>/dev/null || true
+  kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
+
+  grep -q 'could not verify who holds this role' "$out"
+  # Not consumed: the row is still there for whoever does own the role.
+  local ib; ib="$(bash "$SCRIPTS/inbox.sh" team alice 2>/dev/null || true)"
+  grep -q 'BROAD-UNREADABLE-983' <<<"$ib"
+}
+
+@test "watch: the re-verify makes exactly ONE lock read, and derives nothing (#983)" {
+  # co3's round-2 finding was not a wrong value, it was a wrong SHAPE: the helper
+  # checked the status of one read and then used a second read's answer, and the
+  # second one (inside actas_lock_state) collapses its own failure to free/rc0. No
+  # behavioural test can express "the second read failed but the first did not" —
+  # the window between them is not addressable from a test. So the property is
+  # pinned structurally: one read, of the raw owner, and no delegation to anything
+  # that reads again or classifies.
+  local body
+  body="$(awk '/^_pair_unchanged_since_read\(\) \{/{f=1} f{print} f&&/^\}/{exit}' \
+    "$SCRIPTS/watch.sh" | grep -v '^[[:space:]]*#')"
+  # Canary: the extraction found the function and its one read, so an absence
+  # below is a real absence rather than an empty string.
+  grep -q 'actas_lock_read' <<<"$body"
+  [ "$(grep -c 'actas_lock_read' <<<"$body")" -eq 1 ]
+  # Neither of these may appear: both read or classify a second time.
+  refute grep -q 'actas_lock_state' <<<"$body"
+  refute grep -q 'actas_lock_sid_alive' <<<"$body"
+  # And the folding reader may not come back anywhere in the tree. It answered
+  # "" and rc 0 for missing, unreadable and empty alike; keeping the guard here
+  # while leaving the function callable just moves the next defect one call site
+  # over. (tl: fix the fold, do not guard the caller.) Comment lines are dropped
+  # first -- several comments name it to say what it used to do, and a check that
+  # forbids naming a removed function is a check nobody can keep green.
+  local named live
+  named="$(grep -rn 'actas_lock_owner' "$SCRIPTS" --include='*.sh' || true)"
+  # Canary: the comments that explain the removal are still there, so an empty
+  # `live` below is a real absence and not a search that matched nothing at all.
+  grep -q 'actas_lock_owner' <<<"$named"
+  live="$(awk '{ l = $0; sub(/^[^:]*:[0-9]+:/, "", l); sub(/^[ \t]+/, "", l);
+                 if (l !~ /^#/) print }' <<<"$named")"
+  [ -z "$live" ]
+}

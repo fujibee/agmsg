@@ -611,3 +611,153 @@ require_eperm_pid() {
     | grep -v ':[0-9]*: *#' || true)"
   [ -z "$offenders" ] || { echo "$offenders"; false; }
 }
+
+# --- #983: liveness has a third answer, and it is not "dead" -------------------
+
+@test "instance alive: an unreadable run dir is UNDECIDABLE, not dead" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$SKILL_DIR/run"
+  : > "$SKILL_DIR/run/cc-instance.1"        # canary: there is something to read
+  chmod 000 "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "some-token" || rc=$?
+  chmod 755 "$SKILL_DIR/run" 2>/dev/null || true
+  # 2, not 1: "dead" drives reclaim, lock deletion and the watcher's own exit, so
+  # a failed read must not arrive as one.
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: an ABSENT run dir is still dead" {
+  # The partner: absent is a fact (nothing ever registered). Collapsing it into
+  # undecidable would stop every reclaim forever.
+  rm -rf "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "some-token" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: an unstattable cc-instance is UNDECIDABLE for a composite token too" {
+  # The other direction of the same break (co1): `[ -f ]` is false for "absent"
+  # AND for "cannot stat", and that arm answers ALIVE — so an unreadable run/
+  # made every composite token look alive and blocked legitimate reclaim. The
+  # bare-token branch already returned 2 for the same condition, so one fact
+  # meant opposite things depending on the token shape.
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  mkdir -p "$SKILL_DIR/run"
+  local pid=$$                              # our own pid: alive by construction
+  : > "$SKILL_DIR/run/cc-instance.$pid"
+  chmod 000 "$SKILL_DIR/run"
+  local rc=0; agmsg_instance_alive "sid.$pid" || rc=$?
+  chmod 755 "$SKILL_DIR/run" 2>/dev/null || true
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a composite token with NO cc-instance file is still alive" {
+  # The partner: absent is deliberate here — the pid is alive and nothing
+  # contradicts it. Collapsing that into undecidable would stop every reclaim.
+  mkdir -p "$SKILL_DIR/run"
+  rm -f "$SKILL_DIR/run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive "sid.$$" || rc=$?
+  [ "$rc" -eq 0 ]
+}
+
+@test "instance alive: a run dir that can be LISTED but not entered is undecidable" {
+  # mode 0400: -r is true, -x is false. The glob still enumerates every
+  # cc-instance.* path, and then nothing can stat them. The old guard asked only
+  # for -r, so the loop ran, matched nothing, and returned a confident DEAD from
+  # a scan that had read no file at all. (co1)
+  [ "$(id -u)" -eq 0 ] && skip "directory permissions are ineffective as root"
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-live\n' > "$run/cc-instance.$$"
+  chmod 0400 "$run"
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  chmod 0755 "$run"
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a listable AND enterable run dir still answers dead for an absent token" {
+  # The partner. Without it, a guard that returned 2 for every directory would
+  # pass the test above, and no stale lock would ever be reclaimed again.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else\n' > "$run/cc-instance.$$"
+  chmod 0755 "$run"
+  local rc=0; agmsg_instance_alive sid-not-here || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: an EMPTY cc-instance marker for a live pid is undecidable" {
+  # A half-written marker is not "this process is someone else". Read as a plain
+  # mismatch, a scan of torn markers reports a live owner as DEAD, and dead is
+  # what licences a reclaim. Same fact as an empty lock file. (co3)
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  : > "$run/cc-instance.$$"          # live pid, marker not yet written
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a WRITTEN cc-instance marker naming someone else is still dead" {
+  # The partner. Without it, answering 2 for every marker would pass the test
+  # above and no stale lock would ever be reclaimed.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else\n' > "$run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive sid-live || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: an EMPTY cc-instance marker is undecidable for a COMPOSITE token too" {
+  # Composite is the ordinary owner token, so this is the path that matters most
+  # -- and it is the one I left behind when fixing the bare branch. A torn marker
+  # read as a mismatch makes a live seat's lock reclaimable. (co1, co3)
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  : > "$run/cc-instance.$$"                 # live pid, marker not yet written
+  local rc=0; agmsg_instance_alive "sid-live.$$" || rc=$?
+  [ "$rc" -eq 2 ]
+}
+
+@test "instance alive: a composite marker naming a DIFFERENT session is still dead" {
+  # The partner: a written marker that disagrees is a real mismatch, and must
+  # stay reclaimable or a crashed seat wedges its role forever.
+  local run="$SKILL_DIR/run"
+  mkdir -p "$run"
+  printf 'sid-someone-else.%s\n' "$$" > "$run/cc-instance.$$"
+  local rc=0; agmsg_instance_alive "sid-live.$$" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+@test "instance alive: bare and composite give the SAME answer to the same marker state" {
+  # The two branches disagreed about this file twice, in opposite directions, one
+  # review round apart: composite said ALIVE where bare said 2 (an inaccessible
+  # run/), then bare said 2 where composite said DEAD (an empty marker). Each fix
+  # moved the disagreement instead of removing it. Both now read through
+  # _agmsg_marker_read; this pins the agreement itself rather than the two
+  # answers separately, so the next edit to one branch cannot re-open the split.
+  [ "$(id -u)" -eq 0 ] && skip "directory permissions are ineffective as root"
+  local run="$SKILL_DIR/run" bare=0 comp=0
+  mkdir -p "$run"
+
+  # State 1: a live pid whose marker is present, readable and EMPTY.
+  : > "$run/cc-instance.$$"
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  [ "$bare" -eq 2 ]
+  [ "$comp" -eq 2 ]
+
+  # State 2: the run directory cannot be searched.
+  printf 'sid-live.%s\n' "$$" > "$run/cc-instance.$$"
+  chmod 0400 "$run"
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  chmod 0755 "$run"
+  [ "$bare" -eq 2 ]
+  [ "$comp" -eq 2 ]
+
+  # Canary/partner: with the same directory readable and the marker written, the
+  # pair agrees on a DECIDED answer too -- otherwise "both say 2 always" passes.
+  bare=0; agmsg_instance_alive sid-live               || bare=$?
+  comp=0; agmsg_instance_alive "sid-live.$$"          || comp=$?
+  [ "$bare" -eq 0 ]
+  [ "$comp" -eq 0 ]
+}
