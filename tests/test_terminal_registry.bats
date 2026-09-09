@@ -2213,3 +2213,74 @@ _tmux_op_args() {
   grep -q 'did not name or record' <<<"$output"
   refute test -e "$rival"
 }
+
+# --- #1114 follow-up: refs are compared as PANES, not as strings --------------------
+
+@test "placement guard: a LEGACY socket-less peer record still claims the pane (#1114 follow-up)" {
+  # The record format accepts `%N` / `@N` from before refs carried the server
+  # (#1051), and those are the oldest records -- the ones most likely to belong
+  # to somebody else. Compared as strings, `%1` never matches `tmux:<sock>:%1`,
+  # so the guard waves the write through exactly there. Compared as panes, it
+  # claims.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local peer; peer="$(agmsg_spawn_path seatteam legacypeer)"
+  mkdir -p "$(dirname "$peer")"
+  printf '%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam newcomer)"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" seatteam newcomer /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q 'seatteam__legacypeer' <<<"$output"
+  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
+  refute test -e "$mine"
+}
+
+@test "placement guard: a peer on a DIFFERENT tmux server is not a claim (#1114 follow-up)" {
+  # The partner, and the reason the rule is scoped rather than "same pane id
+  # wins": a pane id is not unique across tmux servers (#1051). When BOTH refs
+  # name a server and the servers differ, they are different panes and the write
+  # proceeds. Only an UNKNOWN server counts as a claim.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local peer; peer="$(agmsg_spawn_path seatteam otherserver)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/OTHERSOCK:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam sameid)"
+  run agmsg_terminal_name_self "" seatteam sameid /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did not name or record' <<<"$output"
+  grep -q '^tmux:/tmp/fake:%1	/proj/MINE	claude-code$' "$mine"
+}
+
+@test "placement guard: the pane splitter agrees with the registry's own ref parsers on every accepted form (#1114 follow-up)" {
+  # The splitter mirrors agmsg_terminal_ref_terminal / agmsg_terminal_ref_id
+  # inline (no fork per scanned record). Two grammars for one format drift; this
+  # pins them together on the bare legacy id, the scheme without a socket, the
+  # full tmux form, and herdr (whose ids contain a colon that is NOT a socket).
+  local ref term id sock
+  for ref in '%7' '@3' 'tmux:%7' 'tmux:/tmp/s:%7' 'tmux:/tmp/with:colon:%7' 'herdr:w1:pB' 'plain:-'; do
+    _agmsg_placement_split "$ref" || { echo "FAIL: split refused $ref"; return 1; }
+    term="$(agmsg_terminal_ref_terminal "$ref")" || { echo "FAIL: registry refused $ref"; return 1; }
+    id="$(agmsg_terminal_ref_id "$ref")"
+    [ "$_AGMSG_PS_TERM" = "$term" ] || { echo "FAIL: $ref term $_AGMSG_PS_TERM vs $term"; return 1; }
+    case "$term" in
+      tmux) sock="${id%:*}"; [ "$sock" = "$id" ] && sock=""; id="${id##*:}"
+            [ "$_AGMSG_PS_SOCK" = "$sock" ] || { echo "FAIL: $ref sock $_AGMSG_PS_SOCK vs $sock"; return 1; } ;;
+      *)    [ -z "$_AGMSG_PS_SOCK" ] || { echo "FAIL: $ref has a socket on $term"; return 1; } ;;
+    esac
+    [ "$_AGMSG_PS_ID" = "$id" ] || { echo "FAIL: $ref id $_AGMSG_PS_ID vs $id"; return 1; }
+  done
+  # And an unknown scheme is refused by both.
+  refute _agmsg_placement_split 'bogus:thing'
+  refute agmsg_terminal_ref_terminal 'bogus:thing'
+}

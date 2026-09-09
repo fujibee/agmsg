@@ -586,11 +586,49 @@ agmsg_terminal_ref_id() {
 # a stale record from a dead seat will squat a pane that a live seat has taken
 # over. That is why it is a stop-gap and not the fix: #1112 makes the resolution
 # correct, and then nothing needs to arbitrate.
+# Split a placement ref into terminal / pane id / socket, so two refs can be
+# compared as PANES rather than as strings. Sets _AGMSG_PS_TERM, _AGMSG_PS_ID and
+# _AGMSG_PS_SOCK (empty when the ref carries no socket); non-zero for a ref it
+# cannot parse.
+#
+# String equality is not enough: the record format still accepts the legacy
+# socket-less tmux forms (`%N`, `@N`) alongside `tmux:<socket>:%N` (see the
+# scheme comment above and agmsg_terminal_ref_terminal), so a peer record holding
+# `%1` never matches a freshly composed `tmux:/tmp/x:%1` -- and the guard waves
+# the write through for exactly the records most likely to be OLD, which are the
+# ones most likely to belong to somebody else.
+#
+# The scheme table below mirrors agmsg_terminal_ref_terminal / agmsg_terminal_ref_id
+# (inline, so the scan forks nothing per record); a test pins that the two agree
+# on every form the record format accepts.
+_agmsg_placement_split() {   # <ref>
+  local ref="$1" term id
+  _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
+  case "$ref" in
+    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
+    herdr:*) term=herdr; id="${ref#herdr:}" ;;
+    plain:*) term=plain; id="${ref#plain:}" ;;
+    %*|@*)   term=tmux;  id="$ref" ;;        # legacy pre-axis bare tmux id
+    *)       return 1 ;;
+  esac
+  if [ "$term" = tmux ]; then
+    case "$id" in
+      *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
+    esac
+  fi
+  [ -n "$id" ] || return 1
+  _AGMSG_PS_TERM="$term"; _AGMSG_PS_ID="$id"
+  return 0
+}
+
 _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
   local ref="$1" mine="$2" dir f first
   [ -n "$ref" ] || return 0
   dir="$(dirname "$mine")"
   [ -d "$dir" ] || return 0
+  local want_term want_id want_sock
+  _agmsg_placement_split "$ref" || return 0
+  want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
   for f in "$dir"/spawn.*; do
     [ -f "$f" ] || continue
     # This seat's own records -- its own file, and the same seat under another
@@ -598,10 +636,22 @@ _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
     # roster it acted in. Neither is a rival claim. One rule, so one seam.
     [ "${f##*__}" = "${mine##*__}" ] && continue
     IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
-    if [ "$first" = "$ref" ]; then
-      printf '%s' "${f##*/spawn.}"
-      return 0
+    [ -n "$first" ] || continue
+    _agmsg_placement_split "$first" || continue
+    [ "$_AGMSG_PS_TERM" = "$want_term" ] || continue
+    [ "$_AGMSG_PS_ID" = "$want_id" ] || continue
+    # Same terminal, same pane id. The sockets decide whether that is the same
+    # PANE: a pane id is not unique across tmux servers (#1051). A record may be
+    # the legacy socket-less form, and an unknown server cannot be shown to be a
+    # DIFFERENT one -- so an unknown socket on either side counts as a claim.
+    # Refusing there costs one action; taking a pane that turns out to be
+    # someone's is the damage this guard exists to prevent.
+    if [ -n "$_AGMSG_PS_SOCK" ] && [ -n "$want_sock" ] \
+       && [ "$_AGMSG_PS_SOCK" != "$want_sock" ]; then
+      continue                                # different servers, different panes
     fi
+    printf '%s' "${f##*/spawn.}"
+    return 0
   done
   return 0
 }
