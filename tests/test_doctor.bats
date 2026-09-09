@@ -555,9 +555,9 @@ configured_off() {
   run bash "$SCRIPTS/doctor.sh" --project "$PROJ" --type claude-code
   chmod 644 "$TEST_SKILL_DIR/run/actas.team__alice.session"
   # `lock=none` is a claim about the world; this is a claim about us. An
-  # operator reads `none` as "nothing here to clean up" and acts on it. tl did
+  # operator reads `none` as "nothing here to clean up" and acts on it. Someone did
   # exactly this today with a record he could not open: reported a seat dead,
-  # it was alive. (co1)
+  # it was alive. (Review.)
   grep -q 'lock=unreadable' <<<"$output"
   refute grep -q 'lock=none' <<<"$output"
 }

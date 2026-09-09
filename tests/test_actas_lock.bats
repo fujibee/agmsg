@@ -292,7 +292,7 @@ live_pid() { echo "$$"; }
   # `[ -e "$lock" ]` is false when the parent lacks search permission, so an
   # inaccessible directory answered "absent" -> `free` -> callers act. The
   # file-level chmod control does not reach this: there the directory is fine.
-  # (co3)
+  # (Review.)
   [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
   actas_lock_claim T alice sid-me
   local lock dir; lock="$(actas_lock_path T alice)"; dir="${lock%/*}"
@@ -368,7 +368,7 @@ live_pid() { echo "$$"; }
   # A third case, distinct from "unreadable" and from "undecidable": the file is
   # there and readable, and its contents are empty. That is not "nobody holds
   # it" — it is a lock written by someone whose write we may be seeing halfway,
-  # or truncated. try_claim's `[ -z "$existing" ]` handed it over. (cc3)
+  # or truncated. try_claim's `[ -z "$existing" ]` handed it over. (#1071)
   actas_lock_claim T alice sid-me
   : > "$(actas_lock_path T alice)"          # empty, still present
   # Assert the VERDICT, not only the outcome. Measured before the fix: the steal
@@ -423,7 +423,7 @@ _owner_only() {   # <team> <agent>
   [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
   local tab; tab="$(printf '\t')"
   # `[ -e ]` is false for both, so asking it alone reports "absent" for a
-  # directory we cannot look inside — the answer that makes callers act (co3).
+  # directory we cannot look inside — the answer that makes callers act (review).
   echo sid-x > "$(actas_lock_path T alice)"
   chmod 000 "$(_actas_lock_dir)"
   local r; r="$(actas_lock_read T alice)"
@@ -438,11 +438,11 @@ _owner_only() {   # <team> <agent>
 }
 
 @test "one state one answer: an empty lock is unknown:owner_empty on EVERY path" {
-  # co1 found the same file answered `free` by observe and `unknown:owner_empty`
+  # Review found the same file answered `free` by observe and `unknown:owner_empty`
   # by try_claim. Both had been made three-valued — separately — so the tree held
   # two answers for one state and nothing marked either wrong. The verdict now
   # lives in one function and each producer translates it, which is what makes
-  # this assertion writable at all. (tl's axis 5.)
+  # this assertion writable at all. (Review axis 5.)
   : > "$(actas_lock_path T alice)"
   [ "$(actas_lock_state T alice sid-me)" = 'unknown:owner_empty' ]
   [ "$(_actas_lock_try_claim T alice sid-me)" = 'unknown:owner_empty' ]

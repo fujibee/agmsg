@@ -420,7 +420,7 @@ EOF
 # bare answered 2 where composite answered DEAD (an empty marker). Each fix moved
 # the disagreement rather than removing it. So the read is here, once, and each
 # branch only decides what its own answer means. Same shape, and the same reason,
-# as _actas_lock_read_path. (co1, co3; tl's axis 5.)
+# as _actas_lock_read_path. (Review, axis 5.)
 _agmsg_marker_read() {   # <path>
   local f="$1" content _dir
   if content="$(cat "$f" 2>/dev/null)"; then
@@ -465,7 +465,7 @@ agmsg_instance_alive() {
       # Absent is alive-by-default and that is deliberate: the pid IS alive and
       # nothing contradicts it. Inaccessible is not absent -- `[ -e ]` is false
       # for both, and this arm used to answer ALIVE for the second one, which
-      # blocks a legitimate reclaim forever (co1).
+      # blocks a legitimate reclaim forever (review).
       absent)     return 0 ;;
       unreadable) return 2 ;;
     esac
@@ -475,7 +475,7 @@ agmsg_instance_alive() {
     # live pid is not you" makes a live seat's lock reclaimable. Not `return 0`
     # by analogy with absent above: absent means the marker was never written,
     # and the pid is then the evidence; a half-written file says a writer WAS
-    # here and we do not know what it meant to say. (co1, co3.)
+    # here and we do not know what it meant to say. (Review.)
     [ -n "$s" ] || return 2
     [ "$s" = "$token" ] && return 0
     return 1
@@ -491,7 +491,7 @@ agmsg_instance_alive() {
   # cc-instance.* path and then every `[ -f "$f" ]` is false, so the loop skipped
   # all of them and fell through to `return 1` -- a confident DEAD, produced by a
   # scan that read nothing. The composite branch above already asked for both,
-  # which is the giveaway: one function, two paths, two answers. (co1)
+  # which is the giveaway: one function, two paths, two answers. (Review.)
   { [ -d "$run" ] && [ -r "$run" ] && [ -x "$run" ]; } || return 2
   local _m
   for f in "$run"/cc-instance.*; do

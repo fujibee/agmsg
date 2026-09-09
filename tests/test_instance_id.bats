@@ -635,7 +635,7 @@ require_eperm_pid() {
 }
 
 @test "instance alive: an unstattable cc-instance is UNDECIDABLE for a composite token too" {
-  # The other direction of the same break (co1): `[ -f ]` is false for "absent"
+  # The other direction of the same break (review): `[ -f ]` is false for "absent"
   # AND for "cannot stat", and that arm answers ALIVE — so an unreadable run/
   # made every composite token look alive and blocked legitimate reclaim. The
   # bare-token branch already returned 2 for the same condition, so one fact
@@ -663,7 +663,7 @@ require_eperm_pid() {
   # mode 0400: -r is true, -x is false. The glob still enumerates every
   # cc-instance.* path, and then nothing can stat them. The old guard asked only
   # for -r, so the loop ran, matched nothing, and returned a confident DEAD from
-  # a scan that had read no file at all. (co1)
+  # a scan that had read no file at all. (Review.)
   [ "$(id -u)" -eq 0 ] && skip "directory permissions are ineffective as root"
   local run="$SKILL_DIR/run"
   mkdir -p "$run"
@@ -688,7 +688,7 @@ require_eperm_pid() {
 @test "instance alive: an EMPTY cc-instance marker for a live pid is undecidable" {
   # A half-written marker is not "this process is someone else". Read as a plain
   # mismatch, a scan of torn markers reports a live owner as DEAD, and dead is
-  # what licences a reclaim. Same fact as an empty lock file. (co3)
+  # what licences a reclaim. Same fact as an empty lock file. (Review.)
   local run="$SKILL_DIR/run"
   mkdir -p "$run"
   : > "$run/cc-instance.$$"          # live pid, marker not yet written
@@ -709,7 +709,7 @@ require_eperm_pid() {
 @test "instance alive: an EMPTY cc-instance marker is undecidable for a COMPOSITE token too" {
   # Composite is the ordinary owner token, so this is the path that matters most
   # -- and it is the one I left behind when fixing the bare branch. A torn marker
-  # read as a mismatch makes a live seat's lock reclaimable. (co1, co3)
+  # read as a mismatch makes a live seat's lock reclaimable. (Review.)
   local run="$SKILL_DIR/run"
   mkdir -p "$run"
   : > "$run/cc-instance.$$"                 # live pid, marker not yet written

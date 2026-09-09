@@ -1480,7 +1480,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 }
 
 @test "watch: a lock that cannot be READ stops the act, it does not read as free (#983)" {
-  # The guard's own fail-open, found by co3. Two layers turn "could not read the
+  # The guard's own fail-open, found in review. Two layers turn "could not read the
   # lock" into "the lock is free" — actas_lock_owner answers empty for both a
   # missing file and a failed read, and actas_lock_state maps an empty owner to
   # `free` at rc 0. With a `|| echo free` on top, an UNREADABLE lock compared
@@ -1516,7 +1516,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 }
 
 @test "watch: an unreadable lock also stops the ctrl:despawn teardown (#983)" {
-  # co3's control (2): the same fail-closed rule on the act that cannot be undone
+  # Review's control (2): the same fail-closed rule on the act that cannot be undone
   # at all. Refusing costs one poll cycle; dropping the role and closing the pane
   # under an unknown lock state does not come back.
   skip_on_windows "watcher background launch under Git Bash (#182)"
@@ -1549,7 +1549,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 }
 
 @test "watch: a BROAD watcher refuses too when the lock stops being readable (#983)" {
-  # co3's exact scenario, and the one the actas-watcher tests above cannot reach.
+  # Review's exact scenario, and the one the actas-watcher tests above cannot reach.
   # A broad watcher claims nothing, so its baseline owner is the EMPTY STRING —
   # and a reader that folds "could not read" into "" compares equal to that
   # baseline and calls the pair unchanged. Every unreadable-lock test we had used
@@ -1594,7 +1594,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
 }
 
 @test "watch: the re-verify makes exactly ONE lock read, and derives nothing (#983)" {
-  # co3's round-2 finding was not a wrong value, it was a wrong SHAPE: the helper
+  # The round-2 finding was not a wrong value, it was a wrong SHAPE: the helper
   # checked the status of one read and then used a second read's answer, and the
   # second one (inside actas_lock_state) collapses its own failure to free/rc0. No
   # behavioural test can express "the second read failed but the first did not" —
@@ -1614,7 +1614,7 @@ _claim_in_window() {   # <team> <agent> <new-sid> — steal the pair mid-turn
   # And the folding reader may not come back anywhere in the tree. It answered
   # "" and rc 0 for missing, unreadable and empty alike; keeping the guard here
   # while leaving the function callable just moves the next defect one call site
-  # over. (tl: fix the fold, do not guard the caller.) Comment lines are dropped
+  # over. (Review: fix the fold, do not guard the caller.) Comment lines are dropped
   # first -- several comments name it to say what it used to do, and a check that
   # forbids naming a removed function is a check nobody can keep green.
   local named live

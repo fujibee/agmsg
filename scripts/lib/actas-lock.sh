@@ -100,7 +100,7 @@ agmsg_spawn_path() {
 # claim / rm / consume. Guarding at each call site is not the fix, because the
 # next call site starts from the same empty string. The fold is removed HERE,
 # and no owner-only form is left in the tree to fall back into.
-# (#983, tl's ruling; the same shape as terminal_team_observe in #1066.)
+# (#983, review ruling; the same shape as terminal_team_observe in #1066.)
 #
 # Prints "<read>\t<owner>":
 #
@@ -111,7 +111,7 @@ agmsg_spawn_path() {
 #   unreadable\t   the lock is there and could not be read, OR its directory
 #                  cannot be searched, in which case absence is not knowable.
 #                  `[ -e ]` is false for BOTH "no such file" and "cannot look
-#                  inside the parent", so the directory is asked first (co3).
+#                  inside the parent", so the directory is asked first (review).
 _actas_lock_read_path() {   # <lock-path>
   local lock="$1" owner _dir
   if owner="$(head -1 "$lock" 2>/dev/null)"; then
@@ -151,10 +151,10 @@ actas_lock_sid_alive() {
 
 # The verdict for one lock, shared by every producer.
 #
-# co1 found the SAME empty lock answered `free` by actas_lock_observe and
+# Review found the SAME empty lock answered `free` by actas_lock_observe and
 # `unknown:owner_empty` by _actas_lock_try_claim. Both had been made three-valued
 # -- separately -- so two producers disagreed about one file and nothing in the
-# code said which was right. tl's axis 5: it is not enough that a path returns
+# code said which was right. Review axis 5: it is not enough that a path returns
 # unknown; every path must return the SAME unknown for the same state. So the
 # decision lives in one function and the producers translate its answer into
 # their own vocabulary instead of deciding again.
@@ -171,7 +171,7 @@ actas_lock_sid_alive() {
 #                                 a tmp file BEFORE linking it into place, and
 #                                 release unlinks), so an empty lock is a torn or
 #                                 truncated write -- a reason to wait, not to take
-#                                 the role. (cc3's #1071 trigger.)
+#                                 the role. (#1071's trigger.)
 #   unknown:liveness_undecidable  the owner is known, its liveness is not
 _actas_lock_verdict() {   # <sid> <read> <owner>
   local sid="$1" rd="$2" owner="$3" arc=0
@@ -220,8 +220,7 @@ _actas_lock_try_claim() {
   # here, unclaimable there. So the write is checked, and then what actually
   # landed is READ BACK before it is linked into place -- printf's status alone
   # does not prove the bytes are on disk. Failing here returns 1, which
-  # actas_lock_claim already reports as unknown:claim_failed. (co3, co1; tl's
-  # axis 6.)
+  # actas_lock_claim already reports as unknown:claim_failed. (Review, axis 6.)
   if ! printf '%s\n' "$sid" > "$tmp" 2>/dev/null; then
     rm -f "$tmp"
     return 1
@@ -271,7 +270,7 @@ _actas_lock_try_claim() {
 # call sites branch on the OUTPUT, so all of those read as "not held: and not
 # unknown:" = "we got it", and a pair nobody had claimed went into the subscribed
 # set. A verdict on every path is what lets a caller require an explicit success
-# instead of inferring one from silence. (#983, co3/co1)
+# instead of inferring one from silence. (#983, review)
 actas_lock_claim() {
   local team="$1" agent="$2" sid="$3"
   local attempts=0 result lock_path reclaim_dir _r _owner _alive_rc
@@ -418,13 +417,13 @@ actas_lock_gc_stale() {
 # Prints "<state>\t<owner>"; the owner is empty when there is none to report.
 # The states are _actas_lock_verdict's, documented there -- this function is the
 # read plus that verdict, and nothing else, so that `observe` and `try_claim`
-# cannot drift apart again (they did: tl's axis 5).
+# cannot drift apart again (they did: review axis 5).
 #
 # Returning the owner alongside the state matters as much as the values: callers
 # that need a baseline to compare against later were reading the state and then
 # reading the owner in a SECOND call, and a claim landing between the two
 # produced a stale state paired with a fresh owner. One read, both facts, no
-# window. (#983, found by co3.)
+# window. (#983, found in review.)
 actas_lock_observe() {
   local _r
   _r="$(actas_lock_read "$1" "$2")"
