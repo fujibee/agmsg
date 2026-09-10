@@ -1088,3 +1088,60 @@ STUB
   grep -qE '^  --fix-pane-names ' <<<"$output"
   grep -qE '^  --rename-sessions ' <<<"$output"
 }
+
+# --- #1131: --fix corrects a record that points at another seat's pane --------------
+# The record is a claim: codex's env reports the shared app-server's pane, so a
+# record can name a pane the seat does not live in. --fix must verify against the
+# label and correct the RECORD, never overwrite the other seat's pane. The fake
+# herdr answers `pane list` so the label resolves, and logs every write so "the
+# other pane was not touched" is a fact about the log.
+_install_misplaced_fixture() {   # alice's record wrongly names w1:pOTHER; her label is on w1:pMINE
+  export MIS_LOG="$BATS_TEST_TMPDIR/herdr.log"; : > "$MIS_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$MIS_LOG"
+case "\$1/\$2" in
+  pane/list) echo '{"result":{"panes":[{"pane_id":"w1:pMINE","label":"fixteam:alice"},{"pane_id":"w1:pOTHER","label":"fixteam:bob"}]}}' ;;
+  pane/get)
+    case "\$3" in
+      w1:pMINE)  echo '{"result":{"pane":{"pane_id":"w1:pMINE","label":"fixteam:alice","agent_status":"idle","terminal_title":"t"}}}' ;;
+      w1:pOTHER) echo '{"result":{"pane":{"pane_id":"w1:pOTHER","label":"fixteam:bob","agent_status":"idle","terminal_title":"t"}}}' ;;
+      *)         echo '{"result":{"pane":{}}}' ;;
+    esac ;;
+  agent/list) echo '{"result":{"agents":[]}}' ;;
+  agent/get)  echo '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  *)          echo '{"result":{"type":"ok"}}' ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+  export AGMSG_TERMINAL_DRIVER=herdr
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  MIS_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  mkdir -p "$(dirname "$MIS_REC")"
+  printf 'herdr:w1:pOTHER\t/tmp/proj\tclaude-code\n' > "$MIS_REC"   # WRONG: another seat's pane
+}
+
+@test "team --fix corrects a record that names another seat's pane, to the seat's own pane (#1131)" {
+  _install_misplaced_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # (a) the record now names alice's OWN pane (the label's answer), project/type kept
+  [ "$(cat "$MIS_REC")" = $'herdr:w1:pMINE\t/tmp/proj\tclaude-code' ]
+  # positive control: --fix reached the corrected pane at all
+  grep -q '^pane get w1:pMINE$' "$MIS_LOG"
+}
+
+@test "team --fix does NOT write identity onto the pane the wrong record named (#1131)" {
+  _install_misplaced_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # positive control that does NOT depend on the correction: the fix ran and
+  # observed SOME pane, so an absence below is a real absence -- if it acted on the
+  # record's pane (the bug) the writes to w1:pOTHER would be present.
+  grep -q '^pane get w1:p' "$MIS_LOG"
+  # (b) THE POINT: the other seat's pane was never renamed to alice's identity.
+  refute grep -q '^pane rename w1:pOTHER ' "$MIS_LOG"
+  refute grep -q '^agent rename w1:pOTHER ' "$MIS_LOG"
+}
