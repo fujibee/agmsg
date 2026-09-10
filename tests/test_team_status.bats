@@ -616,3 +616,118 @@ _herdr_observe_stub() {   # <entries-json>
   [ "$(< "$BATS_TEST_TMPDIR/poke")" = '/rename team-alice' ]
   [ ! -e "$BATS_TEST_TMPDIR/names" ]
 }
+
+# --- codex: --fix / --rename-sessions type UNCONDITIONALLY and confirm NEWNESS ---
+# codex's current name is not dependably readable (its "Thread name:" header
+# scrolls off), so --fix does not gate the keystroke on the (unknown) pre-check.
+# It types and verifies by the rename command's own "Session renamed to <name>."
+# announcement. That line PERSISTS in the scrollback and --fix runs repeatedly (a
+# person may also have typed /rename by hand -- tl seeded exactly this on the live
+# panes), so verification is on the line's NEWNESS (a count increase), never its
+# presence. Read and write are separate capabilities, declared in the manifest
+# (rename_confirm), not branched on the type name (#1109 followup).
+_codex_type_get() {   # codex declares rename_cmd + rename_confirm; name not on title
+  agmsg_type_get() {
+    case "$2" in
+      cli)                 printf 'codex\n' ;;
+      rename_cmd)          printf '/rename\n' ;;
+      rename_confirm)      printf 'Session renamed to\n' ;;
+      session_name_source) printf 'screen:Thread name:\n' ;;
+    esac
+  }
+}
+
+@test "codex session rename: types even when the name is unreadable, verifies a NEW confirmation line" {
+  _codex_type_get
+  : > "$BATS_TEST_TMPDIR/screen"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  # typing /rename is what makes codex print the confirmation line
+  terminal_poke() {
+    printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"
+    printf 'Session renamed to team-alice. To resume run codex resume\n' >> "$BATS_TEST_TMPDIR/screen"
+  }
+  # session_cell is unknown -- the realistic codex case -- and it must STILL type
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tchanged\trenamed_and_verified' ]
+  [ "$(< "$BATS_TEST_TMPDIR/poke")" = '/rename team-alice' ]
+}
+
+@test "codex session rename: a PRE-EXISTING confirmation line does not verify a keystroke that never landed (#1109)" {
+  _codex_type_get
+  # an earlier --fix run, or a hand-typed /rename, already left this line
+  printf 'Session renamed to team-alice. To resume run codex resume\n' > "$BATS_TEST_TMPDIR/screen"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }   # keystroke does NOT reach codex
+  sleep() { :; }                                                       # do not wait out the retry loop
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tfailed\trename_not_observed' ]
+}
+
+@test "codex session rename: typed but no confirmation line -> failed rename_not_observed" {
+  _codex_type_get
+  : > "$BATS_TEST_TMPDIR/screen"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  terminal_poke() { printf 'unrelated output\n' >> "$BATS_TEST_TMPDIR/screen"; }   # typed, codex did not confirm
+  sleep() { :; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tfailed\trename_not_observed' ]
+}
+
+@test "codex session rename: a confirmation line for a DIFFERENT name does not count as ours" {
+  _codex_type_get
+  : > "$BATS_TEST_TMPDIR/screen"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  # the pane shows another seat's rename; ours never confirms (name-specific match,
+  # so a malformed or foreign name cannot false-verify -- no overlap with the
+  # unknown:name_malformed screen check, which this path does not use)
+  terminal_poke() { printf 'Session renamed to team-bob. To resume run codex resume\n' >> "$BATS_TEST_TMPDIR/screen"; }
+  sleep() { :; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tfailed\trename_not_observed' ]
+}
+
+@test "codex session rename: never types without positive readiness" {
+  _codex_type_get
+  : > "$BATS_TEST_TMPDIR/screen"
+  # a pane mid-turn: the confirm arm must skip on the readiness gate, before any
+  # keystroke -- the same guard the claude-code arm has, given its own red here so
+  # deleting it cannot pass unnoticed.
+  terminal_team_input_ready() { printf 'not_ready:agent_status_thinking\n'; return 1; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  terminal_poke() { printf 'called\n' > "$BATS_TEST_TMPDIR/poke"; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tskipped\tnot_ready_agent_status_thinking' ]
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}
+
+@test "codex session rename: a transient read failure before the keystroke does not verify a pre-existing line (#1120 advisor)" {
+  _codex_type_get
+  # the pane already carries the line (an earlier run / a hand-typed rename)
+  printf 'Session renamed to team-alice. To resume run codex resume\n' > "$BATS_TEST_TMPDIR/screen"
+  printf '0' > "$BATS_TEST_TMPDIR/peekn"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  # the BEFORE baseline read fails transiently; later reads recover and show the
+  # pre-existing line. A count function that returned 0 on a failed read would set
+  # a false baseline of 0, then count the recovered pre-existing line as new.
+  terminal_peek() {
+    local n; n="$(cat "$BATS_TEST_TMPDIR/peekn")"; n=$((n + 1)); printf '%s' "$n" > "$BATS_TEST_TMPDIR/peekn"
+    [ "$n" -eq 1 ] && return 1
+    cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null
+  }
+  terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }   # keystroke does NOT land
+  sleep() { :; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  # No trustworthy baseline -> nothing typed, nothing verified.
+  [ "${lines[0]}" = $'cli_session\tskipped\tbaseline_unreadable' ]
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}
