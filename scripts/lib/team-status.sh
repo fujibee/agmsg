@@ -136,6 +136,77 @@ agmsg_team_verify_placement() {
   return 0
 }
 
+# Report a fleet property that no per-seat repair can see (#1144): two DIFFERENT
+# agent names claiming the same placement ref. Claims are discovered through
+# every team's registry and agmsg_spawn_path rather than by splitting the flat
+# `spawn.<team>__<agent>` filename -- both names may legally contain `__`, so the
+# filename alone is not reversible. Output rows are:
+#
+#   <ref> TAB <team> TAB <agent> TAB <type>
+#
+# Every collision group is returned: this is deliberately fleet-wide even when
+# team.sh is displaying one team. The same agent name registered in multiple
+# teams is one seat for this check and is not a collision by itself.
+agmsg_team_placement_collisions() {
+  local teams_dir cfg team escaped agent rec ref _project type tab
+  teams_dir="$SKILL_DIR/teams"
+  [ -d "$teams_dir" ] || return 0
+  tab="$(printf '\t')"
+  {
+    for cfg in "$teams_dir"/*/config.json; do
+      [ -f "$cfg" ] || continue
+      team="${cfg%/config.json}"; team="${team##*/}"
+      escaped="$(sed "s/'/''/g" "$cfg")"
+      while IFS= read -r agent; do
+        [ -n "$agent" ] || continue
+        rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || continue
+        [ -f "$rec" ] || continue
+        IFS="$tab" read -r ref _project type < "$rec" 2>/dev/null || continue
+        [ -n "$ref" ] || continue
+        printf '%s\t%s\t%s\t%s\n' "$ref" "$agent" "$team" "$type"
+      done < <(sqlite3 -noheader :memory: \
+        "SELECT key FROM json_each(json_extract('$escaped', '\$.agents')) ORDER BY key;" 2>/dev/null)
+    done
+  } | LC_ALL=C sort -t "$tab" -k1,1 -k2,2 -k3,3 | awk -F '\t' '
+    function flush() {
+      if (distinct > 1) printf "%s", rows
+    }
+    $1 != ref {
+      flush()
+      ref = $1; last_agent = ""; distinct = 0; rows = ""
+    }
+    {
+      if ($2 != last_agent) { distinct++; last_agent = $2 }
+      rows = rows $1 "\t" $3 "\t" $2 "\t" $4 "\n"
+    }
+    END { flush() }
+  '
+}
+
+# Print `absent` only when the terminal establishes BOTH facts: the pane exists,
+# and no agent resides there. Anything weaker is no report -- a shell/other CLI,
+# an unreachable terminal, and a gone pane are not silently folded into empty.
+agmsg_team_collision_resident() {   # <ref> <type> [<type> ...]
+  local ref="$1" terminal pane state result type cli saw_type=0
+  shift
+  terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || return 1
+  pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || return 1
+  agmsg_terminal_load "$terminal" >/dev/null 2>&1 || return 1
+  state="$(terminal_pane_state "$pane" 2>/dev/null)" || return 1
+  [ "$state" = present ] || return 1
+  declare -F terminal_team_input_ready >/dev/null 2>&1 || return 1
+  for type in "$@"; do
+    [ -n "$type" ] || return 1
+    cli="$(agmsg_type_get "$type" cli 2>/dev/null)" || return 1
+    [ -n "$cli" ] || return 1
+    saw_type=1
+    result="$(terminal_team_input_ready "$pane" "$cli" 2>/dev/null)" || true
+    [ "$result" = not_ready:agent_not_found ] || return 1
+  done
+  [ "$saw_type" -eq 1 ] || return 1
+  printf 'absent\n'
+}
+
 _agmsg_team_identity_field_loaded() {
   local field="$1"; shift
   local identity _activity _al _el _ak _ek _as _es pane_cell key_cell session_cell _consistency

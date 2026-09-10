@@ -37,6 +37,43 @@ $(agmsg_known_types | sort -u)
 EOF
 }
 
+# #1144 fleet fixture: one present herdr pane, optionally with no resident agent.
+# Placement records are written for simple names so the test exercises the same
+# agmsg_spawn_path files as production without parsing their filename framing.
+_install_collision_fixture() {
+  local bin="$BATS_TEST_TMPDIR/collision-bin"
+  mkdir -p "$bin"
+  cat > "$bin/herdr" <<'STUB'
+#!/usr/bin/env bash
+case "$1/$2" in
+  agent/list)
+    printf '%s\n' '{"result":{"agents":[{"agent":"","pane_id":"w1:p9","terminal_id":"tm1","tab_id":"t1","workspace_id":"ws1"}]}}'
+    ;;
+  agent/get)
+    if [ "${COLLISION_OCCUPIED:-0}" -eq 1 ]; then
+      printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+      exit 1
+    fi
+    ;;
+  pane/get)
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","agent_status":"idle","label":"","terminal_title":""}}}'
+    ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+}
+
+_join_with_claim() {   # <team> <agent> [ref]
+  local team="$1" agent="$2" ref="${3:-herdr:w1:p9}"
+  bash "$SCRIPTS/join.sh" "$team" "$agent" claude-code /tmp/proj >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '%s\t/tmp/proj\tclaude-code\n' "$ref" > "$TEST_SKILL_DIR/run/spawn.${team}__${agent}"
+}
+
 # Prepend a fake `ps` to PATH so detect_cli_type's process-tree walk can
 # never match a real ancestor process name (e.g. `codex` when this suite
 # itself runs under a live Codex session) -- reports no process name and an
@@ -1144,4 +1181,54 @@ STUB
   # (b) THE POINT: the other seat's pane was never renamed to alice's identity.
   refute grep -q '^pane rename w1:pOTHER ' "$MIS_LOG"
   refute grep -q '^agent rename w1:pOTHER ' "$MIS_LOG"
+}
+
+# --- #1144: report cross-seat placement collisions; never repair them --------
+
+@test "team reports different agents claiming one ref across teams, and a proven empty pane (#1144)" {
+  _install_collision_fixture
+  _join_with_claim alpha alice
+  _join_with_claim beta alice
+  _join_with_claim gamma bob
+
+  run bash "$SCRIPTS/team.sh" alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Placement collisions:"* ]]
+  [[ "$output" == *"ref: herdr:w1:p9"* ]]
+  [[ "$output" == *"- alpha/alice"* ]]
+  [[ "$output" == *"- beta/alice"* ]]
+  [[ "$output" == *"- gamma/bob"* ]]
+  [[ "$output" == *"resident_agent: absent"* ]]
+  # Reporting is read-only: every claim remains byte-for-byte present.
+  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.alpha__alice")" = herdr:w1:p9 ]
+  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.beta__alice")" = herdr:w1:p9 ]
+  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.gamma__bob")" = herdr:w1:p9 ]
+
+}
+
+@test "team does not call one agent registered in two teams a collision (#1144)" {
+  _install_collision_fixture
+  _join_with_claim alpha alice
+  _join_with_claim beta alice
+
+  run bash "$SCRIPTS/team.sh" alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Placement collisions:"* ]]
+}
+
+@test "team reports fleet collisions but does not guess that an occupied pane is empty (#1144)" {
+  _install_collision_fixture
+  _join_with_claim alpha alice herdr:w1:pA
+  _join_with_claim beta bob
+  _join_with_claim gamma carol
+  export COLLISION_OCCUPIED=1
+
+  # The requested team is unrelated: the diagnostic is fleet-wide by design.
+  run bash "$SCRIPTS/team.sh" alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Placement collisions:"* ]]
+  [[ "$output" == *"- beta/bob"* ]]
+  [[ "$output" == *"- gamma/carol"* ]]
+  [[ "$output" != *"- alpha/alice"* ]]
+  [[ "$output" != *"resident_agent: absent"* ]]
 }
