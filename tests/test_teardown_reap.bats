@@ -28,12 +28,32 @@ H
   # matches the real detached launcher — and so that after the reaper's SIGKILL it is
   # reaped by init rather than lingering as a zombie of this test shell, which would
   # still answer `kill -0` and defeat the "it is dead" assertion. It records its own pid.
-  ( "$holder" "$TEST_SKILL_DIR" & printf '%s\n' "$!" > "$TEST_SKILL_DIR/holder.pid" )
-  local hp n=0; hp="$(cat "$TEST_SKILL_DIR/holder.pid" 2>/dev/null)"
-  while [ ! -e "$TEST_SKILL_DIR/run/held.$hp" ] && [ "$n" -lt 100 ]; do
-    sleep 0.05; n=$((n + 1))
-  done
+  # Close the command substitution's stdout/stderr: leaving either descriptor open in
+  # the orphan makes the caller wait for EOF forever before it can reap the holder.
+  ( "$holder" "$TEST_SKILL_DIR" </dev/null >/dev/null 2>&1 & printf '%s\n' "$!" > "$TEST_SKILL_DIR/holder.pid" )
+  local hp; hp="$(cat "$TEST_SKILL_DIR/holder.pid" 2>/dev/null)"
+  _wait_for_holder_ready "$TEST_SKILL_DIR/run/held.$hp" || {
+    echo "holder $hp did not become ready before the bounded wait expired" >&2
+    return 1
+  }
   printf '%s\n' "$hp"
+}
+
+# Wait for the holder to prove it is writing run/, with an explicit ceiling. Keep the
+# knobs injectable so the timeout behavior can be tested without adding five seconds
+# to the suite.
+_wait_for_holder_ready() {
+  local marker="$1" ticks="${2:-100}" interval="${3:-0.05}" n=0
+  while [ ! -e "$marker" ] && [ "$n" -lt "$ticks" ]; do
+    sleep "$interval"
+    n=$((n + 1))
+  done
+  [ -e "$marker" ]
+}
+
+@test "holder readiness times out and fails instead of waiting forever" {
+  run _wait_for_holder_ready "$TEST_SKILL_DIR/never-ready" 2 0.01
+  [ "$status" -ne 0 ]
 }
 
 @test "teardown reaper kills a detached process holding TEST_SKILL_DIR (#662)" {
