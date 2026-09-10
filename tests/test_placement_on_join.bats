@@ -112,3 +112,60 @@ _join() { bash "$SCRIPTS/join.sh" "$1" "$2" claude-code "$PROJ" >/dev/null 2>&1;
 
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
 }
+
+# --- the other direction: one pane cannot be two differently-named seats -------
+#
+# Raised in review of this change: the watcher serves every pair not held by
+# another live session, and "not held" says nothing about where that pair
+# actually is. Passing `record` for each of them would write THIS pane as the
+# placement of whichever one is reached first.
+#
+# It does not, and the reason is not in this file: the #1114 placement guard
+# refuses a pane another seat's record already claims. What is here is the proof
+# that the two changes meet correctly -- each alone is defensible and the seam is
+# where it would go wrong.
+
+@test "placement: a second, differently-named seat does not take the first one's pane (#1128)" {
+  _join team alice
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+
+  # A second seat joins from the SAME pane. It is a different name, so it is not
+  # "this seat under another team" and the guard treats it as what it is.
+  run bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+
+  # alice keeps the pane, and bob did not take it.
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+  [ -z "$(_placement team bob)" ]
+  # And the refusal named the seat that holds it, rather than failing silently.
+  run bash -c "bash '$SCRIPTS/join.sh' team carol claude-code '$PROJ' 2>&1 >/dev/null"
+  grep -q 'already recorded as' <<<"$output"
+  grep -q 'team__alice' <<<"$output"
+}
+
+@test "placement: a broad watcher serving two names records ONE pane, not two (#1128)" {
+  # The shape review asked about, driven through the watcher rather than join.
+  # Both pairs are registered for this project and neither is held elsewhere, so
+  # both are in the watcher's subscription.
+  _join team alice
+  _join team bob
+  rm -f "$SKILL_DIR"/run/spawn.*
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" watch-sid-two "$PROJ" claude-code \
+    >/dev/null 2>&1 3>&- &
+  local pid=$! i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -n "$(_placement team alice)$(_placement team bob)" ] && break
+    sleep 1
+  done
+  sleep 2
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  # Exactly one of them holds this pane. Which one is not the point and is not
+  # asserted -- that would pin an iteration order nothing promises.
+  local n=0
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ] && n=$((n + 1))
+  [ "$(_placement team bob)" = 'tmux:/tmp/s:%3' ] && n=$((n + 1))
+  [ "$n" -eq 1 ] || { echo "seats holding this pane: $n (alice='$(_placement team alice)' bob='$(_placement team bob)')"; return 1; }
+}

@@ -1537,38 +1537,77 @@ M
 # `record`, which is measured: adding it to join.sh:260 leaves every test in this
 # file and in test_actas_integration green. A safe default proves nothing about
 # who takes it.
-@test "join: names the pane but does NOT take the seat's placement" {
+@test "join: this seat's own STALE record is overwritten with where it joined from (#1128)" {
+  # This test used to assert the opposite -- that join names the pane and leaves
+  # the record alone -- and it is rewritten rather than deleted, because the
+  # reason it existed is worth keeping on the page: join does not take the actas
+  # lock, so "may I speak for this seat's placement" is a fair question to ask
+  # of it.
+  #
+  # The answer (#1128): yes, for its OWN record. A seat joining from %1 is at
+  # %1, and a record saying otherwise is stale. Two live instances of one seat
+  # are what the actas exclusivity lock prevents, and it is the same reason the
+  # #1114 placement guard skips this seat's own records rather than treating
+  # them as rivals. What join must NOT do is speak for a seat it is not -- see
+  # the proxy-join test below, which is that half.
   _install_fake_tmux
   export PATH="$FAKEBIN:$PATH"
   export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
 
-  # A placement already held for this identity by whoever actually claimed it,
-  # and a byte-for-byte snapshot of it to compare against afterwards.
+  # A stale record for this identity, pointing at a pane it is no longer in.
   local rec; rec="$(agmsg_spawn_path seatteam alice)"
   mkdir -p "$(dirname "$rec")"
   printf 'tmux:%%HELD\t/proj/OLD\tclaude-code\n' > "$rec"
-  local snapshot="$BATS_TEST_TMPDIR/placement.snapshot"
-  cp "$rec" "$snapshot"
 
   run bash "$SKILL_DIR/scripts/join.sh" seatteam alice claude-code /proj/A
   [ "$status" -eq 0 ]
 
   # Positive control FIRST: join reached the naming step and the pane really was
-  # named. Without it a join that skipped naming altogether also leaves the record
-  # alone, and this test would read that as the property holding.
+  # named. Without it a join that skipped naming altogether would also leave a
+  # record behind, and this test would read that as the property holding.
   grep -q '\[select-pane\]' "$ARGV_LOG" || grep -q '\[set-option\]' "$ARGV_LOG"
 
-  # The seat's placement is not join's to take. `cmp`, not `[ "$(cat …)" = … ]`:
-  # command substitution strips every trailing newline, so the string form is
-  # blind to a rewrite that changes only that — measured, both ways, before this
-  # line was written. Compared against the whole file, not against "a record
-  # exists": a version that emptied it would pass the weaker form.
-  cmp -s "$rec" "$snapshot"
-  # What that file still says, spelled out for the next reader.
-  grep -q '%HELD' "$rec"
-  grep -q '/proj/OLD' "$rec"
+  # The record now says where the seat joined from.
+  local r; IFS=$'\t' read -r r _ < "$rec"
+  [ "$r" = 'tmux:/tmp/fake:%1' ]
+  # And the stale one is gone -- named individually, so a rewrite that appended
+  # instead of replacing is caught.
+  refute grep -q '%HELD' "$rec"
+  refute grep -q '/proj/OLD' "$rec"
+}
+
+@test "join on behalf of ANOTHER seat writes no record (#1128, the #1096 half)" {
+  # The other half, and the one that keeps the test above honest. `spawn` runs
+  # join.sh in the CALLER'S process for the member it is creating (#1096's proxy
+  # join), so everything join resolves "from its own environment" is the
+  # caller's pane, not the new member's. Writing a record there would make the
+  # caller's pane the new member's placement -- #1096 itself, returning through
+  # a different door.
+  #
+  # spawn sets AGMSG_SELF_NAME=off on that one subprocess (spawn.sh), and the
+  # primitive checks it first, so naming and recording both stop. That was read
+  # rather than measured until this test.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local rec; rec="$(agmsg_spawn_path seatteam newmember)"
+  [ ! -f "$rec" ]
+
+  run env AGMSG_SELF_NAME=off bash "$SKILL_DIR/scripts/join.sh" \
+    seatteam newmember claude-code /proj/A
+  [ "$status" -eq 0 ]
+
+  # No record: the caller's pane is not this member's placement.
+  [ ! -f "$rec" ]
+  # And nothing was named either -- the switch is about the whole act, not only
+  # the record. (Positive control that the fake was reachable at all: the
+  # previous test in this file names through the same fake and logs it.)
+  refute grep -q '\[@agmsg_agent\] \[seatteam:newmember\]' "$ARGV_LOG"
 }
 
 # --- AGMSG_TERMINAL_NAMING=off drops the label and keeps the key (#1044) ------
