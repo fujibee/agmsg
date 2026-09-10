@@ -66,18 +66,54 @@ agmsg_renderable_types() {
 # call). Callers set FAKEBIN and ARGV_LOG first; nothing here reads them at
 # source time, so a suite that does not want a fake terminal is unaffected.
 agmsg_install_fake_tmux() {
+  # The label this fake REMEMBERS. A pane option that is set and then never
+  # readable is not a model of tmux: `terminal_label_of` asks a pane which agmsg
+  # label it carries, and code that acts on the answer (the self-naming fast
+  # half, #1130) cannot be tested against a fake that always answers nothing.
+  # So `set-option ... @agmsg_agent <label>` is stored per pane and
+  # `display-message` replays it. Only the one format that asks for the label is
+  # answered; every other format falls through to silence exactly as before, so
+  # suites that depend on this fake's other behaviour are untouched.
+  export FAKE_TMUX_STATE="${FAKE_TMUX_STATE:-$FAKEBIN/tmux.labels}"
+  : > "$FAKE_TMUX_STATE"
   cat > "$FAKEBIN/tmux" <<EOF
 #!/usr/bin/env bash
 { printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
-case "\$1" in
+state='$FAKE_TMUX_STATE'
+args=("\$@")
+if [ "\${args[0]}" = -S ]; then args=("\${args[@]:2}"); fi
+case "\${args[0]}" in
   new-window)   echo '@7' ;;
   split-window) echo '%9' ;;
   capture-pane) printf 'line one\nline two\n' ;;
+  set-option)
+    # set-option -p -t <id> @agmsg_agent <label>
+    if [ "\${args[4]}" = '@agmsg_agent' ]; then
+      pane="\${args[3]}"; label="\${args[5]}"
+      [ -f "\$state" ] && grep -v "^\$pane	" "\$state" > "\$state.new" 2>/dev/null || : > "\$state.new"
+      printf '%s\t%s\n' "\$pane" "\$label" >> "\$state.new"
+      mv "\$state.new" "\$state"
+    fi ;;
+  display-message)
+    # display-message -p -t <id> <format>
+    if [ "\${args[4]}" = '#{pane_id}|#{@agmsg_agent}' ]; then
+      pane="\${args[3]}"
+      label="\$(awk -F'\t' -v p="\$pane" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
+      printf '%s|%s\n' "\$pane" "\$label"
+    fi ;;
 esac
 exit 0
 EOF
   chmod +x "$FAKEBIN/tmux"
   export PATH="$FAKEBIN:$PATH"
+}
+
+# Clear the agmsg label the fake tmux remembers for <pane>, without touching the
+# pane or the server -- the state "someone renamed the pane by hand" leaves.
+agmsg_fake_tmux_clear_label() {   # <pane>
+  [ -f "${FAKE_TMUX_STATE:-}" ] || return 0
+  grep -v "^$1	" "$FAKE_TMUX_STATE" > "$FAKE_TMUX_STATE.new" 2>/dev/null || : > "$FAKE_TMUX_STATE.new"
+  mv "$FAKE_TMUX_STATE.new" "$FAKE_TMUX_STATE"
 }
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
