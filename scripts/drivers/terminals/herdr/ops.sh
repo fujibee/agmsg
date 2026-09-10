@@ -943,9 +943,23 @@ terminal_find_by_label() {   # <label>
   json="$(herdr pane list 2>/dev/null)" || return 10
   [ -n "$json" ] || return 10
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
+  local rows id
+  rows="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
                     WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
-                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null || return 10
+                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null)" || return 10
+  # EMITTER HALF (#1134): print only pane ids in this driver's grammar. herdr's
+  # listing is trusted for labels, not for the shape of its ids, and a row that
+  # is not a pane id is not an answer -- it used to be printed with rc 0 as if
+  # it were one. What this half guarantees: this driver never hands the resolver
+  # a row it could not act on. It does NOT protect the resolver from another
+  # driver's rows, and the resolver does not lean on it: the resolver validates
+  # every row itself before counting (the reader half). Each half has its own
+  # test; fixing one does not make the other's test pass.
+  printf '%s\n' "$rows" | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    _herdr_pane_id_ok "$id" || continue
+    printf '%s\n' "$id"
+  done
   return 0
 }
 

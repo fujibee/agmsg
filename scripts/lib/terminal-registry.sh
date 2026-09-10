@@ -650,6 +650,17 @@ _agmsg_terminal_resolve_by_label() {   # <team> <agent>
     ids="$(terminal_find_by_label "$label" 2>/dev/null)" || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      # READER HALF (#1134): count only rows that are a pane in this driver's own
+      # grammar. A malformed row is not a candidate, so it must not count as one:
+      # counting it made one driver's garbage plus another driver's correct
+      # pane look like two candidates, and the correct pane was refused with the
+      # garbage. What this half guarantees is exactly that -- a driver that speaks
+      # badly cannot suppress a driver that speaks well. It does NOT rely on the
+      # drivers filtering their own output (the herdr emitter does, separately,
+      # and that is a courtesy, not a contract this loop leans on), and it does
+      # NOT decide whether a well-formed candidate is the right pane -- the
+      # confirmation below does that. Two well-formed candidates still refuse.
+      _agmsg_terminal_id_ok "$name" "$line" || continue
       count=$((count + 1))
       found="$name$tab$line"
     done <<EOF

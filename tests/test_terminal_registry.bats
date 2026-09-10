@@ -2656,3 +2656,48 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = ok ]
 }
+
+# --- #1134: a malformed row from one driver must not suppress another's answer -----
+#
+# Two halves, each with its own red. The READER half (the resolver counts only
+# rows in the driver's grammar) is tested with a driver FILE that emits a
+# malformed row directly, so the emitter fix cannot make it pass. The EMITTER
+# half (the herdr driver prints only well-formed ids) is tested by calling the
+# real driver against a fake herdr, so the reader fix cannot make it pass.
+
+@test "resolve_by_label: one driver's malformed row does not suppress another driver's correct pane (#1134 reader)" {
+  # herdr speaks badly: its label search hands back `bad|id`, which is no pane in
+  # any grammar. tmux speaks well: the seat's label is on %5 of its server.
+  printf '\nterminal_find_by_label() { printf "bad|id\\n"; }\n' >> "$SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
+  _fake_tmux_labels "%5=team:alice"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%5"
+  unset HERDR_ENV HERDR_PANE_ID AGMSG_TERMINAL_DRIVER
+
+  run _agmsg_terminal_resolve_by_label team alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "tmux$(printf '\t')/tmp/fake:%5" ]
+}
+
+@test "herdr find_by_label: a listing row whose pane id is outside the grammar is not emitted (#1134 emitter)" {
+  # The listing carries the right label on two rows; one row's id is garbage.
+  # The driver prints the well-formed id only, and still exits 0.
+  _fake_herdr_labels "bad|id=team:alice" "w1:pOK=team:alice"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
+  run terminal_find_by_label team:alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "w1:pOK" ]
+}
+
+@test "resolve_by_label: two WELL-FORMED candidates from two drivers are still refused (#1134 keeps #1112)" {
+  # The fix removes "refused because one driver spoke badly"; it must not remove
+  # "refused because two panes genuinely carry the label".
+  _fake_herdr_labels "w1:pONE=team:alice"
+  _fake_tmux_labels "%7=team:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID="w1:pDAEMON" TMUX="/tmp/fake,1,0" TMUX_PANE="%7"
+  unset AGMSG_TERMINAL_DRIVER
+
+  run _agmsg_terminal_resolve_by_label team alice
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
