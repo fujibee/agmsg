@@ -53,7 +53,8 @@ setup_test_env() {
 # holds $dir without naming it in argv, revisit (add an lsof pass gated on the rm
 # actually failing, so the cost is paid only when it is needed).
 _pids_referencing_dir() {   # <dir>
-  ps -eo pid=,args= 2>/dev/null | awk -v d="$1" -v me="$$" 'index($0, d) { if ($1+0 != me+0) print $1 }'
+  ps -eo pid=,args= 2>/dev/null |
+    AGMSG_REAP_DIR="$1" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
 }
 
 # Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the

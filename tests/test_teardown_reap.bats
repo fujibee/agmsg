@@ -78,6 +78,12 @@ _wait_for_holder_ready() {
   [ "$status" -eq 0 ]
 }
 
+@test "teardown process scan does not report its own awk probe" {
+  run _pids_referencing_dir "$TEST_SKILL_DIR"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "teardown reaper fails when its bounded wait expires" {
   # Keep the process list non-empty while replacing the side effects with no-ops. The
   # 60-tick ceiling then runs quickly and this test proves timeout is not reported green.
