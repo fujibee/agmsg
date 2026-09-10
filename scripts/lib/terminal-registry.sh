@@ -566,11 +566,14 @@ agmsg_terminal_ref_id() {
 # STOP-GAP (#1114, guarding the regression #1111 exposed). Delete this and its
 # caller when #1112 lands.
 #
-# "Other seat" means another AGENT NAME, in any team. run/ is flat and one seat
-# registered in two teams has two records (spawn.<team1>__<x>, spawn.<team2>__<x>)
-# for the same pane; the second must not be blocked by the first, or a seat that
-# acts in its second team can never be recorded there (measured on this host,
-# where every seat is in two teams).
+# "Other seat" means a record that is not THIS agent's in any existing team.
+# run/ is flat and one seat registered in two teams has two records
+# (spawn.<team1>__<x>, spawn.<team2>__<x>) for the same pane; the second must not
+# be blocked by the first, or a seat that acts in its second team can never be
+# recorded there (measured on this host, where every seat is in two teams).
+# "This agent's" is decided by building the record path for each team on disk
+# with the same encoder and comparing whole file names -- "__" is legal inside
+# a name, so the file name cannot be cut at a separator.
 #
 # Since #1111 a seat records its own placement when it acts, resolving the pane
 # from its OWN environment. For codex that environment is not its own: those
@@ -621,23 +624,48 @@ _agmsg_placement_split() {   # <ref>
   return 0
 }
 
-_agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
-  local ref="$1" mine="$2" dir f first
-  [ -n "$ref" ] || return 0
+# <ref> <team> <agent>
+#   Prints the claimant as its record file spells it ("<team>__<agent>", encoded)
+#   when ANOTHER seat's record claims this pane; prints nothing when the pane is
+#   unclaimed. Returns 1 when this seat's OWN ref cannot be parsed: ownership is
+#   then undecidable and the caller must not name or record (fail-closed).
+_agmsg_placement_claimed_by() {
+  local ref="$1" team="$2" agent="$3" dir f first mine enc_agent t is_mine
+  local want_term want_id want_sock
+  _agmsg_placement_split "$ref" || return 1          # undecidable, not "unclaimed"
+  want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
+  mine="$(agmsg_spawn_path "$team" "$agent")" || return 1
   dir="$(dirname "$mine")"
   [ -d "$dir" ] || return 0
-  local want_term want_id want_sock
-  _agmsg_placement_split "$ref" || return 0
-  want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
+  enc_agent="$(_actas_lock_encode "$agent")"
   for f in "$dir"/spawn.*; do
     [ -f "$f" ] || continue
-    # This seat's own records -- its own file, and the same seat under another
-    # team: the agent part of the file name is the seat, the team part is which
-    # roster it acted in. Neither is a rival claim. One rule, so one seam.
-    [ "${f##*__}" = "${mine##*__}" ] && continue
-    IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
-    [ -n "$first" ] || continue
-    _agmsg_placement_split "$first" || continue
+    [ "$f" = "$mine" ] && continue
+    # This seat under another team is not a rival. "This seat" is decided
+    # EXACTLY: the file equals this agent's record path for a team that exists
+    # on disk, spelled by the same encoder -- never by cutting the file name at
+    # a separator, because "__" is legal inside a name and cutting there made a
+    # peer called "foo__bar" look like "bar". The suffix test is only a cheap
+    # pre-filter before the exact comparison.
+    is_mine=0
+    case "$f" in
+      *"__$enc_agent")
+        for t in "$(dirname "$dir")"/teams/*/; do
+          [ -d "$t" ] || continue
+          t="${t%/}"; t="${t##*/}"
+          [ "$f" = "$(agmsg_spawn_path "$t" "$agent")" ] && { is_mine=1; break; }
+        done ;;
+    esac
+    [ "$is_mine" -eq 1 ] && continue
+    IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || first=""
+    # A record whose ref cannot be read as a pane -- empty, unreadable, or an
+    # unknown spelling -- cannot be ruled out as THIS pane, so it claims. Naming
+    # it lets a person drop it; waving it through is the fail-open this guard
+    # exists to close.
+    if [ -z "$first" ] || ! _agmsg_placement_split "$first"; then
+      printf '%s' "${f##*/spawn.}"
+      return 0
+    fi
     [ "$_AGMSG_PS_TERM" = "$want_term" ] || continue
     [ "$_AGMSG_PS_ID" = "$want_id" ] || continue
     # Same terminal, same pane id. The sockets decide whether that is the same
@@ -756,15 +784,18 @@ agmsg_terminal_name_self() {
     . "$SKILL_DIR/scripts/lib/actas-lock.sh" 2>/dev/null || true
   fi
   if declare -F agmsg_spawn_path >/dev/null 2>&1; then
-    local _claim_rec="" _claim_ref="" _claimed_by=""
-    _claim_rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || _claim_rec=""
+    local _claim_ref="" _claimed_by="" _claim_rc=0
     _claim_ref="$(agmsg_terminal_ref "$terminal" "$id" 2>/dev/null)" || _claim_ref=""
-    if [ -n "$_claim_rec" ] && [ -n "$_claim_ref" ]; then
-      _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$_claim_rec")"
-      if [ -n "$_claimed_by" ]; then
-        echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
-        return 0
-      fi
+    # Undecidable (this seat's own ref cannot be parsed, or its record path
+    # cannot be built) is not "unclaimed": neither name nor record then.
+    _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$team" "$agent")" || _claim_rc=$?
+    if [ "$_claim_rc" -ne 0 ]; then
+      echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+      return 0
+    fi
+    if [ -n "$_claimed_by" ]; then
+      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+      return 0
     fi
   fi
 

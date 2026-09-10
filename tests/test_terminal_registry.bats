@@ -2195,6 +2195,10 @@ _tmux_op_args() {
   export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
 
+  # Both teams exist on disk: "this seat under another team" is decided by
+  # rebuilding this agent's record path for each existing team, never by
+  # cutting the file name.
+  mkdir -p "$SKILL_DIR/teams/otherteam" "$SKILL_DIR/teams/seatteam"
   local other_team; other_team="$(agmsg_spawn_path otherteam twice)"
   mkdir -p "$(dirname "$other_team")"
   printf 'tmux:/tmp/fake:%%1\t/proj/MINE\tclaude-code\n' > "$other_team"
@@ -2283,4 +2287,94 @@ _tmux_op_args() {
   # And an unknown scheme is refused by both.
   refute _agmsg_placement_split 'bogus:thing'
   refute agmsg_terminal_ref_terminal 'bogus:thing'
+}
+
+# --- #1114 follow-up (review): "this seat" is exact, and unreadable is a claim ------
+
+@test "placement guard: a peer whose name ENDS in this seat's name is another seat (#1114 review)" {
+  # "__" is legal inside an agent name (validate allows it). Cutting the record
+  # file name at the last "__" made peer foo__bar look like bar, and bar took
+  # foo__bar's pane. The comparison is on whole record paths built by the
+  # encoder for each existing team, so the peer is a rival here.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  mkdir -p "$SKILL_DIR/teams/seatteam"
+
+  local peer; peer="$(agmsg_spawn_path seatteam foo__bar)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+
+  local mine; mine="$(agmsg_spawn_path seatteam bar)"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" seatteam bar /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q 'seatteam__foo__bar' <<<"$output"
+  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
+  refute test -e "$mine"
+
+  # And the mirror: this seat is foo__bar, the peer is bar -- still a rival.
+  rm -f "$peer"
+  peer="$(agmsg_spawn_path seatteam bar)"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$peer"
+  mine="$(agmsg_spawn_path seatteam foo__bar)"
+  run agmsg_terminal_name_self "" seatteam foo__bar /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'seatteam__bar' <<<"$output"
+  refute test -e "$mine"
+}
+
+@test "placement guard: a peer record whose ref cannot be read as a pane is a CLAIM, not a pass (#1114 review)" {
+  # unknown spelling, and an empty record: neither can be ruled out as this
+  # pane, so both claim and are named, so a person can drop them.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+
+  local peer; peer="$(agmsg_spawn_path seatteam garbled)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'unknown:ref\t/proj/PEER\tclaude-code\n' > "$peer"
+  local mine; mine="$(agmsg_spawn_path seatteam careful)"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" seatteam careful /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q 'seatteam__garbled' <<<"$output"
+  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
+  refute test -e "$mine"
+
+  rm -f "$peer"
+  peer="$(agmsg_spawn_path seatteam blank)"
+  : > "$peer"
+  run agmsg_terminal_name_self "" seatteam careful /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'seatteam__blank' <<<"$output"
+  refute test -e "$mine"
+}
+
+@test "placement guard: this seat's OWN ref unreadable as a pane is undecidable -> neither named nor recorded (#1114 review)" {
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  mkdir -p "$SKILL_DIR/run"
+
+  # The helper itself: rc 1, prints nothing.
+  run _agmsg_placement_claimed_by 'bogus:thing' seatteam who
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+
+  # Through the naming function, with the ref composer handing back a spelling
+  # the guard cannot read: the seat says so, types nothing, records nothing.
+  agmsg_terminal_ref() { printf 'bogus:thing\n'; }
+  local mine; mine="$(agmsg_spawn_path seatteam who)"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" seatteam who /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'cannot be read as a pane' <<<"$output"
+  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
+  refute test -e "$mine"
 }
