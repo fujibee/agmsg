@@ -24,8 +24,10 @@
 #   terminal_spawn <name> <project> <target> <boot...>   RECORD op: create a pane/window,
 #                                       launch boot, print the new bare pane id.
 #   terminal_despawn <id>               control op: kill the pane/window named by bare <id>.
-#   terminal_peek <id> [--lines N]      RECORD op: print visible pane text verbatim (NOT
-#                                       parsed). unsupported -> exit 13, reason on stderr.
+#   terminal_peek <id> [--lines N]      RECORD op: print pane text verbatim (NOT parsed).
+#                                       With --lines, request scrollback depth N; shipped
+#                                       pane drivers pass N unchanged to their backend.
+#                                       unsupported -> exit 13, reason on stderr.
 #   terminal_poke <id> <text>           control op: send text and submit. unsupported -> 13.
 #   terminal_pane_state <id>            READ ONLY: is that pane still there?
 #                                       Prints gone / present / unknown and
