@@ -1144,6 +1144,26 @@ jobs:
       - name: No status read that errexit already decided
         run: .github/scripts/check-errexit-status-reads.sh
 
+  unguarded-env-reads:
+    name: unguarded env reads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Unconditional, like its two siblings above: a job that skips on some
+    # diffs is a required context that can sit pending. It is a static read of
+    # `scripts/**/*.sh`.
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite cannot do this one. Every entry point that reaches those
+      # files runs `set -euo pipefail`; tests/test_helper.bash sets no shell
+      # options, so a read that is only fatal under `-u` never fires in a test.
+      # Measured (#1129): with `set -u` forced into the helper, all 102 suites
+      # produced 8 reds and none was a defect in scripts/ -- and the suite was
+      # 129/129 green on the tree that still held the one confirmed defect of
+      # this class (#1126).
+      - name: No unguarded environment read
+        run: .github/scripts/check-unguarded-env-reads.sh
+
   private-names:
     name: internal names
     runs-on: ubuntu-latest
