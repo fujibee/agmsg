@@ -172,6 +172,11 @@ agmsg_team_fix_pane_names_loaded() {
 # thing that separates this rename from a prior one. Unreadable pane -> 0.
 _agmsg_rename_confirm_count() {   # <pane> <confirm_prefix> <expected>
   local screen
+  # Ask for a generous window so a pre-existing line is captured too. Drivers honor
+  # this differently -- tmux takes --lines as given; the herdr driver maps it to its
+  # own recent window (~80 lines) and ignores a larger number -- so this is a
+  # request, not a guarantee of depth. It does not need to be: before and after read
+  # the SAME window on the SAME driver, so the count DELTA is valid whatever the depth.
   screen="$(terminal_peek "$1" --lines 400 2>/dev/null)" || { printf '0\n'; return 0; }
   printf '%s\n' "$screen" | grep -cF -- "$2 $3." || true
 }

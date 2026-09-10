@@ -693,3 +693,18 @@ _codex_type_get() {   # codex declares rename_cmd + rename_confirm; name not on 
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = $'cli_session\tfailed\trename_not_observed' ]
 }
+
+@test "codex session rename: never types without positive readiness" {
+  _codex_type_get
+  : > "$BATS_TEST_TMPDIR/screen"
+  # a pane mid-turn: the confirm arm must skip on the readiness gate, before any
+  # keystroke -- the same guard the claude-code arm has, given its own red here so
+  # deleting it cannot pass unnoticed.
+  terminal_team_input_ready() { printf 'not_ready:agent_status_thinking\n'; return 1; }
+  terminal_peek() { cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null; }
+  terminal_poke() { printf 'called\n' > "$BATS_TEST_TMPDIR/poke"; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = $'cli_session\tskipped\tnot_ready_agent_status_thinking' ]
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}
