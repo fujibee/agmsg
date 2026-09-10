@@ -1216,6 +1216,7 @@ _install_norecord_tmux_fixture() {
 printf '%s\n' "$*" >> "$NRT_LOG"
 t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
 _label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+sock=""; [ "$1" = -S ] && sock="$2"
 case "$* " in
   *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
   *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
@@ -1226,6 +1227,14 @@ exit 0
 STUB
   chmod +x "$bin/tmux"
   export PATH="$bin:$PATH"
+  # A real socket in a real socket directory: #1146 enumerates that directory and
+  # tests `[ -S ]` on each entry. A stub on PATH alone leaves nothing to
+  # enumerate, and the no-$TMUX arm would then be measuring "this fixture has no
+  # sockets" while reading as "the resolver declined".
+  export NRT_SOCKDIR="$BATS_TEST_TMPDIR/socks"
+  mkdir -p "$NRT_SOCKDIR/tmux-$(id -u)"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+    "$NRT_SOCKDIR/tmux-$(id -u)/srv" 2>/dev/null || true
   # $TMUX is set here to give the resolver a socket, so this pins the record LOGIC
   # (a socket-qualified tmux ref is created from the label). It is NOT the real
   # --fix environment: --fix runs from OUTSIDE the seat's pane, where $TMUX is
@@ -1258,15 +1267,25 @@ STUB
   refute grep -q 'set-option .*-t %22 ' "$NRT_LOG"
 }
 
-# The measured LIVE gap (#1146): --fix runs from OUTSIDE the seat's pane, so it has
-# no $TMUX, and the tmux resolver abstains without it (#1132). So a tmux seat is not
-# actually reached by --fix today -- the same fixture, minus the $TMUX artifice.
-# This is the canary: when #1146 gives the resolver a socket without $TMUX, this
-# flips to a created record and this assertion reddens, saying the limitation lifted.
-@test "team --fix does not YET reach a tmux seat run from outside its pane -- no \$TMUX (#1146)" {
+# This began as a canary for a limitation: `--fix` runs from OUTSIDE the seat's
+# pane, so it has no $TMUX, and the tmux resolver abstained without one (#1132) --
+# a tmux seat could not be repaired by the command meant to repair it. The canary
+# said "not yet", and was written to redden when the limitation lifted.
+#
+# It lifted (#1146): the resolver enumerates the socket directory and qualifies
+# every hit with the socket it came from, so it answers without $TMUX and still
+# never emits a bare `%N`. Turned over rather than deleted, so what it guarded
+# stays visible -- the same fixture, still with no $TMUX, now has to produce the
+# record.
+@test "team --fix reaches a tmux seat run from outside its pane, with no $TMUX (#1146)" {
   _install_norecord_tmux_fixture
   unset TMUX
+  export TMUX_TMPDIR="$NRT_SOCKDIR"
   run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
   [ "$status" -eq 0 ]
-  [ ! -e "$NRT_REC" ]
+  [ -e "$NRT_REC" ]
+  # What it wrote names the server it came from: lifting the limitation must not
+  # relax the hazard the partner test guards (#1051).
+  grep -q 'tmux:' "$NRT_REC"
+  refute grep -qE 'tmux:%[0-9]+' "$NRT_REC"
 }
