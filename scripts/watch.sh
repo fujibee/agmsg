@@ -841,12 +841,26 @@ fi
 # session id and its pairs just as well, and the requirement is about the pane
 # having a name, not about which mode the watcher is in.
 #
-# No record is written: holding the seat is `actas`'s claim to make, and a
-# watcher can be running for a seat it did not claim.
+# `record` IS written (#1128). The older reason not to -- "a watcher can be
+# running for a seat it did not claim" -- is about the actas EXCLUSIVITY claim,
+# which is a different claim from placement: one says who may act as the seat,
+# the other says which pane the seat is in. And the pairs that reach here have
+# already had the first question answered: the actas-lock filter above removed
+# every pair owned by another live session, so what is left is pairs this
+# process legitimately serves, in the pane this process is in.
+#
+# The watcher matters here because it is one of the two places a seat that was
+# named without a record gets picked up later -- and it was missing `record` for
+# the same reason join was (#1111).
+#
+# With more than one DIFFERENTLY-named pair in one pane, the second is refused by
+# the placement guard and says so on stderr; that is the guard working as
+# designed (#1114), not this call being wrong. Pairs that differ only by TEAM are
+# the same seat and are not refused.
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   while IFS=$'\t' read -r _nt _na; do
     [ -z "$_nt" ] && continue
-    agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" || true
+    agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" record || true
   done <<< "$PAIRS"
 fi
 

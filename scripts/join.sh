@@ -256,8 +256,17 @@ set +e
 [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_tr_rc=$?
 [ "$_agmsg_tr_e" = 1 ] && set -e
+# `record`, because joining is the moment this seat becomes addressable and the
+# placement record is what peek/poke/despawn resolve through (#1128). Without it
+# a seat that joined and has not acted yet is named but unreachable -- and the
+# two later chances to pick it up, the watcher and the inbox read, were missing
+# it for the same reason.
+#
+# This process is the seat: join runs in the pane that is joining, and name_self
+# resolves the caller's own pane. See the note at the `record` gate in
+# terminal-registry.sh for the paths that must NOT pass it.
 if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
+  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" record || true
 fi
 
 echo "Joined team $TEAM as $AGENT_ID"

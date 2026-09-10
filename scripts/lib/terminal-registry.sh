@@ -821,13 +821,28 @@ agmsg_terminal_name_self() {
   # this function only ever names the CALLER'S OWN pane -- resolved from the
   # caller's session id or, with an empty sid, its environment (above) -- so
   # `record` asserts "the pane I just resolved as mine is where I live". The
-  # callers that pass it are exactly the self-locating ones: SessionStart and
-  # actas name the seat as it starts, and the action hook (self-name.sh) does the
-  # same on every action for a hand-started seat that was never recorded (#1109).
-  # A future path that names a pane it was HANDED -- batch relabeling of someone
-  # else's pane -- must NOT pass record: it is not that seat and cannot speak for
-  # its placement. (spawn records too, but writes the record itself for the CHILD
-  # pane it created; it does not reach this line.)
+  # callers that pass it are exactly the self-locating ones -- every path that
+  # runs IN the seat's own process, ABOUT itself:
+  #
+  #   join.sh          the seat registers; this is when it becomes addressable
+  #   actas-claim.sh   the seat takes a role
+  #   session-start.sh the seat starts
+  #   watch.sh         the watcher re-arms for pairs this process serves
+  #   check-inbox.sh   the seat reads its own inbox
+  #   lib/self-name.sh the action hook, for a hand-started seat (#1109)
+  #
+  # The first, fourth and fifth did NOT pass it until #1128, so a seat that
+  # joined and had not acted yet was named and unrecorded -- addressable by
+  # label, unreachable by peek/poke, with both later chances to notice it also
+  # silent.
+  #
+  # The exclusion is not "which script" but "who is being named". A path that
+  # names a pane it was HANDED -- batch relabeling of someone else's pane -- must
+  # NOT pass record: it is not that seat and cannot speak for its placement. That
+  # is why spawn is absent from the list above even though it names a pane and
+  # writes a record: it runs in the PARENT's process on behalf of a child, so it
+  # writes the child's record itself rather than reaching this line, and the
+  # parent's own placement is never what it is claiming.
   [ "$write_record" = record ] || return 0
 
   # The record is what despawn/peek/poke resolve through, so it is written only

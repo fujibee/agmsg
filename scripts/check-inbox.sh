@@ -254,7 +254,10 @@ if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/n
   # depend on that staying true.
   for _nteam in ${TEAM_LIST[@]+"${TEAM_LIST[@]}"}; do
     [ -n "$_nteam" ] || continue
-    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" || true
+    # `record`: the second of the two later chances to record a seat that was
+    # named without one (#1128). This process is the seat -- the inbox is read in
+    # the seat's own pane -- so it may speak for its placement.
+    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" record || true
   done
 fi
 
