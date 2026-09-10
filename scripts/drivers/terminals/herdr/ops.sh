@@ -292,9 +292,18 @@ _herdr_pane_id_ok() {
   # ONE herdr pane grammar (do not implement the predicate twice). The herdr
   # driver is always loaded through the registry, so the helper is in scope; a bare
   # source without it falls back to the inline grammar rather than accepting anything.
-  if declare -F _agmsg_terminal_id_ok >/dev/null 2>&1; then
-    _agmsg_terminal_id_ok herdr "$1"; return $?
-  fi
+  # The grammar lives in terminal_id_ok below (the driver ABI hook the registry
+  # asks); this is its local name. It used to delegate UP to the registry, which
+  # held a case over three drivers -- the #1141 review turned that around: the
+  # driver is the authority on its own ids, the registry asks.
+  terminal_id_ok "$1"
+}
+
+# ABI hook: is <id> a herdr pane id in THIS driver's grammar? Asked by the
+# registry (`_agmsg_terminal_id_ok herdr <id>`) for every row the label
+# resolver reads and every ref it validates; a malformed row must answer no.
+#   w<workspace>:p<pane>, alphanumerics only, exactly one colon.
+terminal_id_ok() {   # <id>
   case "$1" in
     w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;
     *) return 1 ;;
@@ -948,9 +957,23 @@ terminal_find_by_label() {   # <label>
   json="$(herdr pane list 2>/dev/null)" || return 10
   [ -n "$json" ] || return 10
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
+  local rows id
+  rows="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
                     WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
-                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null || return 10
+                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null)" || return 10
+  # EMITTER HALF (#1134): print only pane ids in this driver's grammar. herdr's
+  # listing is trusted for labels, not for the shape of its ids, and a row that
+  # is not a pane id is not an answer -- it used to be printed with rc 0 as if
+  # it were one. What this half guarantees: this driver never hands the resolver
+  # a row it could not act on. It does NOT protect the resolver from another
+  # driver's rows, and the resolver does not lean on it: the resolver validates
+  # every row itself before counting (the reader half). Each half has its own
+  # test; fixing one does not make the other's test pass.
+  printf '%s\n' "$rows" | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    _herdr_pane_id_ok "$id" || continue
+    printf '%s\n' "$id"
+  done
   return 0
 }
 

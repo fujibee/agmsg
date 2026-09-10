@@ -152,6 +152,38 @@ terminal_detect() {
 _tmux_sock_of() { case "$1" in *:*) printf '%s' "${1%:*}" ;; *) printf '' ;; esac; }
 _tmux_bare_of() { printf '%s' "${1##*:}"; }
 
+# ABI hook: is <id> a tmux pane ref in THIS driver's grammar? Asked by the
+# registry (`_agmsg_terminal_id_ok tmux <id>`) for every row the label resolver
+# reads and every ref it validates. The grammar moved here from the registry
+# (#1141 review): a driver is the authority on its own ids.
+#
+# Two accepted forms, and the older one is accepted on purpose:
+#   <socket-path>:%N / <socket-path>:@N   written since refs carry the server
+#   %N / @N                               a record written before they did
+# A pane id is not unique across tmux servers (measured: two servers both
+# holding %0), so the socket is what makes a ref answerable. The legacy form
+# still resolves -- it just cannot be asked "is it still there?" (#1051).
+#
+# Split on the LAST colon: a socket path may contain one.
+terminal_id_ok() {   # <id>
+  local id="$1" rest _sock=""
+  case "$id" in
+    *:*) _sock="${id%:*}"; id="${id##*:}"
+         [ -n "$_sock" ] || return 1
+         # What breaks a record is a TAB or a newline -- it is one TAB-separated
+         # line -- not an ordinary space, and socket paths under a home
+         # directory containing a space are perfectly normal. So reject the
+         # CONTROL bytes (TAB 0x09, LF, CR and the rest) and let 0x20 through:
+         # [[:cntrl:]] is exactly that split, where [[:space:]] also swallows
+         # the space and would refuse a legitimate path.
+         case "$_sock" in *[[:cntrl:]]*) return 1 ;; esac ;;
+  esac
+  case "$id" in %*|@*) : ;; *) return 1 ;; esac
+  rest="${id#?}"
+  case "$rest" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
 # Run tmux against the server that owns <id>. With no socket in the id this is
 # plain `tmux`, which is what a legacy record gets and what the ambient
 # environment decides — the honest behaviour for a ref that does not say.
