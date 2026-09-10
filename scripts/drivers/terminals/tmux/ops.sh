@@ -446,6 +446,98 @@ terminal_poke() {
 # <mode> is `key` or absent — see the herdr driver for the split. Here the
 # `@agmsg_agent` pane option is the resolvable one and the window name / pane
 # title is the decoration, so `key` sets the option and stops.
+# Which panes carry this agmsg label? One id per line, socket-qualified like every
+# other id this driver hands out; no match prints nothing and still returns 0.
+#
+# The label is not AUTHORITATIVE -- it is a more recent observation than the
+# alternatives, and that is a weaker claim on purpose. `spawn` writes it, `team
+# --fix` repairs it, and a seat writes it for itself: it is written by the very
+# machinery that is producing wrong answers, so a wrong label is possible and
+# nothing here can rule one out.
+#
+# What it is not is INHERITED. A seat resolves its own pane from $TMUX_PANE, and
+# for an agent whose commands run somewhere other than its pane -- codex, through
+# one shared app-server -- that answer belongs to whoever started the daemon, so
+# every seat under it resolves the same pane, confidently and identically
+# (#1112). `@agmsg_agent` was set on the pane that was actually named, one pane
+# at a time, so asking the server who carries the label asks about a value that
+# was written per pane rather than one that was copied into a process.
+#
+# One call, and the whole server: `-a` so a seat in another session still finds
+# itself. Nothing is filtered by the caller's own $TMUX_PANE on purpose -- that
+# is the value under suspicion.
+#
+# THE ID GOES FIRST and the row is split at the FIRST separator, because only the
+# id is constrained. `validate.sh` is a deny-list of path/JSON hazards and '|' is
+# deliberately not among them, so `team|alice` is a legal pair and its label
+# carries a '|' (#1122 review). A trailing label read as "everything after the
+# first separator" survives that; `-F '|'` and field 2 does not -- it would take
+# `team` and call it the whole label, matching a pane that carries a DIFFERENT
+# label whose first segment happens to agree. A pane id is `%<n>`/`@<n>` and can
+# never contain the separator, so putting it in front makes the split exact for
+# every label, not for the ones without a '|' in them.
+#
+# (A label containing a NEWLINE would still split the row itself. That one is
+# closed upstream: `validate.sh` rejects control characters in both halves of the
+# pair, which is why the separator is the only case left to handle here.)
+terminal_find_by_label() {   # <label>
+  local label="$1" out sock
+  [ -n "$label" ] || return 0
+  command -v tmux >/dev/null 2>&1 || return 10
+  sock="${TMUX%%,*}"
+  out="$(_tmux_do "${sock:+$sock:}" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || return 10
+  printf '%s\n' "$out" | awk -v want="$label" -v sock="$sock" '
+    {
+      p = index($0, "|")
+      if (p == 0) next
+      id = substr($0, 1, p - 1)
+      if (substr($0, p + 1) != want) next
+      if (sock != "") printf "%s:%s\n", sock, id; else print id
+    }'
+  return 0
+}
+
+# What agmsg label does THIS one pane carry? Prints it and returns 0; 1 when the
+# pane carries none, 10 when the server could not be reached, 13 for a ref this
+# driver cannot address.
+#
+# The confirmation half of `terminal_find_by_label`: the listing above is a
+# filter, and a filter that is too loose hands back somebody else's pane with
+# nothing in the count to notice. This asks the server about the single pane the
+# listing chose, through a DIFFERENT query (`display-message -t <id>` rather than
+# `list-panes -a`), so a wrong answer has to be wrong twice.
+#
+# Why this op exists rather than reading `terminal_team_observe`: the label does
+# not live in the same observation field for every driver. tmux has no pane-label
+# field of its own, so it publishes the pair as the KEY (`@agmsg_agent`) and its
+# label field is a constant `n/a:no_independent_field`; herdr has a real pane
+# label and its key is a hash. Reading a fixed field position therefore asks the
+# two drivers different questions -- and asked of tmux, a question whose answer
+# can never equal the label. That is not hypothetical: it shipped in the first
+# revision of #1112 and made the tmux label path fail its confirmation every
+# time, silently, while the herdr tests stayed green (#1122 review).
+#
+# Same identity canary as `terminal_team_observe`, for the same reason: the id
+# names a pane on the server the ref points at, and reading a same-numbered pane
+# on another server would answer confidently about the wrong one (#1051). The id
+# is asked for FIRST so the split at the first '|' lands on the constrained side
+# -- see above.
+terminal_label_of() {   # <id>
+  local id="$1" bare idfield facts seen label
+  [ -n "$id" ] || return 13
+  command -v tmux >/dev/null 2>&1 || return 10
+  bare="$(_tmux_bare_of "$id")"
+  idfield="$(_tmux_identity_field "$bare")" || return 13
+  facts="$(_tmux_do "$id" display-message -p -t "$bare" "$idfield|#{@agmsg_agent}" 2>/dev/null)" || return 10
+  case "$facts" in *'|'*) : ;; *) return 10 ;; esac
+  seen="${facts%%|*}"
+  label="${facts#*|}"
+  [ "$seen" = "$bare" ] || return 10
+  [ -n "$label" ] || return 1
+  printf '%s\n' "$label"
+  return 0
+}
+
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label
   label="$team:$name"

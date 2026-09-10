@@ -918,6 +918,63 @@ _herdr_internal_key() {
 # placement record's pane id. So under `key` that name is still established and
 # only the decoration is skipped —
 # and a key that cannot be set is an error there, because nothing else happened.
+# Which panes carry this agmsg label? One pane id per line; no match prints
+# nothing and still returns 0.
+#
+# `herdr pane list` returns every pane WITH its label in one call (measured: 38
+# panes, label present on each named one, null on the unnamed), so this needs no
+# per-pane round trip.
+#
+# This exists because neither of the other two ways to answer "which pane am I"
+# works for a codex seat (#1112). Its commands run under one shared app-server,
+# not in its pane, so the inherited HERDR_PANE_ID is the daemon's pane and all of
+# them resolve the same one; and herdr's own agent_session for those panes does
+# not match the thread actually running there. The label depends on neither -- it
+# was written per pane rather than inherited by a process.
+#
+# Which is a claim about its FAILURE MODE, not about its truth: the label is
+# written by `spawn`, repaired by `team --fix` and written by seats themselves,
+# so it is written by the same machinery that is producing the wrong answers.
+# Less likely to be wrong, not known to be right.
+terminal_find_by_label() {   # <label>
+  local label="$1" json esc
+  [ -n "$label" ] || return 0
+  command -v herdr >/dev/null 2>&1 || return 10
+  json="$(herdr pane list 2>/dev/null)" || return 10
+  [ -n "$json" ] || return 10
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
+                    WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
+                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null || return 10
+  return 0
+}
+
+# What agmsg label does THIS one pane carry? Prints it and returns 0; 1 when the
+# pane carries none, 10 when herdr could not be reached, 13 for a ref this driver
+# cannot address.
+#
+# The confirmation half of `terminal_find_by_label` -- see the tmux driver for
+# why this is its own op and not a field of `terminal_team_observe`. Here it is
+# `herdr pane get <id>` against the listing's `herdr pane list`: one pane asked
+# about by name, so a listing whose filter was loose does not get to answer for
+# itself.
+terminal_label_of() {   # <id>
+  local id="$1" pane_json esc label
+  [ -n "$id" ] || return 13
+  command -v herdr >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  pane_json="$(herdr pane get "$id" 2>/dev/null)" || return 10
+  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  # NULLIF: json_extract returns SQL NULL for a missing key and '' for a key set
+  # to the empty string, and both mean "this pane carries no label" -- neither is
+  # a label to confirm against. COALESCE alone would let '' through and an empty
+  # target would then confirm itself.
+  label="$(sqlite3 :memory: "SELECT COALESCE(NULLIF(json_extract('$esc','\$.result.pane.label'),''),'')" 2>/dev/null)" || return 10
+  [ -n "$label" ] || return 1
+  printf '%s\n' "$label"
+  return 0
+}
+
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$(_herdr_label "$team" "$name")"
