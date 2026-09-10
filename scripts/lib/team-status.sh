@@ -148,6 +148,17 @@ agmsg_team_verify_placement() {
 # ITSELF is an environment decision and is out of scope; this only lets an outside
 # --fix place it.)
 #
+# EFFECTIVE FOR herdr NOW; tmux WAITS ON #1146. This is only as good as the label
+# resolver, and for tmux the resolver cannot answer from where --fix runs: --fix
+# runs from OUTSIDE the seat's pane (that is its whole purpose), so $TMUX is unset,
+# and terminal_find_by_label abstains without it (#1132/#1126 -- a bare `%N` with
+# no socket is not a resolvable ref, #1051). herdr's `pane list` needs no such
+# environment, so herdr seats are placed today; tmux seats will be once #1146 gives
+# the resolver a socket without $TMUX. Measured live (2026-09-10): a tmux seat
+# stays no_placement_record. This function is correct either way -- when the
+# resolver answers, it places; when it abstains, it leaves the seat unfixable, as
+# before.
+#
 #   agmsg_team_create_placement_from_label <team> <agent> <rec-path> <project> <type>
 #     -> prints the created ref, rc 0; or nothing, rc 1.
 agmsg_team_create_placement_from_label() {

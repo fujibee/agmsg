@@ -1226,7 +1226,13 @@ exit 0
 STUB
   chmod +x "$bin/tmux"
   export PATH="$bin:$PATH"
-  export TMUX="/tmp/tsock,999,0"           # provide the socket so the ref is socket-qualified
+  # $TMUX is set here to give the resolver a socket, so this pins the record LOGIC
+  # (a socket-qualified tmux ref is created from the label). It is NOT the real
+  # --fix environment: --fix runs from OUTSIDE the seat's pane, where $TMUX is
+  # unset, and the tmux resolver abstains without it (#1132) -- so a tmux seat is
+  # not actually reached by --fix until #1146. Measured live. herdr, whose
+  # resolver needs no such environment, is reached today (the herdr fixture above).
+  export TMUX="/tmp/tsock,999,0"
   export AGMSG_TERMINAL_DRIVER=tmux
   bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
   NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
@@ -1250,4 +1256,17 @@ STUB
   grep -q '%11' "$NRT_LOG"
   # (b) the other seat's pane was never written
   refute grep -q 'set-option .*-t %22 ' "$NRT_LOG"
+}
+
+# The measured LIVE gap (#1146): --fix runs from OUTSIDE the seat's pane, so it has
+# no $TMUX, and the tmux resolver abstains without it (#1132). So a tmux seat is not
+# actually reached by --fix today -- the same fixture, minus the $TMUX artifice.
+# This is the canary: when #1146 gives the resolver a socket without $TMUX, this
+# flips to a created record and this assertion reddens, saying the limitation lifted.
+@test "team --fix does not YET reach a tmux seat run from outside its pane -- no \$TMUX (#1146)" {
+  _install_norecord_tmux_fixture
+  unset TMUX
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]
 }
