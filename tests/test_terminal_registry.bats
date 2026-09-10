@@ -2744,3 +2744,79 @@ EOF
   run _agmsg_terminal_resolve_by_label team alice
   [ "$status" -ne 0 ]
 }
+
+# --- seam: #1112's label-first resolution feeds #1117's placement guard ---------------
+#
+# Both touch "which pane is mine": #1112 decides it (label first, environment
+# second) and #1117 refuses to take it when another seat's record claims it.
+# Each is tested alone above; this pins the JOIN -- whichever path resolved the
+# pane, the guard judges THAT pane, and only that pane.
+
+@test "seam: a seat resolved by its LABEL is refused when a peer's record claims the label's pane (#1112 x #1114)" {
+  # The environment points at the shared daemon pane; the label says this seat
+  # is at w1:pMINE. A peer record already claims w1:pMINE.
+  _fake_herdr_labels "w1:pDAEMON=agmsg:other" "w1:pMINE=team:alice"
+  export HERDR_ENV=1 HERDR_PANE_ID="w1:pDAEMON"
+  unset TMUX TMUX_PANE
+  export AGMSG_TERMINAL_DRIVER=herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path team peer)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:w1:pMINE\t/proj/PEER\tclaude-code\n' > "$peer"
+  local mine; mine="$(agmsg_spawn_path team alice)"
+  : > "$ARGV_LOG"
+
+  run agmsg_terminal_name_self "" team alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q 'herdr:w1:pMINE' <<<"$output"
+  grep -q "team__peer" <<<"$output"
+  # The guard judged the LABEL's pane (w1:pMINE), and nothing was renamed.
+  refute grep -qE '\[rename\]' "$ARGV_LOG"
+  refute test -e "$mine"
+
+  # Control 1: the same peer claiming the ENVIRONMENT's pane instead does not
+  # block a seat the label placed elsewhere -- the guard judges the resolved
+  # pane, not the inherited one.
+  printf 'herdr:w1:pDAEMON\t/proj/PEER\tclaude-code\n' > "$peer"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" team alice /proj/A claude-code record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did not name or record' <<<"$output"
+  grep -q 'w1:pMINE' "$ARGV_LOG"
+  refute grep -q 'w1:pDAEMON' "$ARGV_LOG"
+  grep -q '^herdr:w1:pMINE	/proj/A	claude-code$' "$mine"
+}
+
+@test "seam: a seat that fell through to its ENVIRONMENT is refused when a peer's record claims that pane (#1112 x #1114)" {
+  # No label matches, so resolution falls back to the environment (w1:pDAEMON);
+  # a peer record claims exactly that pane -- the co-located codex shape.
+  _fake_herdr_labels "w1:pDAEMON=agmsg:other" "w1:pX=null"
+  export HERDR_ENV=1 HERDR_PANE_ID="w1:pDAEMON"
+  unset TMUX TMUX_PANE
+  export AGMSG_TERMINAL_DRIVER=herdr
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local peer; peer="$(agmsg_spawn_path team other)"
+  mkdir -p "$(dirname "$peer")"
+  printf 'herdr:w1:pDAEMON\t/proj/PEER\tcodex\n' > "$peer"
+  local mine; mine="$(agmsg_spawn_path team alice)"
+  : > "$ARGV_LOG"
+
+  run agmsg_terminal_name_self "" team alice /proj/A codex record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q 'herdr:w1:pDAEMON' <<<"$output"
+  grep -q "team__other" <<<"$output"
+  refute grep -qE '\[rename\]' "$ARGV_LOG"
+  refute test -e "$mine"
+
+  # Control 2: with no claim on the environment's pane, the fallback names and
+  # records it -- the guard got out of the way on this path too.
+  rm -f "$peer"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" team alice /proj/A codex record
+  [ "$status" -eq 0 ]
+  refute grep -q 'did not name or record' <<<"$output"
+  grep -q 'w1:pDAEMON' "$ARGV_LOG"
+  grep -q '^herdr:w1:pDAEMON	/proj/A	codex$' "$mine"
+}
