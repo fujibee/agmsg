@@ -150,4 +150,5 @@ terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
 # plain has no panes to label, so it can never answer this. 13 = unsupported,
 # the same word it uses for every other addressable-pane op.
 terminal_find_by_label() { _plain_unsupported "find_by_label"; }
+terminal_label_of() { _plain_unsupported "label_of"; }
 terminal_name() { _plain_unsupported "name"; }

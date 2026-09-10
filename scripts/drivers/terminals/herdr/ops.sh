@@ -944,6 +944,32 @@ terminal_find_by_label() {   # <label>
   return 0
 }
 
+# What agmsg label does THIS one pane carry? Prints it and returns 0; 1 when the
+# pane carries none, 10 when herdr could not be reached, 13 for a ref this driver
+# cannot address.
+#
+# The confirmation half of `terminal_find_by_label` -- see the tmux driver for
+# why this is its own op and not a field of `terminal_team_observe`. Here it is
+# `herdr pane get <id>` against the listing's `herdr pane list`: one pane asked
+# about by name, so a listing whose filter was loose does not get to answer for
+# itself.
+terminal_label_of() {   # <id>
+  local id="$1" pane_json esc label
+  [ -n "$id" ] || return 13
+  command -v herdr >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  pane_json="$(herdr pane get "$id" 2>/dev/null)" || return 10
+  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  # NULLIF: json_extract returns SQL NULL for a missing key and '' for a key set
+  # to the empty string, and both mean "this pane carries no label" -- neither is
+  # a label to confirm against. COALESCE alone would let '' through and an empty
+  # target would then confirm itself.
+  label="$(sqlite3 :memory: "SELECT COALESCE(NULLIF(json_extract('$esc','\$.result.pane.label'),''),'')" 2>/dev/null)" || return 10
+  [ -n "$label" ] || return 1
+  printf '%s\n' "$label"
+  return 0
+}
+
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$(_herdr_label "$team" "$name")"

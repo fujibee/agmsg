@@ -135,7 +135,7 @@ agmsg_terminal_has() {
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
+_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of"
 
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
@@ -653,15 +653,28 @@ EOF
   # filtering, and a driver whose filter is loose would hand back somebody else's
   # pane with no way for the count to notice. Ask the pane what label it carries,
   # through the op that reads a single pane, and require the answer.
+  #
+  # Through `terminal_label_of`, NOT a field of `terminal_team_observe`: the pair
+  # does not sit in the same observation field for every driver. tmux has no
+  # pane-label field of its own, so it publishes the pair as the KEY and its
+  # label field is the constant `n/a:no_independent_field`; herdr's label field
+  # is a real label and its key is a hash. Reading a fixed position asks the two
+  # drivers different questions -- and asked of tmux, one whose answer can never
+  # be the label, so on tmux the confirmation failed every single time and the
+  # label path never once resolved. It shipped that way and every test stayed
+  # green, because every test that reached a SUCCESS was a herdr test (#1122
+  # review). The driver knows where its own label lives; ask it by name.
+  #
+  # REQUIRED, not "if it is there". A driver that found a pane by label but
+  # cannot read that label back has not confirmed anything, and an unconfirmed
+  # pane is exactly the thing this whole change refuses to take.
   id="${found#*$tab}"
   name="${found%%$tab*}"
   agmsg_terminal_load "$name" >/dev/null 2>&1 || return 1
-  if declare -F terminal_team_observe >/dev/null 2>&1; then
-    local obs seen
-    obs="$(terminal_team_observe "$id" 2>/dev/null)" || return 1
-    seen="${obs#*$tab}"; seen="${seen%%$tab*}"
-    [ "$seen" = "$label" ] || return 1
-  fi
+  declare -F terminal_label_of >/dev/null 2>&1 || return 1
+  local seen
+  seen="$(terminal_label_of "$id" 2>/dev/null)" || return 1
+  [ "$seen" = "$label" ] || return 1
   printf '%s\n' "$found"
   return 0
 }

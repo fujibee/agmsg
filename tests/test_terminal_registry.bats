@@ -1909,7 +1909,11 @@ _fake_herdr_list_anchored_plus() {
 # The op list is DERIVED, not typed: the ABI minus the ops that take no pane id.
 # A new id-taking op therefore fails this test until it is covered, instead of
 # quietly inheriting the old assumption (the fixture-enumeration mistake, again).
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn"
+# terminal_find_by_label is on this list because its argument is a LABEL, not a
+# ref: it searches for the pane rather than being told which one, so there is no
+# owning server in its input to honour -- it asks the server the caller is on.
+# Its confirmation partner terminal_label_of DOES take a ref and is swept.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_find_by_label"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
@@ -2323,6 +2327,12 @@ EOF
 if [ "\$1" = -S ]; then shift 2; fi
 if [ "\$1" = list-panes ]; then
   printf '%s\n' '%5|team:alice' '%6|team:alice'   # one CLI, one bare shell -- same label
+elif [ "\$1" = display-message ]; then
+  # BOTH panes confirm the label, because on the real server both really carried
+  # it. Without this the fake would refuse the confirmation instead, and the
+  # count -- the thing this test is about -- would never be what says no:
+  # measured, the 'exactly one -> at least one' mutation left this test GREEN.
+  printf '%s|%s\n' "\$4" 'team:alice'
 fi
 exit 0
 EOF
@@ -2338,4 +2348,138 @@ EOF
   # returns "the first" or "the last" is caught either way.
   refute grep -q '%5' <<<"$output"
   refute grep -q '%6' <<<"$output"
+}
+
+# --- #1112 on tmux: the label path had no test that ever SUCCEEDED -------------
+#
+# Everything above that reaches a resolution is a herdr test. The tmux side was
+# only ever exercised in its falling-through directions -- no match, two matches,
+# the environment regression -- so the confirmation step could read the wrong
+# observation field and fail on EVERY tmux pane without a single red (#1122
+# review). These fill that in: one tmux success, and the two ways it breaks.
+#
+# A fake tmux that answers `list-panes` AND `display-message` from ONE fixture,
+# so the listing and the confirmation cannot disagree by accident -- when a test
+# wants them to disagree it says so, in its own fake.
+_fake_tmux_labels() {   # <pane_id=label> ...
+  local pair id label rows="" cases=""
+  for pair in "$@"; do
+    id="${pair%%=*}"; label="${pair#*=}"
+    rows="$rows$id|$label
+"
+    cases="$cases    '$id') printf '%s|%s\n' '$id' '$label';;
+"
+  done
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = -S ]; then shift 2; fi
+if [ "\$1" = list-panes ]; then
+  cat <<'ROWS'
+$rows
+ROWS
+elif [ "\$1" = display-message ]; then
+  # display-message -p -t <id> <format>: \$4 is the pane asked about. The format
+  # asks for the pane's own id first and its @agmsg_agent second -- answer in
+  # that shape, from the same fixture the listing came from.
+  case "\$4" in
+$cases    *) exit 1;;
+  esac
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
+@test "self-identity: a unique tmux label RESOLVES, and it is socket-qualified (#1112)" {
+  # The success this suite never had. Without it the confirmation could read a
+  # field that on tmux can never hold the label -- which is what shipped -- and
+  # every test here stayed green because falling through is what they all
+  # assert.
+  _fake_tmux_labels "%5=team:alice" "%6=agmsg:other"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%9"
+  unset HERDR_ENV HERDR_PANE_ID
+  export AGMSG_TERMINAL_DRIVER=tmux
+
+  run _agmsg_terminal_resolve_by_label team alice
+  [ "$status" -eq 0 ]
+  # Socket-qualified: a bare %5 would address whichever server the ambient
+  # environment happens to point at.
+  [ "$output" = "tmux$(printf '\t')/tmp/fake:%5" ]
+}
+
+@test "self-identity: a tmux label containing '|' resolves to ITS pane, not another (#1112)" {
+  # '|' is legal in both halves of the pair -- validate.sh denies path and JSON
+  # hazards and deliberately not this -- so `team|x:alice` is a label a real seat
+  # can carry. The listing separates the id from the label with '|', so a split
+  # that takes "field 2" reads `team` and calls it the whole label: it would
+  # match this pane for the DIFFERENT label `team`, and miss it for its own.
+  #
+  # Both directions, in one fixture: %5 carries the '|' label, %7 carries the
+  # truncation of it.
+  _fake_tmux_labels "%5=team|x:alice" "%7=team"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%9"
+  unset HERDR_ENV HERDR_PANE_ID
+  export AGMSG_TERMINAL_DRIVER=tmux
+
+  run _agmsg_terminal_resolve_by_label 'team|x' alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "tmux$(printf '\t')/tmp/fake:%5" ]
+
+  # ... and the truncation is not the same pane. Asking for `team` finds %7 only.
+  run _agmsg_terminal_resolve_by_label 'team' ''
+  [ "$status" -ne 0 ]
+}
+
+@test "self-identity: a loose tmux listing is caught by the confirmation (#1112)" {
+  # The tmux partner of the herdr looseness test. The listing claims %5 carries
+  # the label; the pane itself says otherwise. One match is not the same as the
+  # right match, and the count cannot tell the difference.
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = -S ]; then shift 2; fi
+if [ "\$1" = list-panes ]; then
+  printf '%s\n' '%5|team:alice'
+elif [ "\$1" = display-message ]; then
+  printf '%s\n' '%5|agmsg:somebody-else'
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%9"
+  unset HERDR_ENV HERDR_PANE_ID
+  export AGMSG_TERMINAL_DRIVER=tmux
+
+  run _agmsg_terminal_resolve_by_label team alice
+  [ "$status" -ne 0 ]
+  refute grep -q '%5' <<<"$output"
+}
+
+@test "self-identity: a tmux pane that answers about ANOTHER pane is not confirmed (#1112)" {
+  # The identity canary, on the confirmation. `display-message -t %5` routed to
+  # the wrong server answers about that server's %5 -- confidently, and about a
+  # pane nobody asked about. Here it answers as %9 while carrying the label, so
+  # only the canary can refuse it.
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = -S ]; then shift 2; fi
+if [ "\$1" = list-panes ]; then
+  printf '%s\n' '%5|team:alice'
+elif [ "\$1" = display-message ]; then
+  printf '%s\n' '%9|team:alice'
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%9"
+  unset HERDR_ENV HERDR_PANE_ID
+  export AGMSG_TERMINAL_DRIVER=tmux
+
+  run _agmsg_terminal_resolve_by_label team alice
+  [ "$status" -ne 0 ]
 }
