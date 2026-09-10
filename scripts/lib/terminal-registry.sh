@@ -563,7 +563,27 @@ agmsg_terminal_ref_id() {
 # Prints "<team>__<agent>" as the record file spells it (percent-encoded, the form
 # on disk) and nothing when the pane is unclaimed.
 #
-# STOP-GAP (#1113). Delete this and its caller when #1112 lands.
+# PLACEMENT GUARD (#1114, guarding the regression #1111 exposed). Written as a
+# stop-gap for #1112; #1112 has landed and this stays as the SECOND line: label-
+# first resolution makes a wrong answer less likely, not impossible (a label can
+# be duplicated, cleared, or stale, and the environment fallback is still the
+# shared daemon's for codex), so a pane another seat's record already claims is
+# still refused here. Removing it is a separate decision, taken only when label
+# resolution is made authoritative; the seam tests pin the two mechanisms
+# together until then.
+#
+# "Other seat" means a record that is not THIS agent's in any existing team.
+# run/ is flat and one seat registered in two teams has two records
+# (spawn.<team1>__<x>, spawn.<team2>__<x>) for the same pane; the second must not
+# be blocked by the first, or a seat that acts in its second team can never be
+# recorded there (measured on this host, where every seat is in two teams).
+# "This agent's" is decided by building the record path for each team on disk
+# with the same encoder and comparing whole file names -- "__" is legal inside
+# a name, so the file name cannot be cut at a separator. The one state this
+# cannot resolve: this agent's own record under a team that has since vanished
+# from teams/ -- no path can be built for it, so it reads as a rival and blocks
+# this seat (fail-closed). The refusal message says so and names the file to
+# remove; a team that is dropped with its run/ records left behind is that state.
 #
 # Since #1111 a seat records its own placement when it acts, resolving the pane
 # from its OWN environment. For codex that environment is not its own: those
@@ -577,21 +597,101 @@ agmsg_terminal_ref_id() {
 # So until the environment is fixed, a seat does not take a pane another seat's
 # record already claims. This is first-writer-wins, which is NOT always right --
 # a stale record from a dead seat will squat a pane that a live seat has taken
-# over. That is why it is a stop-gap and not the fix: #1112 makes the resolution
-# correct, and then nothing needs to arbitrate.
-_agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
-  local ref="$1" mine="$2" dir f first
-  [ -n "$ref" ] || return 0
+# over. #1112 (label-first resolution) is the fix for the shared environment,
+# and this guard is not replaced by it: a label makes a wrong answer less likely,
+# not impossible, so the arbitration stays. The cost of the squat is one action
+# and a message naming the file; the cost of no guard is another seat's pane.
+# Split a placement ref into terminal / pane id / socket, so two refs can be
+# compared as PANES rather than as strings. Sets _AGMSG_PS_TERM, _AGMSG_PS_ID and
+# _AGMSG_PS_SOCK (empty when the ref carries no socket); non-zero for a ref it
+# cannot parse.
+#
+# String equality is not enough: the record format still accepts the legacy
+# socket-less tmux forms (`%N`, `@N`) alongside `tmux:<socket>:%N` (see the
+# scheme comment above and agmsg_terminal_ref_terminal), so a peer record holding
+# `%1` never matches a freshly composed `tmux:/tmp/x:%1` -- and the guard waves
+# the write through for exactly the records most likely to be OLD, which are the
+# ones most likely to belong to somebody else.
+#
+# The scheme table below mirrors agmsg_terminal_ref_terminal / agmsg_terminal_ref_id
+# (inline, so the scan forks nothing per record); a test pins that the two agree
+# on every form the record format accepts.
+_agmsg_placement_split() {   # <ref>
+  local ref="$1" term id
+  _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
+  case "$ref" in
+    tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
+    herdr:*) term=herdr; id="${ref#herdr:}" ;;
+    plain:*) term=plain; id="${ref#plain:}" ;;
+    %*|@*)   term=tmux;  id="$ref" ;;        # legacy pre-axis bare tmux id
+    *)       return 1 ;;
+  esac
+  if [ "$term" = tmux ]; then
+    case "$id" in
+      *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
+    esac
+  fi
+  [ -n "$id" ] || return 1
+  _AGMSG_PS_TERM="$term"; _AGMSG_PS_ID="$id"
+  return 0
+}
+
+# <ref> <team> <agent>
+#   Prints the claimant as its record file spells it ("<team>__<agent>", encoded)
+#   when ANOTHER seat's record claims this pane; prints nothing when the pane is
+#   unclaimed. Returns 1 when this seat's OWN ref cannot be parsed: ownership is
+#   then undecidable and the caller must not name or record (fail-closed).
+_agmsg_placement_claimed_by() {
+  local ref="$1" team="$2" agent="$3" dir f first mine enc_agent t is_mine
+  local want_term want_id want_sock
+  _agmsg_placement_split "$ref" || return 1          # undecidable, not "unclaimed"
+  want_term="$_AGMSG_PS_TERM"; want_id="$_AGMSG_PS_ID"; want_sock="$_AGMSG_PS_SOCK"
+  mine="$(agmsg_spawn_path "$team" "$agent")" || return 1
   dir="$(dirname "$mine")"
   [ -d "$dir" ] || return 0
+  enc_agent="$(_actas_lock_encode "$agent")"
   for f in "$dir"/spawn.*; do
     [ -f "$f" ] || continue
     [ "$f" = "$mine" ] && continue
-    IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || continue
-    if [ "$first" = "$ref" ]; then
+    # This seat under another team is not a rival. "This seat" is decided
+    # EXACTLY: the file equals this agent's record path for a team that exists
+    # on disk, spelled by the same encoder -- never by cutting the file name at
+    # a separator, because "__" is legal inside a name and cutting there made a
+    # peer called "foo__bar" look like "bar". The suffix test is only a cheap
+    # pre-filter before the exact comparison.
+    is_mine=0
+    case "$f" in
+      *"__$enc_agent")
+        for t in "$(dirname "$dir")"/teams/*/; do
+          [ -d "$t" ] || continue
+          t="${t%/}"; t="${t##*/}"
+          [ "$f" = "$(agmsg_spawn_path "$t" "$agent")" ] && { is_mine=1; break; }
+        done ;;
+    esac
+    [ "$is_mine" -eq 1 ] && continue
+    IFS="$(printf '\t')" read -r first _ < "$f" 2>/dev/null || first=""
+    # A record whose ref cannot be read as a pane -- empty, unreadable, or an
+    # unknown spelling -- cannot be ruled out as THIS pane, so it claims. Naming
+    # it lets a person drop it; waving it through is the fail-open this guard
+    # exists to close.
+    if [ -z "$first" ] || ! _agmsg_placement_split "$first"; then
       printf '%s' "${f##*/spawn.}"
       return 0
     fi
+    [ "$_AGMSG_PS_TERM" = "$want_term" ] || continue
+    [ "$_AGMSG_PS_ID" = "$want_id" ] || continue
+    # Same terminal, same pane id. The sockets decide whether that is the same
+    # PANE: a pane id is not unique across tmux servers (#1051). A record may be
+    # the legacy socket-less form, and an unknown server cannot be shown to be a
+    # DIFFERENT one -- so an unknown socket on either side counts as a claim.
+    # Refusing there costs one action; taking a pane that turns out to be
+    # someone's is the damage this guard exists to prevent.
+    if [ -n "$_AGMSG_PS_SOCK" ] && [ -n "$want_sock" ] \
+       && [ "$_AGMSG_PS_SOCK" != "$want_sock" ]; then
+      continue                                # different servers, different panes
+    fi
+    printf '%s' "${f##*/spawn.}"
+    return 0
   done
   return 0
 }
@@ -769,6 +869,48 @@ agmsg_terminal_name_self() {
 
   agmsg_terminal_load "$terminal" || return 1
 
+  # PLACEMENT GUARD (#1114, kept alongside #1112's label-first resolution): a
+  # pane another seat's record already claims is not this seat's to NAME, MARK,
+  # or RECORD, whichever path resolved it. The check sits here,
+  # BEFORE the rename, because the rename is the act it exists to prevent: with
+  # the shared-daemon environment #1112 describes, three codex seats resolve one
+  # pane, and a check placed after the rename let each of them relabel and rekey
+  # that pane (another seat's) and mark itself as named there, sparing only the
+  # record. The resolved reference is known now, so the decision is made now.
+  #
+  # The claim scan needs agmsg_spawn_path (actas-lock.sh). When it cannot be
+  # loaded the scan is skipped -- a caller that asked for `record` fails on that
+  # below, with its own message; a caller that did not is not blocked by a
+  # library it never needed.
+  if ! declare -F agmsg_spawn_path >/dev/null 2>&1 \
+     && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/actas-lock.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    . "$SKILL_DIR/scripts/lib/actas-lock.sh" 2>/dev/null || true
+  fi
+  if declare -F agmsg_spawn_path >/dev/null 2>&1; then
+    local _claim_ref="" _claimed_by="" _claim_rc=0
+    _claim_ref="$(agmsg_terminal_ref "$terminal" "$id" 2>/dev/null)" || _claim_ref=""
+    # Undecidable (this seat's own ref cannot be parsed, or its record path
+    # cannot be built) is not "unclaimed": neither name nor record then.
+    _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$team" "$agent")" || _claim_rc=$?
+    if [ "$_claim_rc" -ne 0 ]; then
+      echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
+      return 0
+    fi
+    if [ -n "$_claimed_by" ]; then
+      # A claimant whose name ends in THIS seat's name may be this seat under a
+      # team no longer on disk (the exact rule cannot tell, and stays closed);
+      # the way out is then the file, not a seat.
+      local _self_hint=""
+      case "$_claimed_by" in
+        *"__$(_actas_lock_encode "$agent")")
+          _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
+      esac
+      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
+      return 0
+    fi
+  fi
+
   # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
   # key stays, always, because it is addressing rather than decoration — the name
   # the TERMINAL knows the agent by, in its own namespace.
@@ -848,18 +990,8 @@ agmsg_terminal_name_self() {
   [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
-  # STOP-GAP (#1113, remove with #1112): do not take a pane another seat's record
-  # already claims. Naming SUCCEEDED -- the pane carries this seat's label -- so
-  # this returns 0; what is declined is the placement CLAIM, and the reason is
-  # said out loud rather than the write silently not happening. Without this, the
-  # first codex seat to act overwrites its own correct record with the shared
-  # daemon's pane, and the next one overwrites that.
-  local _claimed_by=""
-  _claimed_by="$(_agmsg_placement_claimed_by "$ref" "$rec")"
-  if [ -n "$_claimed_by" ]; then
-    echo "agmsg: named the pane but did NOT record it: this seat resolved $ref, and that pane is already recorded as $_claimed_by's. Keeping the existing record. (#1113 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
-    return 0
-  fi
+  # The claim check that used to sit here now sits BEFORE the rename (above):
+  # a claimed pane is neither named nor marked nor recorded.
 
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename): a failed write must not truncate a correct existing
