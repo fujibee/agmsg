@@ -1175,7 +1175,10 @@ STUB
   export AGMSG_TERMINAL_DRIVER=herdr
   bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
   NR_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
-  rm -f "$NR_REC"        # THE POINT: no placement record exists
+  # NOT removed by hand: join writes NO placement record by design (it is not the
+  # seat's claim on a pane), so this is naturally absent -- the measured state, and
+  # a test that reproduces it rather than manufacturing it. If join ever starts
+  # writing one, this assertion reddens and says so.
   [ ! -e "$NR_REC" ]
 }
 
@@ -1198,4 +1201,53 @@ STUB
   # (b) THE POINT: the other seat's pane was never written with alice's identity
   refute grep -q '^pane rename w1:pOTHER ' "$NR_LOG"
   refute grep -q '^agent rename w1:pOTHER ' "$NR_LOG"
+}
+
+# --- #1140: the MEASURED bare-tmux shape (join leaves no record, label resolves) ----
+# Not herdr and not a hand-removed record: a tmux fake shaped like the real thing --
+# `list-panes` publishes @agmsg_agent, and the ref that gets written is
+# socket-qualified. Two arms on the SAME fixture: read-only creates nothing (the
+# FIX gate), --fix creates the socket-qualified record (the measured shape).
+_install_norecord_tmux_fixture() {
+  export NRT_LOG="$BATS_TEST_TMPDIR/tmux.log"; : > "$NRT_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NRT_LOG"
+t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
+_label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+case "$* " in
+  *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
+  *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
+  *display-message*pane_title*)   printf '%s|%s\n' "$t" 'title' ;;
+  *show-options*)                 printf '%s\n' "$(_label "$t")" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin/tmux"
+  export PATH="$bin:$PATH"
+  export TMUX="/tmp/tsock,999,0"           # provide the socket so the ref is socket-qualified
+  export AGMSG_TERMINAL_DRIVER=tmux
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  [ ! -e "$NRT_REC" ]                      # join writes no record: the measured state, naturally
+}
+
+@test "team (read-only, no repair verb) creates NO record even with a unique tmux label (#1140)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
+}
+
+@test "team --fix creates a socket-qualified tmux record from the label (#1140)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # (a) a record now names alice's pane, with a SOCKET-QUALIFIED tmux ref
+  [ "$(cat "$NRT_REC")" = $'tmux:/tmp/tsock:%11\t/tmp/proj\tclaude-code' ]
+  # positive control: --fix reached alice's pane (%11) through the driver
+  grep -q '%11' "$NRT_LOG"
+  # (b) the other seat's pane was never written
+  refute grep -q 'set-option .*-t %22 ' "$NRT_LOG"
 }
