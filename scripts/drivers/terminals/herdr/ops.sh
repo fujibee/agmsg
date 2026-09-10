@@ -929,8 +929,13 @@ _herdr_internal_key() {
 # works for a codex seat (#1112). Its commands run under one shared app-server,
 # not in its pane, so the inherited HERDR_PANE_ID is the daemon's pane and all of
 # them resolve the same one; and herdr's own agent_session for those panes does
-# not match the thread actually running there. The label does not depend on
-# either: terminal_name wrote it on the pane it named.
+# not match the thread actually running there. The label depends on neither -- it
+# was written per pane rather than inherited by a process.
+#
+# Which is a claim about its FAILURE MODE, not about its truth: the label is
+# written by `spawn`, repaired by `team --fix` and written by seats themselves,
+# so it is written by the same machinery that is producing the wrong answers.
+# Less likely to be wrong, not known to be right.
 terminal_find_by_label() {   # <label>
   local label="$1" json esc
   [ -n "$label" ] || return 0

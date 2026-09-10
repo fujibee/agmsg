@@ -449,13 +449,19 @@ terminal_poke() {
 # Which panes carry this agmsg label? One id per line, socket-qualified like every
 # other id this driver hands out; no match prints nothing and still returns 0.
 #
-# The label is authoritative in a way the environment is not. A seat resolves its
-# own pane from $TMUX_PANE, and for an agent whose commands run somewhere other
-# than its pane -- codex, through one shared app-server -- that answer belongs to
-# whoever started the daemon, so every seat under it resolves the same pane
-# (#1112). terminal_name wrote `@agmsg_agent` on the pane it actually named, so
-# asking the server which pane carries the label asks the thing that was set for
-# that pane and no other.
+# The label is not AUTHORITATIVE -- it is a more recent observation than the
+# alternatives, and that is a weaker claim on purpose. `spawn` writes it, `team
+# --fix` repairs it, and a seat writes it for itself: it is written by the very
+# machinery that is producing wrong answers, so a wrong label is possible and
+# nothing here can rule one out.
+#
+# What it is not is INHERITED. A seat resolves its own pane from $TMUX_PANE, and
+# for an agent whose commands run somewhere other than its pane -- codex, through
+# one shared app-server -- that answer belongs to whoever started the daemon, so
+# every seat under it resolves the same pane, confidently and identically
+# (#1112). `@agmsg_agent` was set on the pane that was actually named, one pane
+# at a time, so asking the server who carries the label asks about a value that
+# was written per pane rather than one that was copied into a process.
 #
 # One call, and the whole server: `-a` so a seat in another session still finds
 # itself. Nothing is filtered by the caller's own $TMUX_PANE on purpose -- that

@@ -615,7 +615,15 @@ _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
 #
 # Two independent roads to one wrong answer is not a coincidence; both read the
 # process tree, and for these seats the process tree is not where they live. The
-# label does not: terminal_name wrote "<team>:<agent>" on the pane it named.
+# label is not read from the process tree: it was written on one pane at a time.
+#
+# That is the whole of the claim, and it is deliberately smaller than "the label
+# is correct". The label is written by `spawn`, repaired by `team --fix` and
+# written by seats naming themselves -- the same machinery whose wrong answers
+# this exists to route around. So a wrong label is possible, and preferring it
+# is a bet that a per-pane write is wrong less often than a value inherited by
+# every process under one daemon. Not authority: a more recent observation, from
+# a source that at least distinguishes one pane from another.
 #
 # EXACTLY ONE, or nothing. The label is not unique by construction -- it is
 # usable only WHEN it is unique, which is a different claim and the one the code
@@ -668,6 +676,15 @@ EOF
   # REQUIRED, not "if it is there". A driver that found a pane by label but
   # cannot read that label back has not confirmed anything, and an unconfirmed
   # pane is exactly the thing this whole change refuses to take.
+  #
+  # AND WHAT IT DOES NOT CATCH, so that nobody reads more into it later: a label
+  # that is simply WRONG. Asking the pane again returns the same wrong label,
+  # because the pane is where the wrong value was written. This catches a driver
+  # whose FILTER is loose -- a listing that answers with a pane it should not
+  # have matched -- and nothing about whether the label on that pane belongs to
+  # this seat. Deciding that needs evidence from outside the naming machinery
+  # entirely (asking the seat to emit something and seeing which pane it lands
+  # in); that is not this function and not this change.
   id="${found#*$tab}"
   name="${found%%$tab*}"
   agmsg_terminal_load "$name" >/dev/null 2>&1 || return 1
