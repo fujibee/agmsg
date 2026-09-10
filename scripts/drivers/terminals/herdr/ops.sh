@@ -719,17 +719,18 @@ terminal_arrange() {
 }
 
 # record op: print the visible pane buffer verbatim (NOT parsed — `agent read`/
-# `pane read` output is raw terminal text). --lines N asks for more scrollback
-# (herdr's --source recent) rather than an exact count. ASSERTED argv.
+# `pane read` output is raw terminal text). --lines N selects herdr's recent
+# source and passes the requested depth through to the backend. ASSERTED argv.
 terminal_peek() {
   local id="$1"; shift
-  local src=visible
+  local src=visible lines=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --lines) src=recent; shift 2 ;;
+      --lines) src=recent; lines="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
+  case "$lines" in ''|*[!0-9]*) lines="" ;; esac
   # peek is a READ op: only the pane CONTENT may reach stdout. herdr writes an error
   # JSON to STDOUT on failure (e.g. {"error":{"code":"pane_not_found",...}}), which the
   # caller would otherwise read as the pane's content — "read" and "could-not-read"
@@ -750,7 +751,11 @@ terminal_peek() {
   # never the caller's content.
   local tmp rc=0
   tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
-  herdr pane read "$id" --source "$src" >"$tmp" 2>/dev/null || rc=$?
+  if [ -n "$lines" ]; then
+    herdr pane read "$id" --source "$src" --lines "$lines" >"$tmp" 2>/dev/null || rc=$?
+  else
+    herdr pane read "$id" --source "$src" >"$tmp" 2>/dev/null || rc=$?
+  fi
   if [ "$rc" -ne 0 ]; then
     [ -s "$tmp" ] && cat "$tmp" >&2   # the error body is a diagnostic, not content
     rm -f "$tmp"

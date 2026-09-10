@@ -219,11 +219,11 @@ agmsg_team_fix_pane_names_loaded() {
 # (rc 1, no output) rather than reading as 0 -- see the read-failure note below.
 _agmsg_rename_confirm_count() {   # <pane> <confirm_prefix> <expected>
   local screen
-  # Ask for a generous window so a pre-existing line is captured too. Drivers honor
-  # this differently -- tmux takes --lines as given; the herdr driver maps it to its
-  # own recent window (~80 lines) and ignores a larger number -- so this is a
-  # request, not a guarantee of depth. It does not need to be: before and after read
-  # the SAME window on the SAME driver, so the count DELTA is valid whatever the depth.
+  # Ask for a generous window so a pre-existing line is captured too. The shipped
+  # pane drivers pass this depth to their backends, but it remains a request rather
+  # than a guarantee about an external driver's buffer. It does not need to be a
+  # guarantee: before and after read the SAME window on the SAME driver, so the count
+  # DELTA is valid whatever depth the backend can provide.
   #
   # A READ FAILURE is not zero matches (advisor, #1120). Returning 0 here would let a
   # transient peek failure before the keystroke set a false baseline of 0, and a

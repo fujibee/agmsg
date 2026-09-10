@@ -92,6 +92,15 @@ EOF
   grep -q '^tmux \[capture-pane\] \[-p\] \[-t\] \[%5\] \[-S\] \[-40\]$' "$ARGV_LOG"
 }
 
+@test "peek: herdr record forwards the requested scrollback depth (#1121)" {
+  _install_fake_herdr
+  _write_record "herdr:w1:p5"
+  run bash "$SCRIPTS/peek.sh" testteam alice --lines 40
+  [ "$status" -eq 0 ]
+  _out_has "herdr visible text"
+  grep -q '^herdr \[pane\] \[read\] \[w1:p5\] \[--source\] \[recent\] \[--lines\] \[40\]$' "$ARGV_LOG"
+}
+
 @test "peek: a legacy bare tmux id in the record still resolves as tmux" {
   _install_fake_tmux
   _write_record "%7"
