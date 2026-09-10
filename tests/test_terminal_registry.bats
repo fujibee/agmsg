@@ -2074,13 +2074,15 @@ _tmux_op_args() {
   done
 }
 
-# --- #1114 stop-gap: a seat does not take a pane another seat already records ---
+# --- #1114 placement guard: a seat does not take a pane another seat already records ---
 #
 # Four directions, because the guard is only worth anything if it also gets out
 # of the way: another seat holds it -> neither named nor marked nor recorded;
 # nobody holds it -> named and recorded; this seat's own record holds it ->
-# rewritten; this SEAT under another TEAM holds it -> recorded. Delete these
-# with the guard when #1112 lands.
+# rewritten; this SEAT under another TEAM holds it -> recorded. The guard is
+# kept alongside #1112's label-first resolution (a label makes a wrong answer
+# less likely, not impossible); these go only if the guard does, as a separate
+# decision. The "seam" tests further down pin the two mechanisms together.
 
 @test "terminal_name_self record: a pane ANOTHER seat's record claims is neither named, marked, nor recorded (#1114)" {
   _install_fake_tmux

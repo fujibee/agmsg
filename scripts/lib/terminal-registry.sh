@@ -563,8 +563,14 @@ agmsg_terminal_ref_id() {
 # Prints "<team>__<agent>" as the record file spells it (percent-encoded, the form
 # on disk) and nothing when the pane is unclaimed.
 #
-# STOP-GAP (#1114, guarding the regression #1111 exposed). Delete this and its
-# caller when #1112 lands.
+# PLACEMENT GUARD (#1114, guarding the regression #1111 exposed). Written as a
+# stop-gap for #1112; #1112 has landed and this stays as the SECOND line: label-
+# first resolution makes a wrong answer less likely, not impossible (a label can
+# be duplicated, cleared, or stale, and the environment fallback is still the
+# shared daemon's for codex), so a pane another seat's record already claims is
+# still refused here. Removing it is a separate decision, taken only when label
+# resolution is made authoritative; the seam tests pin the two mechanisms
+# together until then.
 #
 # "Other seat" means a record that is not THIS agent's in any existing team.
 # run/ is flat and one seat registered in two teams has two records
@@ -591,8 +597,10 @@ agmsg_terminal_ref_id() {
 # So until the environment is fixed, a seat does not take a pane another seat's
 # record already claims. This is first-writer-wins, which is NOT always right --
 # a stale record from a dead seat will squat a pane that a live seat has taken
-# over. That is why it is a stop-gap and not the fix: #1112 makes the resolution
-# correct, and then nothing needs to arbitrate.
+# over. #1112 (label-first resolution) is the fix for the shared environment,
+# and this guard is not replaced by it: a label makes a wrong answer less likely,
+# not impossible, so the arbitration stays. The cost of the squat is one action
+# and a message naming the file; the cost of no guard is another seat's pane.
 # Split a placement ref into terminal / pane id / socket, so two refs can be
 # compared as PANES rather than as strings. Sets _AGMSG_PS_TERM, _AGMSG_PS_ID and
 # _AGMSG_PS_SOCK (empty when the ref carries no socket); non-zero for a ref it
@@ -861,8 +869,9 @@ agmsg_terminal_name_self() {
 
   agmsg_terminal_load "$terminal" || return 1
 
-  # STOP-GAP (#1114, remove with #1112): a pane another seat's record already
-  # claims is not this seat's to NAME, MARK, or RECORD. The check sits here,
+  # PLACEMENT GUARD (#1114, kept alongside #1112's label-first resolution): a
+  # pane another seat's record already claims is not this seat's to NAME, MARK,
+  # or RECORD, whichever path resolved it. The check sits here,
   # BEFORE the rename, because the rename is the act it exists to prevent: with
   # the shared-daemon environment #1112 describes, three codex seats resolve one
   # pane, and a check placed after the rename let each of them relabel and rekey
@@ -885,7 +894,7 @@ agmsg_terminal_name_self() {
     # cannot be built) is not "unclaimed": neither name nor record then.
     _claimed_by="$(_agmsg_placement_claimed_by "$_claim_ref" "$team" "$agent")" || _claim_rc=$?
     if [ "$_claim_rc" -ne 0 ]; then
-      echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+      echo "agmsg: did not name or record this pane: this seat's own reference ('$_claim_ref') cannot be read as a pane, so whether another seat holds it cannot be decided. (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
       return 0
     fi
     if [ -n "$_claimed_by" ]; then
@@ -897,7 +906,7 @@ agmsg_terminal_name_self() {
         *"__$(_actas_lock_encode "$agent")")
           _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
       esac
-      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 placement guard, kept alongside #1112's label-first resolution.)" >&2
       return 0
     fi
   fi

@@ -12,8 +12,9 @@
 #                                         pinned as such)
 #   - no mark                          -> named once, mark written
 #   - another seat in the same pane    -> NOT taken while the first seat's record
-#                                         claims it (#1114 stop-gap; was "names it
-#                                         for itself" and returns to that with #1112)
+#                                         claims it (#1114 placement guard, kept
+#                                         alongside #1112; was "names it for itself"
+#                                         and returns to that only if the guard goes)
 #   - order independence: a boot path first, then the action; the action
 #     first, then a boot path -- same key, one terminal call in total
 #   - herdr identifies its pane from HERDR_PANE_ID with no session id
@@ -155,14 +156,15 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   grep -q 'BLIND SPOT' "$SKILL_DIR/scripts/lib/self-name.sh"
 }
 
-@test "another seat in the same pane does NOT take it while the first seat's record claims it (#1114 stop-gap)" {
-  # Before the #1114 stop-gap this test read "names it for itself": the second
-  # seat relabeled the pane and marked itself there. Under the stop-gap a pane
+@test "another seat in the same pane does NOT take it while the first seat's record claims it (#1114 placement guard)" {
+  # Before the #1114 guard this test read "names it for itself": the second
+  # seat relabeled the pane and marked itself there. Under the guard a pane
   # another seat's record claims is neither named, marked, nor recorded -- that
   # is the shape that stops co-located codex seats taking each other's pane, and
   # a second role acting from the SAME pane is indistinguishable from it. The
   # message says who holds the pane and how to release it (drop or despawn).
-  # Delete this test with the guard when #1112 lands and restore the old one.
+  # The guard is kept alongside #1112's label-first resolution; this test goes
+  # only if the guard does, as a separate decision, and the old one returns.
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
