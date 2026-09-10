@@ -1145,3 +1145,57 @@ STUB
   refute grep -q '^pane rename w1:pOTHER ' "$MIS_LOG"
   refute grep -q '^agent rename w1:pOTHER ' "$MIS_LOG"
 }
+
+# --- #1140: --fix CREATES a record for a seat that has none, from its label ---------
+# A seat denied terminal ops (a sandbox) can never name itself, and the record write
+# sits behind naming, so it never gets a record either. --fix, from outside, places
+# it from the label -- when exactly one pane carries it -- and repairs that pane. The
+# other seat's pane must not be touched (the #1131 (a)/(b) independence, again).
+_install_norecord_fixture() {   # alice has NO record; her label is on w1:pMINE
+  export NR_LOG="$BATS_TEST_TMPDIR/herdr.log"; : > "$NR_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$NR_LOG"
+case "\$1/\$2" in
+  pane/list) echo '{"result":{"panes":[{"pane_id":"w1:pMINE","label":"fixteam:alice"},{"pane_id":"w1:pOTHER","label":"fixteam:bob"}]}}' ;;
+  pane/get)
+    case "\$3" in
+      w1:pMINE)  echo '{"result":{"pane":{"pane_id":"w1:pMINE","label":"fixteam:alice","agent_status":"idle","terminal_title":"t"}}}' ;;
+      w1:pOTHER) echo '{"result":{"pane":{"pane_id":"w1:pOTHER","label":"fixteam:bob","agent_status":"idle","terminal_title":"t"}}}' ;;
+      *)         echo '{"result":{"pane":{}}}' ;;
+    esac ;;
+  agent/list) echo '{"result":{"agents":[]}}' ;;
+  agent/get)  echo '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  *)          echo '{"result":{"type":"ok"}}' ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+  export AGMSG_TERMINAL_DRIVER=herdr
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NR_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  rm -f "$NR_REC"        # THE POINT: no placement record exists
+  [ ! -e "$NR_REC" ]
+}
+
+@test "team --fix creates a placement record from the label for a seat that has none (#1140)" {
+  _install_norecord_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # (a) a record now exists and names alice's OWN pane (the label's answer)
+  [ "$(cat "$NR_REC")" = $'herdr:w1:pMINE\t/tmp/proj\tclaude-code' ]
+  # positive control: --fix reached the created pane at all
+  grep -q '^pane get w1:pMINE$' "$NR_LOG"
+}
+
+@test "team --fix, creating a record from the label, does NOT touch another seat's pane (#1140)" {
+  _install_norecord_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # positive control independent of the correction: the fix ran and observed a pane
+  grep -q '^pane get w1:p' "$NR_LOG"
+  # (b) THE POINT: the other seat's pane was never written with alice's identity
+  refute grep -q '^pane rename w1:pOTHER ' "$NR_LOG"
+  refute grep -q '^agent rename w1:pOTHER ' "$NR_LOG"
+}

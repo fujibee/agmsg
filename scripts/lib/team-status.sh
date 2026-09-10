@@ -136,6 +136,39 @@ agmsg_team_verify_placement() {
   return 0
 }
 
+# #1140: the sibling of verify_placement for a seat that has NO record at all. A
+# seat can be DENIED terminal operations -- a sandbox returns PermissionDenied for
+# `agent rename` -- so it can never name itself, and the record write sits BEHIND
+# naming, so no record is ever written either. --fix, running outside the sandbox,
+# is the only actor that can place it, and the material is here: if the label
+# settles on exactly one pane, create the record so the repair can continue on that
+# pane. Zero or many matches -> print nothing / rc 1, and the seat stays unfixable,
+# exactly as before -- this only turns "no record" into "a record" when the label
+# is unambiguous, never inventing a pane. (Making the sandbox seat able to name
+# ITSELF is an environment decision and is out of scope; this only lets an outside
+# --fix place it.)
+#
+#   agmsg_team_create_placement_from_label <team> <agent> <rec-path> <project> <type>
+#     -> prints the created ref, rc 0; or nothing, rc 1.
+agmsg_team_create_placement_from_label() {
+  local team="$1" agent="$2" rec="$3" project="$4" type="$5"
+  local verified v_terminal v_id v_ref tab
+  [ -n "$rec" ] || return 1
+  declare -F _agmsg_terminal_resolve_by_label >/dev/null 2>&1 || return 1
+  verified="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || return 1
+  [ -n "$verified" ] || return 1
+  tab="$(printf '\t')"
+  v_terminal="${verified%%"$tab"*}"; v_id="${verified#*"$tab"}"
+  [ -n "$v_terminal" ] && [ -n "$v_id" ] || return 1
+  v_ref="$(agmsg_terminal_ref "$v_terminal" "$v_id" 2>/dev/null)" || return 1
+  [ -n "$v_ref" ] || return 1
+  declare -F agmsg_write_atomic >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$rec")" 2>/dev/null || true
+  agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$v_ref" "$project" "$type")" 2>/dev/null || return 1
+  printf '%s\n' "$v_ref"
+  return 0
+}
+
 _agmsg_team_identity_field_loaded() {
   local field="$1"; shift
   local identity _activity _al _el _ak _ek _as _es pane_cell key_cell session_cell _consistency

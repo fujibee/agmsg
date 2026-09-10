@@ -771,3 +771,31 @@ _codex_type_get() {   # codex declares rename_cmd + rename_confirm; name not on 
   [ "$output" = 'herdr:w1:pOTHER' ]                                    # keep the record's ref
   [ "$(cat "$BATS_TEST_TMPDIR/rec")" = "$before" ]                     # NOT rewritten
 }
+
+# --- #1140: --fix CREATES a record for a seat that has none, from its label ------
+# The sibling of verify_placement: that one is "record exists but wrong", this is
+# "no record at all" (a sandbox seat denied naming never writes one). Same
+# env-independent material -- the label on exactly one pane.
+
+@test "create_placement: no record + a unique label pane -> the record is created for it (#1140)" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  _agmsg_terminal_resolve_by_label() { printf 'herdr\tw1:pMINE\n'; }
+  local rec="$BATS_TEST_TMPDIR/newrec"
+  [ ! -e "$rec" ]
+  run agmsg_team_create_placement_from_label team alice "$rec" /proj claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = 'herdr:w1:pMINE' ]
+  [ "$(cat "$rec")" = $'herdr:w1:pMINE\t/proj\tclaude-code' ]
+}
+
+@test "create_placement: no unique label pane -> nothing is created, rc 1 (#1140)" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  _agmsg_terminal_resolve_by_label() { return 1; }   # zero or many -> unfixable, as before
+  local rec="$BATS_TEST_TMPDIR/newrec"
+  run agmsg_team_create_placement_from_label team alice "$rec" /proj claude-code
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [ ! -e "$rec" ]     # a pane is never invented
+}
