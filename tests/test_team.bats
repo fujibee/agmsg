@@ -1206,6 +1206,23 @@ STUB
 
 }
 
+@test "team does not call an unknown readiness answer absent even when its body says agent_not_found (#1144)" {
+  _install_collision_fixture
+  _join_with_claim alpha alice
+  _join_with_claim beta bob
+  cat >> "$TEST_SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh" <<'OPS'
+terminal_team_input_ready() {
+  printf 'not_ready:agent_not_found\n'
+  return 2
+}
+OPS
+
+  run bash "$SCRIPTS/team.sh" alpha
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Placement collisions:"* ]]
+  [[ "$output" != *"resident_agent: absent"* ]]
+}
+
 @test "team does not call one agent registered in two teams a collision (#1144)" {
   _install_collision_fixture
   _join_with_claim alpha alice

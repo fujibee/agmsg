@@ -187,7 +187,7 @@ agmsg_team_placement_collisions() {
 # and no agent resides there. Anything weaker is no report -- a shell/other CLI,
 # an unreachable terminal, and a gone pane are not silently folded into empty.
 agmsg_team_collision_resident() {   # <ref> <type> [<type> ...]
-  local ref="$1" terminal pane state result type cli saw_type=0
+  local ref="$1" terminal pane state result rc type cli saw_type=0
   shift
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || return 1
   pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || return 1
@@ -200,8 +200,12 @@ agmsg_team_collision_resident() {   # <ref> <type> [<type> ...]
     cli="$(agmsg_type_get "$type" cli 2>/dev/null)" || return 1
     [ -n "$cli" ] || return 1
     saw_type=1
-    result="$(terminal_team_input_ready "$pane" "$cli" 2>/dev/null)" || true
-    [ "$result" = not_ready:agent_not_found ] || return 1
+    if result="$(terminal_team_input_ready "$pane" "$cli" 2>/dev/null)"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 1 ] && [ "$result" = not_ready:agent_not_found ] || return 1
   done
   [ "$saw_type" -eq 1 ] || return 1
   printf 'absent\n'
