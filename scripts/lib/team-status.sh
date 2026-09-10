@@ -169,7 +169,8 @@ agmsg_team_fix_pane_names_loaded() {
 # /rename by hand), so a later run must not read an EARLIER line as its own. The
 # caller counts before and after its keystroke and requires an INCREASE; the
 # expected name is the same every run, so newness -- not the name -- is the only
-# thing that separates this rename from a prior one. Unreadable pane -> 0.
+# thing that separates this rename from a prior one. An unreadable pane fails
+# (rc 1, no output) rather than reading as 0 -- see the read-failure note below.
 _agmsg_rename_confirm_count() {   # <pane> <confirm_prefix> <expected>
   local screen
   # Ask for a generous window so a pre-existing line is captured too. Drivers honor
