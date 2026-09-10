@@ -557,7 +557,18 @@ terminal_label_of() {   # <id>
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label
   label="$team:$name"
-  _tmux_do "$id" set-option -p -t "$(_tmux_bare_of "$id")" @agmsg_agent "$label" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  # The reason is kept, not discarded (#1127). The token on stdout stays
+  # `runtime_error` -- it is the driver contract -- and tmux's own words go to
+  # stderr, which is the pattern the rest of this file already follows. A
+  # naming failure that says only `runtime_error` cannot be attributed to a
+  # dead server, a vanished pane, or a refused option.
+  local _err _rc=0
+  _err="$(_tmux_do "$id" set-option -p -t "$(_tmux_bare_of "$id")" @agmsg_agent "$label" 2>&1 >/dev/null)" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    echo runtime_error
+    echo "tmux: could not set @agmsg_agent on pane '$id' (rc=$_rc)${_err:+: $_err}" >&2
+    return 13
+  fi
   if [ "$mode" = key ]; then echo ok; return 0; fi
   case "$(_tmux_bare_of "$id")" in
     @*) _tmux_do "$id" rename-window -t "$(_tmux_bare_of "$id")" "$label" >/dev/null 2>&1 || true ;;

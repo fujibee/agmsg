@@ -2572,3 +2572,87 @@ echo "fell through"'
   refute grep -q 'RESOLVED' <<<"$output"
   refute grep -q '%5' <<<"$output"
 }
+
+# --- #1127: a naming failure says WHICH step failed, and what the server said --
+#
+# Measured on this fleet: a seat's placement record was repaired in the same
+# action that failed to name its pane, and all the operator got was
+# `(runtime_error)`. Two different failures print that word -- the key could not
+# be COMPUTED, and the server refused to APPLY it -- and both discarded the
+# server's own stderr, so the case could not be narrowed at all.
+#
+# The token stays: `runtime_error` on stdout is the driver contract and callers
+# read it. What these pin is that the reason is no longer thrown away.
+
+@test "naming failure: herdr says the server refused, and passes its words on (#1127)" {
+  cat > "$FAKEBIN/herdr" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = agent ] && [ "$2" = rename ]; then
+  echo 'herdr: pane w1:pX is gone' >&2
+  exit 4
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load herdr
+
+  run terminal_name w1:pX team alice
+  [ "$status" -eq 13 ]
+  # The contract token is unchanged -- callers switch on it.
+  grep -q '^runtime_error$' <<<"$output"
+  # WHICH step, and the server's own words.
+  grep -q 'agent rename' <<<"$output"
+  grep -q 'pane w1:pX is gone' <<<"$output"
+}
+
+@test "naming failure: herdr distinguishes a key it cannot COMPUTE (#1127)" {
+  # The partner. Without it, one message for both failures passes the test above
+  # -- which is the state #1127 is about.
+  cat > "$FAKEBIN/herdr" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load herdr
+  # No sha256 helper: the key cannot be built. Shadow it for this test only.
+  agmsg_sha256() { return 1; }
+  _herdr_internal_key() { return 1; }
+
+  run terminal_name w1:pX team alice
+  [ "$status" -eq 13 ]
+  grep -q '^runtime_error$' <<<"$output"
+  grep -q 'internal key' <<<"$output"
+  # And it does NOT claim the server refused, which is the other failure.
+  refute grep -q 'agent rename' <<<"$output"
+}
+
+@test "naming failure: tmux passes the server's words on too (#1127)" {
+  cat > "$FAKEBIN/tmux" <<'EOF'
+#!/usr/bin/env bash
+echo "can't find pane %9" >&2
+exit 1
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load tmux
+
+  run terminal_name %9 team alice
+  [ "$status" -eq 13 ]
+  grep -q '^runtime_error$' <<<"$output"
+  grep -q '@agmsg_agent' <<<"$output"
+  grep -q "can't find pane %9" <<<"$output"
+}
+
+@test "naming SUCCESS still prints only the token, on both drivers (#1127 control)" {
+  # "Print the reason always" would pass all three tests above. A successful
+  # naming must stay quiet: callers read stdout, and a stray line there is a
+  # different bug.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load tmux
+  run terminal_name %1 team alice
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+}
