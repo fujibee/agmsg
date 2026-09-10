@@ -90,6 +90,52 @@ _agmsg_team_fix_result() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3"
 }
 
+# #1131: the placement record is a CLAIM about which pane a seat lives in, not a
+# guaranteed address. A record can point at ANOTHER seat's pane -- codex's commands
+# run under a shared app-server, so its environment reports the daemon's pane and
+# the record is written for a pane the seat does not live in (measured on live
+# seats: the environment named a pane a DIFFERENT seat was sitting in). Acting on
+# that pane would overwrite the other seat's label -- --fix would break the correct
+# row to match the wrong one. So before --fix trusts the record's pane, verify it
+# against an
+# environment-INDEPENDENT source: the pane whose label is <team>:<agent>, when
+# exactly one carries it (_agmsg_terminal_resolve_by_label, #1112). If the label
+# settles on a pane that DISAGREES with the record, the record is wrong -- rewrite
+# the RECORD (never the other seat's pane) and hand back the verified ref so the
+# caller acts on the real pane.
+#
+# When the label cannot settle it -- zero matches (a seat that never named itself)
+# or more than one -- the record is kept as-is: no worse than today. A seat with no
+# distinguishing label needs a different source entirely -- asking the seat to emit
+# a token and seeing which pane it lands in (the #1124 route) -- which is
+# deliberately out of scope for this change.
+#
+#   agmsg_team_verify_placement <team> <agent> <rec-path> <ref> <project> <type>
+#     -> prints the ref to act on (verified/corrected, or the original), rc 0.
+agmsg_team_verify_placement() {
+  local team="$1" agent="$2" rec="$3" ref="$4" project="$5" type="$6"
+  local verified v_terminal v_id v_ref tab
+  declare -F _agmsg_terminal_resolve_by_label >/dev/null 2>&1 || { printf '%s\n' "$ref"; return 0; }
+  verified="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || verified=""
+  [ -n "$verified" ] || { printf '%s\n' "$ref"; return 0; }
+  tab="$(printf '\t')"
+  v_terminal="${verified%%"$tab"*}"; v_id="${verified#*"$tab"}"
+  [ -n "$v_terminal" ] && [ -n "$v_id" ] || { printf '%s\n' "$ref"; return 0; }
+  v_ref="$(agmsg_terminal_ref "$v_terminal" "$v_id" 2>/dev/null)" || v_ref=""
+  [ -n "$v_ref" ] || { printf '%s\n' "$ref"; return 0; }
+  if [ "$v_ref" = "$ref" ]; then
+    printf '%s\n' "$ref"; return 0            # the record already names the seat's pane
+  fi
+  # The record names a pane the label says is not this seat's. Correct the RECORD,
+  # atomically (a failed write must not truncate the record it was going to fix),
+  # and act on the pane the label found -- never the other seat's.
+  if declare -F agmsg_write_atomic >/dev/null 2>&1; then
+    agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$v_ref" "$project" "$type")" 2>/dev/null || true
+  fi
+  printf '%s\n' "$v_ref"
+  return 0
+}
+
 _agmsg_team_identity_field_loaded() {
   local field="$1"; shift
   local identity _activity _al _el _ak _ek _as _es pane_cell key_cell session_cell _consistency

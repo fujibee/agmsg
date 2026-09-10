@@ -731,3 +731,43 @@ _codex_type_get() {   # codex declares rename_cmd + rename_confirm; name not on 
   [ "${lines[0]}" = $'cli_session\tskipped\tbaseline_unreadable' ]
   [ ! -e "$BATS_TEST_TMPDIR/poke" ]
 }
+
+# --- #1131: --fix treats the placement record as a claim, and corrects it -------
+# A record can point at ANOTHER seat's pane (codex's env reports the shared
+# app-server's pane). Verify against the label; if it disagrees, the record is
+# wrong -- rewrite the RECORD, never the other pane. The helper below is the
+# record half; the "other pane untouched" half is the team.sh integration test.
+
+@test "verify_placement: a record naming another pane is corrected to the label's pane (#1131)" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  _agmsg_terminal_resolve_by_label() { printf 'herdr\tw1:pMINE\n'; }   # the label finds the real pane
+  printf 'herdr:w1:pOTHER\t/proj\tclaude-code\n' > "$BATS_TEST_TMPDIR/rec"
+  run agmsg_team_verify_placement team alice "$BATS_TEST_TMPDIR/rec" 'herdr:w1:pOTHER' /proj claude-code
+  [ "$status" -eq 0 ]
+  [ "$output" = 'herdr:w1:pMINE' ]                                     # act on the real pane
+  # the record now names the seat's own pane, project and type preserved
+  [ "$(cat "$BATS_TEST_TMPDIR/rec")" = $'herdr:w1:pMINE\t/proj\tclaude-code' ]
+}
+
+@test "verify_placement: a record already naming the seat's pane is left untouched (#1131)" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  _agmsg_terminal_resolve_by_label() { printf 'herdr\tw1:pMINE\n'; }
+  printf 'herdr:w1:pMINE\t/proj\tclaude-code\n' > "$BATS_TEST_TMPDIR/rec"
+  local before; before="$(cat "$BATS_TEST_TMPDIR/rec")"
+  run agmsg_team_verify_placement team alice "$BATS_TEST_TMPDIR/rec" 'herdr:w1:pMINE' /proj claude-code
+  [ "$output" = 'herdr:w1:pMINE' ]
+  [ "$(cat "$BATS_TEST_TMPDIR/rec")" = "$before" ]
+}
+
+@test "verify_placement: when the label cannot settle it, the record is kept as-is (#1131)" {
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  _agmsg_terminal_resolve_by_label() { return 1; }                     # zero or many matches
+  printf 'herdr:w1:pOTHER\t/proj\tclaude-code\n' > "$BATS_TEST_TMPDIR/rec"
+  local before; before="$(cat "$BATS_TEST_TMPDIR/rec")"
+  run agmsg_team_verify_placement team alice "$BATS_TEST_TMPDIR/rec" 'herdr:w1:pOTHER' /proj claude-code
+  [ "$output" = 'herdr:w1:pOTHER' ]                                    # keep the record's ref
+  [ "$(cat "$BATS_TEST_TMPDIR/rec")" = "$before" ]                     # NOT rewritten
+}

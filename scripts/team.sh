@@ -181,13 +181,21 @@ _member_status() {
     _emit_unfixable_actions "$reason"
     return 0
   fi
-  IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
+  IFS="$(printf '\t')" read -r ref rec_project rec_type < "$rec" || true
   if [ -z "$ref" ]; then
     reason=empty_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
     _emit_unfixable_actions "$reason"
     return 0
+  fi
+  # #1131: under a repair verb the record is a CLAIM to verify, not an address to
+  # trust. If the label settles the seat on a different pane, correct the record
+  # and act on the real pane -- so --fix never overwrites another seat's label to
+  # match a wrong record. A read-only `team` status must not rewrite records, so
+  # only --fix / --fix-pane-names / --rename-sessions does this.
+  if [ "$FIX" -eq 1 ] && declare -F agmsg_team_verify_placement >/dev/null 2>&1; then
+    ref="$(agmsg_team_verify_placement "$team" "$agent" "$rec" "$ref" "$rec_project" "$rec_type")"
   fi
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
   pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || pane=""
