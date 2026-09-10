@@ -34,8 +34,99 @@ setup_test_env() {
   mkdir -p "$HOME"
 }
 
+# PIDs (one per line, this shell excluded) whose command line references <dir>.
+# The detached codex children — codex-bridge-launcher.sh and the codex-bridge.js it
+# starts (codex-monitor.sh spawns the launcher with `… &`, "outlives this script") —
+# resolve their SKILL_DIR from their own script path, so their argv carries
+# TEST_SKILL_DIR. The launcher records no pidfile of its own, so a pidfile sweep cannot
+# reach it; the command line is what names it. Unix uses ps; on Git Bash ps enumerates
+# MSYS processes, which the launcher/bridge are, so it reaches them there too.
+#
+# LIMIT (named deliberately, not a defect): this matches only processes that carry
+# $dir IN THEIR ARGV. A process whose CWD is inside $dir but whose argv does not name
+# it would NOT be found. The two known holders are argv-visible today — the launcher
+# resolves SKILL_DIR from its own script path (argv[0]), and the bridge receives
+# --workspace-root <dir> — so they are caught; but that is a property of THOSE two, not
+# a guarantee about any future holder. A cwd/open-fd sweep (lsof) would close the gap;
+# it is deliberately NOT used because lsof is slow and this runs in EVERY test's
+# teardown — too heavy for the ~all tests that hold nothing. If a future detached child
+# holds $dir without naming it in argv, revisit (add an lsof pass gated on the rm
+# actually failing, so the cost is paid only when it is needed).
+_pids_referencing_dir() {   # <dir>
+  ps -eo pid=,args= 2>/dev/null |
+    AGMSG_REAP_DIR="$1" awk -v me="$$" 'index($0, ENVIRON["AGMSG_REAP_DIR"]) { if ($1+0 != me+0) print $1 }'
+}
+
+# Reap any process still holding $TEST_SKILL_DIR, then let handles release, BEFORE the
+# rm. Those detached children keep writing $TEST_SKILL_DIR/run after the test body
+# returns and are in no pidset the tests kill, so the bare rm below races them and fails
+# `rm: Directory not empty` (or, on Windows, `Device or resource busy` on the bridge's
+# open messages.db). #662 == #1036 == #1049.
+#
+# Scope is $TEST_SKILL_DIR ITSELF — a unique mktemp path — so matching it in process
+# args cannot reach a developer's live bridge or another test's processes; this is never
+# a blanket `pkill codex-bridge.js`. Guarded to a temp path so a mis-set variable can
+# never turn the scan loose on a short/rooty prefix. A single `ps` for the ~all tests
+# that spawn nothing.
+#
+# The SIGTERM→wait→SIGKILL sequence is EXERCISED by tests/test_teardown_reap.bats (kill,
+# scope-safety, no-op, guard); whether the wait budget is long enough on a load-3-digit
+# host, and whether killing a holder RELEASES the Windows file handle before the rm, are
+# both timing/OS facts this repo cannot measure on the author's loaded machine — CI
+# (dedicated runners, Windows leg) measures them. Written as designed-and-static-checked,
+# NOT as "measured", per the day's rule that a claim states how it was verified (#1036).
+_reap_test_skill_dir_procs() {
+  local dir="${TEST_SKILL_DIR:-}"
+  case "$dir" in
+    ""|/|/tmp|/var|/private|/usr|"$HOME") return 0 ;;
+  esac
+  case "$dir" in
+    /tmp/*|/private/*|/var/folders/*|/private/var/folders/*) : ;;
+    *)
+      # Outside the well-known temp roots, allow ONLY under a TMPDIR that is set AND a
+      # real path — never unset, "", or "/". Resolve and VALIDATE the prefix before using
+      # it as a pattern: a pattern assembled from an empty prefix ("${TMPDIR:+…}" with
+      # TMPDIR unset, or "${TMPDIR%/}" with TMPDIR="/") degenerates to match ANY non-empty
+      # dir. This guards a KILL, so the loose failure kills EXTRA processes, not nothing
+      # (co2 BLOCKING). Strip the trailing slash first, then require the result non-empty,
+      # so unset / "" / "/" all fail closed. Only then is "$_tmp" safe as a pattern prefix.
+      local _tmp="${TMPDIR:-}"; _tmp="${_tmp%/}"
+      [ -n "$_tmp" ] || return 0
+      case "$dir" in "$_tmp"/?*) : ;; *) return 0 ;; esac
+      ;;
+  esac
+  local pids tries=0 sig p
+  while :; do
+    pids="$(_pids_referencing_dir "$dir")"
+    [ -n "$pids" ] || return 0
+    # Escalate to SIGKILL quickly (after ~0.3s of SIGTERM): a detached launcher may not
+    # act on SIGTERM, and this is a teardown, not a graceful shutdown. SIGKILL is
+    # uncatchable, so once sent the process WILL die — the only remaining wait is for ps
+    # to stop listing it, which a heavily loaded host can slow. So keep re-checking up
+    # to ~6s (a bound only ever reached when something is genuinely stuck; the ~all tests
+    # that hold nothing return on the first check above), then return and let the rm
+    # surface anything still there. The 6s headroom is what covers a load-3-digit host.
+    sig=TERM; [ "$tries" -ge 3 ] && sig=KILL
+    for p in $pids; do kill "-$sig" "$p" 2>/dev/null || true; done
+    [ "$tries" -ge 60 ] && return 1
+    sleep 0.1 2>/dev/null || true
+    tries=$((tries + 1))
+  done
+}
+
 teardown_test_env() {
-  rm -rf "$TEST_SKILL_DIR"
+  # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
+  # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of
+  # the (vast majority of) tests that hold nothing — across the suite's hundreds of tests
+  # that dominates the runtime and pushes CI shards over their timeout. The race it fixes
+  # is rare (only the codex tests spawn the detached launcher), and it announces itself
+  # as a non-zero rm ("Directory not empty" / "Device or resource busy"), so pay the cost
+  # exactly there: on failure, reap the TEST_SKILL_DIR-scoped holders and retry.
+  rm -rf "$TEST_SKILL_DIR" 2>/dev/null && return 0
+  local reap_status=0 rm_status=0
+  _reap_test_skill_dir_procs || reap_status=$?
+  rm -rf "$TEST_SKILL_DIR" || rm_status=$?
+  [ "$reap_status" -eq 0 ] && [ "$rm_status" -eq 0 ]
 }
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for
