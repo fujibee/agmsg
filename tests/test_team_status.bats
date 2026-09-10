@@ -708,3 +708,26 @@ _codex_type_get() {   # codex declares rename_cmd + rename_confirm; name not on 
   [ "${lines[0]}" = $'cli_session\tskipped\tnot_ready_agent_status_thinking' ]
   [ ! -e "$BATS_TEST_TMPDIR/poke" ]
 }
+
+@test "codex session rename: a transient read failure before the keystroke does not verify a pre-existing line (#1120 advisor)" {
+  _codex_type_get
+  # the pane already carries the line (an earlier run / a hand-typed rename)
+  printf 'Session renamed to team-alice. To resume run codex resume\n' > "$BATS_TEST_TMPDIR/screen"
+  printf '0' > "$BATS_TEST_TMPDIR/peekn"
+  terminal_team_input_ready() { printf 'ready\n'; }
+  # the BEFORE baseline read fails transiently; later reads recover and show the
+  # pre-existing line. A count function that returned 0 on a failed read would set
+  # a false baseline of 0, then count the recovered pre-existing line as new.
+  terminal_peek() {
+    local n; n="$(cat "$BATS_TEST_TMPDIR/peekn")"; n=$((n + 1)); printf '%s' "$n" > "$BATS_TEST_TMPDIR/peekn"
+    [ "$n" -eq 1 ] && return 1
+    cat "$BATS_TEST_TMPDIR/screen" 2>/dev/null
+  }
+  terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }   # keystroke does NOT land
+  sleep() { :; }
+  run agmsg_team_rename_session_loaded team alice codex herdr w2:p3 'unknown:name_not_visible'
+  [ "$status" -eq 0 ]
+  # No trustworthy baseline -> nothing typed, nothing verified.
+  [ "${lines[0]}" = $'cli_session\tskipped\tbaseline_unreadable' ]
+  [ ! -e "$BATS_TEST_TMPDIR/poke" ]
+}

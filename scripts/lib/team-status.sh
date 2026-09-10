@@ -177,7 +177,13 @@ _agmsg_rename_confirm_count() {   # <pane> <confirm_prefix> <expected>
   # own recent window (~80 lines) and ignores a larger number -- so this is a
   # request, not a guarantee of depth. It does not need to be: before and after read
   # the SAME window on the SAME driver, so the count DELTA is valid whatever the depth.
-  screen="$(terminal_peek "$1" --lines 400 2>/dev/null)" || { printf '0\n'; return 0; }
+  #
+  # A READ FAILURE is not zero matches (advisor, #1120). Returning 0 here would let a
+  # transient peek failure before the keystroke set a false baseline of 0, and a
+  # recovered read afterward count a PRE-EXISTING line as if it were new -> a false
+  # renamed_and_verified. So fail with NO output and let the caller treat an unread
+  # count as "cannot establish/confirm", never as zero.
+  screen="$(terminal_peek "$1" --lines 400 2>/dev/null)" || return 1
   printf '%s\n' "$screen" | grep -cF -- "$2 $3." || true
 }
 
@@ -219,7 +225,16 @@ EOF
     # Newness, not presence: count the confirmation line before and after, require
     # an INCREASE. A pre-existing line (an earlier run, a hand-typed rename) is in
     # `before`, so it cannot pass a keystroke that never landed.
-    before="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")"
+    #
+    # The baseline must be READ, not assumed. If the before-peek fails we have no
+    # trustworthy zero to measure against -- and a recovered after-peek would then
+    # count a pre-existing line as new (advisor, #1120). So an unreadable baseline
+    # does NOT type: a keystroke we could not verify is worse than none, and this is
+    # transient -- the next --fix run reads the baseline and proceeds.
+    before="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")" || {
+      _agmsg_team_fix_result cli_session skipped baseline_unreadable
+      return 0
+    }
     rc=0
     terminal_poke "$pane" "$rename_cmd $expected_session" >/dev/null 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -228,8 +243,11 @@ EOF
     fi
     tries=0
     while [ "$tries" -lt 20 ]; do
-      after="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")"
-      if [ "$after" -gt "$before" ]; then
+      # A failed after-peek is not "zero matches" either -- leave `after` empty so
+      # it cannot satisfy the comparison, and try again; only a real read that
+      # EXCEEDS the baseline confirms.
+      after="$(_agmsg_rename_confirm_count "$pane" "$rename_confirm" "$expected_session")" || after=""
+      if [ -n "$after" ] && [ "$after" -gt "$before" ]; then
         _agmsg_team_fix_result cli_session changed renamed_and_verified
         return 0
       fi
