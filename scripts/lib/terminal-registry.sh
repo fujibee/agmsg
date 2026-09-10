@@ -135,7 +135,7 @@ agmsg_terminal_has() {
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of"
+_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok"
 
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
@@ -436,52 +436,62 @@ agmsg_terminal_self_env() {
 }
 
 # Print the terminal name of a record ref (stdout). Handles legacy bare ids.
-# Is <id> a well-formed id for <terminal>? The SINGLE authority for the per-terminal
-# bare-id grammar, shared by agmsg_terminal_ref_terminal (below) and the herdr
-# driver's _herdr_pane_id_ok (which delegates here), so the two cannot drift. The id
+# Is <id> a well-formed id for <terminal>? Answered by the DRIVER's terminal_id_ok
+# (the grammar lives in each ops.sh, and the herdr driver's _herdr_pane_id_ok is
+# that same function under its local name), so the emitter and every reader --
+# agmsg_terminal_ref_terminal below, the label resolver -- cannot drift. The id
 # is handed to a terminal as a TARGET, so this is the line between a value we may
 # pass and one we must refuse:
 #   tmux   %<n> / @<n>, n decimal   (rejects tmux:alice -> a real session; %9;kill)
 #   herdr  w<n>:p<x>, one ':', alnum+':' only   (rejects a newline / '|' / junk)
 #   plain  exactly '-'              (no addressable pane; any other value is corrupt)
 _agmsg_terminal_id_ok() {   # <terminal> <id>
-  local id="$2" rest
-  case "$1" in
-    tmux)
-      # Two accepted forms, and the older one is accepted on purpose:
-      #   <socket-path>:%N / <socket-path>:@N   written since refs carry the server
-      #   %N / @N                               a record written before they did
-      # A pane id is not unique across tmux servers (measured: two servers both
-      # holding %0), so the socket is what makes a ref answerable. The legacy form
-      # still resolves — it just cannot be asked "is it still there?" (#1051).
-      #
-      # Split on the LAST colon: a socket path may contain one.
-      local _sock=""
-      case "$id" in
-        *:*) _sock="${id%:*}"; id="${id##*:}"
-             [ -n "$_sock" ] || return 1
-             # What breaks a record is a TAB or a newline — it is one TAB-separated
-             # line — not an ordinary space, and socket paths under a home
-             # directory containing a space are perfectly normal. So reject the
-             # CONTROL bytes (TAB 0x09, LF, CR and the rest) and let 0x20 through:
-             # [[:cntrl:]] is exactly that split, where [[:space:]] also swallows
-             # the space and would refuse a legitimate path.
-             case "$_sock" in *[[:cntrl:]]*) return 1 ;; esac ;;
-      esac
-      case "$id" in %*|@*) : ;; *) return 1 ;; esac
-      rest="${id#?}"
-      case "$rest" in ''|*[!0-9]*) return 1 ;; esac
-      return 0 ;;
-    herdr)
-      case "$id" in w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;; *) return 1 ;; esac
-      case "$id" in *:*:*) return 1 ;; esac
-      case "$id" in *[!0-9A-Za-z:]*) return 1 ;; esac
-      return 0 ;;
-    plain)
-      [ "$id" = '-' ] || return 1
-      return 0 ;;
-    *) return 1 ;;
-  esac
+  local name="$1" id="$2"
+  [ -n "$name" ] && [ -n "$id" ] || return 1
+  # The driver NAME is validated before anything is loaded by it. This function
+  # now reaches the filesystem (a driver directory, resolved through the driver
+  # bases), and a name that is not a plain word -- "../../../plugins/terminals/x"
+  # -- would traverse from the builtin base into a plugin directory and read as
+  # builtin, past the trust gate (review warning, measured on a prototype). No
+  # caller hands this a name from an untrusted reference today; a generic scheme
+  # parser composed later could, so the line is drawn here as well as wherever
+  # discovery draws it.
+  case "$name" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  # The id grammar is a property of the DRIVER, so the driver is asked
+  # (`terminal_id_ok <id>` in its ops.sh); this registry no longer holds a case
+  # over three names. It did until the #1141 review composed it with #1143
+  # (trusted external drivers joining every chooser): a case that knew only
+  # herdr/tmux/plain answered "malformed" for every row an external driver
+  # emitted, and the label resolver -- which now validates each row before
+  # counting -- silently dropped that driver's correct pane. The same shape
+  # #1133 removes from the choosers, added back one layer down.
+  #
+  # Three answers, and the fallback is stated so nobody has to guess it:
+  #   the driver defines terminal_id_ok  -> its verdict (the built-in three do)
+  #   the driver exists but has no hook   -> ACCEPTED. A trusted external driver
+  #                                          is the only authority on its own ids;
+  #                                          refusing here would unmake #1143.
+  #                                          The cost is that malformed-row
+  #                                          filtering for such a driver is only
+  #                                          as good as its own emitter.
+  #   no such driver                      -> refused, as before
+  #
+  # Asked without disturbing the caller: when the driver is the one already
+  # loaded, call it directly (no fork -- this runs per scanned row); otherwise
+  # load it in a SUBSHELL, so the caller's driver functions are not replaced
+  # under it (a ref of terminal X is validated while driver Y is in use, e.g.
+  # the placement scan reading another seat's record).
+  if [ "$name" = "${_AGMSG_TERMINAL_LOADED:-}" ]; then
+    if declare -F terminal_id_ok >/dev/null 2>&1; then
+      terminal_id_ok "$id"; return $?
+    fi
+    return 0
+  fi
+  (
+    agmsg_terminal_load "$name" >/dev/null 2>&1 || exit 1
+    declare -F terminal_id_ok >/dev/null 2>&1 || exit 0
+    terminal_id_ok "$id"
+  )
 }
 
 agmsg_terminal_ref_terminal() {

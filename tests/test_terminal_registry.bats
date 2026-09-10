@@ -1913,7 +1913,12 @@ _fake_herdr_list_anchored_plus() {
 # ref: it searches for the pane rather than being told which one, so there is no
 # owning server in its input to honour -- it asks the server the caller is on.
 # Its confirmation partner terminal_label_of DOES take a ref and is swept.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_find_by_label"
+# terminal_id_ok takes a ref STRING but never addresses a server: it is the
+# grammar the sweep's own refs must pass (#1141 review moved it into the
+# driver), so "did it reach the owning server" does not apply. What keeps it
+# honest is the oracle table in the "#1141 review" section: the socket form
+# and the legacy bare form are both accepted, as the registry accepted them.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_find_by_label terminal_id_ok"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
@@ -2700,4 +2705,127 @@ EOF
   run _agmsg_terminal_resolve_by_label team alice
   [ "$status" -ne 0 ]
   [ -z "$output" ]
+}
+
+# --- #1141 review: the id grammar is the driver's, and the registry asks --------------
+#
+# _agmsg_terminal_id_ok used to hold a case over herdr/tmux/plain. Composed with
+# #1143 (trusted external drivers in every chooser) that case called every
+# external row malformed, and the label resolver -- which now validates rows
+# before counting -- dropped the external driver's correct pane. The registry
+# now asks the driver's terminal_id_ok; a driver without the hook is ACCEPTED.
+
+_install_external_terminal_nohook() {   # <name> [with-hook]
+  local d="$SKILL_DIR/plugins/terminals/$1"
+  mkdir -p "$d" "$SKILL_DIR/db"
+  printf 'name=%s\npriority=15\nbackend=test %s\ncapabilities=name\n' "$1" "$1" > "$d/terminal.conf"
+  cat > "$d/ops.sh" <<'OPS'
+terminal_check() { echo ok; }
+terminal_describe() { echo name=ext; }
+terminal_detect() { printf 'ext-pane\n'; }
+terminal_spawn() { printf 'ext-spawned\n'; }
+terminal_despawn() { :; }
+terminal_pane_state() { echo present; }
+terminal_peek() { :; }
+terminal_poke() { :; }
+terminal_where() { echo ext-container; }
+terminal_arrange() { echo unchanged; }
+terminal_name() { :; }
+terminal_find_by_label() { printf 'ext-pane\n'; }
+terminal_label_of() { printf 'testteam:alice\n'; }
+OPS
+  [ "${2:-}" = with-hook ] && printf 'terminal_id_ok() { [ "$1" = ext-pane ]; }\n' >> "$d/ops.sh"
+  printf 'terminals/%s\t%s\n' "$1" "$d" >> "$SKILL_DIR/db/trusted-plugins"
+}
+
+@test "id grammar: the three built-in drivers answer exactly as the registry's table did (#1141 review)" {
+  # The table this replaces, as an oracle. One wrong verdict on any row is a
+  # behaviour change for a built-in driver, which this move must not make.
+  # Rows are ';'-separated because an id under test may itself contain '|'.
+  local row term id want got rows=0
+  while IFS=';' read -r term id want; do
+    [ -n "$term" ] || continue
+    rows=$((rows + 1))
+    _agmsg_terminal_id_ok "$term" "$id" && got=0 || got=1
+    [ "$got" = "$want" ] || { echo "FAIL: $term '$id' -> $got, want $want"; return 1; }
+  done <<'TABLE'
+herdr;w1:pB;0
+herdr;wT:pSelf;0
+herdr;w1:p2:x;1
+herdr;bad|id;1
+herdr;%1;1
+herdr;/tmp/s:%1;1
+herdr;w1:p B;1
+tmux;%1;0
+tmux;@2;0
+tmux;/tmp/s:%7;0
+tmux;/tmp/with:colon:%7;0
+tmux;/home/a b/sock:%3;0
+tmux;:%1;1
+tmux;%x;1
+tmux;%;1
+tmux;w1:pB;1
+tmux;ext-pane;1
+plain;-;0
+plain;x;1
+bogus;w1:pB;1
+TABLE
+  # The loop ran over the whole table, not over nothing.
+  [ "$rows" -eq 20 ]
+}
+
+@test "id grammar: asking about another driver does not replace the caller's loaded driver (#1141 review)" {
+  _fake_tmux_labels "%5=team:alice"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%5"
+  agmsg_terminal_load tmux
+  [ "$_AGMSG_TERMINAL_LOADED" = tmux ]
+  # Validate a herdr id while tmux is the loaded driver...
+  _agmsg_terminal_id_ok herdr w1:pB
+  refute _agmsg_terminal_id_ok herdr bad_id
+  # ...and tmux is still the loaded driver, with its own functions intact.
+  [ "$_AGMSG_TERMINAL_LOADED" = tmux ]
+  [ "$(terminal_find_by_label team:alice)" = '/tmp/fake:%5' ]
+}
+
+@test "id grammar: a trusted external driver without terminal_id_ok is accepted, with it its verdict is used (#1141 review)" {
+  _install_external_terminal_nohook ext
+  _agmsg_terminal_id_ok ext ext-pane
+  _agmsg_terminal_id_ok ext 'anything|goes'        # no hook: the driver is the authority
+  refute _agmsg_terminal_id_ok nosuchdriver ext-pane   # unknown driver: still refused
+  rm -rf "$SKILL_DIR/plugins/terminals/ext"; : > "$SKILL_DIR/db/trusted-plugins"
+  _install_external_terminal_nohook ext2 with-hook
+  _agmsg_terminal_id_ok ext2 ext-pane
+  refute _agmsg_terminal_id_ok ext2 'anything|goes'   # hook present: its grammar decides
+}
+
+@test "resolve_by_label: a trusted external driver's row is counted, not filtered as malformed (#1141 x #1143)" {
+  # The composition the review found: with #1141's per-row validation and a
+  # registry that only knew three grammars, an external driver's correct row
+  # read as garbage. Now it resolves. The external driver has no id hook.
+  #
+  # Reached through the driver override: on this branch the resolver still
+  # iterates the three built-in names, and putting external drivers into that
+  # list is #1143's change. #1143 carries the auto-discovery composition test;
+  # this one pins the half that is this branch's -- the row is accepted.
+  _install_external_terminal_nohook probe
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID
+  export AGMSG_TERMINAL_DRIVER=probe
+  run _agmsg_terminal_resolve_by_label testteam alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "probe$(printf '\t')ext-pane" ]
+}
+
+@test "id grammar: a driver name that is not a plain word is refused before anything is loaded (#1141 review)" {
+  # A hostile name that resolves, as a path, from the builtin base into a plugin
+  # directory. The plugin's ops.sh would leave a marker if it were ever sourced.
+  local d="$SKILL_DIR/plugins/terminals/evil"
+  mkdir -p "$d"
+  printf 'name=evil\npriority=1\nbackend=evil\ncapabilities=name\n' > "$d/terminal.conf"
+  printf ': > "%s/evil-was-sourced"\nterminal_id_ok() { return 0; }\n' "$BATS_TEST_TMPDIR" > "$d/ops.sh"
+  refute _agmsg_terminal_id_ok '../../../plugins/terminals/evil' evil-id
+  refute _agmsg_terminal_id_ok 'plugins/terminals/evil' evil-id
+  refute _agmsg_terminal_id_ok 'herdr:w1' w1:pB
+  refute test -e "$BATS_TEST_TMPDIR/evil-was-sourced"
+  # Control: a plain-word name of a real driver still answers.
+  _agmsg_terminal_id_ok herdr w1:pB
 }

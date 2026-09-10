@@ -13,6 +13,11 @@
 
 terminal_check() { echo ok; return 0; }
 
+# ABI hook: is <id> a plain "pane" id? plain has no addressable pane; its one
+# id is the sentinel '-'. Asked by the registry (`_agmsg_terminal_id_ok plain`);
+# the grammar moved here from the registry (#1141 review).
+terminal_id_ok() { [ "$1" = '-' ]; }
+
 terminal_describe() {
   printf 'name=plain\n'
   printf 'backend=OS terminal window (no addressable pane)\n'

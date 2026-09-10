@@ -292,9 +292,18 @@ _herdr_pane_id_ok() {
   # ONE herdr pane grammar (do not implement the predicate twice). The herdr
   # driver is always loaded through the registry, so the helper is in scope; a bare
   # source without it falls back to the inline grammar rather than accepting anything.
-  if declare -F _agmsg_terminal_id_ok >/dev/null 2>&1; then
-    _agmsg_terminal_id_ok herdr "$1"; return $?
-  fi
+  # The grammar lives in terminal_id_ok below (the driver ABI hook the registry
+  # asks); this is its local name. It used to delegate UP to the registry, which
+  # held a case over three drivers -- the #1141 review turned that around: the
+  # driver is the authority on its own ids, the registry asks.
+  terminal_id_ok "$1"
+}
+
+# ABI hook: is <id> a herdr pane id in THIS driver's grammar? Asked by the
+# registry (`_agmsg_terminal_id_ok herdr <id>`) for every row the label
+# resolver reads and every ref it validates; a malformed row must answer no.
+#   w<workspace>:p<pane>, alphanumerics only, exactly one colon.
+terminal_id_ok() {   # <id>
   case "$1" in
     w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;
     *) return 1 ;;
