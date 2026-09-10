@@ -484,6 +484,22 @@ terminal_find_by_label() {   # <label>
   local label="$1" out sock
   [ -n "$label" ] || return 0
   command -v tmux >/dev/null 2>&1 || return 10
+  # The same presence test `terminal_detect` opens with, in the same terms, for
+  # two reasons (#1126).
+  #
+  # It has to be GUARDED at all: every entry point that self-names runs under
+  # `set -u` (join.sh, actas-claim.sh, watch.sh, session-start.sh), so a bare
+  # `${TMUX%%,*}` with $TMUX unset kills this function's subshell. The caller
+  # discards stderr and moves on, so the tmux label path was skipped with
+  # nothing said -- resolution then fell back to the environment, which is the
+  # answer the label path exists to replace.
+  #
+  # And it has to REFUSE rather than search the ambient default server: without
+  # a socket there is no way to say which server an id came from, and a bare
+  # `%N` in a placement record is the socket-less legacy form that a pane id is
+  # not unique across (#1051). "Not under tmux" is the honest answer, and it is
+  # the one `terminal_detect` already gives.
+  [ -n "${TMUX:-}" ] || return 10
   sock="${TMUX%%,*}"
   out="$(_tmux_do "${sock:+$sock:}" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || return 10
   printf '%s\n' "$out" | awk -v want="$label" -v sock="$sock" '
