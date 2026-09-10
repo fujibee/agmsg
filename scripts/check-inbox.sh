@@ -254,18 +254,18 @@ if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/n
   # depend on that staying true.
   for _nteam in ${TEAM_LIST[@]+"${TEAM_LIST[@]}"}; do
     [ -n "$_nteam" ] || continue
-    # `record_if_unset`: the later chance to record a seat that was named without
-    # one (#1128). The inbox is read in the seat's own pane, so this process can
-    # say "I am somewhere" -- but it does not check that the pane the environment
-    # handed over is where this seat LIVES, and an existing record was written by
-    # something that may have known more. Filling a hole needs no such proof;
-    # correcting a record does, and that belongs to the paths that check the
-    # label first (the action hook since #1130, and `team --fix`).
+    # NAMES ONLY -- no record (#1128, narrowed twice in review). The inbox is
+    # read in the seat's own pane, so this process can say "I am somewhere", but
+    # the pane comes from the resolver and when the label path finds nothing the
+    # resolver falls back to the environment -- which for a seat under a shared
+    # app-server is the daemon's pane (#1112). A hole filled with the wrong pane
+    # is still wrong, and "never overwrite" does not make an unsupported FIRST
+    # record safe.
     #
-    # Measured: with an unconditional `record` here, a record deleted moments
-    # earlier came straight back on the next inbox read -- which is what a
-    # despawn test caught, and it is the same shape as overwriting somebody's.
-    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" record_if_unset || true
+    # The seat's own next action fills it instead, through lib/self-name.sh,
+    # which since #1130 asks the pane whether it carries this seat's label first.
+    # That is the evidence this path does not have.
+    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" || true
   done
 fi
 

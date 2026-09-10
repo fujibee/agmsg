@@ -893,8 +893,31 @@ agmsg_terminal_name_self() {
   # `record_if_unset` fills a hole; it does not correct one. Decided here rather
   # than at the caller because the record PATH is built here, and a caller
   # rebuilding it is a second spelling of the same thing waiting to drift.
-  if [ "$write_record" = record_if_unset ] && [ -f "$rec" ]; then
-    return 0
+  #
+  # RESERVED, not tested-then-written. `[ -f "$rec" ]` followed by a temp+rename
+  # is check-then-act: two shells joining the same name at once both see it
+  # absent and the later rename wins, which is the exact two-shell race this mode
+  # exists to close (found in review). The reservation below is one atomic
+  # create: under `set -C` bash opens with O_EXCL, so exactly one of them gets
+  # the file and the other is told so by the redirect failing.
+  #
+  # `ln`/`mktemp` are not available to reach for -- `join` must work on a PATH
+  # carrying only bash, dirname, sqlite3, sed, date, mkdir, rmdir, cat, mv, head,
+  # od, tr, sort, basename and paste, and there is a test that enforces it.
+  # `set -C` is a shell builtin, so it costs nothing from that list.
+  #
+  # Two steps rather than one so that BOTH properties hold: existence is decided
+  # atomically here, and the content still arrives through the atomic write
+  # below, into a file this process now owns. A process killed between them
+  # leaves an empty record, which `peek` reports as a record with no pane id
+  # rather than resolving something wrong.
+  if [ "$write_record" = record_if_unset ]; then
+    local _reserved=0 _had_C=0
+    case $- in *C*) _had_C=1 ;; esac
+    set -C
+    if : > "$rec" 2>/dev/null; then _reserved=1; fi
+    [ "$_had_C" = 1 ] || set +C
+    [ "$_reserved" = 1 ] || return 0     # somebody else holds it; nothing to fill
   fi
 
   # STOP-GAP (#1113, remove with #1112): do not take a pane another seat's record
