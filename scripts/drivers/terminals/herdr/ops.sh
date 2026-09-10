@@ -993,8 +993,29 @@ terminal_name() {
   # written, so a member ended up with neither name and no record — the
   # requirement this driver serves broke through that door. tmux has always had
   # this order; herdr was the one driver that put the ornament in front.
-  key="$(_herdr_internal_key "$team" "$name")" || { echo runtime_error; return 13; }
-  herdr agent rename "$id" "$key" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  # Two DIFFERENT failures used to leave the same word and nothing else (#1127):
+  # the key could not be COMPUTED, and the server refused to APPLY it. Both
+  # printed `runtime_error` with herdr's own stderr thrown away, so a naming
+  # failure on a live seat could not be attributed to either -- measured on this
+  # fleet, where a seat's record was repaired in the same action that failed to
+  # name, and the message said only `(runtime_error)`.
+  #
+  # The token on stdout stays `runtime_error`: it is the driver contract and
+  # callers read it. What changes is that the REASON is no longer discarded --
+  # the pattern this file already uses elsewhere, a line on stderr naming which
+  # step failed, and for the server call the server's own words with it.
+  key="$(_herdr_internal_key "$team" "$name")" || {
+    echo runtime_error
+    echo "herdr: cannot compute the internal key for '$team/$name' — the sha256 helper is unavailable, so the pane was not named" >&2
+    return 13
+  }
+  local _err _rc=0
+  _err="$(herdr agent rename "$id" "$key" 2>&1 >/dev/null)" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    echo runtime_error
+    echo "herdr: 'agent rename' for '$team/$name' on pane '$id' failed (rc=$_rc)${_err:+: $_err}" >&2
+    return 13
+  fi
 
   # The label, and its failure is deliberately NOT fatal — the same shape tmux
   # has. Not merely for symmetry: the caller writes the placement record only
