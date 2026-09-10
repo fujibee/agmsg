@@ -480,6 +480,38 @@ terminal_poke() {
 # (A label containing a NEWLINE would still split the row itself. That one is
 # closed upstream: `validate.sh` rejects control characters in both halves of the
 # pair, which is why the separator is the only case left to handle here.)
+# Search every tmux server this user owns for panes carrying <label>, printing
+# each hit socket-qualified. Used when the caller is not inside tmux, where
+# there is no $TMUX to name a server -- see terminal_find_by_label.
+#
+# Every line printed carries its own socket, so a caller cannot end up with an
+# id whose server is unknown; that ambiguity is the thing #1051 keeps out of
+# placement records and the reason #1126 refused the ambient-server shortcut.
+# Finding the same label on two servers is a genuine ambiguity and both lines
+# are printed: the caller counts, and more than one is not resolvable.
+_tmux_find_by_label_all_servers() {
+  local label="$1" dir sock out found=0
+  dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u 2>/dev/null)"
+  [ -d "$dir" ] || return 0          # no servers is not a failure: zero matches
+  for sock in "$dir"/*; do
+    [ -S "$sock" ] || continue
+    # A stale socket makes tmux exit non-zero; that is one dead server, not a
+    # failed search, so keep going rather than reporting we could not answer.
+    out="$(tmux -S "$sock" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || continue
+    [ -n "$out" ] || continue
+    printf '%s\n' "$out" | awk -v want="$label" -v sock="$sock" '
+      {
+        p = index($0, "|")
+        if (p == 0) next
+        id = substr($0, 1, p - 1)
+        if (substr($0, p + 1) != want) next
+        printf "%s:%s\n", sock, id
+      }'
+    found=1
+  done
+  return 0
+}
+
 terminal_find_by_label() {   # <label>
   local label="$1" out sock
   [ -n "$label" ] || return 0
@@ -499,7 +531,18 @@ terminal_find_by_label() {   # <label>
   # `%N` in a placement record is the socket-less legacy form that a pane id is
   # not unique across (#1051). "Not under tmux" is the honest answer, and it is
   # the one `terminal_detect` already gives.
-  [ -n "${TMUX:-}" ] || return 10
+  #
+  # WITHOUT $TMUX we do not refuse outright: `team --fix` runs from outside the
+  # pane it repairs -- that is what it is for -- so it never has $TMUX, and
+  # refusing here means a tmux seat can never be repaired by the one command
+  # meant to repair it (#1146). What #1126 rejected was searching the AMBIENT
+  # server, which cannot say where an id came from. Enumerating the socket
+  # directory and qualifying every hit with the socket it came from says exactly
+  # that, so no bare `%N` reaches a placement record.
+  if [ -z "${TMUX:-}" ]; then
+    _tmux_find_by_label_all_servers "$label"
+    return $?
+  fi
   sock="${TMUX%%,*}"
   out="$(_tmux_do "${sock:+$sock:}" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || return 10
   printf '%s\n' "$out" | awk -v want="$label" -v sock="$sock" '

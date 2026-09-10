@@ -2847,6 +2847,31 @@ EOF
   bash "$BATS_TEST_TMPDIR/probe.sh" 2>&1
 }
 
+_fake_tmux_sockets_with_label() {   # <dir> <server-names> <pane_id> <label>
+  local dir="$1" servers="$2" pane="$3" label="$4" uid n
+  uid="$(id -u)"
+  mkdir -p "$dir/tmux-$uid"
+  for n in $servers; do
+    # A real socket, so the driver's `[ -S ]` test is exercised rather than
+    # bypassed: a plain file would let a laxer test pass and hide the difference.
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$dir/tmux-$uid/$n"
+  done
+  # Unlike the one-label fake, this one HONOURS -S and answers as the server it
+  # was asked about. A fake that ignores -S cannot tell "searched every server"
+  # apart from "searched one", which is the whole subject of these tests.
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+sock=""
+if [ "\$1" = -S ]; then sock="\$2"; shift 2; fi
+case "\$1" in
+  list-panes)      [ -n "\$sock" ] && printf '%s|%s\n' '$pane' '$label' ;;
+  display-message) printf '%s|%s\n' "\$4" '$label' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+}
+
 _fake_tmux_one_label() {   # <pane_id> <label>
   cat > "$FAKEBIN/tmux" <<EOF
 #!/usr/bin/env bash
@@ -2868,19 +2893,22 @@ EOF
   grep -q 'unbound variable' <<<"$output"
 }
 
-@test "self-identity: the tmux label search does not die on an unset \$TMUX (#1126)" {
+@test "self-identity: the tmux label search does not die on an unset $TMUX (#1126)" {
   # The defect: `sock="${TMUX%%,*}"` with no default. The function's subshell
   # died, the caller's `|| continue` swallowed it, and the label path was gone.
+  #
+  # WHAT it does instead of dying changed with #1146; the half this test pins --
+  # surviving -u at all -- did not. No pane comes back here because this fake
+  # publishes no socket directory: nothing to enumerate is "nothing found", and
+  # that is still not a crash.
   _fake_tmux_one_label '%5' 'team:alice'
   run _probe_under_set_u 'unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$BATS_TEST_TMPDIR/no-such-sockets"
 agmsg_terminal_load tmux
 terminal_find_by_label "team:alice" || echo "refused rc=$?"
 echo done'
   refute grep -q 'unbound variable' <<<"$output"
   grep -q 'done' <<<"$output"
-  # Refusing is the right answer -- see the partner test below -- but it must be
-  # a REFUSAL, not a pane.
-  refute grep -q '%5' <<<"$output"
 }
 
 @test "self-identity: with \$TMUX set, the same search still finds the pane (#1126)" {
@@ -2897,19 +2925,53 @@ terminal_find_by_label "team:alice"'
   grep -q '/tmp/sock:%5' <<<"$output"
 }
 
-@test "self-identity: an unset \$TMUX resolves NOTHING rather than a socket-less pane (#1126)" {
-  # The second half of the fix, and the reason the answer is "refuse" and not
-  # "search the ambient default server": with no socket there is no way to say
-  # WHICH server an id came from, and a bare `%N` in a placement record is the
-  # legacy form a pane id is not unique across (#1051). `terminal_detect` has
-  # always treated an unset $TMUX as "not under tmux"; this now agrees with it.
-  _fake_tmux_one_label '%5' 'team:alice'
+@test "self-identity: an unset $TMUX finds the pane instead of declining (#1146)" {
+  # This half used to require that an unset $TMUX resolve NOTHING. That was right
+  # about the hazard and wrong about the remedy, so it is rewritten rather than
+  # deleted -- see the partner test for the hazard it was protecting.
+  #
+  # `team --fix` runs from outside the pane it repairs, so it never has $TMUX.
+  # Declining there meant a tmux seat could not be repaired by the one command
+  # meant to repair it.
+  _fake_tmux_sockets_with_label "$BATS_TEST_TMPDIR/socks" 'srvA' '%5' 'team:alice'
   run _probe_under_set_u 'unset TMUX TMUX_PANE
-_agmsg_terminal_resolve_by_label team alice && echo "RESOLVED: $?"
+export TMUX_TMPDIR="'"$BATS_TEST_TMPDIR"'/socks"
+agmsg_terminal_load tmux
+terminal_find_by_label "team:alice"'
+  [ "$status" -eq 0 ]
+  grep -q '%5' <<<"$output"
+}
+
+@test "self-identity: what comes back names its server, never a bare pane id (#1051, #1146)" {
+  # The hazard the old "resolve NOTHING" test was protecting, kept as its own
+  # gate: with no socket there is no way to say WHICH server an id came from, and
+  # a bare `%N` in a placement record is the legacy form a pane id is not unique
+  # across. Searching the AMBIENT server -- the shortcut #1126 rejected --
+  # reintroduces exactly that.
+  #
+  # Separate from the test above on purpose. Folded together, dropping the search
+  # and dropping the qualification redden the same single test, and either could
+  # then be fixed while the other stayed green.
+  _fake_tmux_sockets_with_label "$BATS_TEST_TMPDIR/socks3" 'srvA' '%5' 'team:alice'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+export TMUX_TMPDIR="'"$BATS_TEST_TMPDIR"'/socks3"
+agmsg_terminal_load tmux
+terminal_find_by_label "team:alice"'
+  grep -q "srvA:%5" <<<"$output"
+  refute grep -qE '(^|[^:])%5$' <<<"$output"
+}
+
+@test "self-identity: one label on two servers is an ambiguity, not a pick (#1146)" {
+  # The differential control. "Print every hit" passes the test above on its own;
+  # this is what stops one label found on two servers from becoming a confident
+  # answer. The resolver counts, and more than one does not resolve.
+  _fake_tmux_sockets_with_label "$BATS_TEST_TMPDIR/socks2" 'srvA srvB' '%5' 'team:alice'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+export TMUX_TMPDIR="'"$BATS_TEST_TMPDIR"'/socks2"
+_agmsg_terminal_resolve_by_label team alice && echo "RESOLVED"
 echo "fell through"'
   grep -q 'fell through' <<<"$output"
   refute grep -q 'RESOLVED' <<<"$output"
-  refute grep -q '%5' <<<"$output"
 }
 
 # --- #1127: a naming failure says WHICH step failed, and what the server said --
