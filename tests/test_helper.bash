@@ -107,7 +107,7 @@ _reap_test_skill_dir_procs() {
     # surface anything still there. The 6s headroom is what covers a load-3-digit host.
     sig=TERM; [ "$tries" -ge 3 ] && sig=KILL
     for p in $pids; do kill "-$sig" "$p" 2>/dev/null || true; done
-    [ "$tries" -ge 60 ] && return 0
+    [ "$tries" -ge 60 ] && return 1
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))
   done
@@ -122,8 +122,10 @@ teardown_test_env() {
   # as a non-zero rm ("Directory not empty" / "Device or resource busy"), so pay the cost
   # exactly there: on failure, reap the TEST_SKILL_DIR-scoped holders and retry.
   rm -rf "$TEST_SKILL_DIR" 2>/dev/null && return 0
-  _reap_test_skill_dir_procs
-  rm -rf "$TEST_SKILL_DIR"
+  local reap_status=0 rm_status=0
+  _reap_test_skill_dir_procs || reap_status=$?
+  rm -rf "$TEST_SKILL_DIR" || rm_status=$?
+  [ "$reap_status" -eq 0 ] && [ "$rm_status" -eq 0 ]
 }
 
 # Skip a test on native Windows / Git Bash (MSYS/MINGW/Cygwin). Use ONLY for

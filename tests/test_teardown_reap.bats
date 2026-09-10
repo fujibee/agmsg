@@ -78,6 +78,16 @@ _wait_for_holder_ready() {
   [ "$status" -eq 0 ]
 }
 
+@test "teardown reaper fails when its bounded wait expires" {
+  # Keep the process list non-empty while replacing the side effects with no-ops. The
+  # 60-tick ceiling then runs quickly and this test proves timeout is not reported green.
+  _pids_referencing_dir() { printf '%s\n' 999999; }
+  kill() { :; }
+  sleep() { :; }
+  run _reap_test_skill_dir_procs
+  [ "$status" -ne 0 ]
+}
+
 @test "teardown reaper refuses to scan when TEST_SKILL_DIR is not a temp path (guard)" {
   # A mis-set TEST_SKILL_DIR must never turn the scan loose on a short/rooty prefix
   # (which would match — and kill — nearly every process).
