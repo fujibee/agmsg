@@ -135,7 +135,7 @@ agmsg_terminal_has() {
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready"
+_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of"
 
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
@@ -688,6 +688,106 @@ _agmsg_placement_claimed_by() {
   return 0
 }
 
+# Resolve this seat's pane by its LABEL, when the label answers unambiguously.
+# Prints "<terminal>\t<id>" and returns 0; returns 1 for "the label did not
+# settle it", which is not a failure -- the caller falls through to the paths
+# that were here before.
+#
+# WHY this goes first (#1112). The two existing ways to answer "which pane am I"
+# both read something that is not the seat:
+#
+#   the environment    HERDR_PANE_ID / TMUX_PANE, inherited. A codex seat's
+#                      commands run under one shared app-server, not in its pane,
+#                      so all of them inherit the pane that started the daemon --
+#                      measured: three seats resolving one pane while sitting in
+#                      three.
+#   the session id     herdr's agent_session for those panes does not match the
+#                      thread actually running there -- measured on the same
+#                      three seats, and it returns the SAME wrong pane.
+#
+# Two independent roads to one wrong answer is not a coincidence; both read the
+# process tree, and for these seats the process tree is not where they live. The
+# label is not read from the process tree: it was written on one pane at a time.
+#
+# That is the whole of the claim, and it is deliberately smaller than "the label
+# is correct". The label is written by `spawn`, repaired by `team --fix` and
+# written by seats naming themselves -- the same machinery whose wrong answers
+# this exists to route around. So a wrong label is possible, and preferring it
+# is a bet that a per-pane write is wrong less often than a value inherited by
+# every process under one daemon. Not authority: a more recent observation, from
+# a source that at least distinguishes one pane from another.
+#
+# EXACTLY ONE, or nothing. The label is not unique by construction -- it is
+# usable only WHEN it is unique, which is a different claim and the one the code
+# makes.
+#
+# Zero matches is the ordinary bootstrap state (nothing has named this seat yet).
+# Two or more is not hypothetical: measured on a real tmux server, two panes
+# carried the same `@agmsg_agent`, both alive, one running a CLI and one a bare
+# shell -- and splitting a labelled pane does NOT copy the option (measured on a
+# dedicated server), so a duplicate is something agmsg itself wrote. Picking the
+# first would choose silently between panes, one of which is someone else's --
+# the failure this whole change exists to stop, re-introduced one layer up. Both
+# fall through.
+_agmsg_terminal_resolve_by_label() {   # <team> <agent>
+  local team="$1" agent="$2" label name ids id line found="" count=0 tab
+  [ -n "$team" ] && [ -n "$agent" ] || return 1
+  label="$team:$agent"
+  tab="$(printf '\t')"
+  local names="herdr tmux plain"
+  [ -n "${AGMSG_TERMINAL_DRIVER:-}" ] && names="$AGMSG_TERMINAL_DRIVER"
+  for name in $names; do
+    agmsg_terminal_load "$name" >/dev/null 2>&1 || continue
+    declare -F terminal_find_by_label >/dev/null 2>&1 || continue
+    ids="$(terminal_find_by_label "$label" 2>/dev/null)" || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      count=$((count + 1))
+      found="$name$tab$line"
+    done <<EOF
+$ids
+EOF
+  done
+  [ "$count" -eq 1 ] || return 1
+  # The count says one; this says it is the RIGHT one. The driver did the
+  # filtering, and a driver whose filter is loose would hand back somebody else's
+  # pane with no way for the count to notice. Ask the pane what label it carries,
+  # through the op that reads a single pane, and require the answer.
+  #
+  # Through `terminal_label_of`, NOT a field of `terminal_team_observe`: the pair
+  # does not sit in the same observation field for every driver. tmux has no
+  # pane-label field of its own, so it publishes the pair as the KEY and its
+  # label field is the constant `n/a:no_independent_field`; herdr's label field
+  # is a real label and its key is a hash. Reading a fixed position asks the two
+  # drivers different questions -- and asked of tmux, one whose answer can never
+  # be the label, so on tmux the confirmation failed every single time and the
+  # label path never once resolved. It shipped that way and every test stayed
+  # green, because every test that reached a SUCCESS was a herdr test (#1122
+  # review). The driver knows where its own label lives; ask it by name.
+  #
+  # REQUIRED, not "if it is there". A driver that found a pane by label but
+  # cannot read that label back has not confirmed anything, and an unconfirmed
+  # pane is exactly the thing this whole change refuses to take.
+  #
+  # AND WHAT IT DOES NOT CATCH, so that nobody reads more into it later: a label
+  # that is simply WRONG. Asking the pane again returns the same wrong label,
+  # because the pane is where the wrong value was written. This catches a driver
+  # whose FILTER is loose -- a listing that answers with a pane it should not
+  # have matched -- and nothing about whether the label on that pane belongs to
+  # this seat. Deciding that needs evidence from outside the naming machinery
+  # entirely (asking the seat to emit something and seeing which pane it lands
+  # in); that is not this function and not this change.
+  id="${found#*$tab}"
+  name="${found%%$tab*}"
+  agmsg_terminal_load "$name" >/dev/null 2>&1 || return 1
+  declare -F terminal_label_of >/dev/null 2>&1 || return 1
+  local seen
+  seen="$(terminal_label_of "$id" 2>/dev/null)" || return 1
+  [ "$seen" = "$label" ] || return 1
+  printf '%s\n' "$found"
+  return 0
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}"
@@ -723,7 +823,13 @@ agmsg_terminal_name_self() {
   # substitution ends the CALLER before the status can be read -- the shape review
   # caught four times in this branch -- so every capture carries `|| rc=$?`.
   local resolved="" rc=0
-  if [ -n "$sid" ]; then
+  # #1112: the label first, when it settles the question. Falls through silently
+  # when it does not -- zero matches is the ordinary state before anything has
+  # named this seat, and more than one means the label is not identifying here.
+  resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
+  if [ -n "$resolved" ]; then
+    :                                        # the label answered; skip the rest
+  elif [ -n "$sid" ]; then
     resolved="$(agmsg_terminal_resolve_name "$sid")" || rc=$?
     [ "$rc" -eq 0 ] || return "$rc"        # unnamed: resolver printed the reason
   else
