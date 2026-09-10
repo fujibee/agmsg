@@ -2822,3 +2822,92 @@ EOF
   grep -q 'w1:pDAEMON' "$ARGV_LOG"
   grep -q '^herdr:w1:pDAEMON	/proj/A	codex$' "$mine"
 }
+
+# --- #1126: the label search must survive `set -u` ----------------------------
+#
+# Every entry point that self-names carries `set -euo pipefail` -- join.sh,
+# actas-claim.sh, watch.sh, session-start.sh. This suite sources the library
+# WITHOUT `set -u`, which is exactly why a bare `${TMUX%%,*}` in
+# terminal_find_by_label went unnoticed: under -u it kills the function's
+# subshell, the caller discards stderr and skips the driver, and resolution
+# falls back to the environment with nothing said.
+#
+# So the probe runs in a real `bash -u` child. Two facts have to hold together:
+# the resolver must not die, AND the harness must actually have -u on -- a probe
+# whose -u silently went missing would pass no matter what the driver does.
+_probe_under_set_u() {   # <extra shell lines>  -> prints the child's combined output
+  cat > "$BATS_TEST_TMPDIR/probe.sh" <<EOF
+set -euo pipefail
+export SKILL_DIR='$SKILL_DIR'
+. "\$SKILL_DIR/scripts/lib/terminal-registry.sh"
+export PATH='$FAKEBIN':"\$PATH"
+export AGMSG_TERMINAL_DRIVER=tmux
+$1
+EOF
+  bash "$BATS_TEST_TMPDIR/probe.sh" 2>&1
+}
+
+_fake_tmux_one_label() {   # <pane_id> <label>
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = -S ]; then shift 2; fi
+case "\$1" in
+  list-panes)      printf '%s|%s\n' '$1' '$2' ;;
+  display-message) printf '%s|%s\n' "\$4" '$2' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+}
+
+@test "self-identity: the harness really has set -u (canary for the two below) (#1126)" {
+  # Without this, "no unbound-variable error" proves nothing: it would also be
+  # the result of a probe that quietly lost -u.
+  run _probe_under_set_u 'printf "%s\n" "${DEFINITELY_NOT_SET_1126}"'
+  [ "$status" -ne 0 ]
+  grep -q 'unbound variable' <<<"$output"
+}
+
+@test "self-identity: the tmux label search does not die on an unset \$TMUX (#1126)" {
+  # The defect: `sock="${TMUX%%,*}"` with no default. The function's subshell
+  # died, the caller's `|| continue` swallowed it, and the label path was gone.
+  _fake_tmux_one_label '%5' 'team:alice'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+agmsg_terminal_load tmux
+terminal_find_by_label "team:alice" || echo "refused rc=$?"
+echo done'
+  refute grep -q 'unbound variable' <<<"$output"
+  grep -q 'done' <<<"$output"
+  # Refusing is the right answer -- see the partner test below -- but it must be
+  # a REFUSAL, not a pane.
+  refute grep -q '%5' <<<"$output"
+}
+
+@test "self-identity: with \$TMUX set, the same search still finds the pane (#1126)" {
+  # The differential control. "Return nothing for everything" also passes the
+  # test above; this is what stops that from being the fix.
+  _fake_tmux_one_label '%5' 'team:alice'
+  run _probe_under_set_u 'export TMUX="/tmp/sock,1,0"
+unset TMUX_PANE
+agmsg_terminal_load tmux
+terminal_find_by_label "team:alice"'
+  [ "$status" -eq 0 ]
+  refute grep -q 'unbound variable' <<<"$output"
+  # Socket-qualified, so the id names the server it came from.
+  grep -q '/tmp/sock:%5' <<<"$output"
+}
+
+@test "self-identity: an unset \$TMUX resolves NOTHING rather than a socket-less pane (#1126)" {
+  # The second half of the fix, and the reason the answer is "refuse" and not
+  # "search the ambient default server": with no socket there is no way to say
+  # WHICH server an id came from, and a bare `%N` in a placement record is the
+  # legacy form a pane id is not unique across (#1051). `terminal_detect` has
+  # always treated an unset $TMUX as "not under tmux"; this now agrees with it.
+  _fake_tmux_one_label '%5' 'team:alice'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+_agmsg_terminal_resolve_by_label team alice && echo "RESOLVED: $?"
+echo "fell through"'
+  grep -q 'fell through' <<<"$output"
+  refute grep -q 'RESOLVED' <<<"$output"
+  refute grep -q '%5' <<<"$output"
+}
