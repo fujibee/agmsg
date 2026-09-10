@@ -1145,3 +1145,128 @@ STUB
   refute grep -q '^pane rename w1:pOTHER ' "$MIS_LOG"
   refute grep -q '^agent rename w1:pOTHER ' "$MIS_LOG"
 }
+
+# --- #1140: --fix CREATES a record for a seat that has none, from its label ---------
+# A seat denied terminal ops (a sandbox) can never name itself, and the record write
+# sits behind naming, so it never gets a record either. --fix, from outside, places
+# it from the label -- when exactly one pane carries it -- and repairs that pane. The
+# other seat's pane must not be touched (the #1131 (a)/(b) independence, again).
+_install_norecord_fixture() {   # alice has NO record; her label is on w1:pMINE
+  export NR_LOG="$BATS_TEST_TMPDIR/herdr.log"; : > "$NR_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/herdr" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$NR_LOG"
+case "\$1/\$2" in
+  pane/list) echo '{"result":{"panes":[{"pane_id":"w1:pMINE","label":"fixteam:alice"},{"pane_id":"w1:pOTHER","label":"fixteam:bob"}]}}' ;;
+  pane/get)
+    case "\$3" in
+      w1:pMINE)  echo '{"result":{"pane":{"pane_id":"w1:pMINE","label":"fixteam:alice","agent_status":"idle","terminal_title":"t"}}}' ;;
+      w1:pOTHER) echo '{"result":{"pane":{"pane_id":"w1:pOTHER","label":"fixteam:bob","agent_status":"idle","terminal_title":"t"}}}' ;;
+      *)         echo '{"result":{"pane":{}}}' ;;
+    esac ;;
+  agent/list) echo '{"result":{"agents":[]}}' ;;
+  agent/get)  echo '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}' ;;
+  *)          echo '{"result":{"type":"ok"}}' ;;
+esac
+STUB
+  chmod +x "$bin/herdr"
+  export PATH="$bin:$PATH"
+  export AGMSG_TERMINAL_DRIVER=herdr
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NR_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  # NOT removed by hand: join writes NO placement record by design (it is not the
+  # seat's claim on a pane), so this is naturally absent -- the measured state, and
+  # a test that reproduces it rather than manufacturing it. If join ever starts
+  # writing one, this assertion reddens and says so.
+  [ ! -e "$NR_REC" ]
+}
+
+@test "team --fix creates a placement record from the label for a seat that has none (#1140)" {
+  _install_norecord_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # (a) a record now exists and names alice's OWN pane (the label's answer)
+  [ "$(cat "$NR_REC")" = $'herdr:w1:pMINE\t/tmp/proj\tclaude-code' ]
+  # positive control: --fix reached the created pane at all
+  grep -q '^pane get w1:pMINE$' "$NR_LOG"
+}
+
+@test "team --fix, creating a record from the label, does NOT touch another seat's pane (#1140)" {
+  _install_norecord_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # positive control independent of the correction: the fix ran and observed a pane
+  grep -q '^pane get w1:p' "$NR_LOG"
+  # (b) THE POINT: the other seat's pane was never written with alice's identity
+  refute grep -q '^pane rename w1:pOTHER ' "$NR_LOG"
+  refute grep -q '^agent rename w1:pOTHER ' "$NR_LOG"
+}
+
+# --- #1140: the MEASURED bare-tmux shape (join leaves no record, label resolves) ----
+# Not herdr and not a hand-removed record: a tmux fake shaped like the real thing --
+# `list-panes` publishes @agmsg_agent, and the ref that gets written is
+# socket-qualified. Two arms on the SAME fixture: read-only creates nothing (the
+# FIX gate), --fix creates the socket-qualified record (the measured shape).
+_install_norecord_tmux_fixture() {
+  export NRT_LOG="$BATS_TEST_TMPDIR/tmux.log"; : > "$NRT_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NRT_LOG"
+t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
+_label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+case "$* " in
+  *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
+  *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
+  *display-message*pane_title*)   printf '%s|%s\n' "$t" 'title' ;;
+  *show-options*)                 printf '%s\n' "$(_label "$t")" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin/tmux"
+  export PATH="$bin:$PATH"
+  # $TMUX is set here to give the resolver a socket, so this pins the record LOGIC
+  # (a socket-qualified tmux ref is created from the label). It is NOT the real
+  # --fix environment: --fix runs from OUTSIDE the seat's pane, where $TMUX is
+  # unset, and the tmux resolver abstains without it (#1132) -- so a tmux seat is
+  # not actually reached by --fix until #1146. Measured live. herdr, whose
+  # resolver needs no such environment, is reached today (the herdr fixture above).
+  export TMUX="/tmp/tsock,999,0"
+  export AGMSG_TERMINAL_DRIVER=tmux
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  [ ! -e "$NRT_REC" ]                      # join writes no record: the measured state, naturally
+}
+
+@test "team (read-only, no repair verb) creates NO record even with a unique tmux label (#1140)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
+}
+
+@test "team --fix creates a socket-qualified tmux record from the label (#1140)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  # (a) a record now names alice's pane, with a SOCKET-QUALIFIED tmux ref
+  [ "$(cat "$NRT_REC")" = $'tmux:/tmp/tsock:%11\t/tmp/proj\tclaude-code' ]
+  # positive control: --fix reached alice's pane (%11) through the driver
+  grep -q '%11' "$NRT_LOG"
+  # (b) the other seat's pane was never written
+  refute grep -q 'set-option .*-t %22 ' "$NRT_LOG"
+}
+
+# The measured LIVE gap (#1146): --fix runs from OUTSIDE the seat's pane, so it has
+# no $TMUX, and the tmux resolver abstains without it (#1132). So a tmux seat is not
+# actually reached by --fix today -- the same fixture, minus the $TMUX artifice.
+# This is the canary: when #1146 gives the resolver a socket without $TMUX, this
+# flips to a created record and this assertion reddens, saying the limitation lifted.
+@test "team --fix does not YET reach a tmux seat run from outside its pane -- no \$TMUX (#1146)" {
+  _install_norecord_tmux_fixture
+  unset TMUX
+  run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]
+}

@@ -8,8 +8,8 @@ set -euo pipefail
 #
 #   <team>     team the member is in
 #   <name>     the member whose pane to read
-#   --lines N  include scrollback: the driver decides what N means for its
-#              backend (tmux: last N lines; herdr: the 'recent' source)
+#   --lines N  request scrollback depth N (passed unchanged to the tmux/herdr
+#              backend)
 #
 # Read-only. The member's placement record (run/spawn.<team>__<name>, written
 # at placement time) names the terminal and the pane id; that terminal's driver

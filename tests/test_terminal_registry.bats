@@ -647,6 +647,13 @@ EOF
   grep -qE '\[agent\] \[rename\] \[wC:p9\] \[a[0-9a-f]{24}\]' "$ARGV_LOG"
 }
 
+@test "herdr: peek passes the requested scrollback depth to pane read (#1121)" {
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  terminal_peek 'wC:p9' --lines 50 >/dev/null
+  grep -q '\[pane\] \[read\] \[wC:p9\] \[--source\] \[recent\] \[--lines\] \[50\]' "$ARGV_LOG"
+}
+
 _install_fake_herdr_layout() {
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
