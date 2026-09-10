@@ -32,6 +32,36 @@ teardown() { teardown_test_env; }
 # terminal layer too now (#1044).
 _install_fake_tmux() { agmsg_install_fake_tmux; }
 
+# Install and trust a fourth terminal driver. Its priority puts it after herdr
+# and before tmux, so every resolver can prove that it discovers manifests
+# instead of consulting a built-in name list.
+_install_external_terminal() {
+  local d="$SKILL_DIR/plugins/terminals/probe"
+  mkdir -p "$d"
+  cat > "$d/terminal.conf" <<'EOF'
+name=probe
+priority=15
+backend=test probe
+capabilities=name
+EOF
+  cat > "$d/ops.sh" <<'EOF'
+terminal_check() { echo ok; }
+terminal_describe() { echo name=probe; }
+terminal_detect() { printf 'probe-pane\n'; }
+terminal_spawn() { printf 'probe-spawned\n'; }
+terminal_despawn() { :; }
+terminal_pane_state() { echo present; }
+terminal_peek() { :; }
+terminal_poke() { :; }
+terminal_where() { echo probe-container; }
+terminal_arrange() { echo unchanged; }
+terminal_name() { :; }
+terminal_find_by_label() { printf 'probe-pane\n'; }
+terminal_label_of() { printf 'testteam:alice\n'; }
+EOF
+  agmsg_driver_trust terminals probe "$d"
+}
+
 # A fake `herdr` that logs argv and returns canned JSON/text for session <sid>.
 _install_fake_herdr() {
   local sid="${1:-}"
@@ -198,6 +228,17 @@ _fake_herdr_list_scalar_session() {
   run agmsg_terminal_resolve_name "sess-abc"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'herdr\twC:p4')" ]
+}
+
+@test "resolve: a trusted external manifest participates in every chooser (#1133)" {
+  _install_fake_tmux
+  _install_external_terminal
+  export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
+
+  [ "$(agmsg_terminal_candidates)" = "$(printf 'herdr\nprobe\ntmux\nplain')" ]
+  [ "$(agmsg_terminal_resolve_placement sess-x)" = "probe" ]
+  [ "$(agmsg_terminal_resolve_name sess-x)" = "$(printf 'probe\tprobe-pane')" ]
+  [ "$(_agmsg_terminal_resolve_by_label testteam alice)" = "$(printf 'probe\tprobe-pane')" ]
 }
 
 @test "resolve: an explicit override wins over detection" {

@@ -132,6 +132,34 @@ agmsg_terminal_has() {
   return 1
 }
 
+# Print every eligible terminal driver name in detection order. Discovery uses
+# the same bases and external-driver trust gate as agmsg_terminal_dir; a driver
+# that can be loaded by name is therefore also eligible for automatic
+# resolution. Lower numeric `priority` wins, with the name as a deterministic
+# tiebreak. Missing or malformed priorities default to 50, between the bundled
+# pane drivers and plain's final fallback.
+agmsg_terminal_candidates() {
+  local kind base dir name names="" priority
+  while IFS=$'\t' read -r kind base; do
+    for dir in "$base"/terminals/*; do
+      [ -d "$dir" ] && [ -f "$dir/terminal.conf" ] || continue
+      name="${dir##*/}"
+      case "$name" in ''|*[!a-zA-Z0-9_-]*) continue ;; esac
+      if [ "$kind" != builtin ] && ! agmsg_driver_is_trusted terminals "$name" "$dir"; then
+        continue
+      fi
+      case " $names " in *" $name "*) ;; *) names="${names:+$names }$name" ;; esac
+    done
+  done <<EOF
+$(agmsg_driver_bases)
+EOF
+  for name in $names; do
+    priority="$(agmsg_terminal_get "$name" priority 50)"
+    case "$priority" in ''|*[!0-9]*) priority=50 ;; esac
+    printf '%s\t%s\n' "$priority" "$name"
+  done | sort -n -k1,1 -k2,2 | cut -f2
+}
+
 # The full terminal ABI. EVERY driver must define EVERY one of these; the loader
 # verifies it. Naming the set here (not relying on each driver being complete) is
 # what makes a missing op FAIL rather than silently borrow the previously loaded
@@ -260,7 +288,8 @@ _agmsg_terminal_detect_one() {
 # decides nothing — these do.
 #
 # Precedence for both: an explicit override (AGMSG_TERMINAL_DRIVER, or arg 2) wins
-# over detection; else detection runs herdr > tmux > plain. This ends the historic
+# over detection; else every eligible driver runs in manifest-priority order.
+# Bundled priorities preserve herdr > tmux > plain. This ends the historic
 # $TMUX-vs-HERDR_* dual system; callers RECORD the resolved terminal rather than
 # re-deciding later from an inherited env (a nested herdr-in-tmux lies — measured
 # 2026-08-21). The override is a SPAWN/NAME preference only: ops on an EXISTING
@@ -285,7 +314,7 @@ agmsg_terminal_resolve_placement() {
     printf '%s\n' "$override"
     return 0
   fi
-  for name in herdr tmux plain; do
+  for name in $(agmsg_terminal_candidates); do
     if _agmsg_terminal_detect_one "$name" "$sid" >/dev/null 2>&1; then
       printf '%s\n' "$name"
       return 0
@@ -297,7 +326,7 @@ agmsg_terminal_resolve_placement() {
 # resolve-for-NAME (terminal_name / SessionStart): prints "<terminal>\t<self-id>"
 # and exit 0. ORDER (2026-09-01, from the nested-herdr measurement): prefer a
 # candidate that PRODUCED A PANE ID over one that only claimed PRESENCE; the
-# declaration order (herdr > tmux > plain) is the tiebreak AMONG id-producers.
+# manifest-priority order is the tiebreak AMONG id-producers.
 #
 # Why not "first present wins": a nested herdr-in-tmux inherits HERDR_* into a tmux
 # server it spawned, so herdr answers "present" though tmux is the real terminal. If
@@ -320,7 +349,8 @@ agmsg_terminal_resolve_name() {
   local sid="${1:-}" override="${2:-${AGMSG_TERMINAL_DRIVER:-}}" name id rc errf reason
   local reasons="" saw_present_unnamed=0 plain_present=0 plain_name=""
   errf="$(mktemp "${TMPDIR:-/tmp}/agmsg-detect.XXXXXX")" || errf=/dev/null
-  local names="herdr tmux plain"
+  local names
+  names="$(agmsg_terminal_candidates)"
   if [ -n "$override" ]; then
     agmsg_terminal_dir "$override" >/dev/null 2>&1 || {
       echo "agmsg: unknown terminal driver '$override' (AGMSG_TERMINAL_DRIVER)" >&2
@@ -754,7 +784,8 @@ _agmsg_terminal_resolve_by_label() {   # <team> <agent>
   [ -n "$team" ] && [ -n "$agent" ] || return 1
   label="$team:$agent"
   tab="$(printf '\t')"
-  local names="herdr tmux plain"
+  local names
+  names="$(agmsg_terminal_candidates)"
   [ -n "${AGMSG_TERMINAL_DRIVER:-}" ] && names="$AGMSG_TERMINAL_DRIVER"
   for name in $names; do
     agmsg_terminal_load "$name" >/dev/null 2>&1 || continue
