@@ -36,12 +36,20 @@
 #     server generation as the environment shows it (tmux: the pid in $TMUX;
 #     herdr: the socket file's inode+ctime, recreated at server start), so a
 #     restart makes the mark not match and the seat names itself again.
-#   BLIND SPOT, stated rather than papered over: a name removed while the
-#   server generation and the pane are unchanged (someone renamed the pane by
-#   hand, or a terminal that clears names without restarting) is not seen
-#   here -- the mark says named, nothing in the environment says otherwise,
-#   and no terminal call is made. `team --fix` (which observes the terminal)
-#   or `rename` repairs that case; this hook does not claim to.
+#   - the name was removed while the server generation and the pane are
+#     unchanged (someone renamed the pane by hand, or a terminal that clears
+#     names without restarting): the fast half asks the pane which agmsg label
+#     it carries, so the missing name IS seen and the seat names itself again.
+#     This was a stated BLIND SPOT until #1130 -- nothing in the environment
+#     changes, so a check that only read the environment could not know -- and
+#     it is closed by the same read that closed the bigger one below.
+#   - the environment is not this seat's at all: a seat whose commands run
+#     under a shared app-server inherits the daemon's pane, so the environment,
+#     and the mark and record written from it, all agree on somebody else's
+#     pane. That seat is perfectly self-consistent and used to short-circuit
+#     forever (#1130, measured: eleven hours of acting, the record never
+#     moved). The same read catches it, because the daemon's pane carries the
+#     daemon owner's label, not this seat's.
 #
 # Never fails the caller: naming is a side effect of the action, the action is
 # the thing. Every failure path returns 0 after one line on stderr.
@@ -54,6 +62,43 @@ _AGMSG_SELF_NAME_SH=1
 _agmsg_self_name_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SKILL_DIR:=$(cd "$_agmsg_self_name_dir/../.." && pwd)}"
 export SKILL_DIR
+
+# Does the pane the ENVIRONMENT names actually carry this seat's label? (#1130)
+#
+# The fast half exists to skip work when everything is already in place, and it
+# decided that from the mark, the record and the environment. All three can agree
+# and all three can be WRONG together: a seat whose commands run under a shared
+# app-server inherits the daemon's pane, so the environment answers with somebody
+# else's pane; whatever was written from that answer -- the mark, the record --
+# agrees with it by construction. Such a seat is perfectly self-consistent and
+# short-circuits forever. Measured on this fleet: a seat's record and mark both
+# named another seat's pane and had not moved in eleven hours of that seat acting,
+# because the hook returned here every single time. The label path added in #1112
+# sits in the slow half and was never reached.
+#
+# So the short-circuit is no longer keyed only on the input it was built to
+# distrust. This asks the pane itself, through the per-pane read the confirmation
+# in #1112 uses: if the environment's pane carries this seat's label, the
+# environment agreed with something that is not the environment and the skip is
+# earned. If it carries someone else's label, or none, or cannot be read, it is
+# not -- and the slow half runs, where the label resolves the right pane.
+#
+# It costs one per-pane query on the FAST path only (it is the last condition, so
+# a seat that already has work to do pays nothing extra). Measured on this
+# machine: `herdr pane get` 25 ms, against 71 ms for the `pane list` a full
+# re-resolution would cost; tmux answers `display-message` on a local socket.
+# That is the price of not trusting a value we decided not to trust.
+#
+# Any answer other than "carries my label" is a reason to do the work, INCLUDING
+# an unreadable one: a read that failed is not a pane that matched, and treating
+# it as one is the fold this codebase keeps paying for.
+_agmsg_self_name_env_corroborated() {   # <terminal> <id> <team> <agent>
+  local terminal="$1" id="$2" want="$3:$4" seen
+  agmsg_terminal_load "$terminal" >/dev/null 2>&1 || return 1
+  declare -F terminal_label_of >/dev/null 2>&1 || return 1
+  seen="$(terminal_label_of "$id" 2>/dev/null)" || return 1
+  [ "$seen" = "$want" ]
+}
 
 agmsg_self_name_on_action() {
   local team="${1:-}" agent="${2:-}" project="${3:-}" type="${4:-}"
@@ -97,7 +142,8 @@ agmsg_self_name_on_action() {
     [ -n "$rec" ] && [ -f "$rec" ] && IFS=$'\t' read -r recorded _ < "$rec" 2>/dev/null || true
   fi
   if [ -n "$have" ] && [ "${have%%	*}" = "$ref" ] && [ "${have#*	}" = "$epoch" ] \
-     && [ "$recorded" = "$ref" ]; then
+     && [ "$recorded" = "$ref" ] \
+     && _agmsg_self_name_env_corroborated "$terminal" "$id" "$team" "$agent"; then
     return 0                                 # named AND recorded at where I am
   fi
 

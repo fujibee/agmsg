@@ -35,22 +35,68 @@ setup() {
 }
 teardown() { teardown_test_env; }
 
+# The fakes below REMEMBER the label they are told to set, because #1130 makes
+# the fast half read it back: a fake that accepts a name and then answers
+# nothing when asked models a terminal that forgets, which is a different
+# terminal from the one under test. Only the one format that asks for the label
+# is answered; anything else stays silent, as before.
 _install_fake_tmux() {
+  export FAKE_TMUX_STATE="$FAKEBIN/tmux.labels"; : > "$FAKE_TMUX_STATE"
   cat > "$FAKEBIN/tmux" <<EOF
 #!/usr/bin/env bash
 { printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+state='$FAKE_TMUX_STATE'
+args=("\$@"); [ "\${args[0]}" = -S ] && args=("\${args[@]:2}")
+case "\${args[0]}" in
+  set-option)
+    if [ "\${args[4]}" = '@agmsg_agent' ]; then
+      grep -v "^\${args[3]}	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
+      printf '%s\t%s\n' "\${args[3]}" "\${args[5]}" >> "\$state.n"; mv "\$state.n" "\$state"
+    fi ;;
+  display-message)
+    if [ "\${args[4]}" = '#{pane_id}|#{@agmsg_agent}' ]; then
+      printf '%s|%s\n' "\${args[3]}" "\$(awk -F'\t' -v p="\${args[3]}" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
+    fi ;;
+esac
 exit 0
 EOF
   chmod +x "$FAKEBIN/tmux"
   export PATH="$FAKEBIN:$PATH"
 }
 
+# Clear the label the fake remembers for <pane>, touching neither the pane nor
+# the server -- the state a hand rename leaves.
+_clear_fake_label() {   # <pane>
+  grep -v "^$1	" "$FAKE_TMUX_STATE" > "$FAKE_TMUX_STATE.n" 2>/dev/null || : > "$FAKE_TMUX_STATE.n"
+  mv "$FAKE_TMUX_STATE.n" "$FAKE_TMUX_STATE"
+}
+
 _install_fake_herdr() {
+  export FAKE_HERDR_STATE="$FAKEBIN/herdr.labels"; : > "$FAKE_HERDR_STATE"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
 { printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+state='$FAKE_HERDR_STATE'
 if [ "\$1" = agent ] && [ "\$2" = list ]; then
   printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "\$1" = pane ] && [ "\$2" = rename ]; then
+  grep -v "^\$3	" "\$state" > "\$state.n" 2>/dev/null || : > "\$state.n"
+  printf '%s\t%s\n' "\$3" "\$4" >> "\$state.n"; mv "\$state.n" "\$state"
+elif [ "\$1" = pane ] && [ "\$2" = list ]; then
+  rows=""
+  while IFS=\$'\t' read -r pid lbl; do
+    [ -n "\$pid" ] || continue
+    [ -n "\$rows" ] && rows="\$rows,"
+    rows="\$rows{\"pane_id\":\"\$pid\",\"label\":\"\$lbl\"}"
+  done < "\$state"
+  printf '{"id":"1","result":{"panes":[%s]}}\n' "\$rows"
+elif [ "\$1" = pane ] && [ "\$2" = get ]; then
+  lbl="\$(awk -F'\t' -v p="\$3" '\$1 == p { print \$2 }' "\$state" 2>/dev/null)"
+  if [ -n "\$lbl" ]; then
+    printf '{"result":{"pane":{"agent_status":"idle","label":"%s","terminal_title":"t"}}}\n' "\$lbl"
+  else
+    printf '{"result":{"pane":{"agent_status":"idle","terminal_title":"t"}}}\n'
+  fi
 fi
 exit 0
 EOF
@@ -110,13 +156,24 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
 }
 
-@test "mark present and matching: the action does not call the terminal at all" {
+@test "mark present and matching: the action READS the pane and writes nothing (#1130)" {
+  # The invariant changed with #1130, and the change is the point: the fast half
+  # no longer decides from the environment alone, because a seat whose
+  # environment is somebody else's pane has a mark and a record that agree with
+  # it and short-circuits forever. It asks the pane which label it carries.
+  #
+  # "No calls at all" is therefore gone. What must still hold -- what the old
+  # assertion was protecting -- is that a settled seat does no WORK: it does not
+  # relabel, rekey or rewrite anything, and it does not go listing panes.
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
   : > "$ARGV_LOG"
   agmsg_self_name_on_action team alice
   agmsg_self_name_on_action team alice
-  [ "$(_terminal_calls)" -eq 0 ]
+  [ "$(_name_calls)" -eq 0 ]
+  [ "$(grep -c '\[display-message\]' "$ARGV_LOG")" -eq 2 ]
+  refute grep -q '\[list-panes\]' "$ARGV_LOG"
+  [ "$(_terminal_calls)" -eq 2 ]
 }
 
 @test "mark present, but I am in another pane: named again, and the mark follows" {
@@ -141,16 +198,33 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=5151' ]
 }
 
-@test "blind spot, pinned: the name removed while pane and server are unchanged is not seen" {
-  # Nothing in the environment changes when a name is cleared by hand, so the
-  # hook cannot know; it is documented as the case team --fix / rename repair.
+@test "the name removed while pane and server are unchanged IS seen now (#1130)" {
+  # This was the documented blind spot. Nothing in the ENVIRONMENT changes when
+  # a label is cleared by hand, so a fast half that read only the environment
+  # could not know, and the case was left to `team --fix` / `rename`. The #1130
+  # read closes it for free: the pane is asked, and the pane says it carries no
+  # agmsg label.
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   agmsg_self_name_on_action team alice
+  [ "$(_name_calls)" -eq 1 ]
   : > "$ARGV_LOG"
-  # (the fake tmux has no state to clear; the point is that the hook makes no call)
+
+  # Settled: nothing to do.
   agmsg_self_name_on_action team alice
-  [ "$(_terminal_calls)" -eq 0 ]
-  grep -q 'BLIND SPOT' "$SKILL_DIR/scripts/lib/self-name.sh"
+  [ "$(_name_calls)" -eq 0 ]
+
+  # Someone clears the label by hand. The pane and the server are untouched, so
+  # the mark still matches, and so does the record.
+  _clear_fake_label %3
+  [ "$(_mark team alice)" = $'tmux:/tmp/s:%3\tpid=4242' ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+  : > "$ARGV_LOG"
+
+  agmsg_self_name_on_action team alice
+  [ "$(_name_calls)" -eq 1 ]
+  grep -q '\[-t\] \[%3\] \[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
+  # And the documentation no longer claims otherwise.
+  refute grep -q 'BLIND SPOT, stated rather than papered over' "$SKILL_DIR/scripts/lib/self-name.sh"
 }
 
 @test "another seat in the same pane names it for itself: its own record has no mark for that pane" {
@@ -181,7 +255,13 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
   : > "$ARGV_LOG"
   agmsg_self_name_on_action team alice
-  [ "$(_terminal_calls)" -eq 0 ]
+  [ "$(_name_calls)" -eq 0 ]
+  # One read per action, no writes. The old assertion here was "no terminal
+  # calls at all"; #1130 makes the fast half ASK the pane which label it
+  # carries, because a seat whose environment is somebody else's pane has a
+  # mark and a record that agree with it and short-circuits forever. What the
+  # old assertion was protecting -- a settled seat does no WORK -- is kept.
+  refute grep -q '\[list-panes\]' "$ARGV_LOG"
 }
 
 @test "the action names first, then a boot path: same key both times" {
@@ -258,7 +338,13 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   agmsg_self_name_on_action team alice
   : > "$ARGV_LOG"
   agmsg_self_name_on_action team alice
-  [ "$(_terminal_calls)" -eq 0 ]
+  [ "$(_name_calls)" -eq 0 ]
+  # One read per action, no writes. The old assertion here was "no terminal
+  # calls at all"; #1130 makes the fast half ASK the pane which label it
+  # carries, because a seat whose environment is somebody else's pane has a
+  # mark and a record that agree with it and short-circuits forever. What the
+  # old assertion was protecting -- a settled seat does no WORK -- is kept.
+  refute grep -q '\[list-panes\]' "$ARGV_LOG"
   # A restarted server recreates its socket. The fingerprint is inode:ctime
   # with ctime in whole seconds, and ext4 hands a just-freed inode straight
   # back (measured on the ubuntu runner: recreate within the same second and
@@ -398,4 +484,59 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # Control: the same call with the switch at its default names once.
   agmsg_terminal_name_self_safe "sid-1" team alice /tmp/p claude-code
   [ "$(_name_calls)" -eq 1 ]
+}
+
+
+# --- #1130: a seat that is WRONG but perfectly self-consistent -----------------
+
+@test "the environment, the mark and the record all name the SAME wrong pane -- one action moves it (#1130)" {
+  # The state measured on this fleet, reproduced through the code that creates
+  # it rather than hand-written: a seat resolves its pane from an environment it
+  # shares with a daemon, names THAT pane, and records it. Everything it can see
+  # then agrees, so the fast half short-circuits -- forever. The seat acted for
+  # eleven hours and its record never moved.
+  #
+  # Every existing test here starts from a CORRECT seat and asks that it stays
+  # correct. All of them were green while this shipped. This one starts broken.
+  _install_fake_herdr; _under_herdr w1:pDAEMON
+
+  # Act once under the wrong environment: this is how the bad state was made.
+  agmsg_self_name_on_action team alice
+  [ "$(_placement team alice)" = 'herdr:w1:pDAEMON' ]
+  local m0; m0="$(_mark team alice)"
+  [ "${m0%%	*}" = 'herdr:w1:pDAEMON' ]
+
+  # And now the truth: the daemon's pane belongs to the seat that started it,
+  # and this seat's label is on a different pane. (This is what the real server
+  # showed: the label was right, the record was somebody else's pane.)
+  printf 'w1:pDAEMON\tteam:other\nw1:pMINE\tteam:alice\n' > "$FAKE_HERDR_STATE"
+  : > "$ARGV_LOG"
+
+  # ONE ordinary action.
+  agmsg_self_name_on_action team alice
+
+  # It moved. The record is the half peek/poke/despawn resolve through, so this
+  # is the assertion that matters; a test on the label alone stays green.
+  [ "$(_placement team alice)" = 'herdr:w1:pMINE' ]
+  local m; m="$(_mark team alice)"
+  [ "${m%%	*}" = 'herdr:w1:pMINE' ]
+  # And it named ITS OWN pane, not the one it was squatting.
+  grep -q '^herdr \[agent\] \[rename\] \[w1:pMINE\] ' "$ARGV_LOG"
+  refute grep -q '\[rename\] \[w1:pDAEMON\]' "$ARGV_LOG"
+}
+
+@test "a seat whose environment IS its own pane still short-circuits (#1130 control)" {
+  # The partner. "Never short-circuit" also passes the test above, and it would
+  # cost every seat a full re-resolution on every action; this is what stops that
+  # from being the fix.
+  _install_fake_herdr; _under_herdr w1:pB
+  agmsg_self_name_on_action team alice
+  [ "$(_placement team alice)" = 'herdr:w1:pB' ]
+  : > "$ARGV_LOG"
+
+  agmsg_self_name_on_action team alice
+  [ "$(_name_calls)" -eq 0 ]
+  # It asked the pane, and it did NOT go listing panes to do it.
+  grep -q '^herdr \[pane\] \[get\] \[w1:pB\]' "$ARGV_LOG"
+  refute grep -q '\[pane\] \[list\]' "$ARGV_LOG"
 }
