@@ -446,6 +446,31 @@ terminal_poke() {
 # <mode> is `key` or absent — see the herdr driver for the split. Here the
 # `@agmsg_agent` pane option is the resolvable one and the window name / pane
 # title is the decoration, so `key` sets the option and stops.
+# Which panes carry this agmsg label? One id per line, socket-qualified like every
+# other id this driver hands out; no match prints nothing and still returns 0.
+#
+# The label is authoritative in a way the environment is not. A seat resolves its
+# own pane from $TMUX_PANE, and for an agent whose commands run somewhere other
+# than its pane -- codex, through one shared app-server -- that answer belongs to
+# whoever started the daemon, so every seat under it resolves the same pane
+# (#1112). terminal_name wrote `@agmsg_agent` on the pane it actually named, so
+# asking the server which pane carries the label asks the thing that was set for
+# that pane and no other.
+#
+# One call, and the whole server: `-a` so a seat in another session still finds
+# itself. Nothing is filtered by the caller's own $TMUX_PANE on purpose -- that
+# is the value under suspicion.
+terminal_find_by_label() {   # <label>
+  local label="$1" out sock
+  [ -n "$label" ] || return 0
+  command -v tmux >/dev/null 2>&1 || return 10
+  sock="${TMUX%%,*}"
+  out="$(_tmux_do "${sock:+$sock:}" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || return 10
+  printf '%s\n' "$out" | awk -F '|' -v want="$label" -v sock="$sock" '
+    $0 != "" && $2 == want { if (sock != "") printf "%s:%s\n", sock, $1; else print $1 }'
+  return 0
+}
+
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label
   label="$team:$name"

@@ -596,6 +596,76 @@ _agmsg_placement_claimed_by() {   # <ref> <this-seat's-record-path>
   return 0
 }
 
+# Resolve this seat's pane by its LABEL, when the label answers unambiguously.
+# Prints "<terminal>\t<id>" and returns 0; returns 1 for "the label did not
+# settle it", which is not a failure -- the caller falls through to the paths
+# that were here before.
+#
+# WHY this goes first (#1112). The two existing ways to answer "which pane am I"
+# both read something that is not the seat:
+#
+#   the environment    HERDR_PANE_ID / TMUX_PANE, inherited. A codex seat's
+#                      commands run under one shared app-server, not in its pane,
+#                      so all of them inherit the pane that started the daemon --
+#                      measured: three seats resolving one pane while sitting in
+#                      three.
+#   the session id     herdr's agent_session for those panes does not match the
+#                      thread actually running there -- measured on the same
+#                      three seats, and it returns the SAME wrong pane.
+#
+# Two independent roads to one wrong answer is not a coincidence; both read the
+# process tree, and for these seats the process tree is not where they live. The
+# label does not: terminal_name wrote "<team>:<agent>" on the pane it named.
+#
+# EXACTLY ONE, or nothing. The label is not unique by construction -- it is
+# usable only WHEN it is unique, which is a different claim and the one the code
+# makes.
+#
+# Zero matches is the ordinary bootstrap state (nothing has named this seat yet).
+# Two or more is not hypothetical: measured on a real tmux server, two panes
+# carried the same `@agmsg_agent`, both alive, one running a CLI and one a bare
+# shell -- and splitting a labelled pane does NOT copy the option (measured on a
+# dedicated server), so a duplicate is something agmsg itself wrote. Picking the
+# first would choose silently between panes, one of which is someone else's --
+# the failure this whole change exists to stop, re-introduced one layer up. Both
+# fall through.
+_agmsg_terminal_resolve_by_label() {   # <team> <agent>
+  local team="$1" agent="$2" label name ids id line found="" count=0 tab
+  [ -n "$team" ] && [ -n "$agent" ] || return 1
+  label="$team:$agent"
+  tab="$(printf '\t')"
+  local names="herdr tmux plain"
+  [ -n "${AGMSG_TERMINAL_DRIVER:-}" ] && names="$AGMSG_TERMINAL_DRIVER"
+  for name in $names; do
+    agmsg_terminal_load "$name" >/dev/null 2>&1 || continue
+    declare -F terminal_find_by_label >/dev/null 2>&1 || continue
+    ids="$(terminal_find_by_label "$label" 2>/dev/null)" || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      count=$((count + 1))
+      found="$name$tab$line"
+    done <<EOF
+$ids
+EOF
+  done
+  [ "$count" -eq 1 ] || return 1
+  # The count says one; this says it is the RIGHT one. The driver did the
+  # filtering, and a driver whose filter is loose would hand back somebody else's
+  # pane with no way for the count to notice. Ask the pane what label it carries,
+  # through the op that reads a single pane, and require the answer.
+  id="${found#*$tab}"
+  name="${found%%$tab*}"
+  agmsg_terminal_load "$name" >/dev/null 2>&1 || return 1
+  if declare -F terminal_team_observe >/dev/null 2>&1; then
+    local obs seen
+    obs="$(terminal_team_observe "$id" 2>/dev/null)" || return 1
+    seen="${obs#*$tab}"; seen="${seen%%$tab*}"
+    [ "$seen" = "$label" ] || return 1
+  fi
+  printf '%s\n' "$found"
+  return 0
+}
+
 agmsg_terminal_name_self() {
   local sid="${1:-}" team="${2:-}" agent="${3:-}" project="${4:-}" type="${5:-}"
   local write_record="${6:-}"
@@ -631,7 +701,13 @@ agmsg_terminal_name_self() {
   # substitution ends the CALLER before the status can be read -- the shape review
   # caught four times in this branch -- so every capture carries `|| rc=$?`.
   local resolved="" rc=0
-  if [ -n "$sid" ]; then
+  # #1112: the label first, when it settles the question. Falls through silently
+  # when it does not -- zero matches is the ordinary state before anything has
+  # named this seat, and more than one means the label is not identifying here.
+  resolved="$(_agmsg_terminal_resolve_by_label "$team" "$agent" 2>/dev/null)" || resolved=""
+  if [ -n "$resolved" ]; then
+    :                                        # the label answered; skip the rest
+  elif [ -n "$sid" ]; then
     resolved="$(agmsg_terminal_resolve_name "$sid")" || rc=$?
     [ "$rc" -eq 0 ] || return "$rc"        # unnamed: resolver printed the reason
   else

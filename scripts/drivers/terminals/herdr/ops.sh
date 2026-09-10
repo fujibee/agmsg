@@ -918,6 +918,32 @@ _herdr_internal_key() {
 # placement record's pane id. So under `key` that name is still established and
 # only the decoration is skipped —
 # and a key that cannot be set is an error there, because nothing else happened.
+# Which panes carry this agmsg label? One pane id per line; no match prints
+# nothing and still returns 0.
+#
+# `herdr pane list` returns every pane WITH its label in one call (measured: 38
+# panes, label present on each named one, null on the unnamed), so this needs no
+# per-pane round trip.
+#
+# This exists because neither of the other two ways to answer "which pane am I"
+# works for a codex seat (#1112). Its commands run under one shared app-server,
+# not in its pane, so the inherited HERDR_PANE_ID is the daemon's pane and all of
+# them resolve the same one; and herdr's own agent_session for those panes does
+# not match the thread actually running there. The label does not depend on
+# either: terminal_name wrote it on the pane it named.
+terminal_find_by_label() {   # <label>
+  local label="$1" json esc
+  [ -n "$label" ] || return 0
+  command -v herdr >/dev/null 2>&1 || return 10
+  json="$(herdr pane list 2>/dev/null)" || return 10
+  [ -n "$json" ] || return 10
+  esc="$(printf '%s' "$json" | sed "s/'/''/g")"
+  sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$esc','\$.result.panes')
+                    WHERE json_extract(value,'\$.label') = '$(printf '%s' "$label" | sed "s/'/''/g")'
+                      AND json_extract(value,'\$.pane_id') IS NOT NULL" 2>/dev/null || return 10
+  return 0
+}
+
 terminal_name() {
   local id="$1" team="$2" name="$3" mode="${4:-}" label key
   label="$(_herdr_label "$team" "$name")"
