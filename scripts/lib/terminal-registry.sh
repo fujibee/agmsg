@@ -573,7 +573,11 @@ agmsg_terminal_ref_id() {
 # recorded there (measured on this host, where every seat is in two teams).
 # "This agent's" is decided by building the record path for each team on disk
 # with the same encoder and comparing whole file names -- "__" is legal inside
-# a name, so the file name cannot be cut at a separator.
+# a name, so the file name cannot be cut at a separator. The one state this
+# cannot resolve: this agent's own record under a team that has since vanished
+# from teams/ -- no path can be built for it, so it reads as a rival and blocks
+# this seat (fail-closed). The refusal message says so and names the file to
+# remove; a team that is dropped with its run/ records left behind is that state.
 #
 # Since #1111 a seat records its own placement when it acts, resolving the pane
 # from its OWN environment. For codex that environment is not its own: those
@@ -751,21 +755,6 @@ agmsg_terminal_name_self() {
 
   agmsg_terminal_load "$terminal" || return 1
 
-  # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
-  # key stays, always, because it is addressing rather than decoration — the name
-  # the TERMINAL knows the agent by, in its own namespace.
-  #
-  # Narrower than an earlier revision of this comment claimed, and the difference
-  # matters: `peek`, `poke` and `despawn` in THIS repo resolve through the
-  # placement record's pane id, and `_herdr_internal_key` is read nowhere outside
-  # its own driver (counted). So dropping the key does not make a member
-  # unreachable to agmsg. Saying it did pointed at the wrong thing to protect.
-  # A caller that genuinely wants no terminal writes at all is describing the
-  # `plain` terminal.
-  #
-  # The env var is read HERE and handed to the driver as a mode, so the policy
-  # has one home and each driver only carries it out. Read at call time, not
-  # cached: a value cached at source time is a value nobody can change.
   # STOP-GAP (#1114, remove with #1112): a pane another seat's record already
   # claims is not this seat's to NAME, MARK, or RECORD. The check sits here,
   # BEFORE the rename, because the rename is the act it exists to prevent: with
@@ -794,11 +783,34 @@ agmsg_terminal_name_self() {
       return 0
     fi
     if [ -n "$_claimed_by" ]; then
-      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again. (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
+      # A claimant whose name ends in THIS seat's name may be this seat under a
+      # team no longer on disk (the exact rule cannot tell, and stays closed);
+      # the way out is then the file, not a seat.
+      local _self_hint=""
+      case "$_claimed_by" in
+        *"__$(_actas_lock_encode "$agent")")
+          _self_hint=" If '$_claimed_by' is this seat under a team that no longer exists, remove run/spawn.$_claimed_by." ;;
+      esac
+      echo "agmsg: did not name or record this pane: this seat resolved $_claim_ref, and that pane is already recorded as $_claimed_by's. Keeping that seat's name and record. If that seat is gone, drop or despawn it and act again.$_self_hint (#1114 stop-gap for the shared-environment resolution #1112 fixes.)" >&2
       return 0
     fi
   fi
 
+  # AGMSG_TERMINAL_NAMING=off suppresses the VISIBLE label and nothing else. The
+  # key stays, always, because it is addressing rather than decoration — the name
+  # the TERMINAL knows the agent by, in its own namespace.
+  #
+  # Narrower than an earlier revision of this comment claimed, and the difference
+  # matters: `peek`, `poke` and `despawn` in THIS repo resolve through the
+  # placement record's pane id, and `_herdr_internal_key` is read nowhere outside
+  # its own driver (counted). So dropping the key does not make a member
+  # unreachable to agmsg. Saying it did pointed at the wrong thing to protect.
+  # A caller that genuinely wants no terminal writes at all is describing the
+  # `plain` terminal.
+  #
+  # The env var is read HERE and handed to the driver as a mode, so the policy
+  # has one home and each driver only carries it out. Read at call time, not
+  # cached: a value cached at source time is a value nobody can change.
   local name_mode=""
   case "${AGMSG_TERMINAL_NAMING:-}" in
     off) name_mode=key ;;

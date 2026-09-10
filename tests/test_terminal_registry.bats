@@ -2378,3 +2378,37 @@ _tmux_op_args() {
   refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
   refute test -e "$mine"
 }
+
+@test "placement guard: this seat's record under a VANISHED team blocks it (closed) and the message names the file to remove (#1114 review)" {
+  # The exact rule builds this agent's record path for each team on disk. A team
+  # dropped with its run/ record left behind has no path to build, so that
+  # record reads as a rival: fail-closed, and the refusal must say the way out
+  # is the file, since "drop or despawn" points at this seat itself.
+  _install_fake_tmux
+  export PATH="$FAKEBIN:$PATH"
+  export TMUX="/tmp/fake,1,0" TMUX_PANE="%1"
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  mkdir -p "$SKILL_DIR/teams/seatteam"          # the live team exists; "gone" does not
+
+  local stale; stale="$(agmsg_spawn_path gone alice)"
+  mkdir -p "$(dirname "$stale")"
+  printf 'tmux:/tmp/fake:%%1\t/proj/OLD\tclaude-code\n' > "$stale"
+
+  local mine; mine="$(agmsg_spawn_path seatteam alice)"
+  : > "$ARGV_LOG"
+  run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
+  [ "$status" -eq 0 ]
+  grep -q 'did not name or record' <<<"$output"
+  grep -q "recorded as gone__alice's" <<<"$output"
+  grep -q 'remove run/spawn.gone__alice' <<<"$output"
+  refute grep -qE '\[set-option\]|\[select-pane\]' "$ARGV_LOG"
+  refute test -e "$mine"
+
+  # Control: a genuine other seat gets no such hint.
+  rm -f "$stale"
+  local rival; rival="$(agmsg_spawn_path seatteam bob)"
+  printf 'tmux:/tmp/fake:%%1\t/proj/PEER\tclaude-code\n' > "$rival"
+  run agmsg_terminal_name_self "" seatteam alice /proj/MINE claude-code record
+  grep -q "recorded as seatteam__bob's" <<<"$output"
+  refute grep -q 'remove run/spawn' <<<"$output"
+}
