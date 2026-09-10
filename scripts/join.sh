@@ -256,17 +256,21 @@ set +e
 [ -r "$SCRIPT_DIR/lib/terminal-registry.sh" ] && . "$SCRIPT_DIR/lib/terminal-registry.sh"
 _agmsg_tr_rc=$?
 [ "$_agmsg_tr_e" = 1 ] && set -e
-# `record`, because joining is the moment this seat becomes addressable and the
-# placement record is what peek/poke/despawn resolve through (#1128). Without it
-# a seat that joined and has not acted yet is named but unreachable -- and the
-# two later chances to pick it up, the watcher and the inbox read, were missing
-# it for the same reason.
+# `record_if_unset`, not `record` (#1128). Joining is the moment this seat
+# becomes addressable, and the placement record is what peek/poke/despawn resolve
+# through -- without it a seat that joined and has not acted yet is named but
+# unreachable. So the hole gets filled here.
 #
-# This process is the seat: join runs in the pane that is joining, and name_self
-# resolves the caller's own pane. See the note at the `record` gate in
-# terminal-registry.sh for the paths that must NOT pass it.
+# It is filled, not corrected. `/agmsg actas` runs join BEFORE actas-claim, and
+# join neither takes nor reads the exclusivity lock (measured on this tree: no
+# lock symbol appears in this file). So two shells can join one name from two
+# panes, and the second `actas` fails with status=held only AFTER an
+# unconditional record would have moved the placement to the pane that lost. An
+# existing record is left alone; #1130 repairs a wrong one when the seat acts,
+# and `team --fix` repairs it from the terminal, both after checking the label
+# this path cannot check.
 if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" record || true
+  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" record_if_unset || true
 fi
 
 echo "Joined team $TEAM as $AGENT_ID"

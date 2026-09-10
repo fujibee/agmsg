@@ -254,10 +254,18 @@ if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/n
   # depend on that staying true.
   for _nteam in ${TEAM_LIST[@]+"${TEAM_LIST[@]}"}; do
     [ -n "$_nteam" ] || continue
-    # `record`: the second of the two later chances to record a seat that was
-    # named without one (#1128). This process is the seat -- the inbox is read in
-    # the seat's own pane -- so it may speak for its placement.
-    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" record || true
+    # `record_if_unset`: the later chance to record a seat that was named without
+    # one (#1128). The inbox is read in the seat's own pane, so this process can
+    # say "I am somewhere" -- but it does not check that the pane the environment
+    # handed over is where this seat LIVES, and an existing record was written by
+    # something that may have known more. Filling a hole needs no such proof;
+    # correcting a record does, and that belongs to the paths that check the
+    # label first (the action hook since #1130, and `team --fix`).
+    #
+    # Measured: with an unconditional `record` here, a record deleted moments
+    # earlier came straight back on the next inbox read -- which is what a
+    # despawn test caught, and it is the same shape as overwriting somebody's.
+    agmsg_terminal_name_self_safe "${SESSION_ID:-}" "$_nteam" "$AGENT" "$PROJECT" "$TYPE" record_if_unset || true
   done
 fi
 

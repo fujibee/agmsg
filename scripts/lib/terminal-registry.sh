@@ -843,7 +843,34 @@ agmsg_terminal_name_self() {
   # writes a record: it runs in the PARENT's process on behalf of a child, so it
   # writes the child's record itself rather than reaching this line, and the
   # parent's own placement is never what it is claiming.
-  [ "$write_record" = record ] || return 0
+  #
+  # THREE strengths, not two, because the callers differ in what they can show
+  # (#1128):
+  #
+  #   (absent)         name only. The caller is not claiming placement at all.
+  #   record           "this pane is where I live". For a caller that can show
+  #                    it: actas, which has just taken the exclusivity lock;
+  #                    SessionStart; the action hook, which since #1130 asks the
+  #                    pane whether it carries this seat's label before it
+  #                    believes the environment.
+  #   record_if_unset  "nobody has said where I live, and I am somewhere". Fills
+  #                    the hole and never overwrites. For a caller that has a
+  #                    pane but no proof it is the only live instance of the
+  #                    seat -- `join`, which runs BEFORE actas-claim and neither
+  #                    takes nor reads the exclusivity lock (measured: no lock
+  #                    symbol appears in join.sh). Two shells can join one name
+  #                    from two panes; the second `actas` then fails with
+  #                    status=held, but an unconditional record would already
+  #                    have moved the placement to the pane that lost.
+  #
+  # A wrong existing record is not this caller's to repair. #1130 repairs it
+  # when the seat acts, and `team --fix` repairs it from the terminal -- both
+  # after checking the LABEL, which is the evidence join does not have.
+  case "$write_record" in
+    record) : ;;
+    record_if_unset) : ;;   # decided below, once the record path is known
+    *) return 0 ;;
+  esac
 
   # The record is what despawn/peek/poke resolve through, so it is written only
   # after the driver has actually named the pane.
@@ -863,6 +890,13 @@ agmsg_terminal_name_self() {
   [ "$rc" -eq 0 ] && [ -n "$rec" ] && [ -n "$ref" ] || {
     echo "agmsg: named the pane but could not build its record path" >&2; return 1
   }
+  # `record_if_unset` fills a hole; it does not correct one. Decided here rather
+  # than at the caller because the record PATH is built here, and a caller
+  # rebuilding it is a second spelling of the same thing waiting to drift.
+  if [ "$write_record" = record_if_unset ] && [ -f "$rec" ]; then
+    return 0
+  fi
+
   # STOP-GAP (#1113, remove with #1112): do not take a pane another seat's record
   # already claims. Naming SUCCEEDED -- the pane carries this seat's label -- so
   # this returns 0; what is declined is the placement CLAIM, and the reason is

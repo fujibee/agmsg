@@ -40,6 +40,10 @@ _placement() {   # <team> <agent>
   printf '%s' "$r"
 }
 
+_recpath() {   # <team> <agent>
+  bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; agmsg_spawn_path "$1" "$2"' _ "$1" "$2"
+}
+
 # Does `peek` reach the pane? Asserted through the real entry point, because the
 # record exists to be resolved by it and nothing else proves that end to end.
 _peek_reaches() {   # <team> <agent>
@@ -79,14 +83,14 @@ _join() { bash "$SCRIPTS/join.sh" "$1" "$2" claude-code "$PROJ" >/dev/null 2>&1;
 
 # --- the watcher re-arming ----------------------------------------------------
 
-@test "placement: the watcher records the pairs it serves (#1128)" {
-  # One of the two later chances to pick up a seat that was named without a
-  # record. The watcher is run for one interval and stopped; the naming block
-  # runs at startup, before any polling.
+@test "placement: a watcher launched FOR a seat records that seat (#1128)" {
+  # The watcher records only with an actas name, because only then does it know
+  # whose pane this is -- see the broad-mode test below, which is the half that
+  # keeps this one from being "record whatever you are subscribed to".
   _join team alice
   rm -f "$SKILL_DIR"/run/spawn.*
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" watch-sid-1128 "$PROJ" claude-code \
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" watch-sid-1128 "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- &
   local pid=$!
   local i
@@ -143,29 +147,68 @@ _join() { bash "$SCRIPTS/join.sh" "$1" "$2" claude-code "$PROJ" >/dev/null 2>&1;
   grep -q 'team__alice' <<<"$output"
 }
 
-@test "placement: a broad watcher serving two names records ONE pane, not two (#1128)" {
-  # The shape review asked about, driven through the watcher rather than join.
-  # Both pairs are registered for this project and neither is held elsewhere, so
-  # both are in the watcher's subscription.
+@test "placement: a BROAD watcher records nothing at all (#1128)" {
+  # Raised in review, and the first draft got it wrong. A broad watcher
+  # subscribes to every identity of the project that no other live session
+  # holds -- which is not the same as every identity that lives HERE. It has no
+  # evidence which of them, if any, is in this pane.
+  #
+  # The first version of this test asked for "exactly one record" on the theory
+  # that the #1114 placement guard refuses the second. That limits an arbitrary
+  # false placement to one; it does not prevent it. The contract is zero: a
+  # process that cannot say whose pane this is does not get to say.
   _join team alice
   _join team bob
   rm -f "$SKILL_DIR"/run/spawn.*
 
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" watch-sid-two "$PROJ" claude-code \
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" watch-sid-broad "$PROJ" claude-code \
     >/dev/null 2>&1 3>&- &
-  local pid=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    [ -n "$(_placement team alice)$(_placement team bob)" ] && break
-    sleep 1
-  done
-  sleep 2
+  local pid=$!
+  sleep 4
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 
-  # Exactly one of them holds this pane. Which one is not the point and is not
-  # asserted -- that would pin an iteration order nothing promises.
-  local n=0
-  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ] && n=$((n + 1))
-  [ "$(_placement team bob)" = 'tmux:/tmp/s:%3' ] && n=$((n + 1))
-  [ "$n" -eq 1 ] || { echo "seats holding this pane: $n (alice='$(_placement team alice)' bob='$(_placement team bob)')"; return 1; }
+  # Nothing recorded, for either of them.
+  [ -z "$(_placement team alice)" ]
+  [ -z "$(_placement team bob)" ]
+  # Positive control: the watcher DID run and DID name, so the absence above is
+  # a decision and not a watcher that never started.
+  grep -q '\[@agmsg_agent\]' "$ARGV_LOG"
+}
+
+@test "placement: join does not overwrite an existing record, whoever wrote it (#1128)" {
+  # The other half of "join fills the hole". join runs BEFORE actas-claim and
+  # neither takes nor reads the exclusivity lock -- measured, no lock symbol
+  # appears in join.sh -- so two shells can join one name from two panes, and
+  # the loser's `actas` fails with status=held only after an unconditional
+  # record would already have moved the placement to the loser's pane.
+  #
+  # So an existing record stands, whatever it says. Repairing a wrong one
+  # belongs to the paths that check the LABEL first (#1130 on action, and
+  # `team --fix`); this one cannot check it.
+  _join team alice
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+
+  printf 'tmux:/tmp/s:%%OTHER\t/proj/X\tclaude-code\n' > "$(_recpath team alice)"
+  : > "$ARGV_LOG"
+
+  run bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%OTHER' ]
+  # Positive control: join ran and NAMED the pane, so the record standing still
+  # is a decision and not a join that did nothing.
+  grep -q '\[@agmsg_agent\] \[team:alice\]' "$ARGV_LOG"
+}
+
+@test "placement: join DOES write when there is no record (#1128 control)" {
+  # The partner. "Never record from join" also passes the test above, and it is
+  # exactly the state #1128 exists to end.
+  _join team alice
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
+  rm -f "$SKILL_DIR"/run/spawn.team__alice
+
+  run bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  [ "$(_placement team alice)" = 'tmux:/tmp/s:%3' ]
 }

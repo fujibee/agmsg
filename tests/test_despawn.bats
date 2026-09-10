@@ -328,6 +328,16 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
   # DESPAWN_BIN (optional) is prepended for the CALLER only, never for the
   # watcher: a stub that has to break one of despawn's own syscalls must not also
   # break the watcher's unrelated cleanup, or the test measures two things.
+  # DESPAWN_DROP_RECORD=1: remove the member's placement record after it is up
+  # and before despawn runs. Since #1128 both `join` and an actas-named watcher
+  # fill an EMPTY record, so "deliberately no record" can no longer be arranged
+  # by simply not writing one -- the member writes its own. Removing it here
+  # keeps the case the test is about (despawn with nothing to resolve) instead
+  # of quietly turning that test into a different one.
+  if [ "${DESPAWN_DROP_RECORD:-}" = 1 ]; then
+    rm -f "$(_spawn_rec_path team alice)"
+  fi
+
   DESPAWN_RC=0
   PATH="${DESPAWN_BIN:+$DESPAWN_BIN:}$bindir:$PATH" bash "$SCRIPTS/despawn.sh" \
     team leader alice --timeout 10 >"$RUN/despawn.out" 2>"$RUN/despawn.err" || DESPAWN_RC=$?
@@ -366,9 +376,21 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
 @test "despawn: graceful — no placement record closes nothing, and says why" {
   local bin="$BATS_TEST_TMPDIR/bin"
   _stub_tmux "$bin"
-  # deliberately NO record written
-
-  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%9
+  # Deliberately NO record at despawn time. Since #1128 a member fills its own
+  # empty record -- `join` does, and so does an actas-named watcher -- so this
+  # state has to be arranged rather than assumed.
+  #
+  # BOTH halves are needed, and the second one is not belt-and-braces. The
+  # watcher writes its readiness sentinel BEFORE it names (watch.sh: the
+  # sentinel at ~827, the naming block at ~875), and the helper returns as soon
+  # as the sentinel appears -- so removing the record at that moment races the
+  # naming that is about to recreate it. Measured: the same test passed or
+  # failed depending on how much other work happened in between.
+  # AGMSG_SELF_NAME=off makes the watcher name nothing, which is exactly the
+  # member this test is about -- one that never named itself -- and removes the
+  # race instead of widening a window.
+  DESPAWN_DROP_RECORD=1 _despawn_member_with_env "$bin" \
+    AGMSG_SELF_NAME=off TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%9
 
   # Nothing was closed...
   if [ -f "$bin/tmux.log" ]; then

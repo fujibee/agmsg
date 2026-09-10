@@ -841,26 +841,45 @@ fi
 # session id and its pairs just as well, and the requirement is about the pane
 # having a name, not about which mode the watcher is in.
 #
-# `record` IS written (#1128). The older reason not to -- "a watcher can be
-# running for a seat it did not claim" -- is about the actas EXCLUSIVITY claim,
-# which is a different claim from placement: one says who may act as the seat,
-# the other says which pane the seat is in. And the pairs that reach here have
-# already had the first question answered: the actas-lock filter above removed
-# every pair owned by another live session, so what is left is pairs this
-# process legitimately serves, in the pane this process is in.
+# `record` ONLY with an actas name (#1128, narrowed in review).
 #
-# The watcher matters here because it is one of the two places a seat that was
-# named without a record gets picked up later -- and it was missing `record` for
-# the same reason join was (#1111).
+# The first draft passed it always, on the argument that the actas-lock filter
+# above has already removed every pair owned by another live session, so what is
+# left is this process's to speak for. That argument does not reach far enough.
+# "Not held by anyone else" is not "here": a seat can be unheld and living in
+# another pane entirely, and a broad watcher subscribes to every unheld identity
+# of the project rather than to a particular seat. Recording from broad mode
+# therefore puts SOME identity in this pane on no evidence -- and the placement
+# guard, which refuses the second differently-named pair, only limits that to one
+# arbitrary false placement instead of preventing it.
 #
-# With more than one DIFFERENTLY-named pair in one pane, the second is refused by
-# the placement guard and says so on stderr; that is the guard working as
-# designed (#1114), not this call being wrong. Pairs that differ only by TEAM are
-# the same seat and are not refused.
+# With an actas name the watcher was launched FOR one seat and serves only that
+# pair (the filter above narrows PAIRS to it), so it knows whose pane this is.
+# Without one it does not, and a claim it cannot support is not worth the repair
+# it would sometimes make: an unrecorded seat is fixed by its own next action
+# (lib/self-name.sh), which runs as the seat and can prove it.
+#
+# And with an actas name it fills a hole rather than correcting one:
+# `record_if_unset`, the same strength `join` uses. Being launched FOR a seat
+# says this session acts as it; it does not check that the pane the environment
+# handed over is where that seat lives, and an existing record was written by
+# something that may have known more. The existing despawn suite already
+# encodes this -- "a record for (team, alice) proves a pane was placed for that
+# seat, never that THIS process is in it" -- and an unconditional record from
+# here broke exactly that test. Correcting a wrong record belongs to the paths
+# that check the LABEL first: the action hook (#1130) and `team --fix`.
+#
+# The watcher still NAMES in both modes -- naming is idempotent and says only
+# "this pane carries this label", which is not a claim about where the seat
+# lives.
 if declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
   while IFS=$'\t' read -r _nt _na; do
     [ -z "$_nt" ] && continue
-    agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" record || true
+    if [ -n "$ACTIVE_NAME" ]; then
+      agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" record_if_unset || true
+    else
+      agmsg_terminal_name_self_safe "$SESSION_ID" "$_nt" "$_na" "$PROJECT_PATH" "$AGENT_TYPE" || true
+    fi
   done <<< "$PAIRS"
 fi
 
