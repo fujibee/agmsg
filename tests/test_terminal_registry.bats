@@ -2847,6 +2847,29 @@ EOF
   bash "$BATS_TEST_TMPDIR/probe.sh" 2>&1
 }
 
+_fake_tmux_sockets_one_unreadable() {   # <dir> <bad> <good> <pane_id> <label> [bad-msg]
+  local dir="$1" bad="$2" good="$3" pane="$4" label="$5" msg="${6:-connect failed: permission denied}" uid n
+  uid="$(id -u)"
+  mkdir -p "$dir/tmux-$uid"
+  for n in "$bad" "$good"; do
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$dir/tmux-$uid/$n"
+  done
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+sock=""
+if [ "\$1" = -S ]; then sock="\$2"; shift 2; fi
+case "\$sock" in
+  */$bad) echo '$msg' >&2; exit 1 ;;
+esac
+case "\$1" in
+  list-panes)      [ -n "\$sock" ] && printf '%s|%s\n' '$pane' '$label' ;;
+  display-message) printf '%s|%s\n' "\$4" '$label' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/tmux"
+}
+
 _fake_tmux_sockets_with_label() {   # <dir> <server-names> <pane_id> <label>
   local dir="$1" servers="$2" pane="$3" label="$4" uid n
   uid="$(id -u)"
@@ -2972,6 +2995,33 @@ _agmsg_terminal_resolve_by_label team alice && echo "RESOLVED"
 echo "fell through"'
   grep -q 'fell through' <<<"$output"
   refute grep -q 'RESOLVED' <<<"$output"
+}
+@test "self-identity: a server we could not READ poisons uniqueness (#1146)" {
+  # Found in review, measured: one socket answering non-zero and one returning a
+  # hit resolved as though the hit were the only one. It is not -- a server we
+  # could not read may hold the same label, and this search claims uniqueness
+  # across every server. "Could not read" is not "is not there".
+  _fake_tmux_sockets_one_unreadable "$BATS_TEST_TMPDIR/mix" 'srvBad' 'srvGood' '%5' 'team:alice'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+export TMUX_TMPDIR="'"$BATS_TEST_TMPDIR"'/mix"
+_agmsg_terminal_resolve_by_label team alice && echo "RESOLVED"
+echo "fell through"'
+  grep -q 'fell through' <<<"$output"
+  refute grep -q 'RESOLVED' <<<"$output"
+}
+
+@test "self-identity: a server tmux calls ABSENT is skipped, not fatal (#1146 control)" {
+  # The differential control for the test above. "Give up whenever any socket
+  # errors" also passes it, and would make one stale socket in the directory --
+  # the ordinary state of a machine that has run tmux before -- disable the
+  # search entirely. Only a server tmux itself reports as gone is skipped.
+  _fake_tmux_sockets_one_unreadable "$BATS_TEST_TMPDIR/stale" 'srvGone' 'srvGood' '%5' 'team:alice' 'no server running on /tmp/x'
+  run _probe_under_set_u 'unset TMUX TMUX_PANE
+export TMUX_TMPDIR="'"$BATS_TEST_TMPDIR"'/stale"
+agmsg_terminal_load tmux
+terminal_find_by_label "team:alice"'
+  [ "$status" -eq 0 ]
+  grep -q "srvGood:%5" <<<"$output"
 }
 
 # --- #1127: a naming failure says WHICH step failed, and what the server said --

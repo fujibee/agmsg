@@ -490,14 +490,31 @@ terminal_poke() {
 # Finding the same label on two servers is a genuine ambiguity and both lines
 # are printed: the caller counts, and more than one is not resolvable.
 _tmux_find_by_label_all_servers() {
-  local label="$1" dir sock out found=0
+  local label="$1" dir sock out err rc=0
   dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u 2>/dev/null)"
   [ -d "$dir" ] || return 0          # no servers is not a failure: zero matches
+  err="$(mktemp "${TMPDIR:-/tmp}/agmsg-tmuxsrv.XXXXXX")" || err=""
   for sock in "$dir"/*; do
     [ -S "$sock" ] || continue
-    # A stale socket makes tmux exit non-zero; that is one dead server, not a
-    # failed search, so keep going rather than reporting we could not answer.
-    out="$(tmux -S "$sock" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>/dev/null)" || continue
+    rc=0
+    out="$(tmux -S "$sock" list-panes -a -F '#{pane_id}|#{@agmsg_agent}' 2>"${err:-/dev/null}")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      # A non-zero does NOT prove the server is gone. Permission, a transient
+      # failure or a protocol mismatch all look the same from here, and this
+      # search claims UNIQUENESS across every server: silently skipping a server
+      # we could not read can hide a second holder of this label and let the one
+      # hit elsewhere resolve as if it were the only one.
+      #
+      # So only a socket tmux itself calls absent is skipped. Anything else is
+      # undecidable, and undecidable poisons the answer: return 10, "could not
+      # answer", which the caller already treats as not-resolved rather than as
+      # zero matches.
+      if [ -n "$err" ] && grep -qiE 'no server running|no such file or directory' "$err" 2>/dev/null; then
+        continue                      # proven stale: one dead server, keep going
+      fi
+      [ -n "$err" ] && rm -f "$err"
+      return 10
+    fi
     [ -n "$out" ] || continue
     printf '%s\n' "$out" | awk -v want="$label" -v sock="$sock" '
       {
@@ -507,8 +524,8 @@ _tmux_find_by_label_all_servers() {
         if (substr($0, p + 1) != want) next
         printf "%s:%s\n", sock, id
       }'
-    found=1
   done
+  [ -n "$err" ] && rm -f "$err"
   return 0
 }
 
@@ -526,19 +543,20 @@ terminal_find_by_label() {   # <label>
   # nothing said -- resolution then fell back to the environment, which is the
   # answer the label path exists to replace.
   #
-  # And it has to REFUSE rather than search the ambient default server: without
-  # a socket there is no way to say which server an id came from, and a bare
-  # `%N` in a placement record is the socket-less legacy form that a pane id is
-  # not unique across (#1051). "Not under tmux" is the honest answer, and it is
-  # the one `terminal_detect` already gives.
+  # WITHOUT $TMUX the answer is neither the ambient server nor a refusal.
   #
-  # WITHOUT $TMUX we do not refuse outright: `team --fix` runs from outside the
-  # pane it repairs -- that is what it is for -- so it never has $TMUX, and
-  # refusing here means a tmux seat can never be repaired by the one command
-  # meant to repair it (#1146). What #1126 rejected was searching the AMBIENT
-  # server, which cannot say where an id came from. Enumerating the socket
-  # directory and qualifying every hit with the socket it came from says exactly
-  # that, so no bare `%N` reaches a placement record.
+  # #1126 refused, and was right about the hazard: with no socket there is no way
+  # to say which server an id came from, and a bare `%N` in a placement record is
+  # the socket-less legacy form a pane id is not unique across (#1051). Searching
+  # whatever server happens to be ambient reintroduces exactly that.
+  #
+  # It was wrong about the remedy. `team --fix` runs from OUTSIDE the pane it
+  # repairs -- that is what it is for -- so it never has $TMUX, and refusing here
+  # meant a tmux seat could not be repaired by the one command meant to repair it
+  # (#1146). Enumerating the socket directory and qualifying every hit with the
+  # socket it came from answers the question the ambient shortcut could not, so
+  # the hazard is met by the FORM of the answer rather than by declining to give
+  # one. No bare `%N` reaches a placement record either way.
   if [ -z "${TMUX:-}" ]; then
     _tmux_find_by_label_all_servers "$label"
     return $?
