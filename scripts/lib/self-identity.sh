@@ -39,38 +39,69 @@ _AGMSG_SELF_MARK_PREFIX="agp-"
 _AGMSG_SELF_MARK_DIGEST_CHARS=13
 _AGMSG_SELF_MARK_LEN=17
 
+# THE ALPHABETS, as literal strings. Membership is tested character by character
+# with `test =`, never with a glob -- see _agmsg_self_chars_in_set for why.
+_AGMSG_SELF_MARK_ALPHABET="abcdefghijklmnopqrstuvwxyz234567"
+_AGMSG_SELF_HEX_ALPHABET="0123456789abcdef"
+
+# Is every character of <string> in <alphabet>? An empty string is not.
+#
+# NO GLOB, AND NOT ONLY BECAUSE OF THE LOCALE. Two separate shell settings widen
+# a pattern past what this file means by its alphabet, and both were measured on
+# this machine:
+#
+#                        bash 3.2            bash 5
+#   case [a-z]           widened by LOCALE   not widened      (collation order)
+#   case [abc...]        widened by NOCASE   widened by NOCASE
+#   [[ x == y ]]         widened by NOCASE   widened by NOCASE
+#   [ x = y ]            not widened         not widened
+#   ${s#pat} ${s%pat}    not widened         not widened
+#
+# The first row is why the range became an explicit set. The second row is why
+# the set is gone too: `shopt -s nocasematch` is the CALLER's setting, this file
+# is SOURCED into the caller's shell, and under it `case A in [abc...])` matches
+# on BOTH interpreters -- so the grammar would accept upper case in any caller
+# that happens to have the option on, and the locale test would go red for a
+# reason that has nothing to do with the locale (found in review).
+#
+# `test =` is literal string equality under both settings on both interpreters,
+# so the check is built out of that alone. Note also what this function does NOT
+# do: it sets no shell option and restores none. Never touching one is the only
+# version of "leaves the caller's options as it found them" that cannot be got
+# wrong -- and on bash 3.2, saving and restoring an option around a function is
+# its own question.
+_agmsg_self_chars_in_set() {   # <string> <alphabet>
+  local s="${1-}" set="${2-}" n m i j c found
+  n=${#s}; m=${#set}
+  [ "$n" -gt 0 ] && [ "$m" -gt 0 ] || return 1
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    found=""
+    j=0
+    while [ "$j" -lt "$m" ]; do
+      if [ "$c" = "${set:$j:1}" ]; then found=1; break; fi
+      j=$((j + 1))
+    done
+    [ -n "$found" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
+}
+
 # Is this exactly a mark? The grammar is checked everywhere a mark crosses a
 # boundary, because a function that accepts "any non-empty string" accepts a
 # newline, a row of spaces, or somebody else's token, and then every later
 # comparison is against something that was never a mark.
 _agmsg_self_mark_ok() {   # <candidate>
-  local s="${1-}" rest i c
+  local s="${1-}" rest
   [ "${#s}" -eq "$_AGMSG_SELF_MARK_LEN" ] || return 1
+  # Prefix removal, not a pattern test: parameter expansion is the one construct
+  # in the table above that neither setting widens.
   rest="${s#"$_AGMSG_SELF_MARK_PREFIX"}"
   [ "$rest" != "$s" ] || return 1
   [ "${#rest}" -eq "$_AGMSG_SELF_MARK_DIGEST_CHARS" ] || return 1
-  i=0
-  while [ "$i" -lt "${#rest}" ]; do
-    c="${rest:$i:1}"
-    # An explicit SET, never a range. Measured on this machine:
-    #
-    #                        LC_ALL=C          LC_ALL=en_US.UTF-8
-    #   bash 3.2  [a-z]      rejects A and é   ACCEPTS A and é
-    #   bash 3.2  [abc...]   rejects both      rejects both
-    #   bash 5    [a-z]      rejects both      rejects both
-    #
-    # So on the macOS /bin/bash, under the locale a developer actually has, the
-    # range accepts an upper-case ASCII letter and an accented one -- both wider
-    # than the contract's [a-z2-7]. A set has no collation order to widen, so it
-    # is right in every combination without this file having to pin a locale
-    # (and pinning one inside a function is its own 3.2 question).
-    case "$c" in
-      [abcdefghijklmnopqrstuvwxyz234567]) : ;;
-      *) return 1 ;;
-    esac
-    i=$((i + 1))
-  done
-  return 0
+  _agmsg_self_chars_in_set "$rest" "$_AGMSG_SELF_MARK_ALPHABET"
 }
 
 # A fresh mark, or nothing.
@@ -97,14 +128,14 @@ agmsg_self_mark() {
   # 32 bytes is 64 hex characters. A short read, a missing /dev/urandom, or an
   # `od` that printed nothing all land here.
   [ "${#bytes}" -eq 64 ] || return 1
-  case "$bytes" in *[!0-9a-f]*) return 1 ;; esac
+  _agmsg_self_chars_in_set "$bytes" "$_AGMSG_SELF_HEX_ALPHABET" || return 1
   hex="$(printf '%s\n%s\n%s' "$bytes" "$$" "$(date -u +%s 2>/dev/null)" | agmsg_sha256)" || return 1
   # Exactly 64 lower-case hex characters. `>= 32` with no alphabet check was not
   # a check: the base32 encoder SKIPS characters that are not hex nibbles, so a
   # truncated or non-hex digest would have produced a short-but-plausible mark
   # instead of a refusal (found in review).
   [ "${#hex}" -eq 64 ] || return 1
-  case "$hex" in *[!0-9a-f]*) return 1 ;; esac
+  _agmsg_self_chars_in_set "$hex" "$_AGMSG_SELF_HEX_ALPHABET" || return 1
   rest="$(printf '%s' "$hex" | _agmsg_self_base32)"
   rest="${rest:0:$_AGMSG_SELF_MARK_DIGEST_CHARS}"
   [ "${#rest}" -eq "$_AGMSG_SELF_MARK_DIGEST_CHARS" ] || return 1
@@ -256,8 +287,8 @@ agmsg_self_classify() {   # <mark> <observation-file>
       printf "unique\t%s\t%s\n", first_t, first_p
     }' "$obs")" || { printf 'unreadable\n'; return 1; }
   printf '%s\n' "$out"
-  case "$out" in
-    unique$'\t'*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # Literal, for the reason the alphabet check is literal: `case` is widened by
+  # nocasematch, and the verdict word is a fixed string.
+  [ "${out:0:7}" = "unique"$'\t' ] || return 1
+  return 0
 }

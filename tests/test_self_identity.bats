@@ -368,28 +368,100 @@ _obs() {   # write an observation file from the lines given
   [ "$output" = "unreadable" ]
 }
 
-@test "grammar: the alphabet is written as a SET, checked statically (#1152)" {
-  # The behavioural test below can only fail where the hazard exists -- bash 3.2
-  # under a UTF-8 locale -- so on bash 5 it passes no matter what the code says.
-  # Measured: swapping the set back for a range produced ZERO reds in this
-  # suite. A control that cannot go red is not a control, so the property is
-  # ALSO pinned statically, which fires on every interpreter.
-  local body
-  # CODE only. The function's own comment documents the hazard by showing
-  # `[a-z]`, and a scan that read comments reported the clean code as defective
-  # -- the second time in this file that a derived check read prose (the first
-  # was the dependency inventory). Prose is not the thing being checked.
-  body="$(awk '/^_agmsg_self_mark_ok\(\)/,/^}/' "$SKILL_DIR/scripts/lib/self-identity.sh" \
-          | grep -v '^[[:space:]]*#')"
-  [ -n "$body" ] || { echo "could not read the grammar function"; return 1; }
-  # A glob RANGE anywhere in the grammar check is the defect: bash 3.2 widens it
-  # by collation order under a non-C locale.
-  if printf '%s\n' "$body" | grep -qE '\[[^]]*[a-zA-Z0-9]-[a-zA-Z0-9][^]]*\]'; then
-    echo "the grammar check uses a glob range:"; printf '%s\n' "$body" | grep -nE '\[[^]]*-[^]]*\]'
+@test "grammar: no shell PATTERN decides the alphabet, checked statically (#1152)" {
+  # Two shell settings widen a glob past the contract's [a-z2-7], and the
+  # behavioural test for each can only go red where the hazard exists:
+  #
+  #   locale       bash 3.2 only    -- measured: reverting the fix reddened
+  #                                   NOTHING on bash 5
+  #   nocasematch  both shells      -- but only while the option is on, which is
+  #                                   the caller's choice, not this file's
+  #
+  # A control that cannot go red on the interpreter running it is not a control.
+  # So the property is ALSO pinned here, where it fires everywhere and does not
+  # depend on any setting: the alphabet is decided by literal comparison, so
+  # there is no glob in this file's shell code at all.
+  local code hits
+  # CODE only. The comments in this file quote `[a-z]` and `case` while
+  # explaining the hazard, and an earlier version of this scan read them and
+  # reported the clean code as defective -- the second time in this file that a
+  # derived check read prose. Prose is not the thing being checked.
+  code="$(grep -v '^[[:space:]]*#' "$SKILL_DIR/scripts/lib/self-identity.sh")"
+  [ -n "$code" ] || { echo "could not read the file"; return 1; }
+  # DERIVED, not enumerated: every shell pattern-matching construct, not a list
+  # of the ones that happen to be here today. `case` and `[[` are both widened
+  # by nocasematch; a bracket range inside either is additionally widened by the
+  # locale on bash 3.2.
+  hits="$(printf '%s\n' "$code" | grep -nE '(^|[^[:alnum:]_])case[[:space:]]|\[\[' || true)"
+  if [ -n "$hits" ]; then
+    echo "shell pattern matching decides something in this file:"
+    printf '%s\n' "$hits"
     return 1
   fi
-  # And the set it does use is the contract's alphabet, entire.
-  printf '%s\n' "$body" | grep -qF '[abcdefghijklmnopqrstuvwxyz234567]'
+  # Not vacuous: the alphabet the literal check uses is the contract's, entire,
+  # and it is a plain string rather than a bracket expression.
+  printf '%s\n' "$code" | grep -qF '_AGMSG_SELF_MARK_ALPHABET="abcdefghijklmnopqrstuvwxyz234567"'
+}
+
+@test "grammar: nocasematch in the CALLER cannot widen the alphabet (#1152)" {
+  # This file is SOURCED, so an option the caller set is in effect inside these
+  # functions. Measured: under `shopt -s nocasematch`, `case A in [abc...])`
+  # matches on bash 3.2 AND on bash 5 -- so unlike the locale row, this control
+  # goes red on every interpreter, whichever one CI happens to use.
+  shopt -s nocasematch
+  local bad f
+  for bad in 'agp-Abcdefghijklm' 'agp-abcdefghijklM' 'AGP-abcdefghijklm'; do
+    if _agmsg_self_mark_ok "$bad"; then
+      echo "mark_ok accepted upper case under nocasematch: [$bad]"; return 1
+    fi
+    if agmsg_self_mark_line "$bad" >/dev/null 2>&1; then
+      echo "mark_line accepted upper case under nocasematch: [$bad]"; return 1
+    fi
+    if _agmsg_self_line_is_mark "$bad" "$bad" 2>/dev/null; then
+      echo "line_is_mark accepted upper case under nocasematch: [$bad]"; return 1
+    fi
+    f="$(_obs "herdr"$'\t'"w1:p7"$'\t'"$bad")"
+    run agmsg_self_classify "$bad" "$f"
+    [ "$status" -eq 1 ]
+    [ "$output" = "unreadable" ]
+  done
+  # Not vacuous: with the option still on, a real mark is still a mark, and the
+  # minting path still produces one (its hex guards are the same literal check).
+  _agmsg_self_mark_ok 'agp-abcdefghijklm'
+  run agmsg_self_mark
+  [ "$status" -eq 0 ]
+  _agmsg_self_mark_ok "$output"
+}
+
+@test "grammar: the checks leave the caller's shell options as they found them (#1152)" {
+  # The fix for the line above must not be "turn the option off and put it
+  # back": this file is sourced into somebody else's shell, and a function that
+  # edits a global setting is a side effect its callers did not ask for -- and
+  # one that leaks if the function returns early. Both directions are checked,
+  # because a function that unconditionally CLEARS the option would pass the
+  # off-to-off half on its own.
+  local before after f m='agp-abcdefghijklm'
+  f="$(_obs "herdr"$'\t'"w1:p7"$'\t'"$m")"
+  _exercise_every_entry_point() {
+    _agmsg_self_mark_ok "$m" || true
+    _agmsg_self_mark_ok 'agp-Abcdefghijklm' || true
+    agmsg_self_mark_line "$m" >/dev/null 2>&1 || true
+    _agmsg_self_line_is_mark "$m" "$m" || true
+    agmsg_self_mark >/dev/null 2>&1 || true
+    agmsg_self_classify "$m" "$f" >/dev/null 2>&1 || true
+  }
+  shopt -u nocasematch
+  before="$(shopt -p)"
+  _exercise_every_entry_point
+  after="$(shopt -p)"
+  [ "$before" = "$after" ] || { echo "options changed (was off):"; diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true; return 1; }
+  shopt -s nocasematch
+  before="$(shopt -p)"
+  _exercise_every_entry_point
+  after="$(shopt -p)"
+  [ "$before" = "$after" ] || { echo "options changed (was on):"; diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true; return 1; }
+  # Not vacuous: the option really was on for the second half.
+  shopt -q nocasematch
 }
 
 @test "grammar: a locale cannot widen the alphabet, behaviourally (#1152)" {
