@@ -71,6 +71,7 @@ export default {
       "grok-build": "xAIのビルド/コーディングエージェント",
       hermes: "軽量なリレーエージェント",
       antigravity: "エージェント型のコーディング環境",
+      devin: "自律型AIソフトウェアエンジニアCLI",
     },
   },
   showcase: {
