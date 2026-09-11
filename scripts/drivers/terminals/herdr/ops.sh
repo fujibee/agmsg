@@ -1056,3 +1056,53 @@ terminal_name() {
   echo ok
   return 0
 }
+
+# OPTIONAL OP. Observe ONE candidate pane's process facts, as a strict record.
+# Contract and vocabulary: see the tmux driver's copy of this op and
+# scripts/lib/self-proof.sh. This op never classifies -- a failure is a non-zero
+# exit, and the coordinator turns that into `undetermined`, never a negative.
+#
+# stdout, on rc 0, exactly one line:
+#
+#   <pane-id><TAB><generation><TAB><pid>[<TAB><pid>…]
+#
+# herdr offers no per-pane generation token, so field 2 is `-`; the coordinator's
+# before/after comparison of the WHOLE record is what notices a change here.
+#
+# THE RESPONSE IS CHECKED TO BE ABOUT THE PANE WE ASKED FOR. `process_info`
+# carries its own `pane_id`, so an answer about a different pane is detectable
+# and is treated as no answer -- the same rule the tmux op's identity canary
+# enforces, for the same reason: this fact decides whether a seat may write into
+# a pane.
+#
+# EVERY VALUE IS TYPE-CHECKED BEFORE IT IS READ. A pid that arrives as the JSON
+# string "123" extracts as 123 and would pass a digit test, but a pid that came
+# as a string is not a validated pid -- so `json_type` is asked first, in the
+# same payload, exactly as _herdr_pane_input_ready does (#1051 review).
+terminal_pane_process_observe() {   # <candidate>
+  local id="${1-}" info jesc seen sp fg pids p
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  info="$(herdr pane process-info --pane "$id" 2>/dev/null)" || return 10
+  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
+  [ "$seen" = "$id" ] || return 10
+  sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 10
+  fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 10
+  pids=""
+  for p in $sp $fg; do
+    case "$p" in ''|0*|*[!0-9]*) continue ;; esac
+    pids="$pids	$p"
+  done
+  # The foreground processes, each pid type-checked in the query itself so a
+  # non-integer entry is dropped by the SELECT rather than by a later string
+  # test that would have accepted "123".
+  for p in $(sqlite3 :memory: "SELECT json_extract(value,'\$.pid') FROM json_each('$jesc','\$.result.process_info.foreground_processes') WHERE json_type(value,'\$.pid')='integer'" 2>/dev/null); do
+    case "$p" in ''|0*|*[!0-9]*) continue ;; esac
+    pids="$pids	$p"
+  done
+  # No pid at all is NOT an empty pane: it is a payload we did not understand.
+  [ -n "$pids" ] || return 10
+  printf '%s\t-%s\n' "$id" "$pids"
+}
