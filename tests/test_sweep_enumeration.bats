@@ -275,7 +275,7 @@ _sessions_json() {
   [ "$(printf '%s\n' "$output" | grep -c '^!')" -eq 1 ]
   printf '%s\n' "$output" | grep -q "^!"$'\t'"/s/sessions/odd/herdr.sock"
   # and NOT the one pane it could read from that instance
-  ! printf '%s\n' "$output" | grep -q 'w1:p3'
+  refute grep -q 'w1:p3' <<<"$output"
   printf '%s\n' "$output" | grep -q 'w1:p1'
 }
 
@@ -309,8 +309,8 @@ _load_registry() {
   # plain has no op at all: the question has no answer there, and a caller can
   # stop asking. That is NOT the same instruction as "could not read".
   printf '%s\n' "$output" | grep -q "^?"$'\t'"plain"
-  ! printf '%s\n' "$output" | grep -q "^!"$'\t'"plain"
-  ! printf '%s\n' "$output" | grep -q "^!!"$'\t'"plain"
+  refute grep -q "^!"$'\t'"plain" <<<"$output"
+  refute grep -q "^!!"$'\t'"plain" <<<"$output"
 }
 
 @test "registry: a terminal whose op fails outright is !! -- retry, not give up (#1152)" {
@@ -327,7 +327,7 @@ HEOF
   run agmsg_terminal_enumerate
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -q "^!!"$'\t'"herdr"
-  ! printf '%s\n' "$output" | grep -q "^?"$'\t'"herdr"
+  refute grep -q "^?"$'\t'"herdr" <<<"$output"
   # and the terminal that DID answer is still reported
   printf '%s\n' "$output" | grep -q "^tmux"$'\t'".*A"$'\t'"%0"
 }
@@ -339,10 +339,17 @@ HEOF
   _herdr_panes one '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'
   _fake_tmux
   _load_registry
-  agmsg_terminal_load plain
-  [ "$_AGMSG_TERMINAL_LOADED" = plain ]
+  # NOT `plain`: it is the LAST candidate, so a version with no restore at all
+  # would leave `plain` loaded and this test would pass on the ordering rather
+  # than on the restore. Measured -- with plain, deleting the restore reddened
+  # nothing. `herdr` is first, so only an actual restore puts it back.
+  agmsg_terminal_load herdr
+  [ "$_AGMSG_TERMINAL_LOADED" = herdr ]
   agmsg_terminal_enumerate >/dev/null
-  [ "$_AGMSG_TERMINAL_LOADED" = plain ]
+  [ "$_AGMSG_TERMINAL_LOADED" = herdr ]
+  # and the candidate order really is the thing that made the weaker version
+  # pass, so it is pinned: if plain ever stops being last, this test weakens.
+  [ "$(agmsg_terminal_candidates | tail -1)" = plain ]
 }
 
 @test "registry: a captured op status, not a piped one (#1152)" {
