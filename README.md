@@ -306,6 +306,8 @@ Codex supports `mode monitor` through an app-server bridge, plus `mode turn` and
 
 > ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has a known limitation (orphans on TUI close — #149).
 
+In a monitor-mode project, a plain `codex` **resumes the role's recorded thread** (the seat `actas` records) rather than opening a fresh one, so the conversation you see is the one the bridge delivers to. It does so only when that is unambiguous — one Codex role registered for the project, seated here, with its rollout still on disk; otherwise it starts fresh and says why. An explicit `codex resume <thread-id>` is always honored as given.
+
 If you prefer a global PATH shim, run `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-shim-install.sh install` and put `~/.agents/bin` before the real Codex binary on PATH. You can also launch with `~/.agents/skills/<cmd>/scripts/drivers/types/codex/codex-monitor.sh`. Codex sandboxing must allow writes to the skill's `db/`, `teams/`, and `run/` dirs — `install.sh` configures those `writable_roots` when `~/.codex/config.toml` exists. Setup notes and internals: [docs/codex-monitor-beta.md](docs/codex-monitor-beta.md).
 
 ### GitHub Copilot CLI

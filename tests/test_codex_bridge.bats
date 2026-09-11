@@ -952,6 +952,116 @@ EOF
   [[ "$output" =~ "no loaded codex thread" ]]
 }
 
+@test "codex-bridge: --wait-for-tui-thread attaches once the TUI has the thread loaded, with no resume of its own" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # The TUI is still opening the thread when the bridge connects: the first two
+  # thread/loaded/list answers do not carry it, the third does. The bridge must
+  # wait for that, and then NOT thread/resume -- the TUI is the thread's writer.
+  local fake="$TEST_SKILL_DIR/fake-app-server-tui-thread.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-tui-thread.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+let lists = 0;
+
+function send(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/loaded/list") {
+    lists += 1;
+    const data = lists >= 3 ? ["other-thread", "seated-thread-1"] : ["other-thread"];
+    send({ jsonrpc: "2.0", id: message.id, result: { data } });
+  } else if (message.method === "thread/resume") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread: { id: message.params.threadId, status: { type: "idle" } } },
+    });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    setTimeout(() => process.exit(0), 10);
+  } else if (message.method === "process/kill") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread seated-thread-1 --wait-for-tui-thread \
+    --loaded-timeout 5000 --timeout 20
+
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qF "TUI loaded thread seated-thread-1; attaching without a competing resume"
+  # Polled until the TUI's load showed up...
+  [ "$(grep -c "thread/loaded/list" "$log")" -ge 3 ]
+  # ...then armed the watch on it, without ever resuming or starting a thread.
+  grep -q "process/spawn" "$log"
+  refute grep -q "thread/resume" "$log"
+  refute grep -q "thread/start" "$log"
+}
+
+@test "codex-bridge: --wait-for-tui-thread gives up when the TUI never loads the thread" {
+  run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
+  if [ "$status" -ne 0 ]; then
+    skip "node child_process.spawn is not available in this sandbox"
+  fi
+
+  # A bridge that cannot see its TUI on the thread must not fall back to a
+  # resume of its own: that is exactly the bridge-on-one-copy, operator-on-
+  # another shape this flag exists to prevent. Exit, and let the launcher retry.
+  local fake="$TEST_SKILL_DIR/fake-app-server-tui-thread-absent.js"
+  local log="$TEST_SKILL_DIR/fake-app-server-tui-thread-absent.log"
+  cat >"$fake" <<'EOF'
+const fs = require("fs");
+const readline = require("readline");
+const log = process.argv[2];
+const rl = readline.createInterface({ input: process.stdin });
+
+function send(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  fs.appendFileSync(log, `${message.method}\n`);
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  } else if (message.method === "thread/loaded/list") {
+    send({ jsonrpc: "2.0", id: message.id, result: { data: ["other-thread"] } });
+  } else if (message.method === "thread/resume") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread: { id: message.params.threadId, status: { type: "idle" } } },
+    });
+  } else if (message.method === "process/spawn") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+  }
+});
+EOF
+
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake $log" run node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread seated-thread-1 --wait-for-tui-thread \
+    --loaded-timeout 1500 --timeout 20
+
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qF "TUI did not load recorded thread seated-thread-1"
+  refute grep -q "thread/resume" "$log"
+  refute grep -q "process/spawn" "$log"
+}
+
 @test "codex-bridge: inline-inbox includes unread message text in turn input" {
   run node -e 'const r = require("child_process").spawnSync("/bin/sh", ["-c", "true"]); if (r.error) { console.error(r.error.message); process.exit(1); }'
   if [ "$status" -ne 0 ]; then

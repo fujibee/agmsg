@@ -29,8 +29,9 @@ agmsg_delivery_on_enable() {
     echo "WARNING: Node.js ('$codex_node') was not found. The Codex bridge needs Node —"
     echo "  monitor delivery will NOT start until Node is installed (or set AGMSG_NODE)."
   fi
-  echo "Restart your Codex session (quit and relaunch \`codex\`), then send your first"
-  echo "  message — the bridge starts on your first turn, not the moment Codex opens."
+  echo "Restart your Codex session (quit and relaunch \`codex\`). A role with a recorded"
+  echo "  seat is resumed on that thread and bridged right away; a new role records its"
+  echo "  seat on your first message, and the bridge starts from there."
   echo "  Already-running sessions stay unmonitored until they restart."
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }

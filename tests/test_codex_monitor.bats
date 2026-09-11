@@ -394,3 +394,115 @@ EOF
   # No truncating redirect to the published path.
   ! grep -qE '>[[:space:]]*"\$PORT_FILE"' "$src"
 }
+
+# --- a plain launch resumes the role's recorded seat ---
+#
+# The bridge is bound to the role's recorded thread (#350) and a recorded seat
+# is never replaced by inference (#579), so a plain `codex` -- which --remote
+# opens as a FRESH thread -- could never become the seat again: the bridge kept
+# delivering to the recorded thread while the operator looked at another one.
+# codex-monitor.sh now opens the TUI on the recorded thread when that is
+# unambiguous, and leaves every other launch exactly as it was.
+
+# A role-session record (team, agent) -> thread, as actas/record-session write it.
+put_seat() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c \
+    'source "$1/lib/role-session.sh"; agmsg_role_session_record "$2" "$3" "$4" "$5" codex' \
+    _ "$SCRIPTS" "$@"
+}
+
+# A codex rollout for <uuid>: what `codex resume <uuid>` needs to exist.
+put_rollout() {
+  local uuid="$1" dir="$HOME/.codex/sessions/2026/08/10"
+  mkdir -p "$dir"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$uuid" "$TEST_PROJECT" \
+    > "$dir/rollout-2026-08-10T13-54-57-$uuid.jsonl"
+}
+
+# The launcher is not under test here; a no-op keeps it from spawning a real
+# bridge against the fake app-server.
+run_monitor() {
+  run env AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_BRIDGE_LAUNCHER_CMD=/bin/true \
+    bash "$TYPES/codex/codex-monitor.sh" --project "$TEST_PROJECT" "$@"
+}
+
+@test "codex-monitor: a plain launch resumes the role's recorded thread" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  put_seat team alice seated-thread-1 "$TEST_PROJECT"
+  put_rollout seated-thread-1
+
+  run_monitor --codex-command codex -- --foo
+  [ "$status" -eq 0 ]
+  # The TUI is opened ON the seat: `resume --remote <url> <thread>`, with the
+  # operator's own args still after it.
+  grep -q '^plain-codex <resume> <--remote> <ws://127.0.0.1:[0-9]*> <seated-thread-1> <--foo>$' "$CALL_LOG"
+  printf '%s\n' "$output" | grep -qF 'attaching Codex TUI to team/alice (thread seated-thread-1)'
+}
+
+@test "codex-monitor: a plain launch stays fresh when the role has no seat" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+
+  run_monitor --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -q '^plain-codex <--remote> <ws://127.0.0.1:[0-9]*>$' "$CALL_LOG"
+  refute grep -q '<resume>' "$CALL_LOG"
+}
+
+@test "codex-monitor: a seat whose rollout is gone falls back to a fresh launch" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  put_seat team alice seated-thread-1 "$TEST_PROJECT"
+  # No rollout: `codex resume <gone-uuid>` would refuse to start ("no rollout
+  # found"), so the seat must not be handed to the TUI. Same gate as spawn.
+
+  run_monitor --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -q '^plain-codex <--remote> <ws://127.0.0.1:[0-9]*>$' "$CALL_LOG"
+  refute grep -q '<resume>' "$CALL_LOG"
+}
+
+@test "codex-monitor: a seat recorded for another project is not resumed here" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  local elsewhere="$TEST_SKILL_DIR/elsewhere"; mkdir -p "$elsewhere"
+  put_seat team alice seated-thread-1 "$elsewhere"
+  put_rollout seated-thread-1
+
+  run_monitor --codex-command codex --
+  [ "$status" -eq 0 ]
+  grep -q '^plain-codex <--remote> <ws://127.0.0.1:[0-9]*>$' "$CALL_LOG"
+  refute grep -q '<resume>' "$CALL_LOG"
+  printf '%s\n' "$output" | grep -qF 'belongs to another project'
+}
+
+@test "codex-monitor: several roles in one project start fresh and say so" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/join.sh" team bob codex "$TEST_PROJECT" >/dev/null
+  put_seat team alice seated-thread-1 "$TEST_PROJECT"
+  put_seat team bob seated-thread-2 "$TEST_PROJECT"
+  put_rollout seated-thread-1
+  put_rollout seated-thread-2
+
+  run_monitor --codex-command codex --
+  [ "$status" -eq 0 ]
+  # A plain launch cannot choose between two seats; it must not guess.
+  grep -q '^plain-codex <--remote> <ws://127.0.0.1:[0-9]*>$' "$CALL_LOG"
+  refute grep -q '<resume>' "$CALL_LOG"
+  printf '%s\n' "$output" | grep -qF '2 Codex roles are registered'
+}
+
+@test "codex-monitor: an explicit resume is passed through as given, seat or not" {
+  skip_on_windows "spawns a python socket listener; flaky on the Windows runner"
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  put_seat team alice seated-thread-1 "$TEST_PROJECT"
+  put_rollout seated-thread-1
+
+  run_monitor --codex-command resume -- other-thread-9
+  [ "$status" -eq 0 ]
+  # The operator's choice wins; the seat is never substituted for it.
+  grep -q '^plain-codex <resume> <--remote> <ws://127.0.0.1:[0-9]*> <other-thread-9>$' "$CALL_LOG"
+  refute grep -q 'seated-thread-1' "$CALL_LOG"
+}

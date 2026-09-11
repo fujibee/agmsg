@@ -230,6 +230,68 @@ SOCKET_URL="ws://127.0.0.1:$PORT"
 
 "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
 
+# A plain monitored launch attaches the TUI to the role's RECORDED thread.
+#
+# The bridge launcher binds each bridge to its role's role-session record
+# (#350), and codex-record-session.sh never lets an inference replace a seat
+# that already exists (#579). Both are right on their own, but together they
+# mean a plain `codex` -- which `--remote` starts as a FRESH thread -- can never
+# become the seat again: the bridge keeps delivering to the recorded thread,
+# and the conversation the operator is looking at is a different one. The
+# turns land, and are marked read, where no one can see them.
+#
+# So the TUI has to make the same choice the launcher makes. One role with a
+# seat in this project, whose rollout still exists, is resumed on that thread
+# (`codex resume --remote <url> <thread>`); everything else keeps the fresh
+# launch it has today. An explicit `codex resume ...` already carries the
+# operator's choice and is left alone. agmsg_role_resume_uuid is the same
+# fail-open gate spawn/resurrect use (record + transcript, else fresh), so a
+# seat whose rollout is gone -- which `codex resume <gone-uuid>` refuses --
+# cannot take the TUI down with it.
+TUI_ROLE=""
+TUI_THREAD=""
+resolve_tui_thread() {
+  [ "$CODEX_COMMAND" = "codex" ] || return 0
+  local ids count team name _rest uuid rec_project rec_project_phys project_phys
+  ids="$("$SCRIPT_DIR/../../../identities.sh" "$PROJECT" codex 2>/dev/null || true)"
+  count="$(printf '%s\n' "$ids" | grep -c . || true)"
+  case "$count" in
+    0) return 0 ;;
+    1) ;;
+    *)
+      echo "agmsg: $count Codex roles are registered for this project; a plain launch cannot choose which one to show, so this is a fresh thread. Use 'codex resume <thread-id>' to pick one." >&2
+      return 0
+      ;;
+  esac
+  IFS=$'\t' read -r team name _rest <<EOF
+$ids
+EOF
+  { [ -n "$team" ] && [ -n "$name" ]; } || return 0
+  # shellcheck source=../../../lib/type-registry.sh
+  source "$SCRIPT_DIR/../../../lib/type-registry.sh"
+  # shellcheck source=../../../lib/role-session.sh
+  source "$SCRIPT_DIR/../../../lib/role-session.sh"
+  # shellcheck source=../../../lib/resolve-project.sh
+  source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+  # shellcheck source=../../../lib/boot-command.sh
+  source "$SCRIPT_DIR/../../../lib/boot-command.sh"
+  uuid="$(agmsg_role_resume_uuid codex "$team" "$name" "$PROJECT" 2>/dev/null || true)"
+  [ -n "$uuid" ] || return 0
+  # The launcher compares the record's project with its own the same way; a
+  # seat in another project is that role's live conversation elsewhere, and
+  # resuming it here would show the wrong one.
+  rec_project="$(agmsg_role_session_get "$team" "$name" project 2>/dev/null || true)"
+  project_phys="$(agmsg_canonical_path "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")"
+  rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
+  if [ "$rec_project_phys" != "$project_phys" ]; then
+    echo "agmsg: the recorded thread for $team/$name belongs to another project; starting a fresh thread instead of resuming the wrong conversation." >&2
+    return 0
+  fi
+  TUI_ROLE="$team/$name"
+  TUI_THREAD="$uuid"
+}
+resolve_tui_thread
+
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"
 export AGMSG_CODEX_BRIDGE_LAUNCHER=1
@@ -244,6 +306,10 @@ cd "$PROJECT"
 # empty array errors with "unbound variable" (a no-arg `codex`/`codex resume`).
 case "$CODEX_COMMAND" in
   codex)
+    if [ -n "$TUI_THREAD" ]; then
+      echo "agmsg: attaching Codex TUI to $TUI_ROLE (thread $TUI_THREAD)" >&2
+      exec "$REAL_CODEX" resume --remote "$SOCKET_URL" "$TUI_THREAD" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
+    fi
     exec "$REAL_CODEX" --remote "$SOCKET_URL" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
     ;;
   resume)

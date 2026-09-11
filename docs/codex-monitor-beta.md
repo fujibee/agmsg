@@ -117,8 +117,37 @@ under `~/.agents/skills/<cmd>/run/`, starts the out-of-sandbox bridge launcher,
 and then connects the Codex TUI to that socket with `--remote`.
 
 Codex fires the SessionStart hook on the session's **first turn** (the first
-message you send), not the moment the TUI opens — so the bridge does not exist
-until you interact once after a restart.
+message you send), not the moment the TUI opens — so for a role that has no
+recorded seat yet, the bridge does not exist until you interact once after a
+restart.
+
+### A plain `codex` resumes the role's seat
+
+Once a role has a recorded seat (the role→thread record `actas` /
+`codex-record-session.sh` writes), a plain monitored `codex` in that project
+opens the TUI **on that thread** — `codex resume --remote <url> <thread>` — not
+on a fresh one. The bridge is bound to the recorded thread (#350), and a seat
+that exists is never replaced by inference (#579), so a fresh TUI thread could
+never become the seat again: the bridge would keep delivering to the recorded
+thread while you looked at a different one, with every turn marked read where
+you could not see it.
+
+The resume happens only when it is unambiguous and safe: exactly one Codex role
+is registered for the project, its seat is recorded for this project, and the
+thread's rollout still exists (`codex resume <gone-uuid>` refuses to start, so
+a stale seat falls back to a fresh launch, like `spawn`). With several roles,
+`codex-monitor.sh` says so and starts fresh; pick one with
+`codex resume <thread-id>`. An explicit `codex resume ...` is never rewritten.
+
+The bridge, for its part, **attaches** to the thread the TUI loaded
+(`--wait-for-tui-thread`: it polls `thread/loaded/list` until the recorded
+thread is there) instead of issuing a `thread/resume` of its own. The TUI is
+the thread's writer, and `turn/start` needs only the thread id (the
+no-rollout fallback has relied on that since #276), so a bridge-side resume is
+at best redundant and at worst a competing writer (Codex Desktop: `already has
+an active writer`, #906). If the TUI has not loaded the thread within
+`--loaded-timeout`, the bridge exits rather than deliver into a thread no one
+is watching, and the launcher relaunches it once the TUI is there.
 
 The SessionStart hook is designed to **not** start the bridge directly — a
 hook-launched process was observed to run inside the Codex sandbox and fail to
@@ -136,8 +165,10 @@ connect to the unix socket (EPERM). Instead:
 2. `codex-bridge-launcher.sh`, started by `codex-monitor.sh` **outside** the
    sandbox, reads the request file and starts `codex-bridge.js`.
 3. The bridge connects to the same app-server over **WebSocket-over-UDS**,
-   resumes the thread, and arms `watch-once.sh` via the app-server `process/spawn`
-   API (which polls the agmsg DB for unread rows, `read_at IS NULL`).
+   attaches to the thread the TUI has loaded (or resumes it, when launched
+   without `--wait-for-tui-thread`), and arms `watch-once.sh` via the
+   app-server `process/spawn` API (which polls the agmsg DB for unread rows,
+   `read_at IS NULL`).
 4. On an unread message it inlines the text into a `turn/start` on that thread —
    surfacing it in the live Codex TUI — then re-arms after the turn ends.
 
