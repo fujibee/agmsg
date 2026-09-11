@@ -53,6 +53,86 @@ _agmsg_lock_describe_dir() {
   echo "agmsg:   running as: $(id 2>/dev/null || echo 'unknown')" >&2
 }
 
+# LIVENESS, from the library that already answers this question (#865).
+#
+# `kill -0` on its own reads EPERM as dead, which in a sandbox turns "cannot
+# signal" into "not running" — and here that would break a lock somebody is
+# holding. `_agmsg_pid_alive_local` treats EPERM as alive, a zombie as gone, and
+# cross-checks with `ps`. Sourced rather than reimplemented; guarded, so a
+# caller that already has it pays nothing.
+if ! declare -f _agmsg_pid_alive_local >/dev/null 2>&1; then
+  # shellcheck source=instance-id.sh
+  source "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/instance-id.sh"
+fi
+
+# Is this lock's recorded holder gone?
+#
+# TRUE ONLY WHEN THERE IS SOMETHING TO ASK ABOUT. No holder file, or one with no
+# pid in it, answers "no" — not because such a lock is healthy, but because
+# nothing here can tell a lock written by an older version of this file from one
+# created microseconds ago whose owner has not written its record yet. Breaking
+# on "I cannot tell" would take a live lock away, which is worse than the leak.
+# That case is #865's remaining half and is left for the change that makes an
+# empty lock impossible in the first place.
+#
+# A recycled pid reads as ALIVE here, and that is the safe direction: this
+# process waits and reports contention instead of breaking a lock whose number
+# now belongs to a stranger. Fencing the number with a start time is the third
+# piece of #865 and is not in this change.
+_agmsg_lock_holder_gone() {
+  local lock="$1" pid
+  [ -f "$lock.holder" ] || return 1
+  pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
+  [ -n "$pid" ] || return 1
+  _agmsg_pid_alive_local "$pid" && return 1
+  return 0
+}
+
+# Break a lock whose recorded holder is gone.
+#
+# CLAIM FIRST, JUDGE SECOND, and the order is the whole correctness argument.
+#
+# The first version read the holder, decided it was dead, and then renamed
+# whatever was at that path. Review took it apart: between the two, a different
+# breaker can claim the old holder and remove the directory, a new owner can
+# take the same path and write a LIVE holder — and the rename then succeeds
+# against the new file, because the path is the same. The `rmdir` after it
+# removes the new owner's lock. "If the lock changed hands the rename fails" was
+# not true of a path.
+#
+# Renaming first makes the claim the thing that is judged. Two processes cannot
+# both claim: `mv` of a given file succeeds for exactly one of them. And once
+# the holder is claimed, nobody else can legitimately break this lock (the file
+# they would have to claim is gone) and no new owner can appear (the directory
+# is still there, so `mkdir` still fails) — so the directory removed below is
+# necessarily the one the claimed holder belonged to.
+#
+# A claim that turns out to be alive is put back. That costs a rename on a live
+# lock, which is why the caller checks `_agmsg_lock_holder_gone` first: the
+# cheap read filters the common case, and this is the judgement that counts.
+_agmsg_lock_break_dead() {
+  local lock="$1" claimed="$lock.dead.$$.${RANDOM:-0}" pid
+  mv "$lock.holder" "$claimed" 2>/dev/null || return 1
+  pid="$(sed -n 's/^pid //p' "$claimed" 2>/dev/null | head -1)"
+  if [ -z "$pid" ] || _agmsg_pid_alive_local "$pid"; then
+    # Alive, or nothing here can say otherwise. Put it back — the next reader
+    # must still find out who the lock says is holding it.
+    mv "$claimed" "$lock.holder" 2>/dev/null || true
+    return 1
+  fi
+  if ! rmdir "$lock" 2>/dev/null; then
+    # Not taking it after all, so the record goes back where it was.
+    mv "$claimed" "$lock.holder" 2>/dev/null || true
+    return 1
+  fi
+  # `rm` is not on every allow-listed PATH that takes this lock — the same
+  # reason the holder lives beside the directory rather than inside it.
+  if command -v rm >/dev/null 2>&1; then
+    rm -f "$claimed" 2>/dev/null || true
+  fi
+  return 0
+}
+
 agmsg_lock_acquire() {
   local team_dir="$1" lock i=0 max="${AGMSG_LOCK_TRIES:-1000}" err=""
   local budget="${AGMSG_LOCK_SECONDS:-10}" started elapsed
@@ -85,6 +165,18 @@ agmsg_lock_acquire() {
       _agmsg_lock_describe_dir "$team_dir"
       return 1
     fi
+    # IS ANYBODY THERE? Until #865 this loop never asked. A lock whose holder
+    # had been killed was indistinguishable from one held by a live process
+    # doing slow work, so it waited out its budget and failed — every time,
+    # forever, and the team stayed wedged until somebody removed a directory by
+    # hand. The observed case is `roster-sync-driver.sh`, which acquires and
+    # then runs node in the foreground: the lock is held for as long as that
+    # runs, so one `kill -9`, one OOM kill or one force-quit in that span leaves
+    # a lock with a holder record and no holder.
+    if _agmsg_lock_holder_gone "$lock" && _agmsg_lock_break_dead "$lock"; then
+      echo "agmsg: broke a registry lock in $team_dir whose recorded holder is gone" >&2
+      continue
+    fi
     i=$((i + 1))
     elapsed=$(( $(date +%s) - started ))
     # Whichever bound arrives first, and the message says which — "1000 tries"
@@ -99,6 +191,32 @@ agmsg_lock_acquire() {
         echo "agmsg: timed out acquiring registry lock for $team_dir after ${elapsed}s" >&2
       else
         echo "agmsg: timed out acquiring registry lock for $team_dir after $i attempts (${elapsed}s)" >&2
+      fi
+      # WHAT WAS HOLDING IT, in the same breath. Since #865 a timeout means one
+      # of exactly two things — a holder that answered as alive, or a lock this
+      # process could not account for and would not break — and which one
+      # decides where the operator looks next. Without this the message says
+      # "contention" for a lock that has no holder at all, which is the sentence
+      # that sent the last three diagnoses after processes that were not there.
+      if [ -f "$lock.holder" ]; then
+        echo "agmsg: the lock records: $(tr '\n' ' ' < "$lock.holder" 2>/dev/null)" >&2
+        # ALIVE AND UNCHECKABLE ARE NOT THE SAME ANSWER. A holder file with no
+        # `pid` line, an empty one, or a value `_agmsg_pid_valid` rejects all
+        # leave `_agmsg_lock_holder_gone` false — which is "this could not be
+        # asked", not "it answered yes". Saying the second puts the operator
+        # back where the old message put them: hunting a process on the strength
+        # of a sentence that never checked (raised in review).
+        _agmsg_timeout_pid="$(sed -n 's/^pid //p' "$lock.holder" 2>/dev/null | head -1)"
+        if [ -z "$_agmsg_timeout_pid" ]; then
+          echo "agmsg: that record names no pid, so nothing here could ask whether it is held." >&2
+        elif _agmsg_pid_alive_local "$_agmsg_timeout_pid"; then
+          echo "agmsg: that process answered as alive, so this was contention." >&2
+        else
+          echo "agmsg: that process is not running — the lock was being broken as this wait ended." >&2
+        fi
+      else
+        echo "agmsg: the lock records no holder, so nothing here could ask whether it is held." >&2
+        echo "agmsg: a lock with no holder record is not broken automatically — see #865." >&2
       fi
       # The reason travels with the timeout too. If the wait was hopeless for
       # a cause this function did not anticipate, the errno is the only thing
@@ -161,8 +279,15 @@ agmsg_lock_acquire() {
   } > "$lock.holder" 2>/dev/null || true
   AGMSG_HELD_LOCKS="${AGMSG_HELD_LOCKS:+$AGMSG_HELD_LOCKS
 }$lock"
-  # Idempotent: re-arming the same handlers each acquire is harmless. They release
-  # every held lock, so a crash with one or two locks held leaves no stale lock.
+  # Idempotent: re-arming the same handlers each acquire is harmless.
+  #
+  # WHAT THEY COVER, AND WHAT THEY DO NOT. These release every lock this process
+  # holds, so an ordinary exit or a Ctrl-C leaves nothing behind. `SIGKILL`, an
+  # OOM kill and the machine going down run no trap at all, and the lock stays.
+  # This sentence used to end at "a crash leaves no stale lock", with no
+  # qualifier, so the next reader believed crashes were covered — and the crash
+  # that is not covered is the one #865 was reported from. What covers it is the
+  # staleness check in the loop above, not this.
   # EXIT releases only. INT/TERM release AND exit, so a signal arriving between
   # commands in a critical section can't release the lock and then let the script
   # continue into an unprotected config move/write (matters for 2-lock
