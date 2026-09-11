@@ -50,7 +50,7 @@
   local workflow="$BATS_TEST_DIRNAME/../.github/workflows/tests.yml"
   # 1. The shard job's name carries the marker, keyed on the docs_only output.
   #    Shard checks are not required contexts, so the name may vary.
-  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/4)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
+  grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/5)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$workflow"
   # 2. The aggregate -- the required context -- keeps its exact name, once,
   #    unconditionally.
   [ "$(grep -c '^    name: bats$' "$workflow")" -eq 1 ]
@@ -72,7 +72,7 @@
   # The mutation took: the marker is gone from the copy.
   if grep -Fq "docs-only, suite skipped' || ''" "$mutant"; then false; fi
   # ...and the name pin no longer matches it.
-  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/4)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
+  if grep -Fq "name: bats (\${{ matrix.os }} \${{ matrix.shard }}/5)\${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}" "$mutant"; then false; fi
 }
 
 # The suite has to run on the shape that actually gets dogfooded. A PR is only
