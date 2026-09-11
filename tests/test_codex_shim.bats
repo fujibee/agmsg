@@ -76,12 +76,54 @@ teardown() {
 @test "codex shim: noninteractive codex subcommands pass through even in monitor mode" {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
-  AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" \
-    run bash "$TYPES/codex/codex-shim.sh" exec echo hi
+  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" exec echo hi'
 
   [ "$status" -eq 0 ]
   grep -q "real-codex <exec> <echo> <hi>" "$CALL_LOG"
   ! grep -q "^monitor" "$CALL_LOG"
+}
+
+@test "codex shim: plugin marketplace commands pass through even in monitor mode" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" plugin marketplace add owner/repository'
+
+  [ "$status" -eq 0 ]
+  grep -Fq "real-codex <plugin> <marketplace> <add> <owner/repository>" "$CALL_LOG"
+  ! grep -q "^monitor" "$CALL_LOG"
+}
+
+@test "codex shim: known non-remote subcommands and aliases bypass the monitor bridge" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  local subcommand
+  for subcommand in mcp-server remote-control update doctor cloud exec-server features e a; do
+    : > "$CALL_LOG"
+
+    run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" "$1" test-arg' _ "$subcommand"
+
+    [ "$status" -eq 0 ]
+    grep -Fq "real-codex <$subcommand> <test-arg>" "$CALL_LOG"
+    ! grep -q "^monitor" "$CALL_LOG"
+  done
+}
+
+@test "codex shim: remote-aware session commands continue through the monitor bridge" {
+  bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
+
+  local subcommand
+  for subcommand in fork archive delete unarchive; do
+    : > "$CALL_LOG"
+
+    run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" "$1" test-session' _ "$subcommand"
+
+    [ "$status" -eq 0 ]
+    grep -Fq "monitor real=$FAKE_CODEX <--project> <$TEST_PROJECT> <--codex-command> <codex> <--> <$subcommand> <test-session>" "$CALL_LOG" || {
+      echo "unexpected routing for $subcommand: $(cat "$CALL_LOG")" >&3
+      false
+    }
+    ! grep -q "^real-codex" "$CALL_LOG"
+  done
 }
 
 @test "codex shim: --cd project is used for monitor detection" {
