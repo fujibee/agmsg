@@ -249,3 +249,6 @@ terminal_name() { _plain_unsupported "name"; }
 # has no answer -- rather than as a failure to retry. A stub that returned
 # "nothing found" would be indistinguishable from a pane whose processes we could
 # not read, and the two must not land in the same bucket (#1152).
+# No pane, so nothing to fence a write against (#1152): the self-write path
+# reads this as "unsupported here" and writes nothing.
+terminal_fence() { printf 'n/a:unsupported\tn/a:unsupported\n'; return 3; }
