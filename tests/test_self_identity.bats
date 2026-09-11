@@ -254,8 +254,13 @@ _obs() {   # write an observation file from the lines given
   # same key, so two distinct panes are counted once -- ambiguous silently
   # becomes unique. Measured: with a ":" join this test reddens and the glob one
   # does not, because awk array keys are exact strings and never globs.
-  # A colon is legal in both fields (tmux refs carry a socket, herdr ids carry a
-  # window), so this pair is constructible rather than contrived.
+  #
+  # HONESTLY: with today's schema the first field is a DRIVER NAME, and no driver
+  # is called "a:b", so this exact pair is not something the tree can produce. An
+  # earlier version of this comment claimed it was, on the strength of tmux refs
+  # carrying a socket -- which is true of the PANE field, not this one. The test
+  # stays because the encoding should not depend on that: the pair key is generic
+  # and the driver-name set is not this file's to assume.
   m='agp-abcdefghijklm'
   f="$(_obs "a"$'\t'"b:c"$'\t'"$m" "a:b"$'\t'"c"$'\t'"$m")"
   run agmsg_self_classify "$m" "$f"
@@ -274,24 +279,91 @@ _obs() {   # write an observation file from the lines given
   [ "$output" = "not_observed" ]
 }
 
+@test "dependencies: without awk the mark REFUSES rather than weakening (#1152)" {
+  # A missing tool must not degrade into a mark that is still shaped like one.
+  command() { if [ "${2:-}" = awk ]; then return 1; fi; builtin command "$@"; }
+  run agmsg_self_mark
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "dependencies: without awk the classifier says unreadable, never a count (#1152)" {
+  m='agp-abcdefghijklm'
+  f="$(_obs "herdr"$'\t'"w1:p7"$'\t'"$m")"
+  command() { if [ "${2:-}" = awk ]; then return 1; fi; builtin command "$@"; }
+  run agmsg_self_classify "$m" "$f"
+  [ "$status" -eq 1 ]
+  [ "$output" = "unreadable" ]
+}
+
+@test "mark: a hash that is short or not hex is a refusal (#1152)" {
+  # `>= 32` with no alphabet check was not a check: the encoder SKIPS characters
+  # that are not hex nibbles, so a truncated or non-hex digest would have made a
+  # short-but-plausible mark instead of a refusal.
+  agmsg_sha256() { printf 'abc123\n'; }
+  run agmsg_self_mark
+  [ "$status" -ne 0 ]
+  agmsg_sha256() { printf 'zzzz%s\n' "$(printf 'a%.0s' $(seq 1 60))"; }
+  run agmsg_self_mark
+  [ "$status" -ne 0 ]
+}
+
 @test "dependencies: the tools this file needs are the ones it says it needs (#1152)" {
   # The header names its dependency set, and the minimal-PATH contract in
   # registry-lock.sh is what makes that a question at all. Derived, so the
   # statement cannot drift away from the code.
   local f="$SKILL_DIR/scripts/lib/self-identity.sh" found="" t
-  for t in awk head od tr sed cut base32 xxd python3 perl; do
+  for t in awk head od tr date sed cut base32 xxd python3 perl; do
     # Comments are prose: the header NAMES base32 and xxd to explain why they
     # are not used, and a scan that reads prose would report them as used.
     if grep -v '^[[:space:]]*#' "$f" | grep -qE "(^|[^a-zA-Z0-9_])$t([[:space:]]|\\|)" ; then
       found="$found $t"
     fi
   done
-  # awk, head, od and tr are used and documented. cut/base32/xxd/sed/python3/perl
-  # must NOT appear: each was either removed or deliberately never introduced.
+  # awk, head, od, tr and date are used and documented -- `date` was missing from
+  # both lists in the first version of this test, which is how a test that claims
+  # to derive an inventory can still be incomplete (found in review).
+  # cut/base32/xxd/sed/python3/perl must NOT appear: each was removed or
+  # deliberately never introduced.
   for t in cut base32 xxd sed python3 perl; do
     case " $found " in *" $t "*) echo "undocumented dependency: $t"; return 1 ;; esac
   done
-  for t in awk head od tr; do
+  for t in awk head od tr date; do
     case " $found " in *" $t "*) : ;; *) echo "documented but unused: $t"; return 1 ;; esac
   done
+}
+
+@test "dependencies: the two contracts that are not commands are named too (#1152)" {
+  # `agmsg_sha256` and /dev/urandom are dependencies as much as any binary, and a
+  # tool-name scan does not see them. Both are used, and both have a refusal
+  # path; this pins that the header says so.
+  local f="$SKILL_DIR/scripts/lib/self-identity.sh"
+  grep -q 'agmsg_sha256' "$f"
+  grep -q '/dev/urandom' "$f"
+  grep -q 'agmsg_sha256' "$f" && grep -q 'urandom' "$f"
+  # and the header states them, not only the code
+  grep -q '^# .*agmsg_sha256' "$f" || grep -q '^#.*`agmsg_sha256`' "$f"
+}
+
+@test "classify: a socket ref with a space is a pane, not a malformed row (#1152)" {
+  # The framing check must not narrow the driver's grammar. tmux socket paths
+  # carry ordinary spaces -- a home directory with a space in it is normal, and
+  # the tmux driver deliberately allows them, rejecting only control bytes. An
+  # earlier charset here would have called this row malformed and thrown the
+  # whole observation away (found in review).
+  m='agp-abcdefghijklm'
+  f="$(_obs "tmux"$'\t'"/Users/some one/.tmux/sock:%5"$'\t'"$m")"
+  run agmsg_self_classify "$m" "$f"
+  [ "$status" -eq 0 ]
+  [ "$output" = "unique"$'\t'"tmux"$'\t'"/Users/some one/.tmux/sock:%5" ]
+}
+
+@test "classify: a control byte in a field IS malformed (#1152)" {
+  # The other direction: framing is still checked, because a field carrying a
+  # control byte is a row this format cannot represent.
+  m='agp-abcdefghijklm'
+  f="$(_obs "tmux"$'\t'"$(printf 'w1\001p7')"$'\t'"$m")"
+  run agmsg_self_classify "$m" "$f"
+  [ "$status" -eq 1 ]
+  [ "$output" = "unreadable" ]
 }

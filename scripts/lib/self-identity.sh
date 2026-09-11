@@ -76,6 +76,9 @@ _agmsg_self_mark_ok() {   # <candidate>
 agmsg_self_mark() {
   local bytes hex rest
   command -v agmsg_sha256 >/dev/null 2>&1 || return 1
+  # The encoder needs awk. If it is not there this REFUSES -- it does not fall
+  # back. A mark produced by a degraded encoder is still shaped like a mark.
+  command -v awk >/dev/null 2>&1 || return 1
   # Exactly 32 bytes, as hex. `od` is used rather than `xxd` because the minimal
   # PATH the entry points must work under carries `od` and not `xxd`.
   bytes="$(head -c 32 /dev/urandom 2>/dev/null | od -An -v -tx1 2>/dev/null | tr -d ' \n')" || return 1
@@ -84,7 +87,12 @@ agmsg_self_mark() {
   [ "${#bytes}" -eq 64 ] || return 1
   case "$bytes" in *[!0-9a-f]*) return 1 ;; esac
   hex="$(printf '%s\n%s\n%s' "$bytes" "$$" "$(date -u +%s 2>/dev/null)" | agmsg_sha256)" || return 1
-  [ "${#hex}" -ge 32 ] || return 1
+  # Exactly 64 lower-case hex characters. `>= 32` with no alphabet check was not
+  # a check: the base32 encoder SKIPS characters that are not hex nibbles, so a
+  # truncated or non-hex digest would have produced a short-but-plausible mark
+  # instead of a refusal (found in review).
+  [ "${#hex}" -eq 64 ] || return 1
+  case "$hex" in *[!0-9a-f]*) return 1 ;; esac
   rest="$(printf '%s' "$hex" | _agmsg_self_base32)"
   rest="${rest:0:$_AGMSG_SELF_MARK_DIGEST_CHARS}"
   [ "${#rest}" -eq "$_AGMSG_SELF_MARK_DIGEST_CHARS" ] || return 1
@@ -95,13 +103,21 @@ agmsg_self_mark() {
 
 # base32 (RFC 4648 alphabet, lower case, no padding) of the hex string on stdin.
 #
-# DEPENDENCIES, stated because the entry points have a PATH contract: this uses
-# `awk`, and the rest of this file uses `head`, `od`, `tr` and bash builtins.
-# `head`, `od` and `tr` are on the minimal list in registry-lock.sh; `awk` is NOT
-# on that list, and neither is `base32`, which is why the encoding is written out
-# here rather than shelled out. Whether a caller that is bound by that minimal
-# PATH may call into this file is a question for the caller -- a test pins the
-# dependency set so the answer cannot drift silently.
+# DEPENDENCIES, and what happens when one is missing.
+#
+# This file uses `awk`, `head`, `od`, `tr` and `date`, plus `agmsg_sha256` and
+# `/dev/urandom`. `head`, `od`, `tr` and `date` are on the minimal list in
+# registry-lock.sh; `awk` is NOT, and neither is `base32` -- which is why the
+# encoding is written out here rather than shelled out, and why the pair key is
+# an awk array rather than a bash one (bash 3.2, the macOS /bin/bash, has no
+# associative arrays).
+#
+# That leaves a real question -- may a caller bound by the minimal PATH call in
+# here? -- and this file does not get to answer it. What it does instead is make
+# the absence LOUD: without `awk`, `agmsg_self_mark` refuses and
+# `agmsg_self_classify` says `unreadable`. Neither degrades into a weaker mark or
+# a count taken without looking. A test pins both, and a test derives the whole
+# dependency set from the code so the list above cannot drift away from it.
 _agmsg_self_base32() {
   LC_ALL=C awk '
     BEGIN { a = "abcdefghijklmnopqrstuvwxyz234567" }
@@ -180,6 +196,11 @@ agmsg_self_classify() {   # <mark> <observation-file>
   _agmsg_self_mark_ok "$mark" || { printf 'unreadable\n'; return 1; }
   # A file that cannot be read is not an empty observation.
   [ -n "$obs" ] && [ -r "$obs" ] || { printf 'unreadable\n'; return 1; }
+  # The pass needs awk (bash 3.2 on macOS has no associative arrays, which is
+  # what the pair key needs). Without it the answer is `unreadable`: a missing
+  # tool is a gap in the observation, and the one thing it must never become is
+  # a count.
+  command -v awk >/dev/null 2>&1 || { printf 'unreadable\n'; return 1; }
   # awk does the whole pass: the pair key lives in an associative array, so a
   # pane id carrying `*`, `?`, `[`, `;` or `:` cannot collide with another pair
   # the way a string-concatenation key in shell could (found in review).
@@ -187,20 +208,25 @@ agmsg_self_classify() {   # <mark> <observation-file>
     # `exit` runs END, so a verdict printed here would be printed again there.
     # The flag is the verdict; END is the only place that prints.
     function bad() { malformed = 1; exit }
+    # FRAMING ONLY. Whether an id is a valid id for its driver is the driver s
+    # question -- tmux socket paths carry ordinary spaces (a home directory with
+    # a space in it is normal) and the tmux driver deliberately allows them,
+    # rejecting only control bytes. A charset here would be this file quietly
+    # narrowing somebody else s grammar, and the panes it rejected would look
+    # like a malformed observation rather than a pane it refused to consider.
+    function field_ok(v) { return (v != "" && v !~ /[\001-\037\177]/) }
     BEGIN { FS = "\t"; unreadable = 0; malformed = 0; n = 0 }
     {
       if ($0 == "") next
       if ($1 == "!") {
         if (NF != 3) bad()
-        if ($2 == "" || $3 == "") bad()
-        if ($2 !~ /^[A-Za-z0-9_.:%@\/-]+$/ || $3 !~ /^[A-Za-z0-9_.:%@\/-]+$/) bad()
+        if (!field_ok($2) || !field_ok($3)) bad()
         unreadable = 1
         next
       }
       if (NF < 3) bad()
       term = $1; pane = $2
-      if (term == "" || pane == "") bad()
-      if (term !~ /^[A-Za-z0-9_.:%@\/-]+$/ || pane !~ /^[A-Za-z0-9_.:%@\/-]+$/) bad()
+      if (!field_ok(term) || !field_ok(pane)) bad()
       # The text is everything after the second tab, so a rendered row that
       # itself contains tabs is compared whole rather than truncated.
       text = $3
