@@ -241,6 +241,20 @@ See **[docs/session-resurrect.md](docs/session-resurrect.md)** for the tmux-resu
 setup, how it resolves each pane, what does and doesn't come back automatically, and
 the manual fallback.
 
+### See who holds what (`doctor`)
+
+When delivery goes quiet or a role refuses to be claimed, `doctor` puts the state of the whole installation on one screen: every registration grouped by (project, type), each actas lock with its owner and whether that owner is still alive, watcher and bridge processes, the delivery mode per project — and a warnings section naming anything stale.
+
+```
+/agmsg doctor                  # the whole installation — every team, project, type
+/agmsg doctor --team myteam    # narrow to one team
+/agmsg doctor --redacted       # masked report for sharing — see below for what is hidden
+```
+
+Bare `doctor` is the normal form: like `claude doctor` or `brew doctor`, it takes no scope and reports on everything. `--project <path>`, `--type <type>`, and `--team <team>` narrow the report and combine freely — reach for them when you already suspect a corner, not because doctor requires them. `--redacted` masks the report for sharing — be precise about what it hides and what it keeps: your home directory prefix is collapsed to `~` (the username disappears, but the path *below* `$HOME` stays visible), project paths **outside** `$HOME` are replaced with consistent pseudonyms (`<project1>`), and team/agent names become `team1`/`agent2`. A project under `$HOME` still shows its directory names, so skim the output for anything you consider sensitive before pasting it into a public issue.
+
+Doctor is **read-only**: a stale lock or dead watcher pidfile is reported, never cleaned up, so the evidence stays in place. The exit code makes it scriptable — `0` clean, `1` one or more warnings, `2` usage or resolution error (an unknown `--type`/`--team`, or an explicit filter that matches nothing). From a shell or CI, invoke it as `~/.agents/skills/<cmd>/scripts/doctor.sh`.
+
 ## Delivery modes
 
 How incoming messages reach your agent. Pick one at first join via the prompt, or change it later with `/agmsg mode <name>`.
