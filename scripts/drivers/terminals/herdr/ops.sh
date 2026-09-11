@@ -1064,10 +1064,7 @@ terminal_name() {
 #
 # stdout, on rc 0, exactly one line:
 #
-#   <pane-id><TAB><generation><TAB><pid>[<TAB><pid>…]
-#
-# herdr offers no per-pane generation token, so field 2 is `-`; the coordinator's
-# before/after comparison of the WHOLE record is what notices a change here.
+#   <pane-id><TAB><pid>[<TAB><pid>…]
 #
 # THE RESPONSE IS CHECKED TO BE ABOUT THE PANE WE ASKED FOR. `process_info`
 # carries its own `pane_id`, so an answer about a different pane is detectable
@@ -1079,8 +1076,16 @@ terminal_name() {
 # string "123" extracts as 123 and would pass a digit test, but a pid that came
 # as a string is not a validated pid -- so `json_type` is asked first, in the
 # same payload, exactly as _herdr_pane_input_ready does (#1051 review).
+#
+# A BAD ELEMENT FAILS THE WHOLE OBSERVATION. An earlier revision skipped entries
+# it could not read and returned whatever was left, which is a PARTIAL set
+# wearing the shape of a complete one -- and if the entry it skipped was the
+# owner's process, the coordinator would answer `disproved` about a pane the seat
+# is actually in. So the count of entries is compared against the count of
+# entries that yielded a valid pid, and a mismatch is no answer at all. (Review:
+# this is the same failure the pure classifier refuses for a malformed row.)
 terminal_pane_process_observe() {   # <candidate>
-  local id="${1-}" info jesc seen sp fg pids p
+  local id="${1-}" info jesc seen sp fg n_all n_ok pids p
   command -v herdr >/dev/null 2>&1 || return 10
   command -v sqlite3 >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
@@ -1088,21 +1093,34 @@ terminal_pane_process_observe() {   # <candidate>
   jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
   seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
   [ "$seen" = "$id" ] || return 10
+  # Both of these are part of the schema this op reads. Absent, or present with
+  # the wrong type, is a payload we do not understand -- not a pane without a
+  # shell.
   sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 10
   fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 10
+  # THREE SOURCES THAT OVERLAP BY DESIGN. The foreground process GROUP id is
+  # normally also one of the foreground processes, and the shell can be too, so
+  # the union is taken here -- where the overlap is a known property of this
+  # payload -- and the record carries each process once. The coordinator still
+  # refuses a record with a repeated pid: a repeat that survives this is a driver
+  # enumerating something other than what the contract says.
   pids=""
-  for p in $sp $fg; do
-    case "$p" in ''|0*|*[!0-9]*) continue ;; esac
-    pids="$pids	$p"
+  _seen_pid() { local q; for q in $pids; do [ "$q" = "$1" ] && return 0; done; return 1; }
+  for p in "$sp" "$fg"; do
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
   done
-  # The foreground processes, each pid type-checked in the query itself so a
-  # non-integer entry is dropped by the SELECT rather than by a later string
-  # test that would have accepted "123".
+  # How many foreground entries there are, and how many of them yielded a pid of
+  # the right type. Equal or nothing: a dropped sibling is a hole in the set.
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_processes')='array' THEN json_array_length('$jesc','\$.result.process_info.foreground_processes') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  n_ok=0
   for p in $(sqlite3 :memory: "SELECT json_extract(value,'\$.pid') FROM json_each('$jesc','\$.result.process_info.foreground_processes') WHERE json_type(value,'\$.pid')='integer'" 2>/dev/null); do
-    case "$p" in ''|0*|*[!0-9]*) continue ;; esac
-    pids="$pids	$p"
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
+    n_ok=$((n_ok + 1))
   done
-  # No pid at all is NOT an empty pane: it is a payload we did not understand.
-  [ -n "$pids" ] || return 10
-  printf '%s\t-%s\n' "$id" "$pids"
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  unset -f _seen_pid
+  printf '%s%s\n' "$id" "$pids"
 }

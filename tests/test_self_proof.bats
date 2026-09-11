@@ -18,6 +18,7 @@ setup() {
 
   PS_TREE="$BATS_TEST_TMPDIR/tree"; : > "$PS_TREE"; export PS_TREE
   PS_FAIL_FOR=""; export PS_FAIL_FOR
+  PS_FAIL_PPID_FOR=""; export PS_FAIL_PPID_FOR
   PS_START="$BATS_TEST_TMPDIR/start"; : > "$PS_START"; export PS_START
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/ps" <<'PSEOF'
@@ -33,7 +34,9 @@ while [ "$#" -gt 0 ]; do
 done
 for bad in $PS_FAIL_FOR; do [ "$bad" = "$pid" ] && exit 1; done
 case "$field" in
-  ppid=)   awk -F'\t' -v p="$pid" '$1 == p { print " " $2; found=1 } END { exit !found }' "$PS_TREE" ;;
+  ppid=)
+    for bad in ${PS_FAIL_PPID_FOR:-}; do [ "$bad" = "$pid" ] && exit 1; done
+    awk -F'\t' -v p="$pid" '$1 == p { print " " $2; found=1 } END { exit !found }' "$PS_TREE" ;;
   lstart=) awk -F'\t' -v p="$pid" '$1 == p { print $2; found=1 } END { exit !found }' "$PS_START" ;;
   *) exit 1 ;;
 esac
@@ -58,15 +61,39 @@ PSEOF
   # than the one that ships.
   agmsg_terminal_load herdr
 
-  OWNER_PID=900
+  # The owner pid must be a REAL live process: the proof verifies the recorded
+  # owner with agmsg_instance_alive, which asks the kernel and not the fake `ps`.
+  # A synthetic owner would make every test answer `owner_not_alive` -- the right
+  # answer to the wrong question.
+  sleep 600 &
+  OWNER_PID=$!
   PANE_PID=800
   _edge "$$" "$OWNER_PID"
   _edge "$OWNER_PID" "$PANE_PID"
   _edge "$PANE_PID" 1
+  for _p in "$PANE_PID" 777 654 80 800; do _start "$_p" "Mon Jan  1 00:00:00 2020"; done
   _own "agmsg" "seat" "sid-1.$OWNER_PID"
-  _driver_returns "w1:p9	gen-1	$PANE_PID"
+  _driver_returns "w1:p9	$PANE_PID"
+
+  # THE CALLER'S SHELL STATE, applied last so it is in force for the test body.
+  # Two defects on this branch came from a caller's option -- `nocasematch`
+  # widening a `case`, and `set -e` killing the shell at a status capture before
+  # the verdict was printed -- and BOTH passed a suite that ran with the
+  # defaults. The suite reruns itself under each state; see the last test.
+  local tok
+  for tok in ${AGMSG_CALLER_SHELL_STATE:-}; do
+    case "$tok" in
+      errexit|nounset|pipefail) set -o "$tok" ;;
+      nocasematch|extglob)      shopt -s "$tok" ;;
+      *) echo "unknown caller shell state: $tok"; return 1 ;;
+    esac
+  done
 }
-teardown() { teardown_test_env; }
+teardown() {
+  [ -z "${OWNER_PID:-}" ] || kill "$OWNER_PID" 2>/dev/null || true
+  teardown_test_env
+}
+_start() { printf '%s\t%s\n' "$1" "$2" >> "$PS_START"; }
 
 _edge() { printf '%s\t%s\n' "$1" "$2" >> "$PS_TREE"; }
 _own() {   # <team> <agent> <owner-token>
@@ -76,10 +103,12 @@ _own() {   # <team> <agent> <owner-token>
 }
 # Replace the driver op with one that hands back a fixed record.
 _driver_returns() {
-  eval 'terminal_pane_process_observe() { printf "%s\n" '"$(printf '%q' "$1")"'; }'
+  FAKE_DRIVER_SRC='terminal_pane_process_observe() { printf "%s\n" '"$(printf '%q' "$1")"'; }'
+  eval "$FAKE_DRIVER_SRC"
 }
 _driver_fails() {   # <rc>
-  eval "terminal_pane_process_observe() { return $1; }"
+  FAKE_DRIVER_SRC="terminal_pane_process_observe() { return $1; }"
+  eval "$FAKE_DRIVER_SRC"
 }
 
 # --- the four states -----------------------------------------------------------
@@ -91,7 +120,7 @@ _driver_fails() {   # <rc>
 }
 
 @test "disproved: it is not, and the observation was whole (#1152)" {
-  _driver_returns "w1:p9	gen-1	777"
+  _driver_returns "w1:p9	777"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 1 ]
   [ "$output" = "disproved"$'\t'"pane_process_not_ancestor" ]
@@ -103,7 +132,7 @@ _driver_fails() {   # <rc>
   # only ever showed it the right pane.
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 0 ]
-  _driver_returns "w1:pX	gen-1	654"
+  _driver_returns "w1:pX	654"
   run agmsg_self_proof agmsg seat w1:pX
   [ "$status" -eq 1 ]
   [ "$output" = "disproved"$'\t'"pane_process_not_ancestor" ]
@@ -121,7 +150,7 @@ _driver_fails() {   # <rc>
 @test "a walk that could not finish is undetermined, NOT disproved (#1152)" {
   # The axis that would be silently wrong. A `ps` that fails part way up produces
   # an empty intersection that looks exactly like a real absence.
-  PS_FAIL_FOR="$PANE_PID"; export PS_FAIL_FOR
+  PS_FAIL_PPID_FOR="$PANE_PID"; export PS_FAIL_PPID_FOR
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"ancestry_truncated" ]
@@ -212,7 +241,7 @@ _driver_fails() {   # <rc>
   # The second observation is where the lock is swapped, so the swap lands
   # between the two reads the proof makes.
   eval 'terminal_pane_process_observe() {
-          printf "%s\n" "w1:p9	gen-1	'"$PANE_PID"'"
+          printf "%s\n" "w1:p9	'"$PANE_PID"'"
           printf "%s\n" "sid-2.'"$OWNER_PID"'" > "'"$f"'"
         }'
   run agmsg_self_proof agmsg seat w1:p9
@@ -235,13 +264,12 @@ _driver_fails() {   # <rc>
   local bad
   for bad in \
     "w1:p9" \
-    "w1:p9	gen-1" \
-    "	gen-1	$PANE_PID" \
-    "w1:p9		$PANE_PID" \
-    "w1:p9	gen-1	not-a-pid" \
-    "w1:p9	gen-1	0$PANE_PID" \
-    "w1:p9	gen-1	0" \
-    "w1:p9	gen-1	" \
+    "	$PANE_PID" \
+    "w1:p9	not-a-pid" \
+    "w1:p9	0$PANE_PID" \
+    "w1:p9	0" \
+    "w1:p9	" \
+    "w1:p9	$PANE_PID	$PANE_PID" \
   ; do
     _driver_returns "$bad"
     run agmsg_self_proof agmsg seat w1:p9
@@ -250,21 +278,21 @@ _driver_fails() {   # <rc>
       || { echo "wrong reason for [$bad]: $output"; return 1; }
   done
   # Not vacuous: the well-formed record still passes.
-  _driver_returns "w1:p9	gen-1	$PANE_PID"
+  _driver_returns "w1:p9	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 0 ]
 }
 
 @test "a second line in the record is malformed, not a first line with extra (#1152)" {
-  _driver_returns "w1:p9	gen-1	$PANE_PID
-w1:pX	gen-1	$PANE_PID"
+  _driver_returns "w1:p9	$PANE_PID
+w1:pX	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"observation_malformed" ]
 }
 
 @test "a control byte in the record is malformed (#1152)" {
-  _driver_returns "w1:$(printf '\001')p9	gen-1	$PANE_PID"
+  _driver_returns "w1:$(printf '\001')p9	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"observation_malformed" ]
@@ -275,9 +303,9 @@ w1:pX	gen-1	$PANE_PID"
   eval 'terminal_pane_process_observe() {
           printf "x\n" >> "'"$c"'"
           if [ "$(wc -l < "'"$c"'" | tr -d " ")" = 1 ]; then
-            printf "%s\n" "w1:p9	gen-1	'"$PANE_PID"'"
+            printf "%s\n" "w1:p9	'"$PANE_PID"'"
           else
-            printf "%s\n" "w1:p9	gen-2	'"$PANE_PID"'"
+            printf "%s\n" "w1:p9	777"
           fi
         }'
   run agmsg_self_proof agmsg seat w1:p9
@@ -285,17 +313,19 @@ w1:pX	gen-1	$PANE_PID"
   [ "$output" = "undetermined"$'\t'"snapshot_changed" ]
 }
 
-@test "a reused pid with a new generation is a DIFFERENT process (#1152)" {
-  # The intersection would still be there -- the pid did not change. Only the
-  # generation token says the process behind it did.
+@test "a reused pid is a DIFFERENT process, though the record is identical (#1152)" {
+  # This is the case a record of bare pids cannot see: the pane process exits
+  # between the two looks and its number is handed to something else. Both
+  # records read `w1:p9<TAB>800`. Only the process start time says they are not
+  # the same process -- which is why the comparison is over (pid, start) pairs
+  # and not over the record.
   local c="$BATS_TEST_TMPDIR/calls2"; : > "$c"
   eval 'terminal_pane_process_observe() {
           printf "x\n" >> "'"$c"'"
-          if [ "$(wc -l < "'"$c"'" | tr -d " ")" = 1 ]; then
-            printf "%s\n" "w1:p9	Mon Jan  1 00:00:00 2020	'"$PANE_PID"'"
-          else
-            printf "%s\n" "w1:p9	Tue Feb  2 00:00:00 2021	'"$PANE_PID"'"
+          if [ "$(wc -l < "'"$c"'" | tr -d " ")" != 1 ]; then
+            printf "%s\t%s\n" "'"$PANE_PID"'" "Tue Feb  2 00:00:00 2021" > "'"$PS_START"'"
           fi
+          printf "%s\n" "w1:p9	'"$PANE_PID"'"
         }'
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
@@ -308,7 +338,7 @@ w1:pX	gen-1	$PANE_PID"
   # A caller that got its own string back would read its own input as a
   # confirmation. The driver here answers about a different pane than the one
   # asked for, and the proof reports the driver's.
-  _driver_returns "w1:pREAL	gen-1	$PANE_PID"
+  _driver_returns "w1:pREAL	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:pASKED
   [ "$status" -eq 0 ]
   [ "$output" = "proved"$'\t'"herdr:w1:pREAL" ]
@@ -316,7 +346,7 @@ w1:pX	gen-1	$PANE_PID"
 }
 
 @test "a canonical ref that fails the shared grammar is undetermined, not proved (#1152)" {
-  _driver_returns "not a pane id	gen-1	$PANE_PID"
+  _driver_returns "not a pane id	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"canonical_ref_invalid" ]
@@ -360,7 +390,7 @@ w1:pX	gen-1	$PANE_PID"
     outs=$((outs + 1))
   }
   run agmsg_self_proof agmsg seat w1:p9;          _check "$output" "$status"
-  _driver_returns "w1:p9	gen-1	777"
+  _driver_returns "w1:p9	777"
   run agmsg_self_proof agmsg seat w1:p9;          _check "$output" "$status"
   _driver_fails 10
   run agmsg_self_proof agmsg seat w1:p9;          _check "$output" "$status"
@@ -456,13 +486,13 @@ w1:pX	gen-1	$PANE_PID"
   # The intersection is between two lists of pids. A substring test -- the
   # obvious `case " $list " in *"$p"*)` -- would find 80 inside 800 and hand out
   # a proof for a pane whose process this seat has never been near.
-  _driver_returns "w1:p9	gen-1	80"
+  _driver_returns "w1:p9	80"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 1 ]
   [ "$output" = "disproved"$'\t'"pane_process_not_ancestor" ]
   # Not vacuous: 800 IS in the ancestry, so the list really does contain the
   # string this test is checking is not matched loosely.
-  _driver_returns "w1:p9	gen-1	800"
+  _driver_returns "w1:p9	800"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 0 ]
 }
@@ -478,13 +508,343 @@ w1:pX	gen-1	$PANE_PID"
   eval 'terminal_pane_process_observe() {
           printf "x\n" >> "'"$c"'"
           if [ "$(wc -l < "'"$c"'" | tr -d " ")" = 1 ]; then
-            printf "%s\n" "w1:p9	gen-1	not-a-pid"
+            printf "%s\n" "w1:p9	not-a-pid"
           else
-            printf "%s\n" "w1:p9	gen-1	'"$PANE_PID"'"
+            printf "%s\n" "w1:p9	'"$PANE_PID"'"
           fi
         }'
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"observation_malformed" ]
   [ "$output" != "undetermined"$'\t'"snapshot_changed" ]
+}
+
+# --- the recorded owner is verified, not just parsed ---------------------------
+
+@test "an owner whose process is gone is undetermined, not a proof about it (#1152)" {
+  # A lock outlives the process that wrote it. Parsing a pid out of the file says
+  # the file holds a number, not that the number is still this session.
+  sleep 60 & local dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  _own agmsg seat "sid-1.$dead"
+  _edge "$$" "$dead"; _edge "$dead" "$PANE_PID"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"owner_not_alive" ]
+}
+
+@test "a REUSED owner pid is caught by the instance marker, not by liveness (#1152)" {
+  # The dangerous shape: the pid is alive, because it now belongs to something
+  # else. `kill -0` says yes. Only the instance marker says the process behind
+  # the number is not the session the lock names -- and without this the seat
+  # would be walked from a stranger's process, and proved into whatever pane that
+  # stranger happens to sit in.
+  mkdir -p "$SKILL_DIR/run"
+  printf 'a-completely-different-session.%s\n' "$OWNER_PID" > "$SKILL_DIR/run/cc-instance.$OWNER_PID"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"owner_not_alive" ]
+  # Not vacuous: with the marker naming this owner, the same call proves.
+  printf 'sid-1.%s\n' "$OWNER_PID" > "$SKILL_DIR/run/cc-instance.$OWNER_PID"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 0 ]
+}
+
+@test "a half-written instance marker is 'cannot tell', not dead and not alive (#1152)" {
+  mkdir -p "$SKILL_DIR/run"
+  : > "$SKILL_DIR/run/cc-instance.$OWNER_PID"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"owner_liveness_unknown" ]
+  [ "$output" != "undetermined"$'\t'"owner_not_alive" ]
+}
+
+# --- a pid is only a name while its process lives ------------------------------
+
+@test "a pid whose process start cannot be read makes the observation unusable (#1152)" {
+  # NO FALLBACK. An earlier revision degraded a missing start token to `-` and
+  # went on to answer proved or disproved -- a verdict resting on the one fact it
+  # had failed to obtain.
+  : > "$PS_START"          # no start times for anybody
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"process_identity_unreadable" ]
+  [ "$output" != "proved"$'\t'"herdr:w1:p9" ]
+  [ "$output" != "disproved"$'\t'"pane_process_not_ancestor" ]
+}
+
+@test "one unreadable start among several fails the whole observation (#1152)" {
+  # Not "the ones we could read": a partial set wearing the shape of a complete
+  # one is the failure this file refuses everywhere else. 999 is in the record
+  # and has no start time to be had.
+  _driver_returns "w1:p9	$PANE_PID	999"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"process_identity_unreadable" ]
+  # Not vacuous: with 999's start readable, the same record proves.
+  _start 999 "Mon Jan  1 00:00:00 2020"
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 0 ]
+}
+
+# --- the caller's shell state ---------------------------------------------------
+
+# Run the proof in a REAL shell that has the given `set`/`shopt` state, as a bare
+# statement -- not through bats' `run`, and not on the left of `&&`/`||`.
+#
+# MEASURED, and it is the whole reason this helper exists: with `set -e` applied
+# in `setup()` and the call made through `run`, reverting an errexit-safe capture
+# to the defective `x="$(cmd)"; rc=$?` produced ZERO reds. bats' `run` turns
+# errexit off for the command it invokes, and so does putting the call on the
+# left of `&&` or `||`. Both of the obvious ways to write this test are therefore
+# blind to the defect the test is FOR. A caller that simply calls the function
+# is not, so that is what this runs.
+#
+# WHAT THE DIFFERENCE ACTUALLY LOOKS LIKE. Under a caller's errexit, a function
+# that returns non-zero as a bare statement kills that caller -- correct code and
+# defective code alike. So the child dying is NOT the signal. The signal is
+# whether the verdict reached stdout first:
+#
+#   correct    the verdict line is printed, then the caller dies on the status
+#   defective  the shell dies inside the capture, and there is NO verdict line
+#
+# So the probe reads stdout and the exit status, and never requires the child to
+# have survived a non-zero verdict.
+_proof_in_a_real_shell() {   # <shell-state> <team> <agent> <candidate>
+  local state="$1" team="$2" agent="$3" cand="$4"
+  local script="$BATS_TEST_TMPDIR/real.sh"
+  cat > "$script" <<'RSEOF'
+for tok in $AGMSG_STATE; do
+  case "$tok" in
+    errexit|nounset|pipefail) set -o "$tok" ;;
+    nocasematch|extglob)      shopt -s "$tok" ;;
+  esac
+done
+# This shell has its own pid, so give the fake process table an edge from it to
+# the owner -- otherwise the invocation is unbound and every answer is the same.
+printf '%s\t%s\n' "$$" "$AGMSG_OWNER_PID" >> "$PS_TREE"
+. "$SKILL_DIR/scripts/lib/instance-id.sh"
+. "$SKILL_DIR/scripts/lib/actas-lock.sh"
+. "$SKILL_DIR/scripts/lib/self-identity.sh"
+. "$SKILL_DIR/scripts/lib/self-proof.sh"
+. "$SKILL_DIR/scripts/lib/terminal-registry.sh"
+agmsg_terminal_load herdr
+eval "$AGMSG_FAKE_DRIVER"
+agmsg_self_proof "$1" "$2" "$3"
+printf '__rc=%s\n' "$?"
+RSEOF
+  AGMSG_STATE="$state" AGMSG_OWNER_PID="$OWNER_PID" \
+  AGMSG_FAKE_DRIVER="${FAKE_DRIVER_SRC:-}" \
+    bash "$script" "$team" "$agent" "$cand" 2>/dev/null
+}
+
+@test "set -e in the CALLER still gets exactly one verdict, from every producer (#1152)" {
+  # The defect this exists for: `x="$(cmd)"; rc=$?` exits the shell under a
+  # caller's errexit BEFORE the verdict line is printed, so the contract ("always
+  # exactly one line") breaks silently for truncated / cycle / limit / driver
+  # failure. Each non-zero producer is driven here in a shell that really has it.
+  local out st
+  _expect() {   # <output> <verdict> <rc>
+    local o="$1" want="$2" want_rc="$3" got_st="$4" v
+    v="$(printf '%s\n' "$o" | grep -v '^__rc=')"
+    [ "$v" = "$want" ] || { echo "verdict was [$v], wanted [$want]"; return 1; }
+    [ "$got_st" = "$want_rc" ] || { echo "exit was [$got_st], wanted [$want_rc]"; return 1; }
+    # A zero verdict means the caller survives, so the trailing line must be
+    # there too -- proof that the function RETURNED rather than the shell dying
+    # on something after the verdict.
+    if [ "$want_rc" = 0 ]; then
+      [ "$(printf '%s\n' "$o" | grep -c '^__rc=0')" = 1 ] \
+        || { echo "proved but the caller did not survive"; return 1; }
+    fi
+  }
+
+  PS_FAIL_PPID_FOR="$PANE_PID"; export PS_FAIL_PPID_FOR
+  out="$(_proof_in_a_real_shell errexit agmsg seat w1:p9)" && st=0 || st=$?
+  _expect "$out" "undetermined"$'\t'"ancestry_truncated" 2 "$st"
+  PS_FAIL_PPID_FOR=""; export PS_FAIL_PPID_FOR
+
+  _driver_fails 10
+  out="$(_proof_in_a_real_shell errexit agmsg seat w1:p9)" && st=0 || st=$?
+  _expect "$out" "undetermined"$'\t'"pane_process_unreadable" 2 "$st"
+
+  _driver_fails 13
+  out="$(_proof_in_a_real_shell errexit agmsg seat w1:p9)" && st=0 || st=$?
+  _expect "$out" "undetermined"$'\t'"candidate_not_well_formed" 2 "$st"
+
+  : > "$PS_TREE"
+  _edge "$OWNER_PID" 901; _edge 901 "$OWNER_PID"
+  _driver_returns "w1:p9	$PANE_PID"
+  out="$(_proof_in_a_real_shell errexit agmsg seat w1:p9)" && st=0 || st=$?
+  _expect "$out" "undetermined"$'\t'"ancestry_cycle" 2 "$st"
+
+  # Not vacuous: the ordinary path is still a proof in the same real shell.
+  : > "$PS_TREE"
+  _edge "$OWNER_PID" "$PANE_PID"; _edge "$PANE_PID" 1
+  out="$(_proof_in_a_real_shell errexit agmsg seat w1:p9)" && st=0 || st=$?
+  _expect "$out" "proved"$'\t'"herdr:w1:p9" 0 "$st"
+}
+
+@test "every caller shell state, together, still gets exactly one verdict (#1152)" {
+  local out
+  local all="errexit nounset pipefail nocasematch extglob" st
+  out="$(_proof_in_a_real_shell "$all" agmsg seat w1:p9)" && st=0 || st=$?
+  [ "$(printf '%s\n' "$out" | grep -v '^__rc=')" = "proved"$'\t'"herdr:w1:p9" ]
+  [ "$st" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | grep '^__rc=')" = "__rc=0" ]
+  _driver_returns "w1:p9	777"
+  out="$(_proof_in_a_real_shell "$all" agmsg seat w1:p9)" && st=0 || st=$?
+  [ "$(printf '%s\n' "$out" | grep -v '^__rc=')" = "disproved"$'\t'"pane_process_not_ancestor" ]
+  [ "$st" -eq 1 ]
+}
+
+@test "the whole suite passes under each caller shell state (#1152)" {
+  # THE CLASS, not the two instances. Both defects review found on this branch
+  # were the caller's shell state leaking into a sourced file -- `nocasematch`
+  # widening a `case`, then `set -e` killing a status capture before the verdict
+  # could be printed -- and both passed a suite that ran with the defaults.
+  # Rather than wait for a third, the suite reruns ITSELF with those states set.
+  #
+  # WHAT THIS CANNOT SEE, stated so nobody reads it as covering errexit: bats'
+  # `run` turns errexit OFF for the command it invokes, so every test in this
+  # file that goes through `run` is blind to an errexit defect no matter what
+  # this harness sets. Measured -- reverting a capture to the defective form
+  # reddened NOTHING here. The errexit axis is covered by the two tests above,
+  # which call the proof in a real shell instead. This harness is for the
+  # options `run` does NOT suppress: nocasematch, extglob, nounset, pipefail.
+  #
+  # ALL OF THEM AT ONCE in the green case, which costs one extra run of this
+  # file; only when that goes red does it rerun each state alone, to say WHICH.
+  [ -z "${AGMSG_CALLER_SHELL_NEST:-}" ] || skip "inner run"
+  local all="errexit nounset pipefail nocasematch extglob"
+  local out="$BATS_TEST_TMPDIR/state.all.out"
+  if AGMSG_CALLER_SHELL_NEST=1 AGMSG_CALLER_SHELL_STATE="$all" \
+     bats "$BATS_TEST_FILENAME" > "$out" 2>&1; then
+    return 0
+  fi
+  echo "the suite is not green with [$all]; narrowing:"
+  local st one
+  for st in $all; do
+    one="$BATS_TEST_TMPDIR/state.$st.out"
+    if AGMSG_CALLER_SHELL_NEST=1 AGMSG_CALLER_SHELL_STATE="$st" \
+       bats "$BATS_TEST_FILENAME" > "$one" 2>&1; then
+      echo "  [$st] green"
+    else
+      echo "  [$st] RED:"
+      grep -A3 '^not ok' "$one" | head -12 | sed 's/^/      /'
+    fi
+  done
+  return 1
+}
+
+# --- the herdr observation, at the driver ---------------------------------------
+#
+# These drive the REAL op with a fake `herdr` binary, because the rule under test
+# lives in the op and not in the coordinator: an entry the op cannot read must
+# fail the WHOLE observation. A coordinator-level fake would never see it.
+
+_fake_herdr() {   # <json>
+  cat > "$BATS_TEST_TMPDIR/bin/herdr" <<HEOF
+#!/usr/bin/env bash
+cat <<'JSONEOF'
+$1
+JSONEOF
+HEOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/herdr"
+}
+
+_load_real_herdr_op() {
+  unset -f terminal_pane_process_observe
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
+}
+
+@test "herdr: a complete payload is one record, each process once (#1152)" {
+  _load_real_herdr_op
+  _fake_herdr '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":[{"pid":22},{"pid":33}]}}}'
+  run terminal_pane_process_observe w1:p9
+  [ "$status" -eq 0 ]
+  # 22 is both the group id and one of the processes; the record carries it once.
+  [ "$output" = "w1:p9"$'\t'"11"$'\t'"22"$'\t'"33" ]
+}
+
+@test "herdr: an entry with no readable pid fails the WHOLE observation (#1152)" {
+  # The defect this replaces: the op skipped what it could not read and returned
+  # the rest -- a partial set wearing the shape of a complete one. If the skipped
+  # entry were the owner's process, the coordinator would answer `disproved`
+  # about a pane the seat is actually in.
+  _load_real_herdr_op
+  _fake_herdr '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":[{"pid":22},{"pid":"not-an-int"},{"pid":33}]}}}'
+  run terminal_pane_process_observe w1:p9
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "herdr: a missing or mistyped schema field is no answer, not an empty pane (#1152)" {
+  _load_real_herdr_op
+  local bad
+  for bad in \
+    '{"result":{"process_info":{"pane_id":"w1:p9","foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}' \
+    '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":"11","foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}' \
+    '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_processes":[{"pid":22}]}}}' \
+    '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":"nope"}}}' \
+    '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":0,"foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}' \
+  ; do
+    _fake_herdr "$bad"
+    run terminal_pane_process_observe w1:p9
+    [ "$status" -ne 0 ] || { echo "accepted: $bad"; return 1; }
+  done
+}
+
+@test "herdr: an answer about a DIFFERENT pane is no answer (#1152)" {
+  # The same rule the tmux op's identity canary enforces. Without it the op would
+  # report another pane's processes under the id that was asked for.
+  _load_real_herdr_op
+  _fake_herdr '{"result":{"process_info":{"pane_id":"w1:pOTHER","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}'
+  run terminal_pane_process_observe w1:p9
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  # Not vacuous: the same payload naming the pane we asked for is accepted.
+  _fake_herdr '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}'
+  run terminal_pane_process_observe w1:p9
+  [ "$status" -eq 0 ]
+}
+
+@test "herdr: a candidate that is not a pane id is told from a pane we cannot reach (#1152)" {
+  _load_real_herdr_op
+  _fake_herdr '{"result":{"process_info":{"pane_id":"w1:p9","shell_pid":11,"foreground_process_group_id":22,"foreground_processes":[{"pid":22}]}}}'
+  run terminal_pane_process_observe 'w1:p9;kill'
+  [ "$status" -eq 13 ]
+  cat > "$BATS_TEST_TMPDIR/bin/herdr" <<'HEOF'
+#!/usr/bin/env bash
+exit 1
+HEOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/herdr"
+  run terminal_pane_process_observe w1:p9
+  [ "$status" -eq 10 ]
+}
+
+@test "the state harness really applies the state it claims to (#1152)" {
+  # A control that has never gone red is indistinguishable from one that never
+  # ran, and the rerun harness above currently has NO defect in this file it can
+  # detect: the errexit axis is invisible to it (bats' `run` suppresses errexit)
+  # and nothing here has a case-foldable alphabet. So rather than let it read as
+  # a control it is not, this asserts the MECHANISM -- that an inner run really
+  # does have the options set. It is a guard against the next defect of that
+  # class, not evidence about this one.
+  if [ -n "${AGMSG_CALLER_SHELL_NEST:-}" ]; then
+    local tok
+    for tok in ${AGMSG_CALLER_SHELL_STATE:-}; do
+      case "$tok" in
+        errexit|nounset|pipefail)
+          [ -o "$tok" ] || { echo "inner run does not have $tok set"; return 1; } ;;
+        nocasematch|extglob)
+          shopt -q "$tok" || { echo "inner run does not have $tok set"; return 1; } ;;
+      esac
+    done
+    # And the outer run must NOT have them, or the inner run proves nothing.
+    return 0
+  fi
+  [ ! -o errexit ] || { echo "the outer run already has errexit; the inner run would prove nothing"; return 1; }
+  shopt -q nocasematch && { echo "the outer run already has nocasematch"; return 1; }
+  return 0
 }

@@ -620,15 +620,16 @@ terminal_name() {
 #
 # stdout, on rc 0, exactly one line:
 #
-#   <canonical-pane-id><TAB><generation><TAB><pid>[<TAB><pid>…]
+#   <canonical-pane-id><TAB><pid>[<TAB><pid>…]
 #
 #   field 1   the pane id AS THE SERVER REPORTED IT for the requested candidate.
 #             The caller's candidate is a search scope; this is the observation.
-#   field 2   a generation token, or `-` when there is none. tmux has no
-#             per-pane one, so the pane process's start time is used: a pid is
-#             only a name while its process lives, and a reused pid with a
-#             different start time is a different process.
-#   3..NF     the pane's process ids.
+#   2..NF     the pane's process ids.
+#
+# The record carries NO generation token. Pairing each pid with its process start
+# is the coordinator's job, in one place, for every driver -- a per-driver token
+# would be a second thing that has to be right, and the driver that had none
+# would degrade to a fallback that the classifier then had to trust.
 #
 # THE IDENTITY CANARY IS NOT OPTIONAL HERE. `display-message -p -t <bad-target>`
 # falls back to the CURRENT pane (#1051), so a pane_pid read without co-observing
@@ -637,7 +638,7 @@ terminal_name() {
 # and the process facts come out of ONE query, so they cannot be from two
 # different panes.
 terminal_pane_process_observe() {   # <candidate>
-  local id="${1-}" bare idfield facts seen_id pane_pid started
+  local id="${1-}" bare idfield facts seen_id pane_pid
   command -v tmux >/dev/null 2>&1 || return 10
   bare="$(_tmux_bare_of "$id")"
   case "$bare" in @*|%*) : ;; *) return 13 ;; esac
@@ -650,10 +651,5 @@ terminal_pane_process_observe() {   # <candidate>
   # An unread value must not reach the comparison. Empty, zero-prefixed and
   # non-decimal are all "we did not get a pid", not "the pane has none".
   case "$pane_pid" in ''|0*|*[!0-9]*) return 10 ;; esac
-  started="$(ps -o lstart= -p "$pane_pid" 2>/dev/null | tr -s '[:space:]' ' ')"
-  # No token is `-`, never an empty field: an empty field would make the record
-  # malformed, and a malformed record is a louder answer than "no token".
-  [ -n "$started" ] || started='-'
-  case "$started" in *[[:cntrl:]]*) started='-' ;; esac
-  printf '%s\t%s\t%s\n' "$bare" "$started" "$pane_pid"
+  printf '%s\t%s\n' "$bare" "$pane_pid"
 }

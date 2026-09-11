@@ -43,6 +43,17 @@
 # incomplete walk is `undetermined`, never a negative. This is the axis the
 # review flagged first and it is the one that would be silently wrong.
 
+# THE CALLER'S SHELL IS NOT THIS FILE'S SHELL. Everything here is SOURCED, so
+# `set -e`, `set -u`, `set -o pipefail`, `nocasematch` and `extglob` are the
+# CALLER's settings and they are in force inside these functions. That has
+# already produced two defects on this branch -- a `case` alphabet widened by
+# `nocasematch`, and `x="$(cmd)"; rc=$?` killing the shell under `set -e` before
+# the verdict could be printed -- and both passed a suite that ran with the
+# defaults. The suite now reruns itself under each of those states; see
+# tests/test_self_proof.bats. The rule here is: capture a status with
+# `if x="$(cmd)"; then rc=0; else rc=$?; fi`, never with a bare assignment
+# followed by `$?`.
+
 [ -n "${_AGMSG_SELF_PROOF_SH:-}" ] && return 0
 _AGMSG_SELF_PROOF_SH=1
 
@@ -114,39 +125,74 @@ _agmsg_proof_pid_in() {   # <needle> <haystack...>
 
 # One driver observation, framed.
 #
-# The driver's record is `<canonical-id><TAB><generation><TAB><pid>[<TAB><pid>…]`
-# on exactly one line. Everything about it is checked HERE rather than trusted,
-# because the driver is the layer with an incentive to be helpful: a record with
-# a missing field, a second line, or a pid that is not a pid is an observation we
-# do not understand, and answering from the part we do understand would be a
-# count over an input nobody read (#1152, the same rule the pure classifier uses
-# for a malformed row).
+# The driver's record is `<canonical-id><TAB><pid>[<TAB><pid>…]` on exactly one
+# line. Everything about it is checked HERE rather than trusted: a record with a
+# missing field, a second line, a pid that is not a pid, or the SAME pid twice is
+# an observation we do not understand, and answering from the part we do
+# understand would be a count over an input nobody read.
+#
+# A DUPLICATE IS MALFORMED, not a set to be deduplicated. Two spellings of one
+# process in a record that is supposed to enumerate them means the driver's
+# enumeration is not what this file thinks it is, and quietly collapsing it would
+# hide exactly that.
 #
 # Prints the framed record unchanged on rc 0. rc 1 means malformed.
 _agmsg_proof_frame() {   # <record>
-  local rec="${1-}" line id gen rest p n=0
+  local rec="${1-}" line id rest p q n=0 seen=""
   [ -n "$rec" ] || return 1
   # Exactly one line. `printf %s` adds none, so a second line can only be the
   # driver's.
   line="$(printf '%s' "$rec" | head -1)"
   [ "$line" = "$rec" ] || return 1
-  id="${rec%%	*}";  rest="${rec#*	}"
+  id="${rec%%	*}"; rest="${rec#*	}"
   [ "$rest" != "$rec" ] || return 1
-  gen="${rest%%	*}"; rest="${rest#*	}"
-  [ "$rest" != "$gen" ] || return 1
   [ -n "$id" ] || return 1
-  [ -n "$gen" ] || return 1
   # A control byte in the id would travel into a ref that later reaches a shell.
   # FRAMING ONLY: which ids are legal for a driver is that driver's question --
   # tmux socket refs carry ordinary spaces.
-  case "$id$gen" in *[[:cntrl:]]*) return 1 ;; esac
+  case "$id" in *[[:cntrl:]]*) return 1 ;; esac
   # shellcheck disable=SC2086
   for p in $rest; do
     _agmsg_proof_pid_ok "$p" || return 1
+    # shellcheck disable=SC2086
+    for q in $seen; do [ "$q" = "$p" ] && return 1; done
+    seen="$seen $p"
     n=$((n + 1))
   done
   [ "$n" -gt 0 ] || return 1
   printf '%s\n' "$rec"
+}
+
+# Give every pid in a framed record its process IDENTITY, not just its number.
+#
+# A PID IS ONLY A NAME WHILE ITS PROCESS LIVES. Between the two observations this
+# proof makes, a pane process can exit and its number be handed to something
+# else; the record would read identically and the intersection would still be
+# there, and the proof would join an old ancestry to a new process. So each pid
+# is paired with its start time, and the pair is what gets compared.
+#
+# NO FALLBACK. A pid whose start cannot be read makes the WHOLE observation
+# unusable (rc 1). An earlier revision degraded a missing token to `-` and then
+# went on to answer proved or disproved: that is a verdict resting on the one
+# fact we failed to obtain. Not knowing is `undetermined`, above.
+#
+# Prints `<canonical-id><TAB><pid>=<start>…`; rc 1 if any identity is missing.
+_agmsg_proof_identify() {   # <framed-record>
+  local rec="${1-}" id rest p start out
+  id="${rec%%	*}"; rest="${rec#*	}"
+  [ -n "$id" ] && [ "$rest" != "$rec" ] || return 1
+  out="$id"
+  # shellcheck disable=SC2086
+  for p in $rest; do
+    # Whitespace collapses to `_` so the tuple stays one word: the comparison
+    # below splits on whitespace, and a start time is full of spaces.
+    start="$(ps -o lstart= -p "$p" 2>/dev/null | tr -s '[:space:]' '_')"
+    start="${start#_}"; start="${start%_}"
+    [ -n "$start" ] || return 1
+    case "$start" in *[[:cntrl:]]*) return 1 ;; esac
+    out="$out	$p=$start"
+  done
+  printf '%s\n' "$out"
 }
 
 _agmsg_proof_say() {   # <state> <payload> <rc>
@@ -169,7 +215,7 @@ _agmsg_proof_say() {   # <state> <payload> <rc>
 # as a confirmation.
 agmsg_self_proof() {   # <team> <agent> <candidate>
   local team="${1-}" agent="${2-}" cand="${3-}"
-  local rd kind owner osid opid anc arc orc obs1 obs2 canon pids rest p
+  local rd kind owner osid opid anc arc orc obs1 obs2 id1 id2 canon pids rest p
   local rd2 owner2 term ref
 
   # A driver that cannot observe a pane's processes is not a driver that failed:
@@ -213,6 +259,25 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   _agmsg_proof_pid_ok "$opid" \
     || _agmsg_proof_say undetermined owner_pid_invalid 2 || return 2
 
+  # A RECORDED OWNER IS NOT A VERIFIED ONE. Parsing a pid out of the lock says
+  # the file holds a number, not that the number is still this session. A pid is
+  # reused; a lock outlives the process that wrote it. Without this, a stale
+  # `<sid>.<pid>` whose number has been handed to some other process would be
+  # walked as if it were the seat -- and if that process happens to sit in a
+  # pane, the seat is `proved` into a pane it has never been in.
+  #
+  # `agmsg_instance_alive` is the three-valued verifier that already exists for
+  # exactly this: it checks the pid AND the instance marker, so a reused pid
+  # shows up as a marker mismatch rather than as a live process. Its three values
+  # stay three here -- `dead` and `cannot tell` are different reasons, and
+  # neither is a negative about the pane.
+  if agmsg_instance_alive "$owner"; then arc=0; else arc=$?; fi
+  case "$arc" in
+    0) : ;;
+    1) _agmsg_proof_say undetermined owner_not_alive 2; return 2 ;;
+    *) _agmsg_proof_say undetermined owner_liveness_unknown 2; return 2 ;;
+  esac
+
   # THIS invocation must be inside the owner it is speaking for. Without this the
   # proof is about a process that merely shares a role name -- measured: a seat's
   # tool invocations can run under a launchd-parented daemon while the recorded
@@ -223,7 +288,7 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   # `ps` that failed somewhere ABOVE the owner -- a part of the tree this
   # question does not care about -- would report the seat as unbound. What is
   # above the owner is the owner walk's business, below.
-  anc="$(_agmsg_proof_ancestry "$$")"; arc=$?
+  if anc="$(_agmsg_proof_ancestry "$$")"; then arc=0; else arc=$?; fi
   # shellcheck disable=SC2086
   if ! _agmsg_proof_pid_in "$opid" $anc; then
     # Not found. That only MEANS "not bound" if we saw the whole chain.
@@ -239,8 +304,7 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   # candidate never named a pane), anything else is "I could not reach it". Both
   # are `undetermined` -- the REASON never changes what a caller may do -- but a
   # caller reading the reason to decide whether to retry needs them apart.
-  obs1="$(terminal_pane_process_observe "$cand" 2>/dev/null)"
-  orc=$?
+  if obs1="$(terminal_pane_process_observe "$cand" 2>/dev/null)"; then orc=0; else orc=$?; fi
   [ "$orc" -eq 0 ] || {
     if [ "$orc" -eq 13 ]; then
       _agmsg_proof_say undetermined candidate_not_well_formed 2; return 2
@@ -249,9 +313,11 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   }
   obs1="$(_agmsg_proof_frame "$obs1")" \
     || _agmsg_proof_say undetermined observation_malformed 2 || return 2
+  id1="$(_agmsg_proof_identify "$obs1")" \
+    || _agmsg_proof_say undetermined process_identity_unreadable 2 || return 2
 
   # --- the owner's ancestry -------------------------------------------------
-  anc="$(_agmsg_proof_ancestry "$opid")"; arc=$?
+  if anc="$(_agmsg_proof_ancestry "$opid")"; then arc=0; else arc=$?; fi
   case "$arc" in
     0) : ;;
     2) _agmsg_proof_say undetermined ancestry_cycle 2; return 2 ;;
@@ -267,7 +333,11 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
     || _agmsg_proof_say undetermined pane_process_unreadable 2 || return 2
   obs2="$(_agmsg_proof_frame "$obs2")" \
     || _agmsg_proof_say undetermined observation_malformed 2 || return 2
-  [ "$obs1" = "$obs2" ] \
+  id2="$(_agmsg_proof_identify "$obs2")" \
+    || _agmsg_proof_say undetermined process_identity_unreadable 2 || return 2
+  # The TUPLES, not the pids: the record can be identical while the processes
+  # behind it are not.
+  [ "$id1" = "$id2" ] \
     || _agmsg_proof_say undetermined snapshot_changed 2 || return 2
 
   # --- the owner, again -----------------------------------------------------
@@ -281,7 +351,7 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   }
 
   canon="${obs1%%	*}"
-  rest="${obs1#*	}"; pids="${rest#*	}"
+  pids="${obs1#*	}"
 
   # The ref that leaves here is the DRIVER's own observation of the pane, run
   # through the same grammar every other ref in the tree goes through, and
