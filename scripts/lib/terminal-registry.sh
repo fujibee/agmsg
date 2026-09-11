@@ -1210,6 +1210,17 @@ agmsg_terminal_enumerate() {
   done
   # Leave the caller with the driver it had. Loading one is a global side effect
   # and this function is a reader.
-  [ -z "$was" ] || agmsg_terminal_load "$was" >/dev/null 2>&1 || rc=1
+  #
+  # NO DRIVER is a state too, and the version that only restored a NAMED driver
+  # left the LAST candidate loaded when the caller had none -- so a caller that
+  # deliberately held no driver got one, silently, from a function it called to
+  # read (found in review). Unsetting the ops is what "none" means here, and it
+  # is the same teardown `agmsg_terminal_load` does before it loads.
+  if [ -n "$was" ]; then
+    agmsg_terminal_load "$was" >/dev/null 2>&1 || rc=1
+  else
+    _agmsg_terminal_unset_ops
+    _AGMSG_TERMINAL_LOADED=""
+  fi
   return "$rc"
 }

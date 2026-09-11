@@ -368,3 +368,41 @@ HEOF
   # and never piped straight into the reader
   ! printf '%s\n' "$body" | grep -qE 'terminal_enumerate_panes[^|]*\|'
 }
+
+@test "registry: a caller holding NO driver is left holding none (#1152)" {
+  # "No driver" is a state, not a missing value. The version that restored only
+  # a NAMED driver left the LAST candidate loaded here -- so a reader handed the
+  # caller a driver it had not asked for. Found in review.
+  _fake_herdr "$(_sessions_json '{"name":"one","running":true,"socket_path":"/s/sessions/one/herdr.sock"}')"
+  _herdr_panes one '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'
+  _fake_tmux
+  _load_registry
+  _AGMSG_TERMINAL_LOADED=""
+  _agmsg_terminal_unset_ops
+  agmsg_terminal_enumerate >/dev/null
+  [ -z "${_AGMSG_TERMINAL_LOADED:-}" ] || { echo "left holding [$_AGMSG_TERMINAL_LOADED]"; return 1; }
+  # and the ops really are gone, not merely the name
+  refute declare -F terminal_enumerate_panes
+}
+
+@test "herdr: a socket path with a space is ONE instance, not three (#1152)" {
+  # `for x in $(sqlite3 …)` word-splits, and a home directory with a space in it
+  # is ordinary. Measured before the fix: `/a path/with spaces/herdr.sock` became
+  # three rows, each claiming to hold the same pane -- which reads as MORE
+  # coverage, not less.
+  _fake_herdr "$(_sessions_json '{"name":"sp","running":true,"socket_path":"/a path/with spaces/herdr.sock"}')"
+  cat > "$BIN/herdr" <<'HEOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "session list") cat "$ANSDIR/sessions.json"; exit 0 ;;
+  "pane list") printf '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; exit 0 ;;
+esac
+exit 9
+HEOF
+  chmod +x "$BIN/herdr"
+  _load_herdr_op
+  run terminal_enumerate_panes
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+  [ "$output" = "/a path/with spaces/herdr.sock"$'\t'"w1:p1" ]
+}
