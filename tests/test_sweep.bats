@@ -24,6 +24,7 @@ _run_sweep_fixture() {   # <rows>
       case "$1:$2:$3" in
         herdr:/run/jugemu.sock:w1:p7) printf "alpha:alice\n" ;;
         tmux:/tmp/tmux-a:%4) printf "alpha:bob\n" ;;
+        "tmux:/tmp/server with space:%4") printf "alpha:bob\n" ;;
         plain:iterm:/dev/ttys040) printf "alpha:alice\n" ;;
         *) return 1 ;;
       esac
@@ -38,15 +39,15 @@ _run_sweep_fixture() {   # <rows>
 @test "sweep makes the poke target and fix ref from the same complete row (#1152)" {
   _run_sweep_fixture $'herdr\t/run/jugemu.sock\tw1:p7\tagent\tclaude-code\ntmux\t/tmp/tmux-a\t%4\tagent\tcodex'
   [ "$status" -eq 0 ]
-  grep -Fqx $'herdr\t/run/jugemu.sock\tw1:p7\talpha/alice\t$agmsg fix --pane herdr:/run/jugemu.sock:w1:p7' "$BATS_TEST_TMPDIR/pokes"
-  grep -Fqx $'tmux\t/tmp/tmux-a\t%4\talpha/bob\t$agmsg fix --pane tmux:/tmp/tmux-a:%4' "$BATS_TEST_TMPDIR/pokes"
+  grep -Fqx $'herdr\t/run/jugemu.sock\tw1:p7\talpha/alice\t$agmsg fix --pane '\''herdr:/run/jugemu.sock:w1:p7'\''' "$BATS_TEST_TMPDIR/pokes"
+  grep -Fqx $'tmux\t/tmp/tmux-a\t%4\talpha/bob\t$agmsg fix --pane '\''tmux:/tmp/tmux-a:%4'\''' "$BATS_TEST_TMPDIR/pokes"
 }
 
 @test "same bare pane in two instances cannot cross target and body (#1152)" {
   _run_sweep_fixture $'herdr\t/run/jugemu.sock\tw1:p7\tagent\tclaude-code\nherdr\t/run/oma.sock\tw1:p7\tagent\tclaude-code'
   [ "$status" -eq 1 ]
   [ "$(wc -l < "$BATS_TEST_TMPDIR/pokes" | tr -d ' ')" -eq 1 ]
-  grep -Fqx $'herdr\t/run/jugemu.sock\tw1:p7\talpha/alice\t$agmsg fix --pane herdr:/run/jugemu.sock:w1:p7' "$BATS_TEST_TMPDIR/pokes"
+  grep -Fqx $'herdr\t/run/jugemu.sock\tw1:p7\talpha/alice\t$agmsg fix --pane '\''herdr:/run/jugemu.sock:w1:p7'\''' "$BATS_TEST_TMPDIR/pokes"
   refute grep -Fq '/run/oma.sock' "$BATS_TEST_TMPDIR/pokes"
 }
 
@@ -64,7 +65,13 @@ _run_sweep_fixture() {   # <rows>
 @test "plain emulator target uses the same fenced path as pane terminals (#1152)" {
   _run_sweep_fixture $'plain\titerm\t/dev/ttys040\tagent\tclaude-code'
   [ "$status" -eq 0 ]
-  grep -Fqx $'plain\titerm\t/dev/ttys040\talpha/alice\t$agmsg fix --pane plain:iterm:/dev/ttys040' "$BATS_TEST_TMPDIR/pokes"
+  grep -Fqx $'plain\titerm\t/dev/ttys040\talpha/alice\t$agmsg fix --pane '\''plain:iterm:/dev/ttys040'\''' "$BATS_TEST_TMPDIR/pokes"
+}
+
+@test "instance paths with spaces stay one quoted fix argument (#1152)" {
+  _run_sweep_fixture $'tmux\t/tmp/server with space\t%4\tagent\tcodex'
+  [ "$status" -eq 0 ]
+  grep -Fqx $'tmux\t/tmp/server with space\t%4\talpha/bob\t$agmsg fix --pane '\''tmux:/tmp/server with space:%4'\''' "$BATS_TEST_TMPDIR/pokes"
 }
 
 @test "fence refusal is loud and does not report a send (#1152)" {

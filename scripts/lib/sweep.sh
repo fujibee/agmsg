@@ -52,6 +52,16 @@ _agmsg_sweep_report_skip() {   # <kind> <instance> <pane> <reason>
   printf 'skipped kind=%s instance=%s pane=%s reason=%s\n' "$1" "$2" "$3" "$4" >&2
 }
 
+# Serialize one argument for the command line typed into an agent. Instance
+# paths may contain spaces and quotes; raw interpolation would let one ref turn
+# into several arguments before `fix` sees it. POSIX single-quote form is
+# understood by every shell-backed command parser used by the agent skills.
+_agmsg_sweep_quote_arg() {   # <value>
+  local value="${1-}" escaped
+  escaped="$(printf '%s' "$value" | sed "s/'/'\\\\''/g")" || return 1
+  printf "'%s'" "$escaped"
+}
+
 # Consume #1155 rows:
 #   kind<TAB>instance<TAB>pane<TAB>state<TAB>payload
 # plus its ! / !! / ? hole rows. Every row that is not a complete, corroborated
@@ -138,7 +148,7 @@ EOF
     # Do not parse the ref back into a bare pane for the write: that would create
     # a second address derivation that could cross instances.
     ref="$kind:$instance:$pane"
-    text="\$agmsg fix --pane $ref"
+    text="\$agmsg fix --pane $(_agmsg_sweep_quote_arg "$ref")"
     owner="$team/$agent"
     poke_rc=0
     _agmsg_sweep_poke_fenced "$kind" "$instance" "$pane" "$owner" "$text" >/dev/null || poke_rc=$?
