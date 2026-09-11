@@ -49,8 +49,10 @@ agmsg は重要な設計判断を記録するために ADR([Architecture Decisio
 
 1. [`docs/adr/template.md`](docs/adr/template.md) を `docs/adr/NNNN-short-title.md` としてコピーする。`NNNN` は次に空いている番号。
 2. 各セクションを埋める。*Alternatives considered*(検討した代替案)は正直に書くこと — ADR の価値の多くは、何を却下したか、なぜ却下したかを記録している点にある。
-3. PR を開く。議論は PR 上で行う。ステータスは最初 `proposed` とし、マージされたら `accepted` に変更する。
-4. 後のADRが以前のADRを置き換える(supersede)場合は、元の ADR はそのまま残し、前方リンクを張る(`Status: superseded by ADR-XXXX`)。ADR は不変の履歴であり、wiki ではない。
+3. PR を開く。議論は PR 上で行う。ステータスは最初 `proposed` とし、実際に決定が下されるまで `proposed` のままにする — ファイルがマージされた時点は、その瞬間ではない。一部が未決・未実装のあいだ `main` 上に `proposed` のまま置かれることは正常な状態であり、放置ではない。
+4. ツリーと突き合わせて確かめられる決定になった時点で `accepted` にする。一部しか成立していない場合は、どの部分かをステータス行に書くか、成立している部分を独立した ADR として accepted にし、残りを `proposed` のままにする。
+5. `proposed` の ADR は、`main` 上かどうかに関わらず、その場で書き換えてよい。まだ何もその上に築かれていないので、直せば読み手に残る記録は2つではなく1つで済む。何を変えたかはコミットメッセージに書くこと。
+6. accepted になった ADR は「下された決定」の記録である。誤字・リンク切れ・書式は自由に直してよいが、決定した内容を変えるのは、それを supersede する後の ADR を通してのみ行う。元の ADR はそのまま残し、前方リンクを張る(`Status: superseded by ADR-XXXX`)。
 
 ### ドキュメント化されていない決定を見つけたとき
 

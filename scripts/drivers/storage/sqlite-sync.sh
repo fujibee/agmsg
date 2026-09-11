@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Optional Stage-1 remote synchronization extension for the SQLite driver.
-# See docs/spec/ref/stage-1-remote-sync.md. All bulk input/output is JSONL.
+# See docs/spec/message-synchronization.md. All bulk input/output is JSONL.
 
 # Exit 13 is this driver's "a check failed", and it was the ONLY thing a caller
 # received: 113 sites across 13 functions returned it with nothing on stderr, so

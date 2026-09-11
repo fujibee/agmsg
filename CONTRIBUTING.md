@@ -49,8 +49,10 @@ Small bug fixes, doc updates, dependency bumps, and new tests do not need ADRs.
 
 1. Copy [`docs/adr/template.md`](docs/adr/template.md) to `docs/adr/NNNN-short-title.md` where `NNNN` is the next free number.
 2. Fill in the sections. Be honest in *Alternatives considered* — the value of an ADR is largely in capturing what you rejected and why.
-3. Open a PR. Discussion happens on the PR. Status starts as `proposed`; mark it `accepted` when merged.
-4. When a later ADR supersedes an earlier one, leave the original in place and link forward (`Status: superseded by ADR-XXXX`). ADRs are immutable history, not a wiki.
+3. Open a PR. Discussion happens on the PR. Status starts as `proposed` and stays `proposed` until the decision is actually taken — merging the file is not that moment. A record may sit on `main` as `proposed` for as long as parts of it are still undecided or unbuilt, and that is a normal state, not an oversight.
+4. Mark it `accepted` when the decision is one a reader can check the tree against. If only part of it holds, say which part in the status line, or accept the part that holds as its own ADR and leave the rest `proposed`.
+5. A `proposed` ADR may be edited in place, on `main` or off it. Nothing is built on it yet, so correcting it leaves a reader one record instead of two. Say what changed in the commit message.
+6. Once accepted, an ADR records a decision that was made: correct typos, broken links, and formatting freely, but change what it decided only through a later ADR that supersedes it, leaving the original in place and linking forward (`Status: superseded by ADR-XXXX`).
 
 ### When you find an undocumented decision
 

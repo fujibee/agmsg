@@ -88,7 +88,7 @@ That placement is a **specification requirement**, not an artefact of how the
 current server happens to be written:
 
 ```
-docs/spec/ref/age-v1-profile.md:342-345
+docs/spec/age-v1-profile.md:342-345
   "Recipient public keys, private identities, recipient-set manifests, and
    epoch history are provisioned outside the message server over an
    authenticated, freshness-proving channel. Copying only the current private
@@ -135,7 +135,7 @@ server that happens to hold key material it never names. It rules out a server
 that *works with* keys.
 
 The claim that keys are not there at all is a **specification requirement**, not
-a finding of this grep — `docs/spec/ref/age-v1-profile.md:342-345`, quoted
+a finding of this grep — `docs/spec/age-v1-profile.md:342-345`, quoted
 above. The two support each other and neither replaces the other: the spec says
 the keys are provisioned elsewhere, and this search says the code has nothing
 that would use them if they arrived.
@@ -202,14 +202,14 @@ table is a claim about adversary B.
 
 | Property | Status | Basis |
 |---|---|---|
-| Confidentiality of message contents | **Provided** | age X25519 encryption; identities are outside the server (`docs/spec/ref/age-v1-profile.md:342-345`) |
-| Integrity of message contents | **Provided** | **inherited** — age's own AEAD, a property of the age format rather than of this tree. The profile deliberately adds no second AEAD layer (`docs/spec/ref/age-v1-profile.md:13`), so the guarantee is age's and is checked by reading age, not this repository. The server's digest is *not* the mechanism — see below |
-| Unforgeability of message contents | **Provided** | Requires recipients' public keys, which the spec places outside the server (`docs/spec/ref/age-v1-profile.md:342-345`, `:58-63`) |
+| Confidentiality of message contents | **Provided** | age X25519 encryption; identities are outside the server (`docs/spec/age-v1-profile.md:342-345`) |
+| Integrity of message contents | **Provided** | **inherited** — age's own AEAD, a property of the age format rather than of this tree. The profile deliberately adds no second AEAD layer (`docs/spec/age-v1-profile.md:13`), so the guarantee is age's and is checked by reading age, not this repository. The server's digest is *not* the mechanism — see below |
+| Unforgeability of message contents | **Provided** | Requires recipients' public keys, which the spec places outside the server (`docs/spec/age-v1-profile.md:342-345`, `:58-63`) |
 | Peer authentication | **Not provided** | No key-to-person binding in the protocol (`docs/design/remote-sync.md:93-94`) |
 | Metadata confidentiality | **Not provided** | **assumption**, and the easy kind: the server routes and orders by the envelope's addressing and timing, so it reads them. No citation is offered because nothing in the tree states it as a rule — it follows from the server doing its job |
-| Forward secrecy (adversary C) | **Not provided** | Recipient sets are per-epoch and immutable (`docs/spec/ref/age-v1-profile.md:88`); an identity that is later compromised decrypts that epoch's history |
+| Forward secrecy (adversary C) | **Not provided** | Recipient sets are per-epoch and immutable (`docs/spec/age-v1-profile.md:88`); an identity that is later compromised decrypts that epoch's history |
 | Post-compromise recovery (adversary C) | **Partial, by rotation** | A new epoch is a new recipient set. The journal records the rotation and a fingerprint, never the key (`docs/design/remote-sync.md:103-104`) |
-| Downgrade resistance (server-forced) | **Provided by the spec's stanza rules** | Scrypt, SSH, plugin and every other non-X25519 stanza are excluded (`docs/spec/ref/age-v1-profile.md:58-63`) |
+| Downgrade resistance (server-forced) | **Provided by the spec's stanza rules** | Scrypt, SSH, plugin and every other non-X25519 stanza are excluded (`docs/spec/age-v1-profile.md:58-63`) |
 | Downgrade resistance (client accepting `cipher: none`) | **Provided by every caller in the tree** | Both `configure` calls pass `--cipher age-v1` and `--minimum-security e2ee-required` together (`scripts/remote.sh:1280`, `:1758`), and there is no third. The refusal is `scripts/internal/remote-sync.mjs:1686`. Removable only by invoking `configure` directly with `plaintext-allowed` |
 
 ### On forward secrecy
@@ -218,7 +218,7 @@ table is a claim about adversary B.
 `key_id` names an **immutable** recipient set:
 
 ```
-docs/spec/ref/age-v1-profile.md:88
+docs/spec/age-v1-profile.md:88
   "A `key_id` identifies an immutable set of X25519 recipients and its private …"
 ```
 
@@ -416,7 +416,7 @@ measured; see "How a deployment ends up on `e2ee-required`" above.)*
 
 ## On the age of the specification this cites
 
-`docs/spec/ref/age-v1-profile.md` is marked **"Status: proposed (dogfood
+`docs/spec/age-v1-profile.md` is marked **"Status: proposed (dogfood
 profile)"** and was last touched on 2026-07-27, by the commit that filed it as
 reference material — `1a56d8e docs: file superseded work as reference`. It lives
 under `ref/`, whose README says plainly: *"Nobody is building toward anything in
@@ -455,9 +455,9 @@ the sections above are the claim.
 | ASVS V6 area | Where this document addresses it |
 |---|---|
 | V6.1 Data classification | "Read this before the properties table", items 1 and 3 |
-| V6.2 Algorithms | Properties table; `docs/spec/ref/age-v1-profile.md:58-63` (X25519 only) |
+| V6.2 Algorithms | Properties table; `docs/spec/age-v1-profile.md:58-63` (X25519 only) |
 | V6.2 Integrity | "`envelopeDigest` is not a signature" |
-| V6.4 Secret management | `docs/spec/ref/age-v1-profile.md:342-345` (provisioning is outside the server) |
+| V6.4 Secret management | `docs/spec/age-v1-profile.md:342-345` (provisioning is outside the server) |
 | V6.4 Key rotation | Properties table, post-compromise recovery; `docs/design/remote-sync.md:103-104` |
 
 ## How to check this document
@@ -466,7 +466,7 @@ Every citation is `path:line`. To verify one, against this branch's head or the
 branch point — the code is the same at both:
 
 ```
-sed -n '342,345p' docs/spec/ref/age-v1-profile.md
+sed -n '342,345p' docs/spec/age-v1-profile.md
 sed -n '221,238p' server/src/protocol.ts
 ```
 

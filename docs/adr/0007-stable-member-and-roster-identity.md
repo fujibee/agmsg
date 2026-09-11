@@ -1,6 +1,12 @@
 # ADR 0007: Stable member and roster identity
 
-**Status:** proposed (design architecture)
+**Status:** proposed
+
+Parts of this decision are in the tree and parts are not: stable `member_id` and
+the rename discipline are implemented, while the single-owner boundary, the
+`pending_remote_acceptance` gate, and the roster-mutation protocol have no
+implementation to point at. It stays proposed until a reader can check the whole
+of it, rather than being accepted on the strength of the part that shipped.
 **Date:** 2026-07-25
 **Deciders:** @fujibee
 
@@ -22,10 +28,10 @@ design/specification.
 
 ### Distinguish every identity layer
 
-- A **team owner** is the one human account authorized to control the hosted
-  team. V1 has exactly one immutable owner. Pairing another device must prove
-  the same owner; it is not an invitation for another owner. Server, CLI, and
-  credential issuance all enforce this boundary.
+- A **team owner** is the one human account that controls the hosted team. V1
+  has exactly one immutable owner. Bringing a second machine onto a team is not
+  an invitation for another owner; it is the same owner reaching the same
+  server, which is what the sync protocol treats as the permission.
 - A **local team identity** is a stable opaque UUID created locally. It is not
   the team display name and is not the remote binding ID.
 - A **member** is an agent principal anchored by stable opaque `member_id`.
@@ -71,8 +77,8 @@ messages or free the old identity for silent reuse.
 When concurrent creators propose the same normalized new name, the first
 accepted `member_id` is canonical. Another ID is not merged by name. A local
 member awaiting remote acceptance remains `pending_remote_acceptance` and
-cannot act, send, create read facts, or participate in Stage 1 or Stage 2 until
-the server accepts that identity.
+cannot act, send, create read facts, or participate in message or read-state
+synchronization until the server accepts that identity.
 
 ### Roster mutations converge by dedupe then revision order
 
@@ -105,9 +111,10 @@ The eventual wire spelling belongs in the versioned protocol specification.
 ### Lifecycle operations do not collapse domains
 
 Leaving or deleting the last local agent placement does not delete the portable
-member catalog, local team identity, remote binding, or team key. Rename and
-retirement do not revoke device credentials. Credential revocation does not
-rewrite or cryptographically erase a member's historical messages.
+member catalog, local team identity, remote binding, or team key. Removing a
+member from the roster does not rewrite or cryptographically erase that
+member's historical messages, and does not revoke a key already distributed —
+anyone holding an epoch's identity can still read what was sealed to it.
 
 Two independently populated teams are never merged implicitly. A reconnect may
 reattach only with exact prior identity and binding proof. Any future populated
@@ -152,8 +159,8 @@ reconciliation protocol; matching display names are insufficient.
   concurrent mutations and makes acknowledgement retry non-convergent.
 - **Implicit populated-to-populated merge.** Rejected until an explicit
   identity/history reconciliation protocol exists.
-- **Treat removal as credential revocation or erasure.** Rejected because
-  membership, device authorization, and ciphertext history are separate facts.
+- **Treat removal as key revocation or erasure.** Rejected because membership,
+  key distribution, and ciphertext history are separate facts.
 
 ## Consequences
 
@@ -171,8 +178,8 @@ reconciliation protocol; matching display names are insufficient.
 
 ## Normative design and specifications
 
-- [Remote sync design](../../design/remote-sync.md)
-- [HTTP API v1](../../../server/spec/v1.md)
-- [Stage-2 read-state synchronization](../../spec/ref/read-state-synchronization.md)
+- [Remote sync design](../design/remote-sync.md)
+- [HTTP API v1](../../server/spec/v1.md)
+- [Read-state synchronization](../spec/read-state-synchronization.md)
 - [ADR 0005: Remote synchronization contract](0005-remote-sync-contract.md)
 - [ADR 0006: Composite read-state frontier](0006-composite-read-state-frontier.md)
