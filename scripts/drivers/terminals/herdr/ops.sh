@@ -1114,6 +1114,19 @@ terminal_pane_process_observe() {   # <candidate>
   # the right type. Equal or nothing: a dropped sibling is a hole in the set.
   n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_processes')='array' THEN json_array_length('$jesc','\$.result.process_info.foreground_processes') ELSE -1 END" 2>/dev/null)" || return 10
   case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  #
+  # TWO GUARDS THAT OVERLAP, both measured, because "one of them never ran" is
+  # the ordinary way a pair like this rots (delete each separately, not together):
+  #
+  #   the per-entry arm removed   -> 1 red   (a mistyped schema field)
+  #   the count check removed     -> 1 red   (a dropped sibling)
+  #   both removed                -> 2 reds
+  #
+  # A third variant, turning the arm's `return 10` into `continue`, produces ZERO
+  # reds -- and that is CORRECT, not a gap: without the increment the count no
+  # longer matches, so the whole observation still fails. Measured directly on
+  # the op rather than inferred: both spellings answer rc=10 with no output for
+  # the same payload. A mutation that changes no behaviour is not a blind spot.
   n_ok=0
   for p in $(sqlite3 :memory: "SELECT json_extract(value,'\$.pid') FROM json_each('$jesc','\$.result.process_info.foreground_processes') WHERE json_type(value,'\$.pid')='integer'" 2>/dev/null); do
     case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
