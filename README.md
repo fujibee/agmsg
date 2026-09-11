@@ -331,7 +331,7 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ### Shell (any agent)
 
 ```bash
-~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> "<message>" [--force]
+~/.agents/skills/<cmd>/scripts/send.sh <team> <from> <to> --stdin [--force]
 ~/.agents/skills/<cmd>/scripts/inbox.sh <team> <agent_id>
 ~/.agents/skills/<cmd>/scripts/history.sh <team> [agent_id] [limit]
 ~/.agents/skills/<cmd>/scripts/team.sh <team>
@@ -341,7 +341,17 @@ See [docs/opencode.md](docs/opencode.md) for full setup instructions.
 ~/.agents/skills/<cmd>/scripts/reset.sh <project_path> <type> [agent_id]
 ```
 
-`send.sh` takes four positional arguments — `<team> <from> <to> "<message>"` — plus an optional trailing `--force`. Quote the message so the shell sees it as one argument; an unquoted message with spaces will be misparsed. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
+`send.sh` takes `<team> <from> <to>`, then the message, then an optional trailing `--force`. Both `from` and `to` must already be registered in `<team>`; an unregistered name errors out (listing the currently registered names) instead of silently storing an undeliverable message. Pass `--force` to bypass this check for an intentional pre-registration send.
+
+Give the message via `--stdin`. It reads the body verbatim from a file descriptor, so it never passes through your shell and never becomes an argv entry. Pick a heredoc delimiter the body cannot contain on a line by itself — a body with a bare `AGMSG_BODY` line would end the heredoc early and the rest would run as shell commands.
+
+```bash
+~/.agents/skills/<cmd>/scripts/send.sh myteam alice bob --stdin <<'AGMSG_BODY'
+whatever you write here arrives byte-for-byte — backticks, $(...), quotes and all
+AGMSG_BODY
+```
+
+The older positional form — `send.sh <team> <from> <to> "<message>"` — still works, but it is **deprecated** (#378). Your shell parses that message before agmsg ever sees it, so backticks or `$(...)` in the body can be evaluated there, and on Windows a long body is silently truncated at 8186 bytes by MSYS's argv conversion. A message composed by an agent **must not** use it. If your body happens to be literally `--`, `--stdin`, or `--force`, put `--` in front of it: `send.sh <team> <from> <to> -- --stdin` — and for a body of `--`, that is `-- --`.
 
 ## FAQ / Design notes
 
@@ -427,7 +437,7 @@ The message store path resolves as **`AGMSG_STORAGE_PATH` (env) > built-in defau
 
 ```bash
 # Run against an isolated store
-AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob "hi"
+printf 'hi' | AGMSG_STORAGE_PATH=/tmp/agmsg-sandbox ./scripts/send.sh myteam alice bob --stdin
 ```
 
 ### Sandbox compatibility (Claude Code)

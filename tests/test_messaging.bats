@@ -108,6 +108,180 @@ teardown() {
   [[ "$output" =~ "Sent to bob" ]]
 }
 
+# --- send.sh: --stdin (#378) ---
+#
+# A positional body goes through the sender's shell (backticks / $(...) can
+# execute or vanish) and, on Windows, through MSYS's argv-conversion path
+# (silent truncation at 8186 bytes). A body sent via --stdin meets neither,
+# because it never touches argv. The positional form remains available
+# (deprecated) and still carries both hazards.
+
+@test "send: -- keeps a body that is literally --stdin working (backwards compat)" {
+  # Before --stdin existed, "--stdin" was just an ordinary body. Adding the
+  # flag must not silently reinterpret it.
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --stdin
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--stdin" ]
+}
+
+@test "send: -- keeps a body that is literally --force working" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --force
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--force" ]
+}
+
+# The two tests below are a pair, and only mean something together: the
+# second is the control for the first. `-- --force --force` sends the body
+# "--force" to an UNREGISTERED team/recipient, which the roster check (#355)
+# refuses unless force mode is on — so the send succeeding is what proves the
+# trailing --force was still parsed as a flag after `--` consumed the body.
+# Without the control, that success could just as well mean the roster check
+# never ran for an unknown team, and the test would assert nothing.
+@test "send: a --force after a '--' body still turns force mode on" {
+  run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody -- --force --force
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF -- "Sent to nobody"
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='nobody';")
+  [ "$stored" = "--force" ]
+}
+
+@test "send: control — the same '--' body without a trailing --force is still roster-checked" {
+  run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody -- --force
+  [ "$status" -ne 0 ]
+  # Assert WHICH failure this is. A bare status check would also pass on an
+  # argument-parsing error, and then the pair would only show that the extra
+  # argument turns failure into success — not that it turned force mode on.
+  printf '%s' "$output" | grep -qF -- "has no registered agents"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+# `--` itself was a valid positional body before the flag existed (only
+# argument 5 was inspected, so argument 4 was taken verbatim). It is now
+# consumed as the terminator, which is the third and least obvious of the
+# literal bodies this change breaks — `-- --` is its migration form.
+@test "send: -- keeps a body that is literally -- working (backwards compat)" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --
+  [ "$status" -eq 0 ]
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "--" ]
+}
+
+@test "send: -- with no body after it is an error, not an empty message" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "missing message body after" ]]
+}
+
+@test "send: --stdin delivers a body containing backticks and \$(...) byte-identical" {
+  local body='price is `echo hi` and $(whoami) literally'
+  run bash -c "printf '%s' \"\$1\" | bash \"\$2\" testteam alice bob --stdin" _ "$body" "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF -- "Sent to bob"
+  local stored
+  stored=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT body FROM messages WHERE to_agent='bob';")
+  [ "$stored" = "$body" ]
+}
+
+@test "send: --stdin preserves an explicit trailing newline byte-for-byte" {
+  # A plain `stored=$(sqlite3 ... SELECT body ...)` capture would strip ALL
+  # trailing newlines via command substitution on the assertion side too,
+  # so it would pass whether the stored body kept zero, one, or several
+  # trailing newlines — it would not actually test what this test claims.
+  # hex()/length() sidestep that: the exact byte sequence of "line1\nline2\n"
+  # is 6c696e65310a6c696e65320a (12 bytes), independent of shell capture.
+  run bash -c "printf 'line1\nline2\n' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  local body_hex body_len
+  # sqlite3's hex() emits uppercase A-F.
+  body_hex=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT hex(body) FROM messages WHERE to_agent='bob';")
+  body_len=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT length(body) FROM messages WHERE to_agent='bob';")
+  [ "$body_hex" = "6C696E65310A6C696E65320A" ]
+  [ "$body_len" -eq 12 ]
+}
+
+@test "send: positional body still works unchanged alongside the new flag" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+}
+
+@test "send: rejects an option-like positional body without a '--' separator" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-fiel
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "option-like body: use -- separator"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: an option-like body still sends verbatim after the '--' separator" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob -- --body-fiel
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to bob" ]]
+}
+
+@test "send: --stdin composes with --force" {
+  run bash -c "printf 'hi' | bash \"\$1\" brandnewteam ghost nobody --stdin --force" _ "$SCRIPTS/send.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to nobody" ]]
+}
+
+@test "send: rejects a positional body combined with --stdin instead of silently picking one" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello" --stdin
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "was already given"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+@test "send: rejects empty stdin with a clear error, not an empty message" {
+  run bash -c "printf '' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "no data was read"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+# A bash string cannot hold a NUL byte, so `IFS= read -r -d ''` stops at the
+# first one. Storing the shortened value with a success exit would report a
+# whole body sent when it was not, so the input is refused instead. Note the
+# NUL must be written by printf's FORMAT string: passing it through an
+# argument (printf '%s' "$var") cannot work, because argv cannot carry NUL
+# either — a test written that way would silently exercise NUL-free input.
+@test "send: rejects --stdin input containing a NUL byte instead of truncating it" {
+  run bash -c "printf 'before\000after' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -qF -- "NUL byte"
+  local n
+  n=$(sqlite3 "$TEST_SKILL_DIR/db/messages.db" "SELECT COUNT(*) FROM messages;")
+  [ "$n" -eq 0 ]
+}
+
+# A leading NUL leaves the read with an empty value AND a zero exit, so the
+# NUL check has to come before the "no data" check — otherwise this input
+# would be blamed on an empty stdin rather than on the byte that caused it.
+@test "send: reports a leading NUL as a NUL, not as empty input" {
+  run bash -c "printf '\000trailing' | bash \"\$1\" testteam alice bob --stdin" _ "$SCRIPTS/send.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "NUL byte" ]]
+}
+
+@test "send: rejects an unexpected extra argument after the message" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob "hello" extra
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "unexpected extra argument" ]]
+}
+
 # --- inbox.sh ---
 
 @test "inbox: shows no messages when empty" {
