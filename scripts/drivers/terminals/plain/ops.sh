@@ -157,3 +157,12 @@ terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
 terminal_find_by_label() { _plain_unsupported "find_by_label"; }
 terminal_label_of() { _plain_unsupported "label_of"; }
 terminal_name() { _plain_unsupported "name"; }
+
+# NO terminal_pane_process_observe HERE, deliberately.
+#
+# The plain driver has no pane and no process to bind to, so there is nothing for
+# it to observe. Its ABSENCE is the answer: the coordinator reads a missing op as
+# `unsupported:driver_no_process_binding` -- a configuration in which the question
+# has no answer -- rather than as a failure to retry. A stub that returned
+# "nothing found" would be indistinguishable from a pane whose processes we could
+# not read, and the two must not land in the same bucket (#1152).
