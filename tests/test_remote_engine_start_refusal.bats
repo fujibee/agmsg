@@ -192,7 +192,13 @@ skip_if_root() {
   local pidfile="$TEST_SKILL_DIR/run/remote-sync.testteam.pid"
   local starter i=0 j=0 freed=0
 
-  bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
+  # A SHORT CEILING, BECAUSE THIS CASE IS NOT ABOUT THE CEILING. It needs the
+  # starter to still be polling while the lock is inspected, and nothing more.
+  # Left at the shipped 1600 turns it took 151 seconds -- the single most
+  # expensive test on the macOS shard, which was being cancelled at its
+  # 25-minute cap. At 40 turns the starter still lives ~2s against a 3s
+  # observation window, and the case passed 5/5 locally.
+  AGMSG_TEST_SYNC_READY_TURNS=40 bash "$SCRIPTS/remote.sh" sync start testteam >/dev/null 2>&1 &
   starter=$!
 
   # The engine existing is what says the START is over and the WAIT has begun.
