@@ -56,7 +56,7 @@ _plain_adapter_probe() {
   }
   script="$(_plain_adapter_script "$emulator")"
   [ -r "$script" ] || {
-    printf 'unsupported: no measured adapter for plain emulator %s\n' "$emulator" >&2
+    printf 'unsupported: no measured adapter is implemented yet for plain emulator %s (may become supported or unknown once one is added)\n' "$emulator" >&2
     return 1
   }
   out="$(osascript "$script" probe "$tty" 2>/dev/null)" || rc=$?
