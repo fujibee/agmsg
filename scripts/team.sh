@@ -149,34 +149,6 @@ _emit_unfixable_actions() {
   _emit_fix_actions "$actions"
 }
 
-_emit_placement_collisions() {
-  declare -F agmsg_team_placement_collisions >/dev/null 2>&1 || return 0
-  local rows ref team agent type current="" types="" resident heading=0
-  rows="$(agmsg_team_placement_collisions)"
-  [ -n "$rows" ] || return 0
-  while IFS="$(printf '\t')" read -r ref team agent type; do
-    [ -n "$ref" ] || continue
-    if [ "$ref" != "$current" ]; then
-      if [ -n "$current" ]; then
-        resident="$(agmsg_team_collision_resident "$current" $types 2>/dev/null)" || resident=""
-        [ "$resident" = absent ] && printf '    resident_agent: absent\n'
-      fi
-      [ "$heading" -eq 1 ] || { printf '\nPlacement collisions:\n'; heading=1; }
-      current="$ref"; types=""
-      printf '  ref: %s\n' "$ref"
-    fi
-    printf '    - %s/%s\n' "$team" "$agent"
-    case " $types " in *" $type "*) ;; *) types="${types:+$types }$type" ;; esac
-  done <<EOF
-$rows
-EOF
-  if [ -n "$current" ]; then
-    resident="$(agmsg_team_collision_resident "$current" $types 2>/dev/null)" || resident=""
-    [ "$resident" = absent ] && printf '    resident_agent: absent\n'
-  fi
-  return 0
-}
-
 _member_status() {
   local team="$1" agent="$2" type="$3" project="$4" registered="$5"
   local rec ref terminal pane location container delivery identity
@@ -343,5 +315,4 @@ if [ "$OUTPUT_MODE" = json ]; then
 else
   echo ""
   echo "$COUNT member(s)"
-  _emit_placement_collisions
 fi
