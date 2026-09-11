@@ -609,3 +609,21 @@ terminal_name() {
   echo ok
   return 0
 }
+
+# Fence for a self-write (#1152): "<instance>\t<terminal_id>". The instance is
+# the socket the id names (tmux pane ids repeat across servers, one server per
+# socket -- the #1051 shape); the terminal_id is the pane's shell pid, which a
+# pane that was closed and recreated does not keep. Same contract and the same
+# limit as the herdr op: a preflight check right before a mutation, not an atomic
+# fence.
+terminal_fence() {   # <id>
+  local id="$1" sock bare pid
+  terminal_id_ok "$id" || { printf 'unknown:invalid_pane_id\tunknown:invalid_pane_id\n'; return 2; }
+  sock="$(_tmux_sock_of "$id")"; bare="$(_tmux_bare_of "$id")"
+  [ -n "$sock" ] || sock="default"
+  pid="$(_tmux_do "$id" display-message -p -t "$bare" '#{pane_pid}' 2>/dev/null)" \
+    || { printf '%s\tunknown:pane_query_failed\n' "$sock"; return 2; }
+  case "$pid" in ''|*[!0-9]*) printf '%s\tunknown:pane_pid_missing\n' "$sock"; return 2 ;; esac
+  printf '%s\tpane_pid=%s\n' "$sock" "$pid"
+  return 0
+}

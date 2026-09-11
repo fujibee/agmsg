@@ -157,3 +157,7 @@ terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
 terminal_find_by_label() { _plain_unsupported "find_by_label"; }
 terminal_label_of() { _plain_unsupported "label_of"; }
 terminal_name() { _plain_unsupported "name"; }
+
+# No pane, so nothing to fence a write against (#1152): the self-write path
+# reads this as "unsupported here" and writes nothing.
+terminal_fence() { printf 'n/a:unsupported\tn/a:unsupported\n'; return 3; }
