@@ -160,6 +160,35 @@ EOF
   done | sort -n -k1,1 -k2,2 | cut -f2
 }
 
+# WHAT A DRIVER MAY ASSUME ABOUT THE SHELL IT IS CALLED IN (#1129)
+#
+# Every entry point that reaches a driver runs `set -euo pipefail` -- join.sh,
+# actas-claim.sh, watch.sh, session-start.sh, inbox.sh, send.sh, history.sh,
+# check-inbox.sh. Drivers are sourced INTO those processes, so a driver function
+# runs under those options whether or not it wants to. Three consequences, and
+# they are requirements, not advice:
+#
+#   1. NEVER read a variable you did not set without a default. `${TMUX}` and
+#      `${TMUX%%,*}` are fatal under `-u` when the variable is unset. Write
+#      `${TMUX:-}`, or open the function with `[ -n "${TMUX:-}" ] || return 10`
+#      and refuse -- which is what `terminal_detect` has always done.
+#
+#   2. A fatal read inside `$( )` kills only that subshell, and callers here
+#      routinely write `x="$(op ... 2>/dev/null)" || continue`. So the failure
+#      arrives as "this driver had nothing to say", with the reason discarded.
+#      That is how #1126 shipped: the tmux label search died on an unset $TMUX
+#      and self-identification silently fell back to the environment -- the
+#      answer the label path exists to replace.
+#
+#   3. THE TEST SUITE CANNOT CATCH THIS, so do not read a green suite as a
+#      promise. `tests/test_helper.bash` sets no shell options, and the tests
+#      call driver functions in the bats shell rather than through the entry
+#      points. Measured (#1129): forcing `set -u` into the shared helper and
+#      running all 102 suites produced 8 reds, none of them a defect in
+#      `scripts/`; and on the tree that still contained #1126 the relevant suite
+#      was 129/129 GREEN. The guard for this class is static and lives in
+#      `.github/scripts/check-unguarded-env-reads.sh`.
+#
 # The full terminal ABI. EVERY driver must define EVERY one of these; the loader
 # verifies it. Naming the set here (not relying on each driver being complete) is
 # what makes a missing op FAIL rather than silently borrow the previously loaded

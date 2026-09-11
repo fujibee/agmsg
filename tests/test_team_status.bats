@@ -225,7 +225,14 @@ EOF
 @test "identity fix repairs names and verifies the CLI rename" {
   agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
   _herdr_internal_key() { printf 'a123\n'; }
-  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  # `${4:-}`, because the 4th argument is the MODE and production calls this
+  # with three arguments whenever it wants label+key. The real drivers declare
+  # `mode="${4:-}"`; a fake that REQUIRES the argument models a driver that
+  # does not exist, and the difference is invisible until something runs the
+  # shell with `-u` -- which every real entry point does and no test does
+  # (#1129). What is asserted below is still the mode: an empty line for the
+  # default, `key` when the caller asked for key-only.
+  terminal_name() { printf '%s\n' "${4:-}" >> "$BATS_TEST_TMPDIR/names"; }
   terminal_team_input_ready() { printf 'ready\n'; }
   terminal_poke() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/poke"; }
   terminal_team_observe() { printf 'idle\tteam:alice\ta123\t✳ team-alice\n'; }
@@ -383,7 +390,7 @@ _herdr_observe_stub() {   # <entries-json>
   # never had one, and must only say `changed` after reading it back.
   agmsg_type_get() { printf '\n'; }
   _herdr_internal_key() { printf 'a123\n'; }
-  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_name() { printf '%s\n' "${4:-}" >> "$BATS_TEST_TMPDIR/names"; }
   terminal_team_observe() { printf 'idle\tteam:alice\ta123\tx\n'; }   # read-back: now present
   run agmsg_team_fix_identity_loaded team alice codex herdr w2:p3 \
     'ok(actual=team:alice)' \
@@ -584,7 +591,7 @@ _herdr_observe_stub() {   # <entries-json>
 @test "pane-names repair never pokes, even with every cell mismatching and the pane ready" {
   agmsg_type_get() { case "$2" in cli) printf 'claude\n';; rename_cmd) printf '/rename\n';; session_name_source) printf 'title\n';; esac; }
   _herdr_internal_key() { printf 'a123\n'; }
-  terminal_name() { printf '%s\n' "$4" >> "$BATS_TEST_TMPDIR/names"; }
+  terminal_name() { printf '%s\n' "${4:-}" >> "$BATS_TEST_TMPDIR/names"; }
   terminal_team_input_ready() { printf 'ready\n'; }
   terminal_poke() { printf 'called %s\n' "$*" >> "$BATS_TEST_TMPDIR/poke"; }
   terminal_team_observe() { printf 'idle\tteam:alice\ta123\t✳ team-alice\n'; }
