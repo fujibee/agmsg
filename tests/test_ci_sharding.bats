@@ -9,6 +9,25 @@ setup() {
   load 'test_helper'
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SHARD="$REPO_ROOT/.github/scripts/shard-tests.sh"
+  TIMED_RUNNER="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
+  TIMING_SUMMARY="$REPO_ROOT/.github/scripts/summarize-bats-timings.sh"
+}
+
+@test "timing summary computes cross-run percentiles and per-run headroom" {
+  local timings
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  printf '%s\n' \
+    $'schema\trecord\trun_id\trun_attempt\tsha\tos\tshard\tshard_total\tfile\tstarted_at\tended_at\telapsed_seconds\tstatus' \
+    $'1\tfile_end\t1\t1\ta\tmacOS\t1\t4\ttests/a.bats\ts\te\t10\t0' \
+    $'1\tfile_end\t2\t1\tb\tmacOS\t2\t4\ttests/a.bats\ts\te\t30\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t1\t4\t-\ts\te\t70\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t2\t4\t-\ts\te\t90\t0' > "$timings"
+
+  run "$TIMING_SUMMARY" --timeout-seconds 100 "$timings"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'file\tmacOS\ttests/a.bats\t2\t10\t30\t30'* ]]
+  [[ "$output" == *$'run\t1\t1\tmacOS\t2\t90\t10\t0'* ]]
 }
 
 all_test_files() {
@@ -27,6 +46,63 @@ union_of_shards() {
   run bash "$SHARD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner is executable and self-documents its usage" {
+  [ -x "$TIMED_RUNNER" ]
+  run "$TIMED_RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner records each file and the shard total" {
+  local fixture manifest timings fake_bin
+  fixture="$BATS_TEST_TMPDIR/fixture.bats"
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$fake_bin"
+  printf '@test "passes" { true; }\n' > "$fixture"
+  printf '%s\n' "$fixture" > "$manifest"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=3 \
+    GITHUB_SHA=abc RUNNER_OS=macOS SHARD=2 SHARD_TOTAL=4 \
+    "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "shard" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "file_end" && $3 == 42 && $4 == 3 && $5 == "abc" && $6 == "macOS" && $7 == 2 && $8 == 4 && $9 != "" && $12 ~ /^[0-9]+$/ && $13 == 0 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "timed bats runner records a failure and continues the shard" {
+  local manifest timings fake_bin calls
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/fail.bats tests/pass.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "$2" >> "$BATS_CALLS"' 'case "$2" in *fail*) exit 7 ;; esac' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 7 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 2 ]
+  awk -F '\t' '$2 == "shard" && $13 == 7 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "CI runs the timed runner and uploads each shard artifact" {
+  local workflow
+  workflow="$REPO_ROOT/.github/workflows/tests.yml"
+  grep -Fq '.github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"' "$workflow"
+  grep -Fq 'name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}' "$workflow"
+  grep -Fq 'path: ${{ runner.temp }}/bats-timings.tsv' "$workflow"
 }
 
 @test "the shards cover every test file exactly once" {

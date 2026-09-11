@@ -377,9 +377,11 @@ jobs:
 
       - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           set +e
-          xargs bats --print-output-on-failure < shard-files.txt
+          .github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"
           status=$?
           : > "$RUNNER_TEMP/bats-done"
           exit $status
@@ -436,6 +438,16 @@ jobs:
           path: ${{ runner.temp }}/hang-samples.txt
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Upload bats timings
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/bats-timings.tsv
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Record which files this shard ran
         if: needs.changes.outputs.docs_only != 'true'
