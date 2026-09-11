@@ -26,8 +26,8 @@ setup() {
   run "$TIMING_SUMMARY" --timeout-seconds 100 "$timings"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *$'file\tmacOS\ttests/a.bats\t2\t10\t30\t30'* ]]
-  [[ "$output" == *$'run\t1\t1\tmacOS\t2\t90\t10\t0'* ]]
+  grep -Fq $'file\tmacOS\ttests/a.bats\t2\t10\t30\t30' <<< "$output"
+  grep -Fq $'run\t1\t1\tmacOS\t2\t90\t10\t0' <<< "$output"
 }
 
 all_test_files() {
