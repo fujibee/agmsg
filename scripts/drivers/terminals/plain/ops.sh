@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# plain terminal driver — an OS terminal window, the detection fallback.
+# plain terminal driver — an emulator-backed OS terminal, and detection fallback.
 #
 # Sourced by the terminals registry into the caller's context. terminal_* only;
-# no set -e/-u. Per the v1 scope, plain IMPLEMENTS spawn/despawn (the existing
-# OS-terminal launchers, moved here faithfully) and returns "unsupported: <why>"
-# for peek/poke/name — it has no addressable pane, so an op that cannot run says
-# so, it does not exit 0 quietly.
+# no set -e/-u. Spawn keeps the existing OS-terminal launchers. Addressed
+# peek/poke are runtime capabilities supplied only by measured emulator adapters;
+# an unqualified legacy record or an unmeasured emulator fails loudly.
 #
 # The launch template comes from AGMSG_TERMINAL (its EXISTING meaning — an
 # OS-terminal command template, distinct from the resolver's driver override
@@ -13,15 +12,80 @@
 
 terminal_check() { echo ok; return 0; }
 
-# ABI hook: is <id> a plain "pane" id? plain has no addressable pane; its one
-# id is the sentinel '-'. Asked by the registry (`_agmsg_terminal_id_ok plain`);
-# the grammar moved here from the registry (#1141 review).
-terminal_id_ok() { [ "$1" = '-' ]; }
+# ABI hook: is <id> an emulator-qualified tty or the legacy '-' sentinel?
+_plain_parse_id() {
+  local id="$1"
+  _PLAIN_EMULATOR=""; _PLAIN_TTY=""
+  case "$id" in
+    iterm:/dev/ttys[0-9]*|terminal:/dev/ttys[0-9]*)
+      _PLAIN_EMULATOR="${id%%:*}"
+      _PLAIN_TTY="${id#*:}"
+      case "${_PLAIN_TTY#/dev/ttys}" in ''|*[!0-9]*) return 1 ;; esac
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Keep '-' valid for legacy records. New addressable refs use emulator + tty.
+terminal_id_ok() {
+  [ "$1" = '-' ] && return 0
+  _plain_parse_id "$1"
+}
 
 terminal_describe() {
   printf 'name=plain\n'
-  printf 'backend=OS terminal window (no addressable pane)\n'
-  printf 'capabilities=spawn despawn\n'
+  printf 'backend=emulator-backed OS terminal\n'
+  printf 'capabilities=spawn despawn peek poke\n'
+}
+
+_plain_adapter_script() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+  printf '%s/adapters/%s.applescript\n' "$here" "$1"
+}
+
+_plain_adapter_probe() {
+  local emulator="$1" tty="$2" script out rc=0
+  [ "$(uname -s)" = Darwin ] || {
+    printf 'unsupported: plain emulator adapter %s is only implemented on macOS\n' "$emulator" >&2
+    return 1
+  }
+  command -v osascript >/dev/null 2>&1 || {
+    printf 'unknown: osascript is unavailable; cannot inspect plain emulator %s\n' "$emulator" >&2
+    return 2
+  }
+  script="$(_plain_adapter_script "$emulator")"
+  [ -r "$script" ] || {
+    printf 'unsupported: no measured adapter for plain emulator %s\n' "$emulator" >&2
+    return 1
+  }
+  out="$(osascript "$script" probe "$tty" 2>/dev/null)" || rc=$?
+  case "$out" in
+    supported) return 0 ;;
+    unsupported:*) printf '%s\n' "$out" >&2; return 1 ;;
+    unknown:*) printf '%s\n' "$out" >&2; return 2 ;;
+  esac
+  printf 'unknown: %s adapter probe failed (rc=%s)\n' "$emulator" "$rc" >&2
+  return 2
+}
+
+# Runtime narrowing hook. A positive result only makes this instance eligible;
+# each operation probes again immediately before touching the emulator.
+terminal_capability() {
+  local capability="$1" id="${2:-}"
+  case "$capability" in
+    spawn) return 0 ;;
+    despawn)
+      printf 'unsupported: plain window teardown needs an owner process witness\n' >&2
+      return 1 ;;
+    peek|poke) ;;
+    *) printf 'unsupported: plain capability %s is not implemented\n' "$capability" >&2; return 1 ;;
+  esac
+  _plain_parse_id "$id" || {
+    printf 'unsupported: plain %s needs an emulator-qualified tty reference\n' "$capability" >&2
+    return 1
+  }
+  _plain_adapter_probe "$_PLAIN_EMULATOR" "$_PLAIN_TTY"
 }
 
 terminal_where() {
@@ -127,31 +191,44 @@ _plain_unsupported() {
   printf 'unsupported: plain terminal has no addressable pane (%s)\n' "$1" >&2
   return 13
 }
-# poke — and ONLY poke — gets the third value, by design: still non-zero,
-# because as a terminal answer "no pane" is correct and stays, but the refusal
-# must not end the conversation: the member's agent TYPE may have a native
-# channel (Claude Code's SendMessage), and the type template is where that
-# question is answered. Deliberately said WITHOUT asking who the caller is:
-# "which terminal am I in" is this driver's question, "does this agent have
-# native messaging" is the type's — mixing them here would rebuild the
-# presence-vs-binary confusion this axis just removed.
-#
-# peek stays a plain dead end ON PURPOSE — the asymmetry is measured, not an
-# oversight: a native WRITE path exists (SendMessage), but there is no native
-# READ path in today's CLI (`claude logs <id>` serves background jobs only —
-# interactive ids answer "No job matching" — and `claude agents --json` lists
-# status, never screen content). If a read endpoint ever appears, this is the
-# line to change.
+# Legacy unqualified records retain the native-channel guidance. New qualified
+# records use an emulator adapter and never fall back to messaging silently.
 _plain_no_pane_but_maybe_native() {
   printf 'unsupported: plain terminal has no addressable pane (%s) — not a dead end: the member'\''s agent type may offer a native channel; the type template says which\n' "$1" >&2
   return 13
 }
-terminal_peek() { _plain_unsupported "peek"; }
+terminal_peek() {
+  local id="$1" lines="" script rc=0
+  shift
+  [ "$id" = '-' ] && { _plain_unsupported "peek"; return $?; }
+  if [ "${1:-}" = --lines ]; then lines="${2:-}"; fi
+  terminal_capability peek "$id" || rc=$?
+  case "$rc" in 0) ;; 1) return 13 ;; *) return 10 ;; esac
+  rc=0
+  _plain_parse_id "$id" || return 13
+  script="$(_plain_adapter_script "$_PLAIN_EMULATOR")"
+  osascript "$script" peek "$_PLAIN_TTY" "$lines" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  printf 'plain: %s adapter could not read %s\n' "$_PLAIN_EMULATOR" "$_PLAIN_TTY" >&2
+  return 10
+}
 
 terminal_team_observe() {
   printf 'n/a:unsupported\tn/a:no_addressable_pane\tn/a:no_addressable_pane\tn/a:no_addressable_pane\n'
 }
-terminal_poke() { _plain_no_pane_but_maybe_native "poke"; }
+terminal_poke() {
+  local id="$1" text="$2" script rc=0
+  [ "$id" = '-' ] && { _plain_no_pane_but_maybe_native "poke"; return $?; }
+  terminal_capability poke "$id" || rc=$?
+  case "$rc" in 0) ;; 1) return 13 ;; *) return 10 ;; esac
+  rc=0
+  _plain_parse_id "$id" || return 13
+  script="$(_plain_adapter_script "$_PLAIN_EMULATOR")"
+  osascript "$script" poke "$_PLAIN_TTY" "$text" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  printf 'plain: %s adapter could not write %s\n' "$_PLAIN_EMULATOR" "$_PLAIN_TTY" >&2
+  return 10
+}
 # plain has no panes to label, so it can never answer this. 13 = unsupported,
 # the same word it uses for every other addressable-pane op.
 terminal_find_by_label() { _plain_unsupported "find_by_label"; }
