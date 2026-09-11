@@ -97,6 +97,38 @@ union_of_shards() {
   awk -F '\t' '$2 == "shard" && $13 == 7 { ok=1 } END { exit !ok }' "$timings"
 }
 
+@test "timed bats runner records the interrupted shard on TERM" {
+  local manifest timings fake_bin ready release runner_pid rc i
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  ready="$BATS_TEST_TMPDIR/ready"
+  release="$BATS_TEST_TMPDIR/release"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/running.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$BATS_READY"' 'while [ ! -f "$BATS_RELEASE" ]; do sleep 0.05; done' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  PATH="$fake_bin:$PATH" BATS_READY="$ready" BATS_RELEASE="$release" \
+    "$TIMED_RUNNER" "$manifest" "$timings" > "$BATS_TEST_TMPDIR/runner.log" 2>&1 &
+  runner_pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ]
+
+  kill -TERM "$runner_pid"
+  : > "$release"
+  rc=0
+  wait "$runner_pid" || rc=$?
+
+  [ "$rc" -eq 143 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "shard" && $13 == 143 { ok=1 } END { exit !ok }' "$timings"
+}
+
 @test "CI runs the timed runner and uploads each shard artifact" {
   local workflow
   workflow="$REPO_ROOT/.github/workflows/tests.yml"
