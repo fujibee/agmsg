@@ -47,12 +47,12 @@ _join_with_claim() {   # <team> <agent> [ref]
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Placement collisions:"* ]]
-  [[ "$output" == *"ref: herdr:w1:p9"* ]]
-  [[ "$output" == *"- alpha/alice"* ]]
-  [[ "$output" == *"- beta/alice"* ]]
-  [[ "$output" == *"- gamma/bob"* ]]
-  [[ "$output" == *"resident_agent: absent"* ]]
+  grep -Fq "Placement collisions:" <<< "$output"
+  grep -Fq "ref: herdr:w1:p9" <<< "$output"
+  grep -Fq -- "- alpha/alice" <<< "$output"
+  grep -Fq -- "- beta/alice" <<< "$output"
+  grep -Fq -- "- gamma/bob" <<< "$output"
+  grep -Fq "resident_agent: absent" <<< "$output"
   [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.alpha__alice")" = herdr:w1:p9 ]
   [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.beta__alice")" = herdr:w1:p9 ]
   [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.gamma__bob")" = herdr:w1:p9 ]
@@ -71,8 +71,8 @@ OPS
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Placement collisions:"* ]]
-  [[ "$output" != *"resident_agent: absent"* ]]
+  grep -Fq "Placement collisions:" <<< "$output"
+  refute grep -Fq "resident_agent: absent" <<< "$output"
 }
 
 @test "placement collisions excludes one agent registered in two teams (#1144)" {
@@ -94,14 +94,14 @@ OPS
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"- beta/bob"* ]]
-  [[ "$output" == *"- gamma/carol"* ]]
-  [[ "$output" != *"- alpha/alice"* ]]
-  [[ "$output" != *"resident_agent: absent"* ]]
+  grep -Fq -- "- beta/bob" <<< "$output"
+  grep -Fq -- "- gamma/carol" <<< "$output"
+  refute grep -Fq -- "- alpha/alice" <<< "$output"
+  refute grep -Fq "resident_agent: absent" <<< "$output"
 }
 
 @test "placement collisions rejects arguments rather than implying a repair scope (#1144)" {
   run bash "$SCRIPTS/placement-collisions.sh" alpha
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Usage: placement-collisions.sh"* ]]
+  grep -Fq "Usage: placement-collisions.sh" <<< "$output"
 }
