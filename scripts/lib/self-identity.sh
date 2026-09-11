@@ -52,8 +52,20 @@ _agmsg_self_mark_ok() {   # <candidate>
   i=0
   while [ "$i" -lt "${#rest}" ]; do
     c="${rest:$i:1}"
+    # An explicit SET, never a range. Measured on this machine:
+    #
+    #                        LC_ALL=C          LC_ALL=en_US.UTF-8
+    #   bash 3.2  [a-z]      rejects A and é   ACCEPTS A and é
+    #   bash 3.2  [abc...]   rejects both      rejects both
+    #   bash 5    [a-z]      rejects both      rejects both
+    #
+    # So on the macOS /bin/bash, under the locale a developer actually has, the
+    # range accepts an upper-case ASCII letter and an accented one -- both wider
+    # than the contract's [a-z2-7]. A set has no collation order to widen, so it
+    # is right in every combination without this file having to pin a locale
+    # (and pinning one inside a function is its own 3.2 question).
     case "$c" in
-      [a-z]|[2-7]) : ;;
+      [abcdefghijklmnopqrstuvwxyz234567]) : ;;
       *) return 1 ;;
     esac
     i=$((i + 1))

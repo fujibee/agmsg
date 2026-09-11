@@ -367,3 +367,52 @@ _obs() {   # write an observation file from the lines given
   [ "$status" -eq 1 ]
   [ "$output" = "unreadable" ]
 }
+
+@test "grammar: the alphabet is written as a SET, checked statically (#1152)" {
+  # The behavioural test below can only fail where the hazard exists -- bash 3.2
+  # under a UTF-8 locale -- so on bash 5 it passes no matter what the code says.
+  # Measured: swapping the set back for a range produced ZERO reds in this
+  # suite. A control that cannot go red is not a control, so the property is
+  # ALSO pinned statically, which fires on every interpreter.
+  local body
+  # CODE only. The function's own comment documents the hazard by showing
+  # `[a-z]`, and a scan that read comments reported the clean code as defective
+  # -- the second time in this file that a derived check read prose (the first
+  # was the dependency inventory). Prose is not the thing being checked.
+  body="$(awk '/^_agmsg_self_mark_ok\(\)/,/^}/' "$SKILL_DIR/scripts/lib/self-identity.sh" \
+          | grep -v '^[[:space:]]*#')"
+  [ -n "$body" ] || { echo "could not read the grammar function"; return 1; }
+  # A glob RANGE anywhere in the grammar check is the defect: bash 3.2 widens it
+  # by collation order under a non-C locale.
+  if printf '%s\n' "$body" | grep -qE '\[[^]]*[a-zA-Z0-9]-[a-zA-Z0-9][^]]*\]'; then
+    echo "the grammar check uses a glob range:"; printf '%s\n' "$body" | grep -nE '\[[^]]*-[^]]*\]'
+    return 1
+  fi
+  # And the set it does use is the contract's alphabet, entire.
+  printf '%s\n' "$body" | grep -qF '[abcdefghijklmnopqrstuvwxyz234567]'
+}
+
+@test "grammar: a locale cannot widen the alphabet, behaviourally (#1152)" {
+  # Measured: on bash 3.2 (the macOS /bin/bash) under en_US.UTF-8, the glob RANGE
+  # [a-z] matches `A` and `é`; the explicit set does not, in any locale, on
+  # either shell. So this test is a real check on macOS and a trivially passing
+  # one on bash 5 -- the same shape as the #670 table, where a construct is fatal
+  # on one interpreter and silent on the other.
+  if locale -a 2>/dev/null | grep -qi '^en_US.UTF-8$'; then
+    export LC_ALL=en_US.UTF-8
+  fi
+  for bad in 'agp-Abcdefghijklm' 'agp-abcdefghijklM'; do
+    if agmsg_self_mark_line "$bad" >/dev/null 2>&1; then
+      echo "mark_line accepted an upper-case letter: [$bad]"; return 1
+    fi
+    if _agmsg_self_line_is_mark "$bad" "$bad" 2>/dev/null; then
+      echo "line_is_mark accepted an upper-case letter: [$bad]"; return 1
+    fi
+    f="$(_obs "herdr"$'\t'"w1:p7"$'\t'"$bad")"
+    run agmsg_self_classify "$bad" "$f"
+    [ "$status" -eq 1 ]
+    [ "$output" = "unreadable" ]
+  done
+  # The valid mark still passes under the same locale, so the loop is not vacuous.
+  agmsg_self_mark_line 'agp-abcdefghijklm' >/dev/null
+}
