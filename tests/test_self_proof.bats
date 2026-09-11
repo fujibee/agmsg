@@ -466,3 +466,25 @@ w1:pX	gen-1	$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 0 ]
 }
+
+@test "the FIRST observation is framed on its own terms, not by the comparison (#1152)" {
+  # Measured: deleting the framing of the first record reddened NOTHING -- the
+  # second record is framed too, and a malformed first one then failed the
+  # before/after comparison instead. Same permission, different reason, and a
+  # reason that names the wrong thing is what a caller reads when it asks why.
+  # So the first record is rejected for BEING malformed, in a run where the
+  # second one is fine.
+  local c="$BATS_TEST_TMPDIR/calls3"; : > "$c"
+  eval 'terminal_pane_process_observe() {
+          printf "x\n" >> "'"$c"'"
+          if [ "$(wc -l < "'"$c"'" | tr -d " ")" = 1 ]; then
+            printf "%s\n" "w1:p9	gen-1	not-a-pid"
+          else
+            printf "%s\n" "w1:p9	gen-1	'"$PANE_PID"'"
+          fi
+        }'
+  run agmsg_self_proof agmsg seat w1:p9
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"observation_malformed" ]
+  [ "$output" != "undetermined"$'\t'"snapshot_changed" ]
+}
