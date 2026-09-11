@@ -2091,7 +2091,13 @@ _fake_herdr_list_anchored_plus() {
 # driver), so "did it reach the owning server" does not apply. What keeps it
 # honest is the oracle table in the "#1141 review" section: the socket form
 # and the legacy bare form are both accepted, as the registry accepted them.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok"
+# terminal_enumerate_panes takes NO argument at all: it is the op that DISCOVERS
+# servers rather than being handed one, so there is no owning server in its input
+# either. It still honours #1051 -- it addresses each server it found with that
+# server's own socket and emits every row socket-qualified -- and that is checked
+# where it belongs, in test_sweep_enumeration.bats, against a fake tmux whose
+# per-socket answers the test writes.
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok terminal_enumerate_panes"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {
