@@ -452,19 +452,94 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Beyond the workflow's `contents: read`, so the failure path can ask which
+    # shard stopped. Without it that call is a 403 the step swallows, and the
+    # listing below would be a feature that reads as present and never runs.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
+      # `result` is the matrix's roll-up: one word for twelve jobs, and the word
+      # it uses for a shard that ran out of `timeout-minutes` is `cancelled`.
+      # That cost an outside contributor a day. Two of their pull requests went
+      # red with every ubuntu shard, every Windows leg and three of four macOS
+      # shards green; the fourth had been stopped at exactly 25 minutes, and
+      # the only thing this job said was `result: cancelled`, which names no
+      # shard. From the outside it read as the repository rejecting the change.
+      #
+      # So name the job. Naming is all this does: `conclusion` plus a job name
+      # is the whole of what the query observes, and the text below says only
+      # that. An earlier draft went on to assert the cap had been hit, that the
+      # log ended mid-suite, and that the change under test was innocent -- none
+      # of which this code establishes, and the last of which is false whenever
+      # the change is itself what hangs. Give the reader the discriminator and
+      # let them apply it.
+      #
+      # The listing also runs on success, where it must find matrix jobs and
+      # finds no failures. That is its positive control: a permissions or API
+      # problem shows up on a green run as "could not list", instead of waiting
+      # for a red to discover the diagnosis was never able to speak.
       - name: Check shard results
         env:
           RESULT: ${{ needs.bats-shard.result }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "$RESULT" in
-            success) ;;
-            skipped) echo "::error::the bats shards did not run"; exit 1 ;;
-            *) echo "::error::the bats shards did not all pass (result: $RESULT)"; exit 1 ;;
-          esac
+          listing="$RUNNER_TEMP/shard-jobs.txt"
+
+          # Inside `if`, so a failed call cannot end the step: the roll-up below
+          # stays the only thing that decides this job's status.
+          # The exact matrix shape, not the `bats (` prefix. Three Windows legs
+          # share that prefix and are gated separately -- they are NOT part of
+          # `needs.bats-shard.result`, so listing them here would let the
+          # diagnosis name an unrelated Windows failure as if it explained the
+          # roll-up. The prefix matched 11 jobs where the roll-up covers 8.
+          # 2 = the matrix's `os:` list (ubuntu-latest, macos-latest). If a third
+          # is added, `seen` stops matching and the listing goes quiet with a
+          # warning rather than describing the wrong set -- the failure mode
+          # this count exists to prevent, announcing itself.
+          expected=$(( SHARD_TOTAL * 2 ))
+          if gh api --paginate \
+               "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+               --jq '.jobs[] | select(.name | test("^bats \\((ubuntu|macos)-latest [0-9]+/[0-9]+\\)$")) | "\(.conclusion)\t\(.name)"' \
+               > "$listing" 2>/dev/null && [ -s "$listing" ]; then
+            seen=$(wc -l < "$listing" | tr -d ' ')
+            echo "Matrix jobs seen: $seen (expected $expected)"
+            # The control is the comparison, not the listing. A count that does
+            # not match means this query is no longer selecting the set the
+            # roll-up summarises, and the lines below would describe some other
+            # set of jobs.
+            [ "$seen" = "$expected" ] || {
+              echo "::warning::listed $seen matrix jobs, expected $expected — not reporting shard names from a set that does not match the roll-up"
+              : > "$listing"
+            }
+          else
+            echo "::warning::could not list the shard jobs (the diagnosis below will be missing)"
+            : > "$listing"
+          fi
+
+          if [ "$RESULT" = "success" ]; then exit 0; fi
+          if [ "$RESULT" = "skipped" ]; then echo "::error::the bats shards did not run"; exit 1; fi
+
+          if grep -v '^success' "$listing" > "$RUNNER_TEMP/bad.txt" 2>/dev/null \
+             && [ -s "$RUNNER_TEMP/bad.txt" ]; then
+            echo "Shards that did not pass:"
+            sed 's/^/  /' "$RUNNER_TEMP/bad.txt"
+            if grep -q '^cancelled' "$RUNNER_TEMP/bad.txt"; then
+              echo
+              echo "A shard whose conclusion is 'cancelled' was stopped rather than"
+              echo "failing a case, and this job cannot tell you why: reaching the"
+              echo "25-minute job cap and being cancelled from outside the run look"
+              echo "identical from here. Open the job named above. If it ran for about"
+              echo "25 minutes and its log ends mid-suite naming no failing case, it"
+              echo "reached the cap -- which a change that hangs can also cause, so the"
+              echo "cap being reached does not by itself say whose fault it is."
+            fi
+          fi
+          echo "::error::the bats shards did not all pass (result: $RESULT)"
+          exit 1
 
       - name: Docs-only change — no shard manifests to verify
         if: needs.changes.outputs.docs_only == 'true'
