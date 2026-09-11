@@ -276,7 +276,7 @@ if [ -n "$PREV_PID_TO_DISPLACE" ]; then
   kill "$PREV_PID_TO_DISPLACE" 2>/dev/null || true
 fi
 
-# --- Say when this watcher is sharing an inbox with another (#683). ---
+# --- Say when this watcher is sharing an inbox with another. ---
 #
 # A watcher started WITHOUT an active name subscribes to every (team, agent)
 # registered for this project that nobody else has claimed. The read cursor is
@@ -547,7 +547,7 @@ fi
 
 # Pairs another session currently holds, so each departure and each return is
 # announced once instead of every cycle. Membership is not a decision -- the
-# lock is -- it only records what has already been said (#683).
+# lock is -- it only records what has already been said.
 #
 # Held as newline-separated entries and compared as EXACT strings, never as
 # patterns. A team name is arbitrary UTF-8 minus a path deny-list and an agent
@@ -623,7 +623,7 @@ while true; do
     # whoever polls first TAKES the row and the other sees nothing. When the
     # one that takes it is this stale process, its printf succeeds -- stdout is
     # still an open pipe to a live session -- so the id is marked read and the
-    # message is gone, delivered to a stream nobody is reading (#683).
+    # message is gone, delivered to a stream nobody is reading (#983).
     #
     # Only the lock file is read here, not the whole subscription set: losing a
     # pair is the half a running process can detect for the price of a file
