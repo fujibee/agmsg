@@ -418,6 +418,10 @@ _fake_herdr_list_scalar_session() {
 }
 
 @test "plain: measured adapter support is checked again by peek and poke" {
+  cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
   cat > "$FAKEBIN/osascript" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$ARGV_LOG"
@@ -427,7 +431,7 @@ case "$2" in
   poke) : ;;
 esac
 SH
-  chmod +x "$FAKEBIN/osascript"
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
   export PATH="$FAKEBIN:$PATH"
   agmsg_terminal_load plain
 
@@ -443,6 +447,10 @@ SH
 }
 
 @test "plain: unsupported and unknown runtime probes remain distinct" {
+  cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
   cat > "$FAKEBIN/osascript" <<'SH'
 #!/usr/bin/env bash
 case "${FAKE_ADAPTER_RESULT:-}" in
@@ -450,7 +458,7 @@ case "${FAKE_ADAPTER_RESULT:-}" in
   unknown) printf 'unknown: automation permission denied\n' ;;
 esac
 SH
-  chmod +x "$FAKEBIN/osascript"
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
   export PATH="$FAKEBIN:$PATH"
   agmsg_terminal_load plain
 

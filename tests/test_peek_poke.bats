@@ -78,6 +78,10 @@ EOF
 }
 
 _install_fake_osascript() {
+  cat > "$FAKEBIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
   cat > "$FAKEBIN/osascript" <<EOF
 #!/usr/bin/env bash
 { printf 'osascript'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
@@ -87,7 +91,7 @@ case "\$2" in
 esac
 exit 0
 EOF
-  chmod +x "$FAKEBIN/osascript"
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
   export PATH="$FAKEBIN:$PATH"
 }
 
