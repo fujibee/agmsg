@@ -57,19 +57,19 @@
 
 : "${SKILL_DIR:?self-write.sh requires SKILL_DIR}"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/actas-lock.sh"
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/actas-lock.sh"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/self-write-lock.sh"
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/self-write-lock.sh"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/registry-lock.sh"        # agmsg_write_atomic
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/registry-lock.sh"        # agmsg_write_atomic
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/terminal-registry.sh"
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/terminal-registry.sh"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/type-registry.sh"
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/type-registry.sh"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/role-session.sh"
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/role-session.sh"
 # shellcheck disable=SC1091
-. "$SKILL_DIR/scripts/lib/team-status.sh"          # agmsg_cli_session_observed
+. "${SKILL_DIR:?self-write.sh requires SKILL_DIR}/scripts/lib/team-status.sh"          # agmsg_cli_session_observed
 
 agmsg_self_write_done_path() {   # <team> <agent>
   local t a; t="$(_actas_lock_encode "$1")"; a="$(_actas_lock_encode "$2")"
