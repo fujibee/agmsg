@@ -745,10 +745,16 @@ terminal_peek() {
   # caller would otherwise read as the pane's content — "read" and "could-not-read"
   # returning in the same shape (the third instance of one channel carrying two
   # meanings). ISOLATE it (capture; the error body goes to stderr, never stdout), and
-  # SPLIT the single 13 so the caller can tell the three cases apart:
-  #   plain has no peek path        -> 13 (unchanged; documented, and the templates say so)
-  #   the terminal is unreachable   -> 10 (herdr not on PATH / cannot even be run)
-  #   the pane is gone / unreadable -> 12 (herdr answered, but not with content)
+  # SPLIT the single 13 so the caller can tell the cases apart:
+  #   plain has no peek path         -> 13 (unchanged; documented, and the templates say so)
+  #   the terminal is unreachable    -> 10 (herdr not on PATH / cannot even be run)
+  #   the pane is CONFIRMED gone     -> 12 (herdr's own reply says so — the only
+  #                                         reply this driver reads as absence)
+  #   the read failed for any other
+  #   reason (a denied socket, a
+  #   timeout, an unrecognized reply) -> 11 (existence is NOT decided; a caller
+  #                                          that branches on this must not treat
+  #                                          it as "gone" — #1158)
   command -v herdr >/dev/null 2>&1 \
     || { echo "herdr: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
   # READ contract: stdout must be the pane's visible text VERBATIM. A command
@@ -758,18 +764,42 @@ terminal_peek() {
   # decide on rc, then cat the bytes unmodified. herdr writes its error JSON to
   # STDOUT on failure, so on the failure path that body is a diagnostic -> stderr,
   # never the caller's content.
-  local tmp rc=0
+  local tmp rc=0 stderr_body=""
   tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
+  # `2>&1 1>"$tmp"` (order matters): stdout still lands in $tmp byte-for-byte on
+  # success, and whatever herdr wrote to its REAL stderr is captured into
+  # $stderr_body instead of the old `2>/dev/null`, which threw it away outright.
+  # That discard was the bug (#1158): an OS-level failure — measured as
+  # `PermissionDenied (Operation not permitted)` from a sandbox that denies
+  # socket operations — never reaches herdr's JSON reply at all, so dropping
+  # stderr left nothing to report except a guess.
   if [ -n "$lines" ]; then
-    herdr pane read "$id" --source "$src" --lines "$lines" >"$tmp" 2>/dev/null || rc=$?
+    stderr_body="$(herdr pane read "$id" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
   else
-    herdr pane read "$id" --source "$src" >"$tmp" 2>/dev/null || rc=$?
+    stderr_body="$(herdr pane read "$id" --source "$src" 2>&1 1>"$tmp")" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    [ -s "$tmp" ] && cat "$tmp" >&2   # the error body is a diagnostic, not content
+    local stdout_body=""
+    [ -s "$tmp" ] && stdout_body="$(cat "$tmp")"
     rm -f "$tmp"
-    echo "herdr: could not read pane '$id' (it may no longer exist)" >&2
-    return 12
+    # Forward both diagnostics verbatim — neither is the caller's content —
+    # instead of discarding one and inventing a single cause for both.
+    [ -n "$stdout_body" ] && printf '%s\n' "$stdout_body" >&2
+    [ -n "$stderr_body" ] && printf '%s\n' "$stderr_body" >&2
+    # ABSENCE is earned, not assumed: the same rule terminal_pane_state above
+    # applies to its own list, and the one the tmux driver applies to "no server
+    # running" — only herdr's OWN claim that the pane is gone may be read as
+    # gone. Say what happened, not what it might mean.
+    case "$stdout_body" in
+      *pane_not_found*)
+        echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
+        return 12
+        ;;
+      *)
+        echo "herdr: could not read pane '$id': ${stderr_body:-${stdout_body:-herdr exited $rc with no diagnostic on either channel}}" >&2
+        return 11
+        ;;
+    esac
   fi
   cat "$tmp"   # only the real pane content reaches stdout, byte-for-byte
   rm -f "$tmp"
@@ -852,17 +882,30 @@ terminal_team_input_ready() {
 # a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).
 terminal_poke() {
   local id="$1" text="$2"
-  # Same exit taxonomy as peek: a terminal that is UNREACHABLE (herdr not on
-  # PATH) is 10; a pane that cannot RECEIVE — gone, or with no live agent to accept the
-  # prompt — is 12. 13 stays reserved for a driver with no poke path at all (plain's
-  # permanent "no addressable pane"); a herdr pane whose agent has EXITED must not
-  # borrow it. This is the peek/poke asymmetry made concrete: peek reads a pane and
-  # succeeds even with no live agent, poke needs a running agent and so has a distinct
-  # "no one to receive" failure that peek does not.
+  # Exit taxonomy: a terminal that is UNREACHABLE (herdr not on PATH) is 10; a
+  # pane that cannot RECEIVE — gone, or with no live agent to accept the
+  # prompt — is 12, unlike peek's narrower 11/12 split (#1158): a caller here
+  # already needs a live agent either way, so the two causes point at the same
+  # next action and are not worth separating. 13 stays reserved for a driver
+  # with no poke path at all (plain's permanent "no addressable pane"); a herdr
+  # pane whose agent has EXITED must not borrow it. This is the peek/poke
+  # asymmetry made concrete: peek reads a pane and succeeds even with no live
+  # agent, poke needs a running agent and so has a distinct "no one to
+  # receive" failure that peek does not.
   command -v herdr >/dev/null 2>&1 \
     || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
-  herdr agent prompt "$id" "$text" >/dev/null 2>&1 \
-    || { echo runtime_error; echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2; return 12; }
+  local body rc=0
+  body="$(herdr agent prompt "$id" "$text" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo runtime_error
+    # Same lesson as peek (#1158): forward what herdr actually said instead of
+    # discarding it via the old `>/dev/null 2>&1`. The sentence below stays
+    # hedged — it already names two possibilities rather than asserting one —
+    # but the reader deserves the real diagnostic alongside it, not silence.
+    [ -n "$body" ] && printf '%s\n' "$body" >&2
+    echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2
+    return 12
+  fi
   echo ok
   return 0
 }
@@ -1087,5 +1130,169 @@ terminal_fence() {   # <id>
   case "$tid" in *[[:cntrl:]]*|*[[:space:]]*) printf '%s\tunknown:terminal_id_malformed\n' "$instance"; return 2 ;; esac
   printf '%s\t%s\n' "$instance" "$tid"
   case "$instance" in unknown:*) return 2 ;; esac
+  return 0
+}
+
+# OPTIONAL OP. Observe ONE candidate pane's process facts, as a strict record.
+# Contract and vocabulary: see the tmux driver's copy of this op and
+# scripts/lib/self-proof.sh. This op never classifies -- a failure is a non-zero
+# exit, and the coordinator turns that into `undetermined`, never a negative.
+#
+# stdout, on rc 0, exactly one line:
+#
+#   <pane-id><TAB><pid>[<TAB><pid>…]
+#
+# THE RESPONSE IS CHECKED TO BE ABOUT THE PANE WE ASKED FOR. `process_info`
+# carries its own `pane_id`, so an answer about a different pane is detectable
+# and is treated as no answer -- the same rule the tmux op's identity canary
+# enforces, for the same reason: this fact decides whether a seat may write into
+# a pane.
+#
+# EVERY VALUE IS TYPE-CHECKED BEFORE IT IS READ. A pid that arrives as the JSON
+# string "123" extracts as 123 and would pass a digit test, but a pid that came
+# as a string is not a validated pid -- so `json_type` is asked first, in the
+# same payload, exactly as _herdr_pane_input_ready does (#1051 review).
+#
+# A BAD ELEMENT FAILS THE WHOLE OBSERVATION. An earlier revision skipped entries
+# it could not read and returned whatever was left, which is a PARTIAL set
+# wearing the shape of a complete one -- and if the entry it skipped was the
+# owner's process, the coordinator would answer `disproved` about a pane the seat
+# is actually in. So the count of entries is compared against the count of
+# entries that yielded a valid pid, and a mismatch is no answer at all. (Review:
+# this is the same failure the pure classifier refuses for a malformed row.)
+terminal_pane_process_observe() {   # <candidate>
+  local id="${1-}" info jesc seen sp fg n_all n_ok pids p
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  _herdr_pane_id_ok "$id" || return 13
+  info="$(herdr pane process-info --pane "$id" 2>/dev/null)" || return 10
+  jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
+  seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
+  [ "$seen" = "$id" ] || return 10
+  # Both of these are part of the schema this op reads. Absent, or present with
+  # the wrong type, is a payload we do not understand -- not a pane without a
+  # shell.
+  sp="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.shell_pid')='integer' THEN json_extract('$jesc','\$.result.process_info.shell_pid') ELSE '' END" 2>/dev/null)" || return 10
+  fg="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_process_group_id')='integer' THEN json_extract('$jesc','\$.result.process_info.foreground_process_group_id') ELSE '' END" 2>/dev/null)" || return 10
+  # THREE SOURCES THAT OVERLAP BY DESIGN. The foreground process GROUP id is
+  # normally also one of the foreground processes, and the shell can be too, so
+  # the union is taken here -- where the overlap is a known property of this
+  # payload -- and the record carries each process once. The coordinator still
+  # refuses a record with a repeated pid: a repeat that survives this is a driver
+  # enumerating something other than what the contract says.
+  pids=""
+  _seen_pid() { local q; for q in $pids; do [ "$q" = "$1" ] && return 0; done; return 1; }
+  for p in "$sp" "$fg"; do
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
+  done
+  # How many foreground entries there are, and how many of them yielded a pid of
+  # the right type. Equal or nothing: a dropped sibling is a hole in the set.
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.foreground_processes')='array' THEN json_array_length('$jesc','\$.result.process_info.foreground_processes') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  #
+  # TWO GUARDS THAT OVERLAP, both measured, because "one of them never ran" is
+  # the ordinary way a pair like this rots (delete each separately, not together):
+  #
+  #   the per-entry arm removed   -> 1 red   (a mistyped schema field)
+  #   the count check removed     -> 1 red   (a dropped sibling)
+  #   both removed                -> 2 reds
+  #
+  # A third variant, turning the arm's `return 10` into `continue`, produces ZERO
+  # reds -- and that is CORRECT, not a gap: without the increment the count no
+  # longer matches, so the whole observation still fails. Measured directly on
+  # the op rather than inferred: both spellings answer rc=10 with no output for
+  # the same payload. A mutation that changes no behaviour is not a blind spot.
+  n_ok=0
+  for p in $(sqlite3 :memory: "SELECT json_extract(value,'\$.pid') FROM json_each('$jesc','\$.result.process_info.foreground_processes') WHERE json_type(value,'\$.pid')='integer'" 2>/dev/null); do
+    case "$p" in ''|0*|*[!0-9]*) return 10 ;; esac
+    _seen_pid "$p" || pids="$pids	$p"
+    n_ok=$((n_ok + 1))
+  done
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  unset -f _seen_pid
+  printf '%s%s\n' "$id" "$pids"
+}
+
+# OPTIONAL OP. Every pane this terminal can see, ACROSS EVERY INSTANCE, each row
+# carrying the instance it was seen in. Contract: see the tmux driver's copy.
+#
+# WHY THIS OP HAS TO EXIST FOR HERDR TOO, and what it cost to find out. A herdr
+# pane id is unique within ONE instance and nowhere else. Measured on this
+# machine, with two instances running:
+#
+#   instance   response pane_id   shell_pid   who is actually there
+#   jugemu     w1:p7              2727        one team's seat
+#   oma        w1:p7              80649       a different team's seat
+#
+# BOTH answer `pane_id=w1:p7`. So an id echoed back by the server proves the
+# server answered about the id we asked for -- never that the instance we meant
+# answered. Every row here is qualified with the SOCKET it came from, which is
+# the value that makes the row answerable again, exactly as the tmux driver
+# qualifies with its socket.
+#
+#   <instance><TAB><pane>    a pane observed in that instance
+#   !<TAB><instance>         that instance could NOT be read
+#
+# `session list --json` reports `running` per session, so a session declared not
+# running is SKIPPED -- that is a decided fact, not a gap. A running session
+# whose pane list fails is the gap, and it gets a named row rather than being
+# dropped: without it the sweep would read "nobody is there" for an instance
+# nobody could open.
+#
+# AN ENTRY WE DO NOT UNDERSTAND FAILS THE WHOLE ENUMERATION, as in
+# terminal_pane_process_observe: `running` must be a JSON boolean and
+# `socket_path` a JSON string, checked by type in the query itself, and the
+# number of entries is compared against the number that passed. A session we
+# could not parse might be the one holding the pane the caller is looking for.
+terminal_enumerate_panes() {
+  local sessions jesc n_all n_ok sockets sock out
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  sessions="$(herdr session list --json 2>/dev/null)" || return 10
+  [ -n "$sessions" ] || return 10
+  jesc="$(printf '%s' "$sessions" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.sessions')='array' THEN json_array_length('$jesc','\$.sessions') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running') IN ('true','false') AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  case "$n_ok" in ''|*[!0-9]*) return 10 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  # ONE PATH PER LINE, never word-split. A socket path is a path: a home
+  # directory with a space in it is ordinary, and `for x in $(...)` turned one
+  # instance into THREE fabricated ones -- each reported as holding the same
+  # pane, which reads as MORE coverage rather than less (found in review,
+  # reproduced: `/a path/with spaces/herdr.sock` became `/a`, `path/with`,
+  # `spaces/herdr.sock`). A path containing a newline is refused instead, since
+  # a line-based channel cannot carry one.
+  sockets="$(sqlite3 :memory: "SELECT json_extract(value,'\$.socket_path') FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    case "$sock" in (*[[:cntrl:]]*) printf '!\t%s\n' "malformed_socket_path"; continue ;; esac
+    out="$(HERDR_SOCKET_PATH="$sock" herdr pane list 2>/dev/null)" || { printf '!\t%s\n' "$sock"; continue; }
+    _herdr_panes_of "$sock" "$out" || printf '!\t%s\n' "$sock"
+  done <<EOF
+$sockets
+EOF
+  return 0
+}
+
+# The pane ids in one `pane list` payload, each prefixed with its instance.
+# Separate so the strictness lives in one place: a payload whose `panes` is not
+# an array, or that holds an entry with no text `pane_id`, is not a short list --
+# it is a payload this driver does not understand, and the caller turns that into
+# a named hole rather than into "that instance has fewer panes".
+_herdr_panes_of() {   # <socket> <pane-list-json>
+  local sock="$1" jesc n_all n_ok ids
+  jesc="$(printf '%s' "$2" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.panes')='array' THEN json_array_length('$jesc','\$.result.panes') ELSE -1 END" 2>/dev/null)" || return 1
+  case "$n_all" in ''|*[!0-9]*) return 1 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  case "$n_ok" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 1
+  ids="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  printf '%s\n' "$ids" | while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    printf '%s\t%s\n' "$sock" "$pane"
+  done
   return 0
 }

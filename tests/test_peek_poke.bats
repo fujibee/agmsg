@@ -77,6 +77,24 @@ EOF
   export PATH="$FAKEBIN:$PATH"
 }
 
+_install_fake_osascript() {
+  cat > "$FAKEBIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  cat > "$FAKEBIN/osascript" <<EOF
+#!/usr/bin/env bash
+{ printf 'osascript'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$2" in
+  probe) printf 'supported\n' ;;
+  peek) printf 'plain visible text\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # --- peek ----------------------------------------------------------------
 
 @test "peek: tmux record reads the pane verbatim; --lines forwards scrollback" {
@@ -132,6 +150,16 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c 'native channel' || true)" -eq 0 ]
 }
 
+@test "peek: an emulator-qualified plain record reads through its adapter" {
+  _install_fake_osascript
+  _write_record "plain:iterm:/dev/ttys040"
+  run bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 0 ]
+  _out_has "plain visible text"
+  [ "$(grep -c ' \[probe\] \[/dev/ttys040\]' "$ARGV_LOG")" -eq 1 ]
+  [ "$(grep -c ' \[peek\] \[/dev/ttys040\]' "$ARGV_LOG")" -eq 1 ]
+}
+
 @test "peek: --lines rejects a non-number instead of passing it through" {
   _install_fake_tmux
   _write_record "tmux:%5"
@@ -182,6 +210,16 @@ EOF
   [ "$status" -eq 13 ]
   _out_has "unsupported: plain terminal has no addressable pane"
   _out_has "agent type may offer a native channel"
+}
+
+@test "poke: an emulator-qualified plain record submits through its adapter" {
+  _install_fake_osascript
+  _write_record "plain:terminal:/dev/ttys039"
+  run bash "$SCRIPTS/poke.sh" testteam alice "one prompt"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via plain"
+  [ "$(grep -c ' \[probe\] \[/dev/ttys039\]' "$ARGV_LOG")" -eq 1 ]
+  grep -q ' \[poke\] \[/dev/ttys039\] \[one prompt\]' "$ARGV_LOG"
 }
 
 @test "poke: unquoted multi-word text is refused, not silently truncated" {
@@ -321,6 +359,41 @@ EOF
   grep -q "could not read pane 'w1:p4'" "$errf"
 }
 
+# herdr whose `pane read` fails with an OS-level error on its REAL stderr — no
+# JSON body at all, and no claim from herdr that the pane is gone. Modeled on
+# the measured case (#1158): a sandbox that denies socket operations returns
+# `PermissionDenied (Operation not permitted)` this way, not as pane_not_found.
+_install_fake_herdr_denied() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  echo "PermissionDenied (Operation not permitted)" >&2
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "peek taxonomy: herdr pane read fails with no absence claim -> 11, not 12 (#1158)" {
+  _install_fake_herdr_denied
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 11 ]
+  [ ! -s "$outf" ]
+  # the real diagnostic is forwarded, not discarded by the old `2>/dev/null`
+  grep -q "PermissionDenied" "$errf"
+  grep -q "could not read pane 'w1:p4'" "$errf"
+  # and the driver must not assert a cause it has not established
+  # `! cmd` never fails a bats test unless it is the last statement (#670), so
+  # both lines go through the refute helper; the second one only "worked" for
+  # being last, and the next line added below it would have silenced it.
+  refute grep -q "no longer exist" "$errf"
+  refute grep -q "it may be" "$errf"
+}
+
 # --- peek READ contract: content reaches stdout VERBATIM --------------
 # herdr's content is captured to a temp file and cat'd, NOT round-tripped through a
 # command substitution (which strips every trailing newline) + printf '%s\n' (which
@@ -441,6 +514,9 @@ EOF
   [ "$status" -eq 12 ]
   _out_has "no live agent to receive"
   _out_has "poke needs a running agent"
+  # the real diagnostic is forwarded now, not discarded by the old
+  # `>/dev/null 2>&1` (#1158's sweep of the same file)
+  _out_has "no live agent in pane"
 }
 
 @test "poke taxonomy: tmux NOT on PATH -> 10 (unreachable), not 13" {

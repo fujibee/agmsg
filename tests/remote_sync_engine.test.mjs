@@ -80,6 +80,7 @@ const candidates = [
 ];
 
 const credentialId = "018f3f7e-0000-7000-8000-000000000020";
+const authorityFileOptions = { mode: 0o644 };
 
 test("a rotator provisions its confirmed snapshot at the server boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-local-key-rotation-"));
@@ -147,7 +148,7 @@ test("a rotator provisions its confirmed snapshot at the server boundary", async
         capabilities: { write_allowed_ciphers: ["none", "age-v1"] },
         cipher_profile: "age-v1", connected_at: "2026-07-29T00:00:00Z",
         disconnected_at: null },
-    })}\n`);
+    })}\n`, authorityFileOptions);
     await writeFile(join(teamDir, "roster.jsonl"), [
       JSON.stringify({ type: "key_rotated", ...rotation,
         at: "2026-07-30T00:00:00.000000Z", server_seq: undefined }),
@@ -453,7 +454,8 @@ async function writeConnectedTeam(root, overrides = {}) {
     ...overrides,
   };
   await writeFile(join(root, "teams", "demo", "config.json"),
-    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`);
+    `${JSON.stringify({ name: "demo", agents: {}, remote_binding: remoteBinding }, null, 2)}\n`,
+    authorityFileOptions);
 }
 
 test("connected binding is a bounded non-writable nofollow authority", async () => {
@@ -1854,7 +1856,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
         remote_team_id: config.remote_team_id, protocol_version: 1,
         capabilities: { write_allowed_ciphers: ["none"] },
         cipher_profile: "none", connected_at: "2026-07-29T00:00:00Z",
-        disconnected_at: null } })}\n`);
+        disconnected_at: null } })}\n`, authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "http://127.0.0.1:8787",
       server_instance_id: config.server_instance_id,
@@ -1863,7 +1865,7 @@ test("set-endpoint aligns the stored sync config's server_url with the moved bin
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1931,7 +1933,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     process.env.AGMSG_SYNC_STORAGE_DIR = join(root, "store");
     await mkdir(join(root, "teams", "demo"), { recursive: true });
     await mkdir(join(root, "store", "remote-sync"), { recursive: true });
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://x.example", 2))}\n`,
+      authorityFileOptions);
     const stored = { format_version: 1, local_team: "demo",
       server_url: "https://o.example",
       server_instance_id: config.server_instance_id,
@@ -1939,7 +1942,7 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
       cipher_profile: "none",
       local_security_history: [{ local_security_revision: "0",
         effective_from_seq: "1", minimum_security_mode: "plaintext-allowed" }] };
-    await writeFile(storedPath, JSON.stringify(stored));
+    await writeFile(storedPath, JSON.stringify(stored), authorityFileOptions);
     const capabilities = { protocol_version: 1,
       server_instance_id: config.server_instance_id,
       team_id: config.remote_team_id, team_name: "demo", min_available_seq: "0",
@@ -1958,7 +1961,8 @@ test("set-endpoint cannot land a stale alignment over a newer move (#739 interle
     const staleOutcome = stale.catch((error) => error);
     while (releaseFetch === null) await new Promise((r) => setTimeout(r, 5));
     // B: moves the binding on to Y and completes its own alignment.
-    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`);
+    await writeFile(teamCfgPath, `${JSON.stringify(bindingFor("https://y.example", 3))}\n`,
+      authorityFileOptions);
     await writeFile(storedPath, JSON.stringify({ ...stored, server_url: "https://y.example" }));
     releaseFetch();
     const outcome = await staleOutcome;

@@ -14,3 +14,4 @@ teams/
 .env
 .env.*
 /.secrets/
+run/

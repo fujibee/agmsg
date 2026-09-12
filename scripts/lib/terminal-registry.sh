@@ -59,6 +59,12 @@
 #                                       both. A driver that has only one name
 #                                       treats it as the key.
 #                                       (safe to re-apply on SessionStart).
+# Optional:
+#   terminal_capability <capability> [id]
+#                                       Narrow the manifest's implementation
+#                                       ceiling for one runtime instance: 0
+#                                       supported, 1 unsupported, 2 unknown.
+#                                       It cannot grant an unadvertised verb.
 #
 # Detection is a driver FUNCTION (not a manifest datum like the types axis's
 # detect=) because herdr's "which pane am I" is logic, not a set of env vars. The
@@ -194,8 +200,39 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_fence"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence"
 
+# Resolve one capability for the terminal instance addressed by <id>.
+# terminal.conf is the implementation ceiling: a runtime hook may narrow that
+# set, but can never grant an operation the manifest does not advertise.
+# Optional terminal_capability has three outcomes: 0 supported, 1 unsupported,
+# and 2 unknown/unavailable. Its stderr reason is preserved deliberately.
+agmsg_terminal_capability() {   # <terminal> <capability> [id]
+  local name="$1" capability="$2" id="${3:-}" rc=0
+  if ! agmsg_terminal_has "$name" capabilities "$capability"; then
+    printf "unsupported: terminal driver '%s' does not implement capability '%s'\n" \
+      "$name" "$capability" >&2
+    return 1
+  fi
+
+  if [ "$name" = "${_AGMSG_TERMINAL_LOADED:-}" ]; then
+    declare -F terminal_capability >/dev/null 2>&1 || return 0
+    terminal_capability "$capability" "$id" || rc=$?
+  else
+    (
+      agmsg_terminal_load "$name" >/dev/null 2>&1 || exit 2
+      declare -F terminal_capability >/dev/null 2>&1 || exit 0
+      terminal_capability "$capability" "$id"
+    ) || rc=$?
+  fi
+  case "$rc" in
+    0|1|2) return "$rc" ;;
+    *)
+      printf "unknown: terminal driver '%s' returned invalid capability status %s for '%s'\n" \
+        "$name" "$rc" "$capability" >&2
+      return 2 ;;
+  esac
+}
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and
@@ -1108,4 +1145,82 @@ agmsg_terminal_name_self_safe() {
   _rc=$?
   [ "$_restore_e" = 1 ] && set -e
   return "$_rc"
+}
+
+# Every pane every terminal can see, as (kind, instance, pane) TRIPLES.
+#
+# A BARE PANE ID IS NOT AN ADDRESS. Measured on this machine, 2026-09-11: two
+# herdr instances were running, and enumerating both produced 52 rows in which
+# `w1:p1`, `w1:p2`, `w1:p4`, `w1:p5` and `w1:p7` each appeared TWICE -- the same
+# id naming a different pane, and a different team's seat, in each instance. The
+# tmux side has had the same property since #1051 (`%0` exists on every server).
+# So nothing here ever emits a pane id on its own; the instance travels with it,
+# and the instance is the value that makes the row answerable again -- a socket
+# path, not a display name.
+#
+# THREE ROW KINDS, because three things happen and collapsing any two of them
+# loses the one that matters:
+#
+#   <kind><TAB><instance><TAB><pane>   a pane was observed there
+#   !<TAB><kind><TAB><instance>        that instance could not be read
+#   !!<TAB><kind>                      that terminal's INSTANCE LIST could not be
+#                                      read, so no instance can even be named
+#   ?<TAB><kind>                       that terminal cannot enumerate at all
+#
+# FOUR CAUSES, FOUR ROWS, and none of them folded. `?` is a CONFIGURATION in
+# which the question has no answer and a caller can stop asking. `!` is one hole
+# in an otherwise good answer. `!!` is a terminal we could not open at all --
+# which looks identical to `?` from the outside and is the opposite instruction
+# to a caller (retry, not give up). Collapsing any pair of these is how "we could
+# not look" becomes "there is nobody there", which is the failure this whole
+# sweep exists to avoid.
+#
+# rc is 0 whenever the walk itself ran. A caller decides what to do about `!` and
+# `?` rows; this function does not decide for it.
+agmsg_terminal_enumerate() {
+  local was name out orc rc=0
+  was="${_AGMSG_TERMINAL_LOADED:-}"
+  for name in $(agmsg_terminal_candidates); do
+    if ! agmsg_terminal_load "$name" >/dev/null 2>&1; then
+      printf '?\t%s\n' "$name"
+      continue
+    fi
+    if ! declare -F terminal_enumerate_panes >/dev/null 2>&1; then
+      printf '?\t%s\n' "$name"
+      continue
+    fi
+    # CAPTURED, not piped. `op | while read` reports the WHILE's status, so the
+    # op could fail outright and the loop would report success over an empty
+    # stream -- "that terminal has no panes", which is the exact confusion this
+    # function exists to prevent. The capture is also written errexit-safe: a
+    # bare `out=$(...)` followed by `$?` kills a caller that has `set -e` before
+    # the row is ever printed.
+    if out="$(terminal_enumerate_panes 2>/dev/null)"; then orc=0; else orc=$?; fi
+    if [ "$orc" -ne 0 ]; then
+      printf '!!\t%s\n' "$name"
+      continue
+    fi
+    printf '%s\n' "$out" | while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      case "$row" in
+        '!'*) printf '!\t%s\t%s\n' "$name" "${row#*	}" ;;
+        *)    printf '%s\t%s\n' "$name" "$row" ;;
+      esac
+    done
+  done
+  # Leave the caller with the driver it had. Loading one is a global side effect
+  # and this function is a reader.
+  #
+  # NO DRIVER is a state too, and the version that only restored a NAMED driver
+  # left the LAST candidate loaded when the caller had none -- so a caller that
+  # deliberately held no driver got one, silently, from a function it called to
+  # read (found in review). Unsetting the ops is what "none" means here, and it
+  # is the same teardown `agmsg_terminal_load` does before it loads.
+  if [ -n "$was" ]; then
+    agmsg_terminal_load "$was" >/dev/null 2>&1 || rc=1
+  else
+    _agmsg_terminal_unset_ops
+    _AGMSG_TERMINAL_LOADED=""
+  fi
+  return "$rc"
 }
