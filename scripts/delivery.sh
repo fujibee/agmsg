@@ -390,9 +390,113 @@ agmsg_delivery_status_default() {
 }
 agmsg_delivery_status() { agmsg_delivery_status_default "$@"; }
 
+# First live watch.sh pid whose cmdline matches <project> <type> (adjacent
+# fields, same needle shape as kill_all_watchers). Empty if none. Used when an
+# identity has no exclusive ready sentinel — Claude Code's default SessionStart
+# watcher is broad (no ACTIVE_NAME) and never writes ready.* (#108).
+# Args: <project> <type>
+agmsg_delivery_find_broad_watcher_pid() {
+  local project="$1" type="$2"
+  local f pid cmd
+  [ -d "$RUN_DIR" ] || return 0
+  local unresolved_count=0 unresolved_pid=""
+  for f in "$RUN_DIR"/watch.*.pid; do
+    [ -f "$f" ] || continue
+    pid=$(tr -d '\r\n' < "$f" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    _agmsg_pid_alive "$pid" || continue
+    cmd=$(compat_get_cmdline "$pid" 2>/dev/null || true)
+    if [ -n "$cmd" ]; then
+      case "$cmd" in
+        *"$SKILL_DIR/scripts/watch.sh"*) ;;
+        *) continue ;;
+      esac
+      # Broad watchers invoke `watch.sh <sid> <project> <type>` with NO 4th
+      # arg — project/type must be the trailing tokens. An exclusive watcher
+      # for some OTHER agent shares the same project/type as a substring but
+      # has a trailing agent name after it, so a plain substring match would
+      # misreport it as broad coverage for an unrelated identity with zero
+      # actual receivers (review finding, 2026-07-19).
+      case "$cmd" in
+        *" $project $type") printf '%s\n' "$pid"; return 0 ;;
+        *) continue ;;
+      esac
+    fi
+    # ps unavailable (e.g. Claude Code sandbox) — compat_get_cmdline can't
+    # inspect argv, so project/type can't be confirmed here. Best effort: if
+    # exactly one watcher is live at all, it's almost certainly this
+    # sandbox's own single watcher; with 0 or 2+ such candidates there is no
+    # way to disambiguate without argv, so stay silent rather than guess
+    # (review finding, 2026-07-19).
+    unresolved_count=$((unresolved_count + 1))
+    unresolved_pid="$pid"
+  done
+  if [ "$unresolved_count" -eq 1 ]; then
+    printf '%s\n' "$unresolved_pid"
+  fi
+  return 0
+}
+
+# Print one liveness line for a (team, agent). Two-tier:
+#   1) exclusive actas receiver via receiver-live.sh (ready + watch.<token>.pid)
+#   2) else, if a project/type-scoped broad watcher is live, say so explicitly
+#      instead of a false "not running" (P1-2)
+# Built on the #372 ready-path idea (@u-ichi) with watcher-pidfile accuracy.
+# Codex bridge liveness stays in the codex plug. See #267 / #338.
+# Args: <team> <agent> <project> <type>
+agmsg_delivery_print_watcher_status() {
+  local team="$1" name="$2" project="$3" type="$4"
+  local pid broad
+
+  if pid=$(bash "$SCRIPT_DIR/receiver-live.sh" "$team" "$name" --pid 2>/dev/null); then
+    echo "Watcher: $team/$name alive (exclusive, pid $pid)"
+    return 0
+  fi
+
+  # No live exclusive receiver. Broad watchers cover many roles without a
+  # per-identity ready file — report coverage instead of a hard not-running.
+  if [ -n "$project" ] && [ -n "$type" ]; then
+    broad=$(agmsg_delivery_find_broad_watcher_pid "$project" "$type")
+    if [ -n "$broad" ]; then
+      echo "Watcher: $team/$name no exclusive receiver (broad watcher alive, pid $broad)"
+      return 0
+    fi
+  fi
+
+  echo "Watcher: $team/$name not running"
+}
+
 agmsg_delivery_runtime_status_default() {
+  local type="${1:-}" project="${2:-}" team_filter="${3:-}"
+
+  # Per-identity receiver liveness when (type, project) is known and identities
+  # are registered. Types with a different runtime (codex bridge) override this
+  # whole function.
+  if [ -n "$type" ] && [ -n "$project" ]; then
+    local pairs
+    pairs=$("$SCRIPT_DIR/identities.sh" "$project" "$type" 2>/dev/null || true)
+    if [ -n "$pairs" ]; then
+      while IFS=$'\t' read -r team name _rest; do
+        if [ -z "$team" ] || [ -z "$name" ]; then
+          continue
+        fi
+        # A caller scoped to one team (doctor.sh's --team) sees only that
+        # team's own identities here -- otherwise this project/type-wide
+        # call leaks every other team's liveness into a team-scoped report.
+        if [ -n "$team_filter" ] && [ "$team" != "$team_filter" ]; then
+          continue
+        fi
+        agmsg_delivery_print_watcher_status "$team" "$name" "$project" "$type"
+      done <<< "$pairs"
+    fi
+  fi
+
+  # Aggregate watch pidfile summary — always emit (0/0 when run/ is absent).
+  # Codex's plug replaces this whole function and suppresses the count.
+  local alive=0 dead=0
   if [ -d "$RUN_DIR" ]; then
-    local alive=0 dead=0
     for f in "$RUN_DIR"/watch.*.pid; do
       [ -f "$f" ] || continue
       local pid
@@ -403,8 +507,8 @@ agmsg_delivery_runtime_status_default() {
         dead=$((dead + 1))
       fi
     done
-    echo "watch processes: $alive alive, $dead stale pidfiles"
   fi
+  echo "watch processes: $alive alive, $dead stale pidfiles"
 }
 agmsg_delivery_runtime_status() { agmsg_delivery_runtime_status_default "$@"; }
 
@@ -721,6 +825,10 @@ do_set() {
 do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
+  # Optional: narrows the default runtime status's per-identity watcher
+  # lines to one team (doctor.sh's --team). Empty means unfiltered, same as
+  # every caller before this argument existed.
+  local TEAM="${3:-}"
 
   # Mode is derived from the project's settings.local.json — there's no
   # global mode value. When called without <type> <project>, we can't infer
@@ -733,7 +841,7 @@ do_status() {
     agmsg_delivery_status "$TYPE" "$PROJECT"
   fi
 
-  agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
+  agmsg_delivery_runtime_status "$TYPE" "$PROJECT" "$TEAM"
 }
 
 kill_all_watchers() {
