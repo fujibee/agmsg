@@ -20,11 +20,16 @@ _run_sweep_fixture() {   # <rows>
     _agmsg_sweep_instance_allowed() {
       [ "$2:$3" != "herdr:/run/oma.sock" ]
     }
+    _agmsg_sweep_locator() {
+      case "$2" in *:*) return 2 ;; esac
+      printf "%s:%s:%s\n" "$1" "$2" "$3"
+    }
     _agmsg_sweep_label_at() {
       case "$1:$2:$3" in
         herdr:/run/jugemu.sock:w1:p7) printf "alpha:alice\n" ;;
         tmux:/tmp/tmux-a:%4) printf "alpha:bob\n" ;;
         "tmux:/tmp/server with space:%4") printf "alpha:bob\n" ;;
+        tmux:/tmp/server:alternate:%4) printf "alpha:bob\n" ;;
         plain:iterm:/dev/ttys040) printf "alpha:alice\n" ;;
         *) return 1 ;;
       esac
@@ -74,6 +79,13 @@ _run_sweep_fixture() {   # <rows>
   grep -Fqx $'tmux\t/tmp/server with space\t%4\talpha/bob\t$agmsg fix --pane '\''tmux:/tmp/server with space:%4'\''' "$BATS_TEST_TMPDIR/pokes"
 }
 
+@test "an unrepresentable colon in an instance is loud and writes nothing (#1152)" {
+  _run_sweep_fixture $'tmux\t/tmp/server:alternate\t%4\tagent\tcodex'
+  [ "$status" -eq 1 ]
+  [ ! -e "$BATS_TEST_TMPDIR/pokes" ]
+  grep -Fq 'reason=locator_unavailable:rc_2' <<< "$output"
+}
+
 @test "fence refusal is loud and does not report a send (#1152)" {
   run bash -c '
     set -u
@@ -81,6 +93,7 @@ _run_sweep_fixture() {   # <rows>
     . "$SCRIPTS/lib/sweep.sh"
     _agmsg_sweep_agent_rows() { printf "herdr\t/run/jugemu.sock\tw1:p7\tagent\tclaude-code\n"; }
     _agmsg_sweep_instance_allowed() { return 0; }
+    _agmsg_sweep_locator() { printf "%s:%s:%s\n" "$1" "$2" "$3"; }
     _agmsg_sweep_label_at() { printf "alpha:alice\n"; }
     _agmsg_sweep_poke_fenced() { return 12; }
     agmsg_sweep_run alpha

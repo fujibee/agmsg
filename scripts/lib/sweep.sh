@@ -23,6 +23,10 @@ _agmsg_sweep_agent_rows() {
 _agmsg_sweep_label_at() { return 127; }       # <kind> <instance> <pane>
 _agmsg_sweep_poke_fenced() { return 127; }    # <kind> <instance> <pane> <owner> <text>
 _agmsg_sweep_instance_allowed() { return 127; } # <team> <kind> <instance>
+_agmsg_sweep_locator() {                      # <kind> <instance> <pane>
+  declare -F agmsg_terminal_locator >/dev/null 2>&1 || return 127
+  agmsg_terminal_locator "$1" "$2" "$3"
+}
 
 # Is <label> exactly one local registration in <team> whose type agrees with
 # the process observation? Prints the agent name on success. A label is only a
@@ -71,7 +75,7 @@ _agmsg_sweep_quote_arg() {   # <value>
 # agent candidate is loud and makes the command non-zero.
 agmsg_sweep_run() {   # <team>
   local team="${1-}" rows rows_rc=0 rc=0 tab line
-  local kind instance pane state payload extra label label_rc agent owner ref text poke_rc
+  local kind instance pane state payload extra label label_rc agent owner ref locator_rc text poke_rc
   [ -n "$team" ] || { echo 'sweep: team is required' >&2; return 2; }
   tab="$(printf '\t')"
 
@@ -147,10 +151,19 @@ EOF
       continue
     fi
 
-    # The address and the instruction are made once, from this row's variables.
-    # Do not parse the ref back into a bare pane for the write: that would create
-    # a second address derivation that could cross instances.
-    ref="$kind:$instance:$pane"
+    # The address and the instruction are made once, from this row's variables,
+    # through the shared terminal-registry grammar. This command neither parses
+    # nor hand-serializes a locator: four readers doing that would become four
+    # subtly different grammars. Do not parse the result back into a bare pane
+    # for the write; that would create a second address derivation that could
+    # cross instances.
+    ref=""; locator_rc=0
+    ref="$(_agmsg_sweep_locator "$kind" "$instance" "$pane" 2>/dev/null)" || locator_rc=$?
+    if [ "$locator_rc" -ne 0 ] || [ -z "$ref" ]; then
+      _agmsg_sweep_report_skip "$kind" "$instance" "$pane" "locator_unavailable:rc_$locator_rc"
+      rc=1
+      continue
+    fi
     text="\$agmsg fix --pane $(_agmsg_sweep_quote_arg "$ref")"
     owner="$team/$agent"
     poke_rc=0
