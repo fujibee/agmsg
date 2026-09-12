@@ -1170,7 +1170,7 @@ terminal_pane_process_observe() {   # <candidate>
 # number of entries is compared against the number that passed. A session we
 # could not parse might be the one holding the pane the caller is looking for.
 terminal_enumerate_panes() {
-  local sessions jesc n_all n_ok sock out
+  local sessions jesc n_all n_ok sockets sock out
   command -v herdr >/dev/null 2>&1 || return 10
   command -v sqlite3 >/dev/null 2>&1 || return 10
   sessions="$(herdr session list --json 2>/dev/null)" || return 10
@@ -1188,13 +1188,15 @@ terminal_enumerate_panes() {
   # reproduced: `/a path/with spaces/herdr.sock` became `/a`, `path/with`,
   # `spaces/herdr.sock`). A path containing a newline is refused instead, since
   # a line-based channel cannot carry one.
-  sqlite3 :memory: "SELECT json_extract(value,'\$.socket_path') FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text'" 2>/dev/null \
-  | while IFS= read -r sock; do
+  sockets="$(sqlite3 :memory: "SELECT json_extract(value,'\$.socket_path') FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  while IFS= read -r sock; do
     [ -n "$sock" ] || continue
     case "$sock" in (*[[:cntrl:]]*) printf '!\t%s\n' "malformed_socket_path"; continue ;; esac
     out="$(HERDR_SOCKET_PATH="$sock" herdr pane list 2>/dev/null)" || { printf '!\t%s\n' "$sock"; continue; }
     _herdr_panes_of "$sock" "$out" || printf '!\t%s\n' "$sock"
-  done
+  done <<EOF
+$sockets
+EOF
   return 0
 }
 

@@ -18,6 +18,7 @@ setup() {
   load 'test_helper'
   setup_test_env
   export SKILL_DIR="$TEST_SKILL_DIR"
+  export REAL_SQLITE3="$(command -v sqlite3)"
   BIN="$BATS_TEST_TMPDIR/bin"; mkdir -p "$BIN"; export PATH="$BIN:$PATH"
   export TMUX_TMPDIR="$BATS_TEST_TMPDIR/tt"
   SOCKDIR="$TMUX_TMPDIR/tmux-$(id -u)"; mkdir -p "$SOCKDIR"
@@ -329,6 +330,29 @@ HEOF
   printf '%s\n' "$output" | grep -q "^!!"$'\t'"herdr"
   refute grep -q "^?"$'\t'"herdr" <<<"$output"
   # and the terminal that DID answer is still reported
+  printf '%s\n' "$output" | grep -q "^tmux"$'\t'".*A"$'\t'"%0"
+}
+
+@test "registry: a failed herdr running-socket query is !! -- not zero panes (#1152)" {
+  _fake_herdr "$(_sessions_json '{"name":"one","running":true,"socket_path":"/s/sessions/one/herdr.sock"}')"
+  _herdr_panes one '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'
+  cat > "$BIN/sqlite3" <<'SEOF'
+#!/usr/bin/env bash
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  *"SELECT json_extract(value,'$.socket_path')"*"json_type(value,'$.running')='true'"*) exit 19 ;;
+esac
+exec "$REAL_SQLITE3" "$@"
+SEOF
+  chmod +x "$BIN/sqlite3"
+  _fake_tmux; _socket A; _answers A 'ok:%0'
+  _load_registry
+  run agmsg_terminal_enumerate
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q "^!!"$'\t'"herdr"
+  refute grep -q "^herdr"$'\t' <<<"$output"
+  # Positive control: the registry continues and reports another terminal.
   printf '%s\n' "$output" | grep -q "^tmux"$'\t'".*A"$'\t'"%0"
 }
 
