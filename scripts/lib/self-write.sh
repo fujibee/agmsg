@@ -226,8 +226,13 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
     4) _sw_say "$head none:fence_unreadable:no_fence_op"; agmsg_self_write_lock_release "$team" "$agent" "$owner"; return 2 ;;
     *) _sw_say "$head none:fence_unreadable:${_SW_F_TID#unknown:}"; agmsg_self_write_lock_release "$team" "$agent" "$owner"; return 2 ;;
   esac
-  # instance:terminal_id -- the instance may be a socket PATH; the terminal_id
-  # never contains ':', so readers split on the LAST colon.
+  # instance:terminal_id. The guarantee runs ONE way: the driver refuses an
+  # instance containing ':' (unknown:socket_path_malformed), so the instance is
+  # colon-free; the terminal_id is a server-issued string whose alphabet is not
+  # ours to decide (and a failed read is spelled unknown:<why>, a colon already).
+  # So readers split on the FIRST colon. An earlier revision split on the last
+  # one, which truncated a tid holding a colon and made every re-read compare
+  # unequal to it: a false refusal of every later cell (review, 2026-09-12).
   fence="$_SW_F_INSTANCE:$_SW_F_TID"
   _sw_say "$head"
   _sw_say "fence=$fence"
@@ -241,7 +246,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
 
   # label + key -- fence first.
   local why
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence##*:}")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}")"; then
     lk_lines="$(_sw_cell_label_key "$id" "$team" "$agent")"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 1p)"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 2p)"
@@ -251,7 +256,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   fi
 
   # session -- fence again: this one types into the pane.
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence##*:}")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}")"; then
     sess_line="$(_sw_cell_session "$id" "$team" "$agent" "$type")"
     _sw_say "session $sess_line"
   else
