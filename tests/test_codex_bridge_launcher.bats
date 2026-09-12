@@ -148,6 +148,27 @@ write_request() {
   printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$hash"
 }
 
+# Start the dispatcher with enough lifetime to remain eligible under a loaded
+# runner, but stop it as soon as the asynchronous bridge launch is observable.
+# A short foreground lifetime followed by a capture wait is not equivalent:
+# once the lifetime process exits, the dispatcher is no longer allowed to spawn
+# the role child that creates CAPTURE.
+run_launcher_until_capture() { # [ENV=VALUE ...]
+  sleep 30 3>&- & local parent=$!
+  env "$@" bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$parent" >/dev/null 2>&1 3>&- &
+  local dispatcher=$! seen=0 i
+  for i in {1..200}; do
+    if [ -f "$CAPTURE" ]; then seen=1; break; fi
+    sleep 0.1
+  done
+  kill "$parent" 2>/dev/null || true
+  wait "$parent" 2>/dev/null || true
+  # Retire the lifetime first and let the dispatcher observe that boundary.
+  # Killing the dispatcher first can strand the detached role child it spawned.
+  wait "$dispatcher" 2>/dev/null || true
+  [ "$seen" -eq 1 ]
+}
+
 # Drive the launcher against a short-lived parent, blocking until it exits. fd 3
 # is closed on the backgrounded parent and the launcher so a stray descriptor
 # can't keep bats from exiting on macOS (#bats-fd3).
@@ -476,19 +497,14 @@ wait_for_child_count() {
 
   put_record team alice thread-msys "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  MSYSTEM=MINGW64 PATH="$stubdir:$PATH" \
-    bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture MSYSTEM=MINGW64 PATH="$stubdir:$PATH" || true
 
   # A bridge was launched at all -- this is what the whole class costs on Windows.
   [ -f "$CAPTURE" ] || { echo "no bridge was started under a blind tasklist"; false; }
   grep -q -- '--thread thread-msys' "$CAPTURE"
 }
 
-@test "launcher: windows-native starts the bridge (#567)" {
+@test "launcher: windows-native starts the bridge (#1161)" {
   skip_unless_windows "the point is the real tasklist and the real MSYS pid space"
   # The counterpart to codex-monitor's windows-native test, and the half #582
   # does NOT fix: reaching the bridged handoff is not the same as delivering a
@@ -498,11 +514,7 @@ wait_for_child_count() {
   # started. Real tasklist, no stub.
   put_record team alice thread-win "$PROJ" codex
 
-  sleep 6 3>&- & local p=$!
-  bash "$LAUNCHER" codex "$PROJ" "ws://127.0.0.1:1" "$p" >/dev/null 2>&1 3>&- || true
-  wait "$p" 2>/dev/null || true
-  local i
-  for i in {1..30}; do [ -f "$CAPTURE" ] && break; sleep 0.1; done
+  run_launcher_until_capture || true
 
   [ -f "$CAPTURE" ] || { echo "no bridge was started on native Windows"; false; }
   grep -q -- '--thread thread-win' "$CAPTURE"
