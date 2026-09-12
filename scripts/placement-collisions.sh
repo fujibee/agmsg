@@ -71,11 +71,14 @@ trap 'rm -rf "$COV_DIR"' EXIT
 : > "$COV_DIR/rows"
 : > "$COV_DIR/unscoped"
 
-shopt -s nullglob
-cfgs=("$SKILL_DIR"/teams/*/config.json)
-shopt -u nullglob
-
-for cfg in "${cfgs[@]}"; do
+# NOT `shopt -s nullglob; cfgs=(...); for cfg in "${cfgs[@]}"`: macOS's
+# default /bin/bash is 3.2, where referencing "${cfgs[@]}" on a
+# ZERO-element array under `set -u` raises "unbound variable" (fixed
+# upstream well after 3.2; ubuntu-latest's modern bash does not reproduce
+# this, which is exactly why this broke on macOS only -- measured on CI).
+# A plain glob with no nullglob leaves the literal pattern as one word when
+# nothing matches, and `[ -f "$cfg" ]` already filters that out.
+for cfg in "$SKILL_DIR"/teams/*/config.json; do
   [ -f "$cfg" ] || continue
   team="${cfg%/config.json}"; team="${team##*/}"
   escaped="$(sed "s/'/''/g" "$cfg")"
