@@ -698,17 +698,50 @@ while true; do
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
     _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
-    ROWS="$(agmsg_sqlite ':memory:' "
-      SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.id'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.at'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.team'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.from'),'') || char(31) ||
-             COALESCE(json_extract(value,'\$.to'),'') || char(31) ||
-             replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||
-             COALESCE(json_extract(value,'\$.cursor'),'')
-      FROM json_each('${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}');
-    " 2>/dev/null || true)"
+    # #777: this pair's undelivered backlog grows independently of anything
+    # this loop bounds, so interpolating it into ONE argv element eventually
+    # exceeds the OS's per-argument ceiling (Linux MAX_ARG_STRLEN=131,072
+    # bytes; smaller still on Windows/macOS) and `agmsg_sqlite` fails with
+    # "Argument list too long" -- every single poll, because the failure
+    # below was already swallowed by `|| true` and the read cursor is only
+    # advanced from FINAL_CURSOR/DELIVERED_IDS further down, so a silently
+    # empty ROWS here left the cursor stuck forever, repeating the same
+    # failure on every future poll. Pass the statement on stdin instead,
+    # mirroring drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`,
+    # #882) and history.sh/inbox.sh: printf is a bash builtin, so writing a
+    # large value to a temp file never execs and can hit neither that ceiling
+    # nor argv's at all.
+    #
+    # No trap here: this script installs `trap cleanup EXIT` and
+    # `trap 'exit 0' INT TERM HUP` once, near the top (bash traps do not
+    # stack -- the last one set wins), and this runs inside that same
+    # process's long-lived polling loop, once per pair per interval. Adding a
+    # loop-local trap here would silently replace those for the rest of the
+    # process's life. The temp file is removed explicitly on every path
+    # instead; the one path that leaks it (a signal landing between mktemp
+    # and the following rm) is caught by the pre-existing INT/TERM/HUP
+    # handler tearing down the whole process, same as any other in-flight
+    # work here.
+    _agmsg_watch_sql="$(mktemp "${TMPDIR:-/tmp}/agmsg-watch-rows.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$_agmsg_watch_sql" ]; then
+      {
+        printf "%s\n" "SELECT COALESCE(json_extract(value,'\$.type'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.id'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.at'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.team'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.from'),'') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.to'),'') || char(31) ||"
+        printf "%s\n" "       replace(replace(replace(COALESCE(json_extract(value,'\$.body'),''), char(13), ''), char(10), '\\n'), char(9), '\t') || char(31) ||"
+        printf "%s\n" "       COALESCE(json_extract(value,'\$.cursor'),'')"
+        printf "FROM json_each('"
+        printf '%s' "${_arr//$_AGMSG_SQ/$_AGMSG_SQ$_AGMSG_SQ}"
+        printf "');\n"
+      } > "$_agmsg_watch_sql"
+      ROWS="$(agmsg_sqlite ':memory:' < "$_agmsg_watch_sql" 2>/dev/null || true)"
+      rm -f "$_agmsg_watch_sql"
+    else
+      ROWS=""
+    fi
 
     FINAL_CURSOR=""
     DELIVERED_IDS=()
