@@ -1333,9 +1333,12 @@ _herdr_panes_of() {   # <socket> <pane-list-json>
 }
 
 # Fence for a self-write (#1152). Prints "<instance>\t<terminal_id>" for one pane:
-# the herdr SESSION this driver is talking to (pane ids repeat across sessions --
-# w1:p2 exists in both `jugemu` and `oma`, measured 2026-09-11) and the pane's
-# server-side terminal_id (unique across sessions, 52 panes / 0 crossings; CHANGES
+# the herdr instance this driver is talking to, named by its SOCKET PATH -- the
+# same string the sweep's enumeration (terminal_enumerate_panes) uses for an
+# instance, so a location the sweep hands a seat and the fence the seat stores
+# compare as equal strings (pane ids repeat across instances -- w1:p2 exists in
+# both `jugemu` and `oma`, measured 2026-09-11) -- and the pane's server-side
+# terminal_id (unique across sessions, 52 panes / 0 crossings; CHANGES
 # across a herdr restart, so a stored fence expires with the server and a later
 # write refuses instead of landing in whatever now sits at that pane id).
 # Each half is either a value or a namespaced reason; the caller compares both
@@ -1346,8 +1349,9 @@ _herdr_panes_of() {   # <socket> <pane-list-json>
 # resolved in one session landing in another's live pane.
 terminal_fence() {   # <id>
   local id="$1" instance pane_json esc tid
-  instance="${HERDR_SESSION:-}"
-  [ -n "$instance" ] || instance="unknown:no_session_in_env"
+  instance="${HERDR_SOCKET_PATH:-}"
+  [ -n "$instance" ] || instance="unknown:no_socket_in_env"
+  case "$instance" in *:*|*[[:cntrl:]]*|*[[:space:]]*) instance="unknown:socket_path_malformed" ;; esac
   command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
   _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
   pane_json="$(herdr pane get "$id" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
