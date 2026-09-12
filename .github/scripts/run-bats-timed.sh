@@ -60,7 +60,7 @@ while IFS= read -r file; do
     "$file" "$started_at" >> "$timings"
   echo "bats timing: start $file at $started_at"
 
-  bats --print-output-on-failure "$file"
+  bats --print-output-on-failure "$file" </dev/null
   status=$?
 
   ended_epoch="$(date -u +%s)"

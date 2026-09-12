@@ -97,6 +97,27 @@ union_of_shards() {
   awk -F '\t' '$2 == "shard" && $13 == 7 { ok=1 } END { exit !ok }' "$timings"
 }
 
+@test "timed bats runner does not pass the manifest as test stdin" {
+  local manifest timings fake_bin calls
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/first.bats tests/second.bats > "$manifest"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'echo "$2" >> "$BATS_CALLS"' \
+    'if IFS= read -r unexpected; then echo "unexpected stdin: $unexpected" >&2; exit 9; fi' \
+    'exit 0' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+}
+
 @test "timed bats runner records the interrupted shard on TERM" {
   local manifest timings fake_bin ready release runner_pid rc i
   manifest="$BATS_TEST_TMPDIR/manifest.txt"
