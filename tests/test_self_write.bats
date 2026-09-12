@@ -17,7 +17,8 @@ setup() {
   export ARGV_LOG="$SKILL_DIR/argv.log"; : > "$ARGV_LOG"
   export FIX="$SKILL_DIR/fixture"
   export PATH="$FAKEBIN:$PATH"
-  export HERDR_ENV=1 HERDR_SESSION=jugemu HERDR_PANE_ID=w1:pB
+  export HERDR_ENV=1 HERDR_SOCKET_PATH=/tmp/herdr/sessions/jugemu/herdr.sock HERDR_PANE_ID=w1:pB
+  unset HERDR_SESSION
   unset TMUX TMUX_PANE
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-write.sh"
@@ -79,14 +80,14 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 0 ]
   [ "$(_line seat)" = "seat=T/alice sid=$ME pane=herdr:w1:pB" ]
-  [ "$(_line fence)" = "fence=jugemu:term_AAA" ]
+  [ "$(_line fence)" = "fence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA" ]
   [ "$(_line record)" = "record attempt=ok readback=verified" ]
   [ "$(_line label)" = "label attempt=ok readback=verified" ]
   [ "$(_line key)" = "key attempt=ok readback=verified" ]
   [ "$(_line session)" = "session attempt=ok readback=verified" ]
   [ "$(_line policy)" = "policy=accepted" ]
   # the record: ref, project, type, fence -- four TAB fields, nothing derived
-  [ "$(_rec)" = "$(printf 'herdr:w1:pB\t/proj/alice\tclaude-code\tfence=jugemu:term_AAA')" ]
+  [ "$(_rec)" = "$(printf 'herdr:w1:pB\t/proj/alice\tclaude-code\tfence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA')" ]
   # exactly one keystroke, into our own pane, the rename command
   [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 1 ]
   grep -q 'herdr \[agent\] \[prompt\] \[w1:pB\] \[/rename T-alice\]' "$ARGV_LOG"
@@ -137,7 +138,7 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
   [ "$status" -eq 0 ]
   [ "$(_line record)" = "record attempt=ok readback=unavailable:record_unreadable" ]
   [ "$(_line policy)" = "policy=accepted_unverified" ]
-  [ "$(cat "$rec")" = "$(printf 'herdr:w1:pB\t/proj/alice\tclaude-code\tfence=jugemu:term_AAA')" ]
+  [ "$(cat "$rec")" = "$(printf 'herdr:w1:pB\t/proj/alice\tclaude-code\tfence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA')" ]
 }
 
 # --- the fence ---------------------------------------------------------------------
@@ -155,7 +156,7 @@ FAKE
   grep -q 'term_BBB' "$FAKEBIN/herdr"
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 0 ]
-  [ "$(_line fence)" = "fence=jugemu:term_AAA" ]
+  [ "$(_line fence)" = "fence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA" ]
   [ "$(_line record)" = "record attempt=ok readback=verified" ]
   [ "$(_line label)" = "label attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
   [ "$(_line key)" = "key attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
@@ -163,7 +164,7 @@ FAKE
   [ "$(_line policy)" = "policy=accepted" ]
   [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
   [ "$(grep -c 'herdr \[pane\] \[rename\]' "$ARGV_LOG")" -eq 0 ]
-  case "$(_rec)" in *"fence=jugemu:term_AAA") : ;; *) false ;; esac
+  case "$(_rec)" in *"fence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA") : ;; *) false ;; esac
 }
 
 @test "fence: an unreadable fence before any write refuses the whole generation and writes nothing" {
@@ -176,8 +177,8 @@ FAKE
   [ ! -e "$(agmsg_self_write_lock_path T alice)" ]
 }
 
-@test "fence: no session in the environment is an unreadable instance half, refused before any write" {
-  unset HERDR_SESSION
+@test "fence: no socket path in the environment is an unreadable instance half, refused before any write" {
+  unset HERDR_SOCKET_PATH
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 2 ]
   case "$output" in *"none:fence_unreadable:"*) : ;; *) false ;; esac
