@@ -116,3 +116,20 @@ _run_sweep_fixture() {   # <rows>
   grep -Fq 'scripts/sweep.sh <team>' "$BATS_TEST_DIRNAME/../SKILL.md"
   grep -Fq 'Never run it from inbox delivery' "$BATS_TEST_DIRNAME/../SKILL.md"
 }
+
+@test "locator adapter uses the shared registry composer (#1152, #1168)" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  declare -F agmsg_locator_compose >/dev/null 2>&1 || skip "#1168 not in this base yet"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/sweep.sh"
+
+  run _agmsg_sweep_locator herdr "/run/path with space/herdr.sock" w1:p7
+  [ "$status" -eq 0 ]
+  [ "$output" = "herdr:/run/path with space/herdr.sock:w1:p7" ]
+
+  run _agmsg_sweep_locator herdr "/run/path:alternate/herdr.sock" w1:p7
+  [ "$status" -eq 2 ]
+  [ "$output" = "agmsg: locator: instance_malformed" ]
+}
