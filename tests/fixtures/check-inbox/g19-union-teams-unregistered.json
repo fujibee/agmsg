@@ -1,0 +1,102 @@
+{
+  "name": "g19-union-teams-unregistered",
+  "description": "multiple identities: first agent Alpha registered only in team mes, Beta in team ops; a row addressed to Alpha exists in ops - teams union (bash parity) polls Alpha's inbox in ops too and delivers it",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Alpha": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ops",
+      "agents": {
+        "Beta": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Alpha",
+      "body": "alpha-in-mes",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    },
+    {
+      "id": 2,
+      "team": "ops",
+      "from": "claude",
+      "to": "Alpha",
+      "body": "alpha-in-ops",
+      "created_at": "2026-07-20T10:01:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "alpha-in-mes",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        },
+        {
+          "team": "ops",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "alpha-in-ops",
+              "created_at": "2026-07-20T10:01:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [],
+    "readIds": [
+      1,
+      2
+    ],
+    "markerTouched": true,
+    "note": "bash TEAMS is the whoami teams= union across all identities; a team-scoped implementation would leave id 2 unread and fail here"
+  }
+}

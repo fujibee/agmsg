@@ -4,6 +4,11 @@ set -euo pipefail
 # Usage: history.sh <team> [agent_id] [limit]
 # Shows message history. If agent_id given, shows only that agent's messages.
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/fast-dispatch.sh"
+agmsg_fast_dispatch history "$@"
+
 TEAM="${1:?Usage: history.sh <team> [agent_id] [limit]}"
 AGENT="${2:-}"
 LIMIT="${3:-20}"
@@ -13,7 +18,6 @@ LIMIT="${3:-20}"
 # used elsewhere (config.sh, watch.sh).
 case "$LIMIT" in ''|*[!0-9]*) LIMIT=20 ;; esac
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 

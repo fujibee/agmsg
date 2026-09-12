@@ -1,0 +1,101 @@
+{
+  "name": "g08-two-teams-both-unread",
+  "description": "member of two teams: both teams' blocks concatenated, both marked read",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ops",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "m-mes",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    },
+    {
+      "id": 2,
+      "team": "ops",
+      "from": "claude",
+      "to": "Codex",
+      "body": "m-ops",
+      "created_at": "2026-07-20T10:01:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "m-mes",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        },
+        {
+          "team": "ops",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "m-ops",
+              "created_at": "2026-07-20T10:01:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [],
+    "readIds": [
+      1,
+      2
+    ],
+    "markerTouched": true
+  }
+}

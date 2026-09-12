@@ -4,9 +4,12 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-TEAM="${1:?Usage: team.sh <team>}"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/fast-dispatch.sh"
+agmsg_fast_dispatch team "$@"
+
+TEAM="${1:?Usage: team.sh <team>}"
 
 # Reject team names that would escape teams/ as a path segment (#140).
 # shellcheck disable=SC1091

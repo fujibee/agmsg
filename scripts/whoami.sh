@@ -12,6 +12,13 @@ set -euo pipefail
 #   If type is omitted, auto-detect from env vars and process tree.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The native resolver needs an explicit type. Preserve the existing shell's
+# process-tree auto-detection when callers omit it.
+if [ "$#" -ge 2 ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/fast-dispatch.sh"
+  agmsg_fast_dispatch whoami "$@"
+fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/type-registry.sh"
 # shellcheck disable=SC1091

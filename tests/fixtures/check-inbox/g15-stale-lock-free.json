@@ -1,0 +1,75 @@
+{
+  "name": "g15-stale-lock-free",
+  "description": "actas lock whose owner session is dead is treated as free: delivery continues",
+  "input": {
+    "type": "codex",
+    "project": "/e/Workspace/mes-reference-impl",
+    "stdin": "",
+    "interval": null
+  },
+  "run": {
+    "marker": null,
+    "locks": [
+      {
+        "team": "mes",
+        "agent": "Codex",
+        "owner": "dead-session",
+        "alive": false
+      }
+    ],
+    "watch": null
+  },
+  "runners": [
+    "bash",
+    "node"
+  ],
+  "teams": [
+    {
+      "name": "mes",
+      "agents": {
+        "Codex": {
+          "registrations": [
+            {
+              "type": "codex",
+              "project": "/e/Workspace/mes-reference-impl"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "team": "mes",
+      "from": "claude",
+      "to": "Codex",
+      "body": "deliver",
+      "created_at": "2026-07-20T10:00:00Z",
+      "read_at": null
+    }
+  ],
+  "expected": {
+    "exitCode": 0,
+    "stdoutSemantic": {
+      "kind": "block",
+      "teams": [
+        {
+          "team": "mes",
+          "messages": [
+            {
+              "from": "claude",
+              "body": "deliver",
+              "created_at": "2026-07-20T10:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    "unreadIds": [],
+    "readIds": [
+      1
+    ],
+    "markerTouched": true
+  }
+}
