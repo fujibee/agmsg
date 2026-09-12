@@ -12,8 +12,8 @@ _AGMSG_SWEEP_SH=1
 # observation without an environment-based target injection path in the shipped
 # command.
 _agmsg_sweep_agent_rows() {
-  declare -F agmsg_terminal_agents >/dev/null 2>&1 || return 127
-  agmsg_terminal_agents
+  declare -F agmsg_terminal_enumerate >/dev/null 2>&1 || return 127
+  agmsg_terminal_enumerate
 }
 
 # These two adapters are intentionally fail-closed until the instance-aware

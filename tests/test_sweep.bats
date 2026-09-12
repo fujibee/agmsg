@@ -8,6 +8,20 @@ setup() {
   bash "$SCRIPTS/join.sh" alpha bob codex /tmp/b >/dev/null
 }
 
+@test "census seam delegates to the shared terminal enumeration primitive" {
+  run bash -c '
+    unset _AGMSG_SWEEP_SH
+    source "$1/lib/sweep.sh"
+    agmsg_terminal_enumerate() {
+      printf "herdr\t/run/jugemu.sock\tw1:p7\n"
+    }
+    _agmsg_sweep_agent_rows
+  ' _ "$SCRIPTS"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = $'herdr\t/run/jugemu.sock\tw1:p7' ]
+}
+
 teardown() { teardown_test_env; }
 
 _run_sweep_fixture() {   # <rows>
