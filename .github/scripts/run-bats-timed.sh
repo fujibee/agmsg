@@ -51,7 +51,7 @@ stop() {
 }
 trap stop INT TERM
 
-while IFS= read -r file; do
+while IFS= read -r file <&3; do
   [ -n "$file" ] || continue
   started_epoch="$(date -u +%s)"
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -73,6 +73,6 @@ while IFS= read -r file; do
 
   completed=$((completed + 1))
   [ "$status" -eq 0 ] || suite_status="$status"
-done < "$manifest"
+done 3< "$manifest"
 
 exit "$suite_status"
