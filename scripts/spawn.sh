@@ -203,11 +203,53 @@ PROJECT="$(agmsg_normalize_project_path "$PROJECT")"
 SPAWN_LAUNCHER="$(agmsg_type_get "$AGENT_TYPE" spawn)"
 CLI_BIN="$(agmsg_type_get "$AGENT_TYPE" cli)"
 CLI_BIN_EXE="${CLI_BIN%% *}"
-CLI_PATH=""
+CLI_BIN_SUFFIX="${CLI_BIN#"$CLI_BIN_EXE"}"
+CLI_FALLBACK_PATH=""
+
+# Resolve a direct CLI from locations GUI-launched hosts commonly omit from
+# PATH. This is only a parent-side availability fallback: the generated boot
+# script still checks its own (often richer login-shell) PATH first, preserving
+# wrappers, functions, and shims such as agmsg's optional Codex monitor shim.
+resolve_cli_fallback() {
+  local name="$1" platform dir candidate extension appdata_dir
+  local -a extensions=("") fallback_dirs=()
+  platform="$(uname -s)"
+  [ -n "${HOME:-}" ] && fallback_dirs+=("$HOME/.local/bin")
+  case "$platform" in
+    MINGW*|MSYS*|CYGWIN*)
+      extensions=("" ".exe" ".cmd" ".bat")
+      if [ -n "${APPDATA:-}" ]; then
+        appdata_dir="$(cygpath -u "$APPDATA" 2>/dev/null || true)"
+        [ -n "$appdata_dir" ] && fallback_dirs+=("$appdata_dir/npm")
+      fi
+      ;;
+  esac
+  fallback_dirs+=(/opt/homebrew/bin /usr/local/bin /usr/bin /bin)
+
+  for dir in "${fallback_dirs[@]}"; do
+    for extension in "${extensions[@]}"; do
+      candidate="$dir/$name$extension"
+      case "$extension" in
+        .cmd|.bat)
+          [ -f "$candidate" ] || continue
+          ;;
+        *)
+          [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+          ;;
+      esac
+      printf '%s\n' "$candidate"
+      return 0
+    done
+  done
+  return 1
+}
+
 if [ -n "$CLI_BIN" ]; then
-  command -v "$CLI_BIN_EXE" >/dev/null 2>&1 \
-    || die "'$CLI_BIN_EXE' not found on PATH — install the ${AGENT_TYPE} CLI first"
-  CLI_PATH="$(command -v "$CLI_BIN_EXE")"
+  if ! command -v "$CLI_BIN_EXE" >/dev/null 2>&1; then
+    CLI_FALLBACK_PATH="$(resolve_cli_fallback "$CLI_BIN_EXE" 2>/dev/null || true)"
+    [ -n "$CLI_FALLBACK_PATH" ] \
+      || die "'$CLI_BIN_EXE' not found on PATH or in fallback locations (~/.local/bin, Windows APPDATA/npm, /opt/homebrew/bin, /usr/local/bin, /usr/bin, /bin) — install the ${AGENT_TYPE} CLI first"
+  fi
 elif [ -z "$SPAWN_LAUNCHER" ]; then
   die "agent type '$AGENT_TYPE' manifest declares neither a 'cli' binary nor a 'spawn' launcher"
 fi
@@ -453,8 +495,22 @@ esac
   else
     # Direct-CLI launch:
     # `<cli> [<resume_arg> <uuid>] [<model_arg> <model_id>] [spawn-options...] [<name_arg> <name>] [<prompt_arg>] "/<cmd> actas <name>"`.
-    # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
-    # above) that may itself be several tokens (e.g. `opencode run --interactive`).
+    # A CLI found on the parent's PATH keeps the existing late-bound manifest
+    # command. If only a fixed fallback was available, the child checks its own
+    # PATH first (login shells may add a wrapper or shim) and uses the quoted
+    # fallback path only when the logical command is still unavailable.
+    if [ -n "$CLI_FALLBACK_PATH" ]; then
+      printf 'if command -v %q >/dev/null 2>&1; then\n' "$CLI_BIN_EXE"
+      printf '  _agmsg_cli=%q\n' "$CLI_BIN_EXE"
+      echo 'else'
+      printf '  _agmsg_cli=%q\n' "$CLI_FALLBACK_PATH"
+      echo 'fi'
+      printf '%s"$_agmsg_cli"%s' "$MSYS_GUARD" "$CLI_BIN_SUFFIX"
+    else
+      # cli is emitted unquoted — it is trusted fixed-prefix manifest data (see
+      # above) that may itself be several tokens (e.g. `opencode run --interactive`).
+      printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
+    fi
     # The resume head (#339) is emitted RIGHT AFTER the cli, before all other
     # args: mandatory for a subcommand-shaped resume (codex `resume <id>`),
     # harmless for a flag-shaped one (claude `--resume <id>`) -- see
@@ -464,7 +520,6 @@ esac
     # agmsg_role_cli_args so its flag order matches resurrect-panes.sh.
     # MSYS_GUARD (#336) prefixes the CLI line as a command-local env assignment;
     # emitted with %s (not %q) so it stays an assignment, not a single token.
-    printf '%s%s' "$MSYS_GUARD" "$CLI_BIN"
     agmsg_role_resume_head "$AGENT_TYPE" "$RESUME_UUID"
     [ -n "$MODEL_ID" ] && printf ' %s %q' "$MODEL_ARG" "$MODEL_ID"
     for _tok in ${SPAWN_OPT_TOKENS[@]+"${SPAWN_OPT_TOKENS[@]}"}; do
@@ -476,6 +531,7 @@ esac
     # FROM (claim is idempotent per sid).
     agmsg_role_cli_args "$AGENT_TYPE" "$SESSION_NAME" "$ACTAS_PROMPT"
     printf '\n'
+    [ -n "$CLI_FALLBACK_PATH" ] && echo 'unset _agmsg_cli'
   fi
   echo 'rm -f "$0" 2>/dev/null'   # self-clean once the agent exits
   echo 'exec "${SHELL:-/bin/bash}" -i'
