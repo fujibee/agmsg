@@ -1,0 +1,19 @@
+# Functions in scripts/drivers/terminals/herdr/ops.sh that call the `herdr` CLI
+# directly, with the exact number of such calls. Checked by
+# .github/scripts/check-herdr-cli-routing.sh in both directions.
+#
+# Every function here is instance-wide or deliberately ambient: it lists or
+# creates in the instance the environment names, and takes no pane id whose
+# socket could name a different one. A function that operates ON a pane id is
+# not allowed here -- it routes through `_herdr_cli <id> ...`, which sets
+# HERDR_SOCKET_PATH from a socket-qualified id. (`_herdr_cli` itself calls
+# `herdr "$@"` with no literal subcommand word, so the position rule never
+# counts it: it is the one routed call by construction.)
+#
+# <function> <count>
+_herdr_pane_for_session 1
+terminal_describe 2
+terminal_detect 1
+terminal_find_by_label 1
+terminal_spawn 5
+terminal_enumerate_panes 2

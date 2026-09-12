@@ -1147,6 +1147,98 @@ agmsg_terminal_name_self_safe() {
   return "$_rc"
 }
 
+# ---------------------------------------------------------------------------
+# Locators: the one grammar for "a pane, in an instance, of a kind" (#1055, #1152).
+#
+#   <kind>:<driver id>, where every driver's id is itself <instance>:<pane>:
+#     herdr:/run/jugemu.sock:w1:p7      instance = the server's socket path
+#     tmux:/tmp/tmux-501/default:%4     instance = the socket path
+#     plain:iterm:/dev/ttys040          instance = the emulator adapter name
+#
+# Pane ids repeat across instances (two herdr sessions both own a w1:p2; tmux
+# has one id space per socket), so a pane id alone can name a live pane in
+# another instance -- measured 2026-09-11 when a repair resolved in one session
+# landed in another's pane. A locator carries the instance, and every reader
+# of one goes through THIS split: four seats read locators today, and four
+# parsers would disagree only after the fact.
+#
+# The registry owns the outer shape (kind + id) and asks the KIND's driver for
+# the boundary inside its id (`terminal_id_split`): where a herdr id ends in
+# two colon fields and a tmux or plain id in one is the driver's grammar, held
+# once, in the driver. An instance may contain spaces; it may NOT contain a
+# colon or a control character -- a socket path with a colon is legal on POSIX
+# and is refused BY NAME (instance_malformed) rather than mis-split; the
+# round-trippable encoding is deferred (#1166), and refusing is what keeps a
+# mis-read from becoming a write.
+#
+# agmsg_locator_compose <kind> <instance> <pane>   -> "<kind>:<instance>:<pane>"  rc 0
+# agmsg_locator_split   <locator>                  -> "<kind>\t<instance>\t<pane>" rc 0
+#   rc 2, nothing on stdout, one named reason on stderr:
+#     unknown_kind | instance_malformed | pane_malformed | id_malformed | locator_malformed
+#   (id_malformed: the kind's driver refused "<instance>:<pane>" as one id --
+#   a colon inside a socket path, a bare pane with no instance, a pane outside
+#   the grammar; the registry does not guess which half)
+# Neither function replaces the caller's loaded driver: the kind's driver is
+# consulted through _agmsg_terminal_id_ok / _agmsg_terminal_id_split, which
+# load it in a subshell when it is not the loaded one.
+
+_agmsg_locator_kind_ok() {   # <kind>
+  case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  [ -d "$(agmsg_terminal_dir "$1" 2>/dev/null)" ]
+}
+
+_agmsg_locator_instance_ok() {   # <instance>
+  case "$1" in ''|*:*|*[[:cntrl:]]*) return 1 ;; esac
+  return 0
+}
+
+# The kind's own split of its id: "<instance>\t<pane>", or rc 1 when the id is
+# not a qualified one. Direct when that driver is loaded; a subshell load
+# otherwise (the same posture as _agmsg_terminal_id_ok).
+_agmsg_terminal_id_split() {   # <kind> <id>
+  local kind="$1" id="$2"
+  _agmsg_locator_kind_ok "$kind" || return 1
+  if [ "$kind" = "$_AGMSG_TERMINAL_LOADED" ]; then
+    declare -F terminal_id_split >/dev/null 2>&1 || return 1
+    terminal_id_split "$id"
+  else
+    ( agmsg_terminal_load "$kind" >/dev/null 2>&1 || exit 1
+      declare -F terminal_id_split >/dev/null 2>&1 || exit 1
+      terminal_id_split "$id" )
+  fi
+}
+
+agmsg_locator_compose() {   # <kind> <instance> <pane>
+  local kind="$1" instance="$2" pane="$3" id
+  _agmsg_locator_kind_ok "$kind"         || { echo "agmsg: locator: unknown_kind" >&2; return 2; }
+  _agmsg_locator_instance_ok "$instance" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
+  case "$pane" in ''|*[[:cntrl:]]*) echo "agmsg: locator: pane_malformed" >&2; return 2 ;; esac
+  id="$instance:$pane"
+  _agmsg_terminal_id_ok "$kind" "$id"    || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
+  # The driver must split it back into the same halves, or the grammar and the
+  # composition disagree about where the instance ends.
+  [ "$(_agmsg_terminal_id_split "$kind" "$id")" = "$(printf '%s\t%s' "$instance" "$pane")" ] \
+    || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
+  printf '%s:%s:%s\n' "$kind" "$instance" "$pane"
+}
+
+agmsg_locator_split() {   # <locator>
+  local loc="$1" kind id halves instance pane
+  case "$loc" in *[[:cntrl:]]*|'') echo "agmsg: locator: locator_malformed" >&2; return 2 ;; esac
+  case "$loc" in *:*) ;; *) echo "agmsg: locator: locator_malformed" >&2; return 2 ;; esac
+  kind="${loc%%:*}"; id="${loc#*:}"
+  _agmsg_locator_kind_ok "$kind" || { echo "agmsg: locator: unknown_kind" >&2; return 2; }
+  [ -n "$id" ] || { echo "agmsg: locator: locator_malformed" >&2; return 2; }
+  # The driver is the only judge of its own id. When it refuses, the registry
+  # cannot honestly say WHICH half is wrong (a plain instance is an enumerated
+  # adapter name, a herdr one a path), so the reason names the whole id.
+  _agmsg_terminal_id_ok "$kind" "$id" || { echo "agmsg: locator: id_malformed" >&2; return 2; }
+  halves="$(_agmsg_terminal_id_split "$kind" "$id")" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
+  instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+  _agmsg_locator_instance_ok "$instance" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
+  printf '%s\t%s\t%s\n' "$kind" "$instance" "$pane"
+}
+
 # Every pane every terminal can see, as (kind, instance, pane) TRIPLES.
 #
 # A BARE PANE ID IS NOT AN ADDRESS. Measured on this machine, 2026-09-11: two

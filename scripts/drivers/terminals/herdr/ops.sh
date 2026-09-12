@@ -303,7 +303,26 @@ _herdr_pane_id_ok() {
 # registry (`_agmsg_terminal_id_ok herdr <id>`) for every row the label
 # resolver reads and every ref it validates; a malformed row must answer no.
 #   w<workspace>:p<pane>, alphanumerics only, exactly one colon.
-terminal_id_ok() {   # <id>
+# A herdr id is `wN:pX`, optionally qualified by the socket of the instance
+# that owns it: `<socket-path>:wN:pX` (#1055; the shape tmux took in #1051).
+# Pane ids repeat across running herdr sessions, so a bare id names a pane only
+# in whatever instance the ambient HERDR_SOCKET_PATH points at; a qualified id
+# names ONE pane, and every call about it goes to that socket (_herdr_cli). A
+# socket path may contain spaces; a colon or a control character in it is
+# refused rather than mis-split (the round-trippable form is #1166).
+_herdr_sock_of() {   # <id> -> socket path, or "" for a bare id
+  case "$1" in
+    *:w*:p*) printf '%s' "${1%:*:*}" ;;
+    *) printf '' ;;
+  esac
+}
+_herdr_bare_of() {   # <id> -> wN:pX
+  case "$1" in
+    *:w*:p*) printf '%s' "${1#"${1%:*:*}":}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+_herdr_bare_ok() {   # <wN:pX>
   case "$1" in
     w[0-9A-Za-z]*:p[0-9A-Za-z]*) : ;;
     *) return 1 ;;
@@ -311,6 +330,35 @@ terminal_id_ok() {   # <id>
   case "$1" in *:*:*) return 1 ;; esac
   case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac
   return 0
+}
+terminal_id_ok() {   # <id>
+  local sock bare
+  # Control characters are checked on the WHOLE id first: `$( )` would strip a
+  # trailing newline from a split half and let it pass.
+  case "$1" in *[[:cntrl:]]*) return 1 ;; esac
+  sock="$(_herdr_sock_of "$1")"; bare="$(_herdr_bare_of "$1")"
+  if [ -n "$sock" ]; then
+    case "$sock" in *:*) return 1 ;; esac
+  fi
+  case "$1" in :*) return 1 ;; esac
+  _herdr_bare_ok "$bare"
+}
+# The id's two halves, as the locator grammar wants them: "<instance>\t<pane>".
+# A bare id has no instance and is refused here -- a locator must name one.
+terminal_id_split() {   # <id>
+  local sock
+  terminal_id_ok "$1" || return 1
+  sock="$(_herdr_sock_of "$1")"
+  [ -n "$sock" ] || return 1
+  printf '%s\t%s\n' "$sock" "$(_herdr_bare_of "$1")"
+}
+# Run one herdr CLI call ABOUT <id>: a qualified id reaches its own instance
+# through HERDR_SOCKET_PATH; a bare id keeps the ambient one. The bare pane id
+# is what the CLI is given (via the caller's arguments), never the qualified one.
+_herdr_cli() {   # <id> <herdr args...>
+  local id="$1"; shift
+  local sock; sock="$(_herdr_sock_of "$id")"
+  if [ -n "$sock" ]; then HERDR_SOCKET_PATH="$sock" herdr "$@"; else herdr "$@"; fi
 }
 
 _herdr_new_pane_id() {
@@ -359,7 +407,7 @@ _herdr_new_pane_id() {
 #                  they are not split — both are UNKNOWN.
 _herdr_pane_input_ready() {
   local pane="$1" info rc=0 sp fg jesc
-  info="$(herdr pane process-info --pane "$pane" 2>/dev/null)" || rc=$?
+  info="$(_herdr_cli "$pane" pane process-info --pane "$(_herdr_bare_of "$pane")" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || return 2
   jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
   # Require the JSON TYPE to be integer, in the SAME payload, BEFORE reading the value:
@@ -473,7 +521,7 @@ terminal_spawn() {
 terminal_pane_state() {
   local id="$1" json rc=0
   command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
-  json="$(herdr agent list 2>/dev/null)" || rc=$?
+  json="$(_herdr_cli "$id" agent list 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] || { echo unknown; return 10; }
   [ -n "$json" ] || { echo unknown; return 10; }
 
@@ -503,7 +551,7 @@ terminal_pane_state() {
   # The asymmetry is the point — the cheap answer is permissive, the destructive
   # one is not.
   local iesc q jtype jtrc out orc alen det hit
-  iesc="$(printf '%s' "$id" | sed "s/'/''/g")"
+  iesc="$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")"   # responses carry the BARE pane
   for q in '$.result.agents' '$' '$.agents' '$.result'; do
     jtrc=0
     jtype="$(sqlite3 :memory: "SELECT json_type('$jesc', '$q')" 2>/dev/null)" || jtrc=$?
@@ -550,7 +598,7 @@ terminal_pane_state() {
 
 terminal_despawn() {
   local id="$1"
-  herdr pane close "$id" >/dev/null 2>&1 || { echo runtime_error; return 13; }
+  _herdr_cli "$id" pane close "$(_herdr_bare_of "$id")" >/dev/null 2>&1 || { echo runtime_error; return 13; }
   echo ok
   return 0
 }
@@ -562,10 +610,10 @@ terminal_where() {
   local id="$1" json rc=0 esc container present
   command -v herdr >/dev/null 2>&1 || { echo unknown; return 10; }
   _herdr_pane_id_ok "$id" || { echo unsupported; return 13; }
-  json="$(herdr pane layout --pane "$id" 2>/dev/null)" || rc=$?
+  json="$(_herdr_cli "$id" pane layout --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$json" ] || { echo unknown; return 10; }
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$id" | sed "s/'/''/g")'" 2>/dev/null)" \
+  present="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$esc','\$.result.layout.panes') WHERE json_extract(value,'\$.pane_id') = '$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")'" 2>/dev/null)" \
     || { echo unknown; return 10; }
   container="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.layout.tab_id')" 2>/dev/null)" \
     || { echo unknown; return 10; }
@@ -657,6 +705,12 @@ _herdr_swap_changed() {
 
 terminal_arrange() {
   local source="$1" intent="$2" target="$3" layout source_layout state rc=0 tab first second temporary_tab swap_result
+  # Two panes are only arrangeable inside ONE instance: a qualified source and
+  # target naming different sockets is refused here, before any call is made.
+  if [ "$(_herdr_sock_of "$source")" != "$(_herdr_sock_of "$target")" ]; then
+    echo "herdr: cannot arrange across instances ('$source' vs '$target')" >&2
+    echo runtime_error; return 10
+  fi
   command -v herdr >/dev/null 2>&1 || { echo runtime_error; return 10; }
   _herdr_pane_id_ok "$source" && _herdr_pane_id_ok "$target" || { echo unsupported; return 13; }
   case "$intent" in place_below|place_right|swap) : ;; *) echo unsupported; return 13 ;; esac
@@ -665,13 +719,13 @@ terminal_arrange() {
     # Swap keeps both panes occupied, but the native command still needs a
     # positive existence observation for each id. A layout response for one
     # pane cannot establish the other when they live in different tabs.
-    layout="$(herdr pane layout --pane "$target" 2>/dev/null)" || { echo runtime_error; return 10; }
-    [ -n "$layout" ] && _herdr_layout_has_pane "$layout" "$target" \
+    layout="$(_herdr_cli "$target" pane layout --pane "$(_herdr_bare_of "$target")" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$layout" ] && _herdr_layout_has_pane "$layout" "$(_herdr_bare_of "$target")" \
       || { echo unknown; return 10; }
-    source_layout="$(herdr pane layout --pane "$source" 2>/dev/null)" || { echo runtime_error; return 10; }
-    [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$source" \
+    source_layout="$(_herdr_cli "$source" pane layout --pane "$(_herdr_bare_of "$source")" 2>/dev/null)" || { echo runtime_error; return 10; }
+    [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$(_herdr_bare_of "$source")" \
       || { echo unknown; return 10; }
-    swap_result="$(herdr pane swap --source-pane "$source" --target-pane "$target" 2>/dev/null)" \
+    swap_result="$(_herdr_cli "$source" pane swap --source-pane "$(_herdr_bare_of "$source")" --target-pane "$(_herdr_bare_of "$target")" 2>/dev/null)" \
       || { echo runtime_error; return 12; }
     [ -n "$swap_result" ] || { echo runtime_error; return 12; }
     rc=0
@@ -682,10 +736,10 @@ terminal_arrange() {
       *) echo runtime_error; return 12 ;;
     esac
   fi
-  layout="$(herdr pane layout --pane "$target" 2>/dev/null)" || rc=$?
+  layout="$(_herdr_cli "$target" pane layout --pane "$(_herdr_bare_of "$target")" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ] && [ -n "$layout" ] || { echo runtime_error; return 10; }
   rc=0
-  state="$(_herdr_arrange_state "$layout" "$source" "$intent" "$target")" || rc=$?
+  state="$(_herdr_arrange_state "$layout" "$(_herdr_bare_of "$source")" "$intent" "$(_herdr_bare_of "$target")")" || rc=$?
   case "$state" in
     unchanged) echo unchanged; return 0 ;;
     ambiguous_layout) echo ambiguous_layout; return 12 ;;
@@ -696,8 +750,8 @@ terminal_arrange() {
       # valid move candidate. Ask the source itself before treating absence as
       # "different"; an unanswered or malformed lookup remains unknown.
       rc=0
-      source_layout="$(herdr pane layout --pane "$source" 2>/dev/null)" || rc=$?
-      [ "$rc" -eq 0 ] && [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$source" \
+      source_layout="$(_herdr_cli "$source" pane layout --pane "$(_herdr_bare_of "$source")" 2>/dev/null)" || rc=$?
+      [ "$rc" -eq 0 ] && [ -n "$source_layout" ] && _herdr_layout_has_pane "$source_layout" "$(_herdr_bare_of "$source")" \
         || { echo unknown; return 10; }
       ;;
     unknown) echo unknown; return 10 ;;
@@ -706,13 +760,13 @@ terminal_arrange() {
   tab="$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$layout" | sed "s/'/''/g")','\$.result.layout.tab_id')" 2>/dev/null)" \
     || { echo runtime_error; return 10; }
   [ -n "$tab" ] || { echo runtime_error; return 10; }
-  first="$(herdr pane move "$source" --new-tab --no-focus 2>/dev/null)" || { echo runtime_error; echo "herdr: failed before moving '$source' to a temporary tab" >&2; return 12; }
+  first="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --new-tab --no-focus 2>/dev/null)" || { echo runtime_error; echo "herdr: failed before moving '$source' to a temporary tab" >&2; return 12; }
   _herdr_move_changed "$first" || { echo runtime_error; echo "herdr: the temporary-tab move for '$source' did not report changed=true" >&2; return 12; }
   temporary_tab="$(_herdr_move_created_tab "$first")" || temporary_tab=""
   [ -n "$temporary_tab" ] || temporary_tab='<new tab id unavailable>'
   case "$intent" in
-    place_below) second="$(herdr pane move "$source" --tab "$tab" --split down --target-pane "$target" --no-focus 2>/dev/null)" ;;
-    place_right) second="$(herdr pane move "$source" --tab "$tab" --split right --target-pane "$target" --no-focus 2>/dev/null)" ;;
+    place_below) second="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --tab "$tab" --split down --target-pane "$(_herdr_bare_of "$target")" --no-focus 2>/dev/null)" ;;
+    place_right) second="$(_herdr_cli "$source" pane move "$(_herdr_bare_of "$source")" --tab "$tab" --split right --target-pane "$(_herdr_bare_of "$target")" --no-focus 2>/dev/null)" ;;
   esac || {
     echo runtime_error
     echo "herdr: '$source' is left in temporary tab '$temporary_tab': placing it back in tab '$tab' relative to '$target' failed" >&2
@@ -774,9 +828,9 @@ terminal_peek() {
   # socket operations — never reaches herdr's JSON reply at all, so dropping
   # stderr left nothing to report except a guess.
   if [ -n "$lines" ]; then
-    stderr_body="$(herdr pane read "$id" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
   else
-    stderr_body="$(herdr pane read "$id" --source "$src" 2>&1 1>"$tmp")" || rc=$?
+    stderr_body="$(_herdr_cli "$id" pane read "$(_herdr_bare_of "$id")" --source "$src" 2>&1 1>"$tmp")" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     local stdout_body=""
@@ -812,8 +866,8 @@ terminal_team_observe() {
   local id="$1" pane_json agents_json pesc aesc activity label key title
   command -v herdr >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
-  pane_json="$(herdr pane get "$id" 2>/dev/null)" || return 10
-  agents_json="$(herdr agent list 2>/dev/null)" || return 10
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
+  agents_json="$(_herdr_cli "$id" agent list 2>/dev/null)" || return 10
   pesc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
   aesc="$(printf '%s' "$agents_json" | sed "s/'/''/g")"
   activity="$(sqlite3 :memory: "SELECT COALESCE(json_extract('$pesc','\$.result.pane.agent_status'),'unknown:activity_missing')" 2>/dev/null)" || return 10
@@ -841,7 +895,7 @@ terminal_team_observe() {
   #
   # The nesting does the split: the inner COALESCE fires only when a row matched,
   # the outer one only when none did.
-  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$id" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
+  key="$(sqlite3 :memory: "SELECT COALESCE((SELECT COALESCE(NULLIF(json_extract(value,'\$.name'),''),'absent:agent_key_unset') FROM json_each('$aesc','\$.result.agents') WHERE json_extract(value,'\$.pane_id')='$(printf '%s' "$(_herdr_bare_of "$id")" | sed "s/'/''/g")' LIMIT 1),'unknown:pane_not_in_agent_list')" 2>/dev/null)" || return 10
   case "$activity$label$key$title" in *$'\t'*|*$'\n'*|*$'\r'*) return 10 ;; esac
   printf '%s\t%s\t%s\t%s\n' "$activity" "$label" "$key" "$title"
 }
@@ -855,7 +909,7 @@ terminal_team_input_ready() {
   local id="$1" expected="$2" raw escaped kind status rc=0
   command -v herdr >/dev/null 2>&1 || { printf 'unknown:terminal_unreachable\n'; return 2; }
   _herdr_pane_id_ok "$id" || { printf 'unknown:invalid_pane_id\n'; return 2; }
-  raw="$(herdr agent get "$id" 2>/dev/null)" || rc=$?
+  raw="$(_herdr_cli "$id" agent get "$(_herdr_bare_of "$id")" 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     case "$raw" in
       *agent_not_found*) printf 'not_ready:agent_not_found\n'; return 1 ;;
@@ -895,7 +949,7 @@ terminal_poke() {
   command -v herdr >/dev/null 2>&1 \
     || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
   local body rc=0
-  body="$(herdr agent prompt "$id" "$text" 2>&1)" || rc=$?
+  body="$(_herdr_cli "$id" agent prompt "$(_herdr_bare_of "$id")" "$text" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo runtime_error
     # Same lesson as peek (#1158): forward what herdr actually said instead of
@@ -1034,7 +1088,7 @@ terminal_label_of() {   # <id>
   [ -n "$id" ] || return 13
   command -v herdr >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
-  pane_json="$(herdr pane get "$id" 2>/dev/null)" || return 10
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
   esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
   # NULLIF: json_extract returns SQL NULL for a missing key and '' for a key set
   # to the empty string, and both mean "this pane carries no label" -- neither is
@@ -1081,7 +1135,7 @@ terminal_name() {
     return 13
   }
   local _err _rc=0
-  _err="$(herdr agent rename "$id" "$key" 2>&1 >/dev/null)" || _rc=$?
+  _err="$(_herdr_cli "$id" agent rename "$(_herdr_bare_of "$id")" "$key" 2>&1 >/dev/null)" || _rc=$?
   if [ "$_rc" -ne 0 ]; then
     echo runtime_error
     echo "herdr: 'agent rename' for '$team/$name' on pane '$id' failed (rc=$_rc)${_err:+: $_err}" >&2
@@ -1094,7 +1148,7 @@ terminal_name() {
   # non-zero here would therefore throw away the very thing the reordering above
   # exists to protect, for a decoration.
   if [ "$mode" != key ]; then
-    herdr pane rename "$id" "$label" >/dev/null 2>&1 || true
+    _herdr_cli "$id" pane rename "$(_herdr_bare_of "$id")" "$label" >/dev/null 2>&1 || true
   fi
   echo ok
   return 0
@@ -1132,10 +1186,10 @@ terminal_pane_process_observe() {   # <candidate>
   command -v herdr >/dev/null 2>&1 || return 10
   command -v sqlite3 >/dev/null 2>&1 || return 10
   _herdr_pane_id_ok "$id" || return 13
-  info="$(herdr pane process-info --pane "$id" 2>/dev/null)" || return 10
+  info="$(_herdr_cli "$id" pane process-info --pane "$(_herdr_bare_of "$id")" 2>/dev/null)" || return 10
   jesc="$(printf '%s' "$info" | sed "s/'/''/g")"
   seen="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.process_info.pane_id')='text' THEN json_extract('$jesc','\$.result.process_info.pane_id') ELSE '' END" 2>/dev/null)" || return 10
-  [ "$seen" = "$id" ] || return 10
+  [ "$seen" = "$(_herdr_bare_of "$id")" ] || return 10   # the response names the BARE pane
   # Both of these are part of the schema this op reads. Absent, or present with
   # the wrong type, is a payload we do not understand -- not a pane without a
   # shell.
