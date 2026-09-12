@@ -96,3 +96,9 @@ _run_sweep_fixture() {   # <rows>
   [ "$output" = 'Usage: sweep.sh <team>' ]
   refute rg -n 'sweep\.sh|agmsg_sweep_run' "$SCRIPTS"/join.sh "$SCRIPTS"/team.sh "$SCRIPTS"/watch.sh "$SCRIPTS"/session-start.sh
 }
+
+@test "skill exposes sweep only as an explicit team-scoped action (#1152)" {
+  grep -Fq 'If argument starts with "sweep" followed by a team name:' "$BATS_TEST_DIRNAME/../SKILL.md"
+  grep -Fq 'scripts/sweep.sh <team>' "$BATS_TEST_DIRNAME/../SKILL.md"
+  grep -Fq 'Never run it from inbox delivery' "$BATS_TEST_DIRNAME/../SKILL.md"
+}

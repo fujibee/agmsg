@@ -4,10 +4,13 @@
 [ -n "${_AGMSG_SWEEP_SH:-}" ] && return 0
 _AGMSG_SWEEP_SH=1
 
-# This is the only seam between the command and #1155. Once that change lands,
-# the body is exactly the production primitive. Keeping the call here also lets
-# the orchestrator tests replace the observation without an environment-based
-# target injection path in the shipped command.
+# This is the only seam between the command and #1155's read-only census. The
+# census is shared infrastructure, not a sweep-owned scan: diagnostics and this
+# command consume the same observation independently and never consume one
+# another's output. Once #1155 lands, the body is exactly the production
+# primitive. Keeping the call here also lets the orchestrator tests replace the
+# observation without an environment-based target injection path in the shipped
+# command.
 _agmsg_sweep_agent_rows() {
   declare -F agmsg_terminal_agents >/dev/null 2>&1 || return 127
   agmsg_terminal_agents
@@ -163,3 +166,9 @@ $rows
 EOF
   return "$rc"
 }
+
+# LIMIT: the command can target only locations the census can observe. A seat
+# whose real location is absent from that snapshot cannot be swept, and a
+# detector using the same census cannot diagnose that seat's lone bad claim by
+# comparing it with a location the census never saw. Never fill that hole from
+# a placement record: the record is the projection being repaired.

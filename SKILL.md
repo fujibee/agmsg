@@ -105,6 +105,14 @@ If argument is "team", "team --json", "team --fix", "team --fix-pane-names", or 
    - `--rename-sessions` repairs the CLI session name by **typing** the type's rename command (e.g. `/rename <team>-<agent>`) into each session whose name mismatches, is renamable, and is at a prompt; reported as `changed`, `poked_unverified`, `skipped`, or `failed`.
    - `--fix` does both, unconditionally, including the keystroke.
 
+If argument starts with "sweep" followed by a team name:
+1. Run `~/.agents/skills/__SKILL_NAME__/scripts/sweep.sh <team>`.
+2. This is an explicit leader action. Never run it from inbox delivery, session
+   startup, a status command, or any other automatic path.
+3. Show the complete result. A skipped `none`, `unknown`, unreadable,
+   unsupported, or malformed observation is part of the result, not noise to
+   summarize away; the command returns non-zero when any such row exists.
+
 If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
 2. Determine which team the target agent belongs to, then run:
