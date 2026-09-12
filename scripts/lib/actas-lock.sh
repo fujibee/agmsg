@@ -72,6 +72,17 @@ agmsg_ready_path() {
   printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
 }
 
+# One-shot actas-completion sentinel path for (team, agent). Unlike
+# agmsg_ready_path(), this does NOT represent a live watcher: ready.sh marks it
+# once after an agent finishes its actas bootstrap, and spawn consumes it. Keep
+# the prefix disjoint from ready.* so watcher GC never mistakes one protocol for
+# the other. See #338 Gap 2.
+agmsg_actas_ready_path() {
+  local team="$1" agent="$2"
+  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  printf '%s/actas-ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
+}
+
 # Placement record path for a spawned (team, agent). `spawn` writes the
 # member's tmux target id + project + type here at launch time so that
 # `despawn --force` can tear the member down (kill its pane/window, drop its
