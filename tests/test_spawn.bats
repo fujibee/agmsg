@@ -187,6 +187,45 @@ teardown() {
   [[ "$output" == *"export AGMSG_SPAWNED=1"* ]]
 }
 
+@test "spawn: boot script records and clears a boot-pid presence sentinel" {
+  # The boot script writes its own pid to agmsg_boot_pid_path before running
+  # the CLI, and removes it right after -- a liveness signal independent of
+  # the ready sentinel, which only appears once the CLI/model reaches its own
+  # watcher-registration step (some types, e.g. grok-build, never get there
+  # when the underlying model call itself fails, such as an unresolved
+  # rate-limit dialog).
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
+  [ "$status" -eq 0 ]
+
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/actas-lock.sh"
+  local pid_path; pid_path="$(agmsg_boot_pid_path myteam alice)"
+
+  boot="$(cat "$CAPTURE")"; run cat "$boot"
+  # The literal path is assigned to a boot-local var once, then referenced by
+  # name everywhere else (write, trap, clear) rather than re-embedded.
+  [[ "$output" == *"AGMSG_BOOT_PID_PATH=$pid_path"* ]]
+  [[ "$output" == *'echo $$ > "$AGMSG_BOOT_PID_PATH"'* ]]
+  [[ "$output" == *'trap '"'"'rm -f "$AGMSG_BOOT_PID_PATH"'* ]]
+  [[ "$output" == *"EXIT HUP TERM INT"* ]]
+  [[ "$output" == *'rm -f "$AGMSG_BOOT_PID_PATH"'* ]]
+  # Written before the CLI line, cleared after it -- not the other way round.
+  # (The CLI invocation is asserted-between, not line-anchored, since it may be
+  # prefixed by MSYS2_ARG_CONV_EXCL=... even on macOS/Linux -- inert there, but
+  # it means the line doesn't start with the bare cli name.)
+  local write_line clear_line between
+  write_line="$(grep -n "AGMSG_BOOT_PID_PATH=" "$boot" | head -1 | cut -d: -f1)"
+  clear_line="$(grep -n "^rm -f \"\$AGMSG_BOOT_PID_PATH\"" "$boot" | head -1 | cut -d: -f1)"
+  [ -n "$write_line" ]
+  [ -n "$clear_line" ]
+  [ "$write_line" -lt "$clear_line" ]
+  between="$(sed -n "${write_line},${clear_line}p" "$boot")"
+  [[ "$between" == *"claude"* ]]
+  [[ "$between" == *"actas"* ]]
+  [[ "$between" == *"alice"* ]]
+}
+
 @test "spawn: a type without name_arg emits no name flag (#339)" {
   # gemini's manifest has no name_arg=, so the boot script must not name the
   # session -- no bare `-n` token, unchanged from pre-#339 behavior.
