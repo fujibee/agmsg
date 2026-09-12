@@ -359,6 +359,41 @@ EOF
   grep -q "could not read pane 'w1:p4'" "$errf"
 }
 
+# herdr whose `pane read` fails with an OS-level error on its REAL stderr — no
+# JSON body at all, and no claim from herdr that the pane is gone. Modeled on
+# the measured case (#1158): a sandbox that denies socket operations returns
+# `PermissionDenied (Operation not permitted)` this way, not as pane_not_found.
+_install_fake_herdr_denied() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  echo "PermissionDenied (Operation not permitted)" >&2
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "peek taxonomy: herdr pane read fails with no absence claim -> 11, not 12 (#1158)" {
+  _install_fake_herdr_denied
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 11 ]
+  [ ! -s "$outf" ]
+  # the real diagnostic is forwarded, not discarded by the old `2>/dev/null`
+  grep -q "PermissionDenied" "$errf"
+  grep -q "could not read pane 'w1:p4'" "$errf"
+  # and the driver must not assert a cause it has not established
+  # `! cmd` never fails a bats test unless it is the last statement (#670), so
+  # both lines go through the refute helper; the second one only "worked" for
+  # being last, and the next line added below it would have silenced it.
+  refute grep -q "no longer exist" "$errf"
+  refute grep -q "it may be" "$errf"
+}
+
 # --- peek READ contract: content reaches stdout VERBATIM --------------
 # herdr's content is captured to a temp file and cat'd, NOT round-tripped through a
 # command substitution (which strips every trailing newline) + printf '%s\n' (which
@@ -479,6 +514,9 @@ EOF
   [ "$status" -eq 12 ]
   _out_has "no live agent to receive"
   _out_has "poke needs a running agent"
+  # the real diagnostic is forwarded now, not discarded by the old
+  # `>/dev/null 2>&1` (#1158's sweep of the same file)
+  _out_has "no live agent in pane"
 }
 
 @test "poke taxonomy: tmux NOT on PATH -> 10 (unreachable), not 13" {

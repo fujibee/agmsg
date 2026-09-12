@@ -745,10 +745,16 @@ terminal_peek() {
   # caller would otherwise read as the pane's content — "read" and "could-not-read"
   # returning in the same shape (the third instance of one channel carrying two
   # meanings). ISOLATE it (capture; the error body goes to stderr, never stdout), and
-  # SPLIT the single 13 so the caller can tell the three cases apart:
-  #   plain has no peek path        -> 13 (unchanged; documented, and the templates say so)
-  #   the terminal is unreachable   -> 10 (herdr not on PATH / cannot even be run)
-  #   the pane is gone / unreadable -> 12 (herdr answered, but not with content)
+  # SPLIT the single 13 so the caller can tell the cases apart:
+  #   plain has no peek path         -> 13 (unchanged; documented, and the templates say so)
+  #   the terminal is unreachable    -> 10 (herdr not on PATH / cannot even be run)
+  #   the pane is CONFIRMED gone     -> 12 (herdr's own reply says so — the only
+  #                                         reply this driver reads as absence)
+  #   the read failed for any other
+  #   reason (a denied socket, a
+  #   timeout, an unrecognized reply) -> 11 (existence is NOT decided; a caller
+  #                                          that branches on this must not treat
+  #                                          it as "gone" — #1158)
   command -v herdr >/dev/null 2>&1 \
     || { echo "herdr: not on PATH — cannot reach the terminal to peek pane '$id'" >&2; return 10; }
   # READ contract: stdout must be the pane's visible text VERBATIM. A command
@@ -758,18 +764,42 @@ terminal_peek() {
   # decide on rc, then cat the bytes unmodified. herdr writes its error JSON to
   # STDOUT on failure, so on the failure path that body is a diagnostic -> stderr,
   # never the caller's content.
-  local tmp rc=0
+  local tmp rc=0 stderr_body=""
   tmp="$(mktemp)" || { echo "herdr: could not allocate a temp file to peek pane '$id'" >&2; return 12; }
+  # `2>&1 1>"$tmp"` (order matters): stdout still lands in $tmp byte-for-byte on
+  # success, and whatever herdr wrote to its REAL stderr is captured into
+  # $stderr_body instead of the old `2>/dev/null`, which threw it away outright.
+  # That discard was the bug (#1158): an OS-level failure — measured as
+  # `PermissionDenied (Operation not permitted)` from a sandbox that denies
+  # socket operations — never reaches herdr's JSON reply at all, so dropping
+  # stderr left nothing to report except a guess.
   if [ -n "$lines" ]; then
-    herdr pane read "$id" --source "$src" --lines "$lines" >"$tmp" 2>/dev/null || rc=$?
+    stderr_body="$(herdr pane read "$id" --source "$src" --lines "$lines" 2>&1 1>"$tmp")" || rc=$?
   else
-    herdr pane read "$id" --source "$src" >"$tmp" 2>/dev/null || rc=$?
+    stderr_body="$(herdr pane read "$id" --source "$src" 2>&1 1>"$tmp")" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    [ -s "$tmp" ] && cat "$tmp" >&2   # the error body is a diagnostic, not content
+    local stdout_body=""
+    [ -s "$tmp" ] && stdout_body="$(cat "$tmp")"
     rm -f "$tmp"
-    echo "herdr: could not read pane '$id' (it may no longer exist)" >&2
-    return 12
+    # Forward both diagnostics verbatim — neither is the caller's content —
+    # instead of discarding one and inventing a single cause for both.
+    [ -n "$stdout_body" ] && printf '%s\n' "$stdout_body" >&2
+    [ -n "$stderr_body" ] && printf '%s\n' "$stderr_body" >&2
+    # ABSENCE is earned, not assumed: the same rule terminal_pane_state above
+    # applies to its own list, and the one the tmux driver applies to "no server
+    # running" — only herdr's OWN claim that the pane is gone may be read as
+    # gone. Say what happened, not what it might mean.
+    case "$stdout_body" in
+      *pane_not_found*)
+        echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
+        return 12
+        ;;
+      *)
+        echo "herdr: could not read pane '$id': ${stderr_body:-${stdout_body:-herdr exited $rc with no diagnostic on either channel}}" >&2
+        return 11
+        ;;
+    esac
   fi
   cat "$tmp"   # only the real pane content reaches stdout, byte-for-byte
   rm -f "$tmp"
@@ -852,17 +882,30 @@ terminal_team_input_ready() {
 # a tmux send-keys concern, not herdr's. ASSERTED argv (agent prompt <id> <text>).
 terminal_poke() {
   local id="$1" text="$2"
-  # Same exit taxonomy as peek: a terminal that is UNREACHABLE (herdr not on
-  # PATH) is 10; a pane that cannot RECEIVE — gone, or with no live agent to accept the
-  # prompt — is 12. 13 stays reserved for a driver with no poke path at all (plain's
-  # permanent "no addressable pane"); a herdr pane whose agent has EXITED must not
-  # borrow it. This is the peek/poke asymmetry made concrete: peek reads a pane and
-  # succeeds even with no live agent, poke needs a running agent and so has a distinct
-  # "no one to receive" failure that peek does not.
+  # Exit taxonomy: a terminal that is UNREACHABLE (herdr not on PATH) is 10; a
+  # pane that cannot RECEIVE — gone, or with no live agent to accept the
+  # prompt — is 12, unlike peek's narrower 11/12 split (#1158): a caller here
+  # already needs a live agent either way, so the two causes point at the same
+  # next action and are not worth separating. 13 stays reserved for a driver
+  # with no poke path at all (plain's permanent "no addressable pane"); a herdr
+  # pane whose agent has EXITED must not borrow it. This is the peek/poke
+  # asymmetry made concrete: peek reads a pane and succeeds even with no live
+  # agent, poke needs a running agent and so has a distinct "no one to
+  # receive" failure that peek does not.
   command -v herdr >/dev/null 2>&1 \
     || { echo runtime_error; echo "herdr: not on PATH — cannot reach the terminal to poke pane '$id'" >&2; return 10; }
-  herdr agent prompt "$id" "$text" >/dev/null 2>&1 \
-    || { echo runtime_error; echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2; return 12; }
+  local body rc=0
+  body="$(herdr agent prompt "$id" "$text" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo runtime_error
+    # Same lesson as peek (#1158): forward what herdr actually said instead of
+    # discarding it via the old `>/dev/null 2>&1`. The sentence below stays
+    # hedged — it already names two possibilities rather than asserting one —
+    # but the reader deserves the real diagnostic alongside it, not silence.
+    [ -n "$body" ] && printf '%s\n' "$body" >&2
+    echo "herdr: could not deliver to pane '$id' — it may be gone, or have no live agent to receive (poke needs a running agent; peek does not)" >&2
+    return 12
+  fi
   echo ok
   return 0
 }
