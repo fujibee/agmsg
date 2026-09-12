@@ -185,6 +185,30 @@ FAKE
   [ ! -e "$(agmsg_spawn_path T alice)" ]
 }
 
+@test "fence: a terminal_id that CONTAINS a colon and does not change lets the later cells proceed (stored and re-read tids compare whole)" {
+  # The instance half is guaranteed colon-free by the driver; the terminal_id
+  # half is not (a failed read is even spelled unknown:<why>). A stored fence
+  # split on the LAST colon truncates such a tid and every re-read compares
+  # unequal to it -- a false refusal on every later cell.
+  _fixture terminal_id "term:0x5:9" title "◐ claude" label "" key "" status idle kind claude
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line fence)" = "fence=/tmp/herdr/sessions/jugemu/herdr.sock:term:0x5:9" ]
+  [ "$(_line label)" = "label attempt=ok readback=verified" ]
+  [ "$(_line session)" = "session attempt=ok readback=verified" ]
+}
+
+@test "fence: two terminal_ids that differ only BEFORE their last colon are still told apart" {
+  _fixture terminal_id "term:a:9" title "◐ claude" label "" key "" status idle kind claude
+  sed -i '' -e 's|^fx() { sed -n "s/^$1=//p" "$FIX" \| head -1; }$|fx() { if [ "$1" = terminal_id ] \&\& [ "$(grep -c "\\[pane\\] \\[get\\]" "$ARGV_LOG")" -gt 1 ]; then echo term:c:9; return; fi; sed -n "s/^$1=//p" "$FIX" \| head -1; }|' "$FAKEBIN/herdr" 2>/dev/null \
+    || sed -i 's|^fx() { sed -n "s/^$1=//p" "$FIX" \| head -1; }$|fx() { if [ "$1" = terminal_id ] \&\& [ "$(grep -c "\\[pane\\] \\[get\\]" "$ARGV_LOG")" -gt 1 ]; then echo term:c:9; return; fi; sed -n "s/^$1=//p" "$FIX" \| head -1; }|' "$FAKEBIN/herdr"
+  grep -q 'term:c:9' "$FAKEBIN/herdr"
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line label)" = "label attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
+  [ "$(_line session)" = "session attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
+}
+
 # --- the entry refuses what is not a location of ours ------------------------------
 
 @test "refuse: a ref outside the driver grammar writes nothing" {
