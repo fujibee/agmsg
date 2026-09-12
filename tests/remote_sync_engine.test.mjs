@@ -2393,6 +2393,10 @@ test("a staged input leaves nothing behind, whether the call succeeds or fails",
   const before = await residue();
 
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-residue-"));
+  t.after(async () => {
+    if (!root.startsWith(tmpdir())) throw new Error("unsafe test root");
+    await rm(root, { recursive: true, force: true });
+  });
   const input = Array.from({ length: 8 }, (_, index) => ({ type: "probe", index }));
 
   const ok = (pidFile, helperFile) => `#!/usr/bin/env bash
