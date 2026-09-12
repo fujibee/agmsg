@@ -77,6 +77,24 @@ EOF
   export PATH="$FAKEBIN:$PATH"
 }
 
+_install_fake_osascript() {
+  cat > "$FAKEBIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  cat > "$FAKEBIN/osascript" <<EOF
+#!/usr/bin/env bash
+{ printf 'osascript'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case "\$2" in
+  probe) printf 'supported\n' ;;
+  peek) printf 'plain visible text\n' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # --- peek ----------------------------------------------------------------
 
 @test "peek: tmux record reads the pane verbatim; --lines forwards scrollback" {
@@ -132,6 +150,16 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c 'native channel' || true)" -eq 0 ]
 }
 
+@test "peek: an emulator-qualified plain record reads through its adapter" {
+  _install_fake_osascript
+  _write_record "plain:iterm:/dev/ttys040"
+  run bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 0 ]
+  _out_has "plain visible text"
+  [ "$(grep -c ' \[probe\] \[/dev/ttys040\]' "$ARGV_LOG")" -eq 1 ]
+  [ "$(grep -c ' \[peek\] \[/dev/ttys040\]' "$ARGV_LOG")" -eq 1 ]
+}
+
 @test "peek: --lines rejects a non-number instead of passing it through" {
   _install_fake_tmux
   _write_record "tmux:%5"
@@ -182,6 +210,16 @@ EOF
   [ "$status" -eq 13 ]
   _out_has "unsupported: plain terminal has no addressable pane"
   _out_has "agent type may offer a native channel"
+}
+
+@test "poke: an emulator-qualified plain record submits through its adapter" {
+  _install_fake_osascript
+  _write_record "plain:terminal:/dev/ttys039"
+  run bash "$SCRIPTS/poke.sh" testteam alice "one prompt"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via plain"
+  [ "$(grep -c ' \[probe\] \[/dev/ttys039\]' "$ARGV_LOG")" -eq 1 ]
+  grep -q ' \[poke\] \[/dev/ttys039\] \[one prompt\]' "$ARGV_LOG"
 }
 
 @test "poke: unquoted multi-word text is refused, not silently truncated" {

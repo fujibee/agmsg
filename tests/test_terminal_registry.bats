@@ -312,7 +312,7 @@ _fake_herdr_list_scalar_session() {
   [ "$(agmsg_terminal_get tmux capabilities)" = "spawn despawn peek poke where arrange name" ]
   agmsg_terminal_has tmux capabilities peek
   refute agmsg_terminal_has tmux capabilities nonesuch
-  [ "$(agmsg_terminal_get plain capabilities)" = "spawn despawn" ]
+  [ "$(agmsg_terminal_get plain capabilities)" = "spawn despawn peek poke" ]
   [ "$(agmsg_terminal_get plain nonesuch DEFLT)" = "DEFLT" ]
 }
 
@@ -347,7 +347,48 @@ _fake_herdr_list_scalar_session() {
 
 # --- plain driver -----------------------------------------------------------
 
-@test "plain: peek and poke are unsupported (exit 13, reason on stderr)" {
+@test "runtime capability: drivers without a hook fall back to the static ceiling" {
+  run agmsg_terminal_capability tmux peek '%1'
+  [ "$status" -eq 0 ]
+  run agmsg_terminal_capability tmux nonesuch '%1'
+  [ "$status" -eq 1 ]
+  grep -q 'does not implement' <<<"$output"
+}
+
+@test "runtime capability: hook narrows static support and preserves three outcomes" {
+  agmsg_terminal_load plain
+  terminal_capability() {
+    case "$1" in
+      peek) echo 'unsupported: adapter absent' >&2; return 1 ;;
+      poke) echo 'unknown: automation denied' >&2; return 2 ;;
+    esac
+    return 0
+  }
+  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
+  [ "$status" -eq 1 ]
+  grep -q 'adapter absent' <<<"$output"
+  run agmsg_terminal_capability plain poke 'iterm:/dev/ttys040'
+  [ "$status" -eq 2 ]
+  grep -q 'automation denied' <<<"$output"
+}
+
+@test "runtime capability: hook cannot grant beyond the static ceiling" {
+  agmsg_terminal_load plain
+  terminal_capability() { echo called > "$TEST_SKILL_DIR/hook-called"; return 0; }
+  run agmsg_terminal_capability plain arrange 'iterm:/dev/ttys040'
+  [ "$status" -eq 1 ]
+  [ ! -e "$TEST_SKILL_DIR/hook-called" ]
+}
+
+@test "runtime capability: an invalid hook status becomes unknown" {
+  agmsg_terminal_load plain
+  terminal_capability() { return 9; }
+  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
+  [ "$status" -eq 2 ]
+  grep -q 'invalid capability status 9' <<<"$output"
+}
+
+@test "plain: legacy unqualified peek and poke are unsupported" {
   agmsg_terminal_load plain
   run terminal_peek "-"
   [ "$status" -eq 13 ]
@@ -357,13 +398,97 @@ _fake_herdr_list_scalar_session() {
   grep -q 'unsupported' <<<"$output"
 }
 
-@test "plain: check ok, describe advertises spawn despawn" {
+@test "plain: check ok, describe advertises its runtime-narrowed ceiling" {
   agmsg_terminal_load plain
   run terminal_check
   [ "$status" -eq 0 ]
   [ "$output" = "ok" ]
   run terminal_describe
-  grep -q '^capabilities=spawn despawn$' <<<"$output"
+  grep -q '^capabilities=spawn despawn peek poke$' <<<"$output"
+}
+
+@test "plain: address grammar accepts measured emulator tty refs only" {
+  agmsg_terminal_load plain
+  terminal_id_ok 'iterm:/dev/ttys040'
+  terminal_id_ok 'terminal:/dev/ttys039'
+  terminal_id_ok '-'
+  refute terminal_id_ok 'iterm:w0t0p0:inherited'
+  refute terminal_id_ok 'unknown:/dev/ttys040'
+  refute terminal_id_ok 'terminal:/dev/ttysx'
+}
+
+@test "plain: measured adapter support is checked again by peek and poke" {
+  cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  cat > "$FAKEBIN/osascript" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGV_LOG"
+case "$2" in
+  probe) printf 'supported\n' ;;
+  peek) printf 'visible terminal text\n' ;;
+  poke) : ;;
+esac
+SH
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load plain
+
+  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
+  [ "$status" -eq 0 ]
+  run terminal_peek 'iterm:/dev/ttys040'
+  [ "$status" -eq 0 ]
+  [ "$output" = 'visible terminal text' ]
+  run terminal_poke 'iterm:/dev/ttys040' 'one submitted prompt'
+  [ "$status" -eq 0 ]
+  [ "$(grep -c ' probe /dev/ttys040' "$ARGV_LOG")" -ge 3 ]
+  grep -q ' poke /dev/ttys040 one submitted prompt' "$ARGV_LOG"
+}
+
+@test "plain: unsupported and unknown runtime probes remain distinct" {
+  cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  cat > "$FAKEBIN/osascript" <<'SH'
+#!/usr/bin/env bash
+case "${FAKE_ADAPTER_RESULT:-}" in
+  unsupported) printf 'unsupported: no matching tty\n' ;;
+  unknown) printf 'unknown: automation permission denied\n' ;;
+esac
+SH
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/osascript"
+  export PATH="$FAKEBIN:$PATH"
+  agmsg_terminal_load plain
+
+  export FAKE_ADAPTER_RESULT=unsupported
+  run agmsg_terminal_capability plain poke 'terminal:/dev/ttys039'
+  [ "$status" -eq 1 ]
+  grep -q 'no matching tty' <<<"$output"
+  run terminal_poke 'terminal:/dev/ttys039' text
+  [ "$status" -eq 13 ]
+
+  export FAKE_ADAPTER_RESULT=unknown
+  run agmsg_terminal_capability plain poke 'terminal:/dev/ttys039'
+  [ "$status" -eq 2 ]
+  grep -q 'automation permission denied' <<<"$output"
+  run terminal_poke 'terminal:/dev/ttys039' text
+  [ "$status" -eq 10 ]
+}
+
+@test "plain: only measured emulator adapters may claim support" {
+  local adapters_dir f
+  adapters_dir="$(dirname "$BATS_TEST_DIRNAME")/scripts/drivers/terminals/plain/adapters"
+  for f in "$adapters_dir"/*.applescript; do
+    case "$(basename "$f")" in
+      iterm.applescript|terminal.applescript) continue ;;
+    esac
+    if grep -q 'operation is "probe" then return "supported"' "$f"; then
+      echo "$(basename "$f") claims supported for an emulator that was never measured" >&2
+      return 1
+    fi
+  done
 }
 
 # --- tmux driver ops (fake tmux argv) --------------------------------------
@@ -1966,7 +2091,7 @@ _fake_herdr_list_anchored_plus() {
 # driver), so "did it reach the owning server" does not apply. What keeps it
 # honest is the oracle table in the "#1141 review" section: the socket form
 # and the legacy bare form are both accepted, as the registry accepted them.
-_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_find_by_label terminal_id_ok"
+_TMUX_NO_ID_OPS="terminal_check terminal_describe terminal_detect terminal_spawn terminal_capability terminal_find_by_label terminal_id_ok"
 
 # op -> the argument list to call it with, using SOCKID/BAREID as the id slot.
 _tmux_op_args() {

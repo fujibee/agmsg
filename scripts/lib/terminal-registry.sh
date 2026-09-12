@@ -59,6 +59,12 @@
 #                                       both. A driver that has only one name
 #                                       treats it as the key.
 #                                       (safe to re-apply on SessionStart).
+# Optional:
+#   terminal_capability <capability> [id]
+#                                       Narrow the manifest's implementation
+#                                       ceiling for one runtime instance: 0
+#                                       supported, 1 unsupported, 2 unknown.
+#                                       It cannot grant an unadvertised verb.
 #
 # Detection is a driver FUNCTION (not a manifest datum like the types axis's
 # detect=) because herdr's "which pane am I" is logic, not a set of env vars. The
@@ -194,7 +200,39 @@ EOF
 # what makes a missing op FAIL rather than silently borrow the previously loaded
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
-_AGMSG_TERMINAL_OPTIONAL="terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe"
+_AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe"
+
+# Resolve one capability for the terminal instance addressed by <id>.
+# terminal.conf is the implementation ceiling: a runtime hook may narrow that
+# set, but can never grant an operation the manifest does not advertise.
+# Optional terminal_capability has three outcomes: 0 supported, 1 unsupported,
+# and 2 unknown/unavailable. Its stderr reason is preserved deliberately.
+agmsg_terminal_capability() {   # <terminal> <capability> [id]
+  local name="$1" capability="$2" id="${3:-}" rc=0
+  if ! agmsg_terminal_has "$name" capabilities "$capability"; then
+    printf "unsupported: terminal driver '%s' does not implement capability '%s'\n" \
+      "$name" "$capability" >&2
+    return 1
+  fi
+
+  if [ "$name" = "${_AGMSG_TERMINAL_LOADED:-}" ]; then
+    declare -F terminal_capability >/dev/null 2>&1 || return 0
+    terminal_capability "$capability" "$id" || rc=$?
+  else
+    (
+      agmsg_terminal_load "$name" >/dev/null 2>&1 || exit 2
+      declare -F terminal_capability >/dev/null 2>&1 || exit 0
+      terminal_capability "$capability" "$id"
+    ) || rc=$?
+  fi
+  case "$rc" in
+    0|1|2) return "$rc" ;;
+    *)
+      printf "unknown: terminal driver '%s' returned invalid capability status %s for '%s'\n" \
+        "$name" "$rc" "$capability" >&2
+      return 2 ;;
+  esac
+}
 
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
