@@ -24,8 +24,8 @@ _agmsg_sweep_label_at() { return 127; }       # <kind> <instance> <pane>
 _agmsg_sweep_poke_fenced() { return 127; }    # <kind> <instance> <pane> <owner> <text>
 _agmsg_sweep_instance_allowed() { return 127; } # <team> <kind> <instance>
 _agmsg_sweep_locator() {                      # <kind> <instance> <pane>
-  declare -F agmsg_terminal_locator >/dev/null 2>&1 || return 127
-  agmsg_terminal_locator "$1" "$2" "$3"
+  declare -F agmsg_locator_compose >/dev/null 2>&1 || return 127
+  agmsg_locator_compose "$1" "$2" "$3"
 }
 
 # Is <label> exactly one local registration in <team> whose type agrees with
@@ -158,7 +158,11 @@ EOF
     # for the write; that would create a second address derivation that could
     # cross instances.
     ref=""; locator_rc=0
-    ref="$(_agmsg_sweep_locator "$kind" "$instance" "$pane" 2>/dev/null)" || locator_rc=$?
+    # Composer stderr carries its named refusal (instance_malformed,
+    # pane_malformed, unknown_kind). Preserve it: a generic rc without the
+    # grammar reason would make malformed input indistinguishable from an
+    # unavailable implementation.
+    ref="$(_agmsg_sweep_locator "$kind" "$instance" "$pane")" || locator_rc=$?
     if [ "$locator_rc" -ne 0 ] || [ -z "$ref" ]; then
       _agmsg_sweep_report_skip "$kind" "$instance" "$pane" "locator_unavailable:rc_$locator_rc"
       rc=1

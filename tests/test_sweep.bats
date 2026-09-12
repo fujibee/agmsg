@@ -21,7 +21,7 @@ _run_sweep_fixture() {   # <rows>
       [ "$2:$3" != "herdr:/run/oma.sock" ]
     }
     _agmsg_sweep_locator() {
-      case "$2" in *:*) return 2 ;; esac
+      case "$2" in *:*) echo instance_malformed >&2; return 2 ;; esac
       printf "%s:%s:%s\n" "$1" "$2" "$3"
     }
     _agmsg_sweep_label_at() {
@@ -83,6 +83,7 @@ _run_sweep_fixture() {   # <rows>
   _run_sweep_fixture $'tmux\t/tmp/server:alternate\t%4\tagent\tcodex'
   [ "$status" -eq 1 ]
   [ ! -e "$BATS_TEST_TMPDIR/pokes" ]
+  grep -Fq 'instance_malformed' <<< "$output"
   grep -Fq 'reason=locator_unavailable:rc_2' <<< "$output"
 }
 
