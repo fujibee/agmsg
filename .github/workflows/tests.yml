@@ -104,7 +104,21 @@ concurrency:
 env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
   # stay in lockstep; the stable summary job below verifies that they do.
-  SHARD_TOTAL: 4
+  #
+  # 4 -> 5 (#1107). Same change already on the terminal-driver integration branch;
+  # this is the main-targeted twin so main PRs stop hitting the same macOS cap.
+  # shard-tests.sh seeds each pinned file at one shard's AVERAGE share
+  # (total_tests/total), which grows with the suite while the pinned files do not,
+  # over-reserving the two pin shards and pushing the real load onto the non-pin
+  # ones. main is 1742 @tests here, so the worst-case non-pin shard
+  # (total*(N+2)/N^2) is 653 at N=4 and 488 at N=5 -- and a 4-shard macOS leg was
+  # already reaching the 30-min cap while still passing tests (a slow shard, not a
+  # hang: the workflow's own #848/#857 note). Five, not six, because the account
+  # runs at most FIVE macOS jobs at once (the concurrency header): a sixth would
+  # queue behind the other five of its own run. This does NOT fix the scaling
+  # property (pin_seed still grows, count still under-values wait-dominant files);
+  # that re-fit is #847.
+  SHARD_TOTAL: 5
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
   # This comment used to end "one trip to chocolatey, which is the only time
@@ -249,7 +263,7 @@ jobs:
     # the required contexts are `bats` (the aggregate) and the Windows install
     # leg, and neither is renamed, so branch protection sees exactly what it
     # saw. `needs` is one of the contexts a job name may read.
-    name: bats (${{ matrix.os }} ${{ matrix.shard }}/4)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
+    name: bats (${{ matrix.os }} ${{ matrix.shard }}/5)${{ needs.changes.outputs.docs_only == 'true' && ' — docs-only, suite skipped' || '' }}
     needs: changes
     # Run even if `changes` somehow failed/was skipped — fail open to the full
     # suite rather than leaving this REQUIRED check unreported (which would
@@ -283,7 +297,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
