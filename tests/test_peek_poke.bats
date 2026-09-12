@@ -387,8 +387,11 @@ EOF
   grep -q "PermissionDenied" "$errf"
   grep -q "could not read pane 'w1:p4'" "$errf"
   # and the driver must not assert a cause it has not established
-  ! grep -q "no longer exist" "$errf"
-  ! grep -q "it may be" "$errf"
+  # `! cmd` never fails a bats test unless it is the last statement (#670), so
+  # both lines go through the refute helper; the second one only "worked" for
+  # being last, and the next line added below it would have silenced it.
+  refute grep -q "no longer exist" "$errf"
+  refute grep -q "it may be" "$errf"
 }
 
 # --- peek READ contract: content reaches stdout VERBATIM --------------
