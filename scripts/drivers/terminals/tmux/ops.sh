@@ -662,3 +662,102 @@ terminal_pane_process_observe() {   # <candidate>
   case "$pane_pid" in ''|0*|*[!0-9]*) return 10 ;; esac
   printf '%s\t%s\n' "$bare" "$pane_pid"
 }
+
+# OPTIONAL OP. Every pane this terminal can see, ACROSS EVERY SERVER, each row
+# carrying the instance it was seen in.
+#
+# RESURRECTED FROM #1146 / PR #1147. The socket enumeration and -- more
+# importantly -- the rule for when a server counts as DEAD were already written
+# and measured there; that PR was closed only because a different design was
+# expected to replace it, and that expectation is gone. The mechanics below are
+# that branch's, unchanged in substance.
+#
+# WHY A PANE ID ALONE IS NOT AN ANSWER. A pane id is unique within one server and
+# nowhere else: `%0` exists on every server that has ever opened a pane (#1051).
+# So every row here is qualified with the socket it came from, and a caller can
+# never end up holding an id it cannot ask about again.
+#
+# stdout, one line per record:
+#
+#   <instance><TAB><pane>    a pane observed in that instance
+#   !<TAB><instance>         that instance could NOT be read
+#
+# THE SECOND ROW IS THE POINT, and it is where this differs from #1146's search.
+# That search asked "is this label unique across every server?", so a server it
+# could not read POISONED the whole answer -- it returned "could not answer"
+# rather than risk reporting one hit while a second hit sat unread. This op asks
+# a different question ("what is out there?"), and for that question one
+# unreadable server must not lose the panes of the servers that did answer. So
+# the hole is NAMED and enumeration continues. Same mechanics, different verdict,
+# because the question is different.
+#
+# A SOCKET PROVES NOTHING. It outlives the server that made it. Only tmux saying
+# `no server running` or `no such file or directory` is evidence of death;
+# permission, a transient failure and a protocol mismatch all look identical from
+# here, and treating those as death would silently drop a live server's panes.
+terminal_enumerate_panes() {
+  local dir uid sock socks out err rc=0
+  command -v tmux >/dev/null 2>&1 || return 10
+  # If the uid cannot be read, the socket directory cannot be NAMED -- and a
+  # directory we could not name is not an empty one. Measured on this machine
+  # (2026-09-11): while directory services were degraded, `id -un` returned the
+  # bare uid and name lookups failed outright. Falling through with an empty uid
+  # would build `/tmp/tmux-`, find nothing, and report "no servers".
+  uid="$(id -u 2>/dev/null)"
+  case "$uid" in ''|*[!0-9]*) return 10 ;; esac
+  dir="${TMUX_TMPDIR:-/tmp}/tmux-$uid"
+  # No socket directory IS an answer: this user has never run a tmux server.
+  # Distinct from the case above, where we could not look.
+  [ -d "$dir" ] || return 0
+  err="$(mktemp "${TMPDIR:-/tmp}/agmsg-tmuxenum.XXXXXX")" || err=""
+  # THE GLOB RUNS IN A SUBSHELL, with `nullglob` set there and nowhere else.
+  # Measured on this machine, both interpreters: with a caller's
+  # `shopt -s failglob` and an EMPTY socket directory, a bare
+  # `for sock in "$dir"/*` produced NO OUTPUT AT ALL -- the shell died at the
+  # expansion, before any row could be printed. That is the same shape as the
+  # errexit defect review found in the proof coordinator, arriving through a
+  # glob option instead: the caller's shell state reaching into a sourced file.
+  #
+  # A command substitution is its own subshell, so `shopt` inside it cannot leak
+  # back to the caller -- which is the only way to get a predictable glob without
+  # editing a setting that is not ours. Control bytes are refused rather than
+  # carried: every row here is TAB-separated and a socket name is not a place to
+  # smuggle one.
+  # TWO THINGS, and each was measured wrong first:
+  #
+  #   `shopt -u failglob`  nullglob does NOT cover this. With both set, failglob
+  #                        WINS: bash 5 still died with `no match:` after
+  #                        nullglob was set. The subshell is where the option
+  #                        can be dropped without editing the caller's.
+  #   `case … in (pat)`    bash 3.2 parses `$( … )` by counting parens, so a
+  #                        `case` pattern's closing `)` inside a command
+  #                        substitution ends the substitution early: measured,
+  #                        `syntax error near unexpected token 'newline'` on
+  #                        3.2 and fine on 5. The leading `(` balances it.
+  socks="$(shopt -u failglob 2>/dev/null; shopt -s nullglob 2>/dev/null
+           for s in "$dir"/*; do
+             [ -S "$s" ] || continue
+             case "$s" in (*[[:cntrl:]]*) continue ;; esac
+             printf '%s\n' "$s"
+           done)"
+  [ -n "$socks" ] || { [ -n "$err" ] && rm -f "$err"; return 0; }
+  printf '%s\n' "$socks" | while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    rc=0
+    out="$(tmux -S "$sock" list-panes -a -F '#{pane_id}' 2>"${err:-/dev/null}")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ -n "$err" ] && grep -qiE 'no server running|no such file or directory' "$err" 2>/dev/null; then
+        continue                      # proven stale: one dead server, keep going
+      fi
+      printf '!\t%s\n' "$sock"        # a hole with a name, not a silent drop
+      continue
+    fi
+    [ -n "$out" ] || continue
+    printf '%s\n' "$out" | while IFS= read -r pane; do
+      [ -n "$pane" ] || continue
+      printf '%s\t%s\n' "$sock" "$pane"
+    done
+  done
+  [ -n "$err" ] && rm -f "$err"
+  return 0
+}

@@ -17,7 +17,9 @@
 # HOW IT COUNTS. By CALL POSITION, not by text match: a line is a direct call
 # only when `herdr <subcommand>` stands where a command stands -- at the start
 # of a statement, or right after `$(`, `if`, `!`, `&&`, `||`, `|`, `then`,
-# `else`, `do`. Comment lines are skipped before matching, and `herdr:` inside a
+# `else`, `do`, with any `VAR=value` assignment prefixes in between (a call
+# that sets HERDR_SOCKET_PATH by hand is the bypass this exists to catch).
+# Comment lines are skipped before matching, and `herdr:` inside a
 # message string never has a subcommand word after it. (An earlier count of
 # these calls by plain grep answered 55 where the true number is 34: comments
 # and prose matched. That count is what this script must not repeat.)
@@ -48,7 +50,10 @@ counts="$(awk '
     sub(/[[:space:]]#.*$/,"",line)
     n=0
     # a command boundary, then optional spaces, then `herdr <word>`
-    while (match(line, /(^|\$\(|[;|&(]|[[:space:]](if|then|else|do|!)[[:space:]])[[:space:]]*herdr[[:space:]]+[a-z][a-z-]*/)) {
+    # An assignment prefix (VAR=value ...) before the word is still a command
+    # position: `HERDR_SOCKET_PATH="$sock" herdr pane list` is exactly the form a
+    # bypass of _herdr_cli takes, and it must be counted, not hidden by the prefix.
+    while (match(line, /(^|\$\(|[;|&(]|[[:space:]](if|then|else|do|!)[[:space:]])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=("[^"]*"|[^[:space:]"]*)[[:space:]]+)*herdr[[:space:]]+[a-z][a-z-]*/)) {
       n++
       line=substr(line, RSTART+RLENGTH)
     }

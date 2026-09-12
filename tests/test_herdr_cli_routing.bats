@@ -104,3 +104,31 @@ FAKE
   refute grep -q '/run/other.sock:w1:p7' "$ARGV_LOG"
   grep -q 'sock=/run/other.sock | \[pane\] \[read\] \[w1:p7\]' "$ARGV_LOG"
 }
+
+@test "routing: pane_process_observe on a qualified id reads its OWN socket even when the ambient socket points at another instance holding the same bare pane" {
+  # Two instances, both with a w1:p7. The ambient environment names instance B;
+  # the id names instance A. The op must answer with A's pids only -- reading B
+  # would build a false proved from another seat's process set (review BLOCK).
+  export FAKEBIN="$SKILL_DIR/fakebin"; mkdir -p "$FAKEBIN"
+  export ARGV_LOG="$SKILL_DIR/argv.log"; : > "$ARGV_LOG"
+  export PATH="$FAKEBIN:$PATH"
+  cat > "$FAKEBIN/herdr" <<'FAKE'
+#!/usr/bin/env bash
+{ printf 'sock=%s |' "${HERDR_SOCKET_PATH:-<unset>}"; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$ARGV_LOG"
+# the strict record shape terminal_pane_process_observe parses (#1155)
+case "${HERDR_SOCKET_PATH:-}" in
+  /run/a.sock) printf '{"result":{"process_info":{"pane_id":"w1:p7","shell_pid":1111,"foreground_process_group_id":1111,"foreground_processes":[{"pid":1111}]}}}\n' ;;
+  /run/b.sock) printf '{"result":{"process_info":{"pane_id":"w1:p7","shell_pid":2222,"foreground_process_group_id":2222,"foreground_processes":[{"pid":2222}]}}}\n' ;;
+  *)           printf '{"result":{"process_info":{"pane_id":"w1:p7","shell_pid":9999,"foreground_process_group_id":9999,"foreground_processes":[{"pid":9999}]}}}\n' ;;
+esac
+FAKE
+  chmod +x "$FAKEBIN/herdr"
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/scripts/lib/terminal-registry.sh"; agmsg_terminal_load herdr
+  local out
+  out="$(HERDR_SOCKET_PATH=/run/b.sock terminal_pane_process_observe "/run/a.sock:w1:p7" 2>/dev/null)" || true
+  grep -Fq 'sock=/run/a.sock | [pane] [process-info] [--pane] [w1:p7]' "$ARGV_LOG"
+  refute grep -Fq 'sock=/run/b.sock' "$ARGV_LOG"
+  case "$out" in *1111*) : ;; *) echo "expected instance A's pid in: $out" >&2; return 1 ;; esac
+  case "$out" in *2222*|*9999*) echo "another instance's pid leaked: $out" >&2; return 1 ;; esac
+}
