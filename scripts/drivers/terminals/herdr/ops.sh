@@ -1137,3 +1137,86 @@ terminal_pane_process_observe() {   # <candidate>
   unset -f _seen_pid
   printf '%s%s\n' "$id" "$pids"
 }
+
+# OPTIONAL OP. Every pane this terminal can see, ACROSS EVERY INSTANCE, each row
+# carrying the instance it was seen in. Contract: see the tmux driver's copy.
+#
+# WHY THIS OP HAS TO EXIST FOR HERDR TOO, and what it cost to find out. A herdr
+# pane id is unique within ONE instance and nowhere else. Measured on this
+# machine, with two instances running:
+#
+#   instance   response pane_id   shell_pid   who is actually there
+#   jugemu     w1:p7              2727        one team's seat
+#   oma        w1:p7              80649       a different team's seat
+#
+# BOTH answer `pane_id=w1:p7`. So an id echoed back by the server proves the
+# server answered about the id we asked for -- never that the instance we meant
+# answered. Every row here is qualified with the SOCKET it came from, which is
+# the value that makes the row answerable again, exactly as the tmux driver
+# qualifies with its socket.
+#
+#   <instance><TAB><pane>    a pane observed in that instance
+#   !<TAB><instance>         that instance could NOT be read
+#
+# `session list --json` reports `running` per session, so a session declared not
+# running is SKIPPED -- that is a decided fact, not a gap. A running session
+# whose pane list fails is the gap, and it gets a named row rather than being
+# dropped: without it the sweep would read "nobody is there" for an instance
+# nobody could open.
+#
+# AN ENTRY WE DO NOT UNDERSTAND FAILS THE WHOLE ENUMERATION, as in
+# terminal_pane_process_observe: `running` must be a JSON boolean and
+# `socket_path` a JSON string, checked by type in the query itself, and the
+# number of entries is compared against the number that passed. A session we
+# could not parse might be the one holding the pane the caller is looking for.
+terminal_enumerate_panes() {
+  local sessions jesc n_all n_ok sockets sock out
+  command -v herdr >/dev/null 2>&1 || return 10
+  command -v sqlite3 >/dev/null 2>&1 || return 10
+  sessions="$(herdr session list --json 2>/dev/null)" || return 10
+  [ -n "$sessions" ] || return 10
+  jesc="$(printf '%s' "$sessions" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.sessions')='array' THEN json_array_length('$jesc','\$.sessions') ELSE -1 END" 2>/dev/null)" || return 10
+  case "$n_all" in ''|*[!0-9]*) return 10 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running') IN ('true','false') AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  case "$n_ok" in ''|*[!0-9]*) return 10 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 10
+  # ONE PATH PER LINE, never word-split. A socket path is a path: a home
+  # directory with a space in it is ordinary, and `for x in $(...)` turned one
+  # instance into THREE fabricated ones -- each reported as holding the same
+  # pane, which reads as MORE coverage rather than less (found in review,
+  # reproduced: `/a path/with spaces/herdr.sock` became `/a`, `path/with`,
+  # `spaces/herdr.sock`). A path containing a newline is refused instead, since
+  # a line-based channel cannot carry one.
+  sockets="$(sqlite3 :memory: "SELECT json_extract(value,'\$.socket_path') FROM json_each('$jesc','\$.sessions') WHERE json_type(value,'\$.running')='true' AND json_type(value,'\$.socket_path')='text'" 2>/dev/null)" || return 10
+  while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    case "$sock" in (*[[:cntrl:]]*) printf '!\t%s\n' "malformed_socket_path"; continue ;; esac
+    out="$(HERDR_SOCKET_PATH="$sock" herdr pane list 2>/dev/null)" || { printf '!\t%s\n' "$sock"; continue; }
+    _herdr_panes_of "$sock" "$out" || printf '!\t%s\n' "$sock"
+  done <<EOF
+$sockets
+EOF
+  return 0
+}
+
+# The pane ids in one `pane list` payload, each prefixed with its instance.
+# Separate so the strictness lives in one place: a payload whose `panes` is not
+# an array, or that holds an entry with no text `pane_id`, is not a short list --
+# it is a payload this driver does not understand, and the caller turns that into
+# a named hole rather than into "that instance has fewer panes".
+_herdr_panes_of() {   # <socket> <pane-list-json>
+  local sock="$1" jesc n_all n_ok ids
+  jesc="$(printf '%s' "$2" | sed "s/'/''/g")"
+  n_all="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$jesc','\$.result.panes')='array' THEN json_array_length('$jesc','\$.result.panes') ELSE -1 END" 2>/dev/null)" || return 1
+  case "$n_all" in ''|*[!0-9]*) return 1 ;; esac
+  n_ok="$(sqlite3 :memory: "SELECT count(*) FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  case "$n_ok" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n_ok" -eq "$n_all" ] || return 1
+  ids="$(sqlite3 :memory: "SELECT json_extract(value,'\$.pane_id') FROM json_each('$jesc','\$.result.panes') WHERE json_type(value,'\$.pane_id')='text'" 2>/dev/null)" || return 1
+  printf '%s\n' "$ids" | while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    printf '%s\t%s\n' "$sock" "$pane"
+  done
+  return 0
+}
