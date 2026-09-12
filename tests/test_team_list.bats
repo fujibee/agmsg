@@ -10,6 +10,12 @@ setup() {
 }
 
 teardown() {
+  # (#1107) A test that fails between starting the mock and its inline kill would
+  # otherwise leak the process. It is harmless now that the mock closes the
+  # descriptors it inherits, but a leaked server still holds a port and memory, so
+  # reap it here too. bats runs each test in its own subshell, so MOCK_PID is
+  # unset for a case that never started one.
+  [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null || true
   teardown_test_env
 }
 
@@ -53,7 +59,8 @@ json_field() {
 
   "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
-  local mock_pid=$!
+  MOCK_PID=$!
+  local mock_pid=$MOCK_PID
   wait_for_file_contains "$TEST_SKILL_DIR/server.port" '^[0-9][0-9]*$'
   local mock_port; mock_port="$(cat "$TEST_SKILL_DIR/server.port")"
   local endpoint="http://127.0.0.1:$mock_port"
@@ -76,7 +83,8 @@ json_field() {
   bash "$SCRIPTS/join.sh" myteam alice claude-code /tmp/project-a
   "$MOCK_PYTHON3" "$BATS_TEST_DIRNAME/helpers/mock_remote_server.py" 0 \
     </dev/null > "$TEST_SKILL_DIR/server.port" 2>"$TEST_SKILL_DIR/server.log" 3>&- &
-  local mock_pid=$!
+  MOCK_PID=$!
+  local mock_pid=$MOCK_PID
   wait_for_file_contains "$TEST_SKILL_DIR/server.port" '^[0-9][0-9]*$'
   local mock_port; mock_port="$(cat "$TEST_SKILL_DIR/server.port")"
   local endpoint="http://127.0.0.1:$mock_port"
