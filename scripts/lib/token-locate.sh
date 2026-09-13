@@ -73,3 +73,90 @@ agmsg_token_locate_classify() {   # <token> <locator1> <text1> [...]
     *) printf 'ambiguous\t%s\n' "$matches" ;;
   esac
 }
+
+# The wiring #1157's fix entry calls when #1154 (process ancestry) could not
+# establish this seat's location: emit a token, look for it across every pane
+# the fleet census (#1155's agmsg_terminal_enumerate) can reach, and say
+# where it landed. Requires agmsg_terminal_enumerate / agmsg_terminal_load /
+# terminal_peek / agmsg_locator_compose (terminal-registry.sh) to already be
+# sourced by the caller; this file does not source them itself so it stays
+# testable against fakes without pulling in a real terminal driver.
+#
+# Same four-state SHAPE as agmsg_self_proof (self-proof.sh) -- one line,
+# "state<TAB>payload", exit status carrying the same thing -- so a caller
+# that composes the two never reads a different answer from one than the
+# other. But this route can only ever ESTABLISH or FAIL TO ESTABLISH, never
+# DISPROVE: an emitted token not found in the panes this pass could reach is
+# not evidence the seat is nowhere -- render lag, an unreadable pane, or a
+# scan depth the token scrolled past are all still open per #1124's own
+# measurements, and only a completed ancestry walk gets to claim a real
+# negative. So `disproved` (rc 1) is never printed here.
+#
+#   rc 0  proved<TAB><locator>       the token matched exactly one pane's
+#                                    text; <locator> is kind:instance:pane,
+#                                    from agmsg_locator_compose
+#   rc 2  undetermined<TAB><reason>  census_enumerate_failed / no_panes_observed
+#                                    / no_panes_readable / not_found / ambiguous
+#   rc 3  unsupported<TAB><reason>   this build has no census primitive at all
+#                                    (agmsg_terminal_enumerate is not defined)
+#
+# Side effects: writes exactly one line to THIS process's own stdout (the
+# token, prefixed so it is not mistaken for anything else) and nothing else.
+# Every other pane reached here is only READ (terminal_peek), looking for
+# this seat's own just-emitted token -- never targeted by name, never
+# written to. One pass, no polling: called once, synchronous, costs one
+# terminal_peek per live pane the census reports.
+agmsg_token_locate_self() {   # <team> <agent>
+  local team="$1" agent="$2"
+  declare -F agmsg_terminal_enumerate >/dev/null 2>&1 \
+    || { printf 'unsupported\tcensus_primitive_unavailable\n'; return 3; }
+
+  local token; token="$(agmsg_token_locate_generate)"
+  printf 'AGMSG_LOCATE_TOKEN(%s/%s): %s\n' "$team" "$agent" "$token"
+
+  local census
+  if ! census="$(agmsg_terminal_enumerate)"; then
+    printf 'undetermined\tcensus_enumerate_failed\n'; return 2
+  fi
+  [ -n "$census" ] || { printf 'undetermined\tno_panes_observed\n'; return 2; }
+
+  local was="${_AGMSG_TERMINAL_LOADED:-}"
+  local a b c kind inst pane id text locator saw_pane=0
+  local pane_args=()
+  while IFS="$(printf '\t')" read -r a b c; do
+    case "$a" in
+      '?'|'!!'|'!') continue ;;   # that kind/instance could not be read at all
+      *) kind="$a"; inst="$b"; pane="$c" ;;
+    esac
+    [ -n "$kind" ] && [ -n "$inst" ] && [ -n "$pane" ] || continue
+    agmsg_terminal_load "$kind" >/dev/null 2>&1 || continue
+    id="$inst:$pane"
+    # 200 lines: this pass's own token is at most a few lines back in its own
+    # pane (nothing else runs between emitting it and this scan), and other
+    # seats' panes need only enough depth to plausibly still hold their own
+    # recent output -- an arbitrary, stated bound (#1124 left the general
+    # case open), not a claim that it is always enough.
+    if text="$(terminal_peek "$id" --lines 200 2>/dev/null)"; then
+      if locator="$(agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null)"; then
+        saw_pane=1
+        pane_args+=("$locator" "$text")
+      fi
+    fi
+  done <<< "$census"
+  if [ -n "$was" ]; then
+    agmsg_terminal_load "$was" >/dev/null 2>&1 || true
+  elif declare -F _agmsg_terminal_unset_ops >/dev/null 2>&1; then
+    _agmsg_terminal_unset_ops
+    _AGMSG_TERMINAL_LOADED=""
+  fi
+
+  [ "$saw_pane" -eq 1 ] || { printf 'undetermined\tno_panes_readable\n'; return 2; }
+
+  local result
+  result="$(agmsg_token_locate_classify "$token" "${pane_args[@]}")"
+  case "$result" in
+    found*)      printf 'proved\t%s\n' "${result#found$'\t'}"; return 0 ;;
+    ambiguous*)  printf 'undetermined\tambiguous\n'; return 2 ;;
+    *)           printf 'undetermined\tnot_found\n'; return 2 ;;
+  esac
+}
