@@ -351,7 +351,7 @@ close_own_placement() {
     watch_log "despawned '$name' (role dropped); no placement record for '$team/$name', so there is no pane to close from here — if a window remains it was not placed by agmsg; close it directly"
     return 2
   fi
-  IFS=$'\t' read -r ref _ _ < "$rec"
+  IFS=$'\t' read -r ref _ _ _ < "$rec"
   if [ -z "$ref" ]; then
     watch_report "despawned '$name' (role dropped); the placement record at $rec is empty, so the pane cannot be identified — close this window manually"
     return 1

@@ -26,7 +26,7 @@ _placement() {
   local agent="$1" rec ref terminal id project type
   rec="$(agmsg_spawn_path "$TEAM" "$agent")"
   [ -f "$rec" ] || { echo "arrange: no placement record for '$TEAM/$agent'" >&2; return 1; }
-  IFS=$'\t' read -r ref project type < "$rec" || true
+  IFS=$'\t' read -r ref project type _fence < "$rec" || true
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
   id="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || id=""
   [ -n "$terminal" ] && [ -n "$id" ] \
