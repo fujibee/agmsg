@@ -359,6 +359,71 @@ EOF
   grep -q "could not read pane 'w1:p4'" "$errf"
 }
 
+# herdr whose `pane read` fails with a DIFFERENT error whose message merely
+# mentions the word pane_not_found (#1169). A substring reader called this gone.
+_install_fake_herdr_other_error_mentioning_gone() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '{"error":{"code":"read_failed","message":"pane_not_found is not what happened; the read timed out","pane":"%s"}}\n' "\$3"
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+# herdr that says a pane is gone -- a DIFFERENT pane than the one asked for.
+_install_fake_herdr_gone_other_pane() {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "\$1" = pane ] && [ "\$2" = read ]; then
+  printf '{"error":{"code":"pane_not_found","pane":"w9:p9"}}\n'
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+}
+
+@test "peek taxonomy: another error whose MESSAGE mentions pane_not_found is 11, not gone (#1169)" {
+  _install_fake_herdr_other_error_mentioning_gone
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 11 ]
+  [ ! -s "$outf" ]
+  grep -q "read_failed" "$errf"                       # the real body is forwarded
+  refute grep -q "no longer exists" "$errf"           # and no absence is claimed
+}
+
+@test "peek taxonomy: a pane_not_found about a DIFFERENT pane is 11, and says which pane (#1169)" {
+  _install_fake_herdr_gone_other_pane
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 11 ]
+  grep -q "pane 'w9:p9' does not exist -- a different pane" "$errf"
+  refute grep -q "no longer exists" "$errf"
+}
+
+@test "peek taxonomy: a renamed error code is 11 with the body forwarded, never a silent gone (#1169)" {
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = pane ] && [ "\$2" = read ]; then printf '{"error":{"code":"PaneNotFound","pane":"%s"}}\n' "\$3"; exit 1; fi
+exit 0
+EOF
+  chmod +x "$FAKEBIN/herdr"; export PATH="$FAKEBIN:$PATH"
+  _write_record "herdr:w1:p4"
+  local outf errf rc=0; outf="$TEST_SKILL_DIR/o"; errf="$TEST_SKILL_DIR/e"
+  HERDR_ENV=1 bash "$SCRIPTS/peek.sh" testteam alice >"$outf" 2>"$errf" || rc=$?
+  [ "$rc" -eq 11 ]
+  grep -q "PaneNotFound" "$errf"
+  refute grep -q "no longer exists" "$errf"
+}
+
 # herdr whose `pane read` fails with an OS-level error on its REAL stderr — no
 # JSON body at all, and no claim from herdr that the pane is gone. Modeled on
 # the measured case (#1158): a sandbox that denies socket operations returns

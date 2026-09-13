@@ -844,16 +844,31 @@ terminal_peek() {
     # applies to its own list, and the one the tmux driver applies to "no server
     # running" — only herdr's OWN claim that the pane is gone may be read as
     # gone. Say what happened, not what it might mean.
-    case "$stdout_body" in
-      *pane_not_found*)
-        echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
-        return 12
-        ;;
-      *)
-        echo "herdr: could not read pane '$id': ${stderr_body:-${stdout_body:-herdr exited $rc with no diagnostic on either channel}}" >&2
-        return 11
-        ;;
-    esac
+    #
+    # The claim is read STRUCTURALLY (#1169): herdr's error reply is JSON with
+    # `error.code`, and only the code being exactly `pane_not_found`, about the
+    # pane we asked for, is gone. An earlier revision matched the substring
+    # anywhere in the body, so a different error whose message merely mentioned
+    # the word read as gone, and a renamed code would have silently become
+    # "unknown" -- the same family as #1158, a failure returning as a different
+    # value that looks like an answer. No sqlite3, no JSON, no code, a code
+    # about another pane: all of those are 11, with the body forwarded above.
+    local _code="" _pane="" _esc
+    if [ -n "$stdout_body" ] && command -v sqlite3 >/dev/null 2>&1; then
+      _esc="$(printf '%s' "$stdout_body" | sed "s/'/''/g")"
+      _code="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.code')='text' THEN json_extract('$_esc','\$.error.code') ELSE '' END" 2>/dev/null || true)"
+      _pane="$(sqlite3 :memory: "SELECT CASE WHEN json_valid('$_esc') AND json_type('$_esc','\$.error.pane')='text' THEN json_extract('$_esc','\$.error.pane') ELSE '' END" 2>/dev/null || true)"
+    fi
+    if [ "$_code" = pane_not_found ] && { [ -z "$_pane" ] || [ "$_pane" = "$(_herdr_bare_of "$id")" ]; }; then
+      echo "herdr: could not read pane '$id': the terminal reports it no longer exists" >&2
+      return 12
+    fi
+    if [ "$_code" = pane_not_found ]; then
+      echo "herdr: could not read pane '$id': the terminal reports pane '$_pane' does not exist -- a different pane, not this one" >&2
+      return 11
+    fi
+    echo "herdr: could not read pane '$id': ${stderr_body:-${stdout_body:-herdr exited $rc with no diagnostic on either channel}}" >&2
+    return 11
   fi
   cat "$tmp"   # only the real pane content reaches stdout, byte-for-byte
   rm -f "$tmp"
