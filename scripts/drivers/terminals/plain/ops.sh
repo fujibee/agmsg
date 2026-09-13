@@ -51,7 +51,7 @@ _plain_adapter_script() {
 }
 
 _plain_adapter_probe() {
-  local emulator="$1" tty="$2" script out rc=0
+  local emulator="$1" tty="$2" capability="${3:-peek}" operation=probe script out rc=0
   [ "$(uname -s)" = Darwin ] || {
     printf 'unsupported: plain emulator adapter %s is only implemented on macOS\n' "$emulator" >&2
     return 1
@@ -65,7 +65,8 @@ _plain_adapter_probe() {
     printf 'unsupported: no measured adapter is implemented yet for plain emulator %s (may become supported or unknown once one is added)\n' "$emulator" >&2
     return 1
   }
-  out="$(osascript "$script" probe "$tty" 2>/dev/null)" || rc=$?
+  [ "$capability" = despawn ] && operation=probe_despawn
+  out="$(osascript "$script" "$operation" "$tty" 2>/dev/null)" || rc=$?
   case "$out" in
     supported) return 0 ;;
     unsupported:*) printf '%s\n' "$out" >&2; return 1 ;;
@@ -81,17 +82,14 @@ terminal_capability() {
   local capability="$1" id="${2:-}"
   case "$capability" in
     spawn) return 0 ;;
-    despawn)
-      printf 'unsupported: plain window teardown needs an owner process witness\n' >&2
-      return 1 ;;
-    peek|poke) ;;
+    despawn|peek|poke) ;;
     *) printf 'unsupported: plain capability %s is not implemented\n' "$capability" >&2; return 1 ;;
   esac
   _plain_parse_id "$id" || {
     printf 'unsupported: plain %s needs an emulator-qualified tty reference\n' "$capability" >&2
     return 1
   }
-  _plain_adapter_probe "$_PLAIN_EMULATOR" "$_PLAIN_TTY"
+  _plain_adapter_probe "$_PLAIN_EMULATOR" "$_PLAIN_TTY" "$capability"
 }
 
 terminal_where() {
@@ -106,9 +104,25 @@ terminal_arrange() {
   return 13
 }
 
-# record op: the fallback always "matches" but has no addressable pane, so the
-# self id is '-'. Detection order puts plain last.
-terminal_detect() { printf '%s\n' '-'; return 0; }
+# A measured macOS emulator can identify the current seat by its controlling
+# tty. Other plain environments retain the explicit legacy '-' sentinel: they
+# are structurally present, but this implementation has no addressable locator.
+terminal_detect() {
+  local emulator="" tty=""
+  case "${TERM_PROGRAM:-}" in
+    iTerm.app) emulator=iterm ;;
+    Apple_Terminal) emulator=terminal ;;
+    *) printf '%s\n' '-'; return 0 ;;
+  esac
+  tty="$(command tty 2>/dev/null)" || tty=""
+  case "$tty" in /dev/ttys[0-9]*) ;; *)
+    printf 'plain: controlling tty is unavailable; cannot produce an emulator-qualified locator\n' >&2
+    printf '%s\n' '-'
+    return 0 ;;
+  esac
+  printf '%s:%s\n' "$emulator" "$tty"
+  return 0
+}
 
 _plain_has_template() { case "$1" in *'{cmd}'*) return 0 ;; *) return 1 ;; esac; }
 
@@ -133,7 +147,7 @@ terminal_spawn() {
     local q_boot; q_boot="$(printf '%q' "$boot")"
     local cmd="${tmpl//\{cmd\}/$q_boot}"
     bash -c "$cmd" 1>&2 || return 13
-    printf '%s\n' '-'; return 0
+    _plain_spawn_locator; return $?
   fi
   case "$(uname -s)" in
     Darwin)
@@ -162,7 +176,7 @@ terminal_spawn() {
           konsole)        konsole --workdir "$project" -e "$boot" 1>&2 || return 13 ;;
           *)              "$term" -e "$boot" 1>&2 || return 13 ;;
         esac
-        printf '%s\n' '-'; return 0
+        _plain_spawn_locator; return $?
       done
       printf 'unsupported: no terminal emulator found; set a {cmd} AGMSG_TERMINAL or run inside tmux/herdr\n' >&2
       return 13 ;;
@@ -178,20 +192,143 @@ terminal_spawn() {
       printf 'unsupported: platform %s (run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL)\n' "$(uname -s)" >&2
       return 13 ;;
   esac
-  printf '%s\n' '-'
+  _plain_spawn_locator
+}
+
+# The new window is the first process that can observe its tty. spawn.sh embeds
+# a one-shot witness writer in the boot script and hands this driver its result
+# path. Wait for that positive observation; never turn a timeout or malformed
+# row into the legacy '-' sentinel after a window has already been created.
+_plain_spawn_locator() {
+  local witness="${AGMSG_PLAIN_SPAWN_WITNESS:-}" emulator tty pid start extra tries=0
+  local limit="${AGMSG_TEST_PLAIN_WITNESS_TRIES:-100}"
+  case "$limit" in ''|*[!0-9]*) limit=100 ;; esac
+  [ -n "$witness" ] || {
+    printf 'plain: spawn witness path is unavailable; the created window cannot be recorded\n' >&2
+    return 13
+  }
+  if [ -n "${AGMSG_TEST_PLAIN_WITNESS_ROW:-}" ] && [ ! -s "$witness" ]; then
+    printf '%s\n' "$AGMSG_TEST_PLAIN_WITNESS_ROW" > "$witness"
+  fi
+  while [ "$tries" -lt "$limit" ]; do
+    [ -s "$witness" ] && break
+    sleep 0.1 2>/dev/null || true
+    tries=$((tries + 1))
+  done
+  [ -s "$witness" ] || {
+    printf 'plain: spawned window did not report its tty and owner before the handshake deadline\n' >&2
+    return 13
+  }
+  IFS=$'\t' read -r emulator tty pid start extra < "$witness"
+  [ -n "$emulator" ] && [ -n "$tty" ] && [ -n "$pid" ] && [ -n "$start" ] && [ -z "$extra" ] || {
+    printf 'plain: spawned window returned an incomplete owner witness\n' >&2
+    return 13
+  }
+  _plain_parse_id "$emulator:$tty" || {
+    printf 'plain: spawned window returned an unsupported emulator or tty\n' >&2
+    return 13
+  }
+  case "$pid" in *[!0-9]*|'')
+    printf 'plain: spawned window returned an invalid owner pid\n' >&2
+    return 13 ;;
+  esac
+  case "$start" in *[!0-9A-Za-z_:]*)
+    printf 'plain: spawned window returned an invalid owner start time\n' >&2
+    return 13 ;;
+  esac
+  printf '%s:%s\n' "$emulator" "$tty"
   return 0
 }
 
-# control op: an OS terminal window has no addressable handle (the placement id
-# is '-'), so there is nothing to kill from here — it closes when its process
-# exits, exactly as before the axis (OS-terminal members were never force-
-# killable). Report ok (nothing to tear down) rather than a spurious error.
-# plain has no addressable pane, so it cannot be asked whether one is still
-# there. 13 is that answer, and it is a real answer rather than a failure — the
-# caller must not read it as "closed".
+# A tty reference does not provide a read-only existence authority for the
+# process-bound placement, so pane_state remains unknown. Despawn is stronger:
+# it receives the record's owner witness, revalidates it, then closes the exact
+# emulator session through the measured adapter.
 terminal_pane_state() { echo unknown; return 13; }
 
-terminal_despawn() { echo ok; return 0; }
+_plain_process_witness_matches() {   # <pid> <start> <tty> <kind>
+  local pid="$1" start="$2" tty="$3" kind="$4" observed current_start
+  case "$pid" in ''|*[!0-9]*)
+    printf 'plain: %s process witness is malformed\n' "$kind" >&2
+    return 10 ;;
+  esac
+  observed="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
+  case "$observed" in /dev/*) ;; ''|'?'|'??'|'-') observed="" ;; *) observed="/dev/$observed" ;; esac
+  [ "$observed" = "$tty" ] || {
+    printf 'plain: %s process no longer controls %s\n' "$kind" "$tty" >&2
+    return 10
+  }
+  current_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//; s/ *$//' | tr ' ' '_')"
+  [ -n "$current_start" ] && [ "$current_start" = "$start" ] || {
+    printf 'plain: %s process witness no longer matches pid %s\n' "$kind" "$pid" >&2
+    return 10
+  }
+  return 0
+}
+
+terminal_despawn() {   # <id> <fence=instance:anchor>
+  local id="$1" fence="${2:-}" emulator tty anchor remaining witness_tty="" pid="" start="" boot="" boot_start="" kv script
+  _plain_parse_id "$id" || {
+    printf 'unsupported: plain window teardown needs an emulator-qualified tty reference\n' >&2
+    return 13
+  }
+  emulator="$_PLAIN_EMULATOR"; tty="$_PLAIN_TTY"
+  case "$fence" in fence=*:*) ;; *)
+    printf 'unsupported: plain window teardown needs an owner process witness\n' >&2
+    return 13 ;;
+  esac
+  anchor="${fence#fence=*:}"
+  [ "${fence#fence=}" = "$emulator:$anchor" ] || {
+    printf 'plain: owner witness emulator does not match the placement locator\n' >&2
+    return 10
+  }
+  remaining="$anchor"
+  while :; do
+    kv="${remaining%%,*}"
+    case "$kv" in
+      tty=*) [ -z "$witness_tty" ] || { printf 'plain: duplicate tty in owner witness\n' >&2; return 10; }; witness_tty="${kv#tty=}" ;;
+      pid=*) [ -z "$pid" ] || { printf 'plain: duplicate pid in owner witness\n' >&2; return 10; }; pid="${kv#pid=}" ;;
+      start=*) [ -z "$start" ] || { printf 'plain: duplicate start in owner witness\n' >&2; return 10; }; start="${kv#start=}" ;;
+      boot=*) [ -z "$boot" ] || { printf 'plain: duplicate boot pid in owner witness\n' >&2; return 10; }; boot="${kv#boot=}" ;;
+      boot_start=*) [ -z "$boot_start" ] || { printf 'plain: duplicate boot start in owner witness\n' >&2; return 10; }; boot_start="${kv#boot_start=}" ;;
+      *) : ;; # Forward-compatible: only known keys are evidence for this reader.
+    esac
+    case "$remaining" in *,*) remaining="${remaining#*,}" ;; *) break ;; esac
+  done
+  [ "$witness_tty" = "$tty" ] || {
+    printf 'plain: owner witness tty does not match the placement locator\n' >&2
+    return 10
+  }
+  if { [ -n "$pid" ] && [ -z "$start" ]; } || { [ -z "$pid" ] && [ -n "$start" ]; }; then
+    printf 'plain: CLI process witness is incomplete\n' >&2
+    return 10
+  fi
+  if { [ -n "$boot" ] && [ -z "$boot_start" ]; } || { [ -z "$boot" ] && [ -n "$boot_start" ]; }; then
+    printf 'plain: boot process witness is incomplete\n' >&2
+    return 10
+  fi
+  [ -n "$pid" ] || [ -n "$boot" ] || {
+    printf 'plain: owner process witness carries no known process identity\n' >&2
+    return 10
+  }
+  [ -z "$pid" ] || _plain_process_witness_matches "$pid" "$start" "$tty" CLI || return $?
+  [ -z "$boot" ] || _plain_process_witness_matches "$boot" "$boot_start" "$tty" boot || return $?
+  [ "$(uname -s)" = Darwin ] || {
+    printf 'unsupported: plain window teardown adapters are only implemented on macOS\n' >&2
+    return 13
+  }
+  command -v osascript >/dev/null 2>&1 || {
+    printf 'unknown: osascript is unavailable; cannot close plain emulator %s\n' "$emulator" >&2
+    return 10
+  }
+  script="$(_plain_adapter_script "$emulator")"
+  osascript "$script" despawn "$tty" >/dev/null || {
+    printf 'plain: %s adapter could not close %s\n' "$emulator" "$tty" >&2
+    return 10
+  }
+  echo ok
+  return 0
+}
 
 _plain_unsupported() {
   printf 'unsupported: plain terminal has no addressable pane (%s)\n' "$1" >&2

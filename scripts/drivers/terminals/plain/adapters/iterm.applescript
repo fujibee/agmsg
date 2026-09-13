@@ -15,12 +15,13 @@ on run argv
       end repeat
 
       if (count of matches) is not 1 then
-        if operation is "probe" then return "unsupported: iTerm tty matched " & (count of matches) & " sessions"
+        if operation starts with "probe" then return "unsupported: iTerm tty matched " & (count of matches) & " sessions"
         error "iTerm tty no longer identifies exactly one session"
       end if
       set targetSession to item 1 of matches
 
       if operation is "probe" then return "supported"
+      if operation is "probe_despawn" then return "supported"
       if operation is "peek" then return contents of targetSession
       if operation is "poke" then
         set bodyText to item 3 of argv
@@ -30,10 +31,14 @@ on run argv
         end tell
         return ""
       end if
+      if operation is "despawn" then
+        close targetSession
+        return ""
+      end if
       return "unsupported: unknown iTerm adapter operation"
     end tell
   on error errorText
-    if operation is "probe" then return "unknown: iTerm adapter error: " & errorText
+    if operation starts with "probe" then return "unknown: iTerm adapter error: " & errorText
     error errorText
   end try
 end run

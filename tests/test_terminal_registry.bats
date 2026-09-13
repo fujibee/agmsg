@@ -347,6 +347,19 @@ _fake_herdr_list_scalar_session() {
 
 # --- plain driver -----------------------------------------------------------
 
+@test "plain: detect produces an emulator-qualified controlling tty when observable" {
+  cat > "$FAKEBIN/tty" <<'EOF'
+#!/usr/bin/env bash
+printf '/dev/ttys040\n'
+EOF
+  chmod +x "$FAKEBIN/tty"
+  export PATH="$FAKEBIN:$PATH" TERM_PROGRAM=iTerm.app
+  agmsg_terminal_load plain
+  run terminal_detect ""
+  [ "$status" -eq 0 ]
+  [ "$output" = 'iterm:/dev/ttys040' ]
+}
+
 @test "runtime capability: drivers without a hook fall back to the static ceiling" {
   run agmsg_terminal_capability tmux peek '%1'
   [ "$status" -eq 0 ]
@@ -417,7 +430,7 @@ _fake_herdr_list_scalar_session() {
   refute terminal_id_ok 'terminal:/dev/ttysx'
 }
 
-@test "plain: measured adapter support is checked again by peek and poke" {
+@test "plain: measured adapter support is checked again by despawn, peek and poke" {
   cat > "$FAKEBIN/uname" <<'SH'
 #!/usr/bin/env bash
 printf 'Darwin\n'
@@ -426,7 +439,7 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$ARGV_LOG"
 case "$2" in
-  probe) printf 'supported\n' ;;
+  probe*) printf 'supported\n' ;;
   peek) printf 'visible terminal text\n' ;;
   poke) : ;;
 esac
@@ -436,6 +449,8 @@ SH
   agmsg_terminal_load plain
 
   run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
+  [ "$status" -eq 0 ]
+  run agmsg_terminal_capability plain despawn 'iterm:/dev/ttys040'
   [ "$status" -eq 0 ]
   run terminal_peek 'iterm:/dev/ttys040'
   [ "$status" -eq 0 ]
@@ -1162,7 +1177,7 @@ OPS
   done
 }
 
-@test "plain: spawn runs the boot THROUGH the {cmd} template, and returns '-'; despawn is a no-op ok" {
+@test "plain: spawn runs the boot THROUGH the {cmd} template and returns its witnessed locator" {
   agmsg_terminal_load plain
   # The fake BOOT records that IT ran — so the test proves the template actually
   # launched the boot, not merely that the template's own side effect fired. A
@@ -1170,34 +1185,81 @@ OPS
   # ignore {cmd}" template would hide.
   local ran="$TEST_SKILL_DIR/boot-ran"
   local boot="$TEST_SKILL_DIR/boot"
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$ran" > "$boot"
+  printf '#!/usr/bin/env bash\ntouch %q\nprintf '\''iterm\\t/dev/ttys040\\t123\\tSTART\\n'\'' > "$AGMSG_PLAIN_SPAWN_WITNESS"\n' "$ran" > "$boot"
   chmod +x "$boot"
   # The template invokes {cmd} directly (a runnable path), like a real terminal
   # would run the boot script.
   export AGMSG_TERMINAL="{cmd}"
+  export AGMSG_PLAIN_SPAWN_WITNESS="$TEST_SKILL_DIR/plain-witness"
   run terminal_spawn alice /proj window "$boot"
   [ "$status" -eq 0 ]
-  [ "$output" = "-" ]
+  [ "$output" = "iterm:/dev/ttys040" ]
   [ -f "$ran" ]     # the boot itself ran, reached via the template
   run terminal_despawn "-"
-  [ "$status" -eq 0 ]
-  [ "$output" = "ok" ]
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"emulator-qualified tty"* ]]
 }
 
-@test "plain: spawn ISOLATES backend stdout — the record-op result is exactly '-'" {
-  # spawn is a record op: its stdout must be the id ('-') and nothing else. A backend
+@test "plain: spawn ISOLATES backend stdout — the record-op result is exactly the locator" {
+  # spawn is a record op: its stdout must be the id and nothing else. A backend
   # (here a {cmd} template) that writes to stdout must not pollute the captured result
   # — otherwise the caller reads '<noise>\n-' as the placement id. Capture stdout
   # ALONE (stderr, where the noise now goes as a diagnostic, is separated).
   agmsg_terminal_load plain
   local noisy="$TEST_SKILL_DIR/noisy-boot"
-  printf '#!/usr/bin/env bash\necho "BACKEND STDOUT NOISE"\nprintf "and more\\n"\n' > "$noisy"
+  printf '#!/usr/bin/env bash\necho "BACKEND STDOUT NOISE"\nprintf "and more\\n"\nprintf '\''iterm\\t/dev/ttys040\\t123\\tSTART\\n'\'' > "$AGMSG_PLAIN_SPAWN_WITNESS"\n' > "$noisy"
   chmod +x "$noisy"
   export AGMSG_TERMINAL="{cmd}"
+  export AGMSG_PLAIN_SPAWN_WITNESS="$TEST_SKILL_DIR/plain-witness"
   local out rc=0
   out="$(terminal_spawn alice /proj window "$noisy" 2>/dev/null)" || rc=$?
   [ "$rc" -eq 0 ]
-  [ "$out" = "-" ]                       # exactly '-', the backend noise did not leak
+  [ "$out" = "iterm:/dev/ttys040" ]      # backend noise did not leak
+}
+
+@test "plain: a launched window without a witness fails loudly instead of returning '-'" {
+  agmsg_terminal_load plain
+  unset AGMSG_TEST_PLAIN_WITNESS_ROW
+  local launched="$TEST_SKILL_DIR/window-launched"
+  export AGMSG_TERMINAL="touch $launched; {cmd}"
+  export AGMSG_PLAIN_SPAWN_WITNESS="$TEST_SKILL_DIR/missing-witness"
+  export AGMSG_TEST_PLAIN_WITNESS_TRIES=1
+  local boot="$TEST_SKILL_DIR/no-witness-boot"
+  printf '#!/usr/bin/env bash\n:\n' > "$boot"
+  chmod +x "$boot"
+
+  run terminal_spawn alice /proj window "$boot"
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"did not report its tty and owner"* ]]
+  [ -f "$launched" ]
+  refute grep -qx -- '-' <<<"$output"
+}
+
+@test "plain: despawn verifies the owner witness before closing exactly that tty" {
+  agmsg_terminal_load plain
+  cat > "$FAKEBIN/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *'tty='*) printf 'ttys040\n' ;; *'lstart='*) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+EOF
+  cat > "$FAKEBIN/osascript" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$ARGV_LOG"
+EOF
+  cat > "$FAKEBIN/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  chmod +x "$FAKEBIN/ps" "$FAKEBIN/osascript" "$FAKEBIN/uname"
+  export PATH="$FAKEBIN:$PATH"
+
+  run terminal_despawn 'iterm:/dev/ttys040' 'fence=iterm:tty=/dev/ttys040,pid=123,start=Sat_Sep_13_02:10:11_2026'
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  grep -Fq 'despawn /dev/ttys040' "$ARGV_LOG"
+
+  run terminal_despawn 'iterm:/dev/ttys040' 'fence=iterm:tty=/dev/ttys040,pid=123,start=OTHER'
+  [ "$status" -eq 10 ]
+  [[ "$output" == *"no longer matches"* ]]
 }
 
 # --- load failure cleanup: source failure, like missing-function, leaves nothing (review round 2) ---
