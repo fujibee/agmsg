@@ -3669,7 +3669,7 @@ EOF
 # herdr anything at all, because there is nothing to ask BY. So the control is
 # the same invocation carrying a session id, which does reach herdr and does
 # rename; the silence of the other half means something only next to it.
-@test "check-inbox: no session id names nothing; the same call with one does (#1044)" {
+@test "check-inbox: no session id names nothing; the same call with one does (#1044, #1055)" {
   # Same reason as the sibling test above: naming itself is what this test
   # verifies, against a fake herdr, never a real terminal.
   unset AGMSG_SELF_NAME
