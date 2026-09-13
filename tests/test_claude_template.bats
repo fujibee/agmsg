@@ -39,3 +39,15 @@ setup() {
   grep -Fq 'Do not report `actas` as complete without saying this' "$RENDERED"
   grep -Fq 'Do not report the drop as complete without mentioning it' "$RENDERED"
 }
+
+@test "Claude rendered skill names no terminal driver, so an agent has no name to reach for (#1171)" {
+  # Measured on the pre-fix branch: tmux 4, herdr 0. The fix is not balancing
+  # that count -- it is dropping terminal names from agent-facing text
+  # entirely, so the choice this incident hinged on ("which terminal's
+  # syntax do I know") never comes up. Case-insensitive: a capitalized
+  # mention would steer just as much as a lowercase one.
+  run grep -ic 'tmux\|herdr' "$RENDERED"
+  [ "$status" -ne 0 ] || [ "$output" -eq 0 ]
+  grep -Fq 'If argument is "where"' "$RENDERED"
+  grep -Fq 'this call already asked every driver' "$RENDERED"
+}

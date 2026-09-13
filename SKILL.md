@@ -122,6 +122,11 @@ If argument is "version":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/version.sh`
 2. Show the output — the installed version (git-describe provenance recorded at install time).
 
+If argument is "where" (e.g. asked to report this session's own pane or placement):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/where.sh`
+2. Report exactly what it prints. Do not try to answer this by naming a terminal yourself or running any terminal-specific command directly — this call already asked every driver on this session's behalf.
+3. `resolved=true placement=<terminal>:<id>` is a known pane; `resolved=true placement=none` is a GENUINE negative (this session's own terminal confirmed it has no addressable pane). `resolved=false` means placement could NOT be determined — `reason` names which terminal(s) were asked and why. Never report a `resolved=false` answer as "no pane" or "not attached to a pane"; those are different answers to different questions, and the difference is the entire point of this command (#1171).
+
 
 <!-- agmsg:slot actas -->
 If argument starts with "actas" followed by an agent name:
@@ -140,9 +145,9 @@ If argument starts with "drop" followed by an agent name:
 If argument starts with "spawn" (e.g. "spawn claude-code alice", "spawn codex reviewer --window"):
 1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
-   - `spawn.sh` pre-joins `<name>`, then opens a tmux pane/window or a new OS terminal and launches the target CLI with `__CMD_PREFIX____SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt.
+   - `spawn.sh` pre-joins `<name>`, then opens a new pane or window through the terminal driver and launches the target CLI with `__CMD_PREFIX____SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt. Which terminal that is is the driver's decision, never something to name here.
    - By default it waits for a target watcher to attach and report `status=ready`; `--no-wait` returns immediately. Codex has no Monitor, so a Codex spawn skips that readiness wait.
-   - It refuses early when `<name>` is already held, the target CLI is missing, the project path is invalid, or no tmux/usable terminal is available.
+   - It refuses early when `<name>` is already held, the target CLI is missing, the project path is invalid, or the terminal driver has nowhere to place it.
 3. Show the script's output.
 
 If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
@@ -157,10 +162,10 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 
 <!-- drop guidance is supplied by the type overlay -->
 
-If argument starts with "arrange" (e.g. "arrange alice place_below tmux:%2"):
-1. Parse `<agent> <place_below|place_right|swap> <anchor-ref>` and determine the source agent's team.
+If argument starts with "arrange" (e.g. "arrange alice place_below <anchor-ref>"):
+1. Parse `<agent> <place_below|place_right|swap> <anchor-ref>` and determine the source agent's team. `<anchor-ref>` is a placement reference for another pane — copy it exactly as another command reported it (e.g. `team`/`team --json`'s `terminal`/`pane` fields for that row); it is never something to construct from a remembered terminal syntax.
 2. Run `~/.agents/skills/__SKILL_NAME__/scripts/arrange.sh <team> <agent> <intent> <anchor-ref>`.
-3. Show the script output. Report `moved` as a performed move and `unchanged` as already in the requested arrangement; do not collapse the two. `place_below` and `place_right` are idempotent, but `swap` is not: calling `swap` twice swaps the panes back, so a native swap normally reports `moved`; `unchanged` is only possible when the driver explicitly reports `changed=false`. `ambiguous_layout` means the layout must be simplified before retrying, `runtime_error` means inspect the terminal, and `unsupported` means the terminal/placement cannot be arranged (`tmux:@N` window placements included).
+3. Show the script output. Report `moved` as a performed move and `unchanged` as already in the requested arrangement; do not collapse the two. `place_below` and `place_right` are idempotent, but `swap` is not: calling `swap` twice swaps the panes back, so a native swap normally reports `moved`; `unchanged` is only possible when the driver explicitly reports `changed=false`. `ambiguous_layout` means the layout must be simplified before retrying, `runtime_error` means inspect the terminal, and `unsupported` means the terminal/placement cannot be arranged (a window-level placement can be one such case).
 
 If argument starts with "peek" (e.g. "peek", "peek reviewer", "peek alice --lines 80"):
 1. With a name, parse `<name>` and an optional `--lines N` (how many of the pane's visible lines to return), determine which team `<name>` belongs to (as with `send`), then run `~/.agents/skills/__SKILL_NAME__/scripts/peek.sh <team> <name> [--lines N]`.
