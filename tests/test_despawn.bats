@@ -330,7 +330,7 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
   # break the watcher's unrelated cleanup, or the test measures two things.
   DESPAWN_RC=0
   PATH="${DESPAWN_BIN:+$DESPAWN_BIN:}$bindir:$PATH" bash "$SCRIPTS/despawn.sh" \
-    team leader alice --timeout 10 >"$RUN/despawn.out" 2>"$RUN/despawn.err" || DESPAWN_RC=$?
+    team leader alice --timeout "${DESPAWN_TIMEOUT:-10}" >"$RUN/despawn.out" 2>"$RUN/despawn.err" || DESPAWN_RC=$?
   for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$WPID" 2>/dev/null || break; sleep 0.5; done
   kill "$WPID" 2>/dev/null || true; wait "$WPID" 2>/dev/null || true
 }
@@ -504,5 +504,122 @@ EOF
   run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --timeout 2
   [ "$status" -ne 0 ]
   printf '%s' "$output" | grep -Fq 'needs-force'
+  [ -f "$rec" ]
+}
+
+# --- #1097: a graceful despawn waits for the PANE, not only the lock ----------
+#
+# The watcher releases the actas lock (via reset.sh) BEFORE it folds its pane, so
+# the instant the lock reads `free` the pane is still present on a teardown that
+# is working correctly -- measured tens of seconds on a live herdr session.
+# Checking the pane once, there, reported `needs-force` every time, teaching
+# everyone to reach for --force (which skips the member's own cleanup). The two
+# tests below force both ends, and each fails on its own if its wait is removed:
+# drop the pane-wait loop and the LATE closer reports needs-force instead of ok
+# (and its list-panes is polled once, not repeatedly); drop the loop's
+# `waited < TIMEOUT` bound and the NEVER closer never returns.
+#
+# Records carry a socket (terminal_pane_state returns `unknown` without one), and
+# the stubs answer the socketed `tmux -S <sock> list-panes` form, so `$1` is `-S`,
+# not the subcommand -- the argv is scanned instead. The gate keys on the EXACT
+# pane-state format `-F '#{pane_id}'`: the watcher's attach also runs list-panes,
+# with `-F '#{pane_id}|#{@agmsg_agent}'` (a label search), and an earlier version
+# that transitioned on the first list-panes of ANY kind was tripped by that label
+# search ~4s before the despawn caller ever polled, so the caller read `gone` on
+# its single check and the test passed even with the wait removed. The late stub
+# now counts only pane-state polls: present on the first, gone after.
+
+# Pane-state poll present on the first check, gone after: an async fold that lags
+# the lock release. kill-pane succeeds (the fold was initiated). The label search
+# is answered (so the watcher resolves) but does not advance the pane-state count.
+_stub_tmux_closes_late() {
+  local bin="$1"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$bin/tmux.log"
+args="\$*"
+case "\$args" in
+  *kill-pane*)                    exit 0 ;;
+  *capture-pane*)                 echo x; exit 0 ;;
+  *"#{pane_id}|#{@agmsg_agent}"*) echo '%1|alice'; exit 0 ;;   # label search: resolve, do not gate
+  *"-F #{pane_id}")                                            # terminal_pane_state's poll, and only it
+    c="$bin/ps_polls"
+    n=\$(cat "\$c" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "\$c"
+    [ "\$n" -le 1 ] && echo '%1'                               # present on the 1st poll, gone after
+    exit 0 ;;
+  *list-panes*)                   echo '%1'; exit 0 ;;         # any other list form: present, ungated
+esac
+exit 0
+EOF
+  chmod +x "$bin/tmux"
+}
+
+@test "despawn: graceful — a member that closes its pane LATE still returns ok (#1097)" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux_closes_late "$bin"
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:/tmp/fake-tmux-socket:%%1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%1
+
+  # Positive control: the caller polled the PANE STATE more than once -- it
+  # WAITED rather than catching an already-gone pane on a single check. Remove the
+  # pane-wait loop and this is exactly one pane-state poll.
+  [ "$(cat "$bin/ps_polls" 2>/dev/null || echo 0)" -ge 2 ]
+
+  # The point: a late close reads as success, and the record is cleared.
+  grep -Fq 'status=ok' "$RUN/despawn.out"
+  [ "$DESPAWN_RC" -eq 0 ]
+  [ ! -f "$rec" ]
+}
+
+# Present forever: the fold never takes. Every pane-state poll names the pane,
+# and pane-state polls are counted so the test can prove the caller waited (polled
+# repeatedly) rather than refusing on a single check.
+_stub_tmux_never_closes() {
+  local bin="$1"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$bin/tmux.log"
+args="\$*"
+case "\$args" in
+  *kill-pane*)                    exit 0 ;;
+  *capture-pane*)                 echo x; exit 0 ;;
+  *"#{pane_id}|#{@agmsg_agent}"*) echo '%1|alice'; exit 0 ;;   # label search
+  *"-F #{pane_id}")                                            # terminal_pane_state's poll
+    c="$bin/ps_polls"
+    n=\$(cat "\$c" 2>/dev/null || echo 0); echo \$((n + 1)) > "\$c"
+    echo '%1'; exit 0 ;;
+  *list-panes*)                   echo '%1'; exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$bin/tmux"
+}
+
+@test "despawn: graceful — a member that NEVER closes reports needs-force at the timeout (#1097)" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  _stub_tmux_never_closes "$bin"
+  local rec; rec="$(_spawn_rec_path team alice)"
+  mkdir -p "$(dirname "$rec")"
+  printf 'tmux:/tmp/fake-tmux-socket:%%1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+
+  # 8s, not a tight 2-3: the lock wait and the pane wait share this one budget, so
+  # it must clear the lock wait (~2-3s here, same watcher as the tests above that
+  # use --timeout 10) AND leave room for the caller to poll the pane more than once.
+  DESPAWN_TIMEOUT=8 _despawn_member_with_env "$bin" TMUX=/tmp/fake-tmux-socket,0,0 TMUX_PANE=%1
+
+  # It polled the pane repeatedly across the budget before giving up -- not a
+  # single refusal. This is the discriminator: drop the pane-wait loop and the
+  # caller checks once (ps_polls == 1); an unbounded loop never returns here at
+  # all. (`after=3s` is not used as the guard: the lock wait alone can consume
+  # the whole budget, so it does not distinguish a waited-out pane from an
+  # immediate refusal.)
+  [ "$(cat "$bin/ps_polls" 2>/dev/null || echo 0)" -ge 2 ]
+  grep -Fq 'status=needs-force' "$RUN/despawn.out"
+  grep -Fq 'note=pane-still-open' "$RUN/despawn.out"
+  grep -Fq 'after=8s' "$RUN/despawn.out"
+  [ "$DESPAWN_RC" -ne 0 ]
   [ -f "$rec" ]
 }
