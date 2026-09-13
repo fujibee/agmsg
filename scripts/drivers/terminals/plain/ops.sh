@@ -268,6 +268,7 @@ _plain_process_witness_matches() {   # <pid> <start> <tty> <kind>
 
 terminal_despawn() {   # <id> <fence=instance:anchor>
   local id="$1" fence="${2:-}" emulator tty anchor remaining witness_tty="" pid="" start="" boot="" boot_start="" kv script
+  local witness_ok=1 cli_why="" boot_why=""
   _plain_parse_id "$id" || {
     printf 'unsupported: plain window teardown needs an emulator-qualified tty reference\n' >&2
     return 13
@@ -311,8 +312,21 @@ terminal_despawn() {   # <id> <fence=instance:anchor>
     printf 'plain: owner process witness carries no known process identity\n' >&2
     return 10
   }
-  [ -z "$pid" ] || _plain_process_witness_matches "$pid" "$start" "$tty" CLI || return $?
-  [ -z "$boot" ] || _plain_process_witness_matches "$boot" "$boot_start" "$tty" boot || return $?
+  # Either complete pair can prove that this is still the spawned window. The
+  # CLI pair is newer, but the CLI is expected to exit before a later forced
+  # despawn; the carried boot-shell pair exists specifically to outlive it.
+  # Conversely, a replaced boot shell must not block a still-live CLI proof.
+  if [ -n "$pid" ]; then
+    cli_why="$(_plain_process_witness_matches "$pid" "$start" "$tty" CLI 2>&1)" && witness_ok=0
+  fi
+  if [ -n "$boot" ]; then
+    boot_why="$(_plain_process_witness_matches "$boot" "$boot_start" "$tty" boot 2>&1)" && witness_ok=0
+  fi
+  if [ "$witness_ok" -ne 0 ]; then
+    [ -z "$cli_why" ] || printf '%s\n' "$cli_why" >&2
+    [ -z "$boot_why" ] || printf '%s\n' "$boot_why" >&2
+    return 10
+  fi
   [ "$(uname -s)" = Darwin ] || {
     printf 'unsupported: plain window teardown adapters are only implemented on macOS\n' >&2
     return 13
