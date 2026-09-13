@@ -22,13 +22,13 @@ set -euo pipefail
 #   the caller does not have one.
 #
 # Output (stdout, one line, key=value):
-#   resolved=true placement=<terminal>:<id> container=<container>
+#   resolved=true placement=<terminal>:<id> container=<container> capabilities=<list>
 #     A real, addressable pane was identified. `container` is best-effort
 #     extra context (e.g. the window/tab it lives in); if the driver could
 #     not answer THAT sub-question, container names why
 #     (unknown:<reason>) — that failure is about the container lookup, not
 #     about whether this session has a pane, which is already settled.
-#   resolved=true placement=none reason=no_addressable_pane terminal=<name>
+#   resolved=true placement=none reason=no_addressable_pane terminal=<name> capabilities=<list>
 #     A GENUINE negative: <name> was identified as this session's terminal,
 #     and it confirmed it has no addressable pane (a plain OS terminal).
 #   resolved=false reason=<text>
@@ -36,7 +36,16 @@ set -euo pipefail
 #     was actually asked and why it did not answer (e.g. "under a terminal
 #     but cannot identify this pane to name it — tmux: \$TMUX_PANE is
 #     unset — cannot identify this pane"). This is never collapsed into
-#     "no pane" — that claim requires resolved=true.
+#     "no pane" — that claim requires resolved=true. There is no terminal to
+#     report capabilities for here, so none are printed.
+#
+# `capabilities` (#1082) is the resolved driver's own manifest ceiling
+# (terminal.conf's `capabilities=`), space-separated, verbatim — not a
+# restatement written by hand in some doc that can drift from it. A verb
+# not listed here will not work on this terminal; that terminal's own
+# instructions, at scripts/drivers/terminals/<terminal>/SKILL.md, say which
+# listed verbs need more than the ceiling promises (e.g. plain's peek/poke
+# need an emulator-qualified placement, not just the capability being listed).
 #
 # Exit code mirrors `resolved`: 0 when true, 1 when false.
 
@@ -67,8 +76,14 @@ fi
 terminal="${resolved%%$'\t'*}"
 id="${resolved#*$'\t'}"
 
+# The manifest's own ceiling, space-separated, verbatim (#1082). Absent
+# manifest data prints as empty rather than failing this call — capabilities
+# are extra context on top of an already-settled placement answer, never a
+# reason to withhold it.
+capabilities="$(agmsg_terminal_get "$terminal" capabilities 2>/dev/null || true)"
+
 if [ "$id" = '-' ]; then
-  printf 'resolved=true placement=none reason=no_addressable_pane terminal=%s\n' "$terminal"
+  printf 'resolved=true placement=none reason=no_addressable_pane terminal=%s capabilities=%s\n' "$terminal" "$capabilities"
   exit 0
 fi
 
@@ -77,5 +92,5 @@ fi
 # whether this session has a pane, which the branch above already settled.
 location="$(agmsg_team_location "$terminal" "$id")"
 container="${location##*$'\t'}"
-printf 'resolved=true placement=%s:%s container=%s\n' "$terminal" "$id" "$container"
+printf 'resolved=true placement=%s:%s container=%s capabilities=%s\n' "$terminal" "$id" "$container" "$capabilities"
 exit 0
