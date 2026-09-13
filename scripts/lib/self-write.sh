@@ -7,12 +7,15 @@
 # itself, writes ONLY its own cells, and nothing here reads another seat's state
 # to decide a write. There is no "who is right" left to decide.
 #
-# WHERE THE PANE COMES FROM. Not from here. The seat does not derive or verify
-# its pane: a leader sweeps the workspace and types `fix --pane P` into pane P,
-# and the seat that receives it is in P by construction -- typing into P is the
-# only way to reach P (koit, 2026-09-11). So <ref> arrives as an argument and is
-# a LOCATION carried by the channel, never an identity: team and agent come from
-# the seat's own actas, and no argument may name another seat.
+# WHERE THE PANE COMES FROM. Not from here, and not from outside. The seat
+# PROVES it (scripts/lib/self-fix.sh, ruling of 2026-09-13): its own process
+# ancestry against the pane's processes (self-proof.sh), or failing that a token
+# it writes to its own screen and finds (token-locate.sh); if neither decides,
+# nothing is written. A location handed in from outside was measured to be the
+# accident itself: a seat with a broken label resolved itself through an
+# inherited environment into ANOTHER seat's pane. So <ref> arrives here already
+# proved, and it is a LOCATION, never an identity: team and agent come from the
+# seat's own actas, and no argument may name another seat.
 #
 # THE FENCE. Pane ids repeat across terminal instances (two herdr sessions both
 # have a w1:p2; tmux has one id space per socket), so a pane id alone can name
