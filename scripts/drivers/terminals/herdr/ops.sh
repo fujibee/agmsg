@@ -1330,5 +1330,37 @@ _herdr_panes_of() {   # <socket> <pane-list-json>
     [ -n "$pane" ] || continue
     printf '%s\t%s\n' "$sock" "$pane"
   done
+}
+
+# Fence for a self-write (#1152). Prints "<instance>\t<terminal_id>" for one pane:
+# the herdr instance this driver is talking to, named by its SOCKET PATH -- the
+# same string the sweep's enumeration (terminal_enumerate_panes) uses for an
+# instance, so a location the sweep hands a seat and the fence the seat stores
+# compare as equal strings (pane ids repeat across instances -- w1:p2 exists in
+# both `jugemu` and `oma`, measured 2026-09-11) -- and the pane's server-side
+# terminal_id (unique across sessions, 52 panes / 0 crossings; CHANGES
+# across a herdr restart, so a stored fence expires with the server and a later
+# write refuses instead of landing in whatever now sits at that pane id).
+# Each half is either a value or a namespaced reason; the caller compares both
+# against the stored pair right before each mutation. This is a PREFLIGHT check,
+# not an atomic fence: the read and the keystroke are separate calls, so a pane
+# closed and reused between them is not caught (a real fence would need herdr
+# to compare-and-type). What it removes is the day's actual accident -- a write
+# resolved in one session landing in another's live pane.
+terminal_fence() {   # <id>
+  local id="$1" instance pane_json esc tid
+  instance="${HERDR_SOCKET_PATH:-}"
+  [ -n "$instance" ] || instance="unknown:no_socket_in_env"
+  case "$instance" in *:*|*[[:cntrl:]]*|*[[:space:]]*) instance="unknown:socket_path_malformed" ;; esac
+  command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
+  _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
+  pane_json="$(herdr pane get "$id" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
+  esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
+  tid="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.pane.terminal_id')='text' THEN json_extract('$esc','\$.result.pane.terminal_id') ELSE '' END" 2>/dev/null)" \
+    || { printf '%s\tunknown:pane_response_invalid\n' "$instance"; return 2; }
+  [ -n "$tid" ] || { printf '%s\tunknown:terminal_id_missing\n' "$instance"; return 2; }
+  case "$tid" in *[[:cntrl:]]*|*[[:space:]]*) printf '%s\tunknown:terminal_id_malformed\n' "$instance"; return 2 ;; esac
+  printf '%s\t%s\n' "$instance" "$tid"
+  case "$instance" in unknown:*) return 2 ;; esac
   return 0
 }

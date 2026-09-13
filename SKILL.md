@@ -189,6 +189,10 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 <!-- agmsg:slot mode -->
 <!-- /agmsg:slot mode -->
 
+If argument is "fix" (no further words):
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/fix.sh` — with NO arguments. `fix` repairs THIS session's own seat marks (placement record, pane label, agent key, session name) at the pane the seat PROVES it is in. It takes no location: the seat establishes where it is from its own process ancestry (and, when that cannot decide, by writing a token to its own screen and finding it), and when it cannot establish that, it writes nothing and says why. Whoever invokes it — a `poke` from another member, a person at the keyboard, or this skill — gets the same answer. Passing a pane, a `--pane`, or any word is refused by name: a location handed in from outside is exactly the mistake this exists to remove.
+2. Show the output. Exit 0: every seat this session holds was written. Exit 2: at least one seat was left unwritten, with `state=` and `reason=` on its line. Exit 1: refused (an argument, no session id, or no seat held by this session).
+
 If argument is "reset":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" __AGENT_TYPE__`
 2. Tell the user the result.

@@ -127,6 +127,25 @@ _stub_tmux_exit() {
   [[ "$output" != *alice* ]]                        # registration dropped
 }
 
+@test "despawn --force: a record carrying the self-write fence field still hands the exact type to reset (#1152)" {
+  # The self-write path appends a fourth TAB field, fence=<instance>:<terminal_id>.
+  # A reader splitting with `read -r ref proj type` puts everything after the
+  # third TAB into `type` -- "claude-code<TAB>fence=..." -- and --force then
+  # calls reset with a type nothing is registered under, so the registration
+  # survives. The reader takes a fourth variable; this is the control.
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\t%s\n' '%99' "$PROJ" claude-code 'fence=/run/herdr-a.sock:term_X' > "$RUN/spawn.team__alice"
+  printf 'somesid\n' > "$RUN/actas.team__alice.session"
+  _stub_tmux_exit 0
+
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  [ ! -f "$RUN/spawn.team__alice" ]
+  [ ! -f "$RUN/actas.team__alice.session" ]
+  run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
+  [ "$(printf '%s\n' "$output" | grep -c alice)" -eq 0 ]   # dropped: the type reached reset intact
+}
+
 @test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
   # If the terminal driver does not confirm the pane closed (here: kill-pane exits
   # non-zero), the pane may still be alive. --force must NOT delete the record (the
