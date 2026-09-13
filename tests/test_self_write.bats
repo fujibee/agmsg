@@ -359,3 +359,38 @@ FAKE
   [ "$(_line policy)" = "policy=repair_incomplete" ]
   grep -q 'start=Sat_Sep_13_02:10:11_2026' "$(agmsg_spawn_path T alice)"   # the record carries the FIRST anchor
 }
+
+@test "plain: an emulator adapter that CAN poke still gets no session rename -- plain is record-only by ruling, not by capability" {
+  _plain_seat; _fake_ps "$$" ttys040 "Sat Sep 13 02:10:11 2026"
+  # the capability hook says poke and name are supported for this emulator
+  terminal_capability() { return 0; }
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  [ "$(_line label)" = "label attempt=skipped:unsupported:plain_record_only readback=not_attempted" ]
+  [ "$(_line session)" = "session attempt=skipped:unsupported:plain_record_only readback=not_attempted" ]
+  [ "$(_line policy)" = "policy=accepted" ]
+  refute grep -q 'rename' "$ARGV_LOG"
+}
+
+@test "plain: a spawn-written record with a complete boot pair for the SAME emulator+tty carries that pair into the new fence; an unknown key does not" {
+  _plain_seat; _fake_ps "$$" ttys040 "Sat Sep 13 02:10:11 2026"
+  mkdir -p "$(dirname "$(agmsg_spawn_path T alice)")"
+  printf 'plain:iterm:/dev/ttys040\t/proj/alice\tclaude-code\tfence=iterm:tty=/dev/ttys040,boot=4242,boot_start=Sat_Sep_13_02:00:00_2026,mystery=1\n' > "$(agmsg_spawn_path T alice)"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line fence)" = "fence=iterm:tty=/dev/ttys040,pid=$$,start=Sat_Sep_13_02:10:11_2026,boot=4242,boot_start=Sat_Sep_13_02:00:00_2026" ]
+  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  refute grep -q 'mystery' "$(agmsg_spawn_path T alice)"
+}
+
+@test "plain: a boot pair is NOT carried when the existing record names another tty, or the pair is incomplete" {
+  _plain_seat; _fake_ps "$$" ttys040 "Sat Sep 13 02:10:11 2026"
+  mkdir -p "$(dirname "$(agmsg_spawn_path T alice)")"
+  printf 'plain:iterm:/dev/ttys041\t/proj/alice\tclaude-code\tfence=iterm:tty=/dev/ttys041,boot=4242,boot_start=X\n' > "$(agmsg_spawn_path T alice)"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$(_line fence)" = "fence=iterm:tty=/dev/ttys040,pid=$$,start=Sat_Sep_13_02:10:11_2026" ]
+  printf 'plain:iterm:/dev/ttys040\t/proj/alice\tclaude-code\tfence=iterm:tty=/dev/ttys040,boot=4242\n' > "$(agmsg_spawn_path T alice)"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$(_line fence)" = "fence=iterm:tty=/dev/ttys040,pid=$$,start=Sat_Sep_13_02:10:11_2026" ]
+}
