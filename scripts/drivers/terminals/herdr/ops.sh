@@ -242,7 +242,7 @@ _herdr_pane_for_session() {
 # environment. Non-zero if not under herdr; empty stdout if the pane cannot
 # be resolved.
 terminal_detect() {
-  local sid="${1:-}"
+  local sid="${1:-}" socket
   # PRESENCE (exit code) is HERDR_ENV=1 ALONE: whether herdr is on PATH is a
   # terminal_check question ("can I operate it"), NOT "which terminal am I in"
   # (2026-08-31). Conflating them would make a herdr session with no herdr
@@ -252,11 +252,12 @@ terminal_detect() {
   # answered but we are not in it) goes to stderr for resolve-for-name's error;
   # resolve-for-placement uses only the exit code and needs no id.
   [ "${HERDR_ENV:-}" = 1 ] || return 1
+  socket="$(_herdr_env_socket)" || return 0
   # The pane we are in, from the environment: no round trip, no session id.
   # Only a value of the measured pane-id grammar is taken; anything else
   # falls through to the lookup rather than naming a pane that cannot exist.
   if [ -n "${HERDR_PANE_ID:-}" ] && _herdr_pane_id_ok "${HERDR_PANE_ID}"; then
-    printf '%s\n' "${HERDR_PANE_ID}"
+    printf '%s:%s\n' "$socket" "${HERDR_PANE_ID}"
     return 0
   fi
   if [ -z "$sid" ]; then
@@ -276,7 +277,7 @@ terminal_detect() {
     echo "herdr: session '$sid' is not among the live agents — cannot resolve this pane" >&2
     return 0
   fi
-  printf '%s\n' "$pane"
+  printf '%s:%s\n' "$socket" "$pane"
   return 0
 }
 
@@ -330,6 +331,22 @@ _herdr_bare_ok() {   # <wN:pX>
   case "$1" in *:*:*) return 1 ;; esac
   case "$1" in *[!0-9A-Za-z:]*) return 1 ;; esac
   return 0
+}
+
+# The instance that owns an env-derived or newly-created pane. A bare pane id
+# cannot be recorded safely: the same id may name a different live pane in every
+# herdr instance. Keep absence and malformed input as distinct diagnostics.
+_herdr_env_socket() {
+  local sock="${HERDR_SOCKET_PATH:-}"
+  if [ -z "$sock" ]; then
+    echo "herdr: HERDR_SOCKET_PATH is unset — cannot identify this pane's instance" >&2
+    return 1
+  fi
+  case "$sock" in *:*|*[[:cntrl:]]*)
+    echo "herdr: HERDR_SOCKET_PATH is malformed — cannot identify this pane's instance" >&2
+    return 2 ;;
+  esac
+  printf '%s\n' "$sock"
 }
 terminal_id_ok() {   # <id>
   local sock bare
@@ -424,14 +441,14 @@ _herdr_pane_input_ready() {
   return 1
 }
 
-# record op: create a pane/window, launch boot, print the new bare pane id.
+# record op: create a pane/window, launch boot, print its socket-qualified id.
 # Usage: terminal_spawn <name> <project> <target> <boot...>
 # <target> fully specifies the placement (no ambient config): 'window', or
 # 'pane-h' / 'pane-v' (herdr directions right / down). Mirrors spawn.sh's herdr
 # placement (tab create / pane split, then rename + run).
 terminal_spawn() {
   local name="$1" project="$2" target="$3"; shift 3
-  local boot="$*" json pane dir label
+  local boot="$*" json pane qualified dir label socket
   # The label the pane is created with. The driver's spawn signature carries no
   # team; the caller hands it in AGMSG_SPAWN_TEAM (spawn.sh sets it from the
   # resolved team). With it the label is the one vocabulary `_herdr_label`
@@ -443,6 +460,9 @@ terminal_spawn() {
     window|pane-h|pane-v) : ;;
     *) printf 'unsupported: unknown target: %s (window|pane-h|pane-v)\n' "$target" >&2; return 13 ;;
   esac
+  # Establish the instance BEFORE creating anything. Discovering afterwards
+  # that the pane cannot be qualified would leave a live, unrecordable pane.
+  socket="$(_herdr_env_socket)" || return 13
   if [ "$target" = window ]; then
     # A window needs a workspace. Absent one, FAIL explicitly rather than
     # silently splitting a pane the caller did not ask for.
@@ -454,6 +474,7 @@ terminal_spawn() {
     json="$(herdr pane split "${HERDR_PANE_ID:-}" --direction "$dir" --no-focus --cwd "$project" 2>/dev/null)" || return 13
   fi
   pane="$(_herdr_new_pane_id "$json")" || return 13
+  qualified="$socket:$pane"
   # The creation-time label is already the FINAL one (the same string
   # terminal_name writes), not a bare name overwritten later. The bare name was
   # the state a pane stayed in whenever the later naming failed (#1096: the key
@@ -461,7 +482,7 @@ terminal_spawn() {
   # it never ran) -- there is no reason to create a state that only exists to
   # be replaced. `pane rename` needs no agent detection; it works on a pane that
   # is seconds old.
-  herdr pane rename "$pane" "$label" >/dev/null 2>&1 || true
+  _herdr_cli "$qualified" pane rename "$pane" "$label" >/dev/null 2>&1 || true
   # requirement 1: wait (bounded) for the shell to reach its prompt, then act on the
   # THREE outcomes distinctly. Only NOT-READY(1) is retried — READY(0) and UNKNOWN(2)
   # are terminal. Every iteration uses the SAME classifier; UNKNOWN is never folded into
@@ -477,7 +498,7 @@ terminal_spawn() {
   # on the next line takes a `set -e` caller down BEFORE the branch classifies it.
   local ready_rc=2 tries=0
   while [ "$tries" -lt 50 ]; do
-    ready_rc=0; _herdr_pane_input_ready "$pane" || ready_rc=$?
+    ready_rc=0; _herdr_pane_input_ready "$qualified" || ready_rc=$?
     [ "$ready_rc" = 1 ] || break
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))
@@ -486,11 +507,11 @@ terminal_spawn() {
     # NOT READY after the bound: a foreground process is still running, so a typed boot
     # would be lost. Do NOT type; close the pane we created and fail with the reason.
     printf 'unsupported: pane %s never returned to its shell prompt (a foreground process is still running); the boot was NOT typed, to avoid a lost keystroke\n' "$pane" >&2
-    herdr pane close "$pane" >/dev/null 2>&1 || true
+    _herdr_cli "$qualified" pane close "$pane" >/dev/null 2>&1 || true
     return 3
   fi
-  herdr pane run "$pane" "$boot" >/dev/null 2>&1 || return 13
-  printf '%s\n' "$pane"
+  _herdr_cli "$qualified" pane run "$pane" "$boot" >/dev/null 2>&1 || return 13
+  printf '%s\n' "$qualified"
   # UNKNOWN: the boot WAS typed, but the pre-input state could not be verified. Signal
   # that distinctly (4) so the caller can warn — a DIFFERENT reason from a missing
   # post-input handshake, and it must not silently read as a clean spawn.
@@ -1048,8 +1069,9 @@ _herdr_internal_key() {
 # so it is written by the same machinery that is producing the wrong answers.
 # Less likely to be wrong, not known to be right.
 terminal_find_by_label() {   # <label>
-  local label="$1" json esc
+  local label="$1" json esc socket
   [ -n "$label" ] || return 0
+  socket="$(_herdr_env_socket)" || return 10
   command -v herdr >/dev/null 2>&1 || return 10
   json="$(herdr pane list 2>/dev/null)" || return 10
   [ -n "$json" ] || return 10
@@ -1069,7 +1091,7 @@ terminal_find_by_label() {   # <label>
   printf '%s\n' "$rows" | while IFS= read -r id; do
     [ -n "$id" ] || continue
     _herdr_pane_id_ok "$id" || continue
-    printf '%s\n' "$id"
+    printf '%s:%s\n' "$socket" "$id"
   done
   return 0
 }
