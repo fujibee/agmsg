@@ -78,7 +78,7 @@ teardown() {
 @test "send: a bare --body-file with no path is refused, not sent (#1101)" {
   run bash "$SCRIPTS/send.sh" testteam alice bob --body-file
   [ "$status" -ne 0 ]
-  [[ "$output" == *"takes exactly one path"* ]]
+  grep -qF -- "takes exactly one path" <<<"$output"
   # Nothing was delivered: the refusal happens at parse, before any write.
   run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" == *"No new messages"* ]]
@@ -90,7 +90,7 @@ teardown() {
   # recipient must receive nothing (not the string "--nope").
   run bash "$SCRIPTS/send.sh" testteam alice bob --nope
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unrecognized option"* ]]
+  grep -qF -- "unrecognized option" <<<"$output"
   run bash "$SCRIPTS/inbox.sh" testteam bob
   [[ "$output" == *"No new messages"* ]]
 }
