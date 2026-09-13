@@ -28,7 +28,7 @@ EOF
   # runner itself is inside herdr: a real herdr pane split would affect the
   # live session.
   unset TMUX
-  unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
 
   export PROJ="$TEST_SKILL_DIR/proj"
@@ -1103,6 +1103,7 @@ STUB
   chmod +x "$herdr_stub"
   export HERDR_ENV=1
   export HERDR_PANE_ID="wT:pSelf"
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
   export HERDR_WORKSPACE_ID="wT"
   # Clear the terminal template so spawn does not take the template path.
   unset AGMSG_TERMINAL
@@ -1130,7 +1131,7 @@ STUB
   [ -f "$rec" ]
   local rec_id
   IFS=$'\t' read -r rec_id _ _ < "$rec"
-  [ "$rec_id" = "herdr:wT:pN" ]
+  [ "$rec_id" = "herdr:$HERDR_SOCKET_PATH:wT:pN" ]
 }
 
 @test "spawn: herdr split --split v maps to --direction down" {
@@ -1154,7 +1155,7 @@ STUB
   [ -f "$rec" ]
   local rec_id
   IFS=$'\t' read -r rec_id _ _ < "$rec"
-  [ "$rec_id" = "herdr:wT:pR" ]
+  [ "$rec_id" = "herdr:$HERDR_SOCKET_PATH:wT:pR" ]
 }
 
 @test "spawn: herdr --window falls back to split when HERDR_WORKSPACE_ID is unset" {
@@ -1217,7 +1218,7 @@ _spawn_recorded_id() {
   [ "$status" -eq 0 ]
   grep -q "pane run wT:pRIGHT" "$HERDR_CALL_LOG"
   refute grep -q "wT:pWRONG" "$HERDR_CALL_LOG"
-  [ "$(_spawn_recorded_id)" = "herdr:wT:pRIGHT" ]
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pRIGHT" ]
 }
 
 @test "spawn: herdr split tolerates reordered keys in the pane object" {
@@ -1226,7 +1227,7 @@ _spawn_recorded_id() {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  [ "$(_spawn_recorded_id)" = "herdr:wT:pLAST" ]
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pLAST" ]
 }
 
 @test "spawn: herdr --window reads root_pane.pane_id past a nested object" {
@@ -1239,7 +1240,7 @@ _spawn_recorded_id() {
   [ "$status" -eq 0 ]
   grep -q "pane run wT:pNESTED" "$HERDR_CALL_LOG"
   refute grep -q "wT:pTABWRONG" "$HERDR_CALL_LOG"
-  [ "$(_spawn_recorded_id)" = "herdr:wT:pNESTED" ]
+  [ "$(_spawn_recorded_id)" = "herdr:$HERDR_SOCKET_PATH:wT:pNESTED" ]
 }
 
 @test "spawn: herdr split fails closed on a malformed or unusable response" {

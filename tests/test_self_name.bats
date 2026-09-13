@@ -352,7 +352,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   grep -q '^herdr \[agent\] \[rename\] \[w1:pB\] ' "$ARGV_LOG"
   refute grep -q '\[agent\] \[list\]' "$ARGV_LOG"
   local m; m="$(_mark team alice)"
-  [ "${m%%	*}" = 'herdr:w1:pB' ]
+  [ "${m%%	*}" = "herdr:$HERDR_SOCKET_PATH:w1:pB" ]
   case "${m#*	}" in sock=*:*) ;; *) echo "epoch not a socket fingerprint: $m"; return 1 ;; esac
 }
 
@@ -411,10 +411,10 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   _install_fake_herdr
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
-  export HERDR_ENV=1 HERDR_PANE_ID=w1:pB
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:pB HERDR_SOCKET_PATH="$BATS_TEST_TMPDIR/herdr.sock"
   run agmsg_terminal_resolve_name ""
   [ "$status" -eq 0 ]
-  [ "$output" = $'herdr\tw1:pB' ]
+  [ "$output" = "$(printf 'herdr\t%s:w1:pB' "$HERDR_SOCKET_PATH")" ]
   refute grep -q '\[agent\] \[list\]' "$ARGV_LOG"
   unset HERDR_PANE_ID
   run agmsg_terminal_resolve_name ""
@@ -525,9 +525,9 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 
   # Act once under the wrong environment: this is how the bad state was made.
   agmsg_self_name_on_action team alice
-  [ "$(_placement team alice)" = 'herdr:w1:pDAEMON' ]
+  [ "$(_placement team alice)" = "herdr:$HERDR_SOCKET_PATH:w1:pDAEMON" ]
   local m0; m0="$(_mark team alice)"
-  [ "${m0%%	*}" = 'herdr:w1:pDAEMON' ]
+  [ "${m0%%	*}" = "herdr:$HERDR_SOCKET_PATH:w1:pDAEMON" ]
 
   # And now the truth: the daemon's pane belongs to the seat that started it,
   # and this seat's label is on a different pane. (This is what the real server
@@ -540,9 +540,9 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
 
   # It moved. The record is the half peek/poke/despawn resolve through, so this
   # is the assertion that matters; a test on the label alone stays green.
-  [ "$(_placement team alice)" = 'herdr:w1:pMINE' ]
+  [ "$(_placement team alice)" = "herdr:$HERDR_SOCKET_PATH:w1:pMINE" ]
   local m; m="$(_mark team alice)"
-  [ "${m%%	*}" = 'herdr:w1:pMINE' ]
+  [ "${m%%	*}" = "herdr:$HERDR_SOCKET_PATH:w1:pMINE" ]
   # And it named ITS OWN pane, not the one it was squatting.
   grep -q '^herdr \[agent\] \[rename\] \[w1:pMINE\] ' "$ARGV_LOG"
   refute grep -q '\[rename\] \[w1:pDAEMON\]' "$ARGV_LOG"
@@ -554,7 +554,7 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   # from being the fix.
   _install_fake_herdr; _under_herdr w1:pB
   agmsg_self_name_on_action team alice
-  [ "$(_placement team alice)" = 'herdr:w1:pB' ]
+  [ "$(_placement team alice)" = "herdr:$HERDR_SOCKET_PATH:w1:pB" ]
   : > "$ARGV_LOG"
 
   agmsg_self_name_on_action team alice

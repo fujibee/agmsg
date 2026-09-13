@@ -21,7 +21,8 @@ setup() {
   mkdir -p "$FAKEBIN"
   : > "$ARGV_LOG"
   # A clean env baseline; individual tests opt into TMUX / HERDR_ENV.
-  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID AGMSG_TERMINAL
+  unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID AGMSG_TERMINAL
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
   # #1095's harness default (AGMSG_SELF_NAME=off, test_helper.bash) protects a
   # test from touching a REAL terminal it happens to inherit -- this file's
   # own baseline above already does that job independently (no real TMUX/HERDR
@@ -108,6 +109,7 @@ exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
   export PATH="$FAKEBIN:$PATH"
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
 }
 
 # A herdr whose `agent list` ERRORS (stands in for herdr-absent/errored).
@@ -228,7 +230,7 @@ _fake_herdr_list_scalar_session() {
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-abc"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\twC:p4')" ]
+  [ "$output" = "$(printf 'herdr\t%s:wC:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "resolve: detection order puts herdr before tmux when both env are present" {
@@ -237,7 +239,7 @@ _fake_herdr_list_scalar_session() {
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%4" HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-abc"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\twC:p4')" ]
+  [ "$output" = "$(printf 'herdr\t%s:wC:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "resolve: a trusted external manifest participates in every chooser (#1133)" {
@@ -723,8 +725,37 @@ EOF
   export HERDR_ENV=1
   run terminal_detect "sess-77"
   [ "$status" -eq 0 ]
-  [ "$output" = "wC:p4" ]
+  [ "$output" = "$HERDR_SOCKET_PATH:wC:p4" ]
   grep -q '\[agent\] \[list\]' "$ARGV_LOG"
+}
+
+@test "herdr: detect names why the instance selector cannot qualify its pane" {
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  export HERDR_ENV=1 HERDR_PANE_ID=wC:p4
+
+  unset HERDR_SOCKET_PATH
+  run agmsg_terminal_resolve_name "sess-77"
+  [ "$status" -eq 1 ]
+  [ "${output#*HERDR_SOCKET_PATH is unset}" != "$output" ]
+
+  export HERDR_SOCKET_PATH='/run/bad:socket'
+  run agmsg_terminal_resolve_name "sess-77"
+  [ "$status" -eq 1 ]
+  [ "${output#*HERDR_SOCKET_PATH is malformed}" != "$output" ]
+}
+
+@test "herdr: spawn without an instance selector fails before creating a pane" {
+  _install_fake_herdr "sess-77"
+  agmsg_terminal_load herdr
+  export HERDR_PANE_ID=wC:p1
+  unset HERDR_SOCKET_PATH
+
+  run terminal_spawn alice /proj pane-v bash -lc boot
+  [ "$status" -eq 13 ]
+  [ "${output#*HERDR_SOCKET_PATH is unset}" != "$output" ]
+  refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
+  refute grep -q '\[tab\] \[create\]' "$ARGV_LOG"
 }
 
 @test "herdr: spawn splits a pane, renames, runs boot, returns the new id" {
@@ -733,7 +764,7 @@ EOF
   export HERDR_PANE_ID='wC:p1'
   run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 0 ]
-  [ "$output" = "wC:p9" ]
+  [ "$output" = "$HERDR_SOCKET_PATH:wC:p9" ]
   grep -q '\[pane\] \[split\]' "$ARGV_LOG"
   grep -q '\[pane\] \[rename\] \[wC:p9\] \[alice\]' "$ARGV_LOG"
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
@@ -751,7 +782,7 @@ EOF
   export HERDR_PROCESS_INFO_RESPONSE='{"result":{"process_info":{"shell_pid":"x","foreground_process_group_id":"x"}}}'
   run bash -c 'set -euo pipefail; . "'"$SKILL_DIR"'/scripts/drivers/terminals/herdr/ops.sh"; terminal_spawn alice /proj pane-v /boot'
   [ "$status" -eq 4 ]                        # arm 3 reached (typed, unverified) — did NOT die at the classifier
-  [ "$output" = "wC:p9" ]                    # the pane id was printed, so the boot was typed
+  [ "$output" = "$HERDR_SOCKET_PATH:wC:p9" ] # the qualified pane id was printed, so the boot was typed
   grep -q '\[pane\] \[run\] \[wC:p9\]' "$ARGV_LOG"
 }
 
@@ -784,7 +815,7 @@ EOF
   # Cross-check both on the boundary set: the shell authority and a resolver lookup
   # (via a one-entry list whose pane_id is the value) must agree on accept/reject.
   agmsg_terminal_load herdr    # brings _herdr_pane_id_ok into scope
-  export HERDR_ENV=1
+  export HERDR_ENV=1 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
   local v want
   for v in 'w1:p4:ACCEPT' 'wC:p4:ACCEPT' 'w1:pB:ACCEPT' \
            'w:p:REJECT' 'w1:p:REJECT' 'w:p4:REJECT' 'w1:x:p4:REJECT' 'w1:p|4:REJECT'; do
@@ -797,7 +828,7 @@ EOF
     _fake_herdr_list_one_pane "sess-mine" "$pane"
     run agmsg_terminal_resolve_name "sess-mine"
     if [ "$want" = ACCEPT ]; then
-      [ "$status" -eq 0 ] && [ "$output" = "$(printf 'herdr\t%s' "$pane")" ] || { echo "resolver rejected $pane"; return 1; }
+      [ "$status" -eq 0 ] && [ "$output" = "$(printf 'herdr\t%s:%s' "$HERDR_SOCKET_PATH" "$pane")" ] || { echo "resolver rejected $pane"; return 1; }
     else
       [ "$status" -ne 0 ] && grep -q "did not answer" <<<"$output" || { echo "resolver accepted $pane"; return 1; }
     fi
@@ -1404,7 +1435,7 @@ M
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\tw1:p4')" ]
+  [ "$output" = "$(printf 'herdr\t%s:w1:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "herdr naming: the bare-pane arm is POSITIVE by STRUCTURE — an unresolvable entry is did-not-answer" {
@@ -1504,7 +1535,7 @@ M
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\twA:p1')" ]
+  [ "$output" = "$(printf 'herdr\t%s:wA:p1' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "herdr naming: a pane_id containing '|' is NOT well-formed -> did-not-answer (framing-safe)" {
@@ -1537,7 +1568,7 @@ M
   export HERDR_ENV=1
   run agmsg_terminal_resolve_name "sess-mine"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\tw1:p4')" ]
+  [ "$output" = "$(printf 'herdr\t%s:w1:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "herdr naming: the SEARCH predicate == the well-formed predicate (no numeric pane_id find)" {
@@ -1593,7 +1624,7 @@ M
   export TMUX="/tmp/s,1,0" TMUX_PANE="%0"       # tmux also has a pane
   run agmsg_terminal_resolve_name "sess-77"
   [ "$status" -eq 0 ]
-  [ "$output" = "$(printf 'herdr\twC:p4')" ]
+  [ "$output" = "$(printf 'herdr\t%s:wC:p4' "$HERDR_SOCKET_PATH")" ]
 }
 
 # --- naming vs placement: join must not take a seat's record ------------------
@@ -1704,7 +1735,7 @@ M
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   local rec; rec="$(agmsg_spawn_path seatteam alice)"
   [ -f "$rec" ]
-  grep -Fq 'herdr:wC:p4' "$rec"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:wC:p4" "$rec"
 }
 
 # --- join names a pane; it does not take the seat -----------------------------
@@ -2658,6 +2689,7 @@ exit 0
 EOF
   chmod +x "$FAKEBIN/herdr"
   export PATH="$FAKEBIN:$PATH"
+  export HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
 }
 
 @test "self-identity: the LABEL wins over an environment pointing at another pane (#1112)" {
@@ -2670,7 +2702,7 @@ EOF
 
   run _agmsg_terminal_resolve_by_label team alice
   [ "$status" -eq 0 ]
-  [ "$output" = "herdr$(printf '\t')w1:pMINE" ]
+  [ "$output" = "$(printf 'herdr\t%s:w1:pMINE' "$HERDR_SOCKET_PATH")" ]
 }
 
 @test "self-identity: no label match falls through, it does not invent a pane (#1112)" {
@@ -2958,14 +2990,14 @@ EOF
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   local peer; peer="$(agmsg_spawn_path team peer)"
   mkdir -p "$(dirname "$peer")"
-  printf 'herdr:w1:pMINE\t/proj/PEER\tclaude-code\n' > "$peer"
+  printf 'herdr:%s:w1:pMINE\t/proj/PEER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
   local mine; mine="$(agmsg_spawn_path team alice)"
   : > "$ARGV_LOG"
 
   run agmsg_terminal_name_self "" team alice /proj/A claude-code record
   [ "$status" -eq 0 ]
   grep -q 'did not name or record' <<<"$output"
-  grep -q 'herdr:w1:pMINE' <<<"$output"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pMINE" <<<"$output"
   grep -q "team__peer" <<<"$output"
   # The guard judged the LABEL's pane (w1:pMINE), and nothing was renamed.
   refute grep -qE '\[rename\]' "$ARGV_LOG"
@@ -2974,14 +3006,14 @@ EOF
   # Control 1: the same peer claiming the ENVIRONMENT's pane instead does not
   # block a seat the label placed elsewhere -- the guard judges the resolved
   # pane, not the inherited one.
-  printf 'herdr:w1:pDAEMON\t/proj/PEER\tclaude-code\n' > "$peer"
+  printf 'herdr:%s:w1:pDAEMON\t/proj/PEER\tclaude-code\n' "$HERDR_SOCKET_PATH" > "$peer"
   : > "$ARGV_LOG"
   run agmsg_terminal_name_self "" team alice /proj/A claude-code record
   [ "$status" -eq 0 ]
   refute grep -q 'did not name or record' <<<"$output"
   grep -q 'w1:pMINE' "$ARGV_LOG"
   refute grep -q 'w1:pDAEMON' "$ARGV_LOG"
-  grep -q '^herdr:w1:pMINE	/proj/A	claude-code$' "$mine"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pMINE" "$mine"
 }
 
 @test "seam: a seat that fell through to its ENVIRONMENT is refused when a peer's record claims that pane (#1112 x #1114)" {
@@ -2994,14 +3026,14 @@ EOF
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
   local peer; peer="$(agmsg_spawn_path team other)"
   mkdir -p "$(dirname "$peer")"
-  printf 'herdr:w1:pDAEMON\t/proj/PEER\tcodex\n' > "$peer"
+  printf 'herdr:%s:w1:pDAEMON\t/proj/PEER\tcodex\n' "$HERDR_SOCKET_PATH" > "$peer"
   local mine; mine="$(agmsg_spawn_path team alice)"
   : > "$ARGV_LOG"
 
   run agmsg_terminal_name_self "" team alice /proj/A codex record
   [ "$status" -eq 0 ]
   grep -q 'did not name or record' <<<"$output"
-  grep -q 'herdr:w1:pDAEMON' <<<"$output"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pDAEMON" <<<"$output"
   grep -q "team__other" <<<"$output"
   refute grep -qE '\[rename\]' "$ARGV_LOG"
   refute test -e "$mine"
@@ -3014,7 +3046,7 @@ EOF
   [ "$status" -eq 0 ]
   refute grep -q 'did not name or record' <<<"$output"
   grep -q 'w1:pDAEMON' "$ARGV_LOG"
-  grep -q '^herdr:w1:pDAEMON	/proj/A	codex$' "$mine"
+  grep -Fq "herdr:$HERDR_SOCKET_PATH:w1:pDAEMON" "$mine"
 }
 
 # --- #1126: the label search must survive `set -u` ----------------------------
@@ -3219,7 +3251,7 @@ EOF
   source "$SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh"
   run terminal_find_by_label team:alice
   [ "$status" -eq 0 ]
-  [ "$output" = "w1:pOK" ]
+  [ "$output" = "$HERDR_SOCKET_PATH:w1:pOK" ]
 }
 
 @test "resolve_by_label: two WELL-FORMED candidates from two drivers are still refused (#1134 keeps #1112)" {

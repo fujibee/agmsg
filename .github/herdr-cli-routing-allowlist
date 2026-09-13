@@ -15,5 +15,5 @@ _herdr_pane_for_session 1
 terminal_describe 2
 terminal_detect 1
 terminal_find_by_label 1
-terminal_spawn 5
+terminal_spawn 2
 terminal_enumerate_panes 2
