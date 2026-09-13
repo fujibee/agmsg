@@ -1,16 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: send.sh <team> <from> <to> <message> [--force]
+# Usage:
+#   send.sh <team> <from> <to> <message> [--force]              # body as ONE quoted arg
+#   send.sh <team> <from> <to> --body-file <path> [--force]     # body read from a file
+#   send.sh <team> <from> <to> --body - [--force]               # body read from stdin
+#
+# --body-file matches poke.sh, for the same reason (#507) AND to close #1101: a caller
+# who learned --body-file from poke used to have send take the literal string
+# "--body-file" as the message and exit zero (the flag has different meanings on the two
+# adjacent commands). A positional <message> also passes through the CALLER's shell first,
+# where a backtick or $( ) executes and its span silently vanishes; send bodies are longer
+# and likelier to contain them. So a message that is a bare unconsumed flag (starts with
+# --, and is not --body-file/--body) is now REFUSED rather than sent, and a mistyped flag
+# never lands as content. Trailing newlines are stripped from a file/stdin body, as in
+# poke (command-substitution semantics).
 
-TEAM="${1:?Usage: send.sh <team> <from> <to> <message> [--force]}"
+die() { echo "send.sh: $*" >&2; exit 1; }
+
+TEAM="${1:?Usage: send.sh <team> <from> <to> <message|--body-file PATH|--body -> [--force]}"
 FROM="${2:?Missing from agent}"
 TO="${3:?Missing to agent}"
-BODY="${4:?Missing message body}"
+shift 3
+
+# --force is historically the trailing flag AFTER the body; recognize it only as the
+# last argument, so a --body-file body whose text happens to be "--force" is unaffected.
 FORCE=0
-if [ "${5:-}" = "--force" ]; then
+if [ "$#" -gt 0 ] && [ "${!#}" = "--force" ]; then
   FORCE=1
+  set -- "${@:1:$#-1}"
 fi
+
+case "${1:-}" in
+  --body-file)
+    [ "$#" -eq 2 ] || die "--body-file takes exactly one path"
+    [ -r "${2:-}" ] || die "cannot read body file: ${2:-<missing>}"
+    BODY="$(cat -- "$2")"
+    ;;
+  --body)
+    { [ "$#" -eq 2 ] && [ "${2:-}" = "-" ]; } \
+      || die "--body accepts only '-' (read stdin); for a file use --body-file <path>"
+    BODY="$(cat)"
+    ;;
+  '')
+    die "Missing message body"
+    ;;
+  --*)
+    die "unrecognized option '${1}' — a message that starts with '-' must go through --body-file <path> or --body - (a bare flag is refused so a mistyped one is never sent as the message, #1101)"
+    ;;
+  *)
+    [ "$#" -eq 1 ] || die "got extra arguments — quote the message as ONE argument, or use --body-file <path>"
+    BODY="$1"
+    ;;
+esac
+[ -n "$BODY" ] || die "the message body is empty — nothing to send"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"

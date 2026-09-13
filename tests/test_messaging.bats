@@ -61,6 +61,54 @@ teardown() {
   [ "$n" -eq 1 ]
 }
 
+# --- send.sh: --body-file / flag-shaped body (#1101) ---
+
+@test "send: --body-file delivers a body that begins with a hyphen, intact (#1101)" {
+  # The exact trap #1101 filed: a caller reaches for poke's flag on send, and the
+  # body here IS a flag string. It must arrive as content, not be consumed. Through
+  # the supported route (--body-file) the recipient receives it whole.
+  printf -- '--body-file is the literal message here' > "$TEST_SKILL_DIR/body.txt"
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file "$TEST_SKILL_DIR/body.txt"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--body-file is the literal message here"* ]]
+}
+
+@test "send: a bare --body-file with no path is refused, not sent (#1101)" {
+  run bash "$SCRIPTS/send.sh" testteam alice bob --body-file
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"takes exactly one path"* ]]
+  # Nothing was delivered: the refusal happens at parse, before any write.
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" == *"No new messages"* ]]
+}
+
+@test "send: a flag-shaped message is refused rather than sent as content (#1101)" {
+  # Before the fix, send took a leading-flag string as the body and exited zero, so a
+  # mistyped flag landed silently as a one-word message. It must be refused, and the
+  # recipient must receive nothing (not the string "--nope").
+  run bash "$SCRIPTS/send.sh" testteam alice bob --nope
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unrecognized option"* ]]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" == *"No new messages"* ]]
+}
+
+@test "send: --body-file rides alongside a trailing --force (#1101)" {
+  printf 'delivered from a file' > "$TEST_SKILL_DIR/b2.txt"
+  run bash "$SCRIPTS/send.sh" brandnewteam ghost nobody --body-file "$TEST_SKILL_DIR/b2.txt" --force
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Sent to nobody" ]]
+}
+
+@test "send: --body - reads the message from stdin (#1101)" {
+  run bash -c "printf 'from stdin, intact' | bash '$SCRIPTS/send.sh' testteam alice bob --body -"
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPTS/inbox.sh" testteam bob
+  [[ "$output" == *"from stdin, intact"* ]]
+}
+
 # --- send.sh: team-name validation (#414) ---
 
 @test "send: rejects a team name with path traversal (../) and never consults a config outside teams/" {
