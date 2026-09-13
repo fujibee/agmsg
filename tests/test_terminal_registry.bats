@@ -1744,6 +1744,28 @@ M
   grep -q '/proj/OLD' "$rec"
 }
 
+@test "join: resolves a herdr pane from the type's dedicated session_env (#1024)" {
+  _install_fake_herdr "thread-right"
+  export PATH="$FAKEBIN:$PATH"
+  export HERDR_ENV=1 CODEX_SANDBOX=marker CODEX_THREAD_ID=thread-right
+  export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/db/messages.db"
+
+  run bash "$SKILL_DIR/scripts/join.sh" seatteam alice codex /proj/A
+  [ "$status" -eq 0 ]
+
+  # Positive controls: join asked herdr and named the pane it found. The
+  # CODEX_SANDBOX marker is deliberately different; borrowing the first detect=
+  # key instead of session_env makes this test fail at the lookup.
+  grep -Fq 'herdr [agent] [list]' "$ARGV_LOG"
+  grep -Fq 'herdr [pane] [rename] [wC:p4] [seatteam:alice]' "$ARGV_LOG"
+
+  # Naming at join is still display-only. Supplying a session id must not turn
+  # join into a placement claim for an identity that another session may hold.
+  source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+  local rec; rec="$(agmsg_spawn_path seatteam alice)"
+  refute test -e "$rec"
+}
+
 # --- AGMSG_TERMINAL_NAMING=off drops the label and keeps the key (#1044) ------
 #
 # Two names, and only one of them is optional. The key is the name the TERMINAL
