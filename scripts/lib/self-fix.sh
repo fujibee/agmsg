@@ -67,7 +67,7 @@ _fix_locator_of_proof() {   # <canonical-ref>
   kind="${ref%%:*}"; pane="${ref#*:}"
   case "$kind" in
     herdr) inst="${HERDR_SOCKET_PATH:-}" ;;
-    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX%%,*}" ;; esac ;;
+    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX:-}"; inst="${inst%%,*}" ;; esac ;;
     plain) case "$pane" in *:*) inst="${pane%%:*}"; pane="${pane#*:}" ;; esac ;;
   esac
   [ -n "$inst" ] || { printf '%s\n' "$ref"; return 0; }   # bare: ambient instance
