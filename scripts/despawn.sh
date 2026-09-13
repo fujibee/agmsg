@@ -199,7 +199,25 @@ done
 #
 # So ask the terminal. The record is deleted, and success reported, only when the
 # answer is a settled `gone`.
+#
+# And ask it MORE THAN ONCE. The watcher releases the lock before it folds its
+# pane, so the moment this loop is reached the pane is still `present` on a
+# graceful teardown that is working correctly — measured on a live herdr session
+# it stayed for tens of seconds (#1097). Checking once here reported `needs-force`
+# every time, teaching everyone to reach for --force (which skips the member's own
+# cleanup — the exact habit the graceful path exists to avoid). So wait for the
+# pane to actually go, drawing from the SAME --timeout budget the lock wait used
+# (the timeout covers the pane wait, not only the lock wait): `waited` is not
+# reset. Only a pane still `present` when that budget is spent is a real
+# needs-force. `unknown` is NOT polled — it means the terminal could not be asked
+# at all (unsupported/unreachable), where waiting cannot change the answer and
+# would only burn the whole timeout before the same needs-force.
 _pane_state="$(recorded_pane_state)"
+while [ "$_pane_state" = "present" ] && [ "$waited" -lt "$TIMEOUT" ]; do
+  sleep 1
+  waited=$((waited + 1))
+  _pane_state="$(recorded_pane_state)"
+done
 case "$_pane_state" in
   no-record|gone)
     rm -f "$SPAWN_REC" 2>/dev/null || true
@@ -218,7 +236,7 @@ case "$_pane_state" in
     echo "status=ok name=$NAME team=$TEAM after=${waited}s"
     ;;
   present)
-    echo "despawn: '$NAME' released its lock but the recorded pane is STILL OPEN — the teardown did not fold the window. The placement record is kept; retry with --force to tear it down through it." >&2
+    echo "despawn: '$NAME' released its lock but the recorded pane is STILL OPEN after ${waited}s — the teardown did not fold the window within the timeout. The placement record is kept; retry with --force to tear it down through it." >&2
     echo "status=needs-force name=$NAME team=$TEAM note=pane-still-open after=${waited}s"
     exit 1
     ;;
