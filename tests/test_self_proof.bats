@@ -73,6 +73,9 @@ PSEOF
   _edge "$PANE_PID" 1
   for _p in "$PANE_PID" 777 654 80 800; do _start "$_p" "Mon Jan  1 00:00:00 2020"; done
   _own "agmsg" "seat" "sid-1.$OWNER_PID"
+  # A live session has its instance marker; the proof requires it (#1187).
+  mkdir -p "$SKILL_DIR/run"
+  printf 'sid-1.%s\n' "$OWNER_PID" > "$SKILL_DIR/run/cc-instance.$OWNER_PID"
   _driver_returns "w1:p9	$PANE_PID"
 
   # THE CALLER'S SHELL STATE, applied last so it is in force for the test body.
@@ -526,11 +529,37 @@ w1:pX	$PANE_PID"
   # the file holds a number, not that the number is still this session.
   sleep 60 & local dead=$!
   kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  # The precondition is that the pid is GONE. On a loaded runner the number can
+  # be handed to a new process between the wait and the read below (#1187,
+  # seen twice on macOS); then this test is not measuring what it says, and a
+  # red here would be about the fixture, not the classifier. Say so and skip.
+  if kill -0 "$dead" 2>/dev/null; then skip "pid $dead was reused by another process before the read (#1187)"; fi
   _own agmsg seat "sid-1.$dead"
   _edge "$$" "$dead"; _edge "$dead" "$PANE_PID"
   run agmsg_self_proof agmsg seat w1:p9
   [ "$status" -eq 2 ]
   [ "$output" = "undetermined"$'\t'"owner_not_alive" ]
+}
+
+@test "an owner pid that is alive but has NO instance marker is undetermined, never a proof (#1187)" {
+  # The dangerous shape behind #1187: a pid that is alive because it was REUSED,
+  # with the session's marker gone (cleaned at its end, or never written). The
+  # lock reclaim reads an absent marker as alive-by-default, which is the
+  # conservative side THERE; here the same default would take a stranger's
+  # process for the owner and, with a complete ancestry, prove it into whatever
+  # pane the stranger sits in. Measured 2026-09-13: before the fix this fixture
+  # returned proved. The proof therefore requires positive identity: no marker,
+  # no proof.
+  sleep 60 & local stranger=$!
+  _own agmsg seat "sid-1.$stranger"
+  rm -f "$SKILL_DIR/run/cc-instance.$stranger"
+  : > "$PS_TREE"
+  _edge "$$" "$stranger"; _edge "$stranger" "$PANE_PID"; _edge "$PANE_PID" 1
+  _driver_returns "w1:p9	$PANE_PID"
+  run agmsg_self_proof agmsg seat w1:p9
+  kill "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null || true
+  [ "$status" -eq 2 ]
+  [ "$output" = "undetermined"$'\t'"owner_marker_absent" ]
 }
 
 @test "a REUSED owner pid is caught by the instance marker, not by liveness (#1152)" {

@@ -272,6 +272,21 @@ agmsg_self_proof() {   # <team> <agent> <candidate>
   # stay three here -- `dead` and `cannot tell` are different reasons, and
   # neither is a negative about the pane.
   if agmsg_instance_alive "$owner"; then arc=0; else arc=$?; fi
+  # Alive is not identity. agmsg_instance_alive reads an ABSENT marker as alive,
+  # and that is the conservative side for the LOCK it serves (nothing contradicts
+  # a live pid, so do not reclaim). Here the same default is the dangerous side:
+  # an absent marker means the number is alive but nothing says whose it is, and
+  # a pid reused by a stranger would be walked as the owner and proved into the
+  # stranger's pane (#1187, measured 2026-09-13). So this file asks for the marker
+  # itself and does NOT share the lock's default -- keep them apart on purpose.
+  if [ "$arc" -eq 0 ]; then
+    local _mk; _mk="$(_agmsg_marker_read "${SKILL_DIR:?self-proof.sh requires SKILL_DIR}/run/cc-instance.$opid")"
+    case "${_mk%%	*}" in
+      ok) ;;
+      absent) _agmsg_proof_say undetermined owner_marker_absent 2; return 2 ;;
+      *)      _agmsg_proof_say undetermined owner_liveness_unknown 2; return 2 ;;
+    esac
+  fi
   case "$arc" in
     0) : ;;
     1) _agmsg_proof_say undetermined owner_not_alive 2; return 2 ;;
