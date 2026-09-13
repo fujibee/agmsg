@@ -95,6 +95,43 @@ EOF
   export PATH="$FAKEBIN:$PATH"
 }
 
+_write_sweep_config() {
+  local project="$1"
+  mkdir -p "$SKILL_DIR/teams/testteam"
+  cat > "$SKILL_DIR/teams/testteam/config.json" <<EOF
+{"agents":{
+  "approval-seat":{"registrations":[{"type":"claude-code","project":"$project"}]},
+  "working-seat":{"registrations":[{"type":"codex","project":"$project"}]},
+  "idle-seat":{"registrations":[{"type":"codex","project":"$project"}]},
+  "gone-seat":{"registrations":[{"type":"codex","project":"$project"}]},
+  "unplaced":{"registrations":[{"type":"codex","project":"$project"}]},
+  "other-seat":{"registrations":[{"type":"codex","project":"$SKILL_DIR/other"}]},
+  "remote-seat":{"registrations":[]}
+}}
+EOF
+  _write_named_record approval-seat 'tmux:%1'
+  _write_named_record working-seat 'tmux:%2'
+  _write_named_record idle-seat 'tmux:%3'
+  _write_named_record gone-seat 'tmux:%4'
+  _write_named_record other-seat 'tmux:%5'
+}
+
+_install_fake_tmux_sweep() {
+  cat > "$FAKEBIN/tmux" <<EOF
+#!/usr/bin/env bash
+{ printf 'tmux'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\n'; } >> "$ARGV_LOG"
+case " \$* " in
+  *' %1 '*) printf 'Do you want to proceed\n'; printf '%080000d\n' 0; printf 'choice detail below prompt\n' ;;
+  *' %2 '*) printf 'Running command\nlast working line\n' ;;
+  *' %3 '*) printf 'ordinary output\nquiet prompt\n' ;;
+  *' %4 '*) printf "can't find pane: %%4\n" >&2; exit 1 ;;
+  *' %5 '*) printf 'must not be read\n' ;;
+esac
+EOF
+  chmod +x "$FAKEBIN/tmux"
+  export PATH="$FAKEBIN:$PATH"
+}
+
 # --- peek ----------------------------------------------------------------
 
 @test "peek: tmux record reads the pane verbatim; --lines forwards scrollback" {
@@ -167,6 +204,50 @@ EOF
   [ "$status" -ne 0 ]
   _out_has "--lines must be a whole number"
   [ ! -s "$ARGV_LOG" ]
+}
+
+@test "peek team: classifies the full screen approval before working before idle" {
+  _install_fake_tmux_sweep
+  local project="$TEST_SKILL_DIR/project-a"
+  mkdir -p "$project"
+  _write_sweep_config "$project"
+  run env AGMSG_RESOLVE_PROJECT=0 bash -c 'cd "$1" && bash "$2" testteam' _ "$project" "$SCRIPTS/peek.sh"
+  [ "$status" -eq 0 ] || return 1
+  printf '%s\n' "$output" | grep -Eq '^approval-se +%1 +approval +choice detail below prompt *$' || return 1
+  printf '%s\n' "$output" | grep -Eq '^working-sea +%2 +working +last working line *$' || return 1
+  printf '%s\n' "$output" | grep -Eq '^idle-seat +%3 +idle +quiet prompt *$' || return 1
+}
+
+@test "peek team: states remote and other-project exclusions and never reads them" {
+  _install_fake_tmux_sweep
+  local project="$TEST_SKILL_DIR/project-a"
+  mkdir -p "$project"
+  _write_sweep_config "$project"
+  run env AGMSG_RESOLVE_PROJECT=0 bash -c 'cd "$1" && bash "$2" testteam' _ "$project" "$SCRIPTS/peek.sh"
+  [ "$status" -eq 0 ] || return 1
+  printf '%s\n' "$output" | grep -Eq '^other-seat +- +excluded:project ' || return 1
+  printf '%s\n' "$output" | grep -Eq '^remote-seat +- +excluded:remote +no_local_registration *$' || return 1
+  printf '%s\n' "$output" | grep -Eq '^unplaced +- +no_record +no_placement_record *$' || return 1
+  [ "$(grep -c '\[%5\]' "$ARGV_LOG" || true)" -eq 0 ] || return 1
+}
+
+@test "peek team: preserves a member read failure as its driver rc" {
+  _install_fake_tmux_sweep
+  local project="$TEST_SKILL_DIR/project-a"
+  mkdir -p "$project"
+  _write_sweep_config "$project"
+  run env AGMSG_RESOLVE_PROJECT=0 bash -c 'cd "$1" && bash "$2" testteam' _ "$project" "$SCRIPTS/peek.sh"
+  [ "$status" -eq 0 ] || return 1
+  printf '%s\n' "$output" | grep -Eq "^gone-seat +%4 +read_rc_12 +tmux: could not capture pane '%4'" || return 1
+}
+
+@test "peek team: a roster query failure is rc 10, never an empty team" {
+  mkdir -p "$SKILL_DIR/teams/testteam"
+  printf '%s\n' '{not json' > "$SKILL_DIR/teams/testteam/config.json"
+  run bash "$SCRIPTS/peek.sh" testteam
+  [ "$status" -eq 10 ] || return 1
+  _out_has "team roster query failed (rc 1)" || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^MEMBER ' || true)" -eq 0 ] || return 1
 }
 
 # --- poke ----------------------------------------------------------------
