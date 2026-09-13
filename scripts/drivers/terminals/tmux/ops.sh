@@ -187,6 +187,15 @@ terminal_id_ok() {   # <id>
 # Run tmux against the server that owns <id>. With no socket in the id this is
 # plain `tmux`, which is what a legacy record gets and what the ambient
 # environment decides — the honest behaviour for a ref that does not say.
+# The id's two halves for the locator grammar: "<socket>\t<%N|@N>". A bare
+# legacy id names no server and is refused -- a locator must carry one.
+terminal_id_split() {   # <id>
+  local sock
+  terminal_id_ok "$1" || return 1
+  sock="$(_tmux_sock_of "$1")"
+  [ -n "$sock" ] || return 1
+  printf '%s\t%s\n' "$sock" "$(_tmux_bare_of "$1")"
+}
 _tmux_do() {   # <id> <tmux args...>
   local id="$1"; shift
   local sock; sock="$(_tmux_sock_of "$id")"

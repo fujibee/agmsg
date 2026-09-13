@@ -31,6 +31,12 @@ terminal_id_ok() {
   [ "$1" = '-' ] && return 0
   _plain_parse_id "$1"
 }
+# The id's two halves for the locator grammar: "<emulator>\t<tty>". The legacy
+# '-' sentinel names no place and is refused -- a locator must carry one.
+terminal_id_split() {   # <id>
+  _plain_parse_id "$1" || return 1
+  printf '%s\t%s\n' "$_PLAIN_EMULATOR" "$_PLAIN_TTY"
+}
 
 terminal_describe() {
   printf 'name=plain\n'

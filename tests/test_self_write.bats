@@ -37,7 +37,7 @@ _fx() { sed -n "s/^$1=//p" "$FIX" | head -1; }
 _fake_herdr() {
   cat > "$FAKEBIN/herdr" <<'FAKE'
 #!/usr/bin/env bash
-{ printf 'herdr'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$ARGV_LOG"
+{ printf 'sock=%s | herdr' "${HERDR_SOCKET_PATH:-<unset>}"; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$ARGV_LOG"
 fx() { sed -n "s/^$1=//p" "$FIX" | head -1; }
 if [ "$1" = pane ] && [ "$2" = get ]; then
   [ "$3" = "$(fx pane)" ] || [ -z "$(fx pane)" ] || { echo '{"error":"pane_not_found"}'; exit 1; }
@@ -207,6 +207,25 @@ FAKE
   [ "$status" -eq 0 ]
   [ "$(_line label)" = "label attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
   [ "$(_line session)" = "session attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
+}
+
+# --- a qualified locator: the pane the sweep hands over names its instance ---------
+
+@test "qualified: a socket-qualified locator is written as delivered, fenced on ITS socket, and every call goes to that socket with the bare pane" {
+  # the ambient environment points elsewhere; the locator's socket must win
+  export HERDR_SOCKET_PATH=/tmp/herdr/sessions/other/herdr.sock
+  _fixture terminal_id term_AAA title "◐ claude" label "" key "" status idle kind claude
+  run agmsg_self_write T alice "herdr:/tmp/herdr/sessions/jugemu-a/herdr.sock:w1:pB" "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line fence)" = "fence=/tmp/herdr/sessions/jugemu-a/herdr.sock:term_AAA" ]
+  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  [ "$(_line policy)" = "policy=accepted" ]
+  [ "$(_rec)" = "$(printf 'herdr:/tmp/herdr/sessions/jugemu-a/herdr.sock:w1:pB\t/proj/alice\tclaude-code\tfence=/tmp/herdr/sessions/jugemu-a/herdr.sock:term_AAA')" ]
+  # the CLI never saw the qualified id, and every call carried the locator's socket
+  refute grep -q 'herdr.sock:w1:pB' "$ARGV_LOG"
+  grep -q 'herdr \[agent\] \[prompt\] \[w1:pB\] \[/rename T-alice\]' "$ARGV_LOG"
+  [ "$(grep -c 'sock=/tmp/herdr/sessions/jugemu-a/herdr.sock' "$ARGV_LOG")" -ge 4 ]
+  refute grep -q 'sock=/tmp/herdr/sessions/other/herdr.sock' "$ARGV_LOG"
 }
 
 # --- the entry refuses what is not a location of ours ------------------------------
