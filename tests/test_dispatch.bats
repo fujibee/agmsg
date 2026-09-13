@@ -221,7 +221,7 @@ STUB
   export PATH="$bin:$PATH"
   : > "$log"
   # Under herdr: presence is HERDR_ENV=1, the pane is HERDR_PANE_ID.
-  export HERDR_ENV=1 HERDR_PANE_ID=wD:pSelf
+  export HERDR_ENV=1 HERDR_SOCKET_PATH=/tmp/hsock HERDR_PANE_ID=wD:pSelf
   unset AGMSG_TERMINAL
 
   # join: the seat names its own pane with the key and the prefixed label.
