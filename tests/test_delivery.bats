@@ -128,6 +128,35 @@ settings_file() {
   [ "$p" = "Bash" ]
 }
 
+@test "delivery set: does not strip a project's OWN hook merely because its command contains the skill name (#1038)" {
+  # A project's own SessionStart hook, named after the tool it cooperates
+  # with -- a natural convention, and exactly what used to trigger this:
+  # ownership was decided by instr(command, SKILL_NAME), a substring match
+  # on the bare skill name, not by the exact install path agmsg actually
+  # writes. Derived from $SCRIPTS, not hardcoded as "agmsg": the test
+  # harness copies the skill into a mktemp -d directory (test_helper.bash),
+  # so the real SKILL_NAME a running delivery.sh sees here is that
+  # directory's own basename, never the literal word "agmsg" -- a fixture
+  # hardcoding "agmsg" would pass whether or not the fix was in place, and
+  # say nothing.
+  local skill_name
+  skill_name="$(basename "$(dirname "$SCRIPTS")")"
+  mkdir -p "$TEST_PROJECT/.claude"
+  printf '%s' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$TEST_PROJECT"'/scripts/'"$skill_name"'-my-wrapper.sh"}]}]}}' \
+    > "$(settings_file)"
+
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+
+  # The project's own hook survived the strip...
+  grep -q "${skill_name}-my-wrapper.sh" "$(settings_file)"
+  # ...and agmsg's own entry landed alongside it, not instead of it.
+  has_session_start "$(settings_file)"
+  local n
+  n=$(sqlite_mem "SELECT count(*) FROM json_each(json_extract(readfile('$(rf "$(settings_file)")'), '\$.hooks.SessionStart'));")
+  [ "$n" -eq 2 ]
+}
+
 @test "delivery set monitor: round-trips multibyte (UTF-8) settings without a short-write reject" {
   # The writefile() guard compares bytes written to the content's BYTE length
   # (CAST AS BLOB). A character-length comparison would mismatch on multibyte
