@@ -1197,7 +1197,7 @@ OPS
   [ -f "$ran" ]     # the boot itself ran, reached via the template
   run terminal_despawn "-"
   [ "$status" -eq 13 ]
-  [[ "$output" == *"emulator-qualified tty"* ]]
+  printf '%s\n' "$output" | grep -Fq 'emulator-qualified tty'
 }
 
 @test "plain: spawn ISOLATES backend stdout — the record-op result is exactly the locator" {
@@ -1230,7 +1230,7 @@ OPS
 
   run terminal_spawn alice /proj window "$boot"
   [ "$status" -eq 13 ]
-  [[ "$output" == *"did not report its tty and owner"* ]]
+  printf '%s\n' "$output" | grep -Fq 'did not report its tty and owner'
   [ -f "$launched" ]
   refute grep -qx -- '-' <<<"$output"
 }
@@ -1259,7 +1259,7 @@ EOF
 
   run terminal_despawn 'iterm:/dev/ttys040' 'fence=iterm:tty=/dev/ttys040,pid=123,start=OTHER'
   [ "$status" -eq 10 ]
-  [[ "$output" == *"no longer matches"* ]]
+  printf '%s\n' "$output" | grep -Fq 'no longer matches'
 }
 
 # --- load failure cleanup: source failure, like missing-function, leaves nothing (review round 2) ---
