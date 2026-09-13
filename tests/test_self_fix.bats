@@ -141,3 +141,26 @@ _proof_says() {   # <rc> <state> <payload>
   grep -Fqx "proof T alice /tmp/tmux-501/default:%5" "$SPY"
   grep -Fqx "write T alice tmux:/tmp/tmux-501/default:%5 $ME" "$SPY"
 }
+
+@test "fix: tmux proved with NO TMUX in the environment, under set -u -> the bare ref is written and the failure path is spoken, never an aborted substitution" {
+  # The entry runs under set -euo pipefail. An unguarded read of TMUX inside the
+  # locator step would kill the $( ) it runs in, and the seat line would come out
+  # with an EMPTY state -- neither written nor refused by name. So this runs in
+  # a real shell with -u, and the signal is the seat line's content.
+  _own_seat alice "$ME"
+  cat > "$SKILL_DIR/probe.sh" <<PROBE
+set -u
+export SKILL_DIR="$SKILL_DIR" AGMSG_SESSION_ID="$ME" SPY="$SPY"
+unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
+. "$SKILL_DIR/scripts/lib/self-fix.sh"
+agmsg_terminal_self_env() { printf 'tmux\t%%5\t0\n'; }
+agmsg_self_proof() { printf 'proved\ttmux:%%5\n'; }
+agmsg_self_write() { printf 'write %s %s %s %s\n' "\$1" "\$2" "\$3" "\$4" >> "\$SPY"; }
+agmsg_fix_run
+PROBE
+  run bash "$SKILL_DIR/probe.sh"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=tmux:%5 via=proof" ]
+  grep -Fqx "write T alice tmux:%5 $ME" "$SPY"
+  refute grep -q 'state= ' <<< "$output"
+}
