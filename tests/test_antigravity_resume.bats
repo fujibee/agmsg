@@ -36,6 +36,25 @@ teardown() {
   rm -rf "$ROOT"
 }
 
+@test "antigravity runtime instructions and resume test names contain no CJK text (#1089)" {
+  local template="$BATS_TEST_DIRNAME/../scripts/drivers/types/antigravity/template.md"
+  run python3 - "$template" "$BATS_TEST_FILENAME" <<'PY'
+import pathlib
+import re
+import sys
+
+cjk = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+template = pathlib.Path(sys.argv[1]).read_text()
+test_names = "\n".join(
+    line for line in pathlib.Path(sys.argv[2]).read_text().splitlines()
+    if line.startswith('@test ')
+)
+if cjk.search(template) or cjk.search(test_names):
+    raise SystemExit("CJK text found in Antigravity runtime instructions or test names")
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "resume: exactly one paused TUI hands its identity to the existing resume" {
   run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 0 ]
