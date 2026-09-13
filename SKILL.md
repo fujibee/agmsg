@@ -119,6 +119,16 @@ Do NOT manually edit config files. Always use join.sh. If the name was recently 
 ~/.agents/skills/agmsg/scripts/delivery.sh set <mode> <type> "$(pwd)"
 ~/.agents/skills/agmsg/scripts/delivery.sh status <type> "$(pwd)"
 
+# Claude Code monitor runtime check:
+# `delivery.sh status ...` showing `mode: monitor` only confirms project hook
+# configuration. Realtime success requires Claude Code's generic Monitor tool:
+# ToolSearch select:Monitor finds Monitor, Monitor(agmsg inbox stream) starts,
+# the footer shows `1 monitor`, and the transcript records
+# `Monitor event: "agmsg inbox stream"`. A footer showing `1 shell`, a
+# Bash/background/nohup watch.sh, or Azure/MCP/other monitor-branded tools are
+# failure states. If generic Monitor is unavailable, use turn/manual inbox
+# fallback, but do not call that realtime monitor delivery.
+
 # Multiple roles per project (one CC = one active role).
 # Claude Code: `actas` claims an exclusivity lock for <name> across sessions
 # and restarts the Monitor filtered to <name> only; peer watchers stop
