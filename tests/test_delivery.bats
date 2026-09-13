@@ -3676,7 +3676,10 @@ EOF
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
   _fake_herdr_with_session "sess-x"
-  export HERDR_ENV=1
+  # The instance selector is common to both arms. The only differing input
+  # remains the type-specific session id below; without it, even a fully
+  # qualified Herdr environment must not name any pane.
+  export HERDR_ENV=1 HERDR_SOCKET_PATH=/run/herdr.sock
   unset TMUX TMUX_PANE
 
   bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"
