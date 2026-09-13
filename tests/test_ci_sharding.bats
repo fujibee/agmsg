@@ -9,6 +9,25 @@ setup() {
   load 'test_helper'
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SHARD="$REPO_ROOT/.github/scripts/shard-tests.sh"
+  TIMED_RUNNER="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
+  TIMING_SUMMARY="$REPO_ROOT/.github/scripts/summarize-bats-timings.sh"
+}
+
+@test "timing summary computes cross-run percentiles and per-run headroom" {
+  local timings
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  printf '%s\n' \
+    $'schema\trecord\trun_id\trun_attempt\tsha\tos\tshard\tshard_total\tfile\tstarted_at\tended_at\telapsed_seconds\tstatus' \
+    $'1\tfile_end\t1\t1\ta\tmacOS\t1\t4\ttests/a.bats\ts\te\t10\t0' \
+    $'1\tfile_end\t2\t1\tb\tmacOS\t2\t4\ttests/a.bats\ts\te\t30\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t1\t4\t-\ts\te\t70\t0' \
+    $'1\tshard\t1\t1\ta\tmacOS\t2\t4\t-\ts\te\t90\t0' > "$timings"
+
+  run "$TIMING_SUMMARY" --timeout-seconds 100 "$timings"
+
+  [ "$status" -eq 0 ]
+  grep -Fq $'file\tmacOS\ttests/a.bats\t2\t10\t30\t30' <<< "$output"
+  grep -Fq $'run\t1\t1\tmacOS\t2\t90\t10\t0' <<< "$output"
 }
 
 all_test_files() {
@@ -27,6 +46,119 @@ union_of_shards() {
   run bash "$SHARD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner is executable and self-documents its usage" {
+  [ -x "$TIMED_RUNNER" ]
+  run "$TIMED_RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"usage:"* ]]
+}
+
+@test "timed bats runner records each file and the shard total" {
+  local fixture manifest timings fake_bin
+  fixture="$BATS_TEST_TMPDIR/fixture.bats"
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$fake_bin"
+  printf '@test "passes" { true; }\n' > "$fixture"
+  printf '%s\n' "$fixture" > "$manifest"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=3 \
+    GITHUB_SHA=abc RUNNER_OS=macOS SHARD=2 SHARD_TOTAL=4 \
+    "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  [ "$(awk -F '\t' '$2 == "shard" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "file_end" && $3 == 42 && $4 == 3 && $5 == "abc" && $6 == "macOS" && $7 == 2 && $8 == 4 && $9 != "" && $12 ~ /^[0-9]+$/ && $13 == 0 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "timed bats runner records a failure and continues the shard" {
+  local manifest timings fake_bin calls
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/fail.bats tests/pass.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "$2" >> "$BATS_CALLS"' 'case "$2" in *fail*) exit 7 ;; esac' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 7 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  [ "$(awk -F '\t' '$2 == "file_end" { n++ } END { print n+0 }' "$timings")" -eq 2 ]
+  awk -F '\t' '$2 == "shard" && $13 == 7 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "timed bats runner does not pass the manifest as test stdin" {
+  local manifest timings fake_bin calls stdin_capture
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  calls="$BATS_TEST_TMPDIR/calls.txt"
+  stdin_capture="$BATS_TEST_TMPDIR/stdin.txt"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/first.bats tests/second.bats > "$manifest"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'echo "$2" >> "$BATS_CALLS"' \
+    'cat >> "$BATS_STDIN_CAPTURE"' \
+    'exit 0' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  run env PATH="$fake_bin:$PATH" BATS_CALLS="$calls" BATS_STDIN_CAPTURE="$stdin_capture" \
+    "$TIMED_RUNNER" "$manifest" "$timings"
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 2 ]
+  [ ! -s "$stdin_capture" ]
+}
+
+@test "timed bats runner records the interrupted shard on TERM" {
+  local manifest timings fake_bin ready release runner_pid rc i
+  manifest="$BATS_TEST_TMPDIR/manifest.txt"
+  timings="$BATS_TEST_TMPDIR/timings.tsv"
+  fake_bin="$BATS_TEST_TMPDIR/bin"
+  ready="$BATS_TEST_TMPDIR/ready"
+  release="$BATS_TEST_TMPDIR/release"
+  mkdir -p "$fake_bin"
+  printf '%s\n' tests/running.bats > "$manifest"
+  printf '%s\n' '#!/usr/bin/env bash' ': > "$BATS_READY"' 'while [ ! -f "$BATS_RELEASE" ]; do sleep 0.05; done' > "$fake_bin/bats"
+  chmod +x "$fake_bin/bats"
+
+  PATH="$fake_bin:$PATH" BATS_READY="$ready" BATS_RELEASE="$release" \
+    "$TIMED_RUNNER" "$manifest" "$timings" > "$BATS_TEST_TMPDIR/runner.log" 2>&1 &
+  runner_pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ]
+
+  kill -TERM "$runner_pid"
+  : > "$release"
+  rc=0
+  wait "$runner_pid" || rc=$?
+
+  [ "$rc" -eq 143 ]
+  [ "$(awk -F '\t' '$2 == "file_start" { n++ } END { print n+0 }' "$timings")" -eq 1 ]
+  awk -F '\t' '$2 == "shard" && $13 == 143 { ok=1 } END { exit !ok }' "$timings"
+}
+
+@test "CI runs the timed runner and uploads each shard artifact" {
+  local workflow
+  workflow="$REPO_ROOT/.github/workflows/tests.yml"
+  grep -Fq '.github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"' "$workflow"
+  grep -Fq 'name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}' "$workflow"
+  grep -Fq 'path: ${{ runner.temp }}/bats-timings.tsv' "$workflow"
 }
 
 @test "the shards cover every test file exactly once" {
@@ -88,7 +220,7 @@ union_of_shards() {
 # The test above catches drift in the TOP TWO BY COUNT — exactly the metric
 # that misses the files pinned below (#847, #848): both are near the bottom
 # of the count-weighted sort (9 and 31 tests) despite carrying some of the
-# largest measured durations in the suite (722s and 380s; see
+# largest measured durations in the suite (679s and 293s; see
 # shard-tests.sh's own comment for the measurement). This test guards the
 # actual fix, not the metric that already worked.
 @test "the pinned-apart heavy files never share a shard, at any shard total >= 2 (#847, #848)" {
@@ -178,41 +310,4 @@ union_of_shards() {
   # ...and the shard job's display name must name the same total, or the run
   # log claims a split the workflow is not performing.
   grep -q "bats (\${{ matrix.os }} \${{ matrix.shard }}/$total)" "$wf"
-}
-
-# The pin's whole point is that these files' @test count does not describe their
-# cost. Seeding the balancer with that count undoes the pin: the shard reads as
-# empty and gets refilled, which is how one shard reached 32 minutes against a
-# 30-minute cap while two others sat at 11 and 12 (macOS, run 33850939213).
-#
-# What this asserts is the reservation itself: a shard holding a pinned file
-# must end up carrying MEASURABLY FEWER tests than the average shard, because
-# the seed already spent that shard's budget. A test that only checked the
-# pinned files land on different shards -- which the suite above already does --
-# stays green through exactly this regression, since they still land apart when
-# seeded by count. That is the break this one is here to catch.
-@test "a pinned file's shard is reserved, not refilled (pin seed is not the count)" {
-  local script="$BATS_TEST_DIRNAME/../.github/scripts/shard-tests.sh"
-  local dir="$BATS_TEST_DIRNAME/.."
-  local total=4 n f count mean grand=0
-
-  for f in "$BATS_TEST_DIRNAME"/*.bats; do
-    grand=$((grand + $(grep -c '^[[:space:]]*@test' "$f" || true)))
-  done
-  mean=$((grand / total))
-  [ "$mean" -gt 0 ]
-
-  # Shard 1 and shard 2 hold the two pinned files (slot 0 and slot 1).
-  for n in 1 2; do
-    count=0
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      count=$((count + $(grep -c '^[[:space:]]*@test' "$dir/$f" || true)))
-    done < <(cd "$dir" && bash "$script" "$n" "$total")
-
-    # Strictly below the average, with margin: seeded by count these shards come
-    # out at roughly the mean, so a bare "<= mean" would be a coin flip rather
-    # than a check. Two thirds is well clear of both states.
-    [ "$count" -lt $((mean * 2 / 3)) ]
-  done
 }

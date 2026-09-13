@@ -940,6 +940,9 @@ class CodexBridge {
     this.turnActive = false;
     this.turnTimer = null;
     this.pendingWake = false;
+    this.startInFlight = false;
+    this.inFlightTurnId = null;
+    this.inFlightTurnEnded = false;
     this.watchHandle = null;
     this.wakeCount = 0;
     this.lastWakeMaxId = "";
@@ -980,7 +983,18 @@ class CodexBridge {
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
     this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
     this.client.on("thread/status/changed", this.clientHandler("thread/status/changed", (params) => this.onThreadStatus(params)));
-    this.client.on("turn/started", this.clientHandler("turn/started", () => {
+    this.client.on("turn/started", this.clientHandler("turn/started", (params) => {
+      // The app-server holds threads beyond ours; another thread's turn must
+      // not flip our state (and, below, must not be mistaken for the turn we
+      // are starting).
+      if (params && params.threadId && params.threadId !== this.threadId) return;
+      // The app-server may notify the turn tryStartTurn() is starting BEFORE
+      // it ACKs the turn/start request. Capture its IDENTITY: only an end
+      // signal carrying this same turn id may be attributed to the new turn
+      // while the request is in flight (see onTurnCompleted).
+      if (this.startInFlight) {
+        this.inFlightTurnId = (params && params.turn && params.turn.id) || null;
+      }
       this.turnActive = true;
       this.threadIdle = false;
       // This turn was not started by tryStartTurn() -- e.g. a TUI-driven turn
@@ -1087,7 +1101,34 @@ class CodexBridge {
   //            and the only victim would be a same-(project,pair) bridge in the
   //            sub-ms window before it overwrites this pid's lease, self-corrected
   //            by the launcher respawning it.
+  //   win32 -> Process.StartTime.Ticks, read through PowerShell. Windows has no
+  //            /proc, and MSYS's `ps` rejects -o outright, so both POSIX sources
+  //            yield an empty token and no lease can be published at all.
+  //            ONE source, not a preference list: WMIC is deprecated and already
+  //            absent from some Windows 11 installs, and letting each side choose
+  //            between WMIC and PowerShell independently would let this writer and
+  //            _start_token (codex-bridge-launcher.sh) record differently-
+  //            FORMATTED tokens for the same process. powershell.exe and pwsh
+  //            return identical Ticks, so falling back between those two binaries
+  //            is safe: the src label names the format, not the executable.
   startToken() {
+    if (process.platform === "win32") {
+      for (const bin of ["powershell.exe", "pwsh"]) {
+        const r = spawnSync(
+          bin,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${process.pid}).StartTime.Ticks`,
+          ],
+          { encoding: "utf8" },
+        );
+        const ticks = (r.status === 0 ? (r.stdout || "") : "").trim();
+        if (/^\d+$/.test(ticks)) return { src: "pwsh", token: ticks };
+      }
+      return { src: "pwsh", token: "" };
+    }
     try {
       const stat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
       const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
@@ -1395,7 +1436,10 @@ class CodexBridge {
       return;
     }
     if (type === "idle") {
-      this.threadIdle = true;
+      // While a turn/start request is in flight, that start owns the state;
+      // a stale idle from the previous turn must not flip threadIdle under
+      // it. onTurnEnded() below decides (and defers) via the same ownership.
+      if (!this.startInFlight) this.threadIdle = true;
       // The real app-server signals idle but may never send turn/completed;
       // treat idle as the end of the turn so detection resumes. See #41.
       this.onTurnEnded().catch((error) =>
@@ -1411,6 +1455,21 @@ class CodexBridge {
     } else {
       console.error(`codex-bridge: turn completed on thread ${this.threadId}`);
     }
+    // Attribution while our turn/start request is unanswered. The previous
+    // turn's tail and the NEW turn's own completion are both legal here, and
+    // a phase flag cannot tell them apart (a stale tail can land AFTER the
+    // new turn was seen starting). Identity can: defer the end only when it
+    // carries the SAME turn id turn/started reported for the turn we are
+    // starting. Anything else — a different id, or no id on either side — is
+    // unattributable mid-start and is dropped; if it really was the new
+    // turn's end, the idle watchdog closes the turn (#41).
+    if (this.startInFlight) {
+      const completedId = params.turn && params.turn.id;
+      if (completedId && this.inFlightTurnId && completedId === this.inFlightTurnId) {
+        this.inFlightTurnEnded = true;
+      }
+      return;
+    }
     await this.onTurnEnded();
   }
 
@@ -1419,6 +1478,18 @@ class CodexBridge {
   // real app-server does not reliably deliver turn/completed, so a bridge that
   // gates re-arm on it never re-arms and sleeps after one message. See #41.
   async onTurnEnded() {
+    // While our turn/start request is unanswered, the only turn-end signal
+    // that can be attributed to the turn being started is an id-matching
+    // turn/completed — and onTurnCompleted defers that one itself before it
+    // ever reaches here. Everything else that funnels in mid-start (a stale
+    // thread/status idle from the previous turn, an id-less completion, a
+    // watchdog firing) is unattributable: acting on it reset turnActive /
+    // threadIdle under the in-flight start and re-entered tryStartTurn with
+    // the same wake, injecting a duplicate turn whose inbox read — after the
+    // first read consumed the rows — was empty. Drop them; a genuinely-ended
+    // new turn that only signalled ambiguously is closed by the idle
+    // watchdog (#41).
+    if (this.startInFlight) return;
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
@@ -1456,6 +1527,16 @@ class CodexBridge {
     const prompt = this.buildPrompt();
     this.turnActive = true;
     this.threadIdle = false;
+    // Claim the wake BEFORE the request goes out, not after it succeeds. With
+    // the claim left set across the await, a turn-end signal arriving mid-
+    // request re-entered this method with the same wake and started a second
+    // turn. The claim is restored on failure so the wake fires again (the
+    // inline inbox rows are already marked read by then, so the retry
+    // re-delivers the wake, not the payload — unchanged from before).
+    this.pendingWake = false;
+    this.startInFlight = true;
+    this.inFlightTurnId = null;
+    this.inFlightTurnEnded = false;
     try {
       await this.client.request("turn/start", {
         threadId: this.threadId,
@@ -1464,16 +1545,24 @@ class CodexBridge {
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
-      this.pendingWake = false;
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
       this.startTurnWatchdog();
     } catch (error) {
+      this.pendingWake = true;
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
       throw error;
+    } finally {
+      this.startInFlight = false;
+    }
+    // A fast turn can be fully notified (started AND ended) before the ACK
+    // arrived; its deferred end is processed now that the start is settled.
+    if (this.inFlightTurnEnded) {
+      this.inFlightTurnEnded = false;
+      await this.onTurnEnded();
     }
   }
 
@@ -1583,7 +1672,10 @@ class CodexBridge {
     const sections = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name], { cwd: this.opts.project, encoding: "utf8" });
+      // --quiet: an empty inbox must read back as EMPTY. The human-facing
+      // "No new messages." line is non-blank, passed tryStartTurn's emptiness
+      // check, and became the entire prompt of an injected turn.
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
       if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
     }
