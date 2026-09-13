@@ -4,17 +4,11 @@ set -euo pipefail
 # Usage: team.sh <team>
 # Shows team members.
 
-USAGE='Usage: team.sh <team> [--json] [--fix | --fix-pane-names | --rename-sessions]
-  --fix              repair every identity cell: the pane names AND the CLI
-                     session name -- the latter by TYPING a rename command
-                     into the session
-  --fix-pane-names   repair the pane label and agent key only; never types
-                     into a session
-  --rename-sessions  repair the CLI session name only; TYPES the rename
-                     command into each session that is at a prompt'
+USAGE='Usage: team.sh <team> [--json]'
 # Printed, not passed to ${1:?...}: the shell prefixes that form with its own
-# "line N: 1:" and renders the whole multi-line text as a single mangled line,
-# which is exactly the help for the options #1110 added.
+# "line N: 1:" and mangles it. Kept even now that the message is one line --
+# the property being guarded is "no shell-diagnostic corruption", not "multiple
+# lines", and the next option this file grows will want the same guarantee.
 if [ $# -eq 0 ]; then
   printf '%s\n' "$USAGE" >&2
   exit 2
@@ -22,27 +16,21 @@ fi
 TEAM="$1"
 shift
 OUTPUT_MODE=human
-# Two separable repairs (#1110): the pane names are written through the
-# terminal's API; the session name is typed into the session. --fix is the
-# unconditional umbrella and does both; the specific flags pick one half.
-FIX_PANE_NAMES=0
-FIX_SESSIONS=0
+# #1152: team.sh no longer repairs another seat. A seat that will not answer is
+# reported as such (#1144's read-only census) and is replaced, not typed into --
+# koichi's ruling: losing the ability to force-fix an unresponsive seat from the
+# outside is the point, not a cost. --fix / --fix-pane-names / --rename-sessions
+# and everything they drove (agmsg_team_fix_pane_names_loaded,
+# agmsg_team_rename_session_loaded, agmsg_team_verify_placement,
+# agmsg_team_create_placement_from_label, all four defined in team-status.sh)
+# are gone with them, not replaced by a softer version of the same authority.
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) OUTPUT_MODE=json ;;
-    --fix) FIX_PANE_NAMES=1; FIX_SESSIONS=1 ;;
-    --fix-pane-names) FIX_PANE_NAMES=1 ;;
-    --rename-sessions) FIX_SESSIONS=1 ;;
     *) echo "$USAGE" >&2; exit 2 ;;
   esac
   shift
 done
-FIX=0
-if [ "$FIX_PANE_NAMES" -eq 1 ] || [ "$FIX_SESSIONS" -eq 1 ]; then FIX=1; fi
-if [ "$FIX" -eq 1 ] && [ "$OUTPUT_MODE" = json ]; then
-  echo "Usage: team.sh <team> [--json] [--fix | --fix-pane-names | --rename-sessions] (--json and a repair flag cannot be combined)" >&2
-  exit 2
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -127,34 +115,11 @@ _emit_unknown_row() {
     "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified
 }
 
-_emit_fix_actions() {
-  local actions="$1" field result reason
-  while IFS="$(printf '\t')" read -r field result reason; do
-    [ -n "$field" ] || continue
-    printf '    fix.%s=%s(reason=%s)\n' "$field" "$result" "$reason"
-  done <<EOF
-$actions
-EOF
-}
-
-# The skipped lines for a member no repair can reach -- only the cells the
-# requested flags cover, so the report never mentions a cell it was not asked
-# to touch.
-_emit_unfixable_actions() {
-  local reason="$1" actions=""
-  [ "$FIX" -eq 1 ] || return 0
-  [ "$FIX_PANE_NAMES" -eq 1 ] && actions="$(printf 'pane_label\tskipped\t%s\nagent_key\tskipped\t%s\n' "$reason" "$reason")"
-  [ "$FIX_SESSIONS" -eq 1 ] && actions="${actions:+$actions
-}$(printf 'cli_session\tskipped\t%s\n' "$reason")"
-  _emit_fix_actions "$actions"
-}
-
 _member_status() {
   local team="$1" agent="$2" type="$3" project="$4" registered="$5"
   local rec ref terminal pane location container delivery identity
   local activity pane_label agent_key cli_session consistency reason
   local _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session
-  local fix_actions=""
   if [ "$registered" -eq 0 ]; then
     _emit_row "$agent" remote n/a:remote_registration \
       n/a:remote n/a:no_local_registration n/a:no_local_registration \
@@ -162,7 +127,6 @@ _member_status() {
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a
-    _emit_unfixable_actions no_local_registration
     return 0
   fi
   delivery="$(_member_delivery "$type" "$project")"
@@ -170,46 +134,27 @@ _member_status() {
     reason=terminal_support_not_loaded
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
-    _emit_unfixable_actions "$reason"
     return 0
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
   if [ -z "$rec" ] || [ ! -f "$rec" ]; then
-    # #1140: no record. A seat denied terminal operations (a sandbox returns
-    # PermissionDenied for the naming call) can never name itself, and the record
-    # write sits BEHIND naming -- so it never gets a record. --fix, from OUTSIDE
-    # the sandbox, can place it FROM THE LABEL when the label settles on exactly
-    # one pane; the repair then continues on that pane. Zero or many matches ->
-    # unfixable, as before. A read-only `team` status never creates a record.
-    ref=""
-    if [ "$FIX" -eq 1 ] && [ -n "$rec" ] && declare -F agmsg_team_create_placement_from_label >/dev/null 2>&1; then
-      ref="$(agmsg_team_create_placement_from_label "$team" "$agent" "$rec" "$project" "$type")" || ref=""
-    fi
-    if [ -z "$ref" ]; then
-      reason=no_placement_record
-      _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-        "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
-      _emit_unfixable_actions "$reason"
-      return 0
-    fi
-    rec_project="$project"; rec_type="$type"       # the record just created carries these
-  else
-    IFS="$(printf '\t')" read -r ref rec_project rec_type < "$rec" || true
-    if [ -z "$ref" ]; then
-      reason=empty_placement_record
-      _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-        "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
-      _emit_unfixable_actions "$reason"
-      return 0
-    fi
-    # #1131: under a repair verb the record is a CLAIM to verify, not an address to
-    # trust. If the label settles the seat on a different pane, correct the record
-    # and act on the real pane -- so --fix never overwrites another seat's label to
-    # match a wrong record. A read-only `team` status must not rewrite records, so
-    # only --fix / --fix-pane-names / --rename-sessions does this.
-    if [ "$FIX" -eq 1 ] && declare -F agmsg_team_verify_placement >/dev/null 2>&1; then
-      ref="$(agmsg_team_verify_placement "$team" "$agent" "$rec" "$ref" "$rec_project" "$rec_type")"
-    fi
+    # #1140/#1152: a seat that never named itself has no record, and status
+    # reports that -- it does not create one from the label. Only the seat
+    # itself writes its own placement (self-write.sh); a read from the outside
+    # never does.
+    reason=no_placement_record
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    return 0
+  fi
+  # The record also carries project/type, unused now that nothing here rewrites
+  # it -- read and discarded, so a line with fewer fields does not shift `ref`.
+  IFS="$(printf '\t')" read -r ref _ _ < "$rec" || true
+  if [ -z "$ref" ]; then
+    reason=empty_placement_record
+    _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+    return 0
   fi
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
   pane="$(agmsg_terminal_ref_id "$ref" 2>/dev/null)" || pane=""
@@ -217,7 +162,6 @@ _member_status() {
     reason=invalid_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
       "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
-    _emit_unfixable_actions "$reason"
     return 0
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
@@ -229,23 +173,6 @@ EOF
     IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
 EOF
-    if [ "$FIX" -eq 1 ]; then
-      # Each half only when its flag asked for it. The pane-names half never
-      # types into the pane; the session half is the one that does (#1110).
-      fix_actions=""
-      if [ "$FIX_PANE_NAMES" -eq 1 ]; then
-        fix_actions="$(agmsg_team_fix_pane_names_loaded "$team" "$agent" "$type" "$terminal" "$pane" \
-          "$pane_label" "$agent_key")"
-      fi
-      if [ "$FIX_SESSIONS" -eq 1 ]; then
-        fix_actions="${fix_actions:+$fix_actions
-}$(agmsg_team_rename_session_loaded "$team" "$agent" "$type" "$terminal" "$pane" "$cli_session")"
-      fi
-      identity="$(agmsg_team_identity_loaded "$team" "$agent" "$type" "$terminal" "$pane")"
-      IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
-$identity
-EOF
-    fi
   else
     reason=terminal_driver_load_failed
     activity="unknown:$reason"; pane_label="unknown:$reason"
@@ -260,13 +187,6 @@ EOF
     "$pane_label" "$_expected_label" "$_actual_label" \
     "$agent_key" "$_expected_key" "$_actual_key" \
     "$cli_session" "$_expected_session" "$_actual_session" "$consistency"
-  if [ "$FIX" -eq 1 ]; then
-    if [ -n "$fix_actions" ]; then
-      _emit_fix_actions "$fix_actions"
-    else
-      _emit_unfixable_actions terminal_driver_load_failed
-    fi
-  fi
 }
 
 if [ "$OUTPUT_MODE" = json ]; then
