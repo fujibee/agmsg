@@ -30,7 +30,22 @@ _run_sweep_fixture() {   # <rows>
     set -u
     SCRIPTS=$1; SKILL_DIR=$2; ROWS=$3; LOG=$4
     . "$SCRIPTS/lib/sweep.sh"
-    _agmsg_sweep_agent_rows() { printf "%s\n" "$ROWS"; }
+    _agmsg_sweep_agent_rows() {
+      printf "%s\n" "$ROWS" | awk -F "\t" '\''
+        $1 == "!" || $1 == "!!" || $1 == "?" { print; next }
+        { print $1 "\t" $2 "\t" $3 }
+      '\''
+    }
+    _agmsg_sweep_process_at() {
+      printf "%s\n" "$ROWS" | awk -F "\t" -v kind="$1" -v instance="$2" -v pane="$3" '\''
+        $1 == kind && $2 == instance && $3 == pane {
+          out = $4
+          for (i = 5; i <= NF; i++) out = out "\t" $i
+          print out
+          exit
+        }
+      '\''
+    }
     _agmsg_sweep_instance_allowed() {
       [ "$2:$3" != "herdr:/run/oma.sock" ]
     }
@@ -71,13 +86,14 @@ _run_sweep_fixture() {   # <rows>
 }
 
 @test "none unknown holes malformed rows and label mismatch are loud and never poked (#1152)" {
-  _run_sweep_fixture $'herdr\t/run/jugemu.sock\tw1:p1\tnone\t\nherdr\t/run/jugemu.sock\tw1:p2\tunknown\twalk_incomplete\n!\therdr\t/run/bad.sock\n!!\ttmux\n?\tplain\nherdr\t/run/jugemu.sock\tw1:p3\tagent\tcodex\textra\nherdr\t/run/jugemu.sock\tw1:p7\tagent\tcodex'
+  _run_sweep_fixture $'herdr\t/run/jugemu.sock\tw1:p1\tnone\t\nherdr\t/run/jugemu.sock\tw1:p2\tunknown\twalk_incomplete\n!\therdr\t/run/bad.sock\n!!\ttmux\n?\tplain\nbroken\trow\nherdr\t/run/jugemu.sock\tw1:p3\tagent\tcodex\textra\nherdr\t/run/jugemu.sock\tw1:p7\tagent\tcodex'
   [ "$status" -eq 1 ]
   [ ! -e "$BATS_TEST_TMPDIR/pokes" ]
   grep -Fq 'reason=none' <<< "$output"
   grep -Fq 'reason=unknown:walk_incomplete' <<< "$output"
   grep -Fq 'reason=enumeration_hole' <<< "$output"
   grep -Fq 'reason=malformed_row' <<< "$output"
+  grep -Fq 'reason=malformed_process_observation' <<< "$output"
   grep -Fq 'reason=roster_label_process_mismatch' <<< "$output"
 }
 
@@ -106,7 +122,8 @@ _run_sweep_fixture() {   # <rows>
     set -u
     SCRIPTS=$1; SKILL_DIR=$2
     . "$SCRIPTS/lib/sweep.sh"
-    _agmsg_sweep_agent_rows() { printf "herdr\t/run/jugemu.sock\tw1:p7\tagent\tclaude-code\n"; }
+    _agmsg_sweep_agent_rows() { printf "herdr\t/run/jugemu.sock\tw1:p7\n"; }
+    _agmsg_sweep_process_at() { printf "agent\tclaude-code\n"; }
     _agmsg_sweep_instance_allowed() { return 0; }
     _agmsg_sweep_locator() { printf "%s:%s:%s\n" "$1" "$2" "$3"; }
     _agmsg_sweep_label_at() { printf "alpha:alice\n"; }

@@ -16,10 +16,11 @@ _agmsg_sweep_agent_rows() {
   agmsg_terminal_enumerate
 }
 
-# These two adapters are intentionally fail-closed until the instance-aware
-# label reader and compare-and-poke ABI land. Neither may be emulated by loading
-# a driver against the leader's environment: two terminal instances routinely
-# contain the same bare pane id.
+# These adapters are intentionally fail-closed until the instance-aware process
+# observer, label reader and compare-and-poke ABI land. None may be emulated by
+# loading a driver against the leader's environment: two terminal instances
+# routinely contain the same bare pane id.
+_agmsg_sweep_process_at() { return 127; }     # <kind> <instance> <pane>
 _agmsg_sweep_label_at() { return 127; }       # <kind> <instance> <pane>
 _agmsg_sweep_poke_fenced() { return 127; }    # <kind> <instance> <pane> <owner> <text>
 _agmsg_sweep_instance_allowed() { return 127; } # <team> <kind> <instance>
@@ -69,13 +70,14 @@ _agmsg_sweep_quote_arg() {   # <value>
   printf "'%s'" "$escaped"
 }
 
-# Consume #1155 rows:
-#   kind<TAB>instance<TAB>pane<TAB>state<TAB>payload
-# plus its ! / !! / ? hole rows. Every row that is not a complete, corroborated
-# agent candidate is loud and makes the command non-zero.
+# Consume #1155's (kind, instance, pane) census plus its ! / !! / ? hole rows.
+# Process state is a separate observation made against that exact triple; the
+# census never grows sweep-only classification fields. Every row that is not a
+# complete, corroborated agent candidate is loud and makes the command non-zero.
 agmsg_sweep_run() {   # <team>
   local team="${1-}" rows rows_rc=0 rc=0 tab line
-  local kind instance pane state payload extra label label_rc agent owner ref locator_rc text poke_rc
+  local kind instance pane census_extra process process_rc state payload process_extra
+  local label label_rc agent owner ref locator_rc text poke_rc
   [ -n "$team" ] || { echo 'sweep: team is required' >&2; return 2; }
   tab="$(printf '\t')"
 
@@ -87,10 +89,10 @@ agmsg_sweep_run() {   # <team>
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    IFS="$tab" read -r kind instance pane state payload extra <<EOF
+    IFS="$tab" read -r kind instance pane census_extra <<EOF
 $line
 EOF
-    if [ -n "${extra:-}" ]; then
+    if [ -n "${census_extra:-}" ]; then
       _agmsg_sweep_report_skip "${kind:-?}" "${instance:-?}" "${pane:-?}" malformed_row
       rc=1
       continue
@@ -102,9 +104,25 @@ EOF
         continue
         ;;
     esac
-    if [ -z "${kind:-}" ] || [ -z "${instance:-}" ] || [ -z "${pane:-}" ] \
-       || [ -z "${state:-}" ]; then
+    if [ -z "${kind:-}" ] || [ -z "${instance:-}" ] || [ -z "${pane:-}" ]; then
       _agmsg_sweep_report_skip "${kind:-?}" "${instance:-?}" "${pane:-?}" malformed_row
+      rc=1
+      continue
+    fi
+
+    process=""; process_rc=0
+    process="$(_agmsg_sweep_process_at "$kind" "$instance" "$pane" 2>/dev/null)" || process_rc=$?
+    if [ "$process_rc" -ne 0 ] || [ -z "$process" ]; then
+      _agmsg_sweep_report_skip "$kind" "$instance" "$pane" "process_unavailable:rc_$process_rc"
+      rc=1
+      continue
+    fi
+    state=""; payload=""; process_extra=""
+    IFS="$tab" read -r state payload process_extra <<EOF
+$process
+EOF
+    if [ -n "${process_extra:-}" ]; then
+      _agmsg_sweep_report_skip "$kind" "$instance" "$pane" malformed_process_observation
       rc=1
       continue
     fi
