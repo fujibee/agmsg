@@ -22,6 +22,9 @@
 # come out at 125s/298s/366s/71s. Per-test cost varies from ~0.0s to ~8s
 # depending on how much a file forks or waits. So the real speedup here is
 # 860s -> 366s (~2.4x), not 4x.
+# These are historical design measurements, not current weights. Every CI shard
+# now uploads a bats-timings artifact with per-file and shard wall times; combine
+# several with summarize-bats-timings.sh before changing the partition.
 #
 # It is still the right weight to ship first. The alternative, a checked-in
 # table of measured per-file seconds, buys ~150s more but goes stale silently:
