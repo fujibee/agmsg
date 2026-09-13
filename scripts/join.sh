@@ -238,13 +238,12 @@ agmsg_lock_release
 # yourself the seat's placement is not. (The 6th argument is omitted deliberately;
 # its default is the safe half.)
 #
-# Called with NO session id: join is a plain CLI invocation and nothing tells it
-# which env var carries this type's session id (`detect=` answers whether a type
-# is present, not where its id lives -- a different question). A terminal that
-# does not need one (tmux, via $TMUX_PANE) is named here; one that does (herdr,
-# which looks the pane up by agent session id) is skipped in silence, and picked
-# up by actas or SessionStart, which both have the id. Passing "" is therefore a
-# statement, not an omission.
+# A type may publish its current session id through the manifest's `session_env=`
+# variable. This is deliberately NOT inferred from `detect=`: detection answers
+# whether a runtime is present and may name several markers or credentials,
+# while session_env names exactly one value with exactly this meaning. A missing
+# key or unset value remains the honest "this type/session publishes no id" and
+# drivers that do not need one (tmux, via $TMUX_PANE) still name normally.
 #
 # The source carries the errexit lift: on bash 3.2 a failure inside a sourced
 # file fires THIS script's `set -e`, so a plain `. x || true` would take the join
@@ -257,7 +256,22 @@ set +e
 _agmsg_tr_rc=$?
 [ "$_agmsg_tr_e" = 1 ] && set -e
 if [ "$_agmsg_tr_rc" -eq 0 ] && declare -F agmsg_terminal_name_self_safe >/dev/null 2>&1; then
-  agmsg_terminal_name_self_safe "" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
+  _agmsg_session_id=""
+  _agmsg_session_env="$(agmsg_type_get "$AGENT_TYPE" session_env)"
+  if [ -n "$_agmsg_session_env" ]; then
+    case "$_agmsg_session_env" in
+      [A-Za-z_]*)
+        case "$_agmsg_session_env" in
+          *[!A-Za-z0-9_]*)
+            printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+              "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+          *) _agmsg_session_id="${!_agmsg_session_env:-}" ;;
+        esac ;;
+      *) printf "agmsg: type '%s' has invalid session_env=%s; session id ignored\n" \
+           "$AGENT_TYPE" "$_agmsg_session_env" >&2 ;;
+    esac
+  fi
+  agmsg_terminal_name_self_safe "$_agmsg_session_id" "$TEAM" "$AGENT_ID" "$PROJECT_PATH" "$AGENT_TYPE" || true
 fi
 
 echo "Joined team $TEAM as $AGENT_ID"

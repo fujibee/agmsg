@@ -273,6 +273,14 @@ EOF
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
 }
 
+@test "type-registry: session identity is a dedicated per-type datum, not inferred from detect" {
+  g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 session_env"; }
+  [ "$(g claude-code)" = "CLAUDE_CODE_SESSION_ID" ]
+  [ "$(g codex)" = "CODEX_THREAD_ID" ]
+  [ "$(g grok-build)" = "GROK_SESSION_ID" ]
+  [ -z "$(g gemini)" ]
+}
+
 @test "type-registry: whoami detects codex end-to-end from CODEX_THREAD_ID" {
   # Join a codex agent so whoami has a registration to report, then call it with
   # no explicit type: detection must pick codex from the manifest's detect= key.
