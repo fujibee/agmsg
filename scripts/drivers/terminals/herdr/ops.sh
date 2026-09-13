@@ -1349,12 +1349,13 @@ _herdr_panes_of() {   # <socket> <pane-list-json>
 # resolved in one session landing in another's live pane.
 terminal_fence() {   # <id>
   local id="$1" instance pane_json esc tid
-  instance="${HERDR_SOCKET_PATH:-}"
+  instance="$(_herdr_sock_of "$id")"
+  [ -n "$instance" ] || instance="${HERDR_SOCKET_PATH:-}"
   [ -n "$instance" ] || instance="unknown:no_socket_in_env"
   case "$instance" in *:*|*[[:cntrl:]]*|*[[:space:]]*) instance="unknown:socket_path_malformed" ;; esac
   command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
   _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
-  pane_json="$(herdr pane get "$id" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
+  pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }
   esc="$(printf '%s' "$pane_json" | sed "s/'/''/g")"
   tid="$(sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','\$.result.pane.terminal_id')='text' THEN json_extract('$esc','\$.result.pane.terminal_id') ELSE '' END" 2>/dev/null)" \
     || { printf '%s\tunknown:pane_response_invalid\n' "$instance"; return 2; }
