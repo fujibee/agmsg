@@ -727,12 +727,12 @@ EOF
   unset HERDR_SOCKET_PATH
   run agmsg_terminal_resolve_name "sess-77"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"HERDR_SOCKET_PATH is unset"* ]]
+  [ "${output#*HERDR_SOCKET_PATH is unset}" != "$output" ]
 
   export HERDR_SOCKET_PATH='/run/bad:socket'
   run agmsg_terminal_resolve_name "sess-77"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"HERDR_SOCKET_PATH is malformed"* ]]
+  [ "${output#*HERDR_SOCKET_PATH is malformed}" != "$output" ]
 }
 
 @test "herdr: spawn without an instance selector fails before creating a pane" {
@@ -743,7 +743,7 @@ EOF
 
   run terminal_spawn alice /proj pane-v bash -lc boot
   [ "$status" -eq 13 ]
-  [[ "$output" == *"HERDR_SOCKET_PATH is unset"* ]]
+  [ "${output#*HERDR_SOCKET_PATH is unset}" != "$output" ]
   refute grep -q '\[pane\] \[split\]' "$ARGV_LOG"
   refute grep -q '\[tab\] \[create\]' "$ARGV_LOG"
 }

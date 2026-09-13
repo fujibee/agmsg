@@ -528,7 +528,7 @@ agmsg_terminal_self_env() {
   fi
   if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] \
     && _agmsg_locator_instance_ok "${HERDR_SOCKET_PATH:-}"; then
-    printf 'herdr\t%s:%s\t%s\n' "$HERDR_SOCKET_PATH" "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
+    printf 'herdr\t%s:%s\t%s\n' "${HERDR_SOCKET_PATH:-}" "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
     return 0
   fi
   return 0
