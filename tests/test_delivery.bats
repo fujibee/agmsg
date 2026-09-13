@@ -949,6 +949,27 @@ JSON
   [ ! -f "$TEST_SKILL_DIR/run/cc-instance.$dead_pid" ]
 }
 
+@test "session-start: a failed cc-instance write publishes no partial marker and is loud (#1079)" {
+  env AGMSG_RESOLVE_PROJECT=0 bash "$SCRIPTS/join.sh" team alice claude-code "$TEST_PROJECT" >/dev/null
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT" >/dev/null
+  local bin="$BATS_TEST_TMPDIR/marker-write-bin" real_mv
+  real_mv="$(command -v mv)"
+  mkdir -p "$bin"
+  cat > "$bin/mv" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do last="\$arg"; done
+case "\$last" in *'/cc-instance.$$') exit 1 ;; esac
+exec "$real_mv" "\$@"
+EOF
+  chmod +x "$bin/mv"
+
+  run env AGMSG_RESOLVE_PROJECT=0 AGMSG_AGENT_PID="$$" PATH="$bin:$PATH" \
+    bash "$SCRIPTS/session-start.sh" claude-code "$TEST_PROJECT" <<<'{"session_id":"write-failed"}'
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq 'could not publish the complete instance marker'
+  [ ! -e "$TEST_SKILL_DIR/run/cc-instance.$$" ]
+}
+
 # --- session-id resolution: vendor field-name differences (grok/cursor) ---
 # Grok Build emits the session id on stdin as camelCase "sessionId" and injects
 # GROK_SESSION_ID into every hook; Claude uses snake_case "session_id". The
