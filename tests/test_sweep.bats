@@ -22,6 +22,23 @@ setup() {
   [ "$output" = $'herdr\t/run/jugemu.sock\tw1:p7' ]
 }
 
+@test "missing SKILL_DIR is a named refusal and writes nothing" {
+  run bash -c '
+    unset _AGMSG_SWEEP_SH SKILL_DIR
+    source "$1/lib/sweep.sh"
+    _agmsg_sweep_agent_rows() { printf "herdr\t/run/jugemu.sock\tw1:p7\n"; }
+    _agmsg_sweep_process_at() { printf "agent\tclaude-code\n"; }
+    _agmsg_sweep_instance_allowed() { return 0; }
+    _agmsg_sweep_label_at() { printf "alpha:alice\n"; }
+    _agmsg_sweep_poke_fenced() { printf written >> "$2"; }
+    agmsg_sweep_run alpha
+  ' _ "$SCRIPTS" "$BATS_TEST_TMPDIR/pokes"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'sweep: skill_dir_unavailable; nothing was written'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/pokes" ]
+}
+
 teardown() { teardown_test_env; }
 
 _run_sweep_fixture() {   # <rows>

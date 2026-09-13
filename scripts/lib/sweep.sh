@@ -33,8 +33,9 @@ _agmsg_sweep_locator() {                      # <kind> <instance> <pane>
 # the process observation? Prints the agent name on success. A label is only a
 # target-selection fact; it is never used as the terminal address.
 _agmsg_sweep_roster_match() {   # <team> <label> <type>
-  local team="$1" label="$2" type="$3" cfg esc out
-  cfg="$SKILL_DIR/teams/$team/config.json"
+  local team="$1" label="$2" type="$3" root="${SKILL_DIR:-}" cfg esc out
+  [ -n "$root" ] || return 2
+  cfg="$root/teams/$team/config.json"
   [ -r "$cfg" ] || return 1
   command -v sqlite3 >/dev/null 2>&1 || return 2
   esc="$(sed "s/'/''/g" "$cfg")" || return 2
@@ -79,6 +80,10 @@ agmsg_sweep_run() {   # <team>
   local kind instance pane census_extra process process_rc state payload process_extra
   local label label_rc agent owner ref locator_rc text poke_rc
   [ -n "$team" ] || { echo 'sweep: team is required' >&2; return 2; }
+  [ -n "${SKILL_DIR:-}" ] || {
+    echo 'sweep: skill_dir_unavailable; nothing was written' >&2
+    return 1
+  }
   tab="$(printf '\t')"
 
   if rows="$(_agmsg_sweep_agent_rows)"; then rows_rc=0; else rows_rc=$?; fi
