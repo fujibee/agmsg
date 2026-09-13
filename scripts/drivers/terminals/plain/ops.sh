@@ -241,6 +241,43 @@ terminal_find_by_label() { _plain_unsupported "find_by_label"; }
 terminal_label_of() { _plain_unsupported "label_of"; }
 terminal_name() { _plain_unsupported "name"; }
 
+# Fence for a self-write (#1152, #1149). A plain seat is record-only: it can
+# write the placement record for the locator it was handed, and nothing else
+# (no label, key or session op exists in this implementation -- see the
+# capability hook, which says so in #1163's words). What it CAN verify before
+# writing is that the locator's tty is the tty of the seat's own CLI process,
+# observed through that process, never through the environment (launcher-
+# inherited session ids were measured colliding across seats, so the emulator
+# half of the locator is carried as delivered and treated as NO evidence).
+#
+# Prints "<emulator>\t<anchor>" where the anchor is the tty plus something that
+# changes when the tty is reused -- /dev/ttysNNN is handed to the next session
+# when this one ends -- namely the owning pid and its start time:
+#   iterm\ttty=/dev/ttys040,pid=12345,start=Sat_Sep_13_02:10:11_2026
+# Every failure is a named unknown in the anchor half, and the writer writes
+# nothing on any of them:
+#   unknown:no_seat_pid        the caller gave no pid to observe
+#   unknown:tty_unobservable   the process has no controlling tty (a daemon,
+#                              a background job), or ps could not answer
+#   unknown:tty_mismatch:<observed>  the process sits on a different tty than
+#                              the locator names -- the leader typed into one
+#                              window and this seat lives in another
+#   unknown:invalid_id         the id is not <emulator>:<tty>
+terminal_fence() {   # <id> [<seat-pid>]
+  local id="$1" pid="${2:-}" observed start
+  _plain_parse_id "$id" || { printf 'unknown:invalid_id\tunknown:invalid_id\n'; return 2; }
+  local emulator="$_PLAIN_EMULATOR" tty="$_PLAIN_TTY"
+  case "$pid" in ''|*[!0-9]*) printf '%s\tunknown:no_seat_pid\n' "$emulator"; return 2 ;; esac
+  observed="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
+  case "$observed" in ''|'??'|'-'|'?') printf '%s\tunknown:tty_unobservable\n' "$emulator"; return 2 ;; esac
+  case "$observed" in /dev/*) ;; *) observed="/dev/$observed" ;; esac
+  [ "$observed" = "$tty" ] || { printf '%s\tunknown:tty_mismatch:%s\n' "$emulator" "$observed"; return 2; }
+  start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//; s/ *$//' | tr ' ' '_')"
+  [ -n "$start" ] || { printf '%s\tunknown:tty_unobservable\n' "$emulator"; return 2; }
+  printf '%s\ttty=%s,pid=%s,start=%s\n' "$emulator" "$tty" "$pid" "$start"
+  return 0
+}
+
 # NO terminal_pane_process_observe HERE, deliberately.
 #
 # The plain driver has no pane and no process to bind to, so there is nothing for
@@ -249,6 +286,3 @@ terminal_name() { _plain_unsupported "name"; }
 # has no answer -- rather than as a failure to retry. A stub that returned
 # "nothing found" would be indistinguishable from a pane whose processes we could
 # not read, and the two must not land in the same bucket (#1152).
-# No pane, so nothing to fence a write against (#1152): the self-write path
-# reads this as "unsupported here" and writes nothing.
-terminal_fence() { printf 'n/a:unsupported\tn/a:unsupported\n'; return 3; }

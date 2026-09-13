@@ -84,20 +84,20 @@ _sw_say() { printf '%s\n' "$1"; _SW_LINES="${_SW_LINES}${1}"$'\n'; }
 # Read the fence for the pane. Sets _SW_F_INSTANCE / _SW_F_TID; returns the
 # driver's rc (0 value, 2 unreadable, 3 unsupported), or 4 when the driver has no
 # fence op at all.
-_sw_fence_read() {   # <id>
+_sw_fence_read() {   # <id> [<seat-pid>]
   local out rc=0
   _SW_F_INSTANCE=""; _SW_F_TID=""
   declare -F terminal_fence >/dev/null 2>&1 || return 4
-  out="$(terminal_fence "$1")" || rc=$?
+  out="$(terminal_fence "$1" "${2:-}")" || rc=$?
   _SW_F_INSTANCE="${out%%$'\t'*}"; _SW_F_TID="${out#*$'\t'}"
   return "$rc"
 }
 
 # Re-read the fence and compare with the stored pair. Prints the reason on a
 # mismatch ("instance" / "terminal_id" / "unreadable:<r>"), nothing when equal.
-_sw_fence_check() {   # <id> <instance> <tid>
+_sw_fence_check() {   # <id> <instance> <tid> [<seat-pid>]
   local rc=0
-  _sw_fence_read "$1" || rc=$?
+  _sw_fence_read "$1" "${4:-}" || rc=$?
   if [ "$rc" -ne 0 ]; then printf 'unreadable:%s\n' "${_SW_F_TID#unknown:}"; return 1; fi
   [ "$_SW_F_INSTANCE" = "$2" ] || { echo instance; return 1; }
   [ "$_SW_F_TID" = "$3" ]      || { echo terminal_id; return 1; }
@@ -125,10 +125,28 @@ _sw_cell_record() {   # <team> <agent> <ref> <project> <type> <fence>
   return 0
 }
 
+# Ask the driver's capability hook (#1163) whether a cell is implemented here.
+# rc 0 = go; rc 1 = unsupported in THIS implementation (the hook's own sentence
+# is the reason, so "no adapter yet" is never reported as "the emulator cannot").
+# Prints the reason on rc 1; a driver without the hook answers "go".
+_sw_capability_reason() {   # <capability> <id>
+  local why
+  declare -F terminal_capability >/dev/null 2>&1 || return 0
+  if why="$(terminal_capability "$1" "$2" 2>&1 >/dev/null)"; then return 0; fi
+  why="${why#unsupported: }"; why="${why%%$'\n'*}"
+  printf '%s\n' "${why:-not_implemented_here}"
+  return 1
+}
+
 # The label and key cells: one terminal_name call, two separate readbacks.
 # Prints two lines: "label attempt=... readback=..." and "key ...".
 _sw_cell_label_key() {   # <id> <team> <agent>
-  local id="$1" team="$2" agent="$3" rc=0 attempt obs lab key exp_label exp_key
+  local id="$1" team="$2" agent="$3" rc=0 attempt obs lab key exp_label exp_key why
+  if ! why="$(_sw_capability_reason name "$id")"; then
+    printf 'label attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"
+    printf 'key attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"
+    return 0
+  fi
   terminal_name "$id" "$team" "$agent" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then attempt=ok; else attempt="failed:$rc"; fi
   if declare -F _herdr_label >/dev/null 2>&1; then exp_label="$(_herdr_label "$team" "$agent")"; else exp_label="$team:$agent"; fi
@@ -168,7 +186,10 @@ _sw_title_now() {   # <id> <type> -> observed session name or unknown:/n/a:
 
 # The session cell. Prints "attempt=... readback=...".
 _sw_cell_session() {   # <id> <team> <agent> <type>
-  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after
+  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why
+  if ! why="$(_sw_capability_reason poke "$id")"; then
+    printf 'attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"; return 0
+  fi
   rename_cmd="$(agmsg_type_get "$type" rename_cmd 2>/dev/null || true)"
   [ -n "$rename_cmd" ] || { printf 'attempt=skipped:no_rename_cmd readback=not_attempted\n'; return 0; }
   cli="$(agmsg_type_get "$type" cli 2>/dev/null || true)"
@@ -202,8 +223,11 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
 # 3 unsupported here (plain).
 agmsg_self_write() {   # <team> <agent> <ref> <owner>
   local team="$1" agent="$2" ref="$3" owner="$4"
-  local term id head lockv fence_rc fence project type rec_line lk_lines sess_line policy
+  local term id head lockv fence_rc fence project type rec_line lk_lines sess_line policy seat_pid=""
   _SW_LINES=""
+  # The seat's own CLI process, when the owner token is composite <sid>.<pid>:
+  # the plain fence observes the tty THROUGH this process, never through env.
+  case "$owner" in *.*) seat_pid="${owner##*.}"; case "$seat_pid" in *[!0-9]*) seat_pid="" ;; esac ;; esac
   head="seat=$team/$agent sid=$owner pane=$ref"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$owner" ] || { _sw_say "seat=$team/$agent sid=$owner none:bad_identity"; return 2; }
   if ! _agmsg_placement_split "$ref"; then _sw_say "$head none:bad_ref"; return 2; fi
@@ -219,7 +243,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   esac
 
   fence_rc=0
-  _sw_fence_read "$id" || fence_rc=$?
+  _sw_fence_read "$id" "$seat_pid" || fence_rc=$?
   case "$fence_rc" in
     0) ;;
     3) _sw_say "$head unsupported:${_SW_F_TID#n/a:}"; agmsg_self_write_lock_release "$team" "$agent" "$owner"; return 3 ;;
@@ -242,11 +266,19 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
 
   # record -- the required cell. Written on the fence just read; nothing between.
   rec_line="$(_sw_cell_record "$team" "$agent" "$ref" "$project" "$type" "$fence")"
+
+  # The witness must still be the same right after the record landed: a tty
+  # or pane handed to a new owner between the two reads is named here, and the
+  # record is not left standing as accepted. Judged BEFORE the record line is
+  # printed, so what the caller sees and what the done file says are one thing.
+  local why
+  if ! why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
+    case "$rec_line" in "attempt=ok readback=verified") rec_line="attempt=ok readback=mismatch:fence_changed:$why" ;; esac
+  fi
   _sw_say "record $rec_line"
 
   # label + key -- fence first.
-  local why
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
     lk_lines="$(_sw_cell_label_key "$id" "$team" "$agent")"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 1p)"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 2p)"
@@ -256,7 +288,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   fi
 
   # session -- fence again: this one types into the pane.
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
     sess_line="$(_sw_cell_session "$id" "$team" "$agent" "$type")"
     _sw_say "session $sess_line"
   else

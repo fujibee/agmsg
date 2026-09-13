@@ -143,7 +143,7 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
 
 # --- the fence ---------------------------------------------------------------------
 
-@test "fence: a terminal_id that changes after the record refuses label/key and session, visibly, and the record keeps the fence it was written on" {
+@test "fence: a terminal_id that changes after the record refuses label/key and session, names the moved witness on the record, and is not accepted" {
   # the pane get answering the LABEL fence re-read sees a different terminal_id:
   # model it by rewriting the fixture right after the record is written, i.e. at
   # the first `agent list` call (which only the label/key readback makes) -- too
@@ -157,11 +157,13 @@ FAKE
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 0 ]
   [ "$(_line fence)" = "fence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA" ]
-  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  # the witness moved right after the record landed: the record is written but
+  # not accepted -- what it names is no longer what was observed
+  [ "$(_line record)" = "record attempt=ok readback=mismatch:fence_changed:terminal_id" ]
   [ "$(_line label)" = "label attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
   [ "$(_line key)" = "key attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
   [ "$(_line session)" = "session attempt=skipped:fence_mismatch:terminal_id readback=not_attempted" ]
-  [ "$(_line policy)" = "policy=accepted" ]
+  [ "$(_line policy)" = "policy=repair_incomplete" ]
   [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 0 ]
   [ "$(grep -c 'herdr \[pane\] \[rename\]' "$ARGV_LOG")" -eq 0 ]
   case "$(_rec)" in *"fence=/tmp/herdr/sessions/jugemu/herdr.sock:term_AAA") : ;; *) false ;; esac
@@ -219,10 +221,10 @@ FAKE
   [ ! -s "$ARGV_LOG" ]
 }
 
-@test "refuse: a plain ref is unsupported, not a failure, and writes nothing" {
+@test "refuse: the legacy plain sentinel names no place -> nothing written, named" {
   run agmsg_self_write T alice "plain:-" "$ME"
-  [ "$status" -eq 3 ]
-  [ "$output" = "seat=T/alice sid=$ME pane=plain:- unsupported:unsupported" ]
+  [ "$status" -eq 2 ]
+  [ "$output" = "seat=T/alice sid=$ME pane=plain:- none:fence_unreadable:invalid_id" ]
   [ ! -e "$(agmsg_spawn_path T alice)" ]
 }
 
@@ -271,4 +273,89 @@ FAKE
   [ -z "$bad" ] || { echo "placement-record readers with only three variables:" >&2; printf '%s\n' "$bad" >&2; return 1; }
   # and the readers do exist -- the pattern is not vacuous
   [ "$(grep -cE "read -r [A-Za-z_]+ [A-Za-z_]+ [A-Za-z_]+ [A-Za-z_]+ < \"?\\\$?(SPAWN_REC|REC|rec)\"?" "$SKILL_DIR"/scripts/despawn.sh "$SKILL_DIR"/scripts/peek.sh "$SKILL_DIR"/scripts/poke.sh "$SKILL_DIR"/scripts/arrange.sh "$SKILL_DIR"/scripts/placement-collisions.sh | awk -F: '{s+=$2} END {print s+0}')" -ge 5 ]
+}
+
+# --- plain: record-only, fenced on the seat's own tty --------------------------------
+#
+# The plain fence observes the seat's tty THROUGH the seat's CLI process (the
+# pid in the owner token), never through the environment. `ps` is faked: it
+# answers `-o tty=` and `-o lstart=` for the pid the fixture names.
+
+_fake_ps() {   # <pid> <tty-or-??> <lstart>
+  cat > "$FAKEBIN/ps" <<FAKE
+#!/usr/bin/env bash
+{ printf 'ps'; for a in "\$@"; do printf ' [%s]' "\$a"; done; printf '\\n'; } >> "$ARGV_LOG"
+pid=""; fmt=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) fmt="\$2"; shift 2 ;; -p) pid="\$2"; shift 2 ;; *) shift ;; esac; done
+[ "\$pid" = "$1" ] || exit 1
+case "\$fmt" in tty=) printf '%s\\n' "$2" ;; lstart=) printf '%s\\n' "$3" ;; *) exit 1 ;; esac
+FAKE
+  chmod +x "$FAKEBIN/ps"
+}
+
+_plain_seat() {   # register alice as a plain-hosted claude-code seat; ME carries the test pid
+  agmsg_role_session_record T alice sid-me /proj/alice claude-code
+  unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID
+}
+
+@test "plain: a locator whose tty is the seat's own tty is recorded with a pid+start anchor; label/key/session are unsupported in the driver's words; policy=accepted" {
+  _plain_seat; _fake_ps "$$" ttys040 "Sat Sep 13 02:10:11 2026"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line fence)" = "fence=iterm:tty=/dev/ttys040,pid=$$,start=Sat_Sep_13_02:10:11_2026" ]
+  [ "$(_line record)" = "record attempt=ok readback=verified" ]
+  case "$(_line label)" in "label attempt=skipped:unsupported:"*) : ;; *) echo "$(_line label)" >&2; return 1 ;; esac
+  case "$(_line session)" in "session attempt=skipped:unsupported:"*) : ;; *) echo "$(_line session)" >&2; return 1 ;; esac
+  [ "$(_line policy)" = "policy=accepted" ]
+  [ "$(_rec)" = "$(printf 'plain:iterm:/dev/ttys040\t/proj/alice\tclaude-code\tfence=iterm:tty=/dev/ttys040,pid=%s,start=Sat_Sep_13_02:10:11_2026' "$$")" ]
+  refute grep -q 'herdr' "$ARGV_LOG"                       # nothing was typed or renamed anywhere
+}
+
+@test "plain: a seat whose process has NO controlling tty writes nothing, and says tty_unobservable" {
+  _plain_seat; _fake_ps "$$" '??' "Sat Sep 13 02:10:11 2026"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 2 ]
+  [ "$output" = "seat=T/alice sid=$ME pane=plain:iterm:/dev/ttys040 none:fence_unreadable:tty_unobservable" ]
+  [ ! -e "$(agmsg_spawn_path T alice)" ]
+  [ ! -e "$(agmsg_self_write_done_path T alice)" ]
+}
+
+@test "plain: a locator naming a DIFFERENT tty than the seat sits on writes nothing, and names both" {
+  _plain_seat; _fake_ps "$$" ttys041 "Sat Sep 13 02:10:11 2026"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 2 ]
+  [ "$output" = "seat=T/alice sid=$ME pane=plain:iterm:/dev/ttys040 none:fence_unreadable:tty_mismatch:/dev/ttys041" ]
+  [ ! -e "$(agmsg_spawn_path T alice)" ]
+}
+
+@test "plain: an owner token without a pid cannot observe a tty -> nothing written, named" {
+  _plain_seat; _fake_ps "$$" ttys040 "Sat Sep 13 02:10:11 2026"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "sid-bare"
+  [ "$status" -eq 2 ]
+  [ "$output" = "seat=T/alice sid=sid-bare pane=plain:iterm:/dev/ttys040 none:fence_unreadable:no_seat_pid" ]
+  [ ! -e "$(agmsg_spawn_path T alice)" ]
+}
+
+@test "plain: a tty reused by a new owner between the record and the re-read is named, and the record is not accepted" {
+  # The same /dev/ttys040 answers, but the process start time is different on
+  # the second observation: the tty was recycled under us. The record stays
+  # (a later sweep re-delivers) but is not left standing as accepted.
+  _plain_seat
+  cat > "$FAKEBIN/ps" <<FAKE
+#!/usr/bin/env bash
+: > "$SKILL_DIR/ps-calls.marker.\$\$"
+n=\$(ls "$SKILL_DIR"/ps-calls.marker.* 2>/dev/null | wc -l | tr -d ' ')
+pid=""; fmt=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) fmt="\$2"; shift 2 ;; -p) pid="\$2"; shift 2 ;; *) shift ;; esac; done
+case "\$fmt" in
+  tty=)    printf 'ttys040\\n' ;;
+  lstart=) if [ "\$n" -le 2 ]; then printf 'Sat Sep 13 02:10:11 2026\\n'; else printf 'Sat Sep 13 02:44:00 2026\\n'; fi ;;
+esac
+FAKE
+  chmod +x "$FAKEBIN/ps"
+  run agmsg_self_write T alice "plain:iterm:/dev/ttys040" "$ME"
+  [ "$status" -eq 0 ]
+  case "$(_line record)" in "record attempt=ok readback=mismatch:fence_changed:"*) : ;; *) echo "$(_line record)" >&2; return 1 ;; esac
+  [ "$(_line policy)" = "policy=repair_incomplete" ]
+  grep -q 'start=Sat_Sep_13_02:10:11_2026' "$(agmsg_spawn_path T alice)"   # the record carries the FIRST anchor
 }
