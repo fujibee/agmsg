@@ -3638,6 +3638,12 @@ EOF
 # Naming is an invariant re-asserted at every entry point, not an assignment made
 # once somewhere — measured across the nine types, no single place covers them.
 @test "check-inbox: names this pane on the way through (#1044)" {
+  # This test's whole subject is the naming primitive firing, exercised
+  # against a fake tmux on $FAKEBIN -- never a real terminal -- so it opts
+  # back into the primitive's own default (on) rather than the harness's
+  # #1095 off (test_helper.bash), the same way test_terminal_registry.bats
+  # already does for its own naming-focused tests.
+  unset AGMSG_SELF_NAME
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
   agmsg_install_fake_tmux
@@ -3664,6 +3670,9 @@ EOF
 # the same invocation carrying a session id, which does reach herdr and does
 # rename; the silence of the other half means something only next to it.
 @test "check-inbox: no session id names nothing; the same call with one does (#1044)" {
+  # Same reason as the sibling test above: naming itself is what this test
+  # verifies, against a fake herdr, never a real terminal.
+  unset AGMSG_SELF_NAME
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
   _fake_herdr_with_session "sess-x"

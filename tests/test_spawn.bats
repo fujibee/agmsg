@@ -1973,6 +1973,11 @@ OPS
 }
 
 @test "join: names its own pane at boot (control), and not under AGMSG_SELF_NAME=off (#1096)" {
+  # The control half needs naming ON by default (against the fake herdr
+  # below, never a real terminal) to mean anything against the off half
+  # right after it -- opt back in from the harness's #1095 off
+  # (test_helper.bash).
+  unset AGMSG_SELF_NAME
   _setup_fake_herdr
   # Control: a seat joining from its own pane names it -- key and prefixed label.
   bash "$SCRIPTS/join.sh" myteam bob claude-code "$PROJ"

@@ -1219,6 +1219,12 @@ STUB
 # "the watcher is usually done by now", which is a claim about the machine — the
 # reason the helpers above exist.
 @test "watch: the watcher names this session's pane (#1044)" {
+  # This test's subject is the naming primitive firing, against a fake tmux
+  # on $FAKEBIN -- never a real terminal -- so it opts back into the
+  # primitive's own default (on) rather than the harness's #1095 off
+  # (test_helper.bash), same as test_terminal_registry.bats's own naming
+  # tests.
+  unset AGMSG_SELF_NAME
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"
   : > "$ARGV_LOG"

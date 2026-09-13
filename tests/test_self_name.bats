@@ -33,6 +33,12 @@ setup() {
   export FAKEBIN ARGV_LOG
   # No terminal by default: each test sets the environment it wants.
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH
+  # This file's whole subject is the naming primitive itself, against fakes
+  # on $FAKEBIN -- never a real terminal -- so it opts back into the
+  # primitive's own default (on) rather than the harness's #1095 off
+  # (test_helper.bash). Individual tests below still set AGMSG_SELF_NAME=off
+  # locally to test the switch itself; that local set overrides this.
+  unset AGMSG_SELF_NAME
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-name.sh"
 }
