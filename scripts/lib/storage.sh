@@ -294,8 +294,7 @@ agmsg_sqlite() {
     set -o pipefail
     # shellcheck disable=SC2086  # intentional split: "-escape off" → two args, or none
     sqlite3 $_AGMSG_ESCAPE_FLAG -cmd ".timeout ${AGMSG_BUSY_TIMEOUT:-5000}" "$@" | sed $'s/\r$//'
-  )
-  _agmsg_sqlite_rc=$?
+  ) || _agmsg_sqlite_rc=$?
   # SQLITE_BUSY after the full timeout used to pass in silence: the caller saw
   # a non-zero it often swallowed, and the operator saw a command that hung
   # for the timeout and said nothing (#1001 -- two people diagnosed two
