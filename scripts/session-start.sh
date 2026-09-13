@@ -35,6 +35,8 @@ RUN_DIR="$SKILL_DIR/run"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"
 # shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/registry-lock.sh"  # publish cc-instance only after a complete write
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/node.sh"
@@ -248,7 +250,10 @@ if [ -n "$CC_PID" ]; then
       fi
     fi
   fi
-  printf '%s\n' "$INSTANCE_ID" > "$STATE"
+  if ! agmsg_write_atomic "$STATE" "$INSTANCE_ID"; then
+    printf 'agmsg: could not publish the complete instance marker: %s\n' "$STATE" >&2
+    exit 1
+  fi
 fi
 
 # --- Start the engine for a connected team that has none (#761, #774). ---
