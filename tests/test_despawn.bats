@@ -120,7 +120,7 @@ _stub_tmux_exit() {
 
   run bash "$SCRIPTS/despawn.sh" team leader alice --force
   [ "$status" -eq 0 ]
-  [[ "$output" == *"status=forced"* ]]
+  printf '%s\n' "$output" | grep -Fq 'status=forced'
   [ ! -f "$RUN/spawn.team__alice" ]                 # placement record cleaned
   [ ! -f "$RUN/actas.team__alice.session" ]         # lock released
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
@@ -144,6 +144,97 @@ _stub_tmux_exit() {
   [ ! -f "$RUN/actas.team__alice.session" ]
   run bash "$SCRIPTS/identities.sh" "$PROJ" claude-code
   [ "$(printf '%s\n' "$output" | grep -c alice)" -eq 0 ]   # dropped: the type reached reset intact
+}
+
+@test "despawn --force: a plain placement closes only after its owner witness matches" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
+    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' > "$RUN/spawn.team__alice"
+  local bin="$TEST_SKILL_DIR/plain-bin"
+  mkdir -p "$bin"
+  cat > "$bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *'tty='*) printf 'ttys040\n' ;; *'lstart='*) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+EOF
+  cat > "$bin/osascript" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_SKILL_DIR/plain-close.log"
+EOF
+  cat > "$bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  chmod +x "$bin/ps" "$bin/osascript" "$bin/uname"
+
+  run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -Fq 'status=forced'
+  [ ! -f "$RUN/spawn.team__alice" ]
+  grep -Fq 'despawn /dev/ttys040' "$TEST_SKILL_DIR/plain-close.log"
+}
+
+@test "despawn --force: self-write keeps the spawn witness after the CLI exits" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  local bin="$TEST_SKILL_DIR/plain-carry-bin" mode="$TEST_SKILL_DIR/plain-carry-mode"
+  mkdir -p "$bin"
+  printf 'self-write\n' > "$mode"
+  cat > "$bin/ps" <<EOF
+#!/usr/bin/env bash
+pid=""; fmt=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) fmt="\$2"; shift 2 ;; -p) pid="\$2"; shift 2 ;; *) shift ;; esac; done
+if [ "\$pid" = "$$" ] && [ "\$(cat "$mode")" = self-write ]; then
+  case "\$fmt" in tty=) printf 'ttys040\n' ;; lstart=) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+elif [ "\$pid" = 123 ]; then
+  case "\$fmt" in tty=) printf 'ttys040\n' ;; lstart=) printf 'Sat Sep 13 02:00:00 2026\n' ;; esac
+else
+  exit 1
+fi
+EOF
+  cat > "$bin/osascript" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_SKILL_DIR/plain-carry-close.log"
+EOF
+  cat > "$bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  chmod +x "$bin/ps" "$bin/osascript" "$bin/uname"
+  export PATH="$bin:$PATH" SKILL_DIR="$TEST_SKILL_DIR" RUN_DIR="$RUN"
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/self-write.sh"
+  agmsg_role_session_record team alice sid-me "$PROJ" claude-code
+  printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
+    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:00:00_2026' > "$RUN/spawn.team__alice"
+
+  agmsg_self_write team alice 'plain:iterm:/dev/ttys040' "sid-me.$$" >/dev/null
+  grep -Fq "pid=$$,start=Sat_Sep_13_02:10:11_2026,boot=123,boot_start=Sat_Sep_13_02:00:00_2026" "$RUN/spawn.team__alice"
+
+  # The CLI process proof is now gone. Only the carried boot pair can prove
+  # that the recorded tty is still the spawned window.
+  printf 'cli-gone\n' > "$mode"
+  run bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=forced"* ]]
+  [ ! -f "$RUN/spawn.team__alice" ]
+  grep -Fq 'despawn /dev/ttys040' "$TEST_SKILL_DIR/plain-carry-close.log"
+}
+
+@test "despawn --force: a stale plain owner witness is named and kept for retry" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
+    'fence=iterm:tty=/dev/ttys040,pid=123,start=OLD' > "$RUN/spawn.team__alice"
+  local bin="$TEST_SKILL_DIR/plain-bin-stale"
+  mkdir -p "$bin"
+  cat > "$bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *'tty='*) printf 'ttys040\n' ;; *'lstart='*) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+EOF
+  chmod +x "$bin/ps"
+
+  run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -Fq 'CLI process witness no longer matches'
+  [ -f "$RUN/spawn.team__alice" ]
 }
 
 @test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
