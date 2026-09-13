@@ -497,9 +497,23 @@ BOOT="$(mktemp "$BOOT_DIR/boot-XXXXXX")"
 case "$(uname -s)" in
   Darwin) mv "$BOOT" "$BOOT.command"; BOOT="$BOOT.command" ;;
 esac
+PLAIN_WITNESS_REQUEST="${BOOT}.plain-witness-request"
+PLAIN_WITNESS="${BOOT}.plain-witness"
 {
   echo '#!/usr/bin/env bash'
   printf 'cd %q || exit 1\n' "$PROJECT"
+  # A plain OS-terminal spawn has no parent-side handle. The child window is the
+  # first authority that can observe its emulator, controlling tty and owner
+  # process. Only the plain launcher creates the request file, so tmux/herdr
+  # boots do no extra work. Publish atomically before starting the CLI.
+  printf 'if [ -f %q ]; then\n' "$PLAIN_WITNESS_REQUEST"
+  echo '  case "${TERM_PROGRAM:-}" in iTerm.app) _agmsg_emulator=iterm ;; Apple_Terminal) _agmsg_emulator=terminal ;; *) _agmsg_emulator=unknown ;; esac'
+  echo '  _agmsg_tty="$(tty 2>/dev/null || true)"'
+  echo '  _agmsg_start="$(ps -o lstart= -p "$$" 2>/dev/null | sed '\''s/^ *//; s/ *$//'\'' | tr '\'' '\'' '\''_'\'')"'
+  printf '  _agmsg_witness_tmp=%q.$$\n' "$PLAIN_WITNESS"
+  echo '  { printf '\''%s\t%s\t%s\t%s'\'' "$_agmsg_emulator" "$_agmsg_tty" "$$" "$_agmsg_start"; echo; } > "$_agmsg_witness_tmp"'
+  printf '  mv "$_agmsg_witness_tmp" %q\n' "$PLAIN_WITNESS"
+  echo 'fi'
   # Mark the launched session as spawn-born (#339): the CLI inherits this, so the
   # actas flow knows the session is already named <team>-<agent> (name_arg) and
   # suppresses the "rename this session" tip meant for hand-started sessions.
@@ -597,8 +611,8 @@ SPAWN_UNREC_REF=""
 # before the boot was typed (herdr process-info did not answer). A WARNING, distinct
 # from the post-input startup verdict — see the note where it is emitted.
 SPAWN_READINESS_UNVERIFIED=0
-_record_placement() {   # <terminal> <id>
-  local rec ref
+_record_placement() {   # <terminal> <id> [fence=...]
+  local rec ref fence="${3:-}" row
   rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
   ref="$(agmsg_terminal_ref "$1" "$2")"
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
@@ -607,7 +621,9 @@ _record_placement() {   # <terminal> <id>
   # record — SPAWN_UNRECORDED is reported only AFTER the old record is proven
   # intact, not on top of one this write just emptied. The helper adds the
   # trailing newline, so the row is passed without one.
-  if ! agmsg_write_atomic "$rec" "$(printf '%s\t%s\t%s' "$ref" "$PROJECT" "$AGENT_TYPE")" 2>/dev/null; then
+  row="$(printf '%s\t%s\t%s' "$ref" "$PROJECT" "$AGENT_TYPE")"
+  [ -z "$fence" ] || row="${row}$(printf '\t%s' "$fence")"
+  if ! agmsg_write_atomic "$rec" "$row" 2>/dev/null; then
     SPAWN_UNRECORDED=1
     SPAWN_UNREC_REF="$ref"
     return 1
@@ -770,17 +786,23 @@ _launch_os_terminal() {
   # duplicate). plain's terminal_spawn does the OS-terminal launch — a {cmd} template
   # on any OS, else the current macOS terminal (`open -g -a`) / a Linux emulator /
   # Windows Terminal, with the same headless + platform guards it moved from here —
-  # and returns '-' (no addressable pane, so no placement record for plain). It reads
-  # AGMSG_TERMINAL as the template / macOS app hint; hand it the resolved value.
+  # and returns the child window's emulator-qualified tty after its boot handshake.
+  # It reads AGMSG_TERMINAL as the template / macOS app hint; hand it the resolved value.
   agmsg_terminal_load plain || die "could not load the plain terminal driver"
-  # CAPTURE the driver's record-op stdout — it is a protocol value ('-' = placed, no
-  # addressable pane), not something a spawn user should see on stdout. Verify it is
-  # exactly '-' (a malformed/empty result is NOT a success), and do not echo it.
-  local _plain_id
-  _plain_id="$(AGMSG_TERMINAL="$TERMINAL_TMPL" terminal_spawn "$NAME" "$PROJECT" - "$BOOT")" \
+  # Request the child's one-shot witness before launching. A window that cannot
+  # report it is live but unrecordable, so the driver fails loudly instead of
+  # returning the legacy '-' sentinel as a false success.
+  : > "$PLAIN_WITNESS_REQUEST" \
+    || die "could not create the plain terminal spawn witness request"
+  local _plain_id _emulator _tty _pid _start _fence
+  _plain_id="$(AGMSG_TERMINAL="$TERMINAL_TMPL" AGMSG_PLAIN_SPAWN_WITNESS="$PLAIN_WITNESS" terminal_spawn "$NAME" "$PROJECT" - "$BOOT")" \
     || die "could not open an OS terminal (see the reason above); run inside tmux/herdr or set a {cmd} AGMSG_TERMINAL"
-  [ "$_plain_id" = '-' ] \
-    || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected '-' (an OS terminal has no addressable pane)"
+  terminal_id_ok "$_plain_id" && [ "$_plain_id" != '-' ] \
+    || die "the plain terminal driver returned an unexpected placement id ('${_plain_id}') — expected an emulator-qualified tty"
+  IFS=$'\t' read -r _emulator _tty _pid _start < "$PLAIN_WITNESS"
+  _fence="fence=${_emulator}:tty=${_tty},boot=${_pid},boot_start=${_start}"
+  _record_placement plain "$_plain_id" "$_fence" || true
+  rm -f "$PLAIN_WITNESS_REQUEST" "$PLAIN_WITNESS" 2>/dev/null || true
   # "launched", NOT "spawned": every placement line below states only that the
   # pane was created and the boot typed into it — a PLACEMENT fact. It is deliberately
   # not the word "spawned", because whether the agent actually STARTED is answered

@@ -99,24 +99,29 @@ recorded_pane_state() {
 
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
-  local id _proj _type _fence _term _bare
+  local id _proj _type _fence _term _bare _reason=""
   IFS=$'\t' read -r id _proj _type _fence < "$SPAWN_REC"
   [ -n "$id" ] || return 1
   _term="$(agmsg_terminal_ref_terminal "$id")" || return 1   # unknown/corrupt ref
   _bare="$(agmsg_terminal_ref_id "$id")"
   agmsg_terminal_load "$_term" 2>/dev/null || return 1       # driver would not load
-  terminal_despawn "$_bare" >/dev/null 2>&1 || return 1      # terminal did not confirm
+  _reason="$(terminal_despawn "$_bare" "$_fence" 2>&1)" || {
+    KILL_RECORDED_REASON="$_reason"
+    return 1
+  }
+  KILL_RECORDED_REASON=""
   return 0
 }
 
 if [ "$FORCE" = "1" ]; then
+  KILL_RECORDED_REASON=""
   [ -f "$SPAWN_REC" ] || die "no placement record for '$TEAM/$NAME' — nothing to force (was it launched via 'spawn'? graceful despawn does not need this)"
   IFS=$'\t' read -r _id _proj _type _fence < "$SPAWN_REC"
   if ! kill_recorded_placement; then
     # Teardown NOT confirmed. Keep the record (the only retry authority), the
     # registration and the lock, and say so — never claim a forced teardown that did
     # not happen (the #625 shape, on the --force side).
-    echo "despawn: could not confirm '$NAME' was torn down via its placement record ($_id) — the terminal driver did not report the pane closed (unknown/corrupt ref, the driver would not load, or the terminal returned an error). The record is KEPT so you can retry; check the pane manually." >&2
+    echo "despawn: could not confirm '$NAME' was torn down via its placement record ($_id) — the terminal driver did not report the pane closed (unknown/corrupt ref, the driver would not load, or the terminal returned an error).${KILL_RECORDED_REASON:+ Reason: $KILL_RECORDED_REASON} The record is KEPT so you can retry; check the pane manually." >&2
     echo "status=error name=$NAME team=$TEAM note=force-teardown-unconfirmed"
     exit 1
   fi
