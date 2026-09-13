@@ -636,7 +636,7 @@ _record_placement() {   # <terminal> <id>
 SPAWN_UNNAMED=0
 SPAWN_UNNAMED_REF=""
 _name_pane() {   # <terminal> <id> -> 0 named (or terminal has no name capability); 1 naming FAILED
-  local term="$1" id="$2" caps mode="" obs key
+  local term="$1" id="$2" caps mode="" obs key name_err="" attempt=1
   # A terminal without the `name` capability (plain: no addressable pane) never
   # could name -- that is not a failure. Skip it, the way agmsg_terminal_name_self
   # does when the capability is absent.
@@ -655,7 +655,21 @@ _name_pane() {   # <terminal> <id> -> 0 named (or terminal has no name capabilit
   # caller's status line can name the pane on any failure below; only READ when
   # SPAWN_UNNAMED gets set, so setting it before the attempt is harmless.
   SPAWN_UNNAMED_REF="$(agmsg_terminal_ref "$term" "$id" 2>/dev/null || printf '%s:%s' "$term" "$id")"
-  terminal_name "$id" "$TEAM" "$NAME" "$mode" >/dev/null 2>&1 || return 1
+  # Herdr cannot name an agent until its screen detector has recognized the CLI.
+  # Measured on herdr 0.9.0 on this host (2026-09-12), from `pane run` through
+  # the first successful `agent rename`: Claude was 2.07--2.88 s (6/6), Codex
+  # was 2.57--5.11 s (14/14). Retry only the measured transient reason, for a
+  # rounded 10-second bound (11 attempts including the immediate one). Other
+  # failures -- a key collision or a missing hash tool, for example -- return
+  # immediately instead of making every naming failure pay the bound.
+  while :; do
+    name_err="$(terminal_name "$id" "$TEAM" "$NAME" "$mode" 2>&1 >/dev/null)" && break
+    [ "$term" = herdr ] || return 1
+    case "$name_err" in *agent_not_found*) ;; *) return 1 ;; esac
+    [ "$attempt" -lt 11 ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
   # Write, then READ BACK -- do not claim named on the write's exit status alone
   # (the team --fix shape). terminal_team_observe prints activity\tlabel\tkey\ttitle;
   # field 3 is the key. `agmsg_observation_has_value` (terminal-registry.sh) is the

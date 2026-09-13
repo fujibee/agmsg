@@ -1766,8 +1766,16 @@ terminal_where()      { printf ''; return 0; }
 terminal_arrange()    { echo ok; return 0; }
 terminal_name() {
   # Log every naming call (id team agent mode) so a control can prove the key was
-  # set with the right, type-independent (team, agent). Exit is FAKE_NAME_RC.
+  # set with the right, type-independent (team, agent). FAKE_NAME_FAILS makes
+  # the first N calls reproduce herdr's pre-detection agent_not_found response.
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$FAKE_NAME_LOG"
+  local calls
+  calls="$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')"
+  if [ "$calls" -le "${FAKE_NAME_FAILS:-0}" ]; then
+    echo runtime_error
+    echo '{"error":{"code":"agent_not_found"}}' >&2
+    return 13
+  fi
   echo ok
   return "${FAKE_NAME_RC:-0}"
 }
@@ -1801,6 +1809,63 @@ OPS
   # naming-on mode ("" — key AND label). Grep the log file directly.
   local want; want="$(printf 'w0:p1\tcxteam\tbob\t')"
   grep -qF -- "$want" "$FAKE_NAME_LOG"
+}
+
+@test "spawn-side naming: herdr retries agent_not_found until detection then confirms the key (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  cat > "$STUB_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
+EOF
+  chmod +x "$STUB_BIN/sleep"
+  export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
+  : > "$FAKE_SLEEP_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=2 \
+    FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 3 ]
+  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 2 ]
+  refute grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: herdr bounds a persistent agent_not_found and reports unnamed (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+  cat > "$STUB_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
+EOF
+  chmod +x "$STUB_BIN/sleep"
+  export FAKE_SLEEP_LOG="$TEST_SKILL_DIR/sleep.log"
+  : > "$FAKE_SLEEP_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_FAILS=99 \
+    FAKE_SLEEP_LOG="$FAKE_SLEEP_LOG" \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 11 ]
+  [ "$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')" -eq 10 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
+}
+
+@test "spawn-side naming: a non-detection failure is not retried (#1100)" {
+  _install_fake_naming_herdr
+  bash "$SCRIPTS/join.sh" cxteam existing codex "$PROJ"
+  export FAKE_NAME_LOG="$TEST_SKILL_DIR/name.log"
+  : > "$FAKE_NAME_LOG"
+
+  run env FAKE_NAME_LOG="$FAKE_NAME_LOG" FAKE_NAME_RC=13 \
+    bash "$SCRIPTS/spawn.sh" codex bob --project "$PROJ" --terminal-driver herdr --no-wait
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$FAKE_NAME_LOG" | tr -d ' ')" -eq 1 ]
+  grep -qF "status=spawned-but-unnamed" <<<"$output"
 }
 
 @test "spawn-side naming: names a claude-code seat too, with the same key inputs a self-name would use" {
