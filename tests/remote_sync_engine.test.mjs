@@ -2682,7 +2682,12 @@ async function withDriverEnvironment(t, root, script, buildCalls) {
 test("storage driver subprocess cannot observe HTTP or age identity secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "agmsg-sync-driver-env-"));
   const mock = join(root, "driver.sh");
+  // Same EPIPE race as the two stubs #759 fixed for #755: this one prints and
+  // exits without reading stdin, so a parent write/end that lands after exit
+  // hits a closed pipe and is reported as a driver failure. `cat` drains stdin
+  // first so the child stays alive until the parent has finished writing.
   await writeFile(mock, `#!/usr/bin/env bash
+cat >/dev/null
 [ -z "\${AGMSG_SYNC_TOKEN:-}" ] || exit 99
 [ -z "\${AGMSG_SYNC_TRUST_DIR:-}" ] || exit 95
 [ -z "\${AGMSG_AGE_IDENTITY:-}" ] || exit 98
