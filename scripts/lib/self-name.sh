@@ -164,18 +164,18 @@ agmsg_self_name_on_action() {
     # the record's own project/type stay only as good as this detection is.
     if [ -z "$type" ]; then
       # shellcheck disable=SC1091
-      . "$SKILL_DIR/scripts/lib/type-registry.sh" 2>/dev/null || true
+      . "${SKILL_DIR:-}/scripts/lib/type-registry.sh" 2>/dev/null || true
       # shellcheck disable=SC1091
-      . "$SKILL_DIR/scripts/lib/compat.sh" 2>/dev/null || true
+      . "${SKILL_DIR:-}/scripts/lib/compat.sh" 2>/dev/null || true
       # shellcheck disable=SC1091
-      if . "$SKILL_DIR/scripts/lib/detect-cli-type.sh" 2>/dev/null \
+      if . "${SKILL_DIR:-}/scripts/lib/detect-cli-type.sh" 2>/dev/null \
         && declare -F agmsg_detect_cli_type >/dev/null 2>&1; then
         type="$(agmsg_detect_cli_type 2>/dev/null || true)"
       fi
     fi
     if [ -z "$project" ]; then
       # shellcheck disable=SC1091
-      if . "$SKILL_DIR/scripts/lib/resolve-project.sh" 2>/dev/null \
+      if . "${SKILL_DIR:-}/scripts/lib/resolve-project.sh" 2>/dev/null \
         && declare -F agmsg_resolve_project >/dev/null 2>&1; then
         project="$(agmsg_resolve_project "$(pwd)" "$type" "$team" 2>/dev/null || true)"
       fi
