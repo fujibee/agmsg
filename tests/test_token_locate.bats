@@ -134,9 +134,9 @@ _fixed_token() { agmsg_token_locate_generate() { printf 'fixed-test-token\n'; };
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
   run agmsg_token_locate_self myteam alice
   [ "$status" -eq 0 ]
-  [[ "$output" == *"proved	herdr:sockA:w1:p2"* ]]
+  grep -Fq "$(printf 'proved\therdr:sockA:w1:p2')" <<< "$output"
   # The token is emitted to this process's own stdout, not silently generated.
-  [[ "$output" == *"fixed-test-token"* ]]
+  grep -Fq "fixed-test-token" <<< "$output"
 }
 
 @test "self: undetermined (ambiguous), never proved, when two panes match (#1124)" {
@@ -147,7 +147,7 @@ _fixed_token() { agmsg_token_locate_generate() { printf 'fixed-test-token\n'; };
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
   run agmsg_token_locate_self myteam alice
   [ "$status" -eq 2 ]
-  [[ "$output" == *"undetermined	ambiguous"* ]]
+  grep -Fq "$(printf 'undetermined\tambiguous')" <<< "$output"
   refute grep -Fq "proved" <<< "$output"
 }
 
@@ -159,6 +159,6 @@ _fixed_token() { agmsg_token_locate_generate() { printf 'fixed-test-token\n'; };
   agmsg_locator_compose() { printf '%s:%s:%s\n' "$1" "$2" "$3"; }
   run agmsg_token_locate_self myteam alice
   [ "$status" -eq 2 ]
-  [[ "$output" == *"undetermined	not_found"* ]]
+  grep -Fq "$(printf 'undetermined\tnot_found')" <<< "$output"
   refute grep -Fq disproved <<< "$output"
 }
