@@ -2306,6 +2306,30 @@ EOF
   grep -q -- "--inline-inbox" "$log"
 }
 
+@test "session-start.sh for codex writes the bridge request from a ws:// port file alone (#1056)" {
+  # No AGMSG_CODEX_BRIDGE_APP_SERVER, no unix:// token on the agent's cmdline
+  # (AGMSG_AGENT_PID is "" per setup()), and no .sock file -- the first three
+  # app-server probes all come up empty. Only the port file _app-server.sh's
+  # _agmsg_codex_app_server_url reads is present, carrying a ws:// port.
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-ws-1056 "$TEST_PROJECT" codex
+
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/lib/hash.sh"
+  local hash; hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '50505' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+
+  ( unset AGMSG_CODEX_BRIDGE_APP_SERVER
+    AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    CODEX_THREAD_ID="thread-ws-1056" \
+      bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null )
+
+  local request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$hash"
+  [ -f "$request_file" ]
+  grep -q -- "ws://127.0.0.1:50505" "$request_file"
+}
+
 @test "session-start.sh for codex stays quiet without monitor launcher env" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"
