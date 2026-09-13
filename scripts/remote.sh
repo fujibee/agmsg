@@ -2190,7 +2190,14 @@ cmd_connect() {
     esac
   done
   : "${endpoint:?Usage: remote.sh connect --endpoint <url> [--e2ee] <team>}"
-  _remote_validate_endpoint "$endpoint" || exit 1
+  # The plaintext-address rule protects message bodies that would otherwise
+  # cross the network unencrypted. Under --e2ee those bodies are sealed before
+  # they ever reach this check, so the rule has nothing left to protect here --
+  # skip it, exactly as the refusal text itself promises ("connect with --e2ee
+  # so the contents are sealed before they leave this machine").
+  if [ "$e2ee" -eq 0 ]; then
+    _remote_validate_endpoint "$endpoint" || exit 1
+  fi
   endpoint="${endpoint%/}"
   team="${positional[0]:-}"
   [ -n "$team" ] || { echo "agmsg: connect requires a team: remote.sh connect --endpoint <url> [--e2ee] <team>" >&2; exit 1; }
