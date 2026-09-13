@@ -15,15 +15,15 @@
 # Contract (per docs/spec/driver-interface.md §1). Every driver's ops.sh exposes:
 #   terminal_check                      control op: deps -> ok|missing_deps(+DIRECTIVE)
 #   terminal_describe [project]         exit 0, key=value only (name/backend/capabilities)
-#   terminal_detect <session_id>        RECORD op: print this session's own pane id and
+#   terminal_detect <session_id>        RECORD op: print this session's own terminal id and
 #                                       exit 0 IFF we are running under this terminal now;
 #                                       non-zero (no stdout) otherwise. herdr resolves the
 #                                       pane from the session id (NOT inherited env);
 #                                       tmux uses $TMUX_PANE; plain is the exit-0 fallback
 #                                       printing '-' (no addressable pane).
 #   terminal_spawn <name> <project> <target> <boot...>   RECORD op: create a pane/window,
-#                                       launch boot, print the new bare pane id.
-#   terminal_despawn <id>               control op: kill the pane/window named by bare <id>.
+#                                       launch boot, print its addressable terminal id.
+#   terminal_despawn <id>               control op: kill the pane/window named by <id>.
 #   terminal_peek <id> [--lines N]      RECORD op: print pane text verbatim (NOT parsed).
 #                                       With --lines, request scrollback depth N; shipped
 #                                       pane drivers pass N unchanged to their backend.
@@ -526,8 +526,9 @@ agmsg_terminal_self_env() {
     printf 'tmux\t%s:%s\t%s\n' "${TMUX%%,*}" "$TMUX_PANE" "$(agmsg_terminal_epoch tmux)"
     return 0
   fi
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
-    printf 'herdr\t%s\t%s\n' "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
+  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] \
+    && _agmsg_locator_instance_ok "${HERDR_SOCKET_PATH:-}"; then
+    printf 'herdr\t%s:%s\t%s\n' "$HERDR_SOCKET_PATH" "$HERDR_PANE_ID" "$(agmsg_terminal_epoch herdr)"
     return 0
   fi
   return 0
