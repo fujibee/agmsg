@@ -278,3 +278,16 @@ FAKE
 @test "never: the library holds no pane derivation, no search and no other-seat resolution, by name" {
   refute grep -E 'terminal_find_by_label|terminal_detect|_agmsg_placement_claimed_by|_agmsg_terminal_resolve_by_label|HERDR_PANE_ID|TMUX_PANE' "$SKILL_DIR/scripts/lib/self-write.sh"
 }
+
+# --- the record's fourth field must not land in anyone's `type` -------------------
+
+@test "readers: every script that splits a placement record with read takes a fourth variable for the fence field" {
+  # `read -r ref proj type` puts everything after the third TAB into `type`. The
+  # self-write record has a fourth field, so every such reader takes a fourth
+  # variable (which absorbs any later fields too). Counted at the read sites,
+  # not by a guess: a reader with three variables is the defect this catches.
+  local bad; bad="$(grep -nE "IFS=(\\\$'\\\\t'|\"\\\$tab\") read -r [A-Za-z_]+ [A-Za-z_]+ [A-Za-z_]+ < \"?\\\$?(SPAWN_REC|REC|rec)\"?" "$SKILL_DIR"/scripts/*.sh || true)"
+  [ -z "$bad" ] || { echo "placement-record readers with only three variables:" >&2; printf '%s\n' "$bad" >&2; return 1; }
+  # and the readers do exist -- the pattern is not vacuous
+  [ "$(grep -cE "read -r [A-Za-z_]+ [A-Za-z_]+ [A-Za-z_]+ [A-Za-z_]+ < \"?\\\$?(SPAWN_REC|REC|rec)\"?" "$SKILL_DIR"/scripts/despawn.sh "$SKILL_DIR"/scripts/peek.sh "$SKILL_DIR"/scripts/poke.sh "$SKILL_DIR"/scripts/arrange.sh "$SKILL_DIR"/scripts/placement-collisions.sh | awk -F: '{s+=$2} END {print s+0}')" -ge 5 ]
+}

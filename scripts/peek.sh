@@ -53,7 +53,7 @@ done
 REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 [ -f "$REC" ] || die "no placement record for '$TEAM/$NAME' — nothing here knows which pane is theirs (spawn writes it at launch; a hand-joined member gets one when a terminal-aware session names its pane)"
 
-IFS=$'\t' read -r REF _PROJ _TYPE < "$REC" || true
+IFS=$'\t' read -r REF _PROJ _TYPE _FENCE < "$REC" || true
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
 # The ref parser fails CLOSED (non-zero) on a corrupt/unknown-scheme ref. Under
