@@ -423,7 +423,7 @@ _REAP_WAIT_TICKS=50
 # token exists to prevent, with nothing to signal it.
 _agmsg_is_windows() {
   case "${_AGMSG_UNAME_S:=$(uname -s 2>/dev/null || echo unknown)}" in
-    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    MINGW*|MSYS*|CYGWIN*|CLANGARM*) return 0 ;;
     *) return 1 ;;
   esac
 }

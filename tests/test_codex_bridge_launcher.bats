@@ -715,7 +715,8 @@ _lease_verdict() { # <startsrc> <start> -> prints accept|reject
   printf 'v=1\nproject=%s\npairs=%s\nhost=h\npid=123\nstart=%s\nstartsrc=%s\n' \
     "$h40" "$h40" "$2" "$1" > "$TEST_SKILL_DIR/lease-under-test"
   bash -c '
-    eval "$(sed -n "/^_read_lease() {/,/^}/p" "$1")"
+    pattern="/^_read_lease() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
     _read_lease "$2" && echo accept || echo reject
   ' _ "$LAUNCHER" "$TEST_SKILL_DIR/lease-under-test" 2>/dev/null
 }
@@ -751,7 +752,8 @@ _lease_verdict() { # <startsrc> <start> -> prints accept|reject
 
 _run_start_token() { # <pid> -> runs _start_token in a subshell
   run bash -c '
-    eval "$(sed -n "/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p" "$1")"
+    pattern="/^_agmsg_is_windows() {/,/^}/p;/^_start_token() {/,/^}/p"
+    eval "$(sed -n "$pattern" "$1")"
     _start_token "$2"
   ' _ "$LAUNCHER" "$1"
 }
@@ -763,6 +765,18 @@ _run_start_token() { # <pid> -> runs _start_token in a subshell
   local tab; tab=$(printf '\t')
   case "${output%%"$tab"*}" in proc|ps) ;; *) false ;; esac
   [ -n "${output#*"$tab"}" ]
+}
+
+@test "launcher: CLANGARM uname selects the Windows start token path" {
+  local stubdir="$TEST_SKILL_DIR/clangarm-bin"
+  mkdir -p "$stubdir"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" CLANGARM64_NT-10.0' > "$stubdir/uname"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" 639231441791462826' > "$stubdir/powershell.exe"
+  chmod +x "$stubdir/uname" "$stubdir/powershell.exe"
+
+  PATH="$stubdir:$PATH" _run_start_token 123
+  [ "$status" -eq 0 ]
+  [ "$output" = $'pwsh\t639231441791462826' ]
 }
 
 @test "launcher: windows-native a live pid yields an integer pwsh start token" {
