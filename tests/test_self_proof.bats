@@ -722,17 +722,32 @@ RSEOF
     return 0
   fi
   echo "the suite is not green with [$all]; narrowing:"
-  local st one
+  local st one any_red=0
   for st in $all; do
     one="$BATS_TEST_TMPDIR/state.$st.out"
     if AGMSG_CALLER_SHELL_NEST=1 AGMSG_CALLER_SHELL_STATE="$st" \
        bats "$BATS_TEST_FILENAME" > "$one" 2>&1; then
       echo "  [$st] green"
     else
+      any_red=1
       echo "  [$st] RED:"
       grep -A3 '^not ok' "$one" | head -12 | sed 's/^/      /'
     fi
   done
+  # When no single state is red, the combined run failed for a reason the
+  # narrowing cannot name -- an interaction, or something outside the states
+  # entirely (a timeout, a killed helper). Say what the combined run said,
+  # instead of leaving an empty narrowing as the only evidence (measured
+  # 2026-09-13: CI red here with five green lines and nothing else).
+  if [ "$any_red" -eq 0 ]; then
+    echo "  no single state is red; the combined run's own output:"
+    if grep -q '^not ok' "$out"; then
+      grep -A6 '^not ok' "$out" | head -30 | sed 's/^/      /'
+    else
+      echo "      (no 'not ok' line -- the inner bats did not finish; tail follows)"
+      tail -15 "$out" | sed 's/^/      /'
+    fi
+  fi
   return 1
 }
 
