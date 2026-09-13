@@ -1,6 +1,19 @@
 # Shared setup/teardown for agmsg BATS tests.
 # Each test gets an isolated skill directory with its own DB and teams.
 
+# #1095: a test that exercises join.sh/actas-claim.sh/spawn.sh/watch.sh/
+# session-start.sh/check-inbox.sh (or the two libraries under them) is, as far
+# as the self-naming primitive can tell, a seat acting -- so it names the pane
+# it is running in, with its own fixture team/agent. On a real machine that is
+# the developer's own terminal, inherited because bats runs inside it. This is
+# TOP-LEVEL, not inside setup_test_env(): `load test_helper` runs it before
+# ANY test's own setup(), so it reaches every file that loads this one,
+# including one (test_install.bats) whose own setup() never calls
+# setup_test_env. A file that deliberately exercises the switch itself
+# (test_self_name.bats, test_self_rename.bats) unsets this right after
+# loading -- that is a local, visible override, not a gap in this default.
+export AGMSG_SELF_NAME=off
+
 setup_test_env() {
   # A test never inherits the developer's terminal. The terminal drivers
   # identify "this pane" from the environment (tmux: $TMUX/$TMUX_PANE; herdr:

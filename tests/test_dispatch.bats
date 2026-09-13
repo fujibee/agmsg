@@ -201,6 +201,11 @@ teardown() {
 # pane, and must keep naming it. A stray AGMSG_SELF_NAME=off on either path turns
 # the matching half of this test red; the fake herdr logs every argv.
 @test "dispatch: join and the actas fallback name the seat's OWN pane (#1096)" {
+  # This test's whole subject is the naming primitive firing (against a fake
+  # herdr below, never a real terminal), so it opts back into the
+  # primitive's own default (on) rather than the harness's #1095 off
+  # (test_helper.bash).
+  unset AGMSG_SELF_NAME
   local proj="$BATS_TEST_TMPDIR/project-naming" log="$BATS_TEST_TMPDIR/herdr.log"
   local bin="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$proj" "$bin"

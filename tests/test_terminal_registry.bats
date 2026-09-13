@@ -22,6 +22,16 @@ setup() {
   : > "$ARGV_LOG"
   # A clean env baseline; individual tests opt into TMUX / HERDR_ENV.
   unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID AGMSG_TERMINAL
+  # #1095's harness default (AGMSG_SELF_NAME=off, test_helper.bash) protects a
+  # test from touching a REAL terminal it happens to inherit -- this file's
+  # own baseline above already does that job independently (no real TMUX/HERDR
+  # ever reaches a test here; every test that wants one exports it AFTER this
+  # point, pointed at a fake on $FAKEBIN). This file's whole subject is the
+  # naming primitive itself, exercised in-process against that fake, so it
+  # opts back into the primitive's own default (on) rather than inheriting
+  # the harness's off, the same way test_self_name.bats and
+  # test_self_rename.bats already do.
+  unset AGMSG_SELF_NAME
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/terminal-registry.sh"
 }
