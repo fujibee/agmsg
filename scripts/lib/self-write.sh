@@ -104,6 +104,30 @@ _sw_fence_check() {   # <id> <instance> <tid> [<seat-pid>]
   return 0
 }
 
+# The boot pair to carry from the seat's own existing record, or nothing.
+# Conditions, all required: the record exists and reads; its ref equals the new
+# locator exactly (same kind, emulator and tty); its fence anchor holds BOTH
+# boot= and boot_start=. Prints "boot=<pid>,boot_start=<start>" or nothing.
+_sw_boot_carry() {   # <team> <agent> <new-ref>
+  local rec line ref anchor kv boot="" boot_start=""
+  case "$3" in plain:*) ;; *) return 0 ;; esac
+  rec="$(agmsg_spawn_path "$1" "$2")"
+  line="$(head -1 "$rec" 2>/dev/null)" || return 0
+  ref="${line%%$'\t'*}"
+  [ "$ref" = "$3" ] || return 0
+  case "$line" in *$'\t'fence=*) anchor="${line##*$'\t'fence=}"; anchor="${anchor#*:}" ;; *) return 0 ;; esac
+  local IFS=,
+  for kv in $anchor; do
+    case "$kv" in
+      boot=*)       [ -z "$boot" ] || return 0; boot="${kv#boot=}" ;;
+      boot_start=*) [ -z "$boot_start" ] || return 0; boot_start="${kv#boot_start=}" ;;
+    esac
+  done
+  [ -n "$boot" ] && [ -n "$boot_start" ] || return 0
+  case "$boot" in ''|*[!0-9]*) return 0 ;; esac
+  printf 'boot=%s,boot_start=%s' "$boot" "$boot_start"
+}
+
 # Write the record cell. Prints "attempt=... readback=...".
 _sw_cell_record() {   # <team> <agent> <ref> <project> <type> <fence>
   local rec content back
@@ -142,6 +166,14 @@ _sw_capability_reason() {   # <capability> <id>
 # Prints two lines: "label attempt=... readback=..." and "key ...".
 _sw_cell_label_key() {   # <id> <team> <agent>
   local id="$1" team="$2" agent="$3" rc=0 attempt obs lab key exp_label exp_key why
+  if [ "${_SW_KIND:-}" = plain ]; then
+    # By ruling, not by capability: a plain seat writes its record and nothing
+    # else, even where an emulator adapter could name or type. The emulator's
+    # identity is not evidence, so no decoration is written on its strength.
+    printf 'label attempt=skipped:unsupported:plain_record_only readback=not_attempted\n'
+    printf 'key attempt=skipped:unsupported:plain_record_only readback=not_attempted\n'
+    return 0
+  fi
   if ! why="$(_sw_capability_reason name "$id")"; then
     printf 'label attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"
     printf 'key attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"
@@ -187,6 +219,9 @@ _sw_title_now() {   # <id> <type> -> observed session name or unknown:/n/a:
 # The session cell. Prints "attempt=... readback=...".
 _sw_cell_session() {   # <id> <team> <agent> <type>
   local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why
+  if [ "${_SW_KIND:-}" = plain ]; then
+    printf 'attempt=skipped:unsupported:plain_record_only readback=not_attempted\n'; return 0
+  fi
   if ! why="$(_sw_capability_reason poke "$id")"; then
     printf 'attempt=skipped:unsupported:%s readback=not_attempted\n' "$why"; return 0
   fi
@@ -231,7 +266,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   head="seat=$team/$agent sid=$owner pane=$ref"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$owner" ] || { _sw_say "seat=$team/$agent sid=$owner none:bad_identity"; return 2; }
   if ! _agmsg_placement_split "$ref"; then _sw_say "$head none:bad_ref"; return 2; fi
-  term="$_AGMSG_PS_TERM"; id="$_AGMSG_PS_ID"
+  term="$_AGMSG_PS_TERM"; id="$_AGMSG_PS_ID"; _SW_KIND="$term"
   _agmsg_terminal_id_ok "$term" "$id" || { _sw_say "$head none:bad_ref"; return 2; }
   agmsg_terminal_load "$term" 2>/dev/null || { _sw_say "$head none:no_driver:$term"; return 2; }
 
@@ -250,6 +285,18 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
     4) _sw_say "$head none:fence_unreadable:no_fence_op"; agmsg_self_write_lock_release "$team" "$agent" "$owner"; return 2 ;;
     *) _sw_say "$head none:fence_unreadable:${_SW_F_TID#unknown:}"; agmsg_self_write_lock_release "$team" "$agent" "$owner"; return 2 ;;
   esac
+  # Carry the spawn-time boot witness forward (review ruling on #1186): when the
+  # seat's OWN existing record names the same plain emulator and tty as the
+  # locator just delivered, and carries a complete boot pair, that pair rides
+  # into the new fence -- the boot shell outlives a CLI whose pid has gone, and
+  # teardown needs it. Nothing else is copied: an unknown key is not evidence,
+  # and this reads the seat's own record only, never another seat's.
+  # The re-reads compare against what the DRIVER reports (the base anchor);
+  # the carried pair is stored but never expected back from a fresh read.
+  local _carry="" _base_tid="$_SW_F_TID"
+  _carry="$(_sw_boot_carry "$team" "$agent" "$ref")"
+  [ -z "$_carry" ] || _SW_F_TID="$_SW_F_TID,$_carry"
+
   # instance:terminal_id. The guarantee runs ONE way: the driver refuses an
   # instance containing ':' (unknown:socket_path_malformed), so the instance is
   # colon-free; the terminal_id is a server-issued string whose alphabet is not
@@ -272,13 +319,13 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   # record is not left standing as accepted. Judged BEFORE the record line is
   # printed, so what the caller sees and what the done file says are one thing.
   local why
-  if ! why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
+  if ! why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "$_base_tid" "$seat_pid")"; then
     case "$rec_line" in "attempt=ok readback=verified") rec_line="attempt=ok readback=mismatch:fence_changed:$why" ;; esac
   fi
   _sw_say "record $rec_line"
 
   # label + key -- fence first.
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "$_base_tid" "$seat_pid")"; then
     lk_lines="$(_sw_cell_label_key "$id" "$team" "$agent")"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 1p)"
     _sw_say "$(printf '%s' "$lk_lines" | sed -n 2p)"
@@ -288,7 +335,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   fi
 
   # session -- fence again: this one types into the pane.
-  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "${fence#*:}" "$seat_pid")"; then
+  if why="$(_sw_fence_check "$id" "$_SW_F_INSTANCE" "$_base_tid" "$seat_pid")"; then
     sess_line="$(_sw_cell_session "$id" "$team" "$agent" "$type")"
     _sw_say "session $sess_line"
   else
