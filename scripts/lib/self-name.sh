@@ -147,6 +147,41 @@ agmsg_self_name_on_action() {
     return 0                                 # named AND recorded at where I am
   fi
 
+  # #1137: none of send.sh/inbox.sh/history.sh pass project or type -- they
+  # never had them to pass, not merely forgot to -- so a record this hook
+  # writes had two empty fields, and arrange.sh (which requires both) refused
+  # any seat whose ONLY placement record came from acting rather than from
+  # spawn/actas/SessionStart (measured live: 12 of 36 records). Resolve them
+  # here, the same way whoami.sh does for the identical question, rather than
+  # threading two new arguments through three callers that have no better
+  # source for them than this process's own cwd and type anyway. Only when
+  # the caller did not supply them -- a caller that already knows better
+  # (every other path through the primitive) is never second-guessed.
+  if [ -z "$project" ] || [ -z "$type" ]; then
+    # Best-effort, matching every other lazy source in this function: a
+    # failure here must not block the naming this hook exists to do, so a
+    # record written with what could be resolved is better than none, and
+    # the record's own project/type stay only as good as this detection is.
+    if [ -z "$type" ]; then
+      # shellcheck disable=SC1091
+      . "${SKILL_DIR:-}/scripts/lib/type-registry.sh" 2>/dev/null || true
+      # shellcheck disable=SC1091
+      . "${SKILL_DIR:-}/scripts/lib/compat.sh" 2>/dev/null || true
+      # shellcheck disable=SC1091
+      if . "${SKILL_DIR:-}/scripts/lib/detect-cli-type.sh" 2>/dev/null \
+        && declare -F agmsg_detect_cli_type >/dev/null 2>&1; then
+        type="$(agmsg_detect_cli_type 2>/dev/null || true)"
+      fi
+    fi
+    if [ -z "$project" ]; then
+      # shellcheck disable=SC1091
+      if . "${SKILL_DIR:-}/scripts/lib/resolve-project.sh" 2>/dev/null \
+        && declare -F agmsg_resolve_project >/dev/null 2>&1; then
+        project="$(agmsg_resolve_project "$(pwd)" "$type" "$team" 2>/dev/null || true)"
+      fi
+    fi
+  fi
+
   # Slow half, once: name the pane through the same primitive every other path
   # uses, and -- the #1109 fix -- record this pane as the seat's placement. The
   # `record` claim is legitimate here and only here among the label writers (see
