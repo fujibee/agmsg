@@ -146,6 +146,51 @@ _stub_tmux_exit() {
   [ "$(printf '%s\n' "$output" | grep -c alice)" -eq 0 ]   # dropped: the type reached reset intact
 }
 
+@test "despawn --force: a plain placement closes only after its owner witness matches" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
+    'fence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' > "$RUN/spawn.team__alice"
+  local bin="$TEST_SKILL_DIR/plain-bin"
+  mkdir -p "$bin"
+  cat > "$bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *'tty='*) printf 'ttys040\n' ;; *'lstart='*) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+EOF
+  cat > "$bin/osascript" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_SKILL_DIR/plain-close.log"
+EOF
+  cat > "$bin/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+  chmod +x "$bin/ps" "$bin/osascript" "$bin/uname"
+
+  run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"status=forced"* ]]
+  [ ! -f "$RUN/spawn.team__alice" ]
+  grep -Fq 'despawn /dev/ttys040' "$TEST_SKILL_DIR/plain-close.log"
+}
+
+@test "despawn --force: a stale plain owner witness is named and kept for retry" {
+  bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
+  printf '%s\t%s\t%s\t%s\n' 'plain:iterm:/dev/ttys040' "$PROJ" claude-code \
+    'fence=iterm:tty=/dev/ttys040,pid=123,start=OLD' > "$RUN/spawn.team__alice"
+  local bin="$TEST_SKILL_DIR/plain-bin-stale"
+  mkdir -p "$bin"
+  cat > "$bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *'tty='*) printf 'ttys040\n' ;; *'lstart='*) printf 'Sat Sep 13 02:10:11 2026\n' ;; esac
+EOF
+  chmod +x "$bin/ps"
+
+  run env PATH="$bin:$PATH" bash "$SCRIPTS/despawn.sh" team leader alice --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"owner process witness no longer matches"* ]]
+  [ -f "$RUN/spawn.team__alice" ]
+}
+
 @test "despawn --force: an UNCONFIRMED teardown keeps the record and reports error (#625, --force side)" {
   # If the terminal driver does not confirm the pane closed (here: kill-pane exits
   # non-zero), the pane may still be alive. --force must NOT delete the record (the

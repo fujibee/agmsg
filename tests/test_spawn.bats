@@ -18,6 +18,7 @@ setup() {
   cat > "$STUB_BIN/record.sh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$CAPTURE"
+printf 'iterm\t/dev/ttys040\t123\tSat_Sep_13_02:10:11_2026\n' > "\${1}.plain-witness"
 EOF
   chmod +x "$STUB_BIN/record.sh"
   export PATH="$STUB_BIN:$PATH"
@@ -30,6 +31,7 @@ EOF
   unset TMUX
   unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
   export AGMSG_TERMINAL="$STUB_BIN/record.sh {cmd}"
+  export AGMSG_TEST_PLAIN_WITNESS_ROW=$'iterm\t/dev/ttys040\t123\tSat_Sep_13_02:10:11_2026'
 
   export PROJ="$TEST_SKILL_DIR/proj"
   mkdir -p "$PROJ"
@@ -1421,15 +1423,17 @@ T
   grep -q "tmux:/tmp/fake:%9" <<<"$output"
 }
 
-@test "spawn: the plain driver's '-' protocol value never leaks to spawn stdout" {
-  # _launch_os_terminal captures terminal_spawn's record-op stdout ('-' = placed, no
-  # pane) and verifies it, rather than letting it print. A normal OS-terminal spawn
-  # must not emit a lone '-' line alongside the human status.
+@test "spawn: the plain driver's locator protocol value does not leak, and its witness is recorded" {
+  # _launch_os_terminal captures terminal_spawn's record-op stdout and verifies
+  # it rather than letting the protocol value appear beside the human status.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
-  refute grep -qx -- '-' <<<"$output"          # no line that is just the protocol '-'
+  refute grep -qx -- 'iterm:/dev/ttys040' <<<"$output"
   grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
+  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  grep -Fq $'plain:iterm:/dev/ttys040\t' "$rec"
+  grep -Fq $'\tfence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' "$rec"
 }
 
 # --- codex launches through the bundled shim, by path (spawn_wrapper=) ---------
