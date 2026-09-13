@@ -201,7 +201,27 @@ _binding_field() {  # $1 = team, $2 = json path under remote_binding
   run curl -sS "$ENDPOINT/_test/rotate-server-id"
   [ "$status" -eq 0 ]
 
+  # #1176: this assertion goes red on CI roughly 3 times in 16 runs and has
+  # never once reproduced locally (15 isolated repeats, a whole-file run, a
+  # deliberate 6s delay here to give the background sync engine's poll a
+  # chance to fire, and the exact 4-file combination the age-v1-contract leg
+  # runs -- all green). Whatever the CI-only condition is, the state that
+  # would show it is gone the moment teardown() runs rm -rf on
+  # $TEST_SKILL_DIR. Dump it into the test's own output NOW, unconditionally
+  # -- bats only surfaces this stream when the test actually fails, so it
+  # costs nothing on the green runs and is exactly what the next red one is
+  # missing today.
+  echo "DIAG(#1176) pre-reconnect: date=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || date -u)"
+  echo "DIAG(#1176) pre-reconnect: live server /v1/health = $(curl -sS "$ENDPOINT/v1/health" 2>&1)"
+  echo "DIAG(#1176) pre-reconnect: anchored=$anchored"
+  echo "DIAG(#1176) pre-reconnect: server.log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/server.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+  echo "DIAG(#1176) pre-reconnect: sync engine pidfile: $(cat "$TEST_SKILL_DIR/run/remote-sync.testteam.pid" 2>&1 || true)"
+  echo "DIAG(#1176) pre-reconnect: sync engine log tail:"
+  { tail -n 20 "$TEST_SKILL_DIR/run/remote-sync.testteam.log" 2>&1 | sed 's/^/DIAG(#1176)   /'; } || true
+
   run bash "$SCRIPTS/remote.sh" connect --endpoint "$ENDPOINT" testteam
+  echo "DIAG(#1176) reconnect: status=$status output=$output"
   [ "$status" -ne 0 ]
   [[ "$output" == *"Refusing to re-anchor"* ]]
   # The binding still points at the server it was made against.
