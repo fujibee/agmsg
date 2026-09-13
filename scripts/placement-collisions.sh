@@ -39,7 +39,7 @@ _placement_collision_rows() {
         [ -n "$agent" ] || continue
         rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || continue
         [ -f "$rec" ] || continue
-        IFS="$tab" read -r ref _project type < "$rec" 2>/dev/null || continue
+        IFS="$tab" read -r ref _project type _fence < "$rec" 2>/dev/null || continue
         [ -n "$ref" ] || continue
         printf '%s\t%s\t%s\t%s\n' "$ref" "$agent" "$team" "$type"
       done < <(sqlite3 -noheader :memory: \

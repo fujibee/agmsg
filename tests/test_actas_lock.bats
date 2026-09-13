@@ -130,11 +130,14 @@ live_pid() { echo "$$"; }
   # slot is stale and is about to enter the cleanup. With the fix the
   # reclaim path now re-checks ownership *inside* this mutex, so even
   # if a peer made it through, sid-A's live lock would be respected.
-  local rd="$(actas_lock_path "T" "alice").reclaim.d"
-  mkdir "$rd"
+  # The mutex is an owner-bearing lock file (a bare directory had no owner
+  # and outlived a crashed reclaimer forever); the peer holding it is live.
+  # (One marker per pid in this harness, so the live peer is sid-A itself.)
+  local rd="$(actas_lock_path "T" "alice").reclaim"
+  echo "sid-A" > "$rd"
 
   run actas_lock_claim "T" "alice" "sid-B"
-  rmdir "$rd"
+  rm -f "$rd"
 
   [ "$status" -eq 1 ]
   [[ "$output" == "held:sid-A" ]]

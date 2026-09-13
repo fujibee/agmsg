@@ -203,9 +203,24 @@ _actas_lock_verdict() {   # <sid> <read> <owner>
 # so this producer and actas_lock_observe cannot disagree about one file.
 _actas_lock_try_claim() {
   local team="$1" agent="$2" sid="$3"
-  local lock dir tmp _r _v _w verdict existing
-  lock="$(actas_lock_path "$team" "$agent")"
-  dir="$(_actas_lock_dir)"
+  _agmsg_lock_try_claim_at "$(actas_lock_path "$team" "$agent")" "$sid"
+}
+
+# The same claim, addressed by LOCK PATH and OWNER TOKEN instead of by role.
+#
+# The actas lock is not the only exclusion in this tree that must survive a
+# claimant dying at any instruction: a seat's own single-flight (self-write-lock.sh)
+# needs the identical write-then-readback-then-link publish, the identical
+# three-valued verdict, and the identical positive-dead-only reclaim. Copying the
+# body would make two producers of the same three values that drift apart one
+# review at a time (the shape _actas_lock_verdict exists to prevent). So the body
+# lives here, once, keyed on a path; the role-keyed functions above and below
+# compute their path and call in. The owner token is whatever agmsg_instance_alive
+# can judge: a session id, or a composite <sid>.<pid> instance token.
+_agmsg_lock_try_claim_at() {   # <lock-path> <owner>
+  local lock="$1" sid="$2"
+  local dir tmp _r _v _w verdict existing
+  dir="${lock%/*}"
   mkdir -p "$dir" 2>/dev/null || true
 
   tmp="$(mktemp "$dir/.actas-claim.XXXXXX" 2>/dev/null)" || return 1
@@ -273,11 +288,17 @@ _actas_lock_try_claim() {
 # instead of inferring one from silence. (#983, review)
 actas_lock_claim() {
   local team="$1" agent="$2" sid="$3"
-  local attempts=0 result lock_path reclaim_dir _r _owner _alive_rc
-  lock_path="$(actas_lock_path "$team" "$agent")"
-  reclaim_dir="${lock_path}.reclaim.d"
+  agmsg_lock_claim_at "$(actas_lock_path "$team" "$agent")" "$sid"
+}
+
+# The claim loop by LOCK PATH and OWNER TOKEN (see _agmsg_lock_try_claim_at for
+# why the body is shared). Same output contract and exit codes as actas_lock_claim.
+agmsg_lock_claim_at() {   # <lock-path> <owner>
+  local lock_path="$1" sid="$2"
+  local attempts=0 result mutex mres _r _owner _alive_rc
+  mutex="$(_agmsg_lock_mutex_path "$lock_path")"
   while [ "$attempts" -lt 3 ]; do
-    if ! result="$(_actas_lock_try_claim "$team" "$agent" "$sid")"; then
+    if ! result="$(_agmsg_lock_try_claim_at "$lock_path" "$sid")"; then
       # mktemp failed, or the lock directory could not be made. Nothing was
       # claimed and nothing was learned about the holder.
       echo "unknown:claim_failed"
@@ -298,30 +319,46 @@ actas_lock_claim() {
         # A's fresh lock -- the original blocker from #65 review finding 1,
         # and the same hazard the mv-only variant inherited.
         #
-        # Per-lock mutex via `mkdir` (atomic on POSIX). Re-check inside it:
-        # only remove the lock if its current owner is still dead. If a peer
-        # snuck a live owner in between our stale decision and the mutex,
-        # leave it -- the next try_claim observes it as held.
-        if mkdir "$reclaim_dir" 2>/dev/null; then
-          # Reclaim DELETES, so it needs three facts, not one: the read
-          # SUCCEEDED, an owner is actually there, and that owner is POSITIVELY
-          # dead. "could not read it" and "could not tell" are neither. (#983)
-          _r="$(_actas_lock_read_path "$lock_path")"
-          if [ "${_r%%$'\t'*}" = "ok" ]; then
-            _owner="${_r#*$'\t'}"
-            if [ -n "$_owner" ]; then
-              _alive_rc=0
-              actas_lock_sid_alive "$_owner" || _alive_rc=$?
-              if [ "$_alive_rc" -eq 1 ]; then
-                rm -f "$lock_path"
+        # The mutex is a LOCK OF THE SAME KIND as the one it protects (an
+        # owner-bearing file published by _agmsg_lock_try_claim_at), not a bare
+        # `mkdir`. A directory has no owner: a reclaimer dying between mkdir and
+        # rmdir left it behind with nothing to say whose it was, and with no
+        # time-based reclaim every later claim spun three rounds into
+        # unknown:reclaim_contended -- the protected lock was crash-safe and
+        # the thing protecting it was not (review, 2026-09-11). With an owner
+        # in the mutex, a reclaimer that died mid-reclaim is found the same way
+        # a dead lock owner is: read, three-valued liveness, positive dead only.
+        mres="$(_agmsg_lock_mutex_take "$mutex" "$sid")"
+        case "$mres" in
+          ok)
+            # Reclaim DELETES, so it needs three facts, not one: the read
+            # SUCCEEDED, an owner is actually there, and that owner is POSITIVELY
+            # dead. "could not read it" and "could not tell" are neither. (#983)
+            _r="$(_actas_lock_read_path "$lock_path")"
+            if [ "${_r%%$'\t'*}" = "ok" ]; then
+              _owner="${_r#*$'\t'}"
+              if [ -n "$_owner" ]; then
+                _alive_rc=0
+                agmsg_instance_alive "$_owner" || _alive_rc=$?
+                if [ "$_alive_rc" -eq 1 ]; then
+                  rm -f "$lock_path"
+                fi
               fi
             fi
-          fi
-          rmdir "$reclaim_dir" 2>/dev/null
-        fi
-        # If mkdir failed, another caller is mid-reclaim. Loop without
-        # touching anything; the next try_claim sees whichever state they
-        # end up in (live -> held, or empty -> we ln-claim).
+            agmsg_lock_release_at "$mutex" "$sid"
+            ;;
+          held:*)
+            # Another reclaimer is alive and mid-reclaim, or a dead one was
+            # just cleared. Touch nothing; the next round sees the result.
+            ;;
+          unknown:*)
+            # The mutex's own state could not be established (unreadable,
+            # empty, liveness undecidable). Spinning would only repeat the
+            # read; say so and stop, so the caller shows it.
+            printf 'unknown:reclaim_mutex:%s\n' "${mres#unknown:}"
+            return 1
+            ;;
+        esac
         attempts=$((attempts + 1))
         continue
         ;;
@@ -341,11 +378,123 @@ actas_lock_claim() {
   return 1
 }
 
+# Where the reclaim mutex for a lock lives: beside it, one file.
+_agmsg_lock_mutex_path() {   # <lock-path>
+  printf '%s.reclaim' "$1"
+}
+
+# Take the reclaim mutex for <owner>. Prints exactly one of:
+#   ok                    held by us now; caller must agmsg_lock_release_at it
+#   held:<reason>         not ours this round (a live reclaimer, a vanished or
+#                         just-cleared mutex); caller loops, touching nothing
+#   unknown:<reason>      the mutex's state could not be established
+# The exit status is 0 on EVERY verdict: the line decides. A step here that
+# printed its verdict and also returned 1 killed a `set -e` caller of the claim
+# loop inside `mres=$(...)`, before any verdict reached stdout -- silence in the
+# shape of a refusal (measured 2026-09-11: child rc 1, empty stdout).
+#
+# A dead reclaimer's mutex is cleared here, and that clearing is the one place
+# a lock of this kind is removed without holding a mutex over IT. Regress has to
+# stop somewhere; it stops with an atomic rename to a name only this claimant
+# uses. `mv` of the mutex to `<mutex>.dead.<us>` succeeds for exactly one
+# caller (the second finds no source), and the winner then owns the moved file
+# exclusively: it is SETTLED there (_agmsg_lock_tomb_settle) -- deleted only if
+# its owner is still positively dead, linked back otherwise. A caller dying
+# between the rename and the settle leaves `<mutex>.dead.<us>` behind, and that
+# is why every take starts by settling whatever tombstones exist: a tombstone is
+# a mutex in transit, not garbage, and a claim that ignored it would link into
+# the gap it left.
+_agmsg_lock_mutex_take() {   # <mutex-path> <owner>
+  local mutex="$1" sid="$2" r tomb s t
+  # Tombstones first. Any of them is a displaced mutex whose fate was not yet
+  # decided; deciding it is the same routine as below. One that cannot be
+  # settled stops this claim with a named unknown instead of a gap.
+  for t in "$mutex".dead.*; do
+    [ -e "$t" ] || continue
+    s="$(_agmsg_lock_tomb_settle "$t" "$mutex")"
+    case "$s" in
+      settled:*) ;;
+      *) printf 'unknown:tombstone_%s\n' "${s#unsettled:}"; return 0 ;;
+    esac
+  done
+  r="$(_agmsg_lock_try_claim_at "$mutex" "$sid")" || { echo "unknown:mutex_claim_failed"; return 0; }
+  case "$r" in
+    ok)        echo ok; return 0 ;;
+    held:*)    printf '%s\n' "$r"; return 0 ;;
+    vanished)  echo "held:vanished"; return 0 ;;
+    unknown:*) printf '%s\n' "$r"; return 0 ;;
+    stale) ;;
+    *)         echo "unknown:mutex_unclassified"; return 0 ;;
+  esac
+  tomb="${mutex}.dead.$(_actas_lock_encode "$sid")"
+  if mv "$mutex" "$tomb" 2>/dev/null; then
+    s="$(_agmsg_lock_tomb_settle "$tomb" "$mutex")"
+    case "$s" in
+      settled:*) ;;
+      *) printf 'unknown:tombstone_%s\n' "${s#unsettled:}"; return 0 ;;
+    esac
+  fi
+  echo "held:reclaiming"
+  return 0
+}
+
+# Decide the fate of one tombstone (a mutex displaced by rename). Prints:
+#   settled:removed    its owner is positively dead -> it is gone
+#   settled:restored   linked back to <mutex-path>  -> the mutex is as it was
+#   settled:superseded a fresh mutex already sits at <mutex-path>, read and
+#                      confirmed there -> the tombstone is dropped
+#   unsettled:<why>    it is KEPT, and the caller must not treat the mutex slot
+#                      as free: restore_failed (ln failed and the destination is
+#                      absent -- ENOSPC, EIO, a permission), destination_unreadable
+#                      (something is there and cannot be read)
+# Exit status 0 on every verdict, for the same reason as _agmsg_lock_mutex_take.
+#
+# The restore is `ln`, never `mv`: a mutex somebody published into the gap must
+# not be overwritten. And a failed `ln` is NOT read as "somebody did": that
+# folds the benign failure (destination exists) with the destructive ones
+# (nothing there, and the link could not be made), and the delete that followed
+# removed the only inode of a mutex just judged undeletable. The destination is
+# re-read instead, and only a mutex actually READ there licenses dropping the
+# tombstone. (Review, 2026-09-11 -- the third "two failure kinds folded into
+# one" of the day.)
+_agmsg_lock_tomb_settle() {   # <tombstone-path> <mutex-path>
+  local tomb="$1" mutex="$2" _r _owner _alive_rc _d
+  _r="$(_actas_lock_read_path "$tomb")"
+  _owner="${_r#*$'\t'}"
+  _alive_rc=2
+  if [ "${_r%%$'\t'*}" = "ok" ] && [ -n "$_owner" ]; then
+    _alive_rc=0
+    agmsg_instance_alive "$_owner" || _alive_rc=$?
+  fi
+  if [ "$_alive_rc" -eq 1 ]; then
+    rm -f "$tomb"
+    echo "settled:removed"
+    return 0
+  fi
+  if ln "$tomb" "$mutex" 2>/dev/null; then
+    rm -f "$tomb"
+    echo "settled:restored"
+    return 0
+  fi
+  _d="$(_actas_lock_read_path "$mutex")"
+  case "${_d%%$'\t'*}" in
+    ok)         rm -f "$tomb"; echo "settled:superseded"; return 0 ;;
+    unreadable) echo "unsettled:destination_unreadable"; return 0 ;;
+    *)          echo "unsettled:restore_failed"; return 0 ;;
+  esac
+}
+
 # Release a lock if we own it. Idempotent.
 actas_lock_release() {
   local team="$1" agent="$2" sid="$3"
-  local lock _r
-  lock="$(actas_lock_path "$team" "$agent")"
+  agmsg_lock_release_at "$(actas_lock_path "$team" "$agent")" "$sid"
+}
+
+# Release by LOCK PATH and OWNER TOKEN. Only an exact owner match deletes; a lock
+# that is unreadable, empty, or someone else's is left exactly as found.
+agmsg_lock_release_at() {   # <lock-path> <owner>
+  local lock="$1" sid="$2"
+  local _r
   # This DELETES, so it needs a read that worked AND an owner that is positively
   # us. `[ -f ] || return 0` followed by comparing a possibly-empty owner landed
   # on the same behaviour by accident (an unreadable lock compares unequal to any

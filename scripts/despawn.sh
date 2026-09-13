@@ -78,8 +78,8 @@ SPAWN_REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 # Asking with it would make a graceful teardown that WORKED report needs-force.
 recorded_pane_state() {
   [ -f "$SPAWN_REC" ] || { printf 'no-record'; return 0; }
-  local id _proj _type _term _bare _out _rc=0
-  IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
+  local id _proj _type _fence _term _bare _out _rc=0
+  IFS=$'\t' read -r id _proj _type _fence < "$SPAWN_REC"
   [ -n "$id" ] || { printf 'unknown'; return 0; }
   _term="$(agmsg_terminal_ref_terminal "$id")" || { printf 'unknown'; return 0; }
   _bare="$(agmsg_terminal_ref_id "$id")"       || { printf 'unknown'; return 0; }
@@ -99,8 +99,8 @@ recorded_pane_state() {
 
 kill_recorded_placement() {
   [ -f "$SPAWN_REC" ] || return 1
-  local id _proj _type _term _bare
-  IFS=$'\t' read -r id _proj _type < "$SPAWN_REC"
+  local id _proj _type _fence _term _bare
+  IFS=$'\t' read -r id _proj _type _fence < "$SPAWN_REC"
   [ -n "$id" ] || return 1
   _term="$(agmsg_terminal_ref_terminal "$id")" || return 1   # unknown/corrupt ref
   _bare="$(agmsg_terminal_ref_id "$id")"
@@ -111,7 +111,7 @@ kill_recorded_placement() {
 
 if [ "$FORCE" = "1" ]; then
   [ -f "$SPAWN_REC" ] || die "no placement record for '$TEAM/$NAME' — nothing to force (was it launched via 'spawn'? graceful despawn does not need this)"
-  IFS=$'\t' read -r _id _proj _type < "$SPAWN_REC"
+  IFS=$'\t' read -r _id _proj _type _fence < "$SPAWN_REC"
   if ! kill_recorded_placement; then
     # Teardown NOT confirmed. Keep the record (the only retry authority), the
     # registration and the lock, and say so — never claim a forced teardown that did

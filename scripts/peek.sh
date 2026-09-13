@@ -44,7 +44,7 @@ _peek_one() { # <team> <name> [lines]
     echo "peek: no placement record for '$team/$name' — nothing here knows which pane is theirs (spawn writes it at launch; a hand-joined member gets one when a terminal-aware session names its pane)" >&2
     return 1
   }
-  IFS=$'\t' read -r ref _proj _type < "$rec" || true
+  IFS=$'\t' read -r ref _proj _type _fence < "$rec" || true
   [ -n "$ref" ] || {
     echo "peek: placement record for '$team/$name' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)" >&2
     return 1
@@ -121,7 +121,7 @@ _peek_team() {
       _sweep_row "$name" - no_record no_placement_record
       continue
     fi
-    IFS=$'\t' read -r ref _rec_project _rec_type < "$rec" || true
+    IFS=$'\t' read -r ref _rec_project _rec_type _rec_fence < "$rec" || true
     pane="$(agmsg_terminal_ref_id "${ref:-}" 2>/dev/null)" || pane="?"
     screen=""; rc=0
     screen="$(_peek_one "$team" "$name" 2>&1)" || rc=$?
