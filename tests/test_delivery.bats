@@ -2306,6 +2306,66 @@ EOF
   grep -q -- "--inline-inbox" "$log"
 }
 
+@test "session-start.sh for codex writes exact scoped URL to the scoped request" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-scoped "$TEST_PROJECT" codex
+  local key hash request_file request
+  key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  source "$SCRIPTS/lib/hash.sh"
+  hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$key"
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.$key.port"
+
+  AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+  AGMSG_CODEX_APP_SERVER_KEY="$key" \
+  AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+  CODEX_THREAD_ID=thread-scoped \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ -f "$request_file" ]
+  request="$(cat "$request_file")"
+  [ "$request" = $'codex\tthread-scoped\tws://127.0.0.1:2222' ]
+  [ ! -e "$TEST_SKILL_DIR/run/codex-bridge-request.$hash" ]
+}
+
+@test "session-start.sh for codex rejects malformed scoped key without a request" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-scoped "$TEST_PROJECT" codex
+  local hash
+  source "$SCRIPTS/lib/hash.sh"
+  hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  mkdir -p "$TEST_SKILL_DIR/run/codex-app-server.bad"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.bad/key.port"
+
+  run env AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_APP_SERVER_KEY=bad/key \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    CODEX_THREAD_ID=thread-scoped \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$(find "$TEST_SKILL_DIR/run" -maxdepth 1 -name 'codex-bridge-request.*' -type f | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "session-start.sh for codex keeps project-hash request without a scoped key" {
+  bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
+  _seed_role_record team alice thread-legacy "$TEST_PROJECT" codex
+  local hash request_file
+  source "$SCRIPTS/lib/hash.sh"
+  hash="$(printf '%s' "$TEST_PROJECT" | agmsg_sha1)"
+  request_file="$TEST_SKILL_DIR/run/codex-bridge-request.$hash"
+
+  env -u AGMSG_CODEX_APP_SERVER_KEY \
+    AGMSG_CODEX_BRIDGE=1 AGMSG_CODEX_BRIDGE_LAUNCHER=1 \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    CODEX_THREAD_ID=thread-legacy \
+    bash "$SCRIPTS/session-start.sh" codex "$TEST_PROJECT" >/dev/null
+
+  [ "$(cat "$request_file")" = $'codex\tthread-legacy\tws://127.0.0.1:3333' ]
+}
+
 @test "session-start.sh for codex stays quiet without monitor launcher env" {
   bash "$SCRIPTS/join.sh" team alice codex "$TEST_PROJECT" >/dev/null
   local fake="$TEST_SKILL_DIR/fake-codex-bridge"

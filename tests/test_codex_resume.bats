@@ -377,6 +377,46 @@ record_with_loaded_via_port_file() {   # <ids-file> <team> <agent> <project>
   [ "$(recorded_uuid team alice)" = "thr-unclaimed" ]
 }
 
+@test "codex record: scoped server key selects only the exact scoped port file" {
+  local proj ids hash key
+  proj="$(mktemp -d)"
+  ids="$TEST_SKILL_DIR/loaded.txt"
+  key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'thr-scoped\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.$key.port"
+
+  ( unset CODEX_THREAD_ID
+    AGMSG_CODEX_APP_SERVER_KEY="$key" \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+
+  [ "$(recorded_uuid team alice)" = "thr-scoped" ]
+}
+
+@test "codex record: malformed scoped server key cannot select a path or fall back" {
+  local proj ids hash
+  proj="$(mktemp -d)"
+  ids="$TEST_SKILL_DIR/loaded.txt"
+  printf 'thr-unsafe\n' > "$ids"
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  hash="$(printf '%s' "$proj" | agmsg_sha1)"
+  printf '1111' > "$TEST_SKILL_DIR/run/codex-app-server.$hash.port"
+  mkdir -p "$TEST_SKILL_DIR/run/codex-app-server.bad"
+  printf '2222' > "$TEST_SKILL_DIR/run/codex-app-server.bad/key.port"
+
+  ( unset CODEX_THREAD_ID
+    AGMSG_CODEX_APP_SERVER_KEY=bad/key \
+    AGMSG_CODEX_BRIDGE_APP_SERVER=ws://127.0.0.1:3333 \
+    AGMSG_NODE="$(fake_node_printing "$ids")" \
+      bash "$TYPES/codex/codex-record-session.sh" team alice "$proj" )
+
+  [ -z "$(recorded_uuid team alice)" ]
+}
+
 @test "codex record: no port file and no variable records nothing, it does not guess" {
   # Fail closed. Without a way to ask, the answer is "could not ask" -- never
   # "asked and found nothing" -- so no weaker signal may seat a thread here.

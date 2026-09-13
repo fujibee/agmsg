@@ -13,9 +13,10 @@ approximates the same experience by launching Codex through an app-server bridge
 > enabling monitor takes effect only after you **restart Codex and send your
 > first message** — the SessionStart hook fires on the first turn, not the
 > moment Codex opens, so the bridge is absent until you interact once; an
-> already-running session stays unmonitored until you restart it (#151); the
-> bridge is not torn down when you close the TUI (orphans linger until reboot
-> or `mode off`/manual kill, see #149).
+> already-running session stays unmonitored until you restart it (#151). A
+> scope-less launch retains the shared project app-server lifetime; callers that
+> need a bounded disposable-worktree lifecycle can opt into invocation scope
+> as described below (#149).
 
 ## Quick Start
 
@@ -109,6 +110,37 @@ codex logout
 
 The shim also passes through when the current project is not in Codex monitor
 mode.
+
+## Invocation-scoped lifetime (opt-in)
+
+The normal monitor keeps its existing behavior: it reuses a live app-server for
+the project and `exec`s the Codex TUI. A caller that owns a disposable worktree
+can instead request a lifecycle boundary for one invocation:
+
+```bash
+codex-monitor.sh --project "$PWD" --invocation-scope "$opaque_scope" --codex-command codex -- -C "$PWD"
+```
+
+`$opaque_scope` is a unique, non-secret token for that invocation. The monitor
+validates it, combines it with the canonical project path, and exposes only the
+derived record key to its children. Each scoped launch starts a fresh app-server,
+so it pays app-server startup cost instead of reusing the project server.
+
+The scoped monitor supervises its captured TUI, app-server, and top-level bridge
+launcher. When the TUI exits normally, it stops and waits for the captured
+processes, removes the matching scoped records, and returns the TUI status. A
+direct `TERM` takes the same path and returns status `143`.
+
+Concurrent scopes use separate request files and dispatchers. A role is routed
+only when its recorded project and thread match that scope's request, while the
+existing project-and-role lock still permits only one bridge consumer for the
+role. Ending one scope therefore does not stop a peer scope's dispatcher or
+delivery.
+
+`SIGKILL` cannot run the supervisor's cleanup traps. It may leave a server or
+lease behind, so callers must treat readiness as failed and handle recovery as
+an explicit incident action. Invocation scope does not change the legacy,
+scope-less lifecycle.
 
 ## Bridge Mechanics
 
