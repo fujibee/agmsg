@@ -66,9 +66,9 @@ If argument starts with "drop" followed by an agent name:
 If argument starts with "spawn" (e.g. "spawn codex reviewer", "spawn claude-code alice --window"):
 1. Parse `<type>` (a spawnable agent type), `<name>`, and any options (`--boot-prompt <text>`, `--project <path>`, `--team <team>`, `--window`, `--split h|v`, `--terminal <template>`, `--no-wait`, `--ready-timeout <secs>`, `--model <id>`, `--fresh`).
 2. Run: `~/.agents/skills/__SKILL_NAME__/scripts/spawn.sh <type> <name> --project "$(pwd)" [options]`
-   - `spawn.sh` pre-joins `<name>`, then opens a tmux pane/window or a new OS terminal and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt.
+   - `spawn.sh` pre-joins `<name>`, then opens a new pane or window through the terminal driver and launches the target CLI with `/__SKILL_NAME__ actas <name>` as its initial prompt. `--boot-prompt` appends a first task to that prompt. Which terminal that is is the driver's decision, never something to name here.
    - By default it blocks until a spawned Claude Code agent's watcher attaches and prints `status=ready`; `--no-wait` returns immediately. A spawned Codex agent has no Monitor and skips the readiness wait.
-   - It refuses early when `<name>` is already held by another live session, the target CLI is missing, the project path is invalid, or no tmux/usable terminal is available.
+   - It refuses early when `<name>` is already held by another live session, the target CLI is missing, the project path is invalid, or the terminal driver has nowhere to place it.
 3. Show the script's output. Do not TaskStop or relaunch this session's own Monitor; spawn affects a separate agent.
 
 If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --force"):
