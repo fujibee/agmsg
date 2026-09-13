@@ -233,18 +233,25 @@ EOF
   done < <(agmsg_renderable_types "$TEST_SKILL_DIR")
 }
 
-@test "every agent template routes team identity reads and fixes through team.sh" {
+@test "every agent template routes team identity reads through team.sh, read-only, and repairs through fix.sh (#1152)" {
   local template type renderable_types
   renderable_types="$(agmsg_renderable_types "$TEST_SKILL_DIR")"
   [ -n "$renderable_types" ]
   grep -qxF 'claude-code' <<<"$renderable_types"
   while IFS= read -r type; do
     template="$(render_type "$type")"
-    grep -Fq '"team --json", "team --fix", "team --fix-pane-names", or "team --rename-sessions"' "$template"
-    grep -Fq 'team.sh $TEAM [--json|--fix|--fix-pane-names|--rename-sessions]' "$template"
-    # The flag list itself says which repair types into a session (#1110).
-    grep -Fq -- '--fix-pane-names' "$template"
-    grep -Fq -- '--rename-sessions' "$template"
+    grep -Fq 'If argument is "team" or "team --json"' "$template"
+    grep -Fq 'team.sh $TEAM [--json]' "$template"
+    grep -Fq 'This is read-only' "$template"
+    # The externally-typed repair flags are gone on purpose (koichi's ruling,
+    # #1152): forcing a fix into another seat's pane from outside is the
+    # defect this removal exists to end, not something to keep under another
+    # name. Their absence is the property this test protects, not their
+    # presence.
+    refute grep -Fq -- '--fix-pane-names' "$template"
+    refute grep -Fq -- '--rename-sessions' "$template"
+    # Repair is self-only, through fix.sh (already documented separately).
+    grep -Fq 'scripts/fix.sh' "$template"
     grep -Fiq 'types' "$template"
   done <<<"$renderable_types"
 }
