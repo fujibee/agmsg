@@ -21,6 +21,7 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 | `template` | yes | the `/agmsg` command template filename, relative to the type dir (e.g. `template.md`); becomes `SKILL.md` |
 | `detect` | — | env-var names whose presence selects this type. `explicit` = never auto-detected from the environment |
 | `detect_proc` | — | parent-process-name glob patterns that select this type (e.g. `codex codex-*`) |
+| `session_env` | — | the single env-var name that carries this runtime's current session id. `join` passes its value to terminal self-naming; omitted means the type publishes no session id |
 | `cli` | spawnable types | the launch command. Usually a single binary name, but may be a fixed multi-word prefix (subcommand and/or flags a CLI needs ahead of its own options) — only the first word is resolved/checked as the executable; the rest are passed through as-is. Safe because this is manifest data agmsg ships, not runtime user input |
 | `spawnable` | — | `yes` if `spawn.sh` can launch this type |
 | `spawn` | — | a `.mjs` node-launcher (beside the manifest) `spawn.sh` runs via Node; also marks the type spawnable |
@@ -110,6 +111,7 @@ template=template.md
 cli=codex
 spawnable=yes
 detect=CODEX_SANDBOX CODEX_THREAD_ID
+session_env=CODEX_THREAD_ID
 detect_proc=codex codex-*
 hooks_file=.codex/hooks.json
 monitor=no
