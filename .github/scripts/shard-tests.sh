@@ -48,16 +48,18 @@
 # per-test cost -- is NOT this case; count already weights it correctly, and
 # it is not pinned.
 #
-# Measured 2026-08-19 on a green main run (head 626a625b, run 32193147987) by
-# correlating each `ok N <desc>` line's own GitHub Actions timestamp against
-# which file's `@test` block that description belongs to, then ranking every
-# file by seconds-per-test rather than by raw duration (raw duration alone
-# does not distinguish "slow because few tests wait a long time" from "slow
-# because there are simply many tests", and only the former is what count
-# weighting misses):
+# First ranked 2026-08-19 by correlating each `ok N <desc>` line's own GitHub
+# Actions timestamp against which file's `@test` block that description belongs
+# to, then ranking every file by seconds-per-test rather than by raw duration
+# (raw duration alone does not distinguish "slow because few tests wait a long
+# time" from "slow because there are simply many tests", and only the former is
+# what count weighting misses). Re-measured 2026-09-12 from the per-file wall
+# times that run-bats-timed.sh now records (#1159), read off the green run that
+# first carried them (GitHub Actions run 34664794167, tests.yml bats job,
+# macos-latest, 5 shards):
 #
-#   tests/test_remote_engine_start_refusal.bats    722s /  9 tests = ~80s/test
-#   tests/test_remote_status_liveness.bats         380s / 31 tests = ~12s/test
+#   tests/test_remote_engine_start_refusal.bats    679s /  9 tests = ~75s/test
+#   tests/test_remote_status_liveness.bats         293s / 31 tests = ~9s/test
 #
 # against a whole-suite per-test cost this script's own header already says
 # runs ~0.0s-8s. Both are 1.5x-10x above that ceiling on a low test count, so
@@ -77,7 +79,7 @@
 # theoretical one.
 #
 # This does not bound a shard's total duration: the heavier entry above
-# (722s) is heavy enough on its own that no repacking of the rest of the
+# (679s) is heavy enough on its own that no repacking of the rest of the
 # suite moves its shard's floor by much. See tests.yml's bats-shard
 # timeout-minutes for the ceiling this is paired with, sized to cover that
 # floor plus a fair share of everything else with real margin. And a file NOT
@@ -139,6 +141,43 @@ file_weight() {
   printf '%s' "$n"
 }
 
+# Load a pinned file contributes when it is seeded, in the same unit the
+# weighted pass below uses: @test-equivalents. A pinned file's @test count
+# (its file_weight) badly understates its cost -- that is the whole reason it
+# is pinned -- so seeding it at that count leaves its shard looking almost
+# empty and the greedy pass piles an average share of other files on top of an
+# already-expensive file. Seed it instead at what its measured wall time is
+# WORTH in average tests: round(measured_macOS_wall_seconds / avg_s_per_test).
+#
+# This is tied to the file's OWN measured cost, not to a count the suite
+# outgrows, so it does not drift as the suite grows -- which is exactly the
+# failure #1107 was (a partition sized against a count baseline that went
+# stale as the suite roughly tripled).
+#
+#   MEASURED AGAINST: GitHub Actions run 34664794167 (#1159, tests.yml bats
+#   job, macos-latest, 5 shards, 2026-09-12). Whole-suite macOS wall summed
+#   over every file = 4212s across 1749 @test blocks => avg = 4212 / 1749 =
+#   2.408 s/test. Both seeds below are that run's per-file wall / that avg:
+#     test_remote_engine_start_refusal.bats  679s / 2.408 = round(281.9) = 282
+#     test_remote_status_liveness.bats       293s / 2.408 = round(121.7) = 122
+#
+# The numerator (per-file wall) and the divisor (whole-suite avg) came from the
+# SAME run, so a refresh must re-derive BOTH together off one green run's
+# bats-timings artifacts (summarize-bats-timings.sh) -- never update one alone.
+# A pinned file with no measured seed here falls back to its @test count.
+# Exact string equality, not `case`: a bare `case` glob widens under an
+# inherited `nocasematch`/locale, and these are meant to match one literal
+# basename each and nothing else.
+pin_seed() {
+  if [ "$1" = test_remote_engine_start_refusal.bats ]; then
+    printf 282
+  elif [ "$1" = test_remote_status_liveness.bats ]; then
+    printf 122
+  else
+    file_weight "$2"
+  fi
+}
+
 # Seed the pinned files into distinct shards first, in PINNED_APART's own
 # (measured-heaviest-first) order — not the order they happen to sort in
 # below, which is by count and is exactly the metric these files defeat. Each
@@ -166,7 +205,7 @@ $files
 EOF
   [ -n "$match" ] || continue
   s=$((slot % total))
-  load[s]=$((load[s] + $(file_weight "$match")))
+  load[s]=$((load[s] + $(pin_seed "$p" "$match")))
   if [ "$s" -eq "$((index - 1))" ]; then
     printf '%s\n' "$match"
   fi

@@ -220,7 +220,7 @@ union_of_shards() {
 # The test above catches drift in the TOP TWO BY COUNT — exactly the metric
 # that misses the files pinned below (#847, #848): both are near the bottom
 # of the count-weighted sort (9 and 31 tests) despite carrying some of the
-# largest measured durations in the suite (722s and 380s; see
+# largest measured durations in the suite (679s and 293s; see
 # shard-tests.sh's own comment for the measurement). This test guards the
 # actual fix, not the metric that already worked.
 @test "the pinned-apart heavy files never share a shard, at any shard total >= 2 (#847, #848)" {
