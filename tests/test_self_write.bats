@@ -16,6 +16,7 @@ setup() {
   export FAKEBIN="$SKILL_DIR/fakebin"; mkdir -p "$FAKEBIN"
   export ARGV_LOG="$SKILL_DIR/argv.log"; : > "$ARGV_LOG"
   export FIX="$SKILL_DIR/fixture"
+  export SCREEN_FILE="$SKILL_DIR/screen"; : > "$SCREEN_FILE"
   export PATH="$FAKEBIN:$PATH"
   export HERDR_ENV=1 HERDR_SOCKET_PATH=/tmp/herdr/sessions/jugemu/herdr.sock HERDR_PANE_ID=w1:pB
   unset HERDR_SESSION
@@ -33,6 +34,7 @@ teardown() { teardown_test_env; }
 # fixture: key value pairs -> one file the fake reads on every call
 _fixture() { : > "$FIX"; while [ $# -ge 2 ]; do printf '%s=%s\n' "$1" "$2" >> "$FIX"; shift 2; done; }
 _fx() { sed -n "s/^$1=//p" "$FIX" | head -1; }
+export SCREEN_FILE
 
 _fake_herdr() {
   cat > "$FAKEBIN/herdr" <<'FAKE'
@@ -59,8 +61,21 @@ elif [ "$1" = agent ] && [ "$2" = rename ]; then
   sed -i '' -e "s/^key=.*/key=$4/" "$FIX" 2>/dev/null || sed -i "s/^key=.*/key=$4/" "$FIX"
   exit 0
 elif [ "$1" = agent ] && [ "$2" = prompt ]; then
-  # a /rename lands in the title on the next read (glyph kept)
-  case "$4" in "/rename "*) sed -i '' -e "s/^title=.*/title=✳ ${4#/rename }/" "$FIX" 2>/dev/null || sed -i "s/^title=.*/title=✳ ${4#/rename }/" "$FIX" ;; esac
+  # a /rename lands in the title on the next read (glyph kept), and -- when the
+  # fixture's confirm field is set (a rename_confirm/codex-shaped seat) -- a
+  # NEW confirmation line is appended to the screen, exactly once, imitating
+  # codex's own announcement after a real /rename keystroke.
+  [ "$(fx poke_fail)" = 1 ] && exit 1
+  case "$4" in
+    "/rename "*)
+      sed -i '' -e "s/^title=.*/title=✳ ${4#/rename }/" "$FIX" 2>/dev/null || sed -i "s/^title=.*/title=✳ ${4#/rename }/" "$FIX"
+      confirm="$(fx confirm)"
+      [ -n "$confirm" ] && printf '%s %s.\n' "$confirm" "${4#/rename }" >> "$SCREEN_FILE"
+      ;;
+  esac
+  exit 0
+elif [ "$1" = pane ] && [ "$2" = read ]; then
+  cat "$SCREEN_FILE" 2>/dev/null
   exit 0
 fi
 exit 0
@@ -103,6 +118,85 @@ _rec()  { cat "$(agmsg_spawn_path T alice)"; }
   [ "$status" -eq 0 ]
   [ "$(_line session)" = "session attempt=ok readback=matched_no_delta" ]
   [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 1 ]
+}
+
+# --- a rename_confirm type (codex, #1109/#1152 stage C) --------------------------
+#
+# codex's session name is never on the title, and the one header that carries
+# it ("Thread name: ...") scrolls away early -- the manifest's own
+# session_name_source says so. So these seats are verified by NEWNESS of a
+# confirmation LINE the /rename keystroke itself prints, counted before and
+# after, an increase required -- never by title/screen-header readback.
+
+@test "rename_confirm: a fresh confirmation line after the keystroke reads verified (#1152 stage C)" {
+  rm -f "$(agmsg_spawn_path T alice)"
+  agmsg_role_session_record T alice sid-me /proj/alice codex
+  _fixture terminal_id term_AAA title "codex" label "" key "" status idle kind codex confirm "Session renamed to"
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=ok readback=verified" ]
+  [ "$(cat "$SCREEN_FILE")" = "Session renamed to T-alice." ]
+}
+
+@test "rename_confirm: a line from an EARLIER rename does not confirm this one -- newness, not presence (#1109)" {
+  rm -f "$(agmsg_spawn_path T alice)"
+  agmsg_role_session_record T alice sid-me /proj/alice codex
+  _fixture terminal_id term_AAA title "codex" label "" key "" status idle kind codex confirm ""
+  printf 'Session renamed to T-alice.\n' > "$SCREEN_FILE"   # a PRIOR generation's line, already on screen
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  # the fixture's confirm is empty, so THIS keystroke prints no new line: the
+  # pre-existing one must not be read as confirmation of it
+  [ "$(_line session)" = "session attempt=ok readback=failed:rename_not_observed" ]
+  [ "$(grep -c 'herdr \[agent\] \[prompt\]' "$ARGV_LOG")" -eq 1 ]   # it still typed -- newness bars READBACK, not the attempt
+}
+
+@test "rename_confirm: the keystroke itself fails -> attempt=failed, and the count-delta loop never runs" {
+  rm -f "$(agmsg_spawn_path T alice)"
+  agmsg_role_session_record T alice sid-me /proj/alice codex
+  _fixture terminal_id term_AAA title "codex" label "" key "" status idle kind codex confirm "Session renamed to" poke_fail 1
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=failed:12 readback=not_attempted" ]
+  [ "$(cat "$SCREEN_FILE")" = "" ]   # no confirmation line was ever looked for after a failed keystroke
+}
+
+@test "rename_confirm: an unreadable pane before the keystroke skips WITHOUT typing (never a blind poke)" {
+  rm -f "$(agmsg_spawn_path T alice)"
+  agmsg_role_session_record T alice sid-me /proj/alice codex
+  _fixture terminal_id term_AAA title "codex" label "" key "" status idle kind codex confirm "Session renamed to"
+  # herdr itself reports a read error on `pane read` -- the real failure shape
+  # (a plain missing screen file would answer empty, a readable zero, and that
+  # is a different case: a genuinely unreadable pane must not be confused with
+  # "read, and it said nothing").
+  cat > "$FAKEBIN/herdr" <<'FAKE'
+#!/usr/bin/env bash
+{ printf 'herdr'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$ARGV_LOG"
+if [ "$1" = pane ] && [ "$2" = get ]; then
+  printf '{"result":{"pane":{"agent_status":"idle","label":"","terminal_title":"codex","terminal_id":"term_AAA"}}}\n'
+elif [ "$1" = agent ] && [ "$2" = list ]; then
+  printf '{"id":"1","result":{"type":"list","agents":[]}}\n'
+elif [ "$1" = agent ] && [ "$2" = get ]; then
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n'
+elif [ "$1" = pane ] && [ "$2" = read ]; then
+  echo '{"error":{"code":"pane_read_denied","pane":"w1:pB"}}' >&2
+  exit 11
+fi
+exit 0
+FAKE
+  chmod +x "$FAKEBIN/herdr"
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=skipped:baseline_unreadable readback=not_attempted" ]
+  refute grep -q 'herdr \[agent\] \[prompt\]' "$ARGV_LOG"   # never typed on an unreadable baseline
+}
+
+@test "rename_confirm: a type WITHOUT it still uses title/screen-header readback, unchanged (claude-code control)" {
+  _fixture terminal_id term_AAA title "◐ claude" label "" key "" status idle kind claude
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  [ "$(_line session)" = "session attempt=ok readback=verified" ]
+  [ "$(cat "$SCREEN_FILE")" = "" ]   # the count-delta path never ran: nothing was peeked
 }
 
 # --- the record is the only required cell -----------------------------------------
