@@ -187,3 +187,40 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   terminal_peek() { printf 'Thread name: %s\n' "$long"; }
   [ "$(agmsg_cli_session_observed codex '' wA:p1)" = 'unknown:name_malformed' ]
 }
+
+@test "the pane the environment names may belong to ANOTHER seat's placement record -- never poke it, never mark it (#1112)" {
+  # Measured live (#1112): a seat whose own label was broken resolved, through
+  # the same inherited environment every codex seat under a shared app-server
+  # sees, into a DIFFERENT seat's pane. That pane's title happened not to be
+  # readable, so this seat only fell into "cannot verify -> skip" -- but the
+  # environment gave no other reason it would have stopped short. Had the
+  # title been readable and different from its own expected name, this would
+  # have typed /rename into a live pane belonging to someone else.
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  # %3 is already recorded as agdev-co1's placement, in a team this agent
+  # (alice) does not hold that role in.
+  mkdir -p "$RUN_DIR"
+  printf 'tmux:/tmp/s:%%3\t/proj\tclaude-code\n' > "$RUN_DIR/spawn.team__agdev-co1"
+  run agmsg_self_rename_on_action team alice claude-code
+  refute grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ -z "$(_mark team alice)" ]   # no mark at all -- next action re-checks, never "done" on a wrong pane
+}
+
+@test "the pane the environment names, recorded as THIS seat's own placement -- renames normally (#1112 control)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  mkdir -p "$RUN_DIR"
+  printf 'tmux:/tmp/s:%%3\t/proj\tclaude-code\n' > "$RUN_DIR/spawn.team__alice"
+  agmsg_self_rename_on_action team alice claude-code
+  grep -q '\[send-keys\] \[-l\] \[-t\] \[%3\] \[--\] \[/rename team-alice\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = attempted ]
+}
+
+@test "no placement record exists for the pane at all -- unclaimed, renames normally (#1112 control)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  agmsg_self_rename_on_action team alice claude-code
+  grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = attempted ]
+}
