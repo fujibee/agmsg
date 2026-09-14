@@ -82,11 +82,24 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF "capabilities=$plain_caps" <<<"$output"
 
   run env -u TMUX -u TMUX_PANE -u AGMSG_TERMINAL_DRIVER \
-    env HERDR_ENV=1 HERDR_PANE_ID=w1:p4 bash "$ROOT/scripts/where.sh"
+    env HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$BATS_TEST_TMPDIR/herdr.sock" \
+    bash "$ROOT/scripts/where.sh"
   [ "$status" -eq 0 ]
   local herdr_caps
   herdr_caps="$(grep '^capabilities=' "$ROOT/scripts/drivers/terminals/herdr/terminal.conf" | cut -d= -f2-)"
   grep -qF "capabilities=$herdr_caps" <<<"$output"
+
+  export FAKEBIN="$BATS_TEST_TMPDIR/fakebin" ARGV_LOG="$BATS_TEST_TMPDIR/tmux.argv"
+  mkdir -p "$FAKEBIN"
+  : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  run env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH \
+    -u AGMSG_TERMINAL_DRIVER TMUX="/tmp/fake-tmux.sock,1,0" TMUX_PANE="%4" \
+    bash "$ROOT/scripts/where.sh"
+  [ "$status" -eq 0 ]
+  local tmux_caps
+  tmux_caps="$(grep '^capabilities=' "$ROOT/scripts/drivers/terminals/tmux/terminal.conf" | cut -d= -f2-)"
+  grep -qF "capabilities=$tmux_caps" <<<"$output"
 }
 
 # Review (#1209) found that the first version of these per-driver docs claimed 13
