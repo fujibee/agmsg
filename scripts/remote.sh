@@ -1952,7 +1952,7 @@ _remote_sync_engine_start_locked() {
   # Stop only an engine whose argv proves that it owns this team. A stale
   # pidfile may point at a recycled, unrelated process and must never authorize
   # signalling that process.
-  IFS=$'\t' read -r old_state old_pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+  IFS=$'\t' read -r old_state old_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$old_state" = "running" ]; then
     kill "$old_pid" 2>/dev/null || true
   fi
@@ -2019,7 +2019,7 @@ _remote_sync_engine_stop() {
   local team="$1" pidfile pid state
   pidfile="$(_remote_sync_engine_pidfile "$team")"
   [ -f "$pidfile" ] || return 0
-  IFS=$'\t' read -r state pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+  IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$state" = "running" ]; then
     if ! _remote_sync_engine_reap_owned "$team" "$pid"; then
       echo "agmsg: sync engine pid $pid did not stop" >&2
@@ -2091,11 +2091,22 @@ _remote_systemd_engine_status() {
 # Print "<state>\t<pid>", where pid is empty when no valid pid is available.
 # A live PID is not enough: PID reuse can make an unrelated process pass
 # kill -0, so running requires the exact engine script/team suffix in argv.
+# The optional --pidfile-only mode is internal: lifecycle operations use it
+# when they must inspect only the unmanaged engine represented by this
+# command's pidfile. Human/JSON status and sync-start admission deliberately
+# omit it so an exported environment value cannot hide a systemd-owned engine.
 _remote_sync_engine_status() {
-  local team="$1" pidfile pid command expected systemd_state systemd_pid
+  local team="$1" mode="${2:-}" pidfile pid command expected systemd_state systemd_pid
+  case "$mode" in
+    ""|--pidfile-only) ;;
+    *)
+      echo "agmsg: internal error: unknown sync engine status mode '$mode'" >&2
+      return 2
+      ;;
+  esac
   REMOTE_SYNC_ENGINE_SUPERVISOR=""
   REMOTE_SYNC_ENGINE_SUPERVISOR_PID=""
-  if [ "${AGMSG_SKIP_SYSTEMD_PROBE:-0}" != 1 ]; then
+  if [ "$mode" != --pidfile-only ]; then
     IFS=$'\t' read -r systemd_state systemd_pid < <(_remote_systemd_engine_status "$team")
   else
     systemd_state=absent
@@ -2139,7 +2150,7 @@ _remote_sync_engine_status() {
 _remote_sync_engine_reap_owned() {
   local team="$1" owned_pid="$2" state pid signal attempts
   for signal in TERM KILL; do
-    IFS=$'\t' read -r state pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+    IFS=$'\t' read -r state pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if ! _agmsg_pid_alive_local "$owned_pid"; then return 0; fi
     [ "$state" = "running" ] && [ "$pid" = "$owned_pid" ] || return 1
     kill "-$signal" "$owned_pid" 2>/dev/null || true
@@ -2947,7 +2958,7 @@ cmd_sync_start() {
   # not the rest of the machine.
   agmsg_lock_release
   while [ "$i" -lt 1600 ]; do
-    IFS=$'\t' read -r engine_state ready_pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+    IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
          awk -v nonce="\"startup_nonce\":\"$startup_nonce\"" '
@@ -3442,7 +3453,7 @@ cmd_set_endpoint() {
     done
   fi
 
-  IFS=$'\t' read -r engine_state engine_pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+  IFS=$'\t' read -r engine_state engine_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   [ "$engine_state" = "running" ] && was_running=1
   _remote_sync_engine_stop "$team" || {
     echo "agmsg: the sync engine did not stop; refusing to move the endpoint under it" >&2
@@ -3473,7 +3484,7 @@ cmd_set_endpoint() {
   # command ran is restarted too (never silently left stopped, and a restart
   # is what hands it the moved address -- a running engine keeps its old
   # config in memory). _remote_sync_engine_start kills a live engine first.
-  IFS=$'\t' read -r end_state end_pid < <(AGMSG_SKIP_SYSTEMD_PROBE=1 _remote_sync_engine_status "$team")
+  IFS=$'\t' read -r end_state end_pid < <(_remote_sync_engine_status "$team" --pidfile-only)
   if [ "$was_running" -eq 1 ] || [ "$end_state" = "running" ]; then
     # Same rule as cmd_pull and cmd_connect: the move is this command's purpose
     # and it is done by here, so a start failure reports rather than fails --
