@@ -544,6 +544,21 @@ spawn_decoy_with_cmdline() {
 # on read. Bodies are tagged "$label-$i-<pad>" so a caller can assert both
 # ends of the run (index 0 and count-1) are actually present in what the
 # script under test displayed, not just that its exit status was 0.
+# 1.3.1 CI speedup: a 100-message backlog through the loop below used to
+# spawn one sqlite3 process PER MESSAGE (storage_send's own -bail invocation),
+# which is what made the two tests that build a real argv-ceiling-sized
+# backlog the two slowest in this file. Verified before switching: a 3-message
+# batch built the old way (storage_send in a loop, one sqlite3 call each) and
+# the new way (one sqlite3 call for all 3) were compared row-for-row across
+# both `messages` and `events` -- same team/from/to/body fields, same rowid
+# sequencing, same events.legacy_id -> messages.rowid linkage. Only
+# created_at differs, because the batched form finishes fast enough that
+# _sqlite_now's second-granularity clock barely advances between messages --
+# expected, not a correctness difference (each message's timestamp is still
+# a real, distinct call to the same clock function). Only takes this path
+# when the driver is sqlite (the only one an argv-ceiling concern applies to,
+# and the one whose private functions this depends on); any other driver
+# keeps the one-call-per-message loop unchanged.
 bulk_send_direct() {
   local team="$1" from="$2" to="$3" count="$4" bodylen="$5" label="$6" \
     i=0 pad
@@ -552,9 +567,27 @@ bulk_send_direct() {
     # shellcheck disable=SC1090
     source "$SCRIPTS/lib/storage.sh"
     agmsg_storage_load
-    while [ "$i" -lt "$count" ]; do
-      storage_send "$team" "$from" "$to" "${label}-${i}-${pad}" >/dev/null
-      i=$((i + 1))
-    done
+    if declare -F _sqlite_message_sent_sql >/dev/null 2>&1 \
+      && declare -F _sqlite_db >/dev/null 2>&1 \
+      && declare -F _sqlite_now >/dev/null 2>&1; then
+      storage_init "$team" >/dev/null 2>&1 || true
+      local db batch id at
+      db="$(_sqlite_db "$team")"
+      batch=""
+      while [ "$i" -lt "$count" ]; do
+        id="$(compat_uuid7)"
+        at="$(_sqlite_now)"
+        batch="${batch}
+$(_sqlite_message_sent_sql "$team" "$from" "$to" "${label}-${i}-${pad}" "$id" "$at")"
+        i=$((i + 1))
+      done
+      agmsg_sqlite_warm
+      printf '%s\n' "$batch" | agmsg_sqlite -bail "$db" >/dev/null
+    else
+      while [ "$i" -lt "$count" ]; do
+        storage_send "$team" "$from" "$to" "${label}-${i}-${pad}" >/dev/null
+        i=$((i + 1))
+      done
+    fi
   )
 }
