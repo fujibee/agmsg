@@ -161,9 +161,6 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
    - If the member has no watcher, or graceful teardown times out, use `--force` to tear down the recorded placement and drop the registration directly.
 3. Show the script's output.
 <!-- /agmsg:slot spawn -->
-<!-- shared actas/drop guidance is supplied by the type overlay -->
-
-<!-- drop guidance is supplied by the type overlay -->
 
 If argument starts with "arrange" (e.g. "arrange alice place_below <anchor-ref>"):
 1. Parse `<agent> <place_below|place_right|swap> <anchor-ref>` and determine the source agent's team. `<anchor-ref>` is a placement reference for another pane — copy it exactly as another command reported it (e.g. `team`/`team --json`'s `terminal`/`pane` fields for that row); it is never something to construct from a remembered terminal syntax.
