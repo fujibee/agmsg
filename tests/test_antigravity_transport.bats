@@ -232,4 +232,15 @@ PY
   [ "$status" -ne 0 ]
   grep -q 'process identity is unreadable' <<<"$output"
   refute grep -q '停止/要確認' <<<"$output"
+
+  # A process that has actually exited is different from an unreadable
+  # identity. ENOENT is the one safe signal for the stopped state.
+  ( exit 0 ) &
+  local gone_pid=$!
+  wait "$gone_pid"
+  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$gone_pid" "$state" \
+    > "$run_dir/antigravity-reservation.unreadable.json"
+  run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q '停止/要確認' <<<"$output"
 }
