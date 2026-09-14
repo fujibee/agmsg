@@ -87,6 +87,36 @@ agmsg_self_rename_on_action() {
   id="${here%%	*}"; epoch="${here#*	}"
   ref="$(agmsg_terminal_ref "$terminal" "$id")"
 
+  # PLACEMENT GUARD (#1112, same rule as terminal-registry.sh's #1114 guard on
+  # the naming/marking/record path -- this is the SECOND call site that turns
+  # the raw environment into a pane, and it was unguarded). A codex seat
+  # inherits its environment from a shared app-server daemon, so a seat whose
+  # own resolution is broken can resolve into ANOTHER seat's pane; measured
+  # live, that happened here and the seat stopped short only because the
+  # other pane's title was not readable. Had it been readable and different
+  # from this seat's expected name, this function would have TYPED /rename
+  # into a live pane belonging to someone else -- more invasive than the
+  # wrong RECORD #1114 was written to prevent. So before anything else: if
+  # the resolved ref is another seat's placement record, this action never
+  # happened as far as rename is concerned -- no poke, and no mark, so the
+  # next action re-checks rather than filing this pane+generation as "done"
+  # on a pane that was never this seat's.
+  if ! declare -F agmsg_spawn_path >/dev/null 2>&1 \
+     && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/actas-lock.sh" ]; then
+    # shellcheck disable=SC1090,SC1091
+    . "$SKILL_DIR/scripts/lib/actas-lock.sh" 2>/dev/null || true
+  fi
+  if declare -F agmsg_spawn_path >/dev/null 2>&1 && declare -F _agmsg_placement_claimed_by >/dev/null 2>&1; then
+    local _claimed_by="" _claim_rc=0
+    _claimed_by="$(_agmsg_placement_claimed_by "$ref" "$team" "$agent")" || _claim_rc=$?
+    # rc != 0 is UNDECIDABLE (this seat's own ref could not be read as a pane),
+    # not "unclaimed" -- #1114's own rule, and the same fail-closed direction
+    # applies here: whether it is safe to type cannot be told, so it does not.
+    if [ "$_claim_rc" -ne 0 ] || [ -n "$_claimed_by" ]; then
+      return 0
+    fi
+  fi
+
   # The mark: what did this seat already do at THIS pane+generation?
   local have hr he hres phase=first
   have="$(agmsg_role_session_renamed "$team" "$agent")"
