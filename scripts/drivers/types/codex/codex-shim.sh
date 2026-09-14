@@ -189,7 +189,7 @@ case "$command_name" in
   # below is intentional: prompt strings and remote-aware session commands
   # (fork/archive/delete/unarchive) must still reach the shared app-server.
   # Add newly introduced non-remote Codex subcommands to this list.
-  app-server|exec|e|login|logout|mcp|mcp-server|plugin|remote-control|completion|update|doctor|\
+  app-server|exec|e|login|logout|mcp|plugin|remote-control|completion|update|doctor|\
   cloud|exec-server|features|debug|apply|a|review|sandbox|help|--help|-h|version|--version|-V)
     exec "$real_codex" "$@"
     ;;

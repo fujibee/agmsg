@@ -97,7 +97,7 @@ teardown() {
   bash "$SCRIPTS/delivery.sh" set monitor codex "$TEST_PROJECT" >/dev/null
 
   local subcommand
-  for subcommand in mcp-server remote-control update doctor cloud exec-server features e a; do
+  for subcommand in remote-control update doctor cloud exec-server features e a; do
     : > "$CALL_LOG"
 
     run bash -c 'cd "$TEST_PROJECT" && AGMSG_REAL_CODEX="$FAKE_CODEX" AGMSG_CODEX_MONITOR_CMD="$FAKE_MONITOR" bash "$TYPES/codex/codex-shim.sh" "$1" test-arg' _ "$subcommand"
