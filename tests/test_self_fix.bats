@@ -57,6 +57,9 @@ _proof_says() {   # <rc> <state> <payload>
 
 @test "fix: disproved -> nothing written; the env candidate never reaches the writer" {
   _own_seat alice "$ME"; _proof_says 1 disproved pane_process_not_ancestor
+  # This test is about the primary proof's own report, not the fallback -- see
+  # the "NO fallback present" test below for why this line is here.
+  unset -f agmsg_token_locate_self 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=disproved reason=pane_process_not_ancestor via=proof (written nothing)" ]
@@ -125,6 +128,9 @@ _proof_says() {   # <rc> <state> <payload>
 @test "fix: herdr with no socket in the environment -> no candidate is available, so nothing is written" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
   unset HERDR_SOCKET_PATH
+  # This test is about no_candidate_in_env, not the fallback -- see the "NO
+  # fallback present" test above for why this line is here.
+  unset -f agmsg_token_locate_self 2>/dev/null || true
   run agmsg_fix_run
   [ "$status" -eq 2 ]
   [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ]

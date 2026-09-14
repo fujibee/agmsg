@@ -57,6 +57,16 @@
 [ -n "${_AGMSG_SELF_PROOF_SH:-}" ] && return 0
 _AGMSG_SELF_PROOF_SH=1
 
+# _agmsg_proof_pid_ok below reuses self-identity.sh's character-set check
+# rather than a glob (same locale/nocasematch reasons documented there). This
+# file depends on it, so this file sources it -- not the caller: a caller-side
+# source left the dependency invisible in production while every test source
+# it directly in its own setup (measured live: every self-proof.sh pid check
+# failed with "command not found" once nothing else in the real load path
+# sourced self-identity.sh first).
+# shellcheck disable=SC1091
+. "${SKILL_DIR:?self-proof.sh requires SKILL_DIR}/scripts/lib/self-identity.sh"
+
 # Walking someone's ancestry is unbounded work if the table lies to us.
 _AGMSG_PROOF_ANCESTRY_MAX=256
 
