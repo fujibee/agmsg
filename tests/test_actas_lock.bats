@@ -660,12 +660,15 @@ _owner_only() {   # <team> <agent>
   refute test -e "$idpath"
 }
 
-@test "#1023: both an id-keyed AND a legacy lock existing for the same member is never silently accepted" {
+@test "#1023: both an id-keyed AND a legacy lock existing for the same member fails closed, not silently" {
   # Review finding: the prior test coverage only exercised legacy-alone. A stale
   # duplicate (crash mid-migration, a manual copy, or a caller that built its
-  # own path independently of these functions) must not resolve without a
-  # signal -- a caller with no reason to suspect anything is wrong would never
-  # know two locks exist for the one member.
+  # own path independently of these functions) must not resolve to EITHER file
+  # -- a warn-and-still-succeed form was tried and rejected on review: a caller
+  # (claim, in particular) would proceed as though it held sole ownership while
+  # an old-version reader could still honor the OTHER file, and several
+  # external callers of these path functions discard stderr, so a warning
+  # alone is not reliably seen. actas_lock_path must refuse outright.
   _fixture_known_ids T "tid-T" eve "mid-eve"
   local legacy idpath
   legacy="$(printf '%s/actas.T__eve.session' "$(_actas_lock_dir)")"
@@ -673,15 +676,74 @@ _owner_only() {   # <team> <agent>
   echo "sid-legacy" > "$legacy"
   echo "sid-idpath" > "$idpath"
 
-  local resolved warn_log="$BATS_TEST_TMPDIR/warn.log"
-  resolved="$(actas_lock_path T eve 2>"$warn_log")"
+  # Manual capture, not `run`: bats' `run` merges stdout+stderr into $output
+  # by default, which would hide whether anything landed on stdout.
+  local err_log="$BATS_TEST_TMPDIR/err.log" out rc=0
+  out="$(actas_lock_path T eve 2>"$err_log")" || rc=$?
 
-  # Resolves deterministically (id-keyed wins) -- a caller still gets a path
-  # to act on -- but never silently: the warning names BOTH files.
-  [ "$resolved" = "$idpath" ]
-  [ -s "$warn_log" ]
-  grep -Fq "$idpath" "$warn_log"
-  grep -Fq "$legacy" "$warn_log"
+  [ "$rc" -ne 0 ]
+  [ -z "$out" ]
+  [ -s "$err_log" ]
+  grep -Fq "$idpath" "$err_log"
+  grep -Fq "$legacy" "$err_log"
+}
+
+@test "#1023: actas_lock_read on a double-existing pair is a named unknown, not absent/unreadable" {
+  # Exercises the real read path, not a mock: distinguishing THIS unknown from
+  # the other two matters because a caller reading "absent" as free, or
+  # "unreadable" as "try again later", would both be wrong reasons for the
+  # same refusal.
+  _fixture_known_ids T "tid-T" frank "mid-frank"
+  echo "sid-legacy" > "$(printf '%s/actas.T__frank.session' "$(_actas_lock_dir)")"
+  echo "sid-idpath" > "$(printf '%s/actas.tid-T__mid-frank.session' "$(_actas_lock_dir)")"
+
+  local r
+  r="$(actas_lock_read T frank)"
+  [ "${r%%$'\t'*}" = "ambiguous" ]
+}
+
+@test "#1023: actas_lock_state on a double-existing pair is unknown:lock_ambiguous, refused like every other unknown" {
+  _fixture_known_ids T "tid-T" grace "mid-grace"
+  echo "sid-legacy" > "$(printf '%s/actas.T__grace.session' "$(_actas_lock_dir)")"
+  echo "sid-idpath" > "$(printf '%s/actas.tid-T__mid-grace.session' "$(_actas_lock_dir)")"
+
+  [ "$(actas_lock_state T grace sid-anyone)" = "unknown:lock_ambiguous" ]
+}
+
+@test "#1023: actas_lock_claim on a double-existing pair fails, and does not create or touch either file" {
+  # The caller-facing safety property: a real claim attempt against the real
+  # double state must not succeed, and must not silently pick a side by
+  # writing to it either.
+  _fixture_known_ids T "tid-T" heidi "mid-heidi"
+  local legacy idpath
+  legacy="$(printf '%s/actas.T__heidi.session' "$(_actas_lock_dir)")"
+  idpath="$(printf '%s/actas.tid-T__mid-heidi.session' "$(_actas_lock_dir)")"
+  echo "sid-legacy" > "$legacy"
+  echo "sid-idpath" > "$idpath"
+
+  # Manual capture, not `run`: `run` merges stdout+stderr into $output, and
+  # actas_lock_path's own stderr line would land in there alongside the
+  # verdict this asserts on.
+  local out rc=0
+  out="$(actas_lock_claim T heidi new-sid 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ]
+  [ "$out" = "unknown:lock_ambiguous" ]
+  [ "$(cat "$legacy")" = "sid-legacy" ]
+  [ "$(cat "$idpath")" = "sid-idpath" ]
+}
+
+@test "#1023: actas_lock_release on a double-existing pair deletes neither file" {
+  _fixture_known_ids T "tid-T" ivan "mid-ivan"
+  local legacy idpath
+  legacy="$(printf '%s/actas.T__ivan.session' "$(_actas_lock_dir)")"
+  idpath="$(printf '%s/actas.tid-T__mid-ivan.session' "$(_actas_lock_dir)")"
+  echo "sid-mine" > "$legacy"
+  echo "sid-mine" > "$idpath"
+
+  run actas_lock_release T ivan sid-mine
+  [ "$status" -ne 0 ]
+  [ -f "$legacy" ]
+  [ -f "$idpath" ]
 }
 
 @test "#1023: a fresh id-bearing pair with no file anywhere gets the NEW path" {

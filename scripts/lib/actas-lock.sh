@@ -105,24 +105,29 @@ _agmsg_id_key_for() {   # <team> <agent>
 # file already lives there, else the legacy one if a file already lives
 # there, else the id-keyed one (nothing exists yet -- the next write starts
 # the new form). Shared by all three functions below so "check, don't guess"
-# is decided in one place.
+# is decided in one place. This is the MAIN defense against the double-lock
+# the review below describes: while any file already lives at the legacy
+# path, every one of the three functions keeps returning it -- an install
+# switched onto this fix does not spontaneously create id-keyed files for
+# pairs whose lock/ready/spawn record already exists at the old path.
 #
-# Review finding: a caller must never see BOTH files exist for the same member
-# and get no signal. That state should not arise through this resolver alone
-# (actas_lock_claim resolves the path once and writes only there), but a
-# crash mid-migration, a manual copy, or a caller that built its own path
-# independently of these functions could still produce it -- and every
-# existing caller of actas_lock_path/agmsg_ready_path/agmsg_spawn_path treats
-# their return as an always-succeeding path string, so failing the call here
-# would ripple that contract change through the whole tree for a state this
-# function did not create. Named instead: warn on stderr, naming both paths
-# and which one wins, and keep resolving to the id-keyed one deterministically
-# -- silence is the thing being removed, not the always-succeeds contract.
+# Review finding: a caller must never see BOTH files exist for the same
+# member and get a resolution with no signal, and a resolution alone is not
+# enough of a signal -- a warning-and-still-succeed form was tried and
+# rejected on review: it still let a caller (claim, in particular) proceed as
+# though it held sole ownership while an old-version reader could still honor
+# the other file, and several callers of the three path functions discard
+# stderr, so the warning was not even reliably seen. Refusing here instead
+# does ripple the "always succeeds" contract of the three functions below to
+# their callers (the trade explicitly accepted on review) -- but this state
+# is reachable only by two writers racing across a version boundary onto a
+# pair with no prior file at all (the MAIN defense above already means an
+# UPGRADE alone, with an existing legacy file, never reaches here), so the
+# callers reached are the ones a genuine double-claim must fail closed for.
 _agmsg_id_or_legacy_path() {   # <id-path> <legacy-path>
   if [ -e "$1" ] && [ -e "$2" ]; then
-    printf 'agmsg: WARNING: both an id-keyed lock (%s) and a legacy lock (%s) exist for the same member -- treating the id-keyed one as authoritative; remove the stale legacy file\n' "$1" "$2" >&2
-    printf '%s\n' "$1"
-    return 0
+    printf 'agmsg: ERROR: both an id-keyed lock (%s) and a legacy lock (%s) exist for the same member -- refusing to resolve a single path; remove the stale one\n' "$1" "$2" >&2
+    return 1
   fi
   [ -e "$1" ] && { printf '%s\n' "$1"; return 0; }
   [ -e "$2" ] && { printf '%s\n' "$2"; return 0; }
@@ -150,6 +155,8 @@ _actas_lock_encode() {
 # Compute the lock file path for (team, agent). #1023: id-keyed when both ids
 # resolve and a file already exists at either candidate path, or nothing does
 # yet; the legacy name-keyed path otherwise -- see _agmsg_id_key_for above.
+# Fails (empty stdout, rc 1) if BOTH candidates exist for the pair -- see
+# _agmsg_id_or_legacy_path. Every caller must check this.
 actas_lock_path() {
   local team="$1" agent="$2"
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
@@ -239,9 +246,17 @@ _actas_lock_read_path() {   # <lock-path>
   printf 'absent\t\n'
 }
 
-# Same read, addressed by (team, agent) instead of by path.
+# Same read, addressed by (team, agent) instead of by path. `ambiguous\t` when
+# actas_lock_path itself could not resolve a single path (both an id-keyed and
+# a legacy lock exist for this pair) -- a fourth read outcome, not folded into
+# `unreadable` (a different fact: there IS a file and it could not be opened)
+# or `absent` (there is no file at all) -- the vocabulary #983 exists to keep
+# apart. _actas_lock_verdict maps it into the same unknown:* family every
+# existing caller already refuses to proceed on.
 actas_lock_read() {   # <team> <agent>
-  _actas_lock_read_path "$(actas_lock_path "$1" "$2")"
+  local p
+  p="$(actas_lock_path "$1" "$2")" || { printf 'ambiguous\t\n'; return 0; }
+  _actas_lock_read_path "$p"
 }
 
 # Return 0 if the given owner token is alive. The token is a per-process
@@ -271,6 +286,9 @@ actas_lock_sid_alive() {
 #   mine                          held by the calling session
 #   other:<sid>                   held by a session POSITIVELY alive
 #   unknown:lock_unreadable       the lock is there and could not be read
+#   unknown:lock_ambiguous        both an id-keyed and a legacy lock exist for
+#                                 this pair; actas_lock_path refused to pick
+#                                 one (#1023 review)
 #   unknown:owner_empty           the lock read fine and is empty. NOT free: the
 #                                 file exists, and nothing in this tree ever
 #                                 creates an empty one (claim writes the sid into
@@ -284,6 +302,7 @@ _actas_lock_verdict() {   # <sid> <read> <owner>
   case "$rd" in
     absent)     printf 'free\t\n';                    return 0 ;;
     unreadable) printf 'unknown:lock_unreadable\t\n'; return 0 ;;
+    ambiguous)  printf 'unknown:lock_ambiguous\t\n';   return 0 ;;
   esac
   if [ -z "$owner" ]; then
     printf 'unknown:owner_empty\t\n'
@@ -382,8 +401,9 @@ _agmsg_lock_try_claim_at() {   # <lock-path> <owner>
 # set. A verdict on every path is what lets a caller require an explicit success
 # instead of inferring one from silence. (#983, review)
 actas_lock_claim() {
-  local team="$1" agent="$2" sid="$3"
-  agmsg_lock_claim_at "$(actas_lock_path "$team" "$agent")" "$sid"
+  local team="$1" agent="$2" sid="$3" p
+  p="$(actas_lock_path "$team" "$agent")" || { echo "unknown:lock_ambiguous"; return 1; }
+  agmsg_lock_claim_at "$p" "$sid"
 }
 
 # The claim loop by LOCK PATH and OWNER TOKEN (see _agmsg_lock_try_claim_at for
@@ -579,10 +599,15 @@ _agmsg_lock_tomb_settle() {   # <tombstone-path> <mutex-path>
   esac
 }
 
-# Release a lock if we own it. Idempotent.
+# Release a lock if we own it. Idempotent. If actas_lock_path cannot resolve a
+# single path (both an id-keyed and a legacy lock exist), this deletes
+# NEITHER -- it already does not know which file the caller means, and
+# releasing based on a guess is exactly the kind of silent resolution #1023
+# review rejected. actas_lock_path's own stderr already named the ambiguity.
 actas_lock_release() {
-  local team="$1" agent="$2" sid="$3"
-  agmsg_lock_release_at "$(actas_lock_path "$team" "$agent")" "$sid"
+  local team="$1" agent="$2" sid="$3" p
+  p="$(actas_lock_path "$team" "$agent")" || return 1
+  agmsg_lock_release_at "$p" "$sid"
 }
 
 # Release by LOCK PATH and OWNER TOKEN. Only an exact owner match deletes; a lock

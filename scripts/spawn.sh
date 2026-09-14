@@ -613,7 +613,15 @@ SPAWN_UNREC_REF=""
 SPAWN_READINESS_UNVERIFIED=0
 _record_placement() {   # <terminal> <id> [fence=...]
   local rec ref fence="${3:-}" row
-  rec="$(agmsg_spawn_path "$TEAM" "$NAME")"
+  # #1023 review: agmsg_spawn_path fails (empty, rc 1) when both an id-keyed
+  # and a legacy placement record exist for this pair. Checked explicitly,
+  # not left to an empty $rec landing on SPAWN_UNRECORDED via a write to ""
+  # that happens to fail for an unrelated-looking reason.
+  if ! rec="$(agmsg_spawn_path "$TEAM" "$NAME")"; then
+    SPAWN_UNRECORDED=1
+    SPAWN_UNREC_REF="$(agmsg_terminal_ref "$1" "$2")"
+    return 1
+  fi
   ref="$(agmsg_terminal_ref "$1" "$2")"
   mkdir -p "$(dirname "$rec")" 2>/dev/null || true
   # Atomic (temp + rename via agmsg_write_atomic, available transitively through
@@ -894,7 +902,13 @@ place_and_launch() {
 READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/null || true)"
 [ -n "$READINESS_SENTINEL" ] || READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" monitor 2>/dev/null || true)"
 
-READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
+# #1023 review: agmsg_ready_path fails (empty, rc 1) when both an id-keyed
+# and a legacy ready sentinel exist for this pair. Checked explicitly here,
+# not left to an empty READY_PATH falling into the wait loop below and
+# reporting a plain status=timeout -- true, but for a reason that timeout
+# does not name (the loop below can never see a sentinel land at "").
+READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")" \
+  || die "'$NAME' in team '$TEAM': readiness sentinel path is ambiguous (both an id-keyed and a legacy sentinel exist); not spawning until the stale one is removed"
 SKIPPED_READINESS_BY_TYPE=0
 SKIPPED_READINESS_BY_MODE=0
 DELIVERY_MODE=""

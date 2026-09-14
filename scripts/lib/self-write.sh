@@ -150,7 +150,14 @@ _sw_boot_carry() {   # <team> <agent> <new-ref>
 # Write the record cell. Prints "attempt=... readback=...".
 _sw_cell_record() {   # <team> <agent> <ref> <project> <type> <fence>
   local rec content back
-  rec="$(agmsg_spawn_path "$1" "$2")"
+  # #1023 review: agmsg_spawn_path now fails (empty, rc 1) when both an
+  # id-keyed and a legacy record exist for this pair -- a state this writer
+  # must never resolve by guessing. Checked explicitly, not left to an empty
+  # $rec falling through to mkdir/write and failing for an unrelated-looking
+  # reason.
+  if ! rec="$(agmsg_spawn_path "$1" "$2")"; then
+    printf 'attempt=failed:record_path_ambiguous readback=not_attempted\n'; return 0
+  fi
   if [ -z "$4" ] || [ -z "$5" ]; then
     printf 'attempt=failed:missing_fields readback=not_attempted\n'; return 0
   fi
