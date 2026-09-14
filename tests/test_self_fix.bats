@@ -51,7 +51,7 @@ _proof_says() {   # <rc> <state> <payload>
   run agmsg_fix_run
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | head -1)" = "fix seat=T/alice state=proved locator=herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB via=proof" ]
-  grep -Fqx "proof T alice w1:pB" "$SPY"                                  # env pane reached the PROOF as a candidate
+  grep -Fqx "proof T alice /tmp/herdr/sessions/a/herdr.sock:w1:pB" "$SPY"  # qualified env pane reached the PROOF as a candidate
   grep -Fqx "write T alice herdr:/tmp/herdr/sessions/a/herdr.sock:w1:pB $ME" "$SPY"
 }
 
@@ -122,13 +122,13 @@ _proof_says() {   # <rc> <state> <payload>
   case "$output" in "fix none:arguments_refused"*) : ;; *) echo "$output" >&2; return 1 ;; esac
 }
 
-@test "fix: herdr with no socket in the environment -> the proof's bare ref is written as-is (ambient instance), not a malformed 'herdr::pane'" {
+@test "fix: herdr with no socket in the environment -> no candidate is available, so nothing is written" {
   _own_seat alice "$ME"; _proof_says 0 proved herdr:w1:pB
   unset HERDR_SOCKET_PATH
   run agmsg_fix_run
-  [ "$status" -eq 0 ]
-  grep -Fqx "write T alice herdr:w1:pB $ME" "$SPY"
-  refute grep -q 'herdr::' "$SPY"
+  [ "$status" -eq 2 ]
+  [ "$output" = "fix seat=T/alice state=undetermined reason=no_candidate_in_env via=proof (written nothing)" ]
+  refute grep -q '^write' "$SPY"
 }
 
 @test "fix: tmux -> the proof's pane is qualified by the socket the observation went through" {
