@@ -570,9 +570,9 @@ _count_exact_role_bridges() { # <project> <name>
 # -- so the caller was handed a number that nothing had ever waited for. That is
 # the half of #984 needing no superset fixture, and it is why all five call sites
 # could fail, not only the superset one.
-_wait_exact_role_count() { # <project> <name> <want>
-  local i seen
-  for i in {1..100}; do
+_wait_exact_role_count() { # <project> <name> <want> [tries]
+  local i seen tries="${4:-100}"
+  for ((i = 0; i < tries; i++)); do
     seen="$(_count_exact_role_bridges "$1" "$2")"
     [ "$seen" = "$3" ] && { printf '%s' "$seen"; return 0; }
     sleep 0.1
@@ -594,8 +594,8 @@ _wait_exact_role_count() { # <project> <name> <want>
 # a precondition cannot be established, say which count was actually reached and
 # fail, rather than continuing into an assertion that no longer means what it
 # says.
-_require_launcher_bridge() { # <project> <name>
-  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1)"
+_require_launcher_bridge() { # <project> <name> [tries]
+  local seen; seen="$(_wait_exact_role_count "$1" "$2" 1 "${3:-}")"
   [ "$seen" = 1 ] && return 0
   echo "the launcher never reached one {$2} bridge (saw $seen), so this test could not create the orphan it is about" >&2
   return 1
@@ -632,8 +632,12 @@ _spawn_fake() { # <project> <pair...>
   # never reach: this is the one assertion here that goes red if the waiter is
   # ever rewritten to return its `want` instead of what it saw. Every other
   # check in this file passes under that rewrite, which is the shape of the
-  # defect being fixed (#984). It costs the waiter's full 10s by design.
-  [ "$(_wait_exact_role_count "$PROJ" bob 1)" -eq 0 ]
+  # defect being fixed (#984). It costs the waiter's full wait by design --
+  # shortened to 5 tries (0.5s) here because the exact-{bob} count is STATIC
+  # for this whole wait: nothing spawned above or below can ever make it
+  # something other than 0, so ending early cannot turn a later true into a
+  # false pass.
+  [ "$(_wait_exact_role_count "$PROJ" bob 1 5)" -eq 0 ]
   # One that IS {alice} counts, with the other three still running.
   _spawn_fake "$PROJ" "team${tab}alice"; local solo=$FAKE_PID
   [ "$(_wait_exact_role_count "$PROJ" alice 1)" -eq 1 ]
@@ -653,9 +657,11 @@ _spawn_fake() { # <project> <pair...>
   # and the test carried on to delete pidfiles that did not exist and assert
   # against a bridge started during the wait. Green, with #937 never exercised.
   #
-  # Costs the waiter's full sweep by design -- an exhausted gate is what is
-  # being measured, so it cannot be short-circuited.
-  run _require_launcher_bridge "$PROJ" alice
+  # An exhausted gate is what is being measured, so its OUTCOME cannot be
+  # short-circuited -- but the exact-{alice} count is STATIC for this whole
+  # wait (no launcher runs here at all, so nothing can ever make it 1), so the
+  # sweep itself is shortened to 5 tries (0.5s).
+  run _require_launcher_bridge "$PROJ" alice 5
   [ "$status" -ne 0 ]
   # And it must say WHICH count it reached: an exhausted gate that fails with a
   # bare non-zero tells the next reader nothing about why.

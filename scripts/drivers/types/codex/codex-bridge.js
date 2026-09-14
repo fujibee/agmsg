@@ -29,6 +29,41 @@ const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
 // #906 incident saturated a per-user pid limit with. A rate, not a poll cadence.
 const MIN_ARM_INTERVAL_MS = 1000;
 
+// Delay before re-arming watch-once after a FAILED run (a clean deadline exit
+// re-arms immediately; this is the failure-path backoff only). Production
+// default 5000ms, unchanged. AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS lets a
+// test that drives several failure/re-arm cycles to prove a failure-count
+// behavior (not this delay's length) skip paying 5s per cycle. Anything but a
+// plain positive integer falls back to the production default rather than
+// being trusted, the same reasoning as remote.sh's
+// AGMSG_TEST_SYNC_START_READY_CEILING (#1252): an empty or malformed value
+// must not silently change real re-arm timing.
+//
+// Digit check by literal character comparison, not a regex character class --
+// same reasoning as remote.sh's _remote_ceiling_is_plain_digits: keeps the
+// check's own alphabet fixed regardless of engine/locale quirks, rather than
+// trusting whatever a class like \d resolves to.
+function _isPlainDigitString(s) {
+  const digits = "0123456789";
+  if (typeof s !== "string" || s.length === 0) return false;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    let found = false;
+    for (let j = 0; j < digits.length; j += 1) {
+      if (c === digits[j]) { found = true; break; }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+function _resolveWatchRearmMs() {
+  const raw = process.env.AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS;
+  if (raw === undefined || !_isPlainDigitString(raw)) return 5000;
+  const n = Number(raw);
+  return n > 0 ? n : 5000;
+}
+const WATCH_REARM_MS = _resolveWatchRearmMs();
+
 function usage() {
   console.log(`Usage: codex-bridge.js --project <path> [--type codex] [--team <team>] [--name <agent>]
 
@@ -1419,7 +1454,7 @@ class CodexBridge {
     this.watchRearmTimer = setTimeout(() => {
       this.watchRearmTimer = null;
       this.armWatch().catch((error) => this.failClientHandler("process/exited", error));
-    }, 5000);
+    }, WATCH_REARM_MS);
   }
 
   clearWatchRearmTimer() {

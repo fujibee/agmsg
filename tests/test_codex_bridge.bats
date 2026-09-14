@@ -1317,7 +1317,14 @@ EOF
   local runner
   runner="$(write_bridge_timeout_runner)"
 
-  AGMSG_CODEX_APP_SERVER_CMD="node $fake" run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
+  # The first watch-once failure below reschedules a re-arm through the
+  # production 5s failure backoff before the second process/spawn (the one
+  # that never answers) is even sent; AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS
+  # shortens that wait, which this test does not otherwise care about, since
+  # it is timing out the SECOND spawn's own request-timeout-ms, not the delay
+  # before it.
+  AGMSG_CODEX_APP_SERVER_CMD="node $fake" AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 \
+    run node "$runner" 10000 node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --timeout 1 --interval 1 \
     --request-timeout-ms 3000 --watch-failure-limit 2
 
@@ -1855,7 +1862,12 @@ EOF
 
   # fail, fail, wake, repeating: the old reset-to-0 held the counter below the
   # limit forever. With the decay it climbs, so the bridge stops itself.
-  run node "$TYPES/codex/codex-bridge.js" \
+  # Reaching the failure cap here means climbing through several fail/wake
+  # cycles (the decay this test exists to prove), each failure paying the
+  # production 5s re-arm backoff -- AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS
+  # shortens that wait; it is the cycle COUNT this test asserts on, not how
+  # long each cycle's backoff takes.
+  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=50 run node "$TYPES/codex/codex-bridge.js" \
     --project "$PROJ" --team team --name alice --thread thread-x \
     --app-server "unix://$sock" --timeout 1 --interval 1
   kill "$server_pid" 2>/dev/null || true
@@ -1863,6 +1875,41 @@ EOF
   [ "$status" -ne 0 ]
   grep -q "stopping after" <<<"$output"
   grep -q "consecutive watch-once failure" <<<"$output"
+}
+
+@test "codex-bridge: an invalid watch-rearm override falls back to the production delay, not an immediate re-arm" {
+  run node -e 'const net=require("net"),crypto=require("crypto");if(!net||!crypto)process.exit(1);'
+  [ "$status" -eq 0 ] || skip "node net/crypto not available"
+  run node -e 'const fs=require("fs"),net=require("net");const s=process.argv[1];try{fs.unlinkSync(s)}catch(_){}const sv=net.createServer();sv.on("error",()=>process.exit(2));sv.listen(s,()=>sv.close(()=>{try{fs.unlinkSync(s)}catch(_){}process.exit(0)}));' "$TEST_SKILL_DIR/probe5.sock"
+  [ "$status" -eq 0 ] || skip "unix socket listen not available"
+
+  local fake="$TEST_SKILL_DIR/rearm-fake3.js" sock="$TEST_SKILL_DIR/rearm3.sock" flog="$TEST_SKILL_DIR/rearm3.log"
+  _write_rearm_fake "$fake"; : > "$flog"
+  node "$fake" "$sock" "$flog" 3>&- &
+  local server_pid="$!"
+  for _ in {1..50}; do [ -S "$sock" ] && break; sleep 0.1; done
+
+  # "abc" is not a plain-digit string, so a correct implementation falls back
+  # to the production 5000ms delay. An implementation that instead trusted it
+  # (Number("abc") is NaN, and setTimeout clamps a NaN delay to 0) would try
+  # to re-arm again almost immediately -- caught here without paying the full
+  # 5000ms: the 2s window below is comfortably past the SEPARATE 1000ms
+  # MIN_ARM_INTERVAL_MS floor every re-arm path is also subject to (so a
+  # broken zero-delay implementation cannot hide behind that floor and still
+  # look slow), and comfortably short of the 5000ms production delay.
+  AGMSG_TEST_CODEX_BRIDGE_WATCH_REARM_MS=abc node "$TYPES/codex/codex-bridge.js" \
+    --project "$PROJ" --team team --name alice --thread thread-x \
+    --app-server "unix://$sock" --timeout 1 --interval 1 >/dev/null 2>&1 3>&- &
+  local bpid="$!"
+
+  for _ in {1..50}; do [ -s "$flog" ] && break; sleep 0.1; done
+  [ -s "$flog" ]
+  sleep 2
+  kill "$bpid" 2>/dev/null || true; wait "$bpid" 2>/dev/null || true
+  kill "$server_pid" 2>/dev/null || true
+
+  local arms; arms="$(grep -c ' arm ' "$flog")"
+  [ "$arms" -eq 1 ]
 }
 
 @test "codex-bridge: a flood of distinct wakes is rate-limited, not a re-arm storm (#936)" {
