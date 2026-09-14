@@ -138,15 +138,6 @@ agmsg_type_template_path() {
   printf '%s\n' "$dir/$rel"
 }
 
-# Comma-or-space list helper: 0 if <value> is in the space-separated <name>'s <key>.
-agmsg_type_has() {
-  local name="$1" key="$2" want="$3" tok
-  for tok in $(agmsg_type_get "$name" "$key"); do
-    [ "$tok" = "$want" ] && return 0
-  done
-  return 1
-}
-
 # Space-separated names of eligible agent types that have a skill template.
 # Types such as agmsg-app remain in the registry but are not renderable because
 # they deliberately have no template= manifest key. Keep this derived from the

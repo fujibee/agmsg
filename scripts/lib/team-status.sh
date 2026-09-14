@@ -57,35 +57,6 @@ EOF
   printf '%s\t%s\t%s\t%s\n' "$activity" "$pane_label" "$agent_key" "$cli_title"
 }
 
-# Normalize a driver's three-valued positive readiness proof. Output is
-# "ready|not_ready|unknown<TAB>reason" and always returns zero so a diagnostic
-# roster survives a terminal failure.
-agmsg_team_input_ready_loaded() {
-  local type="$1" pane="$2" cli raw rc=0 state reason
-  cli="$(agmsg_type_get "$type" cli 2>/dev/null || true)"
-  if [ -z "$cli" ]; then
-    printf 'unknown\ttype_cli_unavailable\n'
-    return 0
-  fi
-  if ! declare -F terminal_team_input_ready >/dev/null 2>&1; then
-    printf 'unknown\treadiness_unsupported\n'
-    return 0
-  fi
-  raw="$(terminal_team_input_ready "$pane" "$cli")" || rc=$?
-  case "$rc" in
-    0) state=ready ;;
-    1) state=not_ready ;;
-    *) state=unknown ;;
-  esac
-  case "$raw" in
-    ready) reason=positive_agent_identity ;;
-    not_ready:*) reason="${raw#not_ready:}" ;;
-    unknown:*) reason="${raw#unknown:}" ;;
-    *) state=unknown; reason=readiness_response_malformed ;;
-  esac
-  printf '%s\t%s\n' "$state" "$reason"
-}
-
 agmsg_identity_cell() {
   local expected="$1" actual="$2"
   case "$actual" in

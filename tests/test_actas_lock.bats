@@ -19,6 +19,16 @@ fake_cc_instance() {
   echo "$sid" > "$RUN_DIR/cc-instance.$pid"
 }
 
+# The role-keyed claim producer, addressed through its real interface: the
+# shared path-keyed core actas_lock_claim itself calls. There is no more a
+# role-keyed wrapper around it (removed as unused outside tests); this is the
+# SAME consistency check the tests below want -- one shared verdict, reached
+# from a second producer -- just no longer through a pass-through nobody else
+# called.
+_try_claim() {   # <team> <agent> <sid>
+  _agmsg_lock_try_claim_at "$(actas_lock_path "$1" "$2")" "$3"
+}
+
 # Use the test process's own PID for "live owner" scenarios. It's guaranteed
 # alive for the duration of the test. Avoids subshell-vs-stdout hangs that
 # bite when you try to spawn a separate long-lived background pid from
@@ -378,7 +388,7 @@ live_pid() { echo "$$"; }
   # did not happen, but only because the reclaim guard refused to rm an empty
   # owner — try_claim still answered `stale`. A test that checks only "the lock
   # survived" passes on a wrong verdict held up by a different mechanism.
-  [ "$(_actas_lock_try_claim T alice sid-other)" = 'unknown:owner_empty' ]
+  [ "$(_try_claim T alice sid-other)" = 'unknown:owner_empty' ]
   local r rc=0; r="$(actas_lock_claim T alice sid-other)" || rc=$?
   [ "$rc" -ne 0 ]
   refute grep -q '^ok$' <<<"$r"
@@ -448,7 +458,7 @@ _owner_only() {   # <team> <agent>
   # this assertion writable at all. (Review axis 5.)
   : > "$(actas_lock_path T alice)"
   [ "$(actas_lock_state T alice sid-me)" = 'unknown:owner_empty' ]
-  [ "$(_actas_lock_try_claim T alice sid-me)" = 'unknown:owner_empty' ]
+  [ "$(_try_claim T alice sid-me)" = 'unknown:owner_empty' ]
   local r rc=0; r="$(actas_lock_claim T alice sid-me)" || rc=$?
   [ "$rc" -eq 1 ]
   [ "$r" = 'unknown:owner_empty' ]
@@ -458,7 +468,7 @@ _owner_only() {   # <team> <agent>
   [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
   echo sid-x > "$(actas_lock_path T alice)"
   chmod 000 "$(actas_lock_path T alice)"
-  local s v; s="$(actas_lock_state T alice sid-me)"; v="$(_actas_lock_try_claim T alice sid-me)"
+  local s v; s="$(actas_lock_state T alice sid-me)"; v="$(_try_claim T alice sid-me)"
   chmod 644 "$(actas_lock_path T alice)"
   [ "$s" = 'unknown:lock_unreadable' ]
   [ "$v" = 'unknown:lock_unreadable' ]
@@ -473,7 +483,7 @@ _owner_only() {   # <team> <agent>
   echo sid-dead > "$(actas_lock_path T alice)"
   agmsg_instance_alive() { return 1; }
   [ "$(actas_lock_state T alice sid-me)" = free ]
-  [ "$(_actas_lock_try_claim T alice sid-me)" = stale ]
+  [ "$(_try_claim T alice sid-me)" = stale ]
 }
 
 @test "claim: says 'ok' out loud on success" {

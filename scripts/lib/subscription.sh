@@ -111,17 +111,3 @@ agmsg_subscription_pairs() {
 
   printf '%s' "$filtered"
 }
-
-# Build a SQL predicate for a tab-separated pair list.
-agmsg_subscription_where() {
-  local pairs="$1"
-  local where="" team agent t_esc a_esc pair
-  while IFS=$'\t' read -r team agent; do
-    [ -z "$team" ] && continue
-    t_esc=$(agmsg_sql_escape "$team")
-    a_esc=$(agmsg_sql_escape "$agent")
-    pair="(team='$t_esc' AND to_agent='$a_esc')"
-    where="${where:+$where OR }$pair"
-  done <<< "$pairs"
-  printf '%s' "$where"
-}

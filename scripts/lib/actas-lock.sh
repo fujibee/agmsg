@@ -152,10 +152,11 @@ actas_lock_sid_alive() {
 # The verdict for one lock, shared by every producer.
 #
 # Review found the SAME empty lock answered `free` by actas_lock_observe and
-# `unknown:owner_empty` by _actas_lock_try_claim. Both had been made three-valued
-# -- separately -- so two producers disagreed about one file and nothing in the
-# code said which was right. Review axis 5: it is not enough that a path returns
-# unknown; every path must return the SAME unknown for the same state. So the
+# `unknown:owner_empty` by the claim path (now `_agmsg_lock_try_claim_at`).
+# Both had been made three-valued -- separately -- so two producers disagreed
+# about one file and nothing in the code said which was right. Review axis 5:
+# it is not enough that a path returns unknown; every path must return the
+# SAME unknown for the same state. So the
 # decision lives in one function and the producers translate its answer into
 # their own vocabulary instead of deciding again.
 #
@@ -193,17 +194,6 @@ _actas_lock_verdict() {   # <sid> <read> <owner>
     1) printf 'free\t%s\n' "$owner" ;;
     *) printf 'unknown:liveness_undecidable\t%s\n' "$owner" ;;
   esac
-}
-
-# Internal: attempt one atomic claim. Echoes "ok" on success, "held:<sid>" when
-# another sid currently owns it, "stale" when the existing lock's owner is
-# positively dead (caller should retry after removing), "vanished" when the lock
-# went away between our failed link and our read, or "unknown:<reason>" when the
-# state could not be established. Every answer comes from _actas_lock_verdict,
-# so this producer and actas_lock_observe cannot disagree about one file.
-_actas_lock_try_claim() {
-  local team="$1" agent="$2" sid="$3"
-  _agmsg_lock_try_claim_at "$(actas_lock_path "$team" "$agent")" "$sid"
 }
 
 # The same claim, addressed by LOCK PATH and OWNER TOKEN instead of by role.

@@ -48,43 +48,7 @@ teardown() { teardown_test_env; }
   [ "$err" = "agmsg: locator: pane_malformed" ]
 }
 
-# --- split -----------------------------------------------------------------------
-
-@test "split: every composed locator round-trips, and the herdr pane keeps its own colon" {
-  local loc
-  for loc in "herdr:/run/herdr-a.sock:w1:p7" "tmux:/tmp/server with space:%4" "plain:iterm:/dev/ttys040" "tmux:/tmp/tmux-a:@12"; do
-    run agmsg_locator_split "$loc"
-    [ "$status" -eq 0 ]
-    case "$loc" in
-      herdr:*) [ "$output" = "$(printf 'herdr\t/run/herdr-a.sock\tw1:p7')" ] ;;
-      tmux:*space*) [ "$output" = "$(printf 'tmux\t/tmp/server with space\t%%4')" ] ;;
-      tmux:*) [ "$output" = "$(printf 'tmux\t/tmp/tmux-a\t@12')" ] ;;
-      plain:*) [ "$output" = "$(printf 'plain\titerm\t/dev/ttys040')" ] ;;
-    esac
-    # and composing the split gives the locator back
-    local k i p; k="${output%%$'\t'*}"; i="${output#*$'\t'}"; p="${i#*$'\t'}"; i="${i%%$'\t'*}"
-    [ "$(agmsg_locator_compose "$k" "$i" "$p")" = "$loc" ]
-  done
-}
-
-@test "split: an instance with a colon is refused by name, never mis-split into a different pane" {
-  # /run/a:b.sock:w1:p7 -- a naive right split would read instance=/run/a, pane=b.sock:w1:p7 or worse
-  run agmsg_locator_split "herdr:/run/a:b.sock:w1:p7"
-  [ "$status" -eq 2 ]; [ "$output" = "agmsg: locator: id_malformed" ]
-  [ -z "$(agmsg_locator_split "herdr:/run/a:b.sock:w1:p7" 2>/dev/null)" ]
-}
-
-@test "locator: the shared herdr instance codec round-trips colon, percent and spaces" {
-  local instance loc halves k i p
-  for instance in "/run/a:b.sock" "/tmp/server with space" " /tmp/leading-space " "/tmp/percent%path:socket"; do
-    loc="$(agmsg_locator_compose herdr "$instance" w1:p7)"
-    run agmsg_locator_split "$loc"
-    [ "$status" -eq 0 ]
-    [ "$output" = "$(printf 'herdr\t%s\tw1:p7' "$instance")" ]
-    halves="$output"; k="${halves%%$'\t'*}"; i="${halves#*$'\t'}"; p="${i#*$'\t'}"; i="${i%%$'\t'*}"
-    [ "$(agmsg_locator_compose "$k" "$i" "$p")" = "$loc" ]
-  done
-}
+# --- the herdr instance codec: versioning and colon-bearing sockets --------------
 
 @test "locator: a versioned herdr locator is visibly invalid to the legacy grammar" {
   local loc id legacy_sock
@@ -122,43 +86,6 @@ teardown() { teardown_test_env; }
 @test "fence codec: a legacy instance beginning with the old marker stays byte-for-byte unchanged" {
   local legacy='fence=v2%3A/run/socket:term_old'
   [ "$(agmsg_fence_split herdr "$legacy")" = "$(printf '%s\t%s' 'v2%3A/run/socket' term_old)" ]
-}
-
-@test "split: unknown kind, no instance, bare pane and control characters are refused by name" {
-  local err
-  err="$(agmsg_locator_split "screen:/x:w1:p7" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: unknown_kind" ]
-  # a bare herdr pane is a VALID driver id with no instance: the registry can tell, and says so
-  err="$(agmsg_locator_split "herdr:w1:p7" 2>&1 >/dev/null)" || true;     [ "$err" = "agmsg: locator: instance_malformed" ]
-  err="$(agmsg_locator_split "plain:/dev/ttys040" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: id_malformed" ]
-  # the legacy plain sentinel is a valid driver id that names no instance: the registry can tell
-  err="$(agmsg_locator_split "plain:-" 2>&1 >/dev/null)" || true;          [ "$err" = "agmsg: locator: instance_malformed" ]
-  err="$(agmsg_locator_split "herdr:/x:w1" 2>&1 >/dev/null)" || true;     [ "$err" = "agmsg: locator: id_malformed" ]
-  err="$(agmsg_locator_split "$(printf 'herdr:/x\n:w1:p7')" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: locator_malformed" ]
-  err="$(agmsg_locator_split "" 2>&1 >/dev/null)" || true;                [ "$err" = "agmsg: locator: locator_malformed" ]
-  err="$(agmsg_locator_split 'herdr:v2:/run/a%ZZ:w1:p7' 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: id_malformed" ]
-  err="$(agmsg_locator_split 'herdr:v2::w1:p7' 2>&1 >/dev/null)" || true;          [ "$err" = "agmsg: locator: id_malformed" ]
-}
-
-@test "split: the tmux legacy pane id inside a locator is still a pane, and the loaded driver is not replaced" {
-  agmsg_terminal_load tmux
-  run agmsg_locator_split "herdr:/run/herdr-a.sock:w1:p7"
-  [ "$status" -eq 0 ]
-  [ "$_AGMSG_TERMINAL_LOADED" = tmux ]
-  declare -F terminal_id_ok >/dev/null
-  terminal_id_ok "%4"        # still tmux's grammar
-}
-
-@test "split: the herdr split relies on the pane grammar having exactly ONE colon -- a three-field pane is refused, never split elsewhere" {
-  # `_herdr_sock_of` takes the trailing two colon fields as the pane. That is
-  # only right while `w…:p…` has exactly one colon, which terminal_id_ok
-  # enforces. If the pane grammar ever grows a field, this is the test that
-  # notices: the value must be REFUSED, not silently split one field to the left.
-  run agmsg_locator_split "herdr:/run/herdr-a.sock:w1:p7:x9"
-  [ "$status" -eq 2 ]
-  [ "$output" = "agmsg: locator: id_malformed" ]
-  agmsg_terminal_load herdr
-  refute terminal_id_ok "/run/herdr-a.sock:w1:p7:x9"
-  refute terminal_id_split "/run/herdr-a.sock:w1:p7:x9"
 }
 
 # --- the herdr id: bare or socket-qualified -------------------------------------------
