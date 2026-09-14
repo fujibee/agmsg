@@ -27,11 +27,11 @@ teardown() { teardown_test_env; }
 }
 
 @test "where: herdr with a live HERDR_PANE_ID resolves to that pane, terminal name is diagnostic only" {
-  export HERDR_ENV=1 HERDR_PANE_ID=w1:p4
+  export HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock"
   run bash "$SCRIPTS/where.sh"
   [ "$status" -eq 0 ]
   grep -q '^resolved=true' <<<"$output"
-  grep -q 'placement=herdr:w1:p4' <<<"$output"
+  grep -q "placement=herdr:$TEST_SKILL_DIR/herdr.sock:w1:p4" <<<"$output"
   # container is best-effort context, never absent outright — its failure
   # (no herdr on PATH here) must say why, not just vanish.
   grep -q 'container=' <<<"$output"

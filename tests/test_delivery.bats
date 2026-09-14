@@ -3668,15 +3668,19 @@ EOF
 # run and it failed — measured: with no session id the resolver does not ask
 # herdr anything at all, because there is nothing to ask BY. So the control is
 # the same invocation carrying a session id, which does reach herdr and does
-# rename; the silence of the other half means something only next to it.
-@test "check-inbox: no session id names nothing; the same call with one does (#1044)" {
+# rename; the silence of the other half means something only next to it. This
+# differential is also the qualified-instance seam control for #1055.
+@test "check-inbox: no session id names nothing; the same call with one does (#1044, #1055)" {
   # Same reason as the sibling test above: naming itself is what this test
   # verifies, against a fake herdr, never a real terminal.
   unset AGMSG_SELF_NAME
   export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
   mkdir -p "$FAKEBIN"; : > "$ARGV_LOG"
   _fake_herdr_with_session "sess-x"
-  export HERDR_ENV=1
+  # The instance selector is common to both arms. The only differing input
+  # remains the type-specific session id below; without it, even a fully
+  # qualified Herdr environment must not name any pane.
+  export HERDR_ENV=1 HERDR_SOCKET_PATH=/run/herdr.sock
   unset TMUX TMUX_PANE
 
   bash "$SCRIPTS/join.sh" nameteam alice claude-code "$TEST_PROJECT"

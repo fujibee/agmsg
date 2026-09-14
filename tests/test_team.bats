@@ -1117,6 +1117,7 @@ STUB
   chmod +x "$bin/herdr"
   export PATH="$bin:$PATH"
   export AGMSG_TERMINAL_DRIVER=herdr
+  export HERDR_SOCKET_PATH=/tmp/hsock
   bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
   MIS_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
   mkdir -p "$(dirname "$MIS_REC")"
@@ -1128,7 +1129,7 @@ STUB
   run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
   [ "$status" -eq 0 ]
   # (a) the record now names alice's OWN pane (the label's answer), project/type kept
-  [ "$(cat "$MIS_REC")" = $'herdr:w1:pMINE\t/tmp/proj\tclaude-code' ]
+  [ "$(cat "$MIS_REC")" = $'herdr:/tmp/hsock:w1:pMINE\t/tmp/proj\tclaude-code' ]
   # positive control: --fix reached the corrected pane at all
   grep -q '^pane get w1:pMINE$' "$MIS_LOG"
 }
@@ -1173,6 +1174,7 @@ STUB
   chmod +x "$bin/herdr"
   export PATH="$bin:$PATH"
   export AGMSG_TERMINAL_DRIVER=herdr
+  export HERDR_SOCKET_PATH=/tmp/hsock
   bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
   NR_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
   # NOT removed by hand: join writes NO placement record by design (it is not the
@@ -1187,7 +1189,7 @@ STUB
   run bash "$SCRIPTS/team.sh" fixteam --fix-pane-names
   [ "$status" -eq 0 ]
   # (a) a record now exists and names alice's OWN pane (the label's answer)
-  [ "$(cat "$NR_REC")" = $'herdr:w1:pMINE\t/tmp/proj\tclaude-code' ]
+  [ "$(cat "$NR_REC")" = $'herdr:/tmp/hsock:w1:pMINE\t/tmp/proj\tclaude-code' ]
   # positive control: --fix reached the created pane at all
   grep -q '^pane get w1:pMINE$' "$NR_LOG"
 }

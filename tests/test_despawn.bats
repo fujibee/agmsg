@@ -359,9 +359,9 @@ _despawn_member_with_env() {   # <bindir> <env assignments...>
   _stub_herdr "$bin" sess-m wT:p1
   local rec; rec="$(_spawn_rec_path team alice)"
   mkdir -p "$(dirname "$rec")"
-  printf 'herdr:wT:p1\t%s\tclaude-code\n' "$PROJ" > "$rec"
+  printf 'herdr:/tmp/hsock:wT:p1\t%s\tclaude-code\n' "$PROJ" > "$rec"
 
-  _despawn_member_with_env "$bin" HERDR_ENV=1
+  _despawn_member_with_env "$bin" HERDR_ENV=1 HERDR_SOCKET_PATH=/tmp/hsock
 
   # THE point of the change: herdr is asked to close the recorded pane. Before
   # this, no herdr member could fold itself away at all.
