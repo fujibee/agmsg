@@ -1849,11 +1849,14 @@ LIST
   run bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
   boot="$(cat "$CAPTURE")"
-  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_FUTURE_KNOB=1 SPAWN_TEST_CANARY=alive bash "$boot"
+  run env SHELL="$STUB_BIN/noshell" AGMSG_CODEX_FUTURE_KNOB=1 AGMSG_ROLE_SESSION_OWNER=parent-owner SPAWN_TEST_CANARY=alive bash "$boot"
   _assert_bridged_argv
   [ -f "$CALL_LOG.env" ]
   grep -q '^SPAWN_TEST_CANARY=alive$' "$CALL_LOG.env"
   [ "$(grep -c '^AGMSG_CODEX_FUTURE_KNOB=' "$CALL_LOG.env")" -eq 0 ]
+  # The bridge owner is identity state for the parent seat, so a spawned seat
+  # must not inherit it and accidentally match the parent's actas lock.
+  [ "$(grep -c '^AGMSG_ROLE_SESSION_OWNER=' "$CALL_LOG.env")" -eq 0 ]
   # And the seat's own marker is NOT cleared by the namespace rule.
   grep -q '^AGMSG_SPAWNED=1$' "$CALL_LOG.env"
 }
