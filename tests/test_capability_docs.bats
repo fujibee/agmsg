@@ -82,7 +82,8 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF "capabilities=$plain_caps" <<<"$output"
 
   run env -u TMUX -u TMUX_PANE -u AGMSG_TERMINAL_DRIVER \
-    env HERDR_ENV=1 HERDR_PANE_ID=w1:p4 bash "$ROOT/scripts/where.sh"
+    env HERDR_ENV=1 HERDR_PANE_ID=w1:p4 HERDR_SOCKET_PATH="$TEST_SKILL_DIR/herdr.sock" \
+    bash "$ROOT/scripts/where.sh"
   [ "$status" -eq 0 ]
   local herdr_caps
   herdr_caps="$(grep '^capabilities=' "$ROOT/scripts/drivers/terminals/herdr/terminal.conf" | cut -d= -f2-)"
