@@ -476,6 +476,15 @@ agmsg_terminal_resolve_name() {
 
 # Compose a record ref from a terminal name and its bare id.
 agmsg_terminal_ref() {
+  if [ "$1" = herdr ]; then
+    case "$2" in
+      *:*:*)
+        local sock="${2%:*:*}" bare="${2#"${2%:*:*}":}"
+        agmsg_locator_compose herdr "$sock" "$bare"
+        return $?
+        ;;
+    esac
+  fi
   printf '%s:%s\n' "$1" "$2"
 }
 
@@ -545,7 +554,7 @@ agmsg_terminal_self_env() {
 #   herdr  w<n>:p<x>, one ':', alnum+':' only   (rejects a newline / '|' / junk)
 #   plain  exactly '-'              (no addressable pane; any other value is corrupt)
 _agmsg_terminal_id_ok() {   # <terminal> <id>
-  local name="$1" id="$2"
+  local name="$1" id="$2" encoded_sock
   [ -n "$name" ] && [ -n "$id" ] || return 1
   # The driver NAME is validated before anything is loaded by it. This function
   # now reaches the filesystem (a driver directory, resolved through the driver
@@ -582,14 +591,35 @@ _agmsg_terminal_id_ok() {   # <terminal> <id>
   # the placement scan reading another seat's record).
   if [ "$name" = "${_AGMSG_TERMINAL_LOADED:-}" ]; then
     if declare -F terminal_id_ok >/dev/null 2>&1; then
-      terminal_id_ok "$id"; return $?
+      terminal_id_ok "$id" || return $?
+      if [ "$name" = herdr ]; then
+        case "$id" in
+          *:*:*)
+            encoded_sock="${id%:*:*}"
+            case "$encoded_sock" in
+              *:*) case "$encoded_sock" in v2:*) _agmsg_locator_instance_decode herdr "$encoded_sock" >/dev/null || return 1 ;; *) return 1 ;; esac ;;
+            esac
+            ;;
+        esac
+      fi
+      return 0
     fi
     return 0
   fi
   (
     agmsg_terminal_load "$name" >/dev/null 2>&1 || exit 1
     declare -F terminal_id_ok >/dev/null 2>&1 || exit 0
-    terminal_id_ok "$id"
+    terminal_id_ok "$id" || exit $?
+    if [ "$name" = herdr ]; then
+      case "$id" in
+        *:*:*)
+          encoded_sock="${id%:*:*}"
+          case "$encoded_sock" in
+            *:*) case "$encoded_sock" in v2:*) _agmsg_locator_instance_decode herdr "$encoded_sock" >/dev/null || exit 1 ;; *) exit 1 ;; esac ;;
+          esac
+          ;;
+      esac
+    fi
   )
 }
 
@@ -614,10 +644,20 @@ agmsg_terminal_ref_terminal() {
 # whole value for a legacy bare id. Uses first-colon split so a herdr id that
 # itself contains ':' (e.g. wC:pN) survives.
 agmsg_terminal_ref_id() {
-  local ref="$1"
+  local ref="$1" term id halves instance pane
   case "$ref" in
     tmux:*)  printf '%s\n' "${ref#tmux:}" ;;
-    herdr:*) printf '%s\n' "${ref#herdr:}" ;;
+    herdr:*)
+      id="${ref#herdr:}"
+      case "$id" in
+        v2:*:*:*)
+          halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
+          instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+          printf '%s:%s\n' "$instance" "$pane"
+          ;;
+        *) printf '%s\n' "$id" ;;
+      esac
+      ;;
     plain:*) printf '%s\n' "${ref#plain:}" ;;
     *)       printf '%s\n' "$ref" ;;         # legacy bare id
   esac
@@ -726,7 +766,7 @@ agmsg_terminal_ref_id() {
 # (inline, so the scan forks nothing per record); a test pins that the two agree
 # on every form the record format accepts.
 _agmsg_placement_split() {   # <ref>
-  local ref="$1" term id
+  local ref="$1" term id halves instance pane
   _AGMSG_PS_TERM=""; _AGMSG_PS_ID=""; _AGMSG_PS_SOCK=""
   case "$ref" in
     tmux:*)  term=tmux;  id="${ref#tmux:}" ;;
@@ -738,6 +778,15 @@ _agmsg_placement_split() {   # <ref>
   if [ "$term" = tmux ]; then
     case "$id" in
       *:*) _AGMSG_PS_SOCK="${id%:*}"; id="${id##*:}" ;;   # split on the LAST colon
+    esac
+  fi
+  if [ "$term" = herdr ]; then
+    case "$id" in
+      *:*:*)
+        halves="$(_agmsg_terminal_id_split herdr "$id")" || return 1
+        instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+        id="$instance:$pane"
+        ;;
     esac
   fi
   [ -n "$id" ] || return 1
@@ -1166,19 +1215,18 @@ agmsg_terminal_name_self_safe() {
 # The registry owns the outer shape (kind + id) and asks the KIND's driver for
 # the boundary inside its id (`terminal_id_split`): where a herdr id ends in
 # two colon fields and a tmux or plain id in one is the driver's grammar, held
-# once, in the driver. An instance may contain spaces; it may NOT contain a
-# colon or a control character -- a socket path with a colon is legal on POSIX
-# and is refused BY NAME (instance_malformed) rather than mis-split; the
-# round-trippable encoding is deferred (#1166), and refusing is what keeps a
-# mis-read from becoming a write.
+# once, in the driver. An instance may contain spaces. Herdr instances
+# containing a colon use the registry's versioned encoding (`v2:` plus percent
+# escapes), so an older reader sees an invalid qualified id and refuses it
+# rather than routing to a different socket. Control characters remain rejected.
 #
 # agmsg_locator_compose <kind> <instance> <pane>   -> "<kind>:<instance>:<pane>"  rc 0
 # agmsg_locator_split   <locator>                  -> "<kind>\t<instance>\t<pane>" rc 0
 #   rc 2, nothing on stdout, one named reason on stderr:
 #     unknown_kind | instance_malformed | pane_malformed | id_malformed | locator_malformed
 #   (id_malformed: the kind's driver refused "<instance>:<pane>" as one id --
-#   a colon inside a socket path, a bare pane with no instance, a pane outside
-#   the grammar; the registry does not guess which half)
+#   a bare pane with no instance or a pane outside the grammar; the registry
+#   does not guess which half)
 # Neither function replaces the caller's loaded driver: the kind's driver is
 # consulted through _agmsg_terminal_id_ok / _agmsg_terminal_id_split, which
 # load it in a subshell when it is not the loaded one.
@@ -1189,38 +1237,102 @@ _agmsg_locator_kind_ok() {   # <kind>
 }
 
 _agmsg_locator_instance_ok() {   # <instance>
-  case "$1" in ''|*:*|*[[:cntrl:]]*) return 1 ;; esac
+  case "$1" in ''|*[[:cntrl:]]*) return 1 ;; esac
   return 0
+}
+
+# Encode/decode the instance component in one place. Herdr pane ids already use
+# a colon between workspace and pane, so a raw socket colon cannot be separated
+# reliably by an older reader. Only herdr needs the versioned form today; tmux's
+# driver splits its socket from the final pane sigil and already round-trips it.
+_agmsg_locator_instance_encode() {   # <kind> <instance>
+  local kind="$1" instance="$2" encoded
+  _agmsg_locator_instance_ok "$instance" || return 1
+  if [ "$kind" = herdr ]; then
+    case "$instance" in
+      *:*)
+        encoded="${instance//%/%25}"
+        encoded="${encoded//:/%3A}"
+        printf 'v2:%s\n' "$encoded"
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s\n' "$instance"
+}
+
+_agmsg_locator_instance_decode() {   # <kind> <encoded-instance>
+  local kind="$1" encoded="$2" payload out chunk rest code
+  _agmsg_locator_instance_ok "$encoded" || return 1
+  if [ "$kind" != herdr ]; then
+    printf '%s\n' "$encoded"
+    return 0
+  fi
+  case "$encoded" in
+    v2:*)
+      payload="${encoded#v2:}"
+      [ -n "$payload" ] || return 1
+      out=""
+      while :; do
+        case "$payload" in
+          *%*)
+            chunk="${payload%%\%*}"
+            rest="${payload#*%}"
+            [ "${#rest}" -ge 2 ] || return 1
+            code="${rest%${rest#??}}"
+            case "$code" in
+              25) out="${out}${chunk}%" ;;
+              3A) out="${out}${chunk}:" ;;
+              *) return 1 ;;
+            esac
+            payload="${rest#??}"
+            ;;
+          *) out="${out}${payload}"; break ;;
+        esac
+      done
+      _agmsg_locator_instance_ok "$out" || return 1
+      printf '%s\n' "$out"
+      ;;
+    *)
+      case "$encoded" in *:*) return 1 ;; esac
+      printf '%s\n' "$encoded"
+      ;;
+  esac
 }
 
 # The kind's own split of its id: "<instance>\t<pane>", or rc 1 when the id is
 # not a qualified one. Direct when that driver is loaded; a subshell load
 # otherwise (the same posture as _agmsg_terminal_id_ok).
 _agmsg_terminal_id_split() {   # <kind> <id>
-  local kind="$1" id="$2"
+  local kind="$1" id="$2" halves instance pane decoded
   _agmsg_locator_kind_ok "$kind" || return 1
   if [ "$kind" = "$_AGMSG_TERMINAL_LOADED" ]; then
     declare -F terminal_id_split >/dev/null 2>&1 || return 1
-    terminal_id_split "$id"
+    halves="$(terminal_id_split "$id")" || return 1
   else
-    ( agmsg_terminal_load "$kind" >/dev/null 2>&1 || exit 1
+    halves="$( agmsg_terminal_load "$kind" >/dev/null 2>&1 || exit 1
       declare -F terminal_id_split >/dev/null 2>&1 || exit 1
-      terminal_id_split "$id" )
+      terminal_id_split "$id" )" || return 1
   fi
+  instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
+  decoded="$(_agmsg_locator_instance_decode "$kind" "$instance")" || return 1
+  printf '%s\t%s\n' "$decoded" "$pane"
 }
 
 agmsg_locator_compose() {   # <kind> <instance> <pane>
-  local kind="$1" instance="$2" pane="$3" id
+  local kind="$1" instance="$2" pane="$3" id encoded
   _agmsg_locator_kind_ok "$kind"         || { echo "agmsg: locator: unknown_kind" >&2; return 2; }
   _agmsg_locator_instance_ok "$instance" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
   case "$pane" in ''|*[[:cntrl:]]*) echo "agmsg: locator: pane_malformed" >&2; return 2 ;; esac
-  id="$instance:$pane"
+  encoded="$(_agmsg_locator_instance_encode "$kind" "$instance")" \
+    || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
+  id="$encoded:$pane"
   _agmsg_terminal_id_ok "$kind" "$id"    || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
   # The driver must split it back into the same halves, or the grammar and the
   # composition disagree about where the instance ends.
   [ "$(_agmsg_terminal_id_split "$kind" "$id")" = "$(printf '%s\t%s' "$instance" "$pane")" ] \
     || { echo "agmsg: locator: pane_malformed" >&2; return 2; }
-  printf '%s:%s:%s\n' "$kind" "$instance" "$pane"
+  printf '%s:%s:%s\n' "$kind" "$encoded" "$pane"
 }
 
 agmsg_locator_split() {   # <locator>

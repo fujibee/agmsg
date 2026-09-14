@@ -309,8 +309,9 @@ _herdr_pane_id_ok() {
 # Pane ids repeat across running herdr sessions, so a bare id names a pane only
 # in whatever instance the ambient HERDR_SOCKET_PATH points at; a qualified id
 # names ONE pane, and every call about it goes to that socket (_herdr_cli). A
-# socket path may contain spaces; a colon or a control character in it is
-# refused rather than mis-split (the round-trippable form is #1166).
+# A socket path may contain spaces and colons. The shared locator registry
+# version-encodes a colon-bearing path when it crosses the locator boundary;
+# direct driver calls keep the raw path and split on the trailing pane fields.
 _herdr_sock_of() {   # <id> -> socket path, or "" for a bare id
   case "$1" in
     *:w*:p*) printf '%s' "${1%:*:*}" ;;
@@ -342,7 +343,7 @@ _herdr_env_socket() {
     echo "herdr: HERDR_SOCKET_PATH is unset — cannot identify this pane's instance" >&2
     return 1
   fi
-  case "$sock" in *:*|*[[:cntrl:]]*)
+  case "$sock" in *[[:cntrl:]]*)
     echo "herdr: HERDR_SOCKET_PATH is malformed — cannot identify this pane's instance" >&2
     return 2 ;;
   esac
@@ -354,9 +355,6 @@ terminal_id_ok() {   # <id>
   # trailing newline from a split half and let it pass.
   case "$1" in *[[:cntrl:]]*) return 1 ;; esac
   sock="$(_herdr_sock_of "$1")"; bare="$(_herdr_bare_of "$1")"
-  if [ -n "$sock" ]; then
-    case "$sock" in *:*) return 1 ;; esac
-  fi
   case "$1" in :*) return 1 ;; esac
   _herdr_bare_ok "$bare"
 }
@@ -1374,7 +1372,7 @@ terminal_fence() {   # <id>
   instance="$(_herdr_sock_of "$id")"
   [ -n "$instance" ] || instance="${HERDR_SOCKET_PATH:-}"
   [ -n "$instance" ] || instance="unknown:no_socket_in_env"
-  case "$instance" in *:*|*[[:cntrl:]]*|*[[:space:]]*) instance="unknown:socket_path_malformed" ;; esac
+  case "$instance" in *[[:cntrl:]]*) instance="unknown:socket_path_malformed" ;; esac
   command -v herdr >/dev/null 2>&1 || { printf '%s\tunknown:terminal_unreachable\n' "$instance"; return 2; }
   _herdr_pane_id_ok "$id" || { printf '%s\tunknown:invalid_pane_id\n' "$instance"; return 2; }
   pane_json="$(_herdr_cli "$id" pane get "$(_herdr_bare_of "$id")" 2>/dev/null)" || { printf '%s\tunknown:pane_query_failed\n' "$instance"; return 2; }

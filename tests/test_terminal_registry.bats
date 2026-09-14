@@ -744,7 +744,7 @@ EOF
   grep -q '\[agent\] \[list\]' "$ARGV_LOG"
 }
 
-@test "herdr: detect names why the instance selector cannot qualify its pane" {
+@test "herdr: detect accepts a colon-bearing socket path and names the pane" {
   _install_fake_herdr "sess-77"
   agmsg_terminal_load herdr
   export HERDR_ENV=1 HERDR_PANE_ID=wC:p4
@@ -756,8 +756,8 @@ EOF
 
   export HERDR_SOCKET_PATH='/run/bad:socket'
   run agmsg_terminal_resolve_name "sess-77"
-  [ "$status" -eq 1 ]
-  [ "${output#*HERDR_SOCKET_PATH is malformed}" != "$output" ]
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'herdr\t/run/bad:socket:wC:p4')" ]
 }
 
 @test "herdr: spawn without an instance selector fails before creating a pane" {
