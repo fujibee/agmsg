@@ -1,107 +1,194 @@
 #!/usr/bin/env bats
+# Record-only layer of the #1144 placement collision report. See the design
+# note reached from the issue and the header of scripts/placement-collisions.sh
+# for the two-layer contract this file exercises only the first half of.
 
 load test_helper
 
 setup() { setup_test_env; }
 teardown() { teardown_test_env; }
 
-_install_collision_fixture() {
-  local bin="$BATS_TEST_TMPDIR/collision-bin"
-  mkdir -p "$bin"
-  cat > "$bin/herdr" <<'STUB'
-#!/usr/bin/env bash
-case "$1/$2" in
-  agent/list)
-    printf '%s\n' '{"result":{"agents":[{"agent":"","pane_id":"w1:p9","terminal_id":"tm1","tab_id":"t1","workspace_id":"ws1"}]}}'
-    ;;
-  agent/get)
-    if [ "${COLLISION_OCCUPIED:-0}" -eq 1 ]; then
-      printf '%s\n' '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}'
-    else
-      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
-      exit 1
-    fi
-    ;;
-  pane/get)
-    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","agent_status":"idle","label":"","terminal_title":""}}}'
-    ;;
-  *) exit 1 ;;
-esac
-STUB
-  chmod +x "$bin/herdr"
-  export PATH="$bin:$PATH"
-}
-
-_join_with_claim() {   # <team> <agent> [ref]
-  local team="$1" agent="$2" ref="${3:-herdr:w1:p9}"
+# <team> <agent> <ref>
+_place() {
+  local team="$1" agent="$2" ref="$3"
   bash "$SCRIPTS/join.sh" "$team" "$agent" claude-code /tmp/proj >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   printf '%s\t/tmp/proj\tclaude-code\n' "$ref" > "$TEST_SKILL_DIR/run/spawn.${team}__${agent}"
 }
 
-@test "placement collisions reports different agents across teams and a proven empty pane (#1144)" {
-  _install_collision_fixture
-  _join_with_claim alpha alice
-  _join_with_claim beta alice
-  _join_with_claim gamma bob
+@test "reports a canonical tmux collision between two distinct seats (#1144)" {
+  _place alpha alice tmux:/tmp/sockA:%3
+  _place beta bob tmux:/tmp/sockA:%3
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  grep -Fq "Placement collisions:" <<< "$output"
+  grep -Fq "Placement collisions (record-only):" <<< "$output"
+  grep -Fq "ref: tmux:/tmp/sockA:%3" <<< "$output"
+  grep -Fq -- "- alpha/alice" <<< "$output"
+  grep -Fq -- "- beta/bob" <<< "$output"
+  grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "unscoped_records: 0" <<< "$output"
+  grep -Fq "coverage: complete" <<< "$output"
+}
+
+@test "two different tmux instances sharing a bare pane number are not joined (#1144)" {
+  _place alpha alice tmux:/tmp/sockA:%3
+  _place beta bob tmux:/tmp/sockB:%3
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "collisions: none" <<< "$output"
+}
+
+@test "herdr refs are never joined as a collision, even when the raw id repeats (#1144)" {
+  _place alpha alice herdr:w1:p9
+  _place beta bob herdr:w1:p9
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  # The whole point: a bare herdr id is not an address (#1155). Record-only
+  # evidence cannot tell two live instances apart, so this must never read as
+  # a proven collision.
+  refute grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 2" <<< "$output"
   grep -Fq "ref: herdr:w1:p9" <<< "$output"
   grep -Fq -- "- alpha/alice" <<< "$output"
-  grep -Fq -- "- beta/alice" <<< "$output"
-  grep -Fq -- "- gamma/bob" <<< "$output"
-  grep -Fq "resident_agent: absent" <<< "$output"
-  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.alpha__alice")" = herdr:w1:p9 ]
-  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.beta__alice")" = herdr:w1:p9 ]
-  [ "$(cut -f1 "$TEST_SKILL_DIR/run/spawn.gamma__bob")" = herdr:w1:p9 ]
-}
-
-@test "placement collisions keeps rc2 unknown even when its body says agent_not_found (#1144)" {
-  _install_collision_fixture
-  _join_with_claim alpha alice
-  _join_with_claim beta bob
-  cat >> "$TEST_SKILL_DIR/scripts/drivers/terminals/herdr/ops.sh" <<'OPS'
-terminal_team_input_ready() {
-  printf 'not_ready:agent_not_found\n'
-  return 2
-}
-OPS
-
-  run bash "$SCRIPTS/placement-collisions.sh"
-  [ "$status" -eq 0 ]
-  grep -Fq "Placement collisions:" <<< "$output"
-  refute grep -Fq "resident_agent: absent" <<< "$output"
-}
-
-@test "placement collisions excludes one agent registered in two teams (#1144)" {
-  _install_collision_fixture
-  _join_with_claim alpha alice
-  _join_with_claim beta alice
-
-  run bash "$SCRIPTS/placement-collisions.sh"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-}
-
-@test "placement collisions never guesses that an occupied pane is empty (#1144)" {
-  _install_collision_fixture
-  _join_with_claim alpha alice herdr:w1:pA
-  _join_with_claim beta bob
-  _join_with_claim gamma carol
-  export COLLISION_OCCUPIED=1
-
-  run bash "$SCRIPTS/placement-collisions.sh"
-  [ "$status" -eq 0 ]
   grep -Fq -- "- beta/bob" <<< "$output"
-  grep -Fq -- "- gamma/carol" <<< "$output"
-  refute grep -Fq -- "- alpha/alice" <<< "$output"
-  refute grep -Fq "resident_agent: absent" <<< "$output"
 }
 
-@test "placement collisions rejects arguments rather than implying a repair scope (#1144)" {
+@test "a legacy bare tmux ref with no socket is unscoped, not joined (#1144)" {
+  _place alpha alice %3
+  _place beta bob %3
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 2" <<< "$output"
+}
+
+@test "the same agent name registered in two teams is one seat, not a collision (#1144)" {
+  _place alpha alice tmux:/tmp/sockA:%3
+  _place beta alice tmux:/tmp/sockA:%3
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 0" <<< "$output"
+}
+
+@test "a plain ref (no addressable pane) is neither a collision nor unscoped (#1144)" {
+  _place alpha alice plain:-
+  _place beta bob plain:-
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 0" <<< "$output"
+  grep -Fq "coverage: complete" <<< "$output"
+}
+
+@test "no teams directory at all is not_attempted, not none (#1144)" {
+  rm -rf "$TEST_SKILL_DIR/teams"
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: not_attempted" <<< "$output"
+  grep -Fq "reason: no teams directory" <<< "$output"
+  refute grep -Fq "collisions: none" <<< "$output"
+}
+
+@test "an empty teams directory is a fully observed empty answer (#1144)" {
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "coverage: complete" <<< "$output"
+}
+
+@test "rejects arguments rather than implying a repair scope (#1144)" {
   run bash "$SCRIPTS/placement-collisions.sh" alpha
   [ "$status" -eq 2 ]
   grep -Fq "Usage: placement-collisions.sh" <<< "$output"
+}
+
+# --- negative controls: an unreadable path must never read as "none" -------
+#
+# Each of these forces one of the walk's failure branches and asserts the
+# output says WHY it is empty, distinctly from a genuinely observed empty
+# answer. Removing the corresponding counting in placement-collisions.sh
+# (reverting to a bare `continue`) makes each of these red: the coverage
+# line and its named category would silently disappear and "collisions:
+# none" would come back instead of "none_observed".
+
+@test "control: a team config whose agents cannot be enumerated is coverage:partial, not none (#1144)" {
+  _place alpha alice tmux:/tmp/sockA:%3
+  # Malformed JSON: the sqlite3 json_each extraction genuinely errors, rather
+  # than the file merely being absent.
+  mkdir -p "$TEST_SKILL_DIR/teams/broken"
+  printf '{ this is not json' > "$TEST_SKILL_DIR/teams/broken/config.json"
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "collisions: none$" <<< "$output"
+  grep -Fq "collisions: none_observed" <<< "$output"
+  grep -Fq "coverage: partial" <<< "$output"
+  grep -Fq "agent_enumeration_failed: 1 (broken)" <<< "$output"
+}
+
+@test "control: a path-resolution failure for one agent is coverage:partial, not none (#1144)" {
+  bash "$SCRIPTS/join.sh" alpha alice claude-code /tmp/proj >/dev/null
+  # Force agmsg_spawn_path to fail for exactly this agent, the way a future
+  # caller's own bug would -- proving the walk surfaces it instead of quietly
+  # treating alice as "never placed".
+  cat >> "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh" <<'OVERRIDE'
+agmsg_spawn_path() {
+  [ "$2" = alice ] && return 1
+  printf '%s/run/spawn.%s__%s' "$SKILL_DIR" "$1" "$2"
+}
+OVERRIDE
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none_observed" <<< "$output"
+  grep -Fq "coverage: partial" <<< "$output"
+  grep -Fq "path_resolution_failed: 1 (alpha/alice)" <<< "$output"
+}
+
+@test "control: an unreadable placement record is coverage:partial, not none (#1144)" {
+  bash "$SCRIPTS/join.sh" alpha alice claude-code /tmp/proj >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  : > "$TEST_SKILL_DIR/run/spawn.alpha__alice"   # present, but empty: read fails
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none_observed" <<< "$output"
+  grep -Fq "coverage: partial" <<< "$output"
+  grep -Fq "record_unreadable: 1 (alpha/alice)" <<< "$output"
+}
+
+@test "control: a record with an empty ref field is coverage:partial, not none (#1144)" {
+  bash "$SCRIPTS/join.sh" alpha alice claude-code /tmp/proj >/dev/null
+  mkdir -p "$TEST_SKILL_DIR/run"
+  printf '\t/tmp/proj\tclaude-code\n' > "$TEST_SKILL_DIR/run/spawn.alpha__alice"
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none_observed" <<< "$output"
+  grep -Fq "coverage: partial" <<< "$output"
+  grep -Fq "empty_ref: 1 (alpha/alice)" <<< "$output"
+}
+
+@test "a coverage gap does not suppress a collision found alongside it (#1144)" {
+  _place alpha alice tmux:/tmp/sockA:%3
+  _place beta bob tmux:/tmp/sockA:%3
+  mkdir -p "$TEST_SKILL_DIR/teams/broken"
+  printf '{ this is not json' > "$TEST_SKILL_DIR/teams/broken/config.json"
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "ref: tmux:/tmp/sockA:%3" <<< "$output"
+  grep -Fq "coverage: partial" <<< "$output"
+  grep -Fq "agent_enumeration_failed: 1 (broken)" <<< "$output"
 }
