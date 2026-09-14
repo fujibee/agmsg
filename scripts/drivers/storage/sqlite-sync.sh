@@ -113,29 +113,31 @@ _sqlite_sync_valid_binding() {
 }
 
 _sqlite_sync_decimal_le() {
+  # Reports through the exit status (0 = left <= right, 1 = not), not by
+  # echoing "0"/"1" for a caller to capture with `$( )`: every caller used to
+  # wrap this in a command substitution, which forks a subshell exactly like
+  # the `printf | sed` this same fix removed above -- and #968's
+  # roster_seqs validation calls this once per entry, so that subshell was
+  # still one fork per entry even after the pipelines were gone (measured:
+  # ~103s left on a 10,001-entry list after that first fix alone). A bash
+  # function's own exit status is already whatever its last command's was,
+  # so returning the boolean directly costs nothing extra here.
   local left="$1" right="$2"
-  # Strip leading zeros with a plain loop, not `printf | sed`: this function
-  # sits inside #968's per-roster-entry validation, so a fork here is a fork
-  # per entry -- measured at ~332s to validate a 10,000-entry roster_seqs
-  # list, almost entirely this pair of pipelines run 10,000 times. Bash 3.2
-  # has no extglob to strip a run of zeros in one substitution, so this walks
-  # one character at a time; `-gt 1`, not `-gt 0`, is what keeps a lone "0"
-  # from being stripped down to an empty string.
+  # Strip leading zeros with a plain loop, not `printf | sed`: bash 3.2 has
+  # no extglob to strip a run of zeros in one substitution, so this walks one
+  # character at a time; `-gt 1`, not `-gt 0`, is what keeps a lone "0" from
+  # being stripped down to an empty string.
   while [ "${#left}" -gt 1 ] && [ "${left:0:1}" = 0 ]; do left="${left:1}"; done
   while [ "${#right}" -gt 1 ] && [ "${right:0:1}" = 0 ]; do right="${right:1}"; done
   [ -n "$left" ] || left=0
   [ -n "$right" ] || right=0
-  if [ "${#left}" -lt "${#right}" ] ||
-     { [ "${#left}" -eq "${#right}" ] && [[ "$left" < "$right" || "$left" = "$right" ]]; }; then
-    echo 1
-  else
-    echo 0
-  fi
+  [ "${#left}" -lt "${#right}" ] ||
+    { [ "${#left}" -eq "${#right}" ] && [[ "$left" < "$right" || "$left" = "$right" ]]; }
 }
 
 _sqlite_sync_sequence() {
   case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
-  [ "$(_sqlite_sync_decimal_le "$1" 9223372036854775807)" = 1 ]
+  _sqlite_sync_decimal_le "$1" 9223372036854775807
 }
 
 
@@ -454,8 +456,8 @@ storage_sync_resync() {
   reason=$(printf '%s\n' "$line" | jq -r '.reason')
   _sqlite_sync_sequence "$expected" && _sqlite_sync_sequence "$floor" &&
     _sqlite_sync_sequence "$current" || { _sqlite_sync_why; return 13; }
-  [ "$(_sqlite_sync_decimal_le "$expected" "$floor")" = 1 ] && [ "$expected" != "$floor" ] || { _sqlite_sync_why; return 13; }
-  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_decimal_le "$expected" "$floor" && [ "$expected" != "$floor" ] || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_decimal_le "$floor" "$current" || { _sqlite_sync_why; return 13; }
   gap_start=$((10#$expected + 1))
   _sqlite_sync_sequence "$gap_start" || { _sqlite_sync_why; return 13; }
   _sqlite_sync_schema "$team" || return $?
@@ -1481,8 +1483,8 @@ EOF
   floor=$(printf '%s\n' "$context" | jq -r '.min_available_seq')
   current=$(printf '%s\n' "$context" | jq -r '.current_seq')
   case "$floor:$current" in *[!0-9:]*) _sqlite_sync_why; return 13 ;; esac
-  [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
-    [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || { _sqlite_sync_why; return 13; }
+  _sqlite_sync_decimal_le "$floor" "$current" &&
+    _sqlite_sync_decimal_le "$current" 9223372036854775807 || { _sqlite_sync_why; return 13; }
   members=$(printf '%s\n' "$context" | jq -c '.members[]')
   count=0
   while IFS= read -r member; do
@@ -1756,8 +1758,8 @@ storage_sync_apply_read_state() {
         floor=$(printf '%s\n' "$line" | jq -r '.min_available_seq // empty')
         current=$(printf '%s\n' "$line" | jq -r '.current_seq // empty')
         case "$floor:$current" in *[!0-9:]*) rm -f "$sql_file"; _sqlite_sync_why; return 13 ;; esac
-        [ "$(_sqlite_sync_decimal_le "$floor" "$current")" = 1 ] &&
-          [ "$(_sqlite_sync_decimal_le "$current" 9223372036854775807)" = 1 ] || {
+        _sqlite_sync_decimal_le "$floor" "$current" &&
+          _sqlite_sync_decimal_le "$current" 9223372036854775807 || {
             rm -f "$sql_file"; _sqlite_sync_why; return 13;
           }
         ;;
@@ -1769,7 +1771,7 @@ storage_sync_apply_read_state() {
         printf '%s\n' "$member" | grep -Eq \
           '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' \
           || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
-        [ "$(_sqlite_sync_decimal_le "$seq" "$current")" = 1 ] || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
+        _sqlite_sync_decimal_le "$seq" "$current" || { rm -f "$sql_file"; _sqlite_sync_why; return 13; }
         printf "%s\n" "INSERT INTO sync_read_assert SELECT CASE WHEN EXISTS(
           SELECT 1 FROM sync_read_members WHERE local_team='$tl'
             AND server_instance_id='$server' AND remote_team_id='$remote'
