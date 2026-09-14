@@ -65,6 +65,13 @@ turn, check your agmsg inbox so you never miss a teammate's message.
 
 There is no background watcher in turn mode — this self-check is how delivery
 works. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 EOF
       ;;
     monitor)
@@ -119,6 +126,13 @@ it once:
 Launch it only once per session — if a watcher is already streaming, do not
 start a second one. Stopping is via the \`kill_command_or_subagent\` tool on the
 watcher's task id. Removing this file turns automatic delivery off.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 EOF
       ;;
     off)

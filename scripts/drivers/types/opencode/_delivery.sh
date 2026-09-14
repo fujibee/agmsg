@@ -43,6 +43,13 @@ agmsg_delivery_apply() {
 ## PostToolUse
 After each tool call, automatically check the agmsg inbox for unread messages.
 - Command: '$SKILL_DIR/scripts/check-inbox.sh' '$type' $project_q
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 EOF
       ;;
     monitor)
@@ -69,6 +76,13 @@ If the \`sentinel_monitor\` tool is not available, fall back to a turn-based
 self-check instead: after each tool call, run
 '$SKILL_DIR/scripts/check-inbox.sh' '$type' $project_q
 to check the agmsg inbox for unread messages.
+
+## Terminal/pane self-awareness
+Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
+fields. Never guess from environment variables or a grep/ps command; a driver
+that IS present can be wrongly reported absent that way. Per-driver detail:
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 EOF
       ;;
     off)

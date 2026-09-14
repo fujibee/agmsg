@@ -83,6 +83,8 @@ Four possible outputs:
 
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.** Treat the storage layout as internal: never construct a database path or invoke `sqlite3` directly. The scripts resolve the active store, including `AGMSG_STORAGE_PATH` overrides.
 
+**Terminal/pane self-awareness.** Asked about this session's own terminal, pane, or driver — or before using `arrange`, `peek`, or `poke` below — run `where.sh` (see the "where" argument below) first and answer from its `terminal=`/`capabilities=` fields. Never infer the driver from environment variables or a `grep`/`ps` guess: that is how a session under a real driver ends up reporting a false negative about its own placement, or claiming a capability or a whole driver does not exist when it does (#1171). Each driver's own operational detail lives in `~/.agents/skills/__SKILL_NAME__/scripts/drivers/terminals/<terminal>/SKILL.md`, named by `where.sh`'s own `terminal=` field — never guessed at from a remembered syntax.
+
 **If no arguments provided (DEFAULT action — always do this when the command is invoked without arguments):**
 1. **IMMEDIATELY** run inbox check for each TEAM: `~/.agents/skills/__SKILL_NAME__/scripts/inbox.sh $TEAM $AGENT`
 2. Do NOT ask the user what to do — just run the inbox check.

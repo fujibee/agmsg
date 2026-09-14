@@ -34,11 +34,29 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   grep -q '^resolved=true' <<<"$output"
   grep -q "placement=herdr:$TEST_SKILL_DIR/herdr.sock:w1:p4" <<<"$output"
+  # the resolved driver is also named on its own key, not only as the
+  # placement prefix a caller would otherwise have to parse out by hand.
+  grep -q 'terminal=herdr' <<<"$output"
   # container is best-effort context, never absent outright — its failure
   # (no herdr on PATH here) must say why, not just vanish.
   grep -q 'container=' <<<"$output"
   # #1082: same ceiling, read from herdr's own terminal.conf.
   grep -q 'capabilities=spawn despawn peek poke where arrange name' <<<"$output"
+}
+
+@test "where: tmux with a live \$TMUX_PANE resolves to that pane, terminal=tmux is explicit" {
+  export FAKEBIN="$TEST_SKILL_DIR/fakebin" ARGV_LOG="$TEST_SKILL_DIR/argv.log"
+  mkdir -p "$FAKEBIN"
+  : > "$ARGV_LOG"
+  agmsg_install_fake_tmux
+  export TMUX="/tmp/sock,1,0" TMUX_PANE="%4"
+  run bash "$SCRIPTS/where.sh"
+  [ "$status" -eq 0 ]
+  grep -q '^resolved=true' <<<"$output"
+  grep -q 'placement=tmux:/tmp/sock:%4' <<<"$output"
+  # same field, same reason as herdr above: named on its own key, not only
+  # as the placement prefix.
+  grep -q 'terminal=tmux' <<<"$output"
 }
 
 # --- the required RED control (#1171): present-but-unidentifiable must NOT
@@ -105,5 +123,6 @@ EOF
   run bash "$SCRIPTS/where.sh"
   [ "$status" -eq 0 ]
   grep -q 'placement=probe:probe-pane' <<<"$output"
+  grep -q 'terminal=probe' <<<"$output"
   grep -q 'capabilities=name frobnicate' <<<"$output"
 }
