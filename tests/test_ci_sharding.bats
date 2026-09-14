@@ -11,6 +11,31 @@ setup() {
   SHARD="$REPO_ROOT/.github/scripts/shard-tests.sh"
   TIMED_RUNNER="$REPO_ROOT/.github/scripts/run-bats-timed.sh"
   TIMING_SUMMARY="$REPO_ROOT/.github/scripts/summarize-bats-timings.sh"
+  SECONDS_TABLE="$REPO_ROOT/.github/scripts/bats-file-seconds.tsv"
+}
+
+# Sum of a shard's files' own real seconds from the checked-in table, the same
+# way shard-tests.sh itself weights them: matched by basename, average-of-table
+# for anything absent. Used by the balance assertions below instead of @test
+# count now that placement is driven by real time, not count (#1243).
+shard_seconds() {
+  local index="$1" total="$2" dir="${3:-$REPO_ROOT}" f base secs sum=0 avg
+  avg="$(table_avg_seconds)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    base="$(basename "$f")"
+    secs="$(awk -F'\t' -v b="$base" '$1 == b { print $2; exit }' "$SECONDS_TABLE")"
+    [ -n "$secs" ] || secs="$avg"
+    sum=$((sum + secs))
+  done < <(cd "$dir" && bash "$SHARD" "$index" "$total")
+  printf '%s' "$sum"
+}
+
+# The table's own average, computed the same way shard-tests.sh computes its
+# fallback -- kept as one value, not two, so this file's estimate of "what an
+# unmeasured file counts as" can never drift from the script's own.
+table_avg_seconds() {
+  awk -F'\t' '$0 !~ /^#/ && NF == 2 { sum += $2; n++ } END { if (n > 0) printf "%d", (sum / n) + 0.5; else print 1 }' "$SECONDS_TABLE"
 }
 
 @test "timing summary computes cross-run percentiles and per-run headroom" {
@@ -312,39 +337,85 @@ union_of_shards() {
   grep -q "bats (\${{ matrix.os }} \${{ matrix.shard }}/$total)" "$wf"
 }
 
-# The pin's whole point is that these files' @test count does not describe their
-# cost. Seeding the balancer with that count undoes the pin: the shard reads as
-# empty and gets refilled, which is how one shard reached 32 minutes against a
-# 30-minute cap while two others sat at 11 and 12 (macOS, run 33850939213).
-#
-# What this asserts is the reservation itself: a shard holding a pinned file
-# must end up carrying MEASURABLY FEWER tests than the average shard, because
-# the seed already spent that shard's budget. A test that only checked the
-# pinned files land on different shards -- which the suite above already does --
-# stays green through exactly this regression, since they still land apart when
-# seeded by count. That is the break this one is here to catch.
-@test "a pinned file's shard is reserved, not refilled (pin seed is not the count)" {
-  local script="$BATS_TEST_DIRNAME/../.github/scripts/shard-tests.sh"
-  local dir="$BATS_TEST_DIRNAME/.."
-  local total=4 n f count mean grand=0
+# #1243: count was never the right proxy for a shard's real cost (a
+# background-process-heavy file can carry a tiny @test count while dominating
+# its shard's wall clock), and pinning a shard by EXCLUDING it from the
+# weighted pass -- a stronger, count-agnostic guarantee tried right before
+# this -- traded that off for balance: on the merged (2550 @test) tree it
+# floored 3 of 5 shards at ~29 minutes of the 30-minute cap regardless of how
+# well those 3 were packed, because excluding 2 shards outright left only 3
+# to absorb the other 120 files' real cost. Weighting every file (pinned or
+# not) by its own real seconds and letting a pinned shard's remaining budget
+# fill normally, like the three tests below check, is what actually keeps
+# every shard close to the mean.
 
-  for f in "$BATS_TEST_DIRNAME"/*.bats; do
-    grand=$((grand + $(grep -c '^[[:space:]]*@test' "$f" || true)))
+@test "shard totals stay balanced by real measured seconds, not count (#1243)" {
+  # Loose ratio bound (1.15x): measured against the real table this comes out
+  # within 1.001x at every total tried (2, 3, 4, 5, 8) -- 1.15 is deliberately
+  # not tight to that number, so ordinary tree growth does not need this test
+  # touched, only a genuinely new imbalance would trip it.
+  local total i s mean sum ratio
+  for total in 3 5 8; do
+    sum=0
+    local -a vals=()
+    for ((i = 1; i <= total; i++)); do
+      s="$(shard_seconds "$i" "$total")"
+      vals+=("$s")
+      sum=$((sum + s))
+    done
+    mean="$sum"
+    for s in "${vals[@]}"; do
+      # ratio = s / (sum/total), compared as s*total vs sum*1.15 to stay in
+      # integer arithmetic (bash has no floating point).
+      if [ $((s * total * 100)) -gt $((sum * 115)) ]; then
+        echo "shard total $total: shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
+        return 1
+      fi
+    done
   done
-  mean=$((grand / total))
-  [ "$mean" -gt 0 ]
+}
 
-  # Shard 1 and shard 2 hold the two pinned files (slot 0 and slot 1).
-  for n in 1 2; do
-    count=0
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      count=$((count + $(grep -c '^[[:space:]]*@test' "$dir/$f" || true)))
-    done < <(cd "$dir" && bash "$script" "$n" "$total")
-
-    # Strictly below the average, with margin: seeded by count these shards come
-    # out at roughly the mean, so a bare "<= mean" would be a coin flip rather
-    # than a check. Two thirds is well clear of both states.
-    [ "$count" -lt $((mean * 2 / 3)) ]
+@test "a pinned file's shard does not stand out from the others (#1243)" {
+  # The specific regression #1243 was named for: a shard holding one of the
+  # two pinned files ends up the outlier, not merely "some shard or other."
+  # Checked at the real CI shard total, where pin1/pin2 sit in slots 1 and 2.
+  local total=5 mean sum=0 i s pin1_s pin2_s
+  for ((i = 1; i <= total; i++)); do
+    s="$(shard_seconds "$i" "$total")"
+    sum=$((sum + s))
+    [ "$i" -eq 1 ] && pin1_s="$s"
+    [ "$i" -eq 2 ] && pin2_s="$s"
   done
+  for s in "$pin1_s" "$pin2_s"; do
+    [ $((s * total * 100)) -le $((sum * 115)) ] || {
+      echo "a pinned file's shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
+      return 1
+    }
+  done
+}
+
+@test "a file missing from the seconds table is estimated at the average, not dropped (#1243)" {
+  # Reproduces the shape #1243's fallback exists for: a brand-new test file
+  # has no row in bats-file-seconds.tsv yet. It must still be assigned to
+  # exactly one shard (coverage never depends on the table), and its weight
+  # must come out as the table's average, not zero -- a zero weight would
+  # make shard-tests.sh under-count that shard's real load the same way
+  # count-based weighting once did for the two files #847 pinned.
+  local dir="$BATS_TEST_TMPDIR/tests-newfile"
+  mkdir -p "$dir"
+  cp "$REPO_ROOT"/tests/*.bats "$dir"/
+  printf '#!/usr/bin/env bats\n\n@test "placeholder" {\n  true\n}\n' > "$dir/test_zzz_unmeasured.bats"
+
+  local total=5 i found="" shard_files
+  for ((i = 1; i <= total; i++)); do
+    shard_files="$(cd "$REPO_ROOT" && bash "$SHARD" "$i" "$total" "$dir")"
+    if grep -qF "test_zzz_unmeasured.bats" <<<"$shard_files"; then
+      found="$i"
+    fi
+  done
+  [ -n "$found" ]
+
+  run env SHARD_TESTS_SECONDS_TABLE="$SECONDS_TABLE" bash "$SHARD" "$found" "$total" "$dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_zzz_unmeasured.bats"* ]]
 }

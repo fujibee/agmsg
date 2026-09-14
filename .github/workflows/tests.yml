@@ -112,13 +112,16 @@ env:
   # other five of its own run, inflating the wall clock past what a lighter
   # shard buys.
   #
-  # shard-tests.sh's pin_seed is no longer an average share -- #847 already
-  # replaced it with a per-file cost fit (round(measured wall / avg s-per-test),
-  # from #1159's real timings) once the average-share seed was measured to
-  # over-reserve the pinned shards as the suite grew. That fit is calibrated
-  # against a specific tree size and needs re-measuring whenever the suite's
-  # size moves materially (tracked the same way #1107 itself was: a constant
-  # sized against an older system stays right only as long as the system does).
+  # shard-tests.sh weights every file (pinned or not) by its own real measured
+  # macOS seconds from .github/scripts/bats-file-seconds.tsv (#1243) rather
+  # than @test count or a count-equivalent fit -- count was never more than a
+  # loose proxy for a file's real cost, and two prior fits against it (#847,
+  # then a #1243 predecessor that excluded pinned shards outright) each
+  # eventually drifted or traded balance away as the suite grew. Re-measure
+  # that table (its own header says how) when the suite's shape has moved
+  # enough that tests/test_ci_sharding.bats's balance-ratio assertion goes
+  # red, the same way #1107 itself was tracked: a constant sized against an
+  # older system stays right only as long as the system does.
   SHARD_TOTAL: 5
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
