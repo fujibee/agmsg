@@ -713,8 +713,14 @@ write_windows_spelling_fixtures() {
   chmod +x "$fake_node"
   fake_bin="$(write_fake_node_ps_fixture "$fake_node")"
 
+  # The fake node above never emits a readiness marker, so this pays the full
+  # production readiness-wait ceiling (minutes, not seconds -- #779) unless
+  # shortened; the assertions below are about what happens once it gives up,
+  # not about how long giving up takes, and `run` blocks synchronously either
+  # way, so there is no timing window elsewhere in this test to protect.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
   [[ "$output" == *"did not become ready"* ]]
@@ -769,8 +775,11 @@ write_unownable_ps_fixture() {
   chmod +x "$fake_node"
   fake_bin="$(write_unownable_ps_fixture)"
 
+  # Same reasoning as the previous test: the unownable-ps fixture also never
+  # lets this reach readiness, so it pays the full ceiling unless shortened.
   run env PATH="$fake_bin:$PATH" AGMSG_NODE="$fake_node" \
     AGMSG_TEST_CHILD_PID_FILE="$child_pid_file" \
+    AGMSG_TEST_SYNC_START_READY_CEILING=30 \
     bash "$SCRIPTS/remote.sh" sync start testteam
   [ "$status" -ne 0 ]
 

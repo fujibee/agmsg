@@ -2803,6 +2803,12 @@ cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
     logfile log_offset=1
+  # Test-only override of the readiness-wait ceiling below, default unchanged
+  # (1600). Exists so a test that drives the engine into never becoming
+  # ready does not have to spend this command's real production wait
+  # (measured ~1min+: the ceiling is counted in iterations, not time (#779),
+  # and each turn spawns several processes) to prove the timeout path.
+  local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
   agmsg_lock_acquire "$TEAMS_DIR/$team" || exit 1
@@ -2878,7 +2884,7 @@ cmd_sync_start() {
   # that is late or missing for ANY reason costs this caller its own wait and
   # not the rest of the machine.
   agmsg_lock_release
-  while [ "$i" -lt 1600 ]; do
+  while [ "$i" -lt "$ready_ceiling" ]; do
     IFS=$'\t' read -r engine_state ready_pid < <(_remote_sync_engine_status "$team")
     if [ "$engine_state" = "running" ] && [ "$ready_pid" = "$started_pid" ] &&
        tail -c "+$log_offset" "$logfile" 2>/dev/null |
