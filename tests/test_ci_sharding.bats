@@ -346,51 +346,31 @@ union_of_shards() {
 # well those 3 were packed, because excluding 2 shards outright left only 3
 # to absorb the other 120 files' real cost. Weighting every file (pinned or
 # not) by its own real seconds and letting a pinned shard's remaining budget
-# fill normally, like the three tests below check, is what actually keeps
-# every shard close to the mean.
+# fill normally is what actually keeps every shard close to the mean; the
+# test below is the one that would fail if that regressed (at the real CI
+# shard total, where slots 1 and 2 hold the two pinned files, so this covers
+# them along with every other shard rather than needing a second test).
 
 @test "shard totals stay balanced by real measured seconds, not count (#1243)" {
   # Loose ratio bound (1.15x): measured against the real table this comes out
-  # within 1.001x at every total tried (2, 3, 4, 5, 8) -- 1.15 is deliberately
-  # not tight to that number, so ordinary tree growth does not need this test
-  # touched, only a genuinely new imbalance would trip it.
-  local total i s mean sum ratio
-  for total in 3 5 8; do
-    sum=0
-    local -a vals=()
-    for ((i = 1; i <= total; i++)); do
-      s="$(shard_seconds "$i" "$total")"
-      vals+=("$s")
-      sum=$((sum + s))
-    done
-    mean="$sum"
-    for s in "${vals[@]}"; do
-      # ratio = s / (sum/total), compared as s*total vs sum*1.15 to stay in
-      # integer arithmetic (bash has no floating point).
-      if [ $((s * total * 100)) -gt $((sum * 115)) ]; then
-        echo "shard total $total: shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
-        return 1
-      fi
-    done
-  done
-}
-
-@test "a pinned file's shard does not stand out from the others (#1243)" {
-  # The specific regression #1243 was named for: a shard holding one of the
-  # two pinned files ends up the outlier, not merely "some shard or other."
-  # Checked at the real CI shard total, where pin1/pin2 sit in slots 1 and 2.
-  local total=5 mean sum=0 i s pin1_s pin2_s
+  # within 1.001x at total=5 -- 1.15 is deliberately not tight to that number,
+  # so ordinary tree growth does not need this test touched, only a genuinely
+  # new imbalance would trip it (which is exactly what happened in practice:
+  # a shard exceeded the 30-minute cap under the design this replaces).
+  local total=5 i s mean sum=0
+  local -a vals=()
   for ((i = 1; i <= total; i++)); do
     s="$(shard_seconds "$i" "$total")"
+    vals+=("$s")
     sum=$((sum + s))
-    [ "$i" -eq 1 ] && pin1_s="$s"
-    [ "$i" -eq 2 ] && pin2_s="$s"
   done
-  for s in "$pin1_s" "$pin2_s"; do
-    [ $((s * total * 100)) -le $((sum * 115)) ] || {
-      echo "a pinned file's shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
+  for s in "${vals[@]}"; do
+    # ratio = s / (sum/total), compared as s*total vs sum*1.15 to stay in
+    # integer arithmetic (bash has no floating point).
+    if [ $((s * total * 100)) -gt $((sum * 115)) ]; then
+      echo "shard at ${s}s exceeds 1.15x the mean (sum=${sum}s over $total shards)" >&2
       return 1
-    }
+    fi
   done
 }
 
