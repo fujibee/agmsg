@@ -87,9 +87,10 @@ _agmsg_role_session_path_into() {
   return 0
 }
 
-# Read the two fields the codex bridge launcher needs in ONE pass, into the
-# caller's shell: AGMSG_ROLE_SESSION_UUID and AGMSG_ROLE_SESSION_PROJECT. Both
-# are empty when the record or the field is absent. This exists so the poll path
+# Read the fields the codex bridge launcher needs in ONE pass, into the caller's
+# shell: AGMSG_ROLE_SESSION_UUID, AGMSG_ROLE_SESSION_PROJECT, and
+# AGMSG_ROLE_SESSION_OWNER. All are empty when the record or field is absent.
+# This exists so the poll path
 # can resolve a role without a single command substitution -- the getters below
 # are fine one-shot, but each one costs a subshell and its own read of the same
 # file, and the launcher wants both fields for the same pair several times a
@@ -98,6 +99,7 @@ agmsg_role_session_load() {
   local team="$1" agent="$2" line path have_uuid=0 have_project=0
   AGMSG_ROLE_SESSION_UUID=""
   AGMSG_ROLE_SESSION_PROJECT=""
+  AGMSG_ROLE_SESSION_OWNER=""
   _agmsg_role_session_path_into "$team" "$agent"
   path="$_AGMSG_ROLE_SESSION_PATH"
   [ -f "$path" ] || return 0
@@ -108,6 +110,9 @@ agmsg_role_session_load() {
         ;;
       project=*)
         [ "$have_project" = "1" ] || { AGMSG_ROLE_SESSION_PROJECT="${line#project=}"; have_project=1; }
+        ;;
+      owner=*)
+        [ -n "$AGMSG_ROLE_SESSION_OWNER" ] || AGMSG_ROLE_SESSION_OWNER="${line#owner=}"
         ;;
     esac
   done < "$path" 2>/dev/null
@@ -131,9 +136,10 @@ agmsg_role_session_load() {
 #                          (PR-D) needs it to rebuild the role's boot command
 #                          from the type manifest. Empty when unknown.
 #   project=<project>      the resolved project root
+#   owner=<instance_id>    the actas owner token written by actas-claim
 #   updated_at=<iso8601>   best-effort timestamp (empty if date(1) unavailable)
 agmsg_role_session_record() {
-  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}"
+  local team="$1" agent="$2" bare_sid="$3" project="${4:-}" type="${5:-}" owner="${6:-}"
   [ -n "$team" ] && [ -n "$agent" ] && [ -n "$bare_sid" ] || return 0
   local path dir tmp ts named_ref="" named_epoch="" named_at=""
   _agmsg_role_session_path_into "$team" "$agent"
@@ -156,6 +162,7 @@ agmsg_role_session_record() {
     printf 'agent=%s\n' "$agent"
     printf 'type=%s\n' "$type"
     printf 'project=%s\n' "$project"
+    [ -z "$owner" ] || printf 'owner=%s\n' "$owner"
     printf 'updated_at=%s\n' "$ts"
     [ -z "$named_ref" ] || printf 'named_ref=%s\n' "$named_ref"
     [ -z "$named_ref" ] || printf 'named_epoch=%s\n' "$named_epoch"

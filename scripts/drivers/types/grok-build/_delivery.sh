@@ -56,7 +56,7 @@ agmsg_delivery_apply() {
 # agmsg — check your inbox each turn
 
 You belong to one or more agmsg teams. Before you respond to the user on each
-turn, check your agmsg inbox so you never miss a teammate's message.
+turn, check your agmsg inbox so you never miss a message from a teammate.
 
 1. Identify yourself (once per session is enough):
    \`$SKILL_DIR/scripts/whoami.sh '$project' $type\`
@@ -79,7 +79,7 @@ that IS present can be wrongly reported absent that way. Per-driver detail:
 '$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
-A teammate's placement and status: '$SKILL_DIR/scripts/team.sh' <team> — never a
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
 stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
 / 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
 says whether it worked and, if not, why.
@@ -146,7 +146,7 @@ that IS present can be wrongly reported absent that way. Per-driver detail:
 '$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
-A teammate's placement and status: '$SKILL_DIR/scripts/team.sh' <team> — never a
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
 stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
 / 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
 says whether it worked and, if not, why.

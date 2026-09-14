@@ -78,9 +78,26 @@ _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
 # only the member_id check reddens). Kept for clarity at each step rather than
 # relying on a guard three calls away, same as #1152's measured-redundant
 # empty-comm checks in agent-detect.sh.
+# rc 0: printed the resolved key.
+# rc 1: NO id for this team/agent -- decided (#1023's own scope cut for a
+#       team with no team_id, or a member the roster never minted an id for).
+#       Safe for a caller to fall back to the legacy name-keyed path.
+# rc 2: UNDETERMINED -- could not even try to resolve one, so this says
+#       NOTHING about whether an id exists. An unset SKILL_DIR is the only
+#       cause today. This is NOT safe to treat as "no id": an id-keyed lock
+#       could already exist on disk, and a caller that falls back anyway
+#       would create a second lock at the legacy path for the same member --
+#       exactly the double-lock _agmsg_id_or_legacy_path's own "MAIN defense"
+#       exists to prevent, bypassed here instead of caught there (#1241
+#       review). Every caller of this function must tell 1 and 2 apart.
 _agmsg_id_key_for() {   # <team> <agent>
   local team="${1-}" agent="${2-}" team_dir config team_id member_id
   [ -n "$team" ] && [ -n "$agent" ] || return 1
+  # Without this, the two `source` calls below run unguarded and errexit
+  # takes down the whole caller (#1234-class hazard, measured on this file
+  # after #1235 added it) -- rc 2, not 1: this says we could not tell, not
+  # that there is no id.
+  [ -n "${SKILL_DIR:-}" ] || return 2
   team_dir="$SKILL_DIR/teams/$team"
   config="$team_dir/config.json"
   [ -f "$config" ] || return 1
@@ -152,18 +169,59 @@ _actas_lock_encode() {
   '
 }
 
+# Bridge _agmsg_id_key_for's 3-way rc (0 resolved / 1 no id / 2 undetermined)
+# into what a path function does next, in ONE place so the distinction is not
+# re-decided three times. Prints the key and returns 0 when one resolved.
+# Returns 1 with nothing printed when there is genuinely no id -- the caller
+# must use <legacy> outright, its existing contract. Returns 2, with a
+# reason on stderr, when resolution could not even be attempted -- the
+# caller MUST NOT fall back (an id-keyed lock could already exist on disk;
+# see the rc-2 note on _agmsg_id_key_for above) (#1241 review).
+_agmsg_id_key_or_legacy() {   # <team> <agent>
+  local key krc=0
+  key="$(_agmsg_id_key_for "$1" "$2")" || krc=$?
+  case "$krc" in
+    0) printf '%s\n' "$key"; return 0 ;;
+    1) return 1 ;;
+    *) printf 'agmsg: ERROR: cannot tell whether %s/%s has an id-keyed lock (SKILL_DIR unresolved) -- refusing rather than risk missing one and creating a second lock at the legacy path\n' "$1" "$2" >&2
+       return 2 ;;
+  esac
+}
+
+# _agmsg_id_key_or_legacy's rc-2 refusal (above) is one level too deep to be
+# the FIRST thing any of the three path functions below does: each builds
+# <legacy> before calling it, and that build calls _actas_lock_dir, which
+# reads SKILL_DIR bare. Under `set -u` -- every real entry point's shell --
+# an unset SKILL_DIR aborts right there with "unbound variable", never
+# reaching the rc-2 refusal at all (#1241 review, round 2: the first pass at
+# this fix protected the resolver but not its own callers' earlier reads).
+# This is the guard that actually runs first, called before any of the
+# three touches SKILL_DIR in any way.
+_agmsg_lock_paths_require_skill_dir() {   # <caller-name, for the message>
+  [ -n "${SKILL_DIR:-}" ] && return 0
+  printf 'agmsg: ERROR: %s: SKILL_DIR is not set -- refusing rather than guess a path\n' "$1" >&2
+  return 1
+}
+
 # Compute the lock file path for (team, agent). #1023: id-keyed when both ids
 # resolve and a file already exists at either candidate path, or nothing does
 # yet; the legacy name-keyed path otherwise -- see _agmsg_id_key_for above.
-# Fails (empty stdout, rc 1) if BOTH candidates exist for the pair -- see
-# _agmsg_id_or_legacy_path. Every caller must check this.
+# Fails (empty stdout, rc 1) if BOTH candidates exist for the pair, or if id
+# resolution itself was undetermined rather than genuinely absent -- see
+# _agmsg_id_or_legacy_path and _agmsg_id_key_or_legacy. Every caller must
+# check this.
 actas_lock_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir actas_lock_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a")"
-  local key
-  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
-  _agmsg_id_or_legacy_path "$(printf '%s/actas.%s.session' "$(_actas_lock_dir)" "$key")" "$legacy"
+  local key krc=0
+  key="$(_agmsg_id_key_or_legacy "$team" "$agent")" || krc=$?
+  case "$krc" in
+    0) _agmsg_id_or_legacy_path "$(printf '%s/actas.%s.session' "$(_actas_lock_dir)" "$key")" "$legacy" ;;
+    1) printf '%s\n' "$legacy" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Readiness sentinel path for (team, agent). watch.sh creates this when an
@@ -174,11 +232,16 @@ actas_lock_path() {
 # both scripts agree without env plumbing. See #108.
 agmsg_ready_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir agmsg_ready_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
-  local key
-  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
-  _agmsg_id_or_legacy_path "$(printf '%s/ready.%s' "$(_actas_lock_dir)" "$key")" "$legacy"
+  local key krc=0
+  key="$(_agmsg_id_key_or_legacy "$team" "$agent")" || krc=$?
+  case "$krc" in
+    0) _agmsg_id_or_legacy_path "$(printf '%s/ready.%s' "$(_actas_lock_dir)" "$key")" "$legacy" ;;
+    1) printf '%s\n' "$legacy" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Placement record path for a spawned (team, agent). `spawn` writes the
@@ -188,11 +251,16 @@ agmsg_ready_path() {
 # to a ctrl:despawn. Same encoding as the lock path. See #109.
 agmsg_spawn_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir agmsg_spawn_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/spawn.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
-  local key
-  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
-  _agmsg_id_or_legacy_path "$(printf '%s/spawn.%s' "$(_actas_lock_dir)" "$key")" "$legacy"
+  local key krc=0
+  key="$(_agmsg_id_key_or_legacy "$team" "$agent")" || krc=$?
+  case "$krc" in
+    0) _agmsg_id_or_legacy_path "$(printf '%s/spawn.%s' "$(_actas_lock_dir)" "$key")" "$legacy" ;;
+    1) printf '%s\n' "$legacy" ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
