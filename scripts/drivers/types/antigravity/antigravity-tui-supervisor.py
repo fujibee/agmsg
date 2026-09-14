@@ -53,7 +53,7 @@ def proc_start(pid):
     """
     if sys.platform == 'darwin':
         try:
-            result=subprocess.run([sys.executable,str(ROOT/'scripts/lib/mac-process-info.py'),str(pid)],capture_output=True,text=True)
+            result=subprocess.run([sys.executable,str(ROOT/'scripts/drivers/types/antigravity/mac-process-info.py'),str(pid)],capture_output=True,text=True)
         except OSError as exc:
             raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc: {exc.strerror})') from exc
         if result.returncode == 1:

@@ -2,11 +2,11 @@
 """Emit one atomic process identity snapshot on macOS.
 
 libproc's BSD process record includes the parent pid, state, and a
-microsecond-resolution start timestamp.  Keeping these values in one kernel
+microsecond-resolution start timestamp. Keeping these values in one kernel
 snapshot avoids the torn identity that separate ps calls can produce.
 """
 import ctypes
-import os
+import errno
 import struct
 import sys
 
@@ -17,14 +17,14 @@ STATE_ZOMBIE = 5
 
 def main(pid):
     try:
-        libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+        libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
         libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
         libproc.proc_pidinfo.restype = ctypes.c_int
         buf = ctypes.create_string_buffer(PROC_BSDINFO_SIZE)
         size = libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, PROC_BSDINFO_SIZE)
     except OSError:
         return 2
-    if size == 0:
+    if size == 0 or (size < 0 and ctypes.get_errno() == errno.ESRCH):
         return 1
     if size < PROC_BSDINFO_SIZE:
         return 2

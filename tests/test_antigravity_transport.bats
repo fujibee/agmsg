@@ -151,6 +151,37 @@ PY
   refute grep -q "proc_start(int(" "$src"
 }
 
+@test "supervisor: a reused pid with a different start token is not the same process" {
+  run python3 - "$SCRIPTS/drivers/types/antigravity/antigravity-tui-supervisor.py" <<'PY'
+import importlib.util, os, sys
+spec=importlib.util.spec_from_file_location('sup', sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+pid=os.getpid(); start=m.proc_start(pid)
+assert m.process_still(pid, start + '-reused') is False
+print('ok')
+PY
+  [ "$status" -eq 0 ]
+  grep -q '^ok$' <<<"$output"
+}
+
+@test "macOS process-info helper agrees with the system start time" {
+  [ "$(uname -s)" = Darwin ] || skip "macOS libproc layout check"
+  run python3 - "$SCRIPTS/drivers/types/antigravity/mac-process-info.py" <<'PY'
+import datetime, subprocess, sys, time
+pid=str(__import__('os').getpid())
+helper=subprocess.run([sys.executable, sys.argv[1], pid], check=True, text=True, capture_output=True).stdout.strip()
+fields=helper.split('\t')
+assert len(fields) == 3 and fields[2].startswith('darwin:'), helper
+helper_sec=int(fields[2].split(':')[1])
+ps=subprocess.check_output(['/bin/ps','-p',pid,'-o','lstart='], text=True).strip()
+ps_sec=int(time.mktime(datetime.datetime.strptime(ps, '%a %b %d %H:%M:%S %Y').timetuple()))
+assert helper_sec == ps_sec, (helper, ps, helper_sec, ps_sec)
+print('ok')
+PY
+  [ "$status" -eq 0 ]
+  grep -q '^ok$' <<<"$output"
+}
+
 @test "the mjs read-guard: turning delivery OFF still works on a non-Linux host" {
   # This is the regression the first version of the guard caused, so it is pinned
   # first. `delivery.sh set off antigravity` runs antigravity-mode.mjs stop, and
@@ -174,7 +205,7 @@ PY
   # the loop skipped the reservation entirely -- the test passed through without
   # ever reaching the code it names. (Measured.)
   printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
-  printf '{"pid":1,"start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
+  printf '{"pid":%s,"start":"x","state":"%s","kind":"tui-pty"}\n' "$$" "$state" \
     > "$run_dir/antigravity-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
@@ -188,4 +219,17 @@ PY
   run node "$SCRIPTS/lib/bridge-read-guard.mjs" check "$run_dir/antigravity-reservation.fixture__worker.json" 1 fixture worker
   [ "$status" -eq 13 ]
   refute grep -q 'unsupported' <<<"$output"
+}
+
+@test "the mjs read-guard: an unreadable process identity refuses with a reason" {
+  local run_dir="$TEST_SKILL_DIR/run"
+  local state="$run_dir/antigravity-unreadable.state.json"
+  printf '{"project":"%s","team":"fixture","role":"worker"}\n' "$PROJ" > "$state"
+  printf '{"pid":-1,"start":"x","state":"%s","kind":"tui-pty"}\n' "$state" \
+    > "$run_dir/antigravity-reservation.unreadable.json"
+
+  run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
+  [ "$status" -ne 0 ]
+  grep -q 'process identity is unreadable' <<<"$output"
+  refute grep -q '停止/要確認' <<<"$output"
 }

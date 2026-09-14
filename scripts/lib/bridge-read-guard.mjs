@@ -18,7 +18,7 @@ function _requirePosix(what) {
     throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
   }
 }
-const darwinInfo=new URL('./mac-process-info.py',import.meta.url).pathname;
+const darwinInfo=new URL('../drivers/types/antigravity/mac-process-info.py',import.meta.url).pathname;
 function _darwinProc(pid) {
   const out=spawnSync('python3',[darwinInfo,String(pid)],{encoding:'utf8'});
   if(out.status===1) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
