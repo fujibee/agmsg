@@ -10,6 +10,11 @@
 # provided by the caller (delivery.sh sources this lib and the type plug).
 rulefile_apply() {
   local type="$1" project="$2" mode="$3"
+  # Refuse before any write: an empty SKILL_DIR would render broken guidance
+  # paths into the rule file, and the rm -f below removes the existing rule
+  # file first -- an unreadable value must never be treated as "nothing to
+  # preserve" (#1234 review).
+  [ -n "${SKILL_DIR:-}" ] || { echo "rulefile_apply ($type): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
   local rule_file
   rule_file="$(resolve_hooks_file "$type" "$project")"
 
