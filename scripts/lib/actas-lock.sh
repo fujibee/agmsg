@@ -188,6 +188,21 @@ _agmsg_id_key_or_legacy() {   # <team> <agent>
   esac
 }
 
+# _agmsg_id_key_or_legacy's rc-2 refusal (above) is one level too deep to be
+# the FIRST thing any of the three path functions below does: each builds
+# <legacy> before calling it, and that build calls _actas_lock_dir, which
+# reads SKILL_DIR bare. Under `set -u` -- every real entry point's shell --
+# an unset SKILL_DIR aborts right there with "unbound variable", never
+# reaching the rc-2 refusal at all (#1241 review, round 2: the first pass at
+# this fix protected the resolver but not its own callers' earlier reads).
+# This is the guard that actually runs first, called before any of the
+# three touches SKILL_DIR in any way.
+_agmsg_lock_paths_require_skill_dir() {   # <caller-name, for the message>
+  [ -n "${SKILL_DIR:-}" ] && return 0
+  printf 'agmsg: ERROR: %s: SKILL_DIR is not set -- refusing rather than guess a path\n' "$1" >&2
+  return 1
+}
+
 # Compute the lock file path for (team, agent). #1023: id-keyed when both ids
 # resolve and a file already exists at either candidate path, or nothing does
 # yet; the legacy name-keyed path otherwise -- see _agmsg_id_key_for above.
@@ -197,6 +212,7 @@ _agmsg_id_key_or_legacy() {   # <team> <agent>
 # check this.
 actas_lock_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir actas_lock_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a")"
   local key krc=0
@@ -216,6 +232,7 @@ actas_lock_path() {
 # both scripts agree without env plumbing. See #108.
 agmsg_ready_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir agmsg_ready_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
   local key krc=0
@@ -234,6 +251,7 @@ agmsg_ready_path() {
 # to a ctrl:despawn. Same encoding as the lock path. See #109.
 agmsg_spawn_path() {
   local team="$1" agent="$2"
+  _agmsg_lock_paths_require_skill_dir agmsg_spawn_path || return 1
   local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
   legacy="$(printf '%s/spawn.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
   local key krc=0

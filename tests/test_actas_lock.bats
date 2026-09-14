@@ -832,8 +832,11 @@ _owner_only() {   # <team> <agent>
   '
   [ "$status" -ne 0 ]
   # Diagnostic on stderr is expected (`run` merges it into $output); what
-  # must NOT be there is a path -- the old (rc-1) shape's stdout.
-  printf '%s' "$output" | grep -q 'SKILL_DIR unresolved'
+  # must NOT be there is a path -- the old (rc-1) shape's stdout. The
+  # specific wording comes from whichever guard fires first (round 2 of
+  # this review moved a second, earlier one in front of this one -- see the
+  # "under set -u" cases below), so this only pins that SKILL_DIR is named.
+  printf '%s' "$output" | grep -q 'SKILL_DIR'
   refute grep -q "$(_actas_lock_dir)/actas" <<< "$output"
   # The existing id-keyed lock is untouched, and no legacy-path lock exists
   # (nothing was created alongside it, and nothing was suggested to a caller
@@ -862,4 +865,56 @@ _owner_only() {   # <team> <agent>
   run actas_lock_path noconfig alice
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '%s/actas.noconfig__alice.session' "$(_actas_lock_dir)")" ]
+}
+
+# --- #1241 review, round 2: the round-1 fix protected _agmsg_id_key_for's
+# own rc, but each path function below still builds <legacy> -- which calls
+# _actas_lock_dir, an unguarded bare SKILL_DIR read -- BEFORE ever calling
+# into that protected resolver. The earlier controls above ran their
+# subshell without `set -u`, the same option every real entry point's shell
+# actually carries, so they could not see whether that earlier read mattered.
+# These reproduce the real entry-point shell directly, for all three path
+# functions, each with its own id-keyed record already on disk.
+
+_run_lock_path_fn_under_set_u() {   # <fn-name> <team> <agent>
+  env -u SKILL_DIR bash -c '
+    export SKILL_DIR="'"$TEST_SKILL_DIR"'"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    unset SKILL_DIR
+    set -euo pipefail
+    '"$1"' "'"$2"'" "'"$3"'"
+  '
+}
+
+@test "actas_lock_path under set -u: SKILL_DIR unset with an existing id-keyed lock refuses, never returns the legacy path (#1241 review round 2)" {
+  _fixture_known_ids skdropU "tid-SKU" bob "mid-BU"
+  local idlock; idlock="$(printf '%s/actas.tid-SKU__mid-BU.session' "$(_actas_lock_dir)")"
+  printf 'existing-owner\n' > "$idlock"
+  run _run_lock_path_fn_under_set_u actas_lock_path skdropU bob
+  [ "$status" -ne 0 ]
+  refute grep -q "$(_actas_lock_dir)/actas" <<< "$output"
+  [ -f "$idlock" ]
+  [ "$(cat "$idlock")" = "existing-owner" ]
+}
+
+@test "agmsg_ready_path under set -u: SKILL_DIR unset with an existing id-keyed ready file refuses, never returns the legacy path (#1241 review round 2)" {
+  _fixture_known_ids readyU "tid-RU" bob "mid-RB"
+  local idready; idready="$(printf '%s/ready.tid-RU__mid-RB' "$(_actas_lock_dir)")"
+  : > "$idready"
+  run _run_lock_path_fn_under_set_u agmsg_ready_path readyU bob
+  [ "$status" -ne 0 ]
+  refute grep -q "$(_actas_lock_dir)/ready" <<< "$output"
+  [ -f "$idready" ]
+}
+
+@test "agmsg_spawn_path under set -u: SKILL_DIR unset with an existing id-keyed spawn record refuses, never returns the legacy path (#1241 review round 2)" {
+  _fixture_known_ids spawnU "tid-SPU" bob "mid-SPB"
+  local idspawn; idspawn="$(printf '%s/spawn.tid-SPU__mid-SPB' "$(_actas_lock_dir)")"
+  printf 'placement\n' > "$idspawn"
+  run _run_lock_path_fn_under_set_u agmsg_spawn_path spawnU bob
+  [ "$status" -ne 0 ]
+  refute grep -q "$(_actas_lock_dir)/spawn" <<< "$output"
+  [ -f "$idspawn" ]
+  [ "$(cat "$idspawn")" = "placement" ]
 }
