@@ -60,11 +60,33 @@ teardown() {
 # The current driver owns read state; a consumed control row must not appear in
 # the recipient's unread view, regardless of whether the backend has legacy
 # `messages.read_at` storage.
-_is_unread_for_alice() {
-  ( # shellcheck disable=SC1090
+#
+# Prints exactly one of "unread" / "read" / "query_failed", and the load and
+# the list call are each checked for their OWN exit status before the
+# substring test ever runs (#1221 review). The earlier shape here was a bare
+# pipeline ending in `grep -Fq`: if `agmsg_storage_load` or
+# `storage_list_unread` failed outright, the pipeline still fed grep empty
+# input, and empty input not containing the needle is indistinguishable from
+# a row that is genuinely read. A broken query and a read row must not answer
+# the same -- one is "keep going, all clear", the other is "something here is
+# broken and nobody can tell what state the row is actually in".
+_alice_unread_state_for() {   # <body-substring>
+  local needle="$1" out rc=0
+  out="$(
+    # shellcheck disable=SC1090
     source "$SCRIPTS/lib/storage.sh"
-    agmsg_storage_load
-    storage_list_unread team alice | grep -Fq "$1" )
+    agmsg_storage_load || exit 2
+    storage_list_unread team alice
+  )" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'query_failed\n'
+    return 0
+  fi
+  if grep -Fq -- "$needle" <<<"$out"; then
+    printf 'unread\n'
+  else
+    printf 'read\n'
+  fi
 }
 
 _control_row_exists_for_alice() {
@@ -81,16 +103,25 @@ _control_row_exists_for_alice() {
 # facade rather than the lock file -- under load the two can still be
 # observably apart for a few polls after the lock is already gone. Bounded at
 # <budget> seconds; a row that genuinely never gets marked read still spends
-# the whole budget and returns 1, so this is the assertion, not a substitute
-# for one -- a longer fixed sleep would only move the flake, not close it.
+# the whole budget and fails, so this is the assertion, not a substitute for
+# one -- a longer fixed sleep would only move the flake, not close it. A
+# storage query FAILURE fails immediately, well under the budget, rather than
+# being read as "0 unread" (#1221 review).
 _wait_until_read_for_alice() {   # <body-substring> <budget-seconds>
-  local needle="$1" budget="${2:-5}" waited_ms=0
-  while _is_unread_for_alice "$needle"; do
+  local needle="$1" budget="${2:-5}" waited_ms=0 state
+  while :; do
+    state="$(_alice_unread_state_for "$needle")"
+    case "$state" in
+      read) return 0 ;;
+      unread) : ;;
+      *)
+        echo "_wait_until_read_for_alice: storage query failed (state=$state), not treating that as read" >&2
+        return 1 ;;
+    esac
     waited_ms=$((waited_ms + 100))
     [ "$waited_ms" -lt $((budget * 1000)) ] || return 1
     sleep 0.1
   done
-  return 0
 }
 
 @test "despawn: graceful — ctrl:despawn control row is marked read (does not linger as unread)" {
@@ -121,6 +152,37 @@ _wait_until_read_for_alice() {   # <body-substring> <budget-seconds>
   _wait_until_read_for_alice "ctrl:despawn" 5
 
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
+}
+
+@test "the read-state wait treats a storage query FAILURE as failure, never as read (#1221 review)" {
+  # A broken query and a genuinely-read row must not look the same. The
+  # earlier shape of _is_unread_for_alice was a bare pipeline ending in
+  # grep -Fq: if agmsg_storage_load or storage_list_unread failed outright,
+  # grep still ran on empty input, and "not found because it's read" and
+  # "not found because the query broke" were the exact same exit code. Point
+  # SCRIPTS at a copy of the skill whose storage.sh cannot load, and confirm
+  # both the state probe and the wait built on it report the failure --
+  # the wait well under its own budget, not by treating "no output" as "0
+  # unread" and returning success, and not by exhausting the budget either
+  # (a timeout LOOKS like this fix from the outside; the elapsed-time check
+  # below is what tells them apart).
+  local broken="$BATS_TEST_TMPDIR/broken-storage"
+  cp -r "$TEST_SKILL_DIR" "$broken"
+  cat > "$broken/scripts/lib/storage.sh" <<'EOF'
+agmsg_storage_load() { return 1; }
+EOF
+
+  SCRIPTS="$broken/scripts" run _alice_unread_state_for "anything"
+  [ "$status" -eq 0 ]
+  [ "$output" = query_failed ]
+
+  local start end elapsed
+  start="$(date +%s)"
+  SCRIPTS="$broken/scripts" run _wait_until_read_for_alice "ctrl:despawn" 5
+  end="$(date +%s)"
+  elapsed=$((end - start))
+  [ "$status" -ne 0 ]
+  [ "$elapsed" -lt 5 ]
 }
 
 # A tmux stub whose kill-pane / kill-window exits with a chosen code, so a --force
