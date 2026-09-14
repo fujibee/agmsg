@@ -1365,7 +1365,7 @@ EOF
 @test "delivery set turn (gemini): rule file tells the agent to run where.sh, not guess its terminal" {
   bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
-  grep -q "drivers/terminals/<terminal>/SKILL.md" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "drivers/terminals/<terminal>/README.md" "$TEST_PROJECT/.agent/rules/agmsg.md"
   grep -q "team.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
   grep -q "arrange.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
 }

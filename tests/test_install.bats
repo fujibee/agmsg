@@ -157,6 +157,39 @@ teardown() {
   [ -x "$SK/uninstall.sh" ]
 }
 
+# #1249: scripts/drivers/terminals/{herdr,plain,tmux}/SKILL.md were renamed to
+# README.md so a directory-scanning skill loader (e.g. codex's) stops
+# mistaking each for its own standalone skill missing YAML frontmatter. `cp
+# -R` never deletes a file absent from the source tree, so an install made
+# before this rename would keep the stale SKILL.md forever without an
+# explicit cleanup on --update.
+@test "install --update: removes a pre-rename drivers/terminals/{herdr,plain,tmux}/SKILL.md, leaving only README.md" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  for d in herdr plain tmux; do
+    cp "$SK/scripts/drivers/terminals/$d/README.md" "$SK/scripts/drivers/terminals/$d/SKILL.md"
+  done
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  for d in herdr plain tmux; do
+    [ ! -f "$SK/scripts/drivers/terminals/$d/SKILL.md" ]
+    [ -s "$SK/scripts/drivers/terminals/$d/README.md" ]
+  done
+}
+
+# Review (#1249): the cleanup must name the three built-in dirs individually,
+# not glob scripts/drivers/terminals/*/SKILL.md -- nothing about that path is
+# exclusive to agmsg's own drivers, so a user can drop a custom driver
+# directory straight under scripts/drivers/terminals/ (not only through the
+# sanctioned AGMSG_PLUGIN_DIRS mechanism), and a glob-based cleanup would
+# delete a SKILL.md this install does not own.
+@test "install --update: does NOT touch a user-added driver's own SKILL.md under drivers/terminals/" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  mkdir -p "$SK/scripts/drivers/terminals/mycustom"
+  echo "user's own driver doc" > "$SK/scripts/drivers/terminals/mycustom/SKILL.md"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$SK/scripts/drivers/terminals/mycustom/SKILL.md" ]
+  [ "$(cat "$SK/scripts/drivers/terminals/mycustom/SKILL.md")" = "user's own driver doc" ]
+}
+
 @test "install: --update --cmd updates the named skill even when a backup skill exists" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
   local backup="$FAKE_HOME/.agents/skills/agmsg.backup-keep"

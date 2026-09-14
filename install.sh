@@ -405,6 +405,22 @@ if [ "$UPDATE_ONLY" = true ]; then
   # ship without enumerating files. The agent-type manifests and per-type runtimes
   # live under scripts/drivers/types/ now, so this single copy carries them too.
   cp -R "$SCRIPT_DIR/scripts/." "$SKILL_DIR/scripts/"
+  # #1249: drivers/terminals/{herdr,plain,tmux}/SKILL.md used to name each
+  # driver's own doc file, and a directory-scanning skill loader (e.g.
+  # codex's) treated it as a standalone skill missing YAML frontmatter,
+  # warning on every start. Renamed to README.md. A plain `cp -R` never
+  # deletes a file absent from the source tree, so an --update over an
+  # install from before this rename would otherwise keep the stale
+  # SKILL.md side by side with the new README.md forever. Named
+  # individually -- NOT a scripts/drivers/terminals/*/SKILL.md glob --
+  # because a user can drop a custom driver directory straight under
+  # scripts/drivers/terminals/ (nothing about that path is exclusive to
+  # agmsg's own three); a glob there would delete a file this install
+  # does not own (#1249 review).
+  for _agmsg_builtin_driver in herdr plain tmux; do
+    rm -f "$SKILL_DIR/scripts/drivers/terminals/$_agmsg_builtin_driver/SKILL.md"
+  done
+  unset _agmsg_builtin_driver
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.

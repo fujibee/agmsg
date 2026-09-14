@@ -36,7 +36,7 @@ _run_session_start() {
   run _run_session_start "sid-plain"
   [ "$status" -eq 0 ]
   # the terminal line must be the FIRST line — before the Monitor directive.
-  [ "$(head -1 <<<"$output")" = "AGMSG terminal: plain (no addressable pane) capabilities=spawn despawn peek poke; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/plain/SKILL.md" ]
+  [ "$(head -1 <<<"$output")" = "AGMSG terminal: plain (no addressable pane) capabilities=spawn despawn peek poke; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/plain/README.md" ]
   grep -qF "AGMSG monitor mode" <<<"$output"
 }
 
@@ -50,7 +50,7 @@ _run_session_start() {
   export HERDR_ENV=1 HERDR_PANE_ID=w1:p9
   run _run_session_start "sid-herdr"
   [ "$status" -eq 0 ]
-  [ "$(head -1 <<<"$output")" = "AGMSG terminal: herdr (pane $TEST_SKILL_DIR/herdr.sock:w1:p9) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/herdr/SKILL.md" ]
+  [ "$(head -1 <<<"$output")" = "AGMSG terminal: herdr (pane $TEST_SKILL_DIR/herdr.sock:w1:p9) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/herdr/README.md" ]
 }
 
 @test "session-start: tmux environment leads with the tmux terminal line, socket-qualified pane id" {
@@ -58,7 +58,7 @@ _run_session_start() {
   export TMUX="/tmp/sock,1,0" TMUX_PANE="%3"
   run _run_session_start "sid-tmux"
   [ "$status" -eq 0 ]
-  [ "$(head -1 <<<"$output")" = "AGMSG terminal: tmux (pane /tmp/sock:%3) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/tmux/SKILL.md" ]
+  [ "$(head -1 <<<"$output")" = "AGMSG terminal: tmux (pane /tmp/sock:%3) capabilities=spawn despawn peek poke where arrange name; notes: $TEST_SKILL_DIR/scripts/drivers/terminals/tmux/README.md" ]
 }
 
 # The required RED control: a where.sh failure (unresolvable terminal) must
