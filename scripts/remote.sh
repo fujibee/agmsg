@@ -2799,6 +2799,36 @@ cmd_status() {
 
 # --- sync lifecycle --------------------------------------------------------
 
+# Literal, char-by-char digit check -- not a `case ... [0-9]*)` bracket
+# expression. A bracket expression's character class is the CALLER's locale,
+# not this file's, and some locales widen it past ASCII (full-width digits
+# among them); `test =` against an explicit alphabet is locale- and
+# nocasematch-proof on both interpreters, the same reasoning
+# self-identity.sh's _agmsg_self_chars_in_set documents (kept local here
+# rather than sourcing that file, since nothing else in this script needs
+# it).
+_remote_ceiling_is_plain_digits() {   # <string>
+  # n=${#s} is its own statement, not part of the `local` line above it: under
+  # `set -u`, a later name in one `local ... =` list that reads an earlier
+  # one's value sees it as still-unbound (measured), the same reason
+  # self-identity.sh's _agmsg_self_chars_in_set splits them too.
+  local s="${1-}" alphabet="0123456789" m=10 i=0 j c found n
+  n=${#s}
+  [ "$n" -gt 0 ] || return 1
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    found=""
+    j=0
+    while [ "$j" -lt "$m" ]; do
+      [ "$c" = "${alphabet:$j:1}" ] && { found=1; break; }
+      j=$((j + 1))
+    done
+    [ -n "$found" ] || return 1
+    i=$((i + 1))
+  done
+  return 0
+}
+
 cmd_sync_start() {
   local team="${1:?Usage: remote.sh sync start <team>}" cfg connected_at disconnected_at \
     engine_state engine_pid started_pid ready_pid startup_nonce ready=0 i=0 \
@@ -2816,7 +2846,7 @@ cmd_sync_start() {
   # environment, not just its test-only timing (the same reasoning that kept
   # an env-var knob out of herdr's boot wait previously).
   local ready_ceiling="${AGMSG_TEST_SYNC_START_READY_CEILING:-1600}"
-  case "$ready_ceiling" in ''|*[!0-9]*) ready_ceiling=1600 ;; esac
+  _remote_ceiling_is_plain_digits "$ready_ceiling" || ready_ceiling=1600
   [ "$ready_ceiling" -gt 0 ] || ready_ceiling=1600
   [ $# -eq 1 ] || { echo "Usage: remote.sh sync start <team>" >&2; exit 1; }
   agmsg_validate_team_name "$team" || exit 1
