@@ -8,12 +8,11 @@ action=run
 case "${1:-}" in
   status|stop|resume|reset-guard|ack|replay) action="$1"; shift ;;
 esac
-# こちらも Linux 専用に戻します。supervisor(Python)は移植しましたが、status / stop / resume /
-# reset-guard の制御はどれも antigravity-mode.mjs を通り、そこが未移植の /proc 読みを持っています
-# ---- 起動はできて停止はできない状態になり、それは提供しないより悪い。(#1090 レビュー)
+# Linux/macOS で動作します。Windows では POSIX のプロセス識別を同じ保証で提供できないため、
+# 起動後に止められない状態を作らないよう拒否します。
 case "$(uname -s)" in
-  Linux) ;;
-  *) echo 'Antigravity TUI monitor は Linux 専用です（antigravity-mode.mjs が /proc に依存）' >&2; exit 1 ;;
+  Linux|Darwin) ;;
+  *) echo 'Antigravity TUI monitor requires POSIX process primitives; this host is unsupported' >&2; exit 1 ;;
 esac
 if [ "$action" = run ]; then
   [ -t 0 ] && [ -t 1 ] || { echo 'Antigravity TUI monitor は対話端末から起動してください' >&2; exit 1; }

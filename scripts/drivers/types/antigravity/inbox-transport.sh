@@ -73,7 +73,10 @@ case "$command" in
    IFS= read -r _AGMSG_BRIDGE_ACK_CAP <&3
    exec 3<&-
    id_lines=$(node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const a=JSON.parse(s);if(!Array.isArray(a)||!a.length||a.some(x=>typeof x!=="string"||!x||/[\r\n]/.test(x)))process.exit(2);console.log(a.join("\n"))})')
-   mapfile -t ids <<< "$id_lines"
+   ids=()
+   while IFS= read -r id; do
+     [ -n "$id" ] && ids+=("$id")
+   done <<< "$id_lines"
    [ "${#ids[@]}" -gt 0 ]
    storage_mark_read_batch "$team" "$role" "${ids[@]}" ;;
  *) exit 2 ;;

@@ -1,37 +1,55 @@
-// Linux専用。flockは呼出し側と共通の記録ロックを使用する。
+// POSIX process identity and advisory-lock helpers shared by the Antigravity
+// bridge and mode controller.
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 
-// Linux 専用なのは この module の2つの操作です ---- proc() が /proc/<pid>/stat を読み、
-// violations() が flock を spawn する。launcher 2本は OS を見て断りますが、ここへは
-// launcher を通らない経路が2つ在ります: _delivery.sh が antigravity-mode.mjs を直接
-// node で起動し、bridge-read-guard.sh も この module を直接 起動します。
+// Linux reads /proc/<pid>/stat and uses the flock utility. macOS reads ps and
+// uses Python fcntl for the same lock file. The direct mode and guard entry
+// points use this module too, so the portability boundary lives here.
 //
-// 断りは **操作の中**に置きます。import 時に投げる版を一度 書きましたが、それは
-// `delivery.sh set off antigravity` を macOS で壊しました ---- off は mode.mjs stop を
-// 通り、**delivery を切ることは どのホストでも できなければならない**。予約が1件も
-// 無ければ proc() は呼ばれないので、その場合は今までどおり成功します。
+// Importing this module never rejects a host. An operation that does not need
+// process inspection (for example disabling delivery with no reservation) must
+// still work everywhere.
 //
-// 型を分けてあるのは、呼び出し側が「読めなかった」を握り潰せるからです。
-// antigravity-mode.mjs は proc() を try{...}catch{} で包み、失敗を live=false に畳んで
-// いました ---- macOS では「動いていない」と嘘をつき、stop は予約を残したまま失敗する。
-// PlatformUnsupported はそこで rethrow されます。
-//
-// mjs 側の macOS 移植(proc の OS 分岐と flock の置き換え)は別 issue です。(#1090 レビュー)
 export class PlatformUnsupported extends Error {}
-function _requireLinux(what) {
-  if (process.platform !== 'linux') {
-    throw new PlatformUnsupported(
-      `Antigravity の ${what} は Linux 専用です`
-      + `（このホストは ${process.platform}）。`
-    );
+function _requirePosix(what) {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
   }
 }
+function _ps(pid, field) {
+  const out=spawnSync('ps',['-p',String(pid),'-o',`${field}=`],{encoding:'utf8'});
+  if(out.status!==0||!out.stdout.trim()) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
+  return out.stdout.trim();
+}
+function _darwinStart(pid) { return _ps(pid,'lstart').replace(/\s+/g,'_'); }
 export function proc(pid) {
-  _requireLinux('プロセス生存判定 (/proc/<pid>/stat)');
-  const fields=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').slice(1).join(') ').split(' ');
-  return {ppid:Number(fields[1]),start:fields[19],state:fields[0]};
+  _requirePosix('process inspection');
+  if(process.platform==='linux') {
+    const fields=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').slice(1).join(') ').split(' ');
+    return {ppid:Number(fields[1]),start:fields[19],state:fields[0]};
+  }
+  return {ppid:Number(_ps(pid,'ppid')),start:_darwinStart(pid),state:_ps(pid,'state').split(/\s+/)[0]};
+}
+function _darwinLocked(file, data, append) {
+  const script = [
+    'import fcntl,sys,time',
+    'lock=open(sys.argv[1], "a+")',
+    'for _ in range(30):',
+    '    try:',
+    '        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break',
+    '    except BlockingIOError:',
+    '        time.sleep(0.1)',
+    'else: raise SystemExit(1)',
+    'if sys.argv[3] == "read":',
+    '    sys.stdout.write(open(sys.argv[2]).read())',
+    'else:',
+    '    with open(sys.argv[2], "a") as target: target.write(sys.stdin.read())',
+  ].join('\n');
+  const out=spawnSync('python3',['-c',script,`${file}.lock`,file,append?'append':'read'],{encoding:'utf8',input:data||''});
+  if(out.status!==0) throw Error('違反記録の読取/lock失敗');
+  return out.stdout;
 }
 export function read(file) {return JSON.parse(fs.readFileSync(file,'utf8'));}
 export function atomic(file,data) {
@@ -43,8 +61,10 @@ export function atomic(file,data) {
   try {fs.fsyncSync(dir);} finally {fs.closeSync(dir);}
 }
 export function violations(file) {
-  _requireLinux('違反記録の読取 (flock)');
-  const out=spawnSync('flock',['-w','3',`${file}.lock`,'cat',file],{encoding:'utf8'});
+  _requirePosix('violation inspection');
+  const out=process.platform==='darwin'
+    ? {status:0,stdout:_darwinLocked(file,'',false)}
+    : spawnSync('flock',['-w','3',`${file}.lock`,'cat',file],{encoding:'utf8'});
   if(out.status!==0) throw Error('違反記録の読取/lock失敗');
   const rows=out.stdout.trim()?out.stdout.trim().split('\n').map(JSON.parse):[];
   for(const r of rows) if(r.event!=='read-denied'||!Number.isInteger(r.pid)) throw Error('違反記録破損');
@@ -66,7 +86,8 @@ if(process.argv[2]==='check') {
     if(authorized && violations(reservation.violations).length===0) process.exit(0);
     const row=JSON.stringify({event:'read-denied',pid:Number(pid)})+'\n';
     // 入力は本文を含まない。書込みに失敗しても拒否を維持する。
-    spawnSync('flock',['-w','3',`${reservation.violations}.lock`,'bash','-c','cat >> "$1"','guard',reservation.violations],{input:row});
+    if(process.platform==='darwin') _darwinLocked(reservation.violations,row,true);
+    else spawnSync('flock',['-w','3',`${reservation.violations}.lock`,'bash','-c','cat >> "$1"','guard',reservation.violations],{input:row});
     console.error('agmsg: bridgeが受領管理中のため既読化を拒否しました');
   // 失敗の理由を1つだけ 分けます。exit 13(拒否)は変えません ---- 呼び出し側が 13 で分岐して
   // いるのと、拒否側に倒すのは元から正しいためです。変えるのは**何と言うか**だけ:

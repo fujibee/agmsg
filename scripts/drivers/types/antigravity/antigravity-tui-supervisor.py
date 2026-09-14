@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Linux-only PTY owner for one Antigravity TUI and one agmsg role.
+"""POSIX PTY owner for one Antigravity TUI and one agmsg role.
 
-Linux-only is a measured statement, not an untried one. Every control action --
-status, stop, resume, reset-guard -- goes through antigravity-mode.mjs, which
-reads /proc/<pid>/stat directly, and the headless sibling additionally spawns
-flock. Porting this file alone would give macOS a TUI that starts and cannot be
-stopped, which is worse than not offering it. (#1090 review; the mjs port is its
-own issue.)
+The supervisor and its headless sibling use the same process identity contract
+on Linux and macOS. Windows remains refused by the shell wrapper because it
+does not provide the POSIX PTY and advisory-lock primitives used here.
 """
-import argparse, codecs, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
+import argparse, codecs, errno, fcntl, hashlib, json, os, pty, re, select, shlex, signal, struct, subprocess, sys, termios, time, tty, unicodedata, uuid
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
@@ -33,26 +30,15 @@ class StartTimeUnreadable(OSError):
     """
 
 def proc_start(pid):
-    """The process's start time, from /proc/<pid>/stat field 22 (clock ticks).
+    """Return the process start token from the native POSIX process table.
 
     A pid alone is not an identity: pids are recycled, and every comparison of
     this value in this file exists to separate "the same process" from "a
     different process that inherited its number".
 
-    ONE source, deliberately. An earlier version of this function fell back to
-    `ps -o lstart=` whenever reading /proc raised, and tagged the result with its
-    source so the two could not be compared by accident. The tag was right; the
-    fallback made it fire. On Linux a single transient read error would return a
-    `ps` token for a process whose stored token came from /proc, the comparison
-    would correctly refuse to match, and a LIVE process would be reported as a
-    different one -- the same outcome as a pid-reuse false positive, from nothing
-    but one failed read. The function that documented "these two must not be
-    compared" was itself producing the mixture. (Found in review of #1090.)
-
-    So a read that fails is a read that failed: raise, and say what could not be
-    read. "Could not determine" is not "a different process" -- the same split
-    this driver's inbox-transport makes between "someone else holds it" and "I
-    could not read the lock".
+    Linux uses /proc clock ticks; macOS uses ps lstart with the same whitespace
+    normalization as the shell process-proof helpers. A read failure remains a
+    separate exception from a confirmed missing pid.
 
     TWO exception types, and the split is the whole point. Callers catch
     FileNotFoundError to mean "that pid is gone" and then unlink a reservation,
@@ -61,14 +47,19 @@ def proc_start(pid):
     StartTimeUnreadable, which those handlers do NOT catch, so it propagates and
     the act does not happen.
 
-    The first version of this raise mapped every OSError to FileNotFoundError,
-    and that fed "could not read" straight into three call sites' "is not there".
-    A live supervisor whose /proc was unreadable would have had its reservation
-    taken. Found in review; it is the third time in one day that this repo has
-    read "could not read it" as "it is not there" (actas_lock_owner, gc_stale,
-    here), and the answer is the same each time: they are different facts and
-    need different values.
+    A live supervisor whose process table cannot be read must therefore keep its
+    reservation rather than being mistaken for a stale process.
     """
+    if sys.platform == 'darwin':
+        try:
+            result=subprocess.run(['ps','-o','lstart=','-p',str(pid)],capture_output=True,text=True)
+        except OSError as exc:
+            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (ps: {exc.strerror})') from exc
+        if result.returncode != 0 or not result.stdout.strip():
+            raise FileNotFoundError(errno.ENOENT, f'pid {pid} is not running')
+        return '_'.join(result.stdout.split())
+    if sys.platform != 'linux':
+        raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (unsupported platform: {sys.platform})')
     try:
         raw=Path(f'/proc/{pid}/stat').read_text()
     except FileNotFoundError as exc:

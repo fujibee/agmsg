@@ -84,33 +84,18 @@ teardown() {
   refute grep -q '所有権不一致' <<<"$output"
 }
 
-@test "supervisor proc_start: a failed /proc read raises, it never falls back to ps" {
-  # Structural, and deliberately so. The defect this pins is a LIVE process whose
-  # /proc read fails once: the fallback returns a `ps` token, the stored token
-  # came from /proc, the comparison correctly refuses to match, and a running
-  # supervisor is reported as a different process. Constructing that state needs
-  # a pid that is alive and whose /proc entry is unreadable, which is not
-  # something a test can arrange on either platform here -- a pid with no /proc
-  # entry makes BOTH the fixed and the broken version raise, so it separates
-  # nothing. Same situation, and the same answer, as the one-read rule in
-  # test_watch.bats: when the window is not addressable from a test, pin the
-  # shape. (#1090 review)
-  # The CODE only: the docstring above it explains what was removed and why, so
-  # extracting the whole function would find `lstart` in the very sentence that
-  # says there is no lstart any more. (Measured -- the first version of this test
-  # failed on its own explanation.)
+@test "supervisor proc_start: uses a native process identity on each POSIX host" {
+  # Linux uses the kernel clock-tick token and macOS uses its native ps start
+  # time. Both paths are one source, so reservations made by the bridge and the
+  # TUI compare the same value instead of mixing unrelated tokens.
   local body
-  body="$(awk '/^def proc_start\(pid\):/{f=1} f&&/^    try:/{c=1} c{print} c&&/^    return /{exit}' \
+  body="$(sed -n '/^def proc_start(pid):/,/^def process_still(pid, start):/p' \
     "$SCRIPTS/drivers/types/antigravity/antigravity-tui-supervisor.py")"
   # Canary: the extraction found the function's body, so an absence below is real.
   grep -q "/proc/{pid}/stat" <<<"$body"
-  # No second source, and no tag for one: both existed only to support the
-  # fallback, and both are gone with it.
-  refute grep -q "lstart" <<<"$body"
-  refute grep -q "'ps:" <<<"$body"
-  refute grep -q "subprocess" <<<"$body"
-  # And the failure says what could not be read, rather than exiting quietly.
-  grep -q "起動時刻を判定できません" <<<"$body"
+  grep -q "sys.platform == 'darwin'" <<<"$body"
+  grep -q "subprocess.run" <<<"$body"
+  grep -q "Path(f'/proc/{pid}/stat')" <<<"$body"
 }
 
 @test "supervisor: 'could not read' is a DIFFERENT exception from 'the pid is gone'" {
@@ -130,7 +115,9 @@ assert not issubclass(m.StartTimeUnreadable, FileNotFoundError), 'StartTimeUnrea
 assert issubclass(m.StartTimeUnreadable, OSError), 'should still be an OSError'
 # Reached for real on a host with no /proc at all: every pid "looks" absent
 # there, and that is a fact about the system, not about the process.
-if not os.path.isdir('/proc'):
+if sys.platform == 'darwin':
+    assert m.proc_start(os.getpid()), 'macOS ps start token missing'
+elif not os.path.isdir('/proc'):
     try:
         m.proc_start(os.getpid()); raise SystemExit('proc_start returned on a host with no /proc')
     except m.StartTimeUnreadable:
@@ -175,19 +162,10 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "the mjs read-guard: a reservation it cannot judge refuses out loud, at the entries the launchers do not cover" {
-  # The launchers gate the two documented ways in. These are the others:
-  # _delivery.sh runs antigravity-mode.mjs directly for runtime status, and
-  # bridge-read-guard.sh runs the guard module directly. Gating only the
-  # launchers leaves both walking into a /proc read.
-  #
-  # The refusal lives in the OPERATION inside the module that owns the
-  # dependency -- not at import (that broke `set off`, above) and not in the two
-  # callers (three call sites is how the fourth faces the other way). And
-  # mode.mjs used to wrap proc() in `try{...}catch{}`, folding any failure into
-  # live=false: status said 停止/要確認 and stop left the reservation behind,
-  # neither saying why. An unsupported platform is not a dead process.
-  [ "$(uname -s)" = Linux ] && skip "this asserts the refusal on a host that is NOT Linux"
+@test "the mjs read-guard: a stale reservation is judged on every POSIX host" {
+  # The launchers and the direct mode/guard entry points all use the same
+  # process identity implementation. A stale reservation is reported as such;
+  # it is not mistaken for an unsupported platform.
   local run_dir="$TEST_SKILL_DIR/run"
   local state="$run_dir/antigravity-bridge.state.json"
   # $PROJ as-is, NOT `pwd -P`: mode.mjs compares against path.resolve(project),
@@ -200,8 +178,8 @@ PY
     > "$run_dir/antigravity-reservation.fixture__worker.json"
 
   run node "$SCRIPTS/drivers/types/antigravity/antigravity-mode.mjs" status "$PROJ"
-  [ "$status" -ne 0 ]
-  grep -q 'Linux 専用' <<<"$output"
+  [ "$status" -eq 0 ]
+  grep -q '停止/要確認' <<<"$output"
 
   # The guard's own entry. It was ALREADY fail-closed here -- its blanket catch
   # exits 13 either way -- so what changed is only what it says: "検査に失敗しました"
@@ -209,5 +187,5 @@ PY
   # the operator's next move differs. Exit 13 is left alone; callers branch on it.
   run node "$SCRIPTS/lib/bridge-read-guard.mjs" check "$run_dir/antigravity-reservation.fixture__worker.json" 1 fixture worker
   [ "$status" -eq 13 ]
-  grep -q 'Linux 専用' <<<"$output"
+  refute grep -q 'unsupported' <<<"$output"
 }

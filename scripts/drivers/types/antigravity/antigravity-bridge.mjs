@@ -201,7 +201,9 @@ export class Bridge {
     process.once('SIGINT',()=>this.stop());process.once('SIGTERM',()=>this.stop());
   }
 }
-if(process.argv[1]===fileURLToPath(import.meta.url)) {
+const invokedPath=process.argv[1]&&fs.existsSync(process.argv[1])?fs.realpathSync(process.argv[1]):'';
+const modulePath=fs.realpathSync(fileURLToPath(import.meta.url));
+if(invokedPath===modulePath) {
   const o={};for(let i=2;i<process.argv.length;i+=2){if(!process.argv[i].startsWith('--')||!process.argv[i+1])throw Error('引数は --key value');o[process.argv[i].slice(2)]=process.argv[i+1];}
   if(!o.project||!o.team||!o.name)throw Error('--project --team --name が必要');
   const b=new Bridge(o);
