@@ -109,7 +109,7 @@ TERMINAL_LINE="$(agmsg_terminal_context_line "$SESSION_ID" "$SKILL_DIR" 2>/dev/n
 # states per-teammate peek/poke/arrange reachability -- as of this line, it
 # does not (that display is tracked separately); wording this makes true only
 # what team.sh actually shows today.
-TEAM_LINE="AGMSG team.sh: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first."
+TEAM_LINE="AGMSG team.sh <team>: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <team> <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first."
 
 # --- Skip spawned worktree sub-sessions (.claude/worktrees checkouts). ---
 # Claude Code's background-task feature runs a short-lived sub-session in an

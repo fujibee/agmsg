@@ -43,7 +43,7 @@ _run_session_start() {
 @test "session-start: the team.sh pointer line follows immediately after the terminal line" {
   run _run_session_start "sid-plain-team-line"
   [ "$status" -eq 0 ]
-  [ "$(sed -n '2p' <<<"$output")" = "AGMSG team.sh: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first." ]
+  [ "$(sed -n '2p' <<<"$output")" = "AGMSG team.sh <team>: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <team> <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first." ]
 }
 
 @test "session-start: herdr environment leads with the herdr terminal line, own pane id" {

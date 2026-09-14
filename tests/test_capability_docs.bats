@@ -31,7 +31,7 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
 @test "SKILL.md points teammate questions at team.sh, and teammate actions at peek/poke/arrange, not a guess" {
   grep -qF "team.sh" "$ROOT/SKILL.md"
-  grep -qF 'peek.sh`/`poke.sh`/`arrange.sh <name>' "$ROOT/SKILL.md"
+  grep -qF 'peek.sh`/`poke.sh`/`arrange.sh <team> <name>' "$ROOT/SKILL.md"
 }
 
 @test "SKILL.md points at capabilities and the per-driver file (#1082)" {
