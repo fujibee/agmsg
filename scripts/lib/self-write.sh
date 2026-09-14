@@ -51,8 +51,17 @@
 #   record  attempt=<ok|failed:<r>>            readback=<verified|mismatch:<seen>|unavailable:<r>|not_attempted>
 #   label   attempt=<ok|failed:<rc>|skipped:<r>> readback=<...>
 #   key     attempt=<same as label: one terminal_name call> readback=<...>
-#   session attempt=<ok|failed:<rc>|skipped:<r>> readback=<verified|matched_no_delta|unchanged:<seen>|mismatch:<seen>|unavailable:<r>|not_attempted>
+#   session attempt=<ok|failed:<rc>|skipped:<r>> readback=<verified|matched_no_delta|unchanged:<seen>|mismatch:<seen>|unavailable:<r>|failed:<r>|not_attempted>
 #   policy=<accepted|accepted_unverified|repair_incomplete>
+#
+# A type that declares rename_confirm (codex: its session name is not on the
+# title, and the one header that carries it scrolls away early) is verified by
+# NEWNESS of its own confirmation line -- counted before and after the
+# keystroke, an increase required -- never by title/screen-header readback,
+# which the type's own manifest documents as unfit for this (#1109/#1152 stage
+# C). `readback=failed:rename_not_observed` is that path's one negative that is
+# NOT "could not tell": the confirmation line is the command's immediate
+# output, so its absence after a successful keystroke is a real miss.
 # The same lines are written, last and atomically, to run/self-write-done.<t>__<a>.
 # policy is decided HERE and only here: accepted = record verified;
 # accepted_unverified = record written, readback unavailable; anything else in
@@ -219,9 +228,26 @@ _sw_title_now() {   # <id> <type> -> observed session name or unknown:/n/a:
   fi
 }
 
+# Count the confirmation lines "<confirm_prefix> <expected>." currently visible
+# in a pane's scrollback. Ported from team-status.sh's _agmsg_rename_confirm_count
+# (#1109; that copy is retired with the old --fix sweep, #1152 stage B) because a
+# rename_confirm type's line PERSISTS after the rename: `fix` runs repeatedly,
+# and a person may have typed /rename by hand, so a later generation must not
+# read an EARLIER line as its own. The caller counts before and after its
+# keystroke and requires an INCREASE -- the expected name is the same every
+# generation, so newness, not the name, is what tells this rename from a prior
+# one. An unreadable pane fails (rc 1, no output) rather than reading as 0: a
+# transient read failure before the keystroke must not set a false baseline of
+# 0 that a recovered read afterward then "beats" with a pre-existing line.
+_sw_rename_confirm_count() {   # <id> <confirm_prefix> <expected>
+  local screen
+  screen="$(terminal_peek "$1" --lines 400 2>/dev/null)" || return 1
+  printf '%s\n' "$screen" | grep -cF -- "$2 $3." || true
+}
+
 # The session cell. Prints "attempt=... readback=...".
 _sw_cell_session() {   # <id> <team> <agent> <type>
-  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why
+  local id="$1" team="$2" agent="$3" type="$4" rename_cmd cli ready rc=0 expected before after why rename_confirm
   if [ "${_SW_KIND:-}" = plain ]; then
     printf 'attempt=skipped:unsupported:plain_record_only readback=not_attempted\n'; return 0
   fi
@@ -239,6 +265,38 @@ _sw_cell_session() {   # <id> <team> <agent> <type>
     *) printf 'attempt=skipped:readiness_unknown:%s readback=not_attempted\n' "${ready#unknown:}"; return 0 ;;
   esac
   expected="$team-$agent"
+
+  # A rename_confirm type (codex) cannot be pre-read: its name is not on the
+  # title, and the one header that carries it ("Thread name: ...") scrolls away
+  # early -- the manifest's own session_name_source says so ("scroll で消える、
+  # 確認に使うな"). Reading TITLE-based readback for such a type is not merely
+  # weaker, it is answering with a datum the manifest documents as unfit for
+  # this. So a type that declares rename_confirm is verified by NEWNESS of its
+  # own confirmation line instead, never by title/screen-header readback.
+  rename_confirm="$(agmsg_type_get "$type" rename_confirm 2>/dev/null || true)"
+  if [ -n "$rename_confirm" ]; then
+    before="$(_sw_rename_confirm_count "$id" "$rename_confirm" "$expected")" || {
+      printf 'attempt=skipped:baseline_unreadable readback=not_attempted\n'; return 0
+    }
+    rc=0
+    terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then printf 'attempt=failed:%s readback=not_attempted\n' "$rc"; return 0; fi
+    local tries=0 after_count=""
+    while [ "$tries" -lt 20 ]; do
+      after_count="$(_sw_rename_confirm_count "$id" "$rename_confirm" "$expected")" || after_count=""
+      if [ -n "$after_count" ] && [ "$after_count" -gt "$before" ]; then
+        printf 'attempt=ok readback=verified\n'; return 0
+      fi
+      sleep 0.1 2>/dev/null || true
+      tries=$((tries + 1))
+    done
+    # Typed, but no NEW confirmation line: the line is the command's own
+    # immediate output, not a header that may already have scrolled off, so its
+    # absence is a real negative (#1109's own distinction) -- never "unknown".
+    printf 'attempt=ok readback=failed:rename_not_observed\n'
+    return 0
+  fi
+
   before="$(_sw_title_now "$id" "$type")"      # a BASELINE for the delta, never a reason to skip
   rc=0
   terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1 || rc=$?
