@@ -162,15 +162,20 @@ file_weight() {
 #     test_remote_engine_start_refusal.bats  631s / 2.155 = round(292.8) = 293
 #     test_remote_status_liveness.bats       364s / 2.155 = round(168.9) = 169
 #
-# KNOWN LIMIT (#1243): even these correctly-measured values do not satisfy
+# RESOLVED (#1243): on the merged (2550 @test, ~1.46x #1159's 1749) tree,
+# these correctly-measured seeds were no longer enough on their own to keep
 # tests/test_ci_sharding.bats's "a pinned file's shard is reserved, not
-# refilled" on this suite size (2550 @tests, ~1.46x #1159's 1749) -- the
-# ratio-based formula itself, not a stale measurement, is the gap now. The
-# same CI run's actual shard durations confirm it in practice: the shard
-# holding test_remote_status_liveness.bats was the slowest leg on both OSes
-# (macOS 29min vs 20/20/11/10 for the others). Tracked in #1243 for a
-# threshold/algorithm review; does not affect what ships, only CI wall-clock
-# balance, so left red rather than patched with an unmeasured number.
+# refilled" green -- the shard holding test_remote_status_liveness.bats was
+# still the slowest leg on both OSes (macOS 29min vs 20/20/11/10 for the
+# others), because a ratio-seeded bias only SHRINKS what gets packed on top
+# of a pinned shard, it does not BOUND it, and no fixed seed value keeps
+# shrinking fast enough as the suite keeps growing. The fix (below, where
+# `reserve` is computed) excludes a pinned shard from the weighted pass
+# outright rather than merely biasing it, so these seed values no longer
+# affect placement at all when reservation is active -- they now exist only
+# as the `load[]` figure that the fallback pool (every shard pinned; not
+# reachable at real CI's SHARD_TOTAL) would seed with, and as a measured
+# record of each pinned file's real cost.
 #
 # The numerator (per-file wall) and the divisor (whole-suite avg) came from the
 # SAME run, so a refresh must re-derive BOTH together off one green run's
@@ -198,6 +203,7 @@ pin_seed() {
 i=0
 while [ "$i" -lt "$total" ]; do
   load[i]=0
+  pinned_slot[i]=0
   i=$((i + 1))
 done
 
@@ -217,6 +223,7 @@ EOF
   [ -n "$match" ] || continue
   s=$((slot % total))
   load[s]=$((load[s] + $(pin_seed "$p" "$match")))
+  pinned_slot[s]=1
   if [ "$s" -eq "$((index - 1))" ]; then
     printf '%s\n' "$match"
   fi
@@ -240,15 +247,44 @@ EOF
 # Heaviest first; ties broken by path so the order is total, not incidental.
 sorted="$(printf '%s' "$weighted" | LC_ALL=C sort -t'	' -k1,1nr -k2,2)"
 
-# Greedy LPT: hand each remaining file to the currently lightest shard. `load`
-# already carries the pinned seeds from above, not reset here.
+# A pinned shard is RESERVED, not merely biased against: it is excluded
+# outright from the candidates below, so no amount of repacking can ever add
+# a single other file to it (#1243). A ratio-seeded bias only shrinks the
+# amount packed on top of a pinned shard; it does not bound it, and on the
+# merged (2550 @test) tree the bias was no longer enough -- the shard holding
+# test_remote_status_liveness.bats still ended up the slowest leg (29m of
+# the 30m cap). Exclusion has no such ratio to outgrow.
+#
+# The one case this cannot honor is every shard being pinned (total <= the
+# number of distinct pinned slots, e.g. total=1 wraps both pins into slot 0):
+# then there is no non-pinned shard left to receive the rest of the suite, so
+# reservation falls back to the old ratio-seeded pool rather than starving
+# every remaining file. Real CI (SHARD_TOTAL=5, 2 pins) is never this case;
+# it only matters for this script's own low-total test coverage.
+pinned_count=0
+i=0
+while [ "$i" -lt "$total" ]; do
+  [ "${pinned_slot[i]}" -eq 1 ] && pinned_count=$((pinned_count + 1))
+  i=$((i + 1))
+done
+reserve=1
+[ "$pinned_count" -lt "$total" ] || reserve=0
+
+# Greedy LPT: hand each remaining file to the currently lightest shard among
+# the eligible ones. `load` already carries the pinned seeds from above, not
+# reset here (still used as the placement metric among non-reserved shards,
+# and as the fallback pool's metric when reserve=0).
 while IFS='	' read -r n f; do
   [ -n "$f" ] || continue
-  best=0
-  best_load=${load[0]}
-  j=1
+  best=-1
+  best_load=0
+  j=0
   while [ "$j" -lt "$total" ]; do
-    if [ "${load[j]}" -lt "$best_load" ]; then
+    if [ "$reserve" -eq 1 ] && [ "${pinned_slot[j]}" -eq 1 ]; then
+      j=$((j + 1))
+      continue
+    fi
+    if [ "$best" -eq -1 ] || [ "${load[j]}" -lt "$best_load" ]; then
       best=$j
       best_load=${load[j]}
     fi
