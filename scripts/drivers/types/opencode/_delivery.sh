@@ -15,6 +15,11 @@ agmsg_delivery_apply() {
   local type="$1"
   local project="$2"
   local mode="$3"
+  # Refuse before any write: an empty SKILL_DIR would render broken guidance
+  # paths into the rule file, and the rm -f below removes the existing rule
+  # file first -- an unreadable value must never be treated as "nothing to
+  # preserve" (#1234 review).
+  [ -n "${SKILL_DIR:-}" ] || { echo "agmsg_delivery_apply (opencode): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
   local rule_file project_q
   rule_file=$(resolve_hooks_file "$type" "$project")
 
@@ -46,14 +51,14 @@ After each tool call, automatically check the agmsg inbox for unread messages.
 
 ## Terminal/pane self-awareness
 Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
-— run '${SKILL_DIR:-}/scripts/where.sh' first and answer from its terminal=/capabilities=
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
 fields. Never guess from environment variables or a grep/ps command; a driver
 that IS present can be wrongly reported absent that way. Per-driver detail:
-'${SKILL_DIR:-}/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
-A teammate's placement and status: '${SKILL_DIR:-}/scripts/team.sh' <team> — never a
-stale memory of their last known pane. Act on one with '${SKILL_DIR:-}/scripts/peek.sh'
+A teammate's placement and status: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
 / 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
 says whether it worked and, if not, why.
 EOF
@@ -85,14 +90,14 @@ to check the agmsg inbox for unread messages.
 
 ## Terminal/pane self-awareness
 Asked about your own terminal, pane, or driver — or before using arrange/peek/poke
-— run '${SKILL_DIR:-}/scripts/where.sh' first and answer from its terminal=/capabilities=
+— run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
 fields. Never guess from environment variables or a grep/ps command; a driver
 that IS present can be wrongly reported absent that way. Per-driver detail:
-'${SKILL_DIR:-}/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
-A teammate's placement and status: '${SKILL_DIR:-}/scripts/team.sh' <team> — never a
-stale memory of their last known pane. Act on one with '${SKILL_DIR:-}/scripts/peek.sh'
+A teammate's placement and status: '$SKILL_DIR/scripts/team.sh' <team> — never a
+stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
 / 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
 says whether it worked and, if not, why.
 EOF
