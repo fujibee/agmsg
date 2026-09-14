@@ -104,6 +104,8 @@ agmsg_session_start() {
   if [ -z "${AGMSG_CODEX_OWNER_ID:-}" ] && [ -n "${CODEX_SESSION_ID:-}" ]; then
     owner_pid_file="$RUN_DIR/codex-app-server.$(printf '%s' "$PROJECT" | agmsg_sha1).pid"
     owner_pid="$(cat "$owner_pid_file" 2>/dev/null || true)"
+    native_owner_pid="$(ps -Ao pid=,ppid=,args= 2>/dev/null | awk -v p="$owner_pid" '$2 == p && $0 ~ /codex.*app-server/ {print $1; exit}')"
+    [ -n "$native_owner_pid" ] && owner_pid="$native_owner_pid"
     if _agmsg_pid_valid "$owner_pid"; then
       AGMSG_CODEX_OWNER_ID="$(agmsg_instance_id_from_pid "$CODEX_SESSION_ID" "$owner_pid")"
       export AGMSG_CODEX_OWNER_ID

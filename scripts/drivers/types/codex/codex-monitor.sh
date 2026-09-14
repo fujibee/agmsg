@@ -142,6 +142,25 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
   (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
+# codex-monitor records the node wrapper's pid, while actas-claim resolves the
+# native codex app-server child (the process whose argv/comm is codex). Keep the
+# owner token on that same pid when the platform exposes a parent column; a
+# wrapper pid would be a different owner and would hide a self-held lock.
+agmsg_codex_owner_pid() {
+  local wrapper="$1" child ppid cmd
+  case "$wrapper" in ''|*[!0-9]*) return 1 ;; esac
+  _agmsg_detect_platform
+  case "$_agmsg_platform" in
+    msys) return 1 ;;
+  esac
+  while IFS=' ' read -r child ppid _rest; do
+    [ "$ppid" = "$wrapper" ] || continue
+    cmd="$(compat_get_cmdline "$child" 2>/dev/null || true)"
+    case "$cmd" in *codex*app-server*) printf '%s' "$child"; return 0 ;; esac
+  done < <(ps -Ao pid=,ppid=,args= 2>/dev/null)
+  return 1
+}
+
 PORT=""
 if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   existing_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
@@ -247,6 +266,8 @@ SOCKET_URL="ws://127.0.0.1:$PORT"
 # may share it, while the lock records the composite session-id.pid token.
 if [ -z "${AGMSG_CODEX_OWNER_ID:-}" ] && [ -n "${CODEX_SESSION_ID:-}" ]; then
   owner_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
+  native_owner_pid="$(agmsg_codex_owner_pid "$owner_pid" 2>/dev/null || true)"
+  [ -n "$native_owner_pid" ] && owner_pid="$native_owner_pid"
   if _agmsg_pid_valid "$owner_pid"; then
     AGMSG_CODEX_OWNER_ID="$(agmsg_instance_id_from_pid "$CODEX_SESSION_ID" "$owner_pid")"
   fi
