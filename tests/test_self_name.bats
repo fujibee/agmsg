@@ -514,6 +514,22 @@ _placement() {   # <team> <agent> -> "<terminal>:<id>" or empty
   [ "$(_terminal_calls)" -eq 0 ]
 }
 
+@test "test helper load clears ambient terminal markers before setup" {
+  local helper="$BATS_TEST_DIRNAME/test_helper.bash"
+  run env \
+    TMUX=/real/tmux,123,0 TMUX_PANE=%9 TMUX_TMPDIR=/real/tmux-dir \
+    HERDR_ENV=1 HERDR_PANE_ID=w9:p9 HERDR_SOCKET_PATH=/real/herdr.sock \
+    HERDR_WORKSPACE_ID=w9 HERDR_TAB_ID=w9:t9 HERDR_SESSION=real \
+    HERDR_BIN_PATH=/real/bin/herdr HERDR_STARTUP_CWD=/real/cwd \
+    bash -c '
+      source "$1"
+      for name in TMUX TMUX_PANE TMUX_TMPDIR HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD; do
+        [ -z "${!name:-}" ] || { printf "%s remained set\\n" "$name"; exit 1; }
+      done
+    ' _ "$helper"
+  [ "$status" -eq 0 ]
+}
+
 @test "the record writer keeps the mark, and the mark writer keeps the record" {
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/role-session.sh"

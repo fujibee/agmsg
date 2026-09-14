@@ -17,8 +17,8 @@
 # before any suite-level setup or test body can unset AGMSG_SELF_NAME. Tests that
 # deliberately model a real terminal restore these variables explicitly, using
 # a fake driver or a documented fixture socket.
-unset TMUX TMUX_PANE
-unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
+unset TMUX TMUX_PANE TMUX_TMPDIR
+unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -29,8 +29,8 @@ setup_test_env() {
   # pane would otherwise write the fixture's team:agent onto the developer's
   # own pane. Tests that want a terminal set these AFTER this call, against a
   # fake on PATH. CI runners carry none of these, so nothing changes there.
-  unset TMUX TMUX_PANE
-  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
+  unset TMUX TMUX_PANE TMUX_TMPDIR
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
