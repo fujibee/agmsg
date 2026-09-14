@@ -48,14 +48,21 @@ agmsg_team_reach() {
   local caps op rc why has_hook=0
   local can_ops="" any_cannot=0 any_unknown=0 cannot_reason="" unknown_reason=""
 
-  # agmsg_terminal_get itself never fails (an unknown terminal or unreadable
-  # manifest degrades silently to its default, empty here) -- so an empty
-  # caps read through it cannot distinguish "the manifest is real and simply
-  # doesn't declare these ops" (cannot) from "the manifest could not be read
-  # at all" (unknown, not the same claim). Check the manifest's own presence
-  # directly first rather than trusting agmsg_terminal_get's
-  # empty-on-failure default to mean the former.
-  if ! agmsg_terminal_dir "$terminal" >/dev/null 2>&1; then
+  # agmsg_terminal_get itself never fails (an unknown terminal, or a manifest
+  # it cannot read, degrades silently to its default, empty here) -- so an
+  # empty caps read through it cannot distinguish "the manifest is real,
+  # readable, and simply doesn't declare these ops" (cannot) from "the
+  # manifest could not be established at all" (unknown, not the same claim).
+  #
+  # agmsg_terminal_dir alone is NOT enough to tell them apart: it only checks
+  # that terminal.conf exists (-f) and passes the trust gate, never that its
+  # CONTENT is readable. agmsg_terminal_get's own grep swallows a real read
+  # failure (permission denied, a transient I/O error) into the same empty
+  # result as "the key is simply absent" via `2>/dev/null || true` -- so a
+  # manifest that exists but cannot be READ would pass agmsg_terminal_dir and
+  # still land on the wrong (cannot) verdict without a direct check here.
+  local tdir=""
+  if ! tdir="$(agmsg_terminal_dir "$terminal" 2>/dev/null)" || [ ! -r "$tdir/terminal.conf" ]; then
     printf 'unknown %s\n' "terminal_manifest_unreadable"
     return 0
   fi

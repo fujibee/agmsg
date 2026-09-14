@@ -6,12 +6,19 @@ setup() {
   setup_test_env
   # shellcheck disable=SC1090
   source "$SCRIPTS/lib/team-status.sh"
+  # A dummy manifest dir the default agmsg_terminal_dir stub below points at --
+  # present AND readable, so agmsg_team_reach's own readability check passes
+  # through to whatever agmsg_terminal_get a given test fakes. Tests of the
+  # unreadable-manifest branch itself override agmsg_terminal_dir locally.
+  export TEAM_STATUS_DUMMY_MANIFEST_DIR="$BATS_TEST_TMPDIR/dummy-manifest"
+  mkdir -p "$TEAM_STATUS_DUMMY_MANIFEST_DIR"
+  : > "$TEAM_STATUS_DUMMY_MANIFEST_DIR/terminal.conf"
 }
 
 agmsg_terminal_load() { return 0; }
 # Default: the terminal's manifest is present and readable. Tests of
 # agmsg_team_reach's own unreadable-manifest branch override this locally.
-agmsg_terminal_dir() { return 0; }
+agmsg_terminal_dir() { printf '%s\n' "$TEAM_STATUS_DUMMY_MANIFEST_DIR"; }
 
 install_team_fake_tmux() {
   local bindir="$BATS_TEST_TMPDIR/fakebin"
@@ -604,10 +611,40 @@ _herdr_observe_stub() {   # <entries-json>
 # indistinguishable from a REAL manifest that simply doesn't declare
 # peek/poke/arrange. The two must not both read as "cannot": the first is
 # "we don't know", the second is a fact about this driver's own manifest.
-@test "reach: an unreadable terminal manifest is unknown, never cannot" {
+@test "reach: a terminal name that does not resolve at all is unknown, never cannot" {
   agmsg_terminal_dir() { return 1; }
   agmsg_terminal_get() { printf ''; }
   run agmsg_team_reach ghost-terminal some-pane 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "unknown terminal_manifest_unreadable" ]
+}
+
+# The stub above only proves the "terminal doesn't resolve at all" half.
+# agmsg_terminal_dir checks that terminal.conf EXISTS (-f) and passes the
+# trust gate -- never that its content can actually be READ. Inside
+# agmsg_terminal_get, a real read failure (permission denied, a transient I/O
+# error) is swallowed by its own `grep ... 2>/dev/null || true` into the same
+# empty result as "the key just isn't there" -- so a manifest that IS present
+# and trusted, but genuinely unreadable, would sail past agmsg_terminal_dir
+# and land on the wrong verdict without a direct readability check. This
+# drives the REAL functions (not stubs) through that exact path.
+@test "reach: a present, trusted, but genuinely UNREADABLE manifest is unknown, never cannot" {
+  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
+  unset -f agmsg_terminal_dir agmsg_terminal_get
+  # shellcheck disable=SC1090
+  source "$SCRIPTS/lib/terminal-registry.sh"
+  local d="$TEST_SKILL_DIR/plugins/terminals/lockedout"
+  mkdir -p "$d" "$TEST_SKILL_DIR/db"
+  cat > "$d/terminal.conf" <<'EOF'
+name=lockedout
+priority=15
+backend=test locked-out manifest
+capabilities=peek poke
+EOF
+  printf 'terminals/lockedout\t%s\n' "$d" > "$TEST_SKILL_DIR/db/trusted-plugins"
+  chmod 000 "$d/terminal.conf"
+  run agmsg_team_reach lockedout some-pane 1 ""
+  chmod 644 "$d/terminal.conf"
   [ "$status" -eq 0 ]
   [ "$output" = "unknown terminal_manifest_unreadable" ]
 }
