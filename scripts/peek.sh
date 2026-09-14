@@ -21,6 +21,12 @@ set -euo pipefail
 #
 # A terminal without an addressable pane (plain) refuses with
 # "unsupported: <why>" on stderr and a non-zero exit — never a silent 0.
+#
+# #1229 exception: a bare plain:- claude-code target has no pane AT ALL, but
+# still has its own session transcript on disk -- a read-only, agent-native
+# substitute for "recent state" (see _peek_native_transcript below). Its
+# output leads with a marker line so a caller always knows this was a
+# transcript read, never a screen read.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # actas-lock.sh requires SKILL_DIR
@@ -37,14 +43,49 @@ TEAM="${1:-}"
 [ -n "$TEAM" ] || die "Usage: peek.sh <team> [<name> [--lines N]]"
 shift
 
+# #1229: a bare plain:- target has no pane, so terminal_peek for it can only
+# ever return 13 (see plain/ops.sh's terminal_peek: id='-' is the first
+# check, unconditional). For a claude-code target specifically, its own
+# session transcript is a read-only, agent-native substitute for "recent
+# state" -- resolved from the actas lock this session's OWNER actually
+# holds (never guessed), never written to. Prints a marker line first so a
+# caller can always tell a transcript read from a screen read; returns 1
+# when no substitute is available (stale/no lock, dead owner, no transcript)
+# so the caller falls back to the driver's own "unsupported" message.
+_peek_native_transcript() {   # <team> <name> <project> <lines>
+  local team="$1" name="$2" project="$3" lines="$4" rd kind owner bare content
+  # The on-disk transcript layout is claude-code-internal, so the reader
+  # lives in that type's own driver hook, never here (same reasoning as
+  # boot-command.sh's resume-uuid gate). A hardcoded relative path, not the
+  # generic type-registry lookup boot-command.sh uses: this function is
+  # ALREADY only reached from the type == claude-code branch, so there is no
+  # type to look up. Absent hook => cannot read => no substitute.
+  if ! declare -F agmsg_transcript_tail >/dev/null 2>&1; then
+    local hook="$SCRIPT_DIR/drivers/types/claude-code/_transcript-exists.sh"
+    [ -f "$hook" ] || return 1
+    # shellcheck disable=SC1090
+    . "$hook"
+    declare -F agmsg_transcript_tail >/dev/null 2>&1 || return 1
+  fi
+  rd="$(actas_lock_read "$team" "$name")"
+  kind="${rd%%$'\t'*}"; owner="${rd#*$'\t'}"
+  [ "$kind" = ok ] && [ -n "$owner" ] || return 1
+  agmsg_instance_alive "$owner" || return 1
+  bare="$(agmsg_instance_bare_sid "$owner")"
+  content="$(agmsg_transcript_tail "$bare" "$project" "$lines")" || return 1
+  [ -n "$content" ] || return 1
+  printf 'AGMSG-NATIVE-RECORD: claude-code session transcript (no addressable pane; not a live screen)\n'
+  printf '%s\n' "$content"
+}
+
 _peek_one() { # <team> <name> [lines]
-  local team="$1" name="$2" lines="${3:-}" rec ref terminal bare_id
+  local team="$1" name="$2" lines="${3:-}" rec ref terminal bare_id proj type
   rec="$(agmsg_spawn_path "$team" "$name")"
   [ -f "$rec" ] || {
     echo "peek: no placement record for '$team/$name' — nothing here knows which pane is theirs (spawn writes it at launch; a hand-joined member gets one when a terminal-aware session names its pane)" >&2
     return 1
   }
-  IFS=$'\t' read -r ref _proj _type _fence < "$rec" || true
+  IFS=$'\t' read -r ref proj type _fence < "$rec" || true
   [ -n "$ref" ] || {
     echo "peek: placement record for '$team/$name' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)" >&2
     return 1
@@ -60,6 +101,19 @@ _peek_one() { # <team> <name> [lines]
     echo "peek: cannot load terminal driver '$terminal' recorded for '$team/$name'" >&2
     return 1
   }
+  if [ "$terminal" = plain ] && [ "$bare_id" = '-' ] && [ "$type" = claude-code ]; then
+    # This id can only ever return 13 -- there is no success stream from it
+    # to preserve byte-for-byte, so capturing its stderr here (unlike the
+    # plain passthrough below) cannot corrupt a verbatim screen read that
+    # does not exist for this case.
+    local trc=0 terr=""
+    terr="$(terminal_peek "$bare_id" 2>&1 >/dev/null)" || trc=$?
+    if [ "$trc" -eq 13 ] && _peek_native_transcript "$team" "$name" "$proj" "${lines:-20}"; then
+      return 0
+    fi
+    [ -z "$terr" ] || printf '%s\n' "$terr" >&2
+    return "${trc:-1}"
+  fi
   if [ -n "$lines" ]; then terminal_peek "$bare_id" --lines "$lines"; else terminal_peek "$bare_id"; fi
 }
 

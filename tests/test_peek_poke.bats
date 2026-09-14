@@ -174,17 +174,34 @@ EOF
   [ ! -s "$ARGV_LOG" ]
 }
 
-@test "peek: a plain record is a dead end — and does NOT point at a native channel" {
+@test "peek: a plain record with no live actas lock falls through to the driver's own unsupported message" {
+  # #1229 gave peek an agent-native substitute for a bare plain:- claude-code
+  # target (its own session transcript) -- but only when this session's OWN
+  # actas lock for the target resolves to a live owner. This fixture never
+  # ran actas, so no lock exists, the substitute is unavailable, and peek
+  # falls through to the driver's plain "unsupported" message, which (unlike
+  # poke's) has never carried native-channel wording.
   _write_record "plain:-"
   run bash "$SCRIPTS/peek.sh" testteam alice
   [ "$status" -eq 13 ]
   _out_has "unsupported: plain terminal has no addressable pane"
-  # The peek/poke asymmetry is measured, not stylistic: SendMessage gives poke
-  # a native write path, but today's CLI has no read path (`claude logs` is
-  # background-only; `agents --json` carries status, not screen content). A
-  # native-channel pointer here would send the reader chasing a door that does
-  # not exist — assert its absence so adding one back is a conscious decision.
   [ "$(printf '%s\n' "$output" | grep -c 'native channel' || true)" -eq 0 ]
+}
+
+@test "peek: a bare plain:- claude-code target with a live actas lock reads its own session transcript instead (#1229)" {
+  _write_record "plain:-"
+  local owner_bare="owner-sid" owner="owner-sid.$$"
+  mkdir -p "$SKILL_DIR/run"
+  printf '%s\n' "$owner" > "$SKILL_DIR/run/cc-instance.$$"
+  bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; printf %s "$1" > "$(actas_lock_path testteam alice)"' _ "$owner"
+  local munged="-tmp-project-a"
+  mkdir -p "$HOME/.claude/projects/$munged"
+  printf '{"type":"user","text":"one"}\n{"type":"assistant","text":"two"}\n' \
+    > "$HOME/.claude/projects/$munged/$owner_bare.jsonl"
+  run bash "$SCRIPTS/peek.sh" testteam alice
+  [ "$status" -eq 0 ]
+  _out_has "AGMSG-NATIVE-RECORD: claude-code session transcript"
+  _out_has '"text":"two"'
 }
 
 @test "peek: an emulator-qualified plain record reads through its adapter" {
@@ -363,12 +380,16 @@ EOF
 
 # A PATH with coreutils but deliberately NO tmux/herdr, so `command -v <cli>` in the
 # driver fails and the UNREACHABLE arm (10) is reached. Built from scratch (not a
-# filtered real PATH) so a stray tmux/herdr elsewhere cannot sneak back in.
+# filtered real PATH) so a stray tmux/herdr elsewhere cannot sneak back in. `paste`
+# is here because poke.sh's #1229 plain fallback sources type-registry.sh (via
+# detect-cli-type.sh), which needs it at source time -- a REAL dependency
+# whoami.sh/identities.sh's callers already carry, not one this fixture should
+# hide by omission.
 _terminal_less_path() {
   local dir tool
   dir="$(mktemp -d)"
   for tool in bash sh dirname basename readlink uname sed grep awk cat tr \
-              mktemp rm cp mv mkdir printf head tail wc sort cut date id sqlite3; do
+              mktemp rm cp mv mkdir printf head tail wc sort cut date id sqlite3 paste; do
     if command -v "$tool" >/dev/null 2>&1; then
       ln -s "$(command -v "$tool")" "$dir/$tool" 2>/dev/null || true
     fi
@@ -702,6 +723,58 @@ EOF
   run env HERDR_ENV=1 bash "$SCRIPTS/poke.sh" testteam alice "hi"
   [ "$status" -eq 12 ]
   _out_has "could not poke 'testteam/alice'"
+}
+
+# #1229: a bare plain:- claude-code target has no pane to type into or
+# retry. When the CALLER is also claude-code, its own local session
+# messaging (ListAgents/SendMessage) is a strictly better substitute than
+# anything this script can do (no shell path to that channel exists, #1229
+# review) -- so poke.sh names the route and refuses rather than silently
+# falling back to something worse.
+@test "poke: bare plain:- claude-code target + claude-code caller names ListAgents/SendMessage, never falls back to a message" {
+  _write_record "plain:-"
+  run env CLAUDE_CODE_SESSION_ID=caller-sid bash "$SCRIPTS/poke.sh" testteam alice "hi"
+  [ "$status" -eq 13 ]
+  _out_has "ListAgents"
+  _out_has "SendMessage"
+  _out_has "testteam-alice"
+  refute _out_has "poked 'testteam/alice' via an agmsg message"
+}
+
+# Otherwise (here: the caller is not claude-code) poke.sh itself delivers the
+# body as an ordinary agmsg message — the same store send.sh writes to —
+# resolving 'from' the same way whoami.sh/identities.sh already do (this
+# session's own (project, type) registration in the target's team). Widened
+# (#1229 review) to also cover identities.sh returning SEVERAL matches for
+# one (project, type) in the same team — this fleet's own real shape, many
+# same-type seats sharing one project checkout — where 'from' must narrow to
+# this session's own actas lock among the ambiguous candidates, or refuse.
+@test "poke: bare plain:- target + non-claude-code caller delivers as an agmsg message from the caller's own identity, narrowed by actas lock when identities.sh alone is ambiguous" {
+  _write_record "plain:-"
+  bash "$SCRIPTS/join.sh" testteam alice claude-code /tmp/project-a >/dev/null
+  bash "$SCRIPTS/join.sh" testteam bob codex "$PWD" >/dev/null
+  bash "$SCRIPTS/join.sh" testteam carol codex "$PWD" >/dev/null
+  # Two codex identities registered to this SAME project in testteam:
+  # identities.sh alone cannot tell bob and carol apart.
+  [ "$(bash "$SCRIPTS/identities.sh" "$PWD" codex | awk -F'\t' '$1=="testteam"' | grep -c .)" -eq 2 ]
+  # This session's own actas lock is bob's; carol has one too, but owned by
+  # a DIFFERENT session -- if the owner match were dropped, both would count
+  # and this would refuse instead of picking bob.
+  bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; printf %s "$1" > "$(actas_lock_path testteam bob)"' _ caller-thread
+  bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; printf %s "$1" > "$(actas_lock_path testteam carol)"' _ someone-elses-thread
+  run env CODEX_THREAD_ID=caller-thread bash "$SCRIPTS/poke.sh" testteam alice "hi from bob"
+  [ "$status" -eq 0 ]
+  _out_has "poked 'testteam/alice' via an agmsg message from 'bob'"
+  run bash "$SCRIPTS/history.sh" testteam alice
+  _out_has "bob"
+  _out_has "hi from bob"
+  # And the SAME ambiguity with no actas lock narrowing it (carol un-owned,
+  # bob's lock removed) refuses rather than guessing -- one test, both
+  # outcomes of the same setup.
+  run bash -c '. "'"$SKILL_DIR"'/scripts/lib/actas-lock.sh"; rm -f "$(actas_lock_path testteam bob)"'
+  run env CODEX_THREAD_ID=caller-thread bash "$SCRIPTS/poke.sh" testteam alice "hi again"
+  [ "$status" -eq 13 ]
+  _out_has "not be resolved to exactly one"
 }
 
 # --- arrange ---------------------------------------------------------------

@@ -19,6 +19,21 @@
 # a fake driver or a documented fixture socket.
 unset TMUX TMUX_PANE TMUX_TMPDIR
 unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
+# #1229: the claude-code transcript-path resolver (agmsg_transcript_path)
+# prefers CLAUDE_CONFIG_DIR over $HOME/.claude when set -- a developer or
+# agent running under a multi-account profile carries this in their real
+# shell, and every fixture in this suite that creates a transcript under the
+# sandboxed HOME assumes that IS the resolved root. Left ambient, those tests
+# would silently resolve against the real profile dir instead of the fixture.
+unset CLAUDE_CONFIG_DIR
+# #1229: poke.sh's plain-no-pane fallback resolves ITS OWN caller identity
+# from AGMSG_SESSION_ID/CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID (the same
+# chain fix.sh uses). Left ambient, a suite run from inside a real
+# claude-code session (this repo's own dev loop very much included) would
+# make that resolution succeed using the DEVELOPER's real session id instead
+# of whatever the fixture set up, silently changing which branch a test
+# exercises. Tests that deliberately model a caller set these explicitly.
+unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -31,6 +46,8 @@ setup_test_env() {
   # fake on PATH. CI runners carry none of these, so nothing changes there.
   unset TMUX TMUX_PANE TMUX_TMPDIR
   unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
+  unset CLAUDE_CONFIG_DIR
+  unset AGMSG_SESSION_ID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
