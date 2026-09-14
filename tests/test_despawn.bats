@@ -74,6 +74,25 @@ _control_row_exists_for_alice() {
     storage_history team alice | grep -F '"to":"alice"' | grep -Fq '"body":"ctrl:despawn"' )
 }
 
+# Wait for the row to stop being unread, polling STATE rather than checking
+# once right after despawn.sh returns (#715). despawn.sh's own wait watches
+# the actas LOCK release; the inbox read-state is a SEPARATE write, made by
+# the same watcher iteration that drops the lock, but through the storage
+# facade rather than the lock file -- under load the two can still be
+# observably apart for a few polls after the lock is already gone. Bounded at
+# <budget> seconds; a row that genuinely never gets marked read still spends
+# the whole budget and returns 1, so this is the assertion, not a substitute
+# for one -- a longer fixed sleep would only move the flake, not close it.
+_wait_until_read_for_alice() {   # <body-substring> <budget-seconds>
+  local needle="$1" budget="${2:-5}" waited_ms=0
+  while _is_unread_for_alice "$needle"; do
+    waited_ms=$((waited_ms + 100))
+    [ "$waited_ms" -lt $((budget * 1000)) ] || return 1
+    sleep 0.1
+  done
+  return 0
+}
+
 @test "despawn: graceful — ctrl:despawn control row is marked read (does not linger as unread)" {
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team leader claude-code "$PROJ" >/dev/null
@@ -92,13 +111,14 @@ _control_row_exists_for_alice() {
   # broad (non-actas) watcher that later scans this project's inbox must not
   # see it resurface as a "new" message (2026-07-19 review finding).
   _control_row_exists_for_alice
-  # `refute`, not a bare `!` (#715). `! cmd` is exempt from errexit on every bash,
-  # so `! _is_unread_for_alice ...` reported ok even when the row WAS unread — the
-  # assertion was written but watched nothing (#670). `refute` makes it fail when
-  # the row lingers unread. The separate, load-dependent flake this then exposes
-  # (the row not yet read right after despawn returns, under load) is NOT fixed
-  # here; it stays open as #715.
-  refute _is_unread_for_alice "ctrl:despawn"
+  # `refute`, not a bare `!` (#670): `! cmd` is exempt from errexit on every
+  # bash, so `! _is_unread_for_alice ...` reported ok even when the row WAS
+  # unread — the assertion was written but watched nothing. That is fixed by
+  # polling STATE below rather than checking once: a fixed-time check right
+  # after despawn.sh returns could still observe the row unread under load
+  # (#715), and lengthening that fixed wait would only move the flake, not
+  # close it.
+  _wait_until_read_for_alice "ctrl:despawn" 5
 
   kill "$wpid" 2>/dev/null || true; wait "$wpid" 2>/dev/null || true
 }
