@@ -1143,6 +1143,18 @@ EOF
   grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
 }
 
+@test "install --update: removes the legacy top-level Antigravity resume helper" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local old="$SK/scripts/antigravity-resume.sh"
+  local current="$SK/scripts/drivers/types/antigravity/antigravity-resume.sh"
+  [ ! -e "$old" ]
+  [ -f "$current" ]
+  printf '%s\n' legacy > "$old"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ ! -e "$old" ]
+  [ -f "$current" ]
+}
+
 @test "uninstall: removes the Antigravity skill" {
   mkdir -p "$FAKE_HOME/.gemini/config"
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg

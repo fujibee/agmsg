@@ -421,6 +421,10 @@ if [ "$UPDATE_ONLY" = true ]; then
     rm -f "$SKILL_DIR/scripts/drivers/terminals/$_agmsg_builtin_driver/SKILL.md"
   done
   unset _agmsg_builtin_driver
+  # The Antigravity resume helper moved under its type directory. A plain
+  # recursive copy cannot remove the old top-level file, so delete this one
+  # known agmsg-owned path during --update; do not sweep user scripts.
+  rm -f "$SKILL_DIR/scripts/antigravity-resume.sh"
   # Ship the external-plugin drop-in dir (just its README) so the location exists
   # post-install. A plain cp — not cp -R --delete — preserves any plugins the
   # user dropped in and their db/trusted-plugins opt-ins.
