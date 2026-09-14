@@ -963,3 +963,50 @@ JSON
   refute grep -q 'line [0-9]*: 1:' <<<"$output"
   [[ "$output" == "Usage: team.sh <team> [--json]" ]]
 }
+
+# --- #1140/#1152: team never creates a placement record --------------------------
+# Retained, not deleted, though it was buried in the #1110 repair block: review
+# caught that this one is a READ-ONLY safety property, not a --fix behaviour,
+# and had no equivalent surviving anywhere else (checked by grep across
+# team-status.sh, which only has the CREATE side of this, not the refusal).
+# team.sh is now purely read-only, which makes "it never writes a record" more
+# load-bearing than it was, not less.
+#
+# Confirmed non-vacuous both ways, on the pre-removal tree: with --fix present,
+# the SAME fixture's paired test showed record creation actually happening
+# (`team --fix creates a socket-qualified tmux record from the label`, deleted
+# alongside --fix itself); and removing the FIX==1 gate on the create-from-label
+# call reddened this exact assertion. This is not "nothing can create a record
+# because the code is gone" read back as a test -- it is the property that was
+# already true, and now must stay true with no flag standing behind it.
+_install_norecord_tmux_fixture() {
+  export NRT_LOG="$BATS_TEST_TMPDIR/tmux.log"; : > "$NRT_LOG"
+  local bin="$BATS_TEST_TMPDIR/bin"; mkdir -p "$bin"
+  cat > "$bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NRT_LOG"
+t=""; prev=""; for x in "$@"; do [ "$prev" = -t ] && t="$x"; prev="$x"; done
+_label() { case "$1" in %11) printf 'fixteam:alice';; %22) printf 'fixteam:bob';; esac; }
+case "$* " in
+  *list-panes*)                   printf '%s|%s\n%s|%s\n' '%11' 'fixteam:alice' '%22' 'fixteam:bob' ;;
+  *display-message*@agmsg_agent*) printf '%s|%s\n' "$t" "$(_label "$t")" ;;
+  *display-message*pane_title*)   printf '%s|%s\n' "$t" 'title' ;;
+  *show-options*)                 printf '%s\n' "$(_label "$t")" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin/tmux"
+  export PATH="$bin:$PATH"
+  export TMUX="/tmp/tsock,999,0"
+  export AGMSG_TERMINAL_DRIVER=tmux
+  bash "$SCRIPTS/join.sh" fixteam alice claude-code /tmp/proj >/dev/null
+  NRT_REC="$(SKILL_DIR="$TEST_SKILL_DIR" bash -c 'cd "$1" && . lib/actas-lock.sh && . lib/terminal-registry.sh && agmsg_spawn_path fixteam alice' _ "$SCRIPTS")"
+  [ ! -e "$NRT_REC" ]                      # join writes no record: the measured state, naturally
+}
+
+@test "team (read-only) creates NO record even with a unique tmux label (#1140/#1152)" {
+  _install_norecord_tmux_fixture
+  run bash "$SCRIPTS/team.sh" fixteam
+  [ "$status" -eq 0 ]
+  [ ! -e "$NRT_REC" ]                       # a read-only status never creates a record
+}
