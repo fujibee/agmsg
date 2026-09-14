@@ -70,20 +70,3 @@ agmsg_self_write_lock_acquire() {   # <team> <agent> <owner>
 agmsg_self_write_lock_release() {   # <team> <agent> <owner>
   agmsg_lock_release_at "$(agmsg_self_write_lock_path "$1" "$2")" "$3"
 }
-
-# Is <owner> the recorded owner right now? rc 0 yes; rc 1 no (free, someone
-# else, or empty); rc 2 could not read. Prints the verdict from the shared
-# three-valued reader so a caller can show WHY, not only whether.
-agmsg_self_write_lock_held_by() {   # <team> <agent> <owner>
-  local lock _r _v verdict
-  lock="$(agmsg_self_write_lock_path "$1" "$2")"
-  _r="$(_actas_lock_read_path "$lock")"
-  _v="$(_actas_lock_verdict "$3" "${_r%%$'\t'*}" "${_r#*$'\t'}")"
-  verdict="${_v%%$'\t'*}"
-  printf '%s\n' "$verdict"
-  case "$verdict" in
-    mine)      return 0 ;;
-    unknown:*) return 2 ;;
-    *)         return 1 ;;
-  esac
-}

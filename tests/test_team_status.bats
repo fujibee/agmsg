@@ -206,22 +206,6 @@ EOF
   [ "$(sqlite3 :memory: "SELECT json_type('$(printf '%s' "$output" | sed "s/'/''/g")','\$.live');")" = "" ]
 }
 
-@test "readiness wrapper preserves a positive driver proof" {
-  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
-  terminal_team_input_ready() { printf 'ready\n'; return 0; }
-  run agmsg_team_input_ready_loaded claude-code w2:p3
-  [ "$status" -eq 0 ]
-  [ "$output" = $'ready\tpositive_agent_identity' ]
-}
-
-@test "readiness wrapper fails closed when the driver cannot prove readiness" {
-  agmsg_type_get() { [ "$2" = cli ] && printf 'claude\n'; }
-  terminal_team_input_ready() { printf 'unknown:agent_response_incomplete\n'; return 2; }
-  run agmsg_team_input_ready_loaded claude-code w2:p3
-  [ "$status" -eq 0 ]
-  [ "$output" = $'unknown\tagent_response_incomplete' ]
-}
-
 # --- herdr observation: "not in the list" is not "has no key" -------------------
 #
 # The measured codex case. `agent list` is fetched successfully before this point,

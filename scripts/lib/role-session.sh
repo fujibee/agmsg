@@ -52,11 +52,11 @@ fi
 # the cache rather than reading a stale path.
 #
 # IMPORTANT: a cache entry is only kept when the helper runs in the caller's own
-# shell. `path="$(_agmsg_role_session_path ...)"` computes the entry inside a
-# command substitution and throws it away with the subshell, so a caller that
-# only ever invokes it that way pays full price every time. Use the _into form
-# below from a long-lived shell; subshells forked afterwards inherit the warm
-# cache and read from it.
+# shell. A stdout wrapper called as `path="$(... )"` would compute the entry
+# inside a command substitution and throw it away with the subshell, so a
+# caller that only ever invoked it that way would pay full price every time.
+# Use this _into form from a long-lived shell; subshells forked afterwards
+# inherit the warm cache and read from it.
 #
 # Parallel arrays, not an associative array: macOS ships bash 3.2, which has
 # none. The pair count is a handful, so the linear scan is cheaper than the
@@ -85,12 +85,6 @@ _agmsg_role_session_path_into() {
     _AGMSG_RS_PATH_VALS[$n]="$_AGMSG_ROLE_SESSION_PATH"
   fi
   return 0
-}
-
-# stdout form, for callers that are not in a hot loop.
-_agmsg_role_session_path() {
-  _agmsg_role_session_path_into "$1" "$2"
-  printf '%s' "$_AGMSG_ROLE_SESSION_PATH"
 }
 
 # Read the two fields the codex bridge launcher needs in ONE pass, into the
@@ -321,26 +315,6 @@ agmsg_role_session_uuid() {
   local team="$1" agent="$2" path
   _agmsg_role_session_path_into "$team" "$agent"
   _agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" session
-}
-
-# Scan run/role-session.* for the record whose name= field equals <name> and
-# print its full body (all key=value lines). Empty if none. Matches on the whole
-# name= field (never by splitting on '-'), per the record's raison d'etre.
-# Used by the resurrect hook (PR-D) to map a pane's `-n <name>` back to a uuid.
-agmsg_role_session_lookup_by_name() {
-  local name="$1" dir f v
-  [ -n "$name" ] || return 0
-  dir="$(_actas_lock_dir)"
-  [ -d "$dir" ] || return 0
-  for f in "$dir"/role-session.*; do
-    [ -f "$f" ] || continue
-    v="$(_agmsg_role_session_field "$f" name)"
-    if [ "$v" = "$name" ]; then
-      cat "$f" 2>/dev/null || true
-      return 0
-    fi
-  done
-  return 0
 }
 
 # Print the session id of every record of <type>, one per line (unordered, may

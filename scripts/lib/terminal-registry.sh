@@ -201,38 +201,6 @@ EOF
 # driver's same-named function.
 _AGMSG_TERMINAL_REQUIRED="terminal_check terminal_describe terminal_detect terminal_spawn terminal_despawn terminal_pane_state terminal_peek terminal_poke terminal_where terminal_arrange terminal_name"
 _AGMSG_TERMINAL_OPTIONAL="terminal_capability terminal_team_observe terminal_team_input_ready terminal_find_by_label terminal_label_of terminal_id_ok terminal_pane_process_observe terminal_enumerate_panes terminal_fence"
-
-# Resolve one capability for the terminal instance addressed by <id>.
-# terminal.conf is the implementation ceiling: a runtime hook may narrow that
-# set, but can never grant an operation the manifest does not advertise.
-# Optional terminal_capability has three outcomes: 0 supported, 1 unsupported,
-# and 2 unknown/unavailable. Its stderr reason is preserved deliberately.
-agmsg_terminal_capability() {   # <terminal> <capability> [id]
-  local name="$1" capability="$2" id="${3:-}" rc=0
-  if ! agmsg_terminal_has "$name" capabilities "$capability"; then
-    printf "unsupported: terminal driver '%s' does not implement capability '%s'\n" \
-      "$name" "$capability" >&2
-    return 1
-  fi
-
-  if [ "$name" = "${_AGMSG_TERMINAL_LOADED:-}" ]; then
-    declare -F terminal_capability >/dev/null 2>&1 || return 0
-    terminal_capability "$capability" "$id" || rc=$?
-  else
-    (
-      agmsg_terminal_load "$name" >/dev/null 2>&1 || exit 2
-      declare -F terminal_capability >/dev/null 2>&1 || exit 0
-      terminal_capability "$capability" "$id"
-    ) || rc=$?
-  fi
-  case "$rc" in
-    0|1|2) return "$rc" ;;
-    *)
-      printf "unknown: terminal driver '%s' returned invalid capability status %s for '%s'\n" \
-        "$name" "$rc" "$capability" >&2
-      return 2 ;;
-  esac
-}
 # A driver's observation fields carry EITHER an observed value or one of these
 # prefixes, which say why there is no value. They are listed here, once, because
 # two sides need the same list and neither owns it: the drivers emit them, and
@@ -1209,8 +1177,9 @@ agmsg_terminal_name_self_safe() {
 # has one id space per socket), so a pane id alone can name a live pane in
 # another instance -- measured 2026-09-11 when a repair resolved in one session
 # landed in another's pane. A locator carries the instance, and every reader
-# of one goes through THIS split: four seats read locators today, and four
-# parsers would disagree only after the fact.
+# of one goes through the SAME driver-level split (_agmsg_terminal_id_split,
+# below _agmsg_placement_split and agmsg_locator_compose's own round-trip
+# check): one grammar per kind, held once, in the driver that owns it.
 #
 # The registry owns the outer shape (kind + id) and asks the KIND's driver for
 # the boundary inside its id (`terminal_id_split`): where a herdr id ends in
@@ -1221,15 +1190,14 @@ agmsg_terminal_name_self_safe() {
 # rather than routing to a different socket. Control characters remain rejected.
 #
 # agmsg_locator_compose <kind> <instance> <pane>   -> "<kind>:<instance>:<pane>"  rc 0
-# agmsg_locator_split   <locator>                  -> "<kind>\t<instance>\t<pane>" rc 0
 #   rc 2, nothing on stdout, one named reason on stderr:
-#     unknown_kind | instance_malformed | pane_malformed | id_malformed | locator_malformed
-#   (id_malformed: the kind's driver refused "<instance>:<pane>" as one id --
-#   a bare pane with no instance or a pane outside the grammar; the registry
-#   does not guess which half)
-# Neither function replaces the caller's loaded driver: the kind's driver is
-# consulted through _agmsg_terminal_id_ok / _agmsg_terminal_id_split, which
-# load it in a subshell when it is not the loaded one.
+#     unknown_kind | instance_malformed | pane_malformed
+#   (pane_malformed also covers the driver refusing "<instance>:<pane>" as
+#   one id -- a bare pane with no instance or a pane outside the grammar; the
+#   registry does not guess which half)
+# Does not replace the caller's loaded driver: the kind's driver is consulted
+# through _agmsg_terminal_id_ok / _agmsg_terminal_id_split, which load it in
+# a subshell when it is not the loaded one.
 
 _agmsg_locator_kind_ok() {   # <kind>
   case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
@@ -1366,22 +1334,6 @@ agmsg_locator_compose() {   # <kind> <instance> <pane>
   printf '%s:%s:%s\n' "$kind" "$encoded" "$pane"
 }
 
-agmsg_locator_split() {   # <locator>
-  local loc="$1" kind id halves instance pane
-  case "$loc" in *[[:cntrl:]]*|'') echo "agmsg: locator: locator_malformed" >&2; return 2 ;; esac
-  case "$loc" in *:*) ;; *) echo "agmsg: locator: locator_malformed" >&2; return 2 ;; esac
-  kind="${loc%%:*}"; id="${loc#*:}"
-  _agmsg_locator_kind_ok "$kind" || { echo "agmsg: locator: unknown_kind" >&2; return 2; }
-  [ -n "$id" ] || { echo "agmsg: locator: locator_malformed" >&2; return 2; }
-  # The driver is the only judge of its own id. When it refuses, the registry
-  # cannot honestly say WHICH half is wrong (a plain instance is an enumerated
-  # adapter name, a herdr one a path), so the reason names the whole id.
-  _agmsg_terminal_id_ok "$kind" "$id" || { echo "agmsg: locator: id_malformed" >&2; return 2; }
-  halves="$(_agmsg_terminal_id_split "$kind" "$id")" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
-  instance="${halves%%$'\t'*}"; pane="${halves#*$'\t'}"
-  _agmsg_locator_instance_ok "$instance" || { echo "agmsg: locator: instance_malformed" >&2; return 2; }
-  printf '%s\t%s\t%s\n' "$kind" "$instance" "$pane"
-}
 
 # Every pane every terminal can see, as (kind, instance, pane) TRIPLES.
 #

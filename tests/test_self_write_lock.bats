@@ -470,25 +470,6 @@ _arm_flip() {   # first liveness read of sid-mx.* = dead, later ones = cannot te
   [ -e "$(agmsg_self_write_lock_path T alice)" ]
 }
 
-# --- held_by: the three answers -----------------------------------------------
-
-@test "held_by: mine / free / other / unreadable are four distinct, named answers" {
-  [ "$(id -u)" -eq 0 ] && skip "chmod 000 is ineffective as root"
-  local tok lock; tok="$(me_token)"; mark_alive "$tok"
-  lock="$(agmsg_self_write_lock_path T alice)"
-  run agmsg_self_write_lock_held_by T alice "$tok"
-  [ "$status" -eq 1 ]; [ "$output" = free ]
-  agmsg_self_write_lock_acquire T alice "$tok" >/dev/null
-  run agmsg_self_write_lock_held_by T alice "$tok"
-  [ "$status" -eq 0 ]; [ "$output" = mine ]
-  run agmsg_self_write_lock_held_by T alice "sid-other.$$"
-  [ "$status" -eq 1 ]; [ "$output" = "other:$tok" ]
-  chmod 000 "$lock"
-  run agmsg_self_write_lock_held_by T alice "$tok"
-  chmod 644 "$lock" 2>/dev/null || true
-  [ "$status" -eq 2 ]; [ "$output" = unknown:lock_unreadable ]
-}
-
 # --- the shared core: the actas lock still lands in its own file --------------
 
 @test "sharing: the actas lock and the self-write lock for one seat are two files, each with its own owner" {

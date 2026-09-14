@@ -372,46 +372,6 @@ EOF
   [ "$output" = 'iterm:/dev/ttys040' ]
 }
 
-@test "runtime capability: drivers without a hook fall back to the static ceiling" {
-  run agmsg_terminal_capability tmux peek '%1'
-  [ "$status" -eq 0 ]
-  run agmsg_terminal_capability tmux nonesuch '%1'
-  [ "$status" -eq 1 ]
-  grep -q 'does not implement' <<<"$output"
-}
-
-@test "runtime capability: hook narrows static support and preserves three outcomes" {
-  agmsg_terminal_load plain
-  terminal_capability() {
-    case "$1" in
-      peek) echo 'unsupported: adapter absent' >&2; return 1 ;;
-      poke) echo 'unknown: automation denied' >&2; return 2 ;;
-    esac
-    return 0
-  }
-  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
-  [ "$status" -eq 1 ]
-  grep -q 'adapter absent' <<<"$output"
-  run agmsg_terminal_capability plain poke 'iterm:/dev/ttys040'
-  [ "$status" -eq 2 ]
-  grep -q 'automation denied' <<<"$output"
-}
-
-@test "runtime capability: hook cannot grant beyond the static ceiling" {
-  agmsg_terminal_load plain
-  terminal_capability() { echo called > "$TEST_SKILL_DIR/hook-called"; return 0; }
-  run agmsg_terminal_capability plain arrange 'iterm:/dev/ttys040'
-  [ "$status" -eq 1 ]
-  [ ! -e "$TEST_SKILL_DIR/hook-called" ]
-}
-
-@test "runtime capability: an invalid hook status becomes unknown" {
-  agmsg_terminal_load plain
-  terminal_capability() { return 9; }
-  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
-  [ "$status" -eq 2 ]
-  grep -q 'invalid capability status 9' <<<"$output"
-}
 
 @test "plain: legacy unqualified peek and poke are unsupported" {
   agmsg_terminal_load plain
@@ -442,7 +402,7 @@ EOF
   refute terminal_id_ok 'terminal:/dev/ttysx'
 }
 
-@test "plain: measured adapter support is checked again by despawn, peek and poke" {
+@test "plain: measured adapter support is checked again by peek and poke" {
   cat > "$FAKEBIN/uname" <<'SH'
 #!/usr/bin/env bash
 printf 'Darwin\n'
@@ -460,16 +420,15 @@ SH
   export PATH="$FAKEBIN:$PATH"
   agmsg_terminal_load plain
 
-  run agmsg_terminal_capability plain peek 'iterm:/dev/ttys040'
-  [ "$status" -eq 0 ]
-  run agmsg_terminal_capability plain despawn 'iterm:/dev/ttys040'
-  [ "$status" -eq 0 ]
   run terminal_peek 'iterm:/dev/ttys040'
   [ "$status" -eq 0 ]
   [ "$output" = 'visible terminal text' ]
   run terminal_poke 'iterm:/dev/ttys040' 'one submitted prompt'
   [ "$status" -eq 0 ]
-  [ "$(grep -c ' probe /dev/ttys040' "$ARGV_LOG")" -ge 3 ]
+  # Each real operation probes again immediately before touching the emulator
+  # (ops.sh's own rule) -- one call for peek, one for poke, never cached
+  # across operations.
+  [ "$(grep -c ' probe /dev/ttys040' "$ARGV_LOG")" -eq 2 ]
   grep -q ' poke /dev/ttys040 one submitted prompt' "$ARGV_LOG"
 }
 
@@ -490,16 +449,10 @@ SH
   agmsg_terminal_load plain
 
   export FAKE_ADAPTER_RESULT=unsupported
-  run agmsg_terminal_capability plain poke 'terminal:/dev/ttys039'
-  [ "$status" -eq 1 ]
-  grep -q 'no matching tty' <<<"$output"
   run terminal_poke 'terminal:/dev/ttys039' text
   [ "$status" -eq 13 ]
 
   export FAKE_ADAPTER_RESULT=unknown
-  run agmsg_terminal_capability plain poke 'terminal:/dev/ttys039'
-  [ "$status" -eq 2 ]
-  grep -q 'automation permission denied' <<<"$output"
   run terminal_poke 'terminal:/dev/ttys039' text
   [ "$status" -eq 10 ]
 }

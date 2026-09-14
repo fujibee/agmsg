@@ -212,7 +212,8 @@ FAKE
 }
 
 @test "policy: a record whose fields are missing is repair_incomplete and writes no record (#1137)" {
-  rm -f "$(_agmsg_role_session_path T alice 2>/dev/null || echo /nonexistent)"
+  _agmsg_role_session_path_into T alice
+  rm -f "$_AGMSG_ROLE_SESSION_PATH"
   agmsg_role_session_record T alice sid-me "" ""
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 0 ]
