@@ -127,7 +127,7 @@ BARE_SID="$(agmsg_instance_bare_sid "$SESSION_ID")"
 PROJECT_PHYS="$(agmsg_canonical_path "$PROJECT")"
 while IFS= read -r team; do
   [ -z "$team" ] && continue
-  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" || true
+  agmsg_role_session_record "$team" "$NAME" "$BARE_SID" "$PROJECT_PHYS" "$TYPE" "$SESSION_ID" || true
 done <<< "$TEAMS"
 
 # Name this pane for the role just claimed, so peek/poke can reach a session a
