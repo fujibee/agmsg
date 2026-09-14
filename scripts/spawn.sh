@@ -908,24 +908,38 @@ fi
 # by the CLI itself. A monitor-capable type in a project configured for turn or
 # off therefore has no sentinel to await. Ask the existing status command for
 # the per-project mode and skip the impossible wait, preserving the distinction
-# from a type that has no handshake at all. If status cannot be read, the absence
-# of positive monitor evidence is still not a reason to block until timeout.
+# from a type that has no handshake at all. If status cannot be read or its output
+# is not recognized, keep waiting: unreadable state is not evidence of mode=off.
 if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
-  _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null | sed -n '1p' || true)"
-  case "$_delivery_mode_line" in
-    "mode: monitor"*) DELIVERY_MODE=monitor ;;
-    "mode: both"*)    DELIVERY_MODE=both ;;
-    "mode: turn"*)    DELIVERY_MODE=turn ;;
-    "mode: off"*)     DELIVERY_MODE=off ;;
-    *)                DELIVERY_MODE=unknown ;;
-  esac
+  _delivery_mode_line=""
+  _delivery_status=0
+  if ! _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null)"; then
+    _delivery_status=1
+  fi
+  _delivery_mode_line="$(printf '%s\n' "$_delivery_mode_line" | sed -n '1p')"
+  if [ "$_delivery_status" -ne 0 ]; then
+    DELIVERY_MODE=unknown
+    echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; delivery status failed — keeping readiness wait" >&2
+  else
+    case "$_delivery_mode_line" in
+      "mode: monitor"*) DELIVERY_MODE=monitor ;;
+      "mode: both"*)    DELIVERY_MODE=both ;;
+      "mode: turn"*)    DELIVERY_MODE=turn ;;
+      "mode: off"*)     DELIVERY_MODE=off ;;
+      *)                DELIVERY_MODE=unknown ;;
+    esac
+    if [ "$DELIVERY_MODE" = "unknown" ]; then
+      echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; status output was not recognized — keeping readiness wait" >&2
+    fi
+  fi
   case "$DELIVERY_MODE" in
     monitor|both) ;;
-    *)
+    turn|off)
       WAIT_READY=0
       SKIPPED_READINESS_BY_MODE=1
       echo "spawn: project delivery mode is '$DELIVERY_MODE' for '$AGENT_TYPE'; no readiness sentinel will arrive — skipping readiness wait (--no-wait implied)" >&2
       ;;
+    unknown) ;;
   esac
 fi
 
