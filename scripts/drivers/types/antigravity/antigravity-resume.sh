@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT="${1:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MONITOR="$SCRIPT_DIR/drivers/types/antigravity/antigravity-tui-monitor.sh"
+MONITOR="$SCRIPT_DIR/antigravity-tui-monitor.sh"
 PAUSED=""
 COUNT=0
 
@@ -15,7 +15,7 @@ while IFS=$'\t' read -r team role; do
 }$team"$'\t'"$role"
     COUNT=$((COUNT + 1))
   fi
-done < <(bash "$SCRIPT_DIR/identities.sh" "$PROJECT" antigravity)
+done < <(bash "$SCRIPT_DIR/../../../identities.sh" "$PROJECT" antigravity)
 
 if [ "$COUNT" -eq 0 ]; then
   echo 'agmsg: paused な Antigravity TUI が見つかりません' >&2

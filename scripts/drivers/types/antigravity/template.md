@@ -39,7 +39,7 @@ If argument is "hook off", run `delivery.sh set off __AGENT_TYPE__ "$(pwd)"`.
 First run `bash ~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh status --project <project> --team <team> --name <role>`. If the output reports that the `tui-pty` runtime has not started, apply the default no-argument behavior above as written. Any other line containing `tui-pty` means the Antigravity TUI monitor is active: **do not apply that default behavior**, and do not call bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh`. Use this status command (`tui-monitor status`) for any required state checks; it neither redisplays message bodies nor marks them read. Acknowledge receipt to the TUI monitor with exactly one line, `AGMSG_RECEIVED:<batch-id>`, using the batch ID from the envelope header.
 
 If argument is "resume":
-1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/antigravity-resume.sh "$(pwd)"`
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/drivers/types/antigravity/antigravity-resume.sh "$(pwd)"`
 2. Show the output. This resumes only when exactly one paused Antigravity TUI is registered for the current project; zero or multiple paused TUI instances fail closed.
 
 If `agy-tui` stopped after detecting a read attempt through the ordinary inbox path, do not run bare `__CMD_PREFIX____SKILL_NAME__`, `inbox.sh`, or `check-inbox.sh` again. After confirming that no batch is pending, run `~/.agents/bin/agy-tui reset-guard --project "$(pwd)" --team <team> --name <role>` to clear only the read-denied guard; it does not read or acknowledge messages.
