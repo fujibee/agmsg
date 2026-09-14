@@ -12,7 +12,7 @@
 setup() {
   export ROOT="$(mktemp -d)"
   mkdir -p "$ROOT/scripts/drivers/types/antigravity"
-  cp "$BATS_TEST_DIRNAME/../scripts/antigravity-resume.sh" "$ROOT/scripts/"
+  cp "$BATS_TEST_DIRNAME/../scripts/drivers/types/antigravity/antigravity-resume.sh" "$ROOT/scripts/drivers/types/antigravity/"
   cat > "$ROOT/scripts/identities.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'demo\talpha\n'
@@ -56,7 +56,7 @@ PY
 }
 
 @test "resume: exactly one paused TUI hands its identity to the existing resume" {
-  run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
+  run bash "$ROOT/scripts/drivers/types/antigravity/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 0 ]
   [[ "$output" == *"resume --project /tmp/project --team demo --name alpha"* ]]
 }
@@ -67,7 +67,7 @@ PY
   _mon="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
   sed "s/runtime: beta tui-pty running/runtime: beta tui-pty paused/" "$_mon" > "$_mon.portable"
   cat "$_mon.portable" > "$_mon"
-  run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
+  run bash "$ROOT/scripts/drivers/types/antigravity/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が複数"* ]]
 }
@@ -76,7 +76,7 @@ PY
   _mon="$ROOT/scripts/drivers/types/antigravity/antigravity-tui-monitor.sh"
   sed "s/runtime: alpha tui-pty paused/runtime: alpha tui-pty running/" "$_mon" > "$_mon.portable"
   cat "$_mon.portable" > "$_mon"
-  run bash "$ROOT/scripts/antigravity-resume.sh" /tmp/project
+  run bash "$ROOT/scripts/drivers/types/antigravity/antigravity-resume.sh" /tmp/project
   [ "$status" -eq 1 ]
   [[ "$output" == *"paused な Antigravity TUI が見つかりません"* ]]
 }
