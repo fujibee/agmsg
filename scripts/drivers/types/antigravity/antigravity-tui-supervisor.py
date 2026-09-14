@@ -36,9 +36,10 @@ def proc_start(pid):
     this value in this file exists to separate "the same process" from "a
     different process that inherited its number".
 
-    Linux uses /proc clock ticks; macOS uses ps lstart with the same whitespace
-    normalization as the shell process-proof helpers. A read failure remains a
-    separate exception from a confirmed missing pid.
+    Linux uses /proc clock ticks; macOS uses the shared libproc helper, which
+    supplies parent, state, and a microsecond start token from one kernel
+    snapshot. A read failure remains a separate exception from a confirmed
+    missing pid.
 
     TWO exception types, and the split is the whole point. Callers catch
     FileNotFoundError to mean "that pid is gone" and then unlink a reservation,
@@ -52,12 +53,17 @@ def proc_start(pid):
     """
     if sys.platform == 'darwin':
         try:
-            result=subprocess.run(['ps','-o','lstart=','-p',str(pid)],capture_output=True,text=True)
+            result=subprocess.run([sys.executable,str(ROOT/'scripts/lib/mac-process-info.py'),str(pid)],capture_output=True,text=True)
         except OSError as exc:
-            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (ps: {exc.strerror})') from exc
-        if result.returncode != 0 or not result.stdout.strip():
+            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc: {exc.strerror})') from exc
+        if result.returncode == 1:
             raise FileNotFoundError(errno.ENOENT, f'pid {pid} is not running')
-        return '_'.join(result.stdout.split())
+        if result.returncode != 0:
+            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc)')
+        fields=result.stdout.strip().split('\t')
+        if len(fields)!=3 or not fields[2].startswith('darwin:'):
+            raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (libproc output)')
+        return fields[2]
     if sys.platform != 'linux':
         raise StartTimeUnreadable(f'pid {pid} の起動時刻を判定できません (unsupported platform: {sys.platform})')
     try:

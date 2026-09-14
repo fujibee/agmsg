@@ -18,19 +18,22 @@ function _requirePosix(what) {
     throw new PlatformUnsupported(`Antigravity ${what} requires POSIX process and lock primitives; this host (${process.platform}) is unsupported`);
   }
 }
-function _ps(pid, field) {
-  const out=spawnSync('ps',['-p',String(pid),'-o',`${field}=`],{encoding:'utf8'});
-  if(out.status!==0||!out.stdout.trim()) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
-  return out.stdout.trim();
+const darwinInfo=new URL('./mac-process-info.py',import.meta.url).pathname;
+function _darwinProc(pid) {
+  const out=spawnSync('python3',[darwinInfo,String(pid)],{encoding:'utf8'});
+  if(out.status===1) { const e=Error(`pid ${pid} を確認できません`);e.code='ENOENT';throw e; }
+  if(out.status!==0||!out.stdout.trim()) throw Error('macOS process identity is unreadable');
+  const fields=out.stdout.trim().split('\t');
+  if(fields.length!==3||!/^[0-9]+$/.test(fields[0])||!['R','Z'].includes(fields[1])||!/^darwin:[0-9]+:[0-9]{6}$/.test(fields[2])) throw Error('macOS process identity is malformed');
+  return {ppid:Number(fields[0]),state:fields[1],start:fields[2]};
 }
-function _darwinStart(pid) { return _ps(pid,'lstart').replace(/\s+/g,'_'); }
 export function proc(pid) {
   _requirePosix('process inspection');
   if(process.platform==='linux') {
     const fields=fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').slice(1).join(') ').split(' ');
     return {ppid:Number(fields[1]),start:fields[19],state:fields[0]};
   }
-  return {ppid:Number(_ps(pid,'ppid')),start:_darwinStart(pid),state:_ps(pid,'state').split(/\s+/)[0]};
+  return _darwinProc(pid);
 }
 function _darwinLocked(file, data, append) {
   const script = [
