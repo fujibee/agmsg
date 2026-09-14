@@ -227,7 +227,12 @@ printf 'Placement collisions (record-only):\n'
 if [ "$n_collisions" -gt 0 ]; then
   printf '%s' "$collision_report"
   printf 'collisions: %s\n' "$n_collisions"
-elif [ "$total_failures" -gt 0 ]; then
+elif [ "$total_failures" -gt 0 ] || [ "$n_unscoped" -gt 0 ]; then
+  # An unscoped record is undecidable evidence, not a checked "no collision
+  # here" (the header's own promise: excluded from BOTH the collision count
+  # AND a "collisions: none" verdict). "none" asserts every claim in this
+  # fleet was actually compared; an unscoped claim never was, so it cannot
+  # be counted toward that assertion any more than a coverage gap can.
   printf 'collisions: none_observed\n'
 else
   printf 'collisions: none\n'

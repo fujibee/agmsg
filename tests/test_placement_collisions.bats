@@ -49,9 +49,12 @@ _place() {
   [ "$status" -eq 0 ]
   # A bare herdr id predates #1055's socket qualification and is not an
   # address on its own (#1155). Record-only evidence cannot tell two live
-  # instances apart from it, so this must never read as a proven collision.
+  # instances apart from it, so this must never read as a proven collision --
+  # and it must not read as a proven ABSENCE of one either: an unscoped
+  # claim was never actually compared, so "none" is not this answer.
   refute grep -Fq "collisions: 1" <<< "$output"
-  grep -Fq "collisions: none" <<< "$output"
+  refute grep -Fqx "collisions: none" <<< "$output"   # -x: the bare, definitive verdict; NOT a substring hit on none_observed
+  grep -Fq "collisions: none_observed" <<< "$output"
   grep -Fq "unscoped_records: 2" <<< "$output"
   grep -Fq "ref: herdr:w1:p9" <<< "$output"
   grep -Fq -- "- alpha/alice" <<< "$output"
@@ -89,7 +92,13 @@ _place() {
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  grep -Fq "collisions: none" <<< "$output"
+  # bob's bare claim was never actually compared against alice's -- it might
+  # share alice's instance, or might not, and record-only evidence cannot
+  # tell. "collisions: none" would assert every claim here WAS checked; it
+  # was not, so the verdict must say so rather than certify a clean answer.
+  refute grep -Fq "collisions: 1" <<< "$output"
+  refute grep -Fqx "collisions: none" <<< "$output"
+  grep -Fq "collisions: none_observed" <<< "$output"
   grep -Fq "unscoped_records: 1" <<< "$output"
   grep -Fq "ref: herdr:w1:p9" <<< "$output"
   grep -Fq -- "- beta/bob" <<< "$output"
@@ -102,7 +111,8 @@ _place() {
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  grep -Fq "collisions: none" <<< "$output"
+  refute grep -Fqx "collisions: none" <<< "$output"
+  grep -Fq "collisions: none_observed" <<< "$output"
   grep -Fq "unscoped_records: 2" <<< "$output"
 }
 
