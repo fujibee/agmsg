@@ -78,7 +78,7 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -qF "capabilities=$herdr_caps" <<<"$output"
 }
 
-# co1 review (#1209): the first version of these per-driver docs claimed 13
+# Review (#1209) found that the first version of these per-driver docs claimed 13
 # for herdr's and tmux's own peek/poke -- a code neither driver's own
 # terminal_peek/terminal_poke ever returns (a target that never existed is
 # refused by the caller's ref parser before any driver loads; 13 belongs to
