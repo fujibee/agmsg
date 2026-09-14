@@ -425,6 +425,7 @@ nodetype:
 YAML
 
   run env -u TMUX -u HERDR_ENV -u HERDR_PANE_ID AGMSG_TERMINAL="$stub_bin/record.sh {cmd}" \
+    AGMSG_TEST_PLAIN_WITNESS_ROW=$'iterm\t/dev/ttys040\t123\tSTART' \
     AGMSG_SPAWN_OPTIONS_FILE="$opts" \
     bash "$SCRIPTS/spawn.sh" nodetype nodeagent --project "$proj" --no-wait
   [ "$status" -eq 0 ]
