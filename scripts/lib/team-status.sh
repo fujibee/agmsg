@@ -4,6 +4,89 @@
 # specific observation and readiness proofs stay in the drivers; this layer
 # joins them into one backend-neutral roster status.
 
+# Which of peek/poke/arrange this session can actually use against a resolved
+# (terminal, pane) -- not merely which verbs the driver's MANIFEST advertises
+# (terminal.conf's capabilities=, the implementation ceiling), and not a guess
+# from whether the caller happens to share the target's terminal instance.
+#
+# Two signals, in this priority:
+#
+#  1. terminal_capability <verb> <id> (#1163) -- an OPTIONAL per-driver hook
+#     that narrows the manifest ceiling for ONE runtime instance: 0 supported,
+#     1 unsupported, 2 unknown. When a driver defines it, it is authoritative:
+#     plain's peek/poke need an emulator-qualified id (plain:<emulator>:<tty>);
+#     a bare plain:- placement is 13/unsupported for both, even though plain's
+#     own manifest lists them. Plain's location probe (terminal_where) cannot
+#     tell that difference -- it is UNCONDITIONALLY unsupported for every
+#     plain id, qualified or not, because plain has no container concept at
+#     all -- so falling back to the location probe here would report every
+#     plain member as unreachable regardless of whether it actually is.
+#
+#  2. For a driver with no such hook (herdr, tmux today), the CALLER's own
+#     location probe already ran (agmsg_team_location, called once per member
+#     by team.sh before this) and is a genuine per-target reachability check:
+#     each driver's terminal_where targets THAT id's own recorded socket
+#     (HERDR_SOCKET_PATH / tmux -S), not the caller's -- so its outcome
+#     stands as the answer, and the manifest ceiling is not narrowed further.
+#
+# Args: <terminal> <pane> <location_ok 0|1> <location_reason>
+#   location_ok/location_reason are what team.sh already computed from
+#   agmsg_team_location's container field -- passed in rather than re-probed,
+#   so a driver without terminal_capability costs no second round-trip per
+#   member.
+#
+# Output: one line, "<status> <detail>"
+#   can <space-separated ops>   -- at least one op usable now
+#   cannot <reason>             -- structurally unsupported (the rc-13 class:
+#                                  a fact about this placement's SHAPE, not a
+#                                  moment-in-time failure to reach it)
+#   unknown <reason>            -- could not be verified (any other failure:
+#                                  a transient/indeterminate reachability
+#                                  problem, never conflated with "cannot")
+agmsg_team_reach() {
+  local terminal="$1" pane="$2" location_ok="$3" location_reason="$4"
+  local caps op rc why has_hook=0
+  local can_ops="" any_cannot=0 any_unknown=0 first_reason=""
+
+  caps="$(agmsg_terminal_get "$terminal" capabilities 2>/dev/null)" || caps=""
+  declare -F terminal_capability >/dev/null 2>&1 && has_hook=1
+
+  if [ "$has_hook" -ne 1 ] && [ "$location_ok" -ne 1 ]; then
+    # No per-instance hook, and the one real reachability probe this driver
+    # gets (location) already failed -- nothing left to narrow.
+    case "$location_reason" in
+      *_rc_13|unsupported) printf 'cannot %s\n' "${location_reason:-unreachable}" ;;
+      *)                   printf 'unknown %s\n' "${location_reason:-unreachable}" ;;
+    esac
+    return 0
+  fi
+
+  for op in peek poke arrange; do
+    case " $caps " in *" $op "*) ;; *) continue ;; esac
+    if [ "$has_hook" -eq 1 ]; then
+      rc=0
+      why="$(terminal_capability "$op" "$pane" 2>&1 >/dev/null)" || rc=$?
+      case "$rc" in
+        0) can_ops="${can_ops:+$can_ops }$op" ;;
+        1) any_cannot=1;  [ -n "$first_reason" ] || first_reason="${why#unsupported: }" ;;
+        *) any_unknown=1; [ -n "$first_reason" ] || first_reason="${why:-terminal_capability_rc_$rc}" ;;
+      esac
+    else
+      can_ops="${can_ops:+$can_ops }$op"
+    fi
+  done
+
+  if [ -n "$can_ops" ]; then
+    printf 'can %s\n' "$can_ops"
+  elif [ "$any_unknown" -eq 1 ]; then
+    printf 'unknown %s\n' "${first_reason:-could_not_verify}"
+  elif [ "$any_cannot" -eq 1 ]; then
+    printf 'cannot %s\n' "${first_reason:-unsupported}"
+  else
+    printf 'cannot %s\n' "driver_does_not_support_these_ops"
+  fi
+}
+
 # Resolve a recorded terminal/pane through the terminal driver's location read.
 # Output is always three TAB-separated, non-empty fields: terminal, pane, and
 # container. Liveness is deliberately absent until the pane-state contract
@@ -275,6 +358,30 @@ agmsg_team_identity_json() {
   esac
 }
 
+# reach_status/reach_detail -> {"status":"can","ops":["peek","poke"]} |
+# {"status":"cannot","reason":"..."} | {"status":"unknown","reason":"..."}
+_agmsg_team_reach_json() {
+  local status="$1" detail="$2" op first=1 out=""
+  case "$status" in
+    can)
+      out='['
+      for op in $detail; do
+        [ "$first" -eq 1 ] || out="$out,"
+        first=0
+        out="$out$(_agmsg_team_json_quote "$op")"
+      done
+      out="$out]"
+      printf '{"status":"can","ops":%s}' "$out"
+      ;;
+    cannot|unknown)
+      printf '{"status":%s,"reason":%s}' "$(_agmsg_team_json_quote "$status")" "$(_agmsg_team_json_quote "$detail")"
+      ;;
+    *)
+      printf '{"status":"unknown","reason":%s}' "$(_agmsg_team_json_quote "invalid_reach_status_$status")"
+      ;;
+  esac
+}
+
 agmsg_team_render_json_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
   local container="$6" activity="$7" delivery="$8"
@@ -283,8 +390,8 @@ agmsg_team_render_json_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1"
-  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s}' \
+  local consistency="$1" reach_status="$2" reach_detail="$3"
+  printf '{"member":%s,"type":%s,"project":%s,"terminal":%s,"pane":%s,"container":%s,"activity":%s,"delivery":%s,"pane_label":%s,"agent_key":%s,"cli_session":%s,"consistency":%s,"reach":%s}' \
     "$(_agmsg_team_json_quote "$member")" "$(_agmsg_team_json_quote "$type")" \
     "$(_agmsg_team_json_quote "$project")" "$(_agmsg_team_json_quote "$terminal")" \
     "$(_agmsg_team_json_quote "$pane")" "$(_agmsg_team_json_quote "$container")" \
@@ -293,7 +400,8 @@ agmsg_team_render_json_row() {
     "$(agmsg_team_identity_json "$label_cell" "$label_expected" "$label_actual")" \
     "$(agmsg_team_identity_json "$key_cell" "$key_expected" "$key_actual")" \
     "$(agmsg_team_identity_json "$session_cell" "$session_expected" "$session_actual")" \
-    "$(_agmsg_team_json_quote "$consistency")"
+    "$(_agmsg_team_json_quote "$consistency")" \
+    "$(_agmsg_team_reach_json "$reach_status" "$reach_detail")"
 }
 
 agmsg_team_render_human_row() {
@@ -301,10 +409,15 @@ agmsg_team_render_human_row() {
   local container="$6" activity="$7" delivery="$8"
   shift 8
   local pane_label="$1" agent_key="$2" cli_session="$3" consistency="$4"
+  local reach_status="$5" reach_detail="$6" reach_summary
+  case "$reach_status" in
+    can) reach_summary="can:${reach_detail// /,}" ;;
+    *)   reach_summary="$reach_status:$reach_detail" ;;
+  esac
 
-  printf '  %s (%s) — %s   [%s %s @%s activity=%s delivery=%s identity=%s]\n' \
+  printf '  %s (%s) — %s   [%s %s @%s activity=%s delivery=%s identity=%s reach=%s]\n' \
     "$member" "$type" "$project" "$terminal" "$pane" "$container" \
-    "$activity" "$delivery" "$consistency"
+    "$activity" "$delivery" "$consistency" "$reach_summary"
   [ "$consistency" = ok ] && return 0
   _agmsg_team_identity_detail pane_label "$pane_label"
   _agmsg_team_identity_detail agent_key "$agent_key"

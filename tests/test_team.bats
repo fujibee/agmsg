@@ -940,6 +940,45 @@ JSON
   [[ "$output" == *"n/a:no_local_registration"* ]]
 }
 
+# --- reach (#1224 follow-up): team.sh names what this session can do to a
+# teammate, not merely their placement. See test_team_status.bats for
+# agmsg_team_reach's own unit coverage; these confirm team.sh's WIRING into
+# it end to end, for the two cases that need no fake terminal binary at all.
+
+@test "team: a pulled (remote) member reaches as cannot, reason remote_registration" {
+  mkdir -p "$TEST_SKILL_DIR/teams/pulled2"
+  cat > "$TEST_SKILL_DIR/teams/pulled2/config.json" <<'JSON'
+{
+  "name": "pulled2",
+  "team_id": "018f3f7e-2222-7000-8000-000000000022",
+  "agents": {
+    "alice": { "member_id": "018f3f7e-2222-7000-8000-000000000030", "registrations": [] }
+  },
+  "created_at": "2026-07-29T00:00:00Z"
+}
+JSON
+  run bash "$SCRIPTS/team.sh" pulled2
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:remote_registration' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" pulled2 --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = remote_registration ]
+}
+
+@test "team: a locally registered member with no placement record reaches as cannot, reason no_placement_record" {
+  bash "$SCRIPTS/join.sh" noreachteam alice claude-code /tmp/project-y >/dev/null
+  run bash "$SCRIPTS/team.sh" noreachteam
+  [ "$status" -eq 0 ]
+  grep -qF 'reach=cannot:no_placement_record' <<<"$output"
+
+  run bash "$SCRIPTS/team.sh" noreachteam --json
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$[0].reach.reason');")" = no_placement_record ]
+}
+
 @test "team: a locally registered member still lists its type and project" {
   # The fix must not change what a normal member looks like.
   bash "$SCRIPTS/join.sh" localteam alice claude-code /tmp/project-x >/dev/null

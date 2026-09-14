@@ -176,18 +176,20 @@ EOF
 @test "human team row collapses verified identity details" {
   run agmsg_team_render_human_row \
     alice claude-code /repo herdr w2:p3 w2:t1 working monitor \
-    'ok(actual=team:alice)' 'ok(actual=a123)' 'ok(actual=team-alice)' ok
+    'ok(actual=team:alice)' 'ok(actual=a123)' 'ok(actual=team-alice)' ok \
+    can 'peek poke arrange'
   [ "$status" -eq 0 ]
-  [ "$output" = '  alice (claude-code) — /repo   [herdr w2:p3 @w2:t1 activity=working delivery=monitor identity=ok]' ]
+  [ "$output" = '  alice (claude-code) — /repo   [herdr w2:p3 @w2:t1 activity=working delivery=monitor identity=ok reach=can:peek,poke,arrange]' ]
 }
 
 @test "human team row expands only non-ok identity observations" {
   run agmsg_team_render_human_row \
     carol claude-code /repo herdr w2:p7 w2:t2 idle turn \
     'ok(actual=team:carol)' 'n/a:no_independent_key' \
-    'mismatch(expected=team-carol,actual=carol)' mismatch
+    'mismatch(expected=team-carol,actual=carol)' mismatch \
+    cannot no_placement_record
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = '  carol (claude-code) — /repo   [herdr w2:p7 @w2:t2 activity=idle delivery=turn identity=mismatch]' ]
+  [ "${lines[0]}" = '  carol (claude-code) — /repo   [herdr w2:p7 @w2:t2 activity=idle delivery=turn identity=mismatch reach=cannot:no_placement_record]' ]
   [ "${lines[1]}" = '    cli_session=mismatch(expected=team-carol,actual=carol)' ]
   [ "${#lines[@]}" -eq 2 ]
 }
@@ -197,13 +199,30 @@ EOF
     carol claude-code /repo herdr w2:p7 w2:t2 idle turn \
     'ok(actual=team:carol)' team:carol team:carol \
     'ok(actual=a123)' a123 a123 \
-    'mismatch(expected=team-carol,actual=carol)' team-carol carol mismatch
+    'mismatch(expected=team-carol,actual=carol)' team-carol carol mismatch \
+    can 'peek poke'
   [ "$status" -eq 0 ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.member');")" = carol ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.status');")" = mismatch ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.expected');")" = team-carol ]
   [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.cli_session.actual');")" = carol ]
   [ "$(sqlite3 :memory: "SELECT json_type('$(printf '%s' "$output" | sed "s/'/''/g")','\$.live');")" = "" ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.status');")" = can ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.ops[0]');")" = peek ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.ops[1]');")" = poke ]
+}
+
+@test "JSON team row renders a cannot reach as a reason, not an ops list" {
+  run agmsg_team_render_json_row \
+    carol claude-code /repo herdr w2:p7 w2:t2 idle turn \
+    'ok(actual=team:carol)' team:carol team:carol \
+    'ok(actual=a123)' a123 a123 \
+    'ok(actual=team-carol)' team-carol team-carol ok \
+    cannot no_placement_record
+  [ "$status" -eq 0 ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.status');")" = cannot ]
+  [ "$(sqlite3 :memory: "SELECT json_extract('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.reason');")" = no_placement_record ]
+  [ "$(sqlite3 :memory: "SELECT json_type('$(printf '%s' "$output" | sed "s/'/''/g")','\$.reach.ops');")" = "" ]
 }
 
 # --- herdr observation: "not in the list" is not "has no key" -------------------
@@ -499,3 +518,80 @@ _herdr_observe_stub() {   # <entries-json>
   refute grep -q 'absent:' <<<"$output"
 }
 
+
+# --- agmsg_team_reach (#1224 follow-up) ---
+#
+# Which of peek/poke/arrange this session can actually use against a resolved
+# member, distinct from the driver manifest's capabilities= ceiling and from
+# any comparison against the caller's own terminal instance (measured: both
+# herdr's and tmux's ops target the RECORDED id's own socket explicitly, so
+# team.sh's existing location probe is already a genuine per-target
+# reachability check, not a "same instance as caller" question).
+
+@test "reach: a driver with no terminal_capability hook and a successful location probe grants the full manifest ceiling" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke where arrange name'; }
+  run agmsg_team_reach herdr w2:p3 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "can peek poke arrange" ]
+}
+
+@test "reach: a driver with no hook and a structurally-unsupported location probe (rc 13) reports cannot" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke where arrange name'; }
+  run agmsg_team_reach herdr w2:p3 0 "location_rc_13"
+  [ "$status" -eq 0 ]
+  [ "$output" = "cannot location_rc_13" ]
+}
+
+@test "reach: a driver with no hook and any OTHER failed location probe reports unknown, never cannot" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke where arrange name'; }
+  run agmsg_team_reach herdr w2:p3 0 "location_rc_10"
+  [ "$status" -eq 0 ]
+  [ "$output" = "unknown location_rc_10" ]
+  refute grep -qF 'cannot' <<<"$output"
+}
+
+@test "reach: a driver whose manifest lists none of peek/poke/arrange reports cannot even when the location probe succeeded" {
+  agmsg_terminal_get() { printf 'spawn despawn'; }
+  run agmsg_team_reach agmsg-app - 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "cannot driver_does_not_support_these_ops" ]
+}
+
+@test "reach: a driver WITH terminal_capability ignores a failed location probe entirely (plain's own container is always unsupported)" {
+  # plain's terminal_where is unconditionally 13/unsupported for every id --
+  # the load-bearing case this priority order exists for.
+  agmsg_terminal_get() { printf 'spawn despawn peek poke'; }
+  terminal_capability() { return 0; }
+  run agmsg_team_reach plain 'iterm:/dev/ttys040' 0 "location_rc_13"
+  [ "$status" -eq 0 ]
+  [ "$output" = "can peek poke" ]
+}
+
+@test "reach: terminal_capability rc 1 (unsupported at this instance) is cannot, with the hook's own reason" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke'; }
+  terminal_capability() { echo "unsupported: plain peek needs an emulator-qualified tty reference" >&2; return 1; }
+  run agmsg_team_reach plain - 0 "location_rc_13"
+  [ "$status" -eq 0 ]
+  [ "$output" = "cannot plain peek needs an emulator-qualified tty reference" ]
+}
+
+@test "reach: terminal_capability rc 2+ (indeterminate) is unknown, never cannot" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke'; }
+  terminal_capability() { echo "adapter probe timed out" >&2; return 2; }
+  run agmsg_team_reach plain 'iterm:/dev/ttys040' 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "unknown adapter probe timed out" ]
+}
+
+@test "reach: mixed per-op results under the hook -- any usable op wins, reported alone" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke'; }
+  terminal_capability() {
+    case "$1" in
+      peek) return 0 ;;
+      poke) echo "unsupported: no adapter for poke" >&2; return 1 ;;
+    esac
+  }
+  run agmsg_team_reach plain 'iterm:/dev/ttys040' 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "can peek" ]
+}
