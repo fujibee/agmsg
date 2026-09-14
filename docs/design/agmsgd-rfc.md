@@ -132,6 +132,47 @@ Under agmsgd the registration already carries the identity: a session tells the 
 - **The subscribed name is locked by default.** Holding the subscription *is* holding the role — the two cannot drift apart, because there is no longer a second place to state it.
 - **`actas` becomes the exception, not the routine**: switching a session to a different role deliberately. It stops being a step every session must remember, which is what made forgetting it possible.
 
+Separating the two jobs is not only a way to stop losing messages — several
+things become possible that a single combined step cannot express.
+
+**One message to a group.** A tag is attached to the identity, not to the
+session, so `to:#devs` reaches everyone holding that tag, and each recipient
+carries its own noticed/read state: three read it, two have not, and that is
+visible. Today the same announcement is N separate sends with no way to see who
+picked it up.
+
+**Broadcast needs no special mechanism.** One built-in tag, `#all`, which every
+identity holds implicitly and cannot drop. `to:#all` *is* the broadcast, so
+there is no second feature to build or to keep working.
+
+**Listening to another team without taking a name in it.** A subscription is
+separate from an identity and carries no exclusivity, so one session can listen
+to several teams — and a subscription *without* an identity is a bystander: it
+sees the traffic and marks nothing read. Watching another team during a release,
+or one seat keeping an eye on all of them, stops requiring you to register as
+someone there and start consuming their messages.
+
+**Changing what you hear without giving up your role.** Today the one step moves
+both at once; afterwards a subscription can widen or narrow while the identity
+stays exactly where it was.
+
+**Nothing to re-declare after a restart.** The subscription is derived at startup
+from what the session already knows — the project it runs in, the role recorded
+for it, the name it was spawned with — and the subscribed name is locked by
+default. There is no ceremony left to forget.
+
+**`from` becomes something that is actually protected.** Measured: `send` does
+not consult the exclusivity lock at all today, so any registered name can be
+sent as. The identity claim is the first mechanism that makes a sender's name
+mean anything.
+
+Underneath, this is three axes rather than one: **identity** (who you are —
+keyed `(team, name)` and the only thing that is exclusive), **tag** (which
+groups you are in — attached to the identity, never exclusive), and
+**subscription** (what you listen to — chosen by the session, never exclusive,
+living only as long as the session does). The word *lock* disappears from the
+model; what remains exclusive is the identity claim.
+
 Worth being precise about what the lock is: it is **local**. It keeps two sessions on the same machine from both answering as `bob`; it is not an authority claim about who may act as `bob` anywhere. Nothing in this section changes that scope — it changes when the lock is acquired (with the subscription, automatically) rather than what it protects.
 
 ### One name, many tools; one message, many recipients
