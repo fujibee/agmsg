@@ -150,6 +150,30 @@ skip_if_no_age() {
   [ "$status" -eq 0 ]
 }
 
+@test "connect: without --e2ee, an address outside the allowlist is still refused (control)" {
+  # 0.0.0.0 is not in the private-range allowlist (10/8, 172.16/12, 192.168/16,
+  # 169.254/16, 127/8) and nothing listens on port 1 there, so this fails fast
+  # either way. The control for the next test: plain sync must still refuse it.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://0.0.0.0:1" testteam
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be https://"* ]]
+}
+
+@test "connect --e2ee: an address the plaintext check would refuse is accepted, since e2ee seals the body before it leaves" {
+  skip_if_no_age
+  # Same address as the control above. Without --e2ee this fails validation
+  # before ever reaching the network. The promise in the refusal text itself
+  # ("connect with --e2ee so the contents are sealed before they leave this
+  # machine") is that --e2ee is an independent way to satisfy this, not
+  # something layered on top of an address that already passed -- so under
+  # --e2ee this must get past the check and fail at the network instead, for
+  # an unrelated reason (nothing listens on 0.0.0.0:1), never for the address.
+  run bash "$SCRIPTS/remote.sh" connect --endpoint "http://0.0.0.0:1" --e2ee testteam
+  [ "$status" -ne 0 ]
+  refute grep -qF 'must be https://' <<<"$output"
+  grep -qF 'agmsg: connect failed' <<<"$output"
+}
+
 # --- #143: a connect that already registered must not dead-end -------------
 #
 # Registration commits on the server in one transaction, and the binding is
