@@ -38,7 +38,7 @@ that IS present can be wrongly reported absent that way. Per-driver detail:
 '$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
-A teammate's placement and status: '$SKILL_DIR/scripts/team.sh' <team> — never a
+Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
 stale memory of their last known pane. Act on one with '$SKILL_DIR/scripts/peek.sh'
 / 'poke.sh' / 'arrange.sh' <team> <name> directly, not a guess: its exit code
 says whether it worked and, if not, why.
