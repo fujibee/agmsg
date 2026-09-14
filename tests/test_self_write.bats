@@ -294,6 +294,17 @@ FAKE
   [ "$(_line session)" = "session attempt=ok readback=verified" ]
 }
 
+@test "fence: a colon-bearing herdr instance is escaped and remains readable" {
+  export HERDR_SOCKET_PATH='/tmp/herdr/sessions/a:b.sock'
+  _fixture terminal_id term_AAA title "◐ claude" label "" key "" status idle kind claude
+  run agmsg_self_write T alice herdr:w1:pB "$ME"
+  [ "$status" -eq 0 ]
+  local fence_line; fence_line="$(printf '%s\n' "$output" | grep -E '^fence(-v2)?=')"
+  [ "$fence_line" = 'fence-v2=/tmp/herdr/sessions/a%3Ab.sock:term_AAA' ]
+  [ "$(agmsg_fence_split herdr "$fence_line")" = "$(printf '/tmp/herdr/sessions/a:b.sock\tterm_AAA')" ]
+  [ "$(_line record)" = 'record attempt=ok readback=verified' ]
+}
+
 @test "fence: two terminal_ids that differ only BEFORE their last colon are still told apart" {
   _fixture terminal_id "term:a:9" title "◐ claude" label "" key "" status idle kind claude
   sed -i '' -e 's|^fx() { sed -n "s/^$1=//p" "$FIX" \| head -1; }$|fx() { if [ "$1" = terminal_id ] \&\& [ "$(grep -c "\\[pane\\] \\[get\\]" "$ARGV_LOG")" -gt 1 ]; then echo term:c:9; return; fi; sed -n "s/^$1=//p" "$FIX" \| head -1; }|' "$FAKEBIN/herdr" 2>/dev/null \

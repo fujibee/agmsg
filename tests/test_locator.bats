@@ -27,21 +27,20 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]; [ "$output" = "plain:iterm:/dev/ttys040" ]
 }
 
-@test "compose: refuses by NAME -- an instance with a colon, an unknown kind, a pane outside the grammar, an empty instance" {
-  # `run` folds stderr into $output, so the reason IS the output and stdout is empty
+@test "compose: encodes a colon-bearing herdr instance; other malformed inputs stay named" {
   run agmsg_locator_compose herdr "/run/a:b.sock" w1:p7
-  [ "$status" -eq 2 ]; [ "$output" = "agmsg: locator: instance_malformed" ]
+  [ "$status" -eq 0 ]; [ "$output" = "herdr:v2:/run/a%3Ab.sock:w1:p7" ]
   run agmsg_locator_compose screen /tmp/x w1:p7
   [ "$status" -eq 2 ]; [ "$output" = "agmsg: locator: unknown_kind" ]
   run agmsg_locator_compose herdr /run/herdr-a.sock "w1"
   [ "$status" -eq 2 ]; [ "$output" = "agmsg: locator: pane_malformed" ]
-  run agmsg_locator_compose herdr "" w1:p7
+  run agmsg_locator_compose herdr "$(printf '/run/x\t')" w1:p7
   [ "$status" -eq 2 ]; [ "$output" = "agmsg: locator: instance_malformed" ]
-  [ -z "$(agmsg_locator_compose herdr "" w1:p7 2>/dev/null)" ]
+  [ -z "$(agmsg_locator_compose herdr "$(printf '/run/x\t')" w1:p7 2>/dev/null)" ]
 }
 
 @test "compose: the reason lands on stderr, one word, and stdout stays empty" {
-  local err; err="$(agmsg_locator_compose herdr "/run/a:b.sock" w1:p7 2>&1 >/dev/null)" || true
+  local err; err="$(agmsg_locator_compose herdr "$(printf '/run/x\t')" w1:p7 2>&1 >/dev/null)" || true
   [ "$err" = "agmsg: locator: instance_malformed" ]
   err="$(agmsg_locator_compose nosuch /x w1:p7 2>&1 >/dev/null)" || true
   [ "$err" = "agmsg: locator: unknown_kind" ]
@@ -75,6 +74,56 @@ teardown() { teardown_test_env; }
   [ -z "$(agmsg_locator_split "herdr:/run/a:b.sock:w1:p7" 2>/dev/null)" ]
 }
 
+@test "locator: the shared herdr instance codec round-trips colon, percent and spaces" {
+  local instance loc halves k i p
+  for instance in "/run/a:b.sock" "/tmp/server with space" " /tmp/leading-space " "/tmp/percent%path:socket"; do
+    loc="$(agmsg_locator_compose herdr "$instance" w1:p7)"
+    run agmsg_locator_split "$loc"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'herdr\t%s\tw1:p7' "$instance")" ]
+    halves="$output"; k="${halves%%$'\t'*}"; i="${halves#*$'\t'}"; p="${i#*$'\t'}"; i="${i%%$'\t'*}"
+    [ "$(agmsg_locator_compose "$k" "$i" "$p")" = "$loc" ]
+  done
+}
+
+@test "locator: a versioned herdr locator is visibly invalid to the legacy grammar" {
+  local loc id legacy_sock
+  loc="$(agmsg_locator_compose herdr "/run/a:b.sock" w1:p7)"
+  id="${loc#herdr:}"; legacy_sock="${id%:*:*}"
+  case "$legacy_sock" in *:*) : ;; *) false ;; esac
+  # The pre-encoding herdr reader rejects a colon in its socket half, so it
+  # cannot reinterpret v2: as a different, reachable socket.
+  run /bin/bash -c 'case "${1%:*:*}" in *:*) exit 1 ;; *) exit 0 ;; esac' _ "$id"
+  [ "$status" -ne 0 ]
+}
+
+@test "record refs: a colon-bearing herdr socket is encoded on write and decoded for the driver" {
+  agmsg_terminal_load herdr
+  local ref
+  ref="$(agmsg_terminal_ref herdr '/run/a:b.sock:w1:p7')"
+  [ "$ref" = "herdr:v2:/run/a%3Ab.sock:w1:p7" ]
+  [ "$(agmsg_terminal_ref_terminal "$ref")" = herdr ]
+  [ "$(agmsg_terminal_ref_id "$ref")" = '/run/a:b.sock:w1:p7' ]
+  _agmsg_placement_split "$ref"
+  [ "$_AGMSG_PS_TERM" = herdr ]
+  [ "$_AGMSG_PS_ID" = '/run/a:b.sock:w1:p7' ]
+}
+
+@test "fence codec: legacy instances stay compatible and colon-bearing paths round-trip" {
+  local old new
+  old="$(agmsg_fence_compose herdr /run/herdr.sock 'term:old')"
+  [ "$old" = 'fence=/run/herdr.sock:term:old' ]
+  [ "$(agmsg_fence_split herdr "$old")" = "$(printf '/run/herdr.sock\tterm:old')" ]
+  new="$(agmsg_fence_compose herdr '/run/a:b.sock' 'term:new:anchor')"
+  [ "$new" = 'fence-v2=/run/a%3Ab.sock:term:new:anchor' ]
+  [ "$(agmsg_fence_split herdr "$new")" = "$(printf '/run/a:b.sock\tterm:new:anchor')" ]
+}
+
+@test "fence codec: a legacy instance beginning with the old marker stays byte-for-byte unchanged" {
+  local legacy='fence=v2%3A/run/socket:term_old'
+  [ "$(agmsg_fence_split herdr "$legacy")" = "$(printf '%s\t%s' 'v2%3A/run/socket' term_old)" ]
+}
+
 @test "split: unknown kind, no instance, bare pane and control characters are refused by name" {
   local err
   err="$(agmsg_locator_split "screen:/x:w1:p7" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: unknown_kind" ]
@@ -86,6 +135,8 @@ teardown() { teardown_test_env; }
   err="$(agmsg_locator_split "herdr:/x:w1" 2>&1 >/dev/null)" || true;     [ "$err" = "agmsg: locator: id_malformed" ]
   err="$(agmsg_locator_split "$(printf 'herdr:/x\n:w1:p7')" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: locator_malformed" ]
   err="$(agmsg_locator_split "" 2>&1 >/dev/null)" || true;                [ "$err" = "agmsg: locator: locator_malformed" ]
+  err="$(agmsg_locator_split 'herdr:v2:/run/a%ZZ:w1:p7' 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: id_malformed" ]
+  err="$(agmsg_locator_split 'herdr:v2::w1:p7' 2>&1 >/dev/null)" || true;          [ "$err" = "agmsg: locator: id_malformed" ]
 }
 
 @test "split: the tmux legacy pane id inside a locator is still a pane, and the loaded driver is not replaced" {
@@ -121,12 +172,12 @@ FAKE
   chmod +x "$FAKEBIN/herdr"
 }
 
-@test "herdr id grammar: bare and socket-qualified ids are accepted; a colon or control char in the socket is refused" {
+@test "herdr id grammar: bare and socket-qualified ids accept colon; control chars remain refused" {
   agmsg_terminal_load herdr
   terminal_id_ok "w1:p7"
   terminal_id_ok "/run/herdr-a.sock:w1:p7"
   terminal_id_ok "/tmp/server with space:w1:pB"
-  refute terminal_id_ok "/run/a:b.sock:w1:p7"
+  terminal_id_ok "/run/a:b.sock:w1:p7"
   refute terminal_id_ok "$(printf '/run/x\n:w1:p7')"
   refute terminal_id_ok ":w1:p7"
   refute terminal_id_ok "w1"
@@ -152,5 +203,6 @@ FAKE
 @test "registry: _agmsg_terminal_id_ok for herdr follows the qualified grammar" {
   _agmsg_terminal_id_ok herdr "/run/herdr-a.sock:w1:p7"
   refute _agmsg_terminal_id_ok herdr "/run/a:b.sock:w1:p7"
+  _agmsg_terminal_id_ok herdr "v2:/run/a%3Ab.sock:w1:p7"
   _agmsg_terminal_id_ok herdr "w1:p7"
 }
