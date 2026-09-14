@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-14
+
+### Added
+- Terminal driver v1 (integration/terminal-driver-v1 into main) (#1240)
+- Report a mark-read that lost to a concurrent writer (#1011) (#1013)
+- Deliver the inbox mid-turn via a PostToolUse hook, not only at Stop (#1003) (#1004)
+
+### Fixed
+- Pass non-remote subcommands through (#590)
+- The remaining argv-to-stdin sites, plus a Windows CRLF row-separator bug (#991)
+- Give the identity lease a start token on Windows (#978)
+- One wake, one turn — attribute mid-start turn-end signals by turn id (#889)
+- Discover a ws:// app-server in the SessionStart plug (#1057)
+- Refuse a non-string envelope.blob/cipher instead of storing "null" (#1042) (#1048)
+- Count roster mutations as held so the read frontier can advance (#968) (#986)
+- A store at the current schema revision skips init's write batch (#1001) (#1010)
+- Probe before the pipe, not inside it (#462) (#904)
+- Widen _wait_pidfile's window and name what it saw (#595) (#797)
+- Stand down instead of an unfiltered watcher when a resumed seat is unidentified (#982) (#993)
+- Refuse to guess between multiple installs on --update with no --cmd (#659)
+- Write Codex writable_roots through a symlinked config.toml instead of replacing the link (#747) (#995)
+- Stop the apply failure path from discarding the shell's stderr (#974)
+- Stand down when the installation is updated underneath (#963) (#965)
+
+### Performance
+- Batch the rollout mtime scan (#1035) (#1037)
+
 ## [1.2.3] - 2026-08-22
 
 ### Added
@@ -456,7 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support spawning into herdr panes (#495)
 - Drag files onto a pane to insert their path (#481)
 - Adaptive catch-up so a backlog doesn't crawl at 100/5s
-- Add team-list.sh (agmsg team list --json)
+- Add team-list.sh (agmsg team list --json, koit-approved)
 - Add status --json and pending list/abort (ADR 0007 addendum)
 - Consume connected team credentials
 - Add scripts/remote.sh (connect/status/disconnect/doctor) per ADR 0007
@@ -491,10 +518,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve symlinks before trampoline compare; doctor checks node
 - Detect the macOS CLT python3 trampoline, not just PATH presence
 - Close the python3 dependency-tiering gap on the remote path
-- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (delta review round 2)
-- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (delta review)
-- Fail closed on incompleteness; shrink v1 schema
-- Wire 'agmsg team list' into actual dispatch entry points (review P1)
+- Close the integer-overflow bypass in AGMSG_TEAM_LIST_MAX_TEAMS validation (co1 delta review round 2)
+- Validate AGMSG_TEAM_LIST_MAX_TEAMS as a positive integer (co1 delta review)
+- Fail closed on incompleteness; shrink v1 schema (co1 P2, mentor-cc ruling)
+- Wire 'agmsg team list' into actual dispatch entry points (co1 P1)
 - Stop binding config JSON via .param set (#87-class tokenizer bug)
 - Hide imported identity at TTY
 - Separate token input from E2EE prompts
@@ -529,15 +556,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read messages from the event log too, not just the legacy table
 - Assert against the event log, not the legacy messages table
 - Escape interpolated names in rename/rename-team SQL (#223, #87)
-- Jsonl compact keys reads by tuple, not a space-join (#221 review)
+- Jsonl compact keys reads by tuple, not a space-join (co1 #221)
 - Make the jsonl driver parse under macOS bash 3.2 (#207, #221 CI)
-- Jsonl mark aborts on a failed existing-reads scan (#207 residual)
-- Jsonl driver must not swallow failures as ok (#207 review)
+- Jsonl mark aborts on a failed existing-reads scan (co1 #207 residual)
+- Jsonl driver must not swallow failures as ok (co1 #207 review)
 - Watch-once stale-wake token = unread-set digest, not a max id (#207)
-- Document --limit semantics + make storage_history agent truly optional (#206 review)
-- Export skips unknown event types; pin high-water with a tail-duplicate test (#205 review)
-- Describe is a metadata op; surface backend errors; chronological reads (re-review, #204)
-- Legacy read, pipefail framing, §1.4 control ops (review, #204)
+- Document --limit semantics + make storage_history agent truly optional (co1 #206 review)
+- Export skips unknown event types; pin high-water with a tail-duplicate test (co1 #205 review)
+- Describe is a metadata op; surface backend errors; chronological reads (co1 re-review, #204)
+- Legacy read, pipefail framing, §1.4 control ops (co1 review, #204)
 
 ### Performance
 - Seal a bulk push page in parallel (#502)
@@ -565,8 +592,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close Stage 2 frontier edge cases
 - Define Stage 2 read-state synchronization
 - Note rename.sh/rename-team.sh/api.sh as sqlite-coupled known gaps
-- Correct the ctrl:despawn cursor-advance comment (step-3 review)
-- Clarify stdout framing, cursor token, watch tip (review, #203)
+- Correct the ctrl:despawn cursor-advance comment (co1 step-3 review)
+- Clarify stdout framing, cursor token, watch tip (co1 review, #203)
 - Storage contract §2 — messages-only, opaque cursor, recipient-scoped read (#203)
 - Draft ADR 0003 — storage axis driver ABI, contract, scope (proposed)
 
@@ -794,7 +821,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Add supported-agents logo strip
-- List hermes in the --agent-type help (review nit)
+- List hermes in the --agent-type help (co1 nit)
 - Add docs/plugins.md + README section + plugins/ drop-in dir
 - Refresh manifest table + paths for the 1.1.0 layout
 - Lead Quick Start with npx, the zero-clone install path
@@ -877,6 +904,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handle empty TaskList explicitly to stop fresh-session loop (#71)
 - Storage driver pluginization design (epic #51) (#52)
 
+[1.3.0]: https://github.com/fujibee/agmsg/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/fujibee/agmsg/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/fujibee/agmsg/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/fujibee/agmsg/compare/v1.2.0...v1.2.1
