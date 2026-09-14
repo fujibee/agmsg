@@ -23,12 +23,12 @@ setup() {
 
 teardown() { teardown_test_env; }
 
-@test "terminal context line: plain (no addressable pane) names the driver, capabilities and its SKILL.md" {
+@test "terminal context line: plain (no addressable pane) names the driver, capabilities and its README.md" {
   run agmsg_terminal_context_line "" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   grep -qF 'AGMSG terminal: plain (no addressable pane)' <<<"$output"
   grep -qF 'capabilities=spawn despawn peek poke' <<<"$output"
-  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/plain/SKILL.md" <<<"$output"
+  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/plain/README.md" <<<"$output"
 }
 
 @test "terminal context line: herdr with a live pane names the pane id, not a generic placeholder" {
@@ -37,7 +37,7 @@ teardown() { teardown_test_env; }
   [ "$status" -eq 0 ]
   grep -qF "AGMSG terminal: herdr (pane $TEST_SKILL_DIR/herdr.sock:w1:p4)" <<<"$output"
   grep -qF 'capabilities=spawn despawn peek poke where arrange name' <<<"$output"
-  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/herdr/SKILL.md" <<<"$output"
+  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/herdr/README.md" <<<"$output"
 }
 
 @test "terminal context line: tmux with a live pane names the socket-qualified pane id" {
@@ -46,7 +46,7 @@ teardown() { teardown_test_env; }
   run agmsg_terminal_context_line "" "$TEST_SKILL_DIR"
   [ "$status" -eq 0 ]
   grep -qF 'AGMSG terminal: tmux (pane /tmp/sock:%4)' <<<"$output"
-  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/tmux/SKILL.md" <<<"$output"
+  grep -qF "notes: $TEST_SKILL_DIR/scripts/drivers/terminals/tmux/README.md" <<<"$output"
 }
 
 # The required RED control: where.sh's own failure (present terminal, unresolvable

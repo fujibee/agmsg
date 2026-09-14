@@ -74,7 +74,7 @@ agmsg_terminal_context_line() {
       ;;
   esac
 
-  notes="$skill_dir/scripts/drivers/terminals/$terminal/SKILL.md"
+  notes="$skill_dir/scripts/drivers/terminals/$terminal/README.md"
   if [ -n "$terminal" ] && [ -f "$notes" ]; then
     printf 'AGMSG terminal: %s (%s) capabilities=%s; notes: %s\n' \
       "$terminal" "$pane_desc" "${capabilities:-none}" "$notes"

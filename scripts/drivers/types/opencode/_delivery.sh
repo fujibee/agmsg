@@ -54,7 +54,7 @@ Asked about your own terminal, pane, or driver — or before using arrange/peek/
 — run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
 fields. Never guess from environment variables or a grep/ps command; a driver
 that IS present can be wrongly reported absent that way. Per-driver detail:
-'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
 Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a
@@ -93,7 +93,7 @@ Asked about your own terminal, pane, or driver — or before using arrange/peek/
 — run '$SKILL_DIR/scripts/where.sh' first and answer from its terminal=/capabilities=
 fields. Never guess from environment variables or a grep/ps command; a driver
 that IS present can be wrongly reported absent that way. Per-driver detail:
-'$SKILL_DIR/scripts/drivers/terminals/<terminal>/SKILL.md' (terminal= names which).
+'$SKILL_DIR/scripts/drivers/terminals/<terminal>/README.md' (terminal= names which).
 
 ## Teammates: placement, status, and reaching them
 Placement and status for a teammate: '$SKILL_DIR/scripts/team.sh' <team> — never a

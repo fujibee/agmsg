@@ -13,20 +13,33 @@ load test_helper
 
 ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
+@test "no source or test file still points a driver-doc reference at .../terminals/<x>/SKILL.md (#1249)" {
+  # #1249: renamed to README.md so a directory-scanning skill loader (e.g.
+  # codex's) stops treating each per-driver doc as its own standalone skill
+  # missing YAML frontmatter. The real per-driver files themselves are gone
+  # (a shipped scripts/drivers/terminals/*/SKILL.md would fail this the same
+  # way a stale text reference would), so this one grep guards both.
+  # install.sh's own --update cleanup and its test deliberately name the old
+  # filename to find and remove it -- excluded as intentional, not stale.
+  run bash -c "cd '$ROOT' && git grep -n 'terminals/[^ ]*/SKILL\.md' -- . \
+    ':!tests/test_capability_docs.bats' ':!install.sh' ':!tests/test_install.bats'"
+  [ "$status" -ne 0 ]
+}
+
 @test "SKILL.md no longer carries the herdr-specific peek/poke detail it used to (#1082)" {
   # Measured before this fix: this exact sentence, presented as if every
   # driver worked this way, when only herdr does.
   run grep -qF 'not every driver distinguishes this from 12 yet' "$ROOT/SKILL.md"
   [ "$status" -ne 0 ]
   # It still exists -- correctly scoped to the one driver it is true of.
-  grep -qF 'the one' "$ROOT/scripts/drivers/terminals/herdr/SKILL.md"
-  grep -qF 'distinguishes 11 from 12' "$ROOT/scripts/drivers/terminals/herdr/SKILL.md"
+  grep -qF 'the one' "$ROOT/scripts/drivers/terminals/herdr/README.md"
+  grep -qF 'distinguishes 11 from 12' "$ROOT/scripts/drivers/terminals/herdr/README.md"
 }
 
 @test "SKILL.md tells the agent to run where.sh before answering terminal/pane questions or using arrange/peek/poke, not to guess" {
   grep -qF 'run `where.sh`' "$ROOT/SKILL.md"
   grep -qiF 'never infer the driver from environment variables or a' "$ROOT/SKILL.md"
-  grep -qF 'scripts/drivers/terminals/<terminal>/SKILL.md' "$ROOT/SKILL.md"
+  grep -qF 'scripts/drivers/terminals/<terminal>/README.md' "$ROOT/SKILL.md"
 }
 
 @test "SKILL.md points teammate questions at team.sh, and teammate actions at peek/poke/arrange, not a guess" {
@@ -36,7 +49,7 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
 @test "SKILL.md points at capabilities and the per-driver file (#1082)" {
   grep -qF 'capabilities=<list>' "$ROOT/SKILL.md"
-  grep -qF 'scripts/drivers/terminals/<terminal>/SKILL.md' "$ROOT/SKILL.md"
+  grep -qF 'scripts/drivers/terminals/<terminal>/README.md' "$ROOT/SKILL.md"
   # The byte-count claim in #1082's own PR (measured against its own parent
   # commit at the time: 26829 -> 26400) is a one-time migration fact, not
   # something to pin here as a literal -- SKILL.md legitimately grows for
@@ -47,25 +60,25 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   # the herdr-specific-detail test.
 }
 
-@test "every shipped terminal driver has its own SKILL.md, and it lists verbs from ITS OWN manifest only (#1082)" {
+@test "every shipped terminal driver has its own README.md, and it lists verbs from ITS OWN manifest only (#1082)" {
   local name conf capabilities word
   for conf in "$ROOT"/scripts/drivers/terminals/*/terminal.conf; do
     name="$(basename "$(dirname "$conf")")"
-    [ -s "$(dirname "$conf")/SKILL.md" ]
+    [ -s "$(dirname "$conf")/README.md" ]
     capabilities="$(grep '^capabilities=' "$conf" | cut -d= -f2-)"
     # A verb NOT in this driver's own ceiling must not appear as a documented
     # heading in its doc (case-sensitive "## <verb>" headings only, so the verb
     # appearing in prose elsewhere is not what this pins).
     for word in where arrange name; do
       if ! grep -qw "$word" <<<"$capabilities"; then
-        refute grep -qi "^## $word" "$(dirname "$conf")/SKILL.md"
+        refute grep -qi "^## $word" "$(dirname "$conf")/README.md"
       fi
     done
   done
 }
 
 @test "plain's own doc names peek/poke as CONDITIONAL, and says where/arrange/name are absent, not merely undocumented (#1082)" {
-  local doc="$ROOT/scripts/drivers/terminals/plain/SKILL.md"
+  local doc="$ROOT/scripts/drivers/terminals/plain/README.md"
   [ -s "$doc" ]
   grep -qF 'NOT in that' "$doc"
   grep -qi 'emulator' "$doc"
@@ -152,7 +165,7 @@ _rcs_in_doc_section() {   # <doc path> <heading text>
   local driver ops doc fn heading actual claimed
   for driver in herdr tmux plain; do
     ops="$ROOT/scripts/drivers/terminals/$driver/ops.sh"
-    doc="$ROOT/scripts/drivers/terminals/$driver/SKILL.md"
+    doc="$ROOT/scripts/drivers/terminals/$driver/README.md"
     [ -s "$ops" ]; [ -s "$doc" ]
     for fn in terminal_peek terminal_poke; do
       case "$fn" in terminal_peek) heading="peek exit codes" ;; *) heading="poke exit codes" ;; esac
