@@ -61,3 +61,27 @@ teardown() { teardown_test_env; }
   grep -qF 'AGMSG terminal: could not be determined' <<<"$output"
   grep -qF 'TMUX_PANE' <<<"$output"
 }
+
+# The earlier version branched on the SHAPE of where.sh's
+# stdout (did it start with "resolved=false"?) rather than its exit code. A
+# where.sh that exits non-zero with EMPTY stdout -- a crash before any printf,
+# a kill, a truncated write; not the documented resolved=false contract --
+# fell through to the success-path parser and printed a line shaped like a
+# real answer ("AGMSG terminal: unknown (pane ) capabilities=none"),
+# discarding the actual failure. rc must be checked on its own, independent of
+# what (if anything) is in $out.
+@test "terminal context line: a where.sh that exits non-zero with EMPTY stdout still renders a visible failure, never a fake success line" {
+  local fake_skill="$TEST_SKILL_DIR/broken-where"
+  mkdir -p "$fake_skill/scripts"
+  cat > "$fake_skill/scripts/where.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+  chmod +x "$fake_skill/scripts/where.sh"
+  run agmsg_terminal_context_line "" "$fake_skill"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  grep -qF 'AGMSG terminal: could not be determined' <<<"$output"
+  # the load-bearing negative: the old bug's exact wrong output must not appear.
+  refute grep -qF 'AGMSG terminal: unknown (pane )' <<<"$output"
+}

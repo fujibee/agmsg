@@ -25,6 +25,24 @@ agmsg_terminal_context_line() {
 
   out="$("$skill_dir/scripts/where.sh" "$sid" 2>/dev/null)" || rc=$?
 
+  # rc, not the SHAPE of $out, decides failure. where.sh's own
+  # contract is "exit code mirrors resolved" — a non-zero rc is the failure
+  # signal on its own, and must be treated as one even when $out is empty or
+  # otherwise doesn't happen to start with "resolved=false" (a crash before
+  # any printf, a kill, a truncated write). The earlier version of this
+  # function matched on `$out`'s content instead, so an empty-stdout,
+  # non-zero-exit where.sh fell through to the success-path parser below and
+  # printed "AGMSG terminal: unknown (pane ) capabilities=none" — a line
+  # shaped like a real answer, silently discarding the actual failure.
+  if [ "$rc" -ne 0 ]; then
+    local reason=""
+    case "$out" in
+      resolved=false*) reason="${out#*reason=}" ;;
+    esac
+    printf 'AGMSG terminal: could not be determined (%s)\n' "${reason:-where.sh exited $rc with no usable output}"
+    return 0
+  fi
+
   # Plain shell parameter expansion throughout, deliberately — not sed/grep
   # regex. `\b` word-boundary matching is a GNU extension; BSD sed (macOS's
   # `/bin/sed`, the same tool this project already routes around elsewhere on
@@ -34,13 +52,6 @@ agmsg_terminal_context_line() {
   # broken on the other" shape this project's own sed patterns avoid
   # elsewhere. `${var#*key=}` / `${var%% *}` are POSIX shell, need no regex
   # engine, and cannot have this split.
-  case "$out" in
-    resolved=false*)
-      local reason="${out#*reason=}"
-      printf 'AGMSG terminal: could not be determined (%s)\n' "${reason:-where.sh failed with no reason}"
-      return 0
-      ;;
-  esac
 
   # `terminal=` and `capabilities=` are present on every resolved=true line
   # (both branches of where.sh); capabilities is always the LAST field, so
