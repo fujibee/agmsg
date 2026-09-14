@@ -99,11 +99,9 @@ If argument starts with "team list" (e.g. "team list", "team list --json", "team
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh <the rest of the args after "team list", unchanged>`
 2. This is a distinct command from bare "team" below — check for "team list" FIRST so "list" is never mistaken for a team name.
 
-If argument is "team", "team --json", "team --fix", "team --fix-pane-names", or "team --rename-sessions":
-1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM [--json|--fix|--fix-pane-names|--rename-sessions]`, preserving the option when present. `--json` returns every observed field. The repair flags report changed, skipped, and failed actions per identity cell:
-   - `--fix-pane-names` repairs the pane label and agent key through the terminal's own API. It never types into a session.
-   - `--rename-sessions` repairs the CLI session name by **typing** the type's rename command (e.g. `/rename <team>-<agent>`) into each session whose name mismatches, is renamable, and is at a prompt; reported as `changed`, `poked_unverified`, `skipped`, or `failed`.
-   - `--fix` does both, unconditionally, including the keystroke.
+If argument is "team" or "team --json":
+1. For each TEAM, run: `~/.agents/skills/__SKILL_NAME__/scripts/team.sh $TEAM [--json]`, preserving the option when present. `--json` returns every observed field.
+2. This is read-only. It reports each member's identity cells and whether they are consistent — including a member that does not answer at all — but writes nothing and pokes no one. A seat that is wrong or unresponsive is not something this command, or any other, repairs from the outside: typing into another seat's session to fix it is exactly the mistake that used to happen here, and it is gone on purpose, not replaced by another form of the same thing. A member repairs its own identity cells by running `fix` (below), from itself. A seat that cannot or will not do that gets despawned and restarted, or a person takes it — not patched over from another pane.
 
 If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
