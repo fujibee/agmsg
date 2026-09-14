@@ -198,10 +198,10 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   # have typed /rename into a live pane belonging to someone else.
   _install_fake_tmux; _under_tmux /tmp/s 4242 %3
   export FAKE_TITLE='wrong-name'
-  # %3 is already recorded as agdev-co1's placement, in a team this agent
-  # (alice) does not hold that role in.
+  # %3 is already recorded as ANOTHER seat's placement (bob's), in the same
+  # team this agent (alice) is acting in.
   mkdir -p "$RUN_DIR"
-  printf 'tmux:/tmp/s:%%3\t/proj\tclaude-code\n' > "$RUN_DIR/spawn.team__agdev-co1"
+  printf 'tmux:/tmp/s:%%3\t/proj\tclaude-code\n' > "$RUN_DIR/spawn.team__bob"
   run agmsg_self_rename_on_action team alice claude-code
   refute grep -q '\[send-keys\]' "$ARGV_LOG"
   [ -z "$(_mark team alice)" ]   # no mark at all -- next action re-checks, never "done" on a wrong pane
