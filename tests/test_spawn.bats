@@ -349,7 +349,7 @@ seed_resumable() {
 }
 
 @test "spawn: grok-build launches the plain grok CLI with the actas prompt" {
-  # grok-build is spawnable and monitor=no, so spawn skips the readiness wait.
+  # grok-build is spawnable and readiness_sentinel=no, so spawn skips the readiness wait.
   # Delivery is a rule file (no hook), so no folder-trust flag is needed —
   # the launch is the bare `grok "/<cmd> actas <name>"`, like claude-code.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
@@ -819,10 +819,10 @@ EOF
   [[ "$output" == *"status=timeout"* ]]
 }
 
-@test "spawn: --no-wait on a monitor=YES type still reports launched-unconfirmed (no post-input confirmation)" {
+@test "spawn: --no-wait on a readiness_sentinel=YES type still reports launched-unconfirmed (no post-input confirmation)" {
   # Full-head review: --no-wait skips the readiness handshake by request, so startup is
-  # NOT confirmed — exactly like monitor=no. Both no-confirmation paths must report
-  # status=launched-unconfirmed (a distinct note keeps the reasons apart). A monitor=YES
+  # NOT confirmed — exactly like readiness_sentinel=no. Both no-confirmation paths must report
+  # status=launched-unconfirmed (a distinct note keeps the reasons apart). A readiness_sentinel=YES
   # type (claude-code) with --no-wait is the arm that was silently falling through both
   # branches with no status line at all.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
@@ -840,12 +840,12 @@ EOF
   [[ "$output" == *"skipping readiness wait"* ]]
 }
 
-@test "spawn: grok-build skips the readiness wait even without --no-wait (monitor=no)" {
+@test "spawn: grok-build skips the readiness wait even without --no-wait (readiness_sentinel=no)" {
   # Regression guard: grok-build's monitor watcher attaches via the agent's
   # actas/rule launch (no SessionStart hook) and only in monitor mode, so there
-  # is no ready sentinel for spawn to await. With monitor=no, spawn must skip the
+  # is no ready sentinel for spawn to await. With readiness_sentinel=no, spawn must skip the
   # wait and return immediately instead of hanging a default turn/off-mode spawn
-  # until --ready-timeout. (Without this, monitor=yes made the wait fire.)
+  # until --ready-timeout. (Without this, readiness_sentinel=yes made the wait fire.)
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run env -u TMUX bash "$SCRIPTS/spawn.sh" grok-build alice --project "$PROJ" \
     --terminal "true # {cmd}"
@@ -855,7 +855,7 @@ EOF
   [[ "$output" != *"status=ready"* ]]
 }
 
-@test "spawn: a no-handshake type (monitor=no) reports startup UNCONFIRMED, not a bare success" {
+@test "spawn: a no-handshake type (readiness_sentinel=no) reports startup UNCONFIRMED, not a bare success" {
   # Observed live: "spawned" printed while the agent had not started (a startup shell prompt
   # ate the first keystroke of the boot command). A type with no readiness handshake
   # cannot confirm startup, so spawn must say so DISTINCTLY — status=launched-unconfirmed
@@ -872,10 +872,10 @@ EOF
   refute grep -q "spawned codex 'reviewer'" <<<"$output"
 }
 
-@test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from monitor=no's" {
+@test "spawn: --no-wait says 'launched' (never 'spawned'), and its unconfirmed NOTE differs from readiness_sentinel=no's" {
   # The placement word is 'launched', never 'spawned', on the --no-wait path too; and
   # the two no-confirmation reasons read apart — --no-wait carries note=no-wait, a
-  # monitor=no type carries note=no-readiness-handshake (distinct wording).
+  # readiness_sentinel=no type carries note=no-readiness-handshake (distinct wording).
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" --no-wait
   [ "$status" -eq 0 ]
@@ -1349,7 +1349,7 @@ _spawn_recorded_id() {
 }
 
 @test "spawn req1: arm-3 (pre-input) and launched-unconfirmed (post-input) are DISTINCT messages" {
-  # The two 'unconfirmed' reasons must read apart. A monitor=no type spawned
+  # The two 'unconfirmed' reasons must read apart. A readiness_sentinel=no type spawned
   # through herdr with UNKNOWN readiness shows BOTH, worded differently.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   _setup_fake_herdr

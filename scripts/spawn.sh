@@ -874,14 +874,20 @@ place_and_launch() {
 # receiving. Block until that appears so the leader doesn't send a job into the
 # cold-start window (before the watcher attaches) and lose it.
 #
-# Types with `monitor=no` do not produce a spawn-awaitable readiness sentinel, so
-# skip the wait. That covers types with no Monitor at all (codex) AND types whose
-# watcher attaches via the agent's own launch rather than a spawn-time sentinel
-# (grok-build, whose monitor mode is real but not awaitable here) — receive there
-# is poll-based or agent-launched anyway.
+# Types with `readiness_sentinel=no` do not produce a spawn-awaitable readiness
+# sentinel, so skip the wait. That covers types with no Monitor at all (codex)
+# AND types whose watcher attaches via the agent's own launch rather than a
+# spawn-time sentinel (grok-build, whose monitor mode is real but not awaitable
+# here) — receive there is poll-based or agent-launched anyway.
+#
+# NOT named `monitor=`: that name reads as a statement about delivery-mode
+# support and collided with `delivery_modes=monitor` in agents' own reports
+# (#1214) — a type can carry `delivery_modes=monitor` (a real, settable mode)
+# and `readiness_sentinel=no` (no spawn-time handshake to await) at once, and
+# `delivery_modes` alone answers "can this type be set to monitor mode".
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
 SKIPPED_READINESS_BY_TYPE=0
-if [ "$(agmsg_type_get "$AGENT_TYPE" monitor)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
+if [ "$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel)" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
   SKIPPED_READINESS_BY_TYPE=1
   echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2

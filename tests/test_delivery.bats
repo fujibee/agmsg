@@ -3683,7 +3683,7 @@ EOF
 # --- the per-turn hook re-asserts the pane's name (#1044) ---------------------
 #
 # For several agent types this is the ONLY entry point that ever knows the
-# session id: grok-build has no SessionStart hook, and `monitor=yes` holds on two
+# session id: grok-build has no SessionStart hook, and `readiness_sentinel=yes` holds on two
 # of the nine, so a hand-started pane on the rest is first named from here.
 # Naming is an invariant re-asserted at every entry point, not an assignment made
 # once somewhere — measured across the nine types, no single place covers them.
