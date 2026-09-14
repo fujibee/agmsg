@@ -896,10 +896,37 @@ READINESS_SENTINEL="$(agmsg_type_get "$AGENT_TYPE" readiness_sentinel 2>/dev/nul
 
 READY_PATH="$(agmsg_ready_path "$TEAM" "$NAME")"
 SKIPPED_READINESS_BY_TYPE=0
+SKIPPED_READINESS_BY_MODE=0
+DELIVERY_MODE=""
 if [ "$READINESS_SENTINEL" = "no" ] && [ "$WAIT_READY" = "1" ]; then
   WAIT_READY=0
   SKIPPED_READINESS_BY_TYPE=1
   echo "spawn: '$AGENT_TYPE' has no spawn readiness handshake — skipping readiness wait (--no-wait implied)" >&2
+fi
+
+# A readiness sentinel is written by the project's monitor delivery watcher, not
+# by the CLI itself. A monitor-capable type in a project configured for turn or
+# off therefore has no sentinel to await. Ask the existing status command for
+# the per-project mode and skip the impossible wait, preserving the distinction
+# from a type that has no handshake at all. If status cannot be read, the absence
+# of positive monitor evidence is still not a reason to block until timeout.
+if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
+  _delivery_mode_line="$("$SCRIPT_DIR/delivery.sh" status "$AGENT_TYPE" "$PROJECT" 2>/dev/null | sed -n '1p' || true)"
+  case "$_delivery_mode_line" in
+    "mode: monitor"*) DELIVERY_MODE=monitor ;;
+    "mode: both"*)    DELIVERY_MODE=both ;;
+    "mode: turn"*)    DELIVERY_MODE=turn ;;
+    "mode: off"*)     DELIVERY_MODE=off ;;
+    *)                DELIVERY_MODE=unknown ;;
+  esac
+  case "$DELIVERY_MODE" in
+    monitor|both) ;;
+    *)
+      WAIT_READY=0
+      SKIPPED_READINESS_BY_MODE=1
+      echo "spawn: project delivery mode is '$DELIVERY_MODE' for '$AGENT_TYPE'; no readiness sentinel will arrive — skipping readiness wait (--no-wait implied)" >&2
+      ;;
+  esac
 fi
 
 # Clear any stale sentinel before launching so we only observe THIS spawn's
@@ -959,6 +986,13 @@ if [ "$WAIT_READY" = "1" ]; then
   # seat that IS receiving but could not be named reports spawned-but-unnamed, not ready.
   [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed "after=${waited}s"
   echo "status=ready name=${NAME} team=${TEAM} after=${waited}s"
+elif [ "$SKIPPED_READINESS_BY_MODE" = "1" ]; then
+  # The type can produce a sentinel, but this project has no active monitor
+  # delivery (turn/off/unrecognized). Startup is therefore unconfirmed for this
+  # invocation; distinguish the configuration cause from a type-level absence.
+  [ "$SPAWN_UNNAMED" = "1" ] && _emit_spawned_but_unnamed
+  echo "status=launched-unconfirmed name=${NAME} team=${TEAM} note=no-monitor-delivery"
+  echo "spawn: '${NAME}' was launched, but project delivery mode '$DELIVERY_MODE' has no readiness watcher. Startup is UNCONFIRMED; enable monitor delivery or read the pane." >&2
 elif [ "$SKIPPED_READINESS_BY_TYPE" = "1" ]; then
   # monitor=no: there is no readiness handshake, so spawn CANNOT confirm the agent
   # actually started — only that its boot was placed/typed. Do not let the

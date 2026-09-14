@@ -801,6 +801,7 @@ EOF
 
 @test "spawn: readiness handshake returns status=ready when the watcher attaches" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
   local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
   # The terminal "launch" just touches the ready sentinel (and comments out the
@@ -813,10 +814,25 @@ EOF
 
 @test "spawn: readiness handshake times out (status=timeout, exit 3) when nothing attaches" {
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ" >/dev/null
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
     --ready-timeout 2 --terminal "true # {cmd}"
   [ "$status" -eq 3 ]
   [[ "$output" == *"status=timeout"* ]]
+}
+
+@test "spawn: a monitor-capable type skips readiness when project delivery is off (#647)" {
+  # No hooks configured means this project's observable delivery mode is off.
+  # A claude-code type can produce a readiness sentinel, but no watcher will be
+  # started for this project, so waiting would only reach the timeout.
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 2 --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "project delivery mode is 'off'" <<<"$output"
+  grep -q "status=launched-unconfirmed" <<<"$output"
+  grep -q "note=no-monitor-delivery" <<<"$output"
+  refute grep -q "status=timeout" <<<"$output"
 }
 
 @test "spawn: --no-wait on a readiness_sentinel=YES type still reports launched-unconfirmed (no post-input confirmation)" {
