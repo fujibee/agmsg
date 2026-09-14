@@ -136,6 +136,24 @@ _reap_test_skill_dir_procs() {
   done
 }
 
+# Derive the run-file path a real caller would use for (team, agent), instead
+# of a test hardcoding the pre-#1023 legacy literal "<team>__<agent>". join.sh
+# mints team_id unconditionally when it creates a brand-new team config, and
+# mints the member's member_id in the same call once team_id exists -- so a
+# freshly join.sh'd team/agent pair (the normal case in this suite) resolves
+# to the NEW id-keyed path, not the legacy one. A literal string baked into a
+# test fixture silently stops matching the path production code actually
+# reads or writes the moment #1023 lands, with no error at the mismatch site.
+_ready_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; agmsg_ready_path "$1" "$2" )
+}
+_spawn_record_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; agmsg_spawn_path "$1" "$2" )
+}
+_actas_session_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; actas_lock_path "$1" "$2" )
+}
+
 teardown_test_env() {
   # Try the plain rm FIRST, and only reap when it actually fails. The reaper's scan is a
   # full `ps -eo pid=,args=`; running it in EVERY teardown would add that cost to all of

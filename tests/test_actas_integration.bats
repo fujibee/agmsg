@@ -147,8 +147,12 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-mine" /tmp/p1 claude-code \
     >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
-  # Give it just enough time to resolve subscription and print stderr.
-  sleep 1
+  # #1023 widened this margin: actas_lock_path now resolves ids through
+  # roster-journal.sh when a team has them (two sqlite3 calls), measured at
+  # ~40ms/call on this machine -- enough, under host load, to occasionally
+  # still be resolving a pair's lock when the old 1s window fired the kill
+  # (measured: 1 flake in 3 runs at 1s, 0 in several at 2s).
+  sleep 2
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
 
@@ -182,7 +186,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-me" /tmp/p1 claude-code alice \
     >/dev/null 2> "$BATS_TEST_TMPDIR/watch.err" 3>&- &
   local wpid=$!
-  sleep 1
+  sleep 2
 
   # Should now own the lock.
   [ "$(_owner_only T alice)" = "sid-me" ]
@@ -297,7 +301,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/broad.out" 2> "$BATS_TEST_TMPDIR/broad.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!
@@ -338,7 +342,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/broad.out" 2> "$BATS_TEST_TMPDIR/broad.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!
@@ -401,7 +405,7 @@ fake_session() {
   AGMSG_WATCH_INTERVAL=1 bash "$SKILL_DIR/scripts/watch.sh" "sid-broad" /tmp/p1 claude-code \
     > "$BATS_TEST_TMPDIR/n.out" 2> "$BATS_TEST_TMPDIR/n.err" 3>&- &
   local broad=$!
-  sleep 1
+  sleep 2
 
   sleep 60 &
   local newpid=$!

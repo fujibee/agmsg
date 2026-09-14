@@ -35,6 +35,100 @@
 
 _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
 
+# --- #1023: run files are keyed by name, and two names can collide ------------
+#
+# `_actas_lock_encode` percent-encodes what a name is made of, but the `__`
+# JOINING team and agent is not itself escaped -- so a team or agent name that
+# legally CONTAINS `__` produces the same three paths for two different
+# members: actas_lock_path("a__b","c") == actas_lock_path("a","b__c"). No
+# separator fixes this on its own (`-` and `:` are equally legal in a name);
+# the fix is to stop joining names at all where a stable id already exists.
+#
+# roster-journal.sh already maintains one: config.json's `team_id`, and a
+# journal-derived `member_id` per (team, name). Both are UUIDs from a fixed
+# alphabet, so `<team_id>__<member_id>` cannot suffer this collision -- no
+# encoding scheme is needed for it.
+#
+# NOT EVERY TEAM HAS ONE. A team created before ids existed, that has never
+# gone through `remote.sh`'s connect (which mints them), has no team_id --
+# and, measured on this tree, a NEW member joining such a team today still
+# gets no member_id either (join.sh's id-bearing branch never runs, because it
+# is gated on the team already having one). There is deliberately no local
+# minting path added here: for an id-less team, `_agmsg_id_key_for` returns
+# nothing, and the three functions below fall back to the ORIGINAL
+# name-encoded path, unconditionally -- the #1023 collision is not fixed for
+# such a team, and that is a decided scope cut (#1023's follow-up), not a bug.
+#
+# FOR AN ID-BEARING TEAM, existing run files predate this change and are
+# still name-keyed on disk. So the three path functions do not simply return
+# the id-based path: each checks for a file already there under the id key,
+# then a file under the legacy name key, and only when NEITHER exists does it
+# hand back the id-based path -- which is where the NEXT write lands. A file
+# already served under the old key keeps being served there until it is
+# naturally replaced (a lock released and re-claimed, a placement rewritten);
+# there is no bulk conversion and no caller anywhere needs to know which key
+# it got. This is the same three-way "check, don't guess" shape the rest of
+# this file already uses for the lock's own three-valued read.
+# The `[ -f "$config" ]` and `[ -n "$team_id" ]` guards below are each
+# measured REDUNDANT with the final `[ -n "$member_id" ]` one: removing config
+# and team_id together still produces zero reds, because a missing config or
+# empty team_id both lead to no roster journal existing, which
+# agmsg_roster_name_owner already answers with an empty member_id -- caught by
+# the one check that is load-bearing on its own (confirmed separately: removing
+# only the member_id check reddens). Kept for clarity at each step rather than
+# relying on a guard three calls away, same as #1152's measured-redundant
+# empty-comm checks in agent-detect.sh.
+_agmsg_id_key_for() {   # <team> <agent>
+  local team="${1-}" agent="${2-}" team_dir config team_id member_id
+  [ -n "$team" ] && [ -n "$agent" ] || return 1
+  team_dir="$SKILL_DIR/teams/$team"
+  config="$team_dir/config.json"
+  [ -f "$config" ] || return 1
+  if ! declare -F agmsg_sql_readfile_path >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$SKILL_DIR/scripts/lib/sqlpath.sh"
+  fi
+  team_id="$(sqlite3 :memory: \
+    "SELECT COALESCE(json_extract(CAST(readfile('$(agmsg_sql_readfile_path "$config")') AS TEXT), '\$.team_id'),'');" \
+    2>/dev/null | tr -d '\r')" || return 1
+  [ -n "$team_id" ] || return 1
+  if ! declare -F agmsg_roster_name_owner >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$SKILL_DIR/scripts/lib/roster-journal.sh"
+  fi
+  member_id="$(agmsg_roster_name_owner "$team_dir" "$agent" 2>/dev/null)" || return 1
+  [ -n "$member_id" ] || return 1
+  printf '%s__%s' "$team_id" "$member_id"
+}
+
+# Which of <id-path> or <legacy-path> to actually use: the id-keyed one if a
+# file already lives there, else the legacy one if a file already lives
+# there, else the id-keyed one (nothing exists yet -- the next write starts
+# the new form). Shared by all three functions below so "check, don't guess"
+# is decided in one place.
+#
+# Review finding: a caller must never see BOTH files exist for the same member
+# and get no signal. That state should not arise through this resolver alone
+# (actas_lock_claim resolves the path once and writes only there), but a
+# crash mid-migration, a manual copy, or a caller that built its own path
+# independently of these functions could still produce it -- and every
+# existing caller of actas_lock_path/agmsg_ready_path/agmsg_spawn_path treats
+# their return as an always-succeeding path string, so failing the call here
+# would ripple that contract change through the whole tree for a state this
+# function did not create. Named instead: warn on stderr, naming both paths
+# and which one wins, and keep resolving to the id-keyed one deterministically
+# -- silence is the thing being removed, not the always-succeeds contract.
+_agmsg_id_or_legacy_path() {   # <id-path> <legacy-path>
+  if [ -e "$1" ] && [ -e "$2" ]; then
+    printf 'agmsg: WARNING: both an id-keyed lock (%s) and a legacy lock (%s) exist for the same member -- treating the id-keyed one as authoritative; remove the stale legacy file\n' "$1" "$2" >&2
+    printf '%s\n' "$1"
+    return 0
+  fi
+  [ -e "$1" ] && { printf '%s\n' "$1"; return 0; }
+  [ -e "$2" ] && { printf '%s\n' "$2"; return 0; }
+  printf '%s\n' "$1"
+}
+
 # Encode a team or agent name into a filesystem-safe form. Anything outside
 # [A-Za-z0-9._-] is percent-encoded byte-by-byte (UTF-8 safe, reversible).
 # An earlier underscore-replacement scheme was lossy: "foo bar" and "foo_bar"
@@ -53,11 +147,16 @@ _actas_lock_encode() {
   '
 }
 
-# Compute the lock file path for (team, agent).
+# Compute the lock file path for (team, agent). #1023: id-keyed when both ids
+# resolve and a file already exists at either candidate path, or nothing does
+# yet; the legacy name-keyed path otherwise -- see _agmsg_id_key_for above.
 actas_lock_path() {
   local team="$1" agent="$2"
-  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
-  printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a"
+  local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  legacy="$(printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a")"
+  local key
+  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
+  _agmsg_id_or_legacy_path "$(printf '%s/actas.%s.session' "$(_actas_lock_dir)" "$key")" "$legacy"
 }
 
 # Readiness sentinel path for (team, agent). watch.sh creates this when an
@@ -68,8 +167,11 @@ actas_lock_path() {
 # both scripts agree without env plumbing. See #108.
 agmsg_ready_path() {
   local team="$1" agent="$2"
-  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
-  printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
+  local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  legacy="$(printf '%s/ready.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
+  local key
+  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
+  _agmsg_id_or_legacy_path "$(printf '%s/ready.%s' "$(_actas_lock_dir)" "$key")" "$legacy"
 }
 
 # Placement record path for a spawned (team, agent). `spawn` writes the
@@ -79,8 +181,11 @@ agmsg_ready_path() {
 # to a ctrl:despawn. Same encoding as the lock path. See #109.
 agmsg_spawn_path() {
   local team="$1" agent="$2"
-  local t a; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
-  printf '%s/spawn.%s__%s' "$(_actas_lock_dir)" "$t" "$a"
+  local t a legacy; t="$(_actas_lock_encode "$team")"; a="$(_actas_lock_encode "$agent")"
+  legacy="$(printf '%s/spawn.%s__%s' "$(_actas_lock_dir)" "$t" "$a")"
+  local key
+  key="$(_agmsg_id_key_for "$team" "$agent")" || { printf '%s\n' "$legacy"; return 0; }
+  _agmsg_id_or_legacy_path "$(printf '%s/spawn.%s' "$(_actas_lock_dir)" "$key")" "$legacy"
 }
 
 # ---------------------------------------------------------------------------
