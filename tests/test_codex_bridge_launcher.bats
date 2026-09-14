@@ -256,6 +256,18 @@ run_launcher() {
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
 }
 
+@test "launcher: ignores a stale request app-server URL and binds to its live server" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  printf 'codex\trec-thread-1\tws://127.0.0.1:2\tteam\talice\n' \
+    > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  run_launcher
+
+  [ -f "$CAPTURE" ]
+  grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
+  refute grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
+}
+
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3

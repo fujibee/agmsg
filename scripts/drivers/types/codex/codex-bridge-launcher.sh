@@ -795,15 +795,18 @@ while _agmsg_pid_alive_local "$PARENT_PID"; do
     retire_recorded_bridge
     exec "$0" "$TYPE" "$PROJECT" "$APP_SERVER" "$PARENT_PID" "$ROLE_PAIR"
   fi
-  # Resolve the app-server URL (and thread) this iteration would launch against
-  # FIRST, so the reuse check can compare a live bridge's bound server with the
-  # current one. Thread source: a request file (older-codex hook) wins; otherwise
-  # discover the live TUI thread via thread/loaded/list.
+  # Resolve the thread this iteration would launch against. A request file may
+  # outlive the app-server that wrote it: SessionStart deliberately exits before
+  # rewriting the request when no recorded role belongs to the new thread, and
+  # actas records the role later without rewriting this project-wide file. The
+  # launcher's APP_SERVER argument, however, comes from the live app-server that
+  # owns this launcher generation, so it is the sole endpoint authority. Keep the
+  # request's thread hint for older Codex versions, but never let its stale URL
+  # override the live launcher's endpoint.
   thread_id="loaded"
   req_app_server="$APP_SERVER"
   if [ -f "$REQUEST_FILE" ]; then
     [ -n "${_rthread:-}" ] && thread_id="$_rthread"
-    [ -n "${_rapp:-}" ] && req_app_server="$_rapp"
   fi
 
   # A child launcher is role-scoped. The seat request supplies the pair and
