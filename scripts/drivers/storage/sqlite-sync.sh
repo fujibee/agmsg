@@ -113,9 +113,16 @@ _sqlite_sync_valid_binding() {
 }
 
 _sqlite_sync_decimal_le() {
-  local left right
-  left=$(printf '%s' "$1" | sed 's/^0*//')
-  right=$(printf '%s' "$2" | sed 's/^0*//')
+  local left="$1" right="$2"
+  # Strip leading zeros with a plain loop, not `printf | sed`: this function
+  # sits inside #968's per-roster-entry validation, so a fork here is a fork
+  # per entry -- measured at ~332s to validate a 10,000-entry roster_seqs
+  # list, almost entirely this pair of pipelines run 10,000 times. Bash 3.2
+  # has no extglob to strip a run of zeros in one substitution, so this walks
+  # one character at a time; `-gt 1`, not `-gt 0`, is what keeps a lone "0"
+  # from being stripped down to an empty string.
+  while [ "${#left}" -gt 1 ] && [ "${left:0:1}" = 0 ]; do left="${left:1}"; done
+  while [ "${#right}" -gt 1 ] && [ "${right:0:1}" = 0 ]; do right="${right:1}"; done
   [ -n "$left" ] || left=0
   [ -n "$right" ] || right=0
   if [ "${#left}" -lt "${#right}" ] ||
