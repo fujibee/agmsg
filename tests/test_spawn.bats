@@ -125,7 +125,7 @@ teardown() {
   local quoted="$TEST_SKILL_DIR/pro'j"
   mkdir -p "$quoted"
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$quoted"
-  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$quoted"
+  run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$quoted" --no-wait
   [[ "$output" != *"no team is registered"* ]]
   [[ "$output" != *"syntax error"* ]]
 }
