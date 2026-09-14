@@ -47,7 +47,7 @@
 #   seat=<team>/<agent> sid=<owner> pane=<ref>        or
 #   seat=... none:<busy:<owner>|bad_ref|no_driver|lock_unknown:<r>|fence_unreadable:<r>>
 #   seat=... unsupported:<r>                            (plain: no pane exists)
-#   fence=<instance>:<terminal_id>
+#   fence=<encoded-instance>:<terminal_id>
 #   record  attempt=<ok|failed:<r>>            readback=<verified|mismatch:<seen>|unavailable:<r>|not_attempted>
 #   label   attempt=<ok|failed:<rc>|skipped:<r>> readback=<...>
 #   key     attempt=<same as label: one terminal_name call> readback=<...>
@@ -121,13 +121,20 @@ _sw_fence_check() {   # <id> <instance> <tid> [<seat-pid>]
 # locator exactly (same kind, emulator and tty); its fence anchor holds BOTH
 # boot= and boot_start=. Prints "boot=<pid>,boot_start=<start>" or nothing.
 _sw_boot_carry() {   # <team> <agent> <new-ref>
-  local rec line ref anchor kv boot="" boot_start=""
+  local rec line ref anchor fence_value parsed kv boot="" boot_start=""
   case "$3" in plain:*) ;; *) return 0 ;; esac
   rec="$(agmsg_spawn_path "$1" "$2")"
   line="$(head -1 "$rec" 2>/dev/null)" || return 0
   ref="${line%%$'\t'*}"
   [ "$ref" = "$3" ] || return 0
-  case "$line" in *$'\t'fence=*) anchor="${line##*$'\t'fence=}"; anchor="${anchor#*:}" ;; *) return 0 ;; esac
+  case "$line" in
+    *$'\t'fence=*)
+      fence_value="${line##*$'\t'fence=}"
+      parsed="$(agmsg_fence_split plain "fence=$fence_value" 2>/dev/null)" || return 0
+      anchor="${parsed#*$'\t'}"
+      ;;
+    *) return 0 ;;
+  esac
   local IFS=,
   for kv in $anchor; do
     case "$kv" in
@@ -358,14 +365,14 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
   _carry="$(_sw_boot_carry "$team" "$agent" "$ref")"
   [ -z "$_carry" ] || _SW_F_TID="$_SW_F_TID,$_carry"
 
-  # instance:terminal_id. The guarantee runs ONE way: the driver refuses an
-  # instance containing ':' (unknown:socket_path_malformed), so the instance is
-  # colon-free; the terminal_id is a server-issued string whose alphabet is not
-  # ours to decide (and a failed read is spelled unknown:<why>, a colon already).
-  # So readers split on the FIRST colon. An earlier revision split on the last
-  # one, which truncated a tid holding a colon and made every re-read compare
-  # unequal to it: a false refusal of every later cell (review, 2026-09-12).
-  fence="$_SW_F_INSTANCE:$_SW_F_TID"
+  # The shared fence codec keeps the legacy first-colon boundary while allowing
+  # an instance path to contain colons. The terminal_id is a server-issued
+  # anchor whose alphabet is not ours to constrain (and may contain colons).
+  fence="$(agmsg_fence_compose "$term" "$_SW_F_INSTANCE" "$_SW_F_TID")" || {
+    _sw_say "$head none:fence_unreadable:instance_malformed"
+    agmsg_self_write_lock_release "$team" "$agent" "$owner"
+    return 2
+  }
   _sw_say "$head"
   _sw_say "fence=$fence"
 

@@ -1300,6 +1300,32 @@ _agmsg_locator_instance_decode() {   # <kind> <encoded-instance>
   esac
 }
 
+# Fence fields use the same instance codec, but the version marker's separator
+# is percent-escaped as well so the fence's legacy first-colon split remains
+# unambiguous. A reader that predates this format sees a different instance and
+# refuses the fence; it cannot route a write to the wrong socket.
+agmsg_fence_compose() {   # <kind> <instance> <anchor>
+  local kind="$1" instance="$2" anchor="$3" encoded
+  _agmsg_locator_instance_ok "$instance" || return 1
+  encoded="$(_agmsg_locator_instance_encode "$kind" "$instance")" || return 1
+  if [ "$kind" = herdr ]; then
+    case "$encoded" in v2:*) encoded="v2%3A${encoded#v2:}" ;; esac
+  fi
+  printf '%s:%s\n' "$encoded" "$anchor"
+}
+
+agmsg_fence_split() {   # <kind> <fence> -> <instance>\t<anchor>
+  local kind="$1" fence="$2" value encoded instance anchor
+  case "$fence" in fence=*:*) ;; *) return 1 ;; esac
+  value="${fence#fence=}"
+  encoded="${value%%:*}"; anchor="${value#*:}"
+  case "$encoded" in
+    v2%3A*) encoded="v2:${encoded#v2%3A}" ;;
+  esac
+  instance="$(_agmsg_locator_instance_decode "$kind" "$encoded")" || return 1
+  printf '%s\t%s\n' "$instance" "$anchor"
+}
+
 # The kind's own split of its id: "<instance>\t<pane>", or rc 1 when the id is
 # not a qualified one. Direct when that driver is loaded; a subshell load
 # otherwise (the same posture as _agmsg_terminal_id_ok).

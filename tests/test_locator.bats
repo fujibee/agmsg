@@ -109,6 +109,16 @@ teardown() { teardown_test_env; }
   [ "$_AGMSG_PS_ID" = '/run/a:b.sock:w1:p7' ]
 }
 
+@test "fence codec: legacy instances stay compatible and colon-bearing paths round-trip" {
+  local old new
+  old="$(agmsg_fence_compose herdr /run/herdr.sock 'term:old')"
+  [ "$old" = '/run/herdr.sock:term:old' ]
+  [ "$(agmsg_fence_split herdr "fence=$old")" = "$(printf '/run/herdr.sock\tterm:old')" ]
+  new="$(agmsg_fence_compose herdr '/run/a:b.sock' 'term:new:anchor')"
+  [ "$new" = 'v2%3A/run/a%3Ab.sock:term:new:anchor' ]
+  [ "$(agmsg_fence_split herdr "fence=$new")" = "$(printf '/run/a:b.sock\tterm:new:anchor')" ]
+}
+
 @test "split: unknown kind, no instance, bare pane and control characters are refused by name" {
   local err
   err="$(agmsg_locator_split "screen:/x:w1:p7" 2>&1 >/dev/null)" || true; [ "$err" = "agmsg: locator: unknown_kind" ]
