@@ -10,7 +10,7 @@
 # #162 byte-count validation, #134 JSON escaping) — can be read and tested on
 # its own.
 #
-# Sourced by delivery.sh AFTER it defines SKILL_NAME (used to detect
+# Sourced by delivery.sh AFTER it defines SKILL_DIR (used to detect
 # agmsg-owned entries); the existing lib convention is for sourced modules to
 # reference caller-set globals rather than re-resolve them.
 
@@ -40,6 +40,16 @@ strip_agmsg_event_file() {
   local tmp tmp_sql
   tmp=$(mktemp "${TMPDIR:-/tmp}/agmsg.XXXXXX")
   tmp_sql=$(agmsg_sql_readfile_path "$tmp")
+  # Ownership is decided against the absolute install directory, not the bare
+  # skill name (#1038): a project's OWN hook whose command happens to contain
+  # the substring "agmsg" -- a natural name for a hook that cooperates with
+  # this tool -- used to match `instr(command, '$SKILL_NAME')` and get
+  # silently stripped alongside agmsg's real entries. $SKILL_DIR is this
+  # install's own absolute path; every command agmsg ever writes invokes a
+  # script under it, and nothing legitimately outside agmsg's install would
+  # ever contain that exact path as a substring.
+  local skill_dir_sql
+  skill_dir_sql=$(printf '%s' "$SKILL_DIR" | sed "s/'/''/g")
   # Write the result with writefile() rather than redirecting sqlite3's CLI
   # output. On strict sqlite3 builds (>= 3.50, shipped on Windows) the CLI
   # renders control bytes — e.g. a CR that rode in on a CRLF settings file —
@@ -62,7 +72,7 @@ strip_agmsg_event_file() {
       WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
             WHERE NOT EXISTS (
               SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
-              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+              WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
             )) = 0 THEN
         json_remove(src.j, '\$.hooks.$event')
       ELSE
@@ -71,7 +81,7 @@ strip_agmsg_event_file() {
            FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
            WHERE NOT EXISTS (
              SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
-             WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+             WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
            ))
         )
     END, '') AS blob FROM src)

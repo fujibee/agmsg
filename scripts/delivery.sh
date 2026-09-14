@@ -58,7 +58,7 @@ RUN_DIR="$SKILL_DIR/run"
 # primitives use it, so source storage first.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/storage.sh"
-# JSON/SQLite hook-file primitives (sourced after SKILL_NAME is set above —
+# JSON/SQLite hook-file primitives (sourced after SKILL_DIR is set above —
 # strip/add reference it to detect agmsg-owned entries).
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/hooks-json.sh"
@@ -311,17 +311,21 @@ agmsg_delivery_status_default() {
     valid=$(agmsg_sqlite_mem "SELECT json_valid(readfile('$sql_hf'));" 2>/dev/null || echo "")
     if [ "$valid" = "1" ]; then
       hf_readable=1
+      # #1038: ownership by the absolute install path, not a substring of the
+      # bare skill name — see strip_agmsg_event_file (hooks-json.sh) for why.
+      local skill_dir_sql
+      skill_dir_sql=$(printf '%s' "$SKILL_DIR" | sed "s/'/''/g")
       has_ss=$(agmsg_sqlite_mem "
         SELECT EXISTS(
           SELECT 1 FROM json_each(json_extract(readfile('$sql_hf'), '\$.hooks.SessionStart')) AS s,
             json_each(json_extract(s.value, '\$.hooks')) AS h
-          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
         );" 2>/dev/null || echo 0)
       has_st=$(agmsg_sqlite_mem "
         SELECT EXISTS(
           SELECT 1 FROM json_each(json_extract(readfile('$sql_hf'), '\$.hooks.Stop')) AS s,
             json_each(json_extract(s.value, '\$.hooks')) AS h
-          WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
+          WHERE instr(json_extract(h.value, '\$.command'), '$skill_dir_sql') > 0
         );" 2>/dev/null || echo 0)
     fi
   fi
