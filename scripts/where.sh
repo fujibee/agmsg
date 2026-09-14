@@ -46,7 +46,7 @@ set -euo pipefail
 # (terminal.conf's `capabilities=`), space-separated, verbatim — not a
 # restatement written by hand in some doc that can drift from it. A verb
 # not listed here will not work on this terminal; that terminal's own
-# instructions, at scripts/drivers/terminals/<terminal>/SKILL.md, say which
+# instructions, at scripts/drivers/terminals/<terminal>/README.md, say which
 # listed verbs need more than the ceiling promises (e.g. plain's peek/poke
 # need an emulator-qualified placement, not just the capability being listed).
 #
