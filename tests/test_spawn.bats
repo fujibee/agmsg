@@ -855,6 +855,26 @@ EOF
   [[ "$output" != *"status=ready"* ]]
 }
 
+@test "spawn: an already-installed manifest with only the legacy monitor= key still skips the wait (#1214 back-compat)" {
+  # Simulates an install from before the readiness_sentinel rename: the copied
+  # type.conf carries ONLY the old bare monitor=no key, no readiness_sentinel=
+  # at all. readiness_sentinel reading empty must not silently behave as "yes"
+  # (wait) -- that would hang a no-handshake type's spawn until --ready-timeout.
+  local conf="$TEST_SKILL_DIR/scripts/drivers/types/codex/type.conf"
+  grep -v '^readiness_sentinel=' "$conf" > "$conf.new"
+  mv "$conf.new" "$conf"
+  printf 'monitor=no\n' >> "$conf"
+  refute grep -q '^readiness_sentinel=' "$conf"
+  grep -q '^monitor=no$' "$conf"
+
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" codex reviewer --project "$PROJ" \
+    --terminal "true # {cmd}"
+  [ "$status" -eq 0 ]
+  grep -q "skipping readiness wait" <<< "$output"
+  refute grep -q "status=timeout" <<< "$output"
+}
+
 @test "spawn: a no-handshake type (readiness_sentinel=no) reports startup UNCONFIRMED, not a bare success" {
   # Observed live: "spawned" printed while the agent had not started (a startup shell prompt
   # ate the first keystroke of the boot command). A type with no readiness handshake
