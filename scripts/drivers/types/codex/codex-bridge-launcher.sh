@@ -225,7 +225,7 @@ poll_sleep() {
 }
 
 # Any change here can change the safe subscription set. Include the request
-# thread plus each role's recorded session/project, not merely registrations:
+# thread, owner, and each role's recorded project, not merely registrations:
 # actas/resume rewrites a role record without changing identities.sh output.
 # $1 is this tick's already-resolved identity list. It is passed in rather than
 # re-resolved so one iteration runs identities.sh once, not twice.
@@ -245,7 +245,7 @@ build_safety_state() {
   while IFS="$TAB" read -r team name; do
     [ -n "$team" ] || continue
     agmsg_role_session_load "$team" "$name" 2>/dev/null || true
-    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT"
+    SAFETY_STATE="$SAFETY_STATE"$'\n'"$team$TAB$name$TAB$AGMSG_ROLE_SESSION_UUID$TAB$AGMSG_ROLE_SESSION_PROJECT$TAB$AGMSG_ROLE_SESSION_OWNER"
   done <<< "$identity"
 }
 
@@ -667,6 +667,7 @@ EOF
   agmsg_role_session_load "$team" "$name" 2>/dev/null || true
   rec_thread="$AGMSG_ROLE_SESSION_UUID"
   rec_project="$AGMSG_ROLE_SESSION_PROJECT"
+  rec_owner="$AGMSG_ROLE_SESSION_OWNER"
   rec_project_phys="$(agmsg_canonical_path "$rec_project" 2>/dev/null || printf '%s' "$rec_project")"
   if [ -z "$rec_thread" ] || [ "$rec_project_phys" != "$PROJECT_PHYS" ]; then
     # A role with no record (or one seated in another project) stays
@@ -756,6 +757,7 @@ EOF
   # Committed to spawning now: clear the stale records immediately before writing
   # the new ones, so no gate can bail out between the wipe and the rewrite.
   rm -f "$pidfile" "$appserver_file" "$thread_file"
+  bridge_owner_args=(--owner "$rec_owner")
 
   nohup "${bridge_run[@]}" \
     --project "$PROJECT" \
@@ -766,6 +768,7 @@ EOF
     "${bridge_pairs[@]}" \
     --thread "$thread_id" \
     --app-server "$req_app_server" \
+    "${bridge_owner_args[@]}" \
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!

@@ -194,6 +194,14 @@ run_launcher() {
   ! grep -q -- "--thread loaded" "$CAPTURE"
 }
 
+@test "launcher: passes the actas owner recorded by the claim" {
+  setup_live_owner "$RUN_DIR" owner-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  run_launcher
+  [ -f "$CAPTURE" ]
+  grep -q -- "--owner owner-session" "$CAPTURE"
+}
+
 @test "launcher: passes the active storage override as a workspace root" {
   export AGMSG_STORAGE_PATH="$TEST_SKILL_DIR/custom-store"
   put_record team alice rec-thread-1 "$PROJ" codex

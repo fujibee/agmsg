@@ -23,10 +23,6 @@ source "$SCRIPT_DIR/../../../lib/compat.sh"
 # _agmsg_pid_alive for the app-server reuse decision below.
 # shellcheck source=../../../lib/instance-id.sh
 source "$SCRIPT_DIR/../../../lib/instance-id.sh"
-# agmsg_instance_id uses the enclosing Codex process to form the same composite
-# owner token that actas-claim writes into the lock.
-# shellcheck source=../../../lib/resolve-project.sh
-source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
 # agmsg_write_atomic: the port file is published, not just written — a reader
 # turns its contents into a URL, and a numeric PREFIX of a real port is itself
 # a valid port, so no reader-side check can tell a half-written file from a
@@ -142,25 +138,6 @@ port_alive() {  # $1 = port; succeeds if something is accepting on 127.0.0.1:$1
   (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
-# codex-monitor records the node wrapper's pid, while actas-claim resolves the
-# native codex app-server child (the process whose argv/comm is codex). Keep the
-# owner token on that same pid when the platform exposes a parent column; a
-# wrapper pid would be a different owner and would hide a self-held lock.
-agmsg_codex_owner_pid() {
-  local wrapper="$1" child ppid cmd
-  case "$wrapper" in ''|*[!0-9]*) return 1 ;; esac
-  _agmsg_detect_platform
-  case "$_agmsg_platform" in
-    msys) return 1 ;;
-  esac
-  while IFS=' ' read -r child ppid _rest; do
-    [ "$ppid" = "$wrapper" ] || continue
-    cmd="$(compat_get_cmdline "$child" 2>/dev/null || true)"
-    case "$cmd" in *codex*app-server*) printf '%s' "$child"; return 0 ;; esac
-  done < <(ps -Ao pid=,ppid=,args= 2>/dev/null)
-  return 1
-}
-
 PORT=""
 if [ -f "$PORT_FILE" ] && [ -f "$SERVER_PID" ]; then
   existing_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
@@ -260,19 +237,6 @@ if ! port_alive "$PORT"; then
   exec_plain_codex
 fi
 SOCKET_URL="ws://127.0.0.1:$PORT"
-
-# The bridge is detached from this shell, so carry the Codex session's actas
-# owner explicitly. A bare session id is not enough: parallel Codex processes
-# may share it, while the lock records the composite session-id.pid token.
-if [ -z "${AGMSG_CODEX_OWNER_ID:-}" ] && [ -n "${CODEX_SESSION_ID:-}" ]; then
-  owner_pid="$(cat "$SERVER_PID" 2>/dev/null || true)"
-  native_owner_pid="$(agmsg_codex_owner_pid "$owner_pid" 2>/dev/null || true)"
-  [ -n "$native_owner_pid" ] && owner_pid="$native_owner_pid"
-  if _agmsg_pid_valid "$owner_pid"; then
-    AGMSG_CODEX_OWNER_ID="$(agmsg_instance_id_from_pid "$CODEX_SESSION_ID" "$owner_pid")"
-  fi
-fi
-export AGMSG_CODEX_OWNER_ID
 
 "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
 

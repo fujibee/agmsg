@@ -98,19 +98,6 @@ INNER_EOF
 agmsg_session_start() {
   thread_id="$(agmsg_resolve_codex_thread "$PROJECT")"
   [ -n "$thread_id" ] || exit 0
-  # Keep the bridge's actas comparison on the same composite owner token as
-  # actas-claim. The hook's CODEX_THREAD_ID names the resumable thread, while
-  # CODEX_SESSION_ID identifies the live Codex process that owns the lock.
-  if [ -z "${AGMSG_CODEX_OWNER_ID:-}" ] && [ -n "${CODEX_SESSION_ID:-}" ]; then
-    owner_pid_file="$RUN_DIR/codex-app-server.$(printf '%s' "$PROJECT" | agmsg_sha1).pid"
-    owner_pid="$(cat "$owner_pid_file" 2>/dev/null || true)"
-    native_owner_pid="$(ps -Ao pid=,ppid=,args= 2>/dev/null | awk -v p="$owner_pid" '$2 == p && $0 ~ /codex.*app-server/ {print $1; exit}')"
-    [ -n "$native_owner_pid" ] && owner_pid="$native_owner_pid"
-    if _agmsg_pid_valid "$owner_pid"; then
-      AGMSG_CODEX_OWNER_ID="$(agmsg_instance_id_from_pid "$CODEX_SESSION_ID" "$owner_pid")"
-      export AGMSG_CODEX_OWNER_ID
-    fi
-  fi
   # A recorded role belongs to its recorded Codex thread. The in-sandbox
   # fallback has no launcher to arbitrate this, so exclude a mismatched role
   # rather than ever injecting it into this session's thread (#150/#350).

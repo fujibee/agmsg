@@ -202,5 +202,6 @@ fi
 # codex thread ids are already bare UUIDs (no composite pid form), so record
 # as-is. The project is recorded in its canonical (physical) form so records
 # carry one path spelling regardless of how the caller spelled the argument.
-agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex || true
+agmsg_role_session_load "$TEAM" "$AGENT" 2>/dev/null || true
+agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AGMSG_ROLE_SESSION_OWNER:-}" || true
 exit 0

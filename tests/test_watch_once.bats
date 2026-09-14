@@ -17,6 +17,10 @@ lock_path() {
   SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_path team alice' _ "$SCRIPTS"
 }
 
+record_owner() {
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/role-session.sh"; _agmsg_role_session_path_into team alice; _agmsg_role_session_field "$_AGMSG_ROLE_SESSION_PATH" owner' _ "$SCRIPTS"
+}
+
 # --- lifetime bound vs slow startup (#558) -----------------------------------
 #
 # The bridge force-kills this child at (timeout + interval + 10) seconds from
@@ -110,9 +114,10 @@ _assert_startup_was_delayed() {
 }
 
 @test "watch-once: keeps a pair whose actas lock belongs to this owner" {
-  local owner="codex-session.12345"
-  mkdir -p "$TEST_SKILL_DIR/run"
-  printf '%s\n' "$owner" > "$(lock_path)"
+  setup_live_owner "$TEST_SKILL_DIR/run" owner-session
+  bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice owner-session >/dev/null
+  local owner
+  owner="$(record_owner)"
   bash "$SCRIPTS/send.sh" team bob alice "owned pending" >/dev/null
 
   run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --owner "$owner" --timeout 1 --interval 1
@@ -163,9 +168,14 @@ _assert_startup_was_delayed() {
 @test "watch-once: excludes a pair whose actas lock belongs to another owner" {
   setup_live_owner "$TEST_SKILL_DIR/run" other-session
   bash "$SCRIPTS/actas-claim.sh" "$PROJ" codex alice other-session >/dev/null
+  local owner
+  owner="$(record_owner)"
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_release team alice "$2"' _ "$SCRIPTS" "$owner" >/dev/null
+  setup_live_owner "$TEST_SKILL_DIR/run" replacement-session
+  SKILL_DIR="$TEST_SKILL_DIR" bash -c 'source "$1/lib/actas-lock.sh"; actas_lock_claim team alice replacement-session' _ "$SCRIPTS" >/dev/null
   bash "$SCRIPTS/send.sh" team bob alice "other owner" >/dev/null
 
-  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --owner codex-session.12345 --timeout 1 --interval 1
+  run bash "$TYPES/codex/watch-once.sh" "$PROJ" codex --name alice --team team --owner "$owner" --timeout 1 --interval 1
   [ "$status" -eq 1 ]
   [[ "$output" =~ "no available subscription" ]]
 }
