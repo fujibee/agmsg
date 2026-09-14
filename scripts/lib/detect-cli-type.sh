@@ -10,8 +10,26 @@
 # cannot end up with two copies of the registry's state.
 
 # Auto-detect CLI type from environment variables and the process tree, driven by
-# the per-type manifests' `detect=` (env-var names) and `detect_proc=` (process
-# name globs) keys — no hardcoded type list lives here.
+# the per-type manifests' `detect=` (env-var names), `detect_fallback=` (weak
+# env-var names), and `detect_proc=` (process name globs) keys — no hardcoded
+# type list lives here.
+
+# Print known types in detection priority order. Lower numeric priority wins;
+# missing or malformed values use the neutral default. The type name breaks
+# ties so existing deterministic ordering remains intact for equal priorities.
+_agmsg_detect_order() {
+  local _t _priority
+  while IFS= read -r _t; do
+    [ -n "$_t" ] || continue
+    _priority="$(agmsg_type_get "$_t" priority 50)"
+    case "$_priority" in
+      ''|*[!0-9]*) _priority=50 ;;
+    esac
+    printf '%s\t%s\n' "$_priority" "$_t"
+  done < <(agmsg_known_types | sort -u) |
+    LC_ALL=C sort -n -k1,1 -k2,2 | cut -f2-
+}
+
 agmsg_detect_cli_type() {
   # `detect=` / `detect_proc=` tokens are split with `read -ra` (IFS word-split,
   # NO pathname expansion) rather than an unquoted `for x in $list` — a file in
@@ -19,11 +37,12 @@ agmsg_detect_cli_type() {
   # pattern. (Plain `set -f` can't be used here: agmsg_known_types discovers types
   # via a `*/` glob that must keep working.)
 
-  # 1. Environment variables. Sorted registry order preserves the historical
-  # precedence: a runtime's own session vars (CLAUDE_CODE_SESSION_ID, CODEX_*) are
-  # checked before the GEMINI_* family, which users also set for the SDK without
-  # the CLI. `detect=explicit` (and types with no detect=) are never auto-detected.
-  local _t _v _detect _toks
+  # 1. Strong environment variables. Runtime session markers are checked by
+  # manifest priority. `detect=explicit` (and types with no detect=) are never
+  # auto-detected. Weak credentials such as GEMINI_API_KEY are deferred until
+  # process evidence has had a chance to identify the actual CLI.
+  local _t _v _detect _fallback _toks _fallback_toks
+  local _fallback_type=""
   while IFS= read -r _t; do
     [ -n "$_t" ] || continue
     _detect="$(agmsg_type_get "$_t" detect)"
@@ -37,9 +56,17 @@ agmsg_detect_cli_type() {
         return 0
       fi
     done
-  done <<EOF
-$(agmsg_known_types | sort -u)
-EOF
+    _fallback="$(agmsg_type_get "$_t" detect_fallback)"
+    if [ -n "$_fallback" ] && [ "$_fallback" != explicit ]; then
+      read -ra _fallback_toks <<<"$_fallback"
+      for _v in "${_fallback_toks[@]}"; do
+        if [ -n "${!_v:-}" ] && [ -z "$_fallback_type" ]; then
+          _fallback_type="$_t"
+          break
+        fi
+      done
+    fi
+  done < <(_agmsg_detect_order)
 
   # 2. Process-tree detection via each type's `detect_proc=` name globs. Walk up
   # from this process; at each ancestor the first type whose glob matches wins
@@ -61,15 +88,17 @@ EOF
             $_pat) echo "$_t"; return 0 ;;
           esac
         done
-      done <<EOF
-$(agmsg_known_types | sort -u)
-EOF
+      done < <(_agmsg_detect_order)
     fi
 
     # Move to parent process
     pid=$(compat_get_ppid "$pid" 2>/dev/null || true)
     depth=$((depth + 1))
   done
+
+  # Weak environment evidence is a last resort. A shared SDK credential must
+  # not hide a stronger process marker for another CLI.
+  [ -n "$_fallback_type" ] && { echo "$_fallback_type"; return 0; }
 
   # Default fallback. A LITERAL, and the one name here that no registry lookup
   # stands behind — which is why whoami.sh validates only a type the caller

@@ -274,7 +274,9 @@ EOF
   g() { env -i PATH="$PATH" bash -c "source '$SCRIPTS/lib/type-registry.sh'; agmsg_type_get $1 $2"; }
   [ "$(g claude-code detect)" = "CLAUDE_CODE_SESSION_ID" ]
   [ "$(g codex detect)" = "CODEX_SANDBOX CODEX_THREAD_ID" ]
-  [ "$(g gemini detect)" = "GEMINI_CLI GEMINI_API_KEY" ]
+  [ "$(g gemini priority)" = "1000" ]
+  [ "$(g gemini detect)" = "GEMINI_CLI" ]
+  [ "$(g gemini detect_fallback)" = "GEMINI_API_KEY" ]
   [ "$(g antigravity detect)" = "explicit" ]
   [ "$(g copilot detect)" = "explicit" ]
   [ "$(g opencode detect_proc)" = "opencode opencode-*" ]
@@ -316,26 +318,27 @@ EOF
   echo "$output" | grep -q "type=codex"
 }
 
-@test "type-registry: env-detection precedence is claude-code < codex < gemini" {
-  # Reproduce whoami's manifest-driven env sweep (sorted order) and assert the
-  # historical precedence: a runtime's own session var beats the GEMINI_* family,
-  # and detect=explicit types never win.
-  sweep() {
-    env -i PATH="$PATH" "$@" bash -c "
-      source '$SCRIPTS/lib/type-registry.sh'
-      while IFS= read -r t; do
-        [ -n \"\$t\" ] || continue
-        d=\$(agmsg_type_get \"\$t\" detect)
-        if [ -z \"\$d\" ] || [ \"\$d\" = explicit ]; then continue; fi
-        for v in \$d; do [ -n \"\${!v:-}\" ] && { echo \"\$t\"; exit 0; }; done
-      done <<< \"\$(agmsg_known_types | sort -u)\"
-      echo claude-code"
+@test "type-registry: detection precedence puts shared Gemini credentials last" {
+  # Exercise the production detector so priority, process evidence, and the
+  # weak credential fallback cannot drift apart.
+  detect() {
+    env -i PATH="$PATH" "$@" bash -c \
+      "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo test-shell; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
   }
-  [ "$(sweep CODEX_THREAD_ID=x)" = codex ]
-  [ "$(sweep GEMINI_API_KEY=x)" = gemini ]
-  [ "$(sweep CLAUDE_CODE_SESSION_ID=x CODEX_THREAD_ID=y)" = claude-code ]
-  [ "$(sweep CODEX_SANDBOX=x GEMINI_API_KEY=y)" = codex ]
-  [ "$(sweep)" = claude-code ]
+  [ "$(detect CODEX_THREAD_ID=x)" = codex ]
+  [ "$(detect GEMINI_API_KEY=x GROK_SESSION_ID=y)" = grok-build ]
+  [ "$(detect GEMINI_API_KEY=x CODEX_THREAD_ID=y)" = codex ]
+  [ "$(detect GEMINI_CLI=x GEMINI_API_KEY=y)" = gemini ]
+  [ "$(detect GEMINI_API_KEY=x)" = gemini ]
+  [ "$(detect CLAUDE_CODE_SESSION_ID=x CODEX_THREAD_ID=y)" = claude-code ]
+  [ "$(detect)" = claude-code ]
+}
+
+@test "type-registry: a process marker beats a shared Gemini credential" {
+  run env -i PATH="$PATH" GEMINI_API_KEY=x bash -c \
+    "source '$SCRIPTS/lib/type-registry.sh'; source '$SCRIPTS/lib/compat.sh'; source '$SCRIPTS/lib/detect-cli-type.sh'; compat_get_comm() { echo opencode; }; compat_get_ppid() { echo 1; }; agmsg_detect_cli_type"
+  [ "$status" -eq 0 ]
+  [ "$output" = opencode ]
 }
 
 @test "type-registry: manifests are DATA — never executed" {
