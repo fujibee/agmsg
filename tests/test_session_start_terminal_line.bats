@@ -40,6 +40,12 @@ _run_session_start() {
   grep -qF "AGMSG monitor mode" <<<"$output"
 }
 
+@test "session-start: the team.sh pointer line follows immediately after the terminal line" {
+  run _run_session_start "sid-plain-team-line"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '2p' <<<"$output")" = "AGMSG team.sh: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first." ]
+}
+
 @test "session-start: herdr environment leads with the herdr terminal line, own pane id" {
   export HERDR_ENV=1 HERDR_PANE_ID=w1:p9
   run _run_session_start "sid-herdr"

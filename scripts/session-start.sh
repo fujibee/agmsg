@@ -101,6 +101,16 @@ fi
 TERMINAL_LINE="$(agmsg_terminal_context_line "$SESSION_ID" "$SKILL_DIR" 2>/dev/null || true)"
 [ -n "$TERMINAL_LINE" ] || TERMINAL_LINE="AGMSG terminal: could not be determined (agmsg_terminal_context_line produced no output)"
 
+# Companion to TERMINAL_LINE: that line is this session's OWN placement;
+# teammates' placement is team.sh's question, not this hook's to compute and
+# print stale — a teammate can move between this session start and the moment
+# the reader acts on it. So this points at the live command rather than a
+# snapshotted answer. Deliberately does not claim team.sh's output already
+# states per-teammate peek/poke/arrange reachability -- as of this line, it
+# does not (that display is tracked separately); wording this makes true only
+# what team.sh actually shows today.
+TEAM_LINE="AGMSG team.sh: shows every teammate's placement and status. To act on one, run peek.sh/poke.sh/arrange.sh <name> directly — its exit code says whether it worked and why not (see each driver's own SKILL.md), so there is no need to guess reachability first."
+
 # --- Skip spawned worktree sub-sessions (.claude/worktrees checkouts). ---
 # Claude Code's background-task feature runs a short-lived sub-session in an
 # isolated worktree under .claude/worktrees/<name>. SessionStart still fires
@@ -325,6 +335,7 @@ if [ -f "$WATCHER_PIDFILE" ]; then
   if [ -n "$existing" ] && _agmsg_pid_alive_local "$existing"; then
     cat <<EOF
 $TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: a watch.sh is already streaming for this session (pid $existing).
 No action needed — the existing watcher is the active one.
 EOF
@@ -443,6 +454,7 @@ if [ -n "$ROLE_NAME" ]; then
   fi
   cat <<EOF
 $TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode (resumed role \`$ROLE_NAME\` in team \`$ROLE_TEAM\`):
 $SEAT_CLAIM, so invoke the Monitor tool now with the following parameters, before
 any other action in this session.
@@ -482,6 +494,7 @@ if [ "${_pair_count:-0}" -le 1 ]; then
   WATCH_COMMAND="$(printf '%q %q %q %q' "$WATCH" "$INSTANCE_ID" "$PROJECT" "$TYPE")"
   cat <<EOF
 $TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: invoke the Monitor tool now with the following parameters,
 before any other action in this session.
 
@@ -509,6 +522,7 @@ fi
 _seat_list="$(printf '%s\n' "$PAIRS" | awk -F'\t' 'NF>=2 && $2!="" {print "  - /agmsg actas "$2}')"
 cat <<EOF
 $TERMINAL_LINE
+$TEAM_LINE
 AGMSG monitor mode: standing down — no inbox watcher was started for this session.
 
 This resumed session could not be matched to a seat (no role-session record, and

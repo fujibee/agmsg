@@ -1366,6 +1366,8 @@ EOF
   bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
   grep -q "drivers/terminals/<terminal>/SKILL.md" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
+  grep -q "arrange.sh" "$TEST_PROJECT/.agent/rules/agmsg.md"
 }
 
 @test "delivery set off (gemini): removes rule file" {
@@ -2345,11 +2347,13 @@ JSON
 @test "opencode set turn: rule file tells the agent to run where.sh, not guess its terminal" {
   bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
 }
 
 @test "opencode set monitor: rule file also tells the agent to run where.sh, not guess its terminal" {
   bash "$SCRIPTS/delivery.sh" set monitor opencode "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.opencode/rules/agmsg.md"
 }
 
 @test "opencode supports off mode: removes rule file" {
@@ -2466,6 +2470,7 @@ JSON
 @test "cursor set turn: rule file tells the agent to run where.sh, not guess its terminal" {
   bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
+  grep -q "team.sh" "$TEST_PROJECT/.cursor/rules/agmsg.mdc"
 }
 
 @test "cursor rule file is an always-apply .mdc (Cursor CLI auto-load)" {
@@ -3103,6 +3108,7 @@ JSON
 @test "delivery set turn (grok-build): rule also tells the agent to run where.sh, not guess its terminal" {
   bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT"
   grep -q "where.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
 }
 
 @test "delivery set off (grok-build): removes the rule file" {
@@ -3135,6 +3141,7 @@ JSON
 @test "delivery set monitor (grok-build): rule also tells the agent to run where.sh, not guess its terminal" {
   GROK_SESSION_ID="grok-sess-1" bash "$SCRIPTS/delivery.sh" set monitor grok-build "$TEST_PROJECT" >/dev/null
   grep -q "where.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
+  grep -q "team.sh" "$TEST_PROJECT/.grok/rules/agmsg.md"
 }
 
 @test "delivery status (grok-build): reports monitor when the monitor rule is present" {
