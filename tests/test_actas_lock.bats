@@ -782,3 +782,34 @@ _owner_only() {   # <team> <agent>
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '%s/actas.broken__alice.session' "$(_actas_lock_dir)")" ]
 }
+
+@test "_agmsg_id_key_for: SKILL_DIR unset after sourcing returns 1 (#1234-class, #1235 review)" {
+  # The file's own top-of-file `: "${SKILL_DIR:?...}"` refuses to even load
+  # with SKILL_DIR unset, so the only reachable way this function ever sees
+  # an empty SKILL_DIR is it going away AFTER a caller has already sourced
+  # this file -- reproduced here by unsetting it between source and call.
+  #
+  # Measured: on THIS tree, `[ -f "$config" ]` (config resolving to the
+  # unreachable path "/teams/<team>/config.json" once SKILL_DIR collapses to
+  # empty) already returns 1 before the unguarded `source` lines below it
+  # would run -- so this specific call does not, today, exercise the crash
+  # the guard exists to prevent. That accidental ordering is not a
+  # substitute for the guard: a later reorder of these checks (the same
+  # function's own comment already notes two of its five early returns are
+  # "measured redundant" with a later one) could remove that protection
+  # silently, and the guard being first, explicit, and independent of
+  # anything below it is what this pins -- the same return-1 contract every
+  # other unresolved step in this function already promises its callers.
+  _fixture_known_ids skdrop "tid-SK" bob "mid-B"
+  run env -u SKILL_DIR bash -c '
+    export SKILL_DIR="'"$TEST_SKILL_DIR"'"
+    # shellcheck disable=SC1090
+    source "$SKILL_DIR/scripts/lib/actas-lock.sh"
+    unset SKILL_DIR
+    rc=0
+    _agmsg_id_key_for skdrop bob || rc=$?
+    printf "rc=%s\n" "$rc"
+  '
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qx 'rc=1'
+}

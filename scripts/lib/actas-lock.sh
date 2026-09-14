@@ -81,6 +81,14 @@ _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
 _agmsg_id_key_for() {   # <team> <agent>
   local team="${1-}" agent="${2-}" team_dir config team_id member_id
   [ -n "$team" ] && [ -n "$agent" ] || return 1
+  # An unset SKILL_DIR must fail the same silent way every other unresolved
+  # step in this function already does (config not found, no team_id, no
+  # member_id -- every one of them a bare `return 1`, on purpose: the caller
+  # falls back to the legacy name-keyed path, no diagnostic expected). Without
+  # this, the two `source` calls below run unguarded and errexit takes down
+  # the whole caller instead of this function returning 1 (#1234-class hazard,
+  # measured on this file after #1235 added it).
+  [ -n "${SKILL_DIR:-}" ] || return 1
   team_dir="$SKILL_DIR/teams/$team"
   config="$team_dir/config.json"
   [ -f "$config" ] || return 1
