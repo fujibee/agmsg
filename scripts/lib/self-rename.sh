@@ -36,8 +36,11 @@
 # (#1206), the same proof `fix` requires before it writes: the placement-claim
 # guard below only catches a pane already recorded as someone else's, and a
 # pane nobody has claimed yet is not thereby proved to be this seat's. Only a
-# `proved` verdict authorizes typing; anything else is recorded as skipped and
-# nothing is poked.
+# `proved` verdict authorizes typing -- and the verdict alone is not enough:
+# the proof's own returned locator (the driver's re-observation, never an
+# echo of the candidate) must match, EXACTLY, the ref about to be poked. Proof
+# without that match, or any other state, is recorded as skipped and nothing
+# is poked.
 #
 # Two-tier opt-out, and it is VISIBLE on the mark, never silent: AGMSG_SELF_NAME=
 # off stops the whole self-naming family; AGMSG_SELF_RENAME=off stops only the
@@ -59,6 +62,29 @@ export SKILL_DIR
 # Record the outcome on the mark, keyed to this pane+generation, and stop.
 _agmsg_self_rename_record() {   # <team> <agent> <ref> <epoch> <result> <type>
   agmsg_role_session_mark_renamed "$1" "$2" "$3" "$4" "$5" "" "$6" 2>/dev/null || true
+}
+
+# agmsg_self_proof's own returned ref is the DRIVER's canonical id for the pane
+# it re-observed -- NOT the caller's candidate echoed back, and for tmux that
+# canonical id is deliberately bare (terminal_pane_process_observe strips the
+# instance before returning it; see the driver's own ops.sh). $ref elsewhere in
+# this file is composed from agmsg_terminal_self_env's id, which for tmux DOES
+# carry the instance ("<socket>:<pane>"). The two are honestly different
+# strings for the exact same pane, so comparing them as-is would refuse every
+# real tmux poke -- the same shape self-fix.sh's own _fix_locator_of_proof
+# exists to close (#1152); this is that same reattachment, kept local to this
+# file rather than shared, so a proof that DOES already carry its own instance
+# (a future driver, or herdr's HERDR_SOCKET_PATH) is left alone.
+_agmsg_self_rename_locator_of_proof() {   # <canonical-ref, e.g. "tmux:%3">
+  local ref="$1" kind pane inst=""
+  kind="${ref%%:*}"; pane="${ref#*:}"
+  case "$kind" in
+    herdr) inst="${HERDR_SOCKET_PATH:-}" ;;
+    tmux)  case "$pane" in *:*) inst="${pane%:*}"; pane="${pane##*:}" ;; *) inst="${TMUX:-}"; inst="${inst%%,*}" ;; esac ;;
+    plain) case "$pane" in *:*) inst="${pane%%:*}"; pane="${pane#*:}" ;; esac ;;
+  esac
+  [ -n "$inst" ] || { printf '%s\n' "$ref"; return 0; }   # bare: ambient instance
+  agmsg_locator_compose "$kind" "$inst" "$pane" 2>/dev/null || printf '%s\n' "$ref"
 }
 
 agmsg_self_rename_on_action() {
@@ -205,8 +231,28 @@ agmsg_self_rename_on_action() {
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:${_proof_state:-no_proof}" "$type"
         return 0
       fi
-      # Readable, wrong, and proved: type the rename ONCE, and mark "attempted"
-      # so the next action confirms instead of poking again.
+      # A `proved` state is not, by itself, proof about THIS pane: self-proof.sh
+      # revalidates the candidate through the driver's own observation and
+      # returns that driver's canonical ref, never the caller's candidate
+      # echoed back (its own stated contract -- reading your own input back as
+      # a confirmation is how a proof becomes a mirror). $ref, above, is a
+      # SEPARATE composition of the same environment, made before the proof
+      # ran. Nothing forces the two to agree except both call sites happening
+      # to compose the same driver + id the same way today -- and a caller
+      # that only reads the STATE word, never the payload, would still poke if
+      # that ever drifted, or if a future driver's canonical id normalizes
+      # differently from what $ref used. So the payload is not optional: only
+      # an EXACT match between what was proved and what is about to be poked
+      # authorizes the keystroke.
+      local _proof_locator
+      _proof_locator="$(_agmsg_self_rename_locator_of_proof "${_proof_out#*	}")"
+      if [ "$_proof_locator" != "$ref" ]; then
+        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:locator_mismatch" "$type"
+        return 0
+      fi
+      # Readable, wrong, and proved for exactly this pane: type the rename
+      # ONCE, and mark "attempted" so the next action confirms instead of
+      # poking again.
       if terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" attempted "$type"
       else

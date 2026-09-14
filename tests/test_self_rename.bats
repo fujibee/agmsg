@@ -26,14 +26,21 @@ setup() {
   source "$SKILL_DIR/scripts/lib/team-status.sh"
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-rename.sh"
-  # #1206: the poke is gated on agmsg_self_proof. Every test above this one in
-  # the file is about the OTHER rules around the poke (own pane only, phase,
-  # opt-out, the placement-claim guard) and predates that gate, so the default
-  # here is a stub that always says proved -- the proof contract itself
-  # (proved/disproved/undetermined/unsupported, real vs. stubbed) is
-  # test_self_proof.bats's job, not this file's. The #1206 tests below
-  # override this per test to exercise the gate itself.
-  agmsg_self_proof() { printf 'proved\tstub\n'; return 0; }
+  # #1206: the poke is gated on agmsg_self_proof, and the gate also requires
+  # the proof's own returned locator to match the pane about to be poked
+  # (review finding: reading only the state word let a proof for pane X
+  # authorize a poke into whatever pane the environment named, even a
+  # DIFFERENT one). Every test above this one in the file is about the OTHER
+  # rules around the poke (own pane only, phase, opt-out, the placement-claim
+  # guard) and predates that gate, so the default here is a stub shaped like
+  # what a REAL proof returns for every one of those tests' shared fixture
+  # (_under_tmux /tmp/s 4242 %3): "tmux:%3", bare -- terminal_pane_process_observe
+  # strips the instance before returning it (tmux/ops.sh), same as the real
+  # driver would. The proof contract itself (proved/disproved/undetermined/
+  # unsupported, real vs. stubbed) is test_self_proof.bats's job, not this
+  # file's. The #1206 tests below override this per test to exercise the gate
+  # itself, including the locator-match.
+  agmsg_self_proof() { printf 'proved\ttmux:%%3\n'; return 0; }
 }
 teardown() { teardown_test_env; }
 
@@ -284,3 +291,33 @@ _poked_panes() { grep -oE '\[send-keys\].*\[-t\] \[[^]]+\]' "$ARGV_LOG" | grep -
   grep -q '\[send-keys\] \[-l\] \[-t\] \[%3\] \[--\] \[/rename team-alice\]' "$ARGV_LOG"
   [ "$(_mark team alice | cut -f3)" = attempted ]
 }
+
+# --- #1206 review: `proved` alone is not proof about THIS pane. self-proof.sh
+# never echoes the caller's candidate back -- it returns the DRIVER's own
+# canonical id for whatever it actually re-observed, revalidated. Reading only
+# the state word, as the four cases above do, would let a proof for pane X
+# authorize a poke into whatever pane the environment happened to name. These
+# pin that a mismatch between the proved pane and the poke target refuses,
+# even though the state is proved in every one of them.
+
+@test "proved, but for a DIFFERENT pane than the one about to be poked -- never poke (#1206 review)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  # The environment names %3, but the proof -- honestly -- says it proved %9.
+  agmsg_self_proof() { printf 'proved\ttmux:%%9\n'; return 0; }
+  agmsg_self_rename_on_action team alice claude-code
+  refute grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:locator_mismatch ]
+}
+
+@test "proved, but for a DIFFERENT tmux instance than the one about to be poked -- never poke (#1206 review)" {
+  _install_fake_tmux; _under_tmux /tmp/s 4242 %3
+  export FAKE_TITLE='wrong-name'
+  # Same bare pane id, but the proof names a server this seat is not attached
+  # to -- the instance-qualified locators are still different panes.
+  agmsg_self_proof() { printf 'proved\ttmux:/tmp/other-server:%%3\n'; return 0; }
+  agmsg_self_rename_on_action team alice claude-code
+  refute grep -q '\[send-keys\]' "$ARGV_LOG"
+  [ "$(_mark team alice | cut -f3)" = skipped:unproved:locator_mismatch ]
+}
+
