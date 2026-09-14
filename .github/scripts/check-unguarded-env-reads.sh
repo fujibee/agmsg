@@ -63,7 +63,9 @@ count_and_list() {
   python3 - "$1" <<'PY'
 import re, sys, pathlib
 root = pathlib.Path(sys.argv[1])
-READ  = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(:[-+?]|[-+?])?[^}]*\}|\$([A-Z][A-Z0-9_]*)\b')
+# Op group: defaults (:- :+ :? / - + ?) plus assignment (:= / =).
+# :- :+ :? skip this read; they are not assignments (#1197).
+READ  = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(:[-+?=]|[-+?=])?[^}]*\}|\$([A-Z][A-Z0-9_]*)\b')
 GUARD = re.compile(r'\[\s+-[nz]\s+"\$\{([A-Z][A-Z0-9_]*):-[^}]*\}"')
 FUNC  = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{')
 # Shell-provided or set-by-the-OS-everywhere: reading these unguarded is not the
@@ -91,7 +93,8 @@ for f in sorted(root.rglob('*.sh')):
             op   = m.group(2)
             if not name or name in SPECIAL or op or name in guarded:
                 continue
-            if re.search(r'(?<![A-Za-z0-9_])' + name + r'=(?!=)', txt):
+            # NAME= and NAME:= (the latter is ${NAME:=...} / ${NAME=...}).
+            if re.search(r'(?<![A-Za-z0-9_])' + name + r':?=(?!=)', txt):
                 continue
             if re.search(r'\b(?:for|read)\b[^\n]*\b' + name + r'\b', txt):
                 continue

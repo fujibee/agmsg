@@ -133,3 +133,57 @@ EOF
   [ "$status" -eq 2 ]
   printf '%s\n' "$output" | grep -q 'no readable baseline'
 }
+
+@test "unguarded-env-reads: \${NAME:=...} is an assignment, so a later read is not reported" {
+  # #1197. The checker used to recognise only NAME=, so a default-assign
+  # expansion left the later read looking unguarded. At runtime the name is
+  # set; reporting it taught a guard the code does not need.
+  fixture="$BATS_TEST_TMPDIR/f6"; mkdir -p "$fixture"
+  cat > "$fixture/ops.sh" <<'EOF'
+: "${SKILL_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+use_it() { printf '%s\n' "$SKILL_DIR/scripts/foo"; }
+EOF
+  printf '0\n' > "$BATS_TEST_TMPDIR/base0f"
+  run env AGMSG_ENV_READS_BASELINE="$BATS_TEST_TMPDIR/base0f" bash "$CHECK" "$fixture"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "unguarded-env-reads: a name that is never assigned is still reported" {
+  # The control for #1197: widening assignment recognition must still fail
+  # on a genuine unguarded read, not just turn the new-green case green.
+  fixture="$BATS_TEST_TMPDIR/f7"; mkdir -p "$fixture"
+  cat > "$fixture/ops.sh" <<'EOF'
+use_it() { printf '%s\n' "$UNSET_VAR/foo"; }
+EOF
+  printf '0\n' > "$BATS_TEST_TMPDIR/base0g"
+  run env AGMSG_ENV_READS_BASELINE="$BATS_TEST_TMPDIR/base0g" bash "$CHECK" "$fixture"
+  [ "$status" -eq 1 ] || { echo "$output" >&2; return 1; }
+  printf '%s\n' "$output" | grep -q 'ops.sh:1: \$UNSET_VAR'
+}
+
+@test "unguarded-env-reads: \${NAME:-} \${NAME:+} \${NAME:?} are not assignments" {
+  # Those ops skip the expansion itself (it has a default / error), but they
+  # do not set the name. A later unguarded read must still fail.
+  fixture="$BATS_TEST_TMPDIR/f8"; mkdir -p "$fixture"
+  cat > "$fixture/ops.sh" <<'EOF'
+: "${NAME:-}"
+: "${NAME:+}"
+: "${NAME:?}"
+use_it() { printf '%s\n' "$NAME/foo"; }
+EOF
+  printf '0\n' > "$BATS_TEST_TMPDIR/base0h"
+  run env AGMSG_ENV_READS_BASELINE="$BATS_TEST_TMPDIR/base0h" bash "$CHECK" "$fixture"
+  [ "$status" -eq 1 ] || { echo "$output" >&2; return 1; }
+  printf '%s\n' "$output" | grep -q 'ops.sh:4: \$NAME'
+}
+
+@test "unguarded-env-reads: a later read after NAME= is not reported" {
+  fixture="$BATS_TEST_TMPDIR/f9"; mkdir -p "$fixture"
+  cat > "$fixture/ops.sh" <<'EOF'
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+use_it() { printf '%s\n' "$SKILL_DIR/scripts/foo"; }
+EOF
+  printf '0\n' > "$BATS_TEST_TMPDIR/base0i"
+  run env AGMSG_ENV_READS_BASELINE="$BATS_TEST_TMPDIR/base0i" bash "$CHECK" "$fixture"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
