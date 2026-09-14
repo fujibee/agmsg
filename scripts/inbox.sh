@@ -58,11 +58,16 @@ fi
 # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
 _AGMSG_SQ="'"
 _arr="[$(printf '%s' "$UNREAD_JSONL" | paste -sd, -)]"
-# #777/#1045: build the statement into a temp file and pass it on STDIN, the way
-# history.sh (#899) already does. Interpolating a large unread backlog into the SQL
-# and handing the whole string to sqlite3 as one argv element exceeds the per-argument
-# length ceiling; the call then fails — and an unread backlog past the limit can never
-# clear itself. A single long body can carry it past the ceiling on its own.
+# #777/#1045: an agent's unread backlog grows with every message sent to it, so
+# interpolating it into ONE argv element eventually exceeds the OS's
+# per-argument ceiling (Linux MAX_ARG_STRLEN=131,072 bytes; smaller still on
+# Windows/macOS) and `agmsg_sqlite` fails with "Argument list too long" --
+# every single call, since the backlog that triggered it never shrinks on its
+# own, and a single long body can carry it past the ceiling on its own too.
+# Build the statement into a temp file and pass it on stdin instead, mirroring
+# drivers/storage/sqlite-sync.sh:1301 (`_sqlite_data_stdin`, #882) and
+# history.sh (#899): printf is a bash builtin, so writing a large value to a
+# temp file never execs and can hit neither that ceiling nor argv's at all.
 _agmsg_rows_sql=$(mktemp "${TMPDIR:-/tmp}/agmsg-inbox-rows.XXXXXX") || exit 13
 trap 'rm -f "$_agmsg_rows_sql"' EXIT HUP INT TERM
 {

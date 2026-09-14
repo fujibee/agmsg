@@ -105,21 +105,20 @@ env:
   # Number of parallel bats shards per OS. The matrix and the shard helper must
   # stay in lockstep; the stable summary job below verifies that they do.
   #
-  # 4 -> 5 (#1107 stopgap). The suite grew ~2.85x (788 -> 2246 @tests) since the
-  # partition was tuned, and shard-tests.sh seeds each pinned file at one shard's
-  # AVERAGE share (total_tests/total = 561 now), which over-reserves the two pin
-  # shards and pushes the whole real load onto the non-pin ones: measured 4-shard
-  # @test weights were 281/302/832/831, and macOS 4/4 (831) reached the 30-min
-  # cap while still passing tests. More shards dilutes "the remaining work over
-  # the non-pin shards" (worst-case per non-pin shard = total*(N+2)/N^2: 842 at
-  # N=4, 629 at N=5). N=5 (not 6) because the account runs at most FIVE macOS
-  # jobs at once (see the concurrency header): a 6th macOS shard would queue
-  # behind the other five of its own run, inflating the wall clock past what a
-  # lighter shard buys. Five fits the slots exactly, no self-queue). This does NOT fix the scaling property -- pin_seed still
-  # grows with the suite and the count weight still under-values wait-dominant
-  # files (test_remote 7.5m / test_remote_sync 5.0m / test_watch 3.0m on macOS,
-  # none of them the currently pinned pair) -- tracked in #847 for a real fix
-  # once #1159's per-file timings land.
+  # 4 -> 5 (#1107). The suite outgrew a 4-shard partition and a 4-shard macOS
+  # leg was reaching the 30-min cap while still passing tests (a slow shard,
+  # not a hang). Five, not six, because the account runs at most FIVE macOS
+  # jobs at once (the concurrency header): a sixth would queue behind the
+  # other five of its own run, inflating the wall clock past what a lighter
+  # shard buys.
+  #
+  # shard-tests.sh's pin_seed is no longer an average share -- #847 already
+  # replaced it with a per-file cost fit (round(measured wall / avg s-per-test),
+  # from #1159's real timings) once the average-share seed was measured to
+  # over-reserve the pinned shards as the suite grew. That fit is calibrated
+  # against a specific tree size and needs re-measuring whenever the suite's
+  # size moves materially (tracked the same way #1107 itself was: a constant
+  # sized against an older system stays right only as long as the system does).
   SHARD_TOTAL: 5
   # The Windows legs' sqlite3, pinned three ways (#824).
   #
@@ -393,9 +392,11 @@ jobs:
 
       - name: Run bats suite (this shard)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           set +e
-          xargs bats --print-output-on-failure < shard-files.txt
+          .github/scripts/run-bats-timed.sh shard-files.txt "$RUNNER_TEMP/bats-timings.tsv"
           status=$?
           : > "$RUNNER_TEMP/bats-done"
           exit $status
@@ -452,6 +453,16 @@ jobs:
           path: ${{ runner.temp }}/hang-samples.txt
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Upload bats timings
+        if: always() && needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-timings-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/bats-timings.tsv
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Record which files this shard ran
         if: needs.changes.outputs.docs_only != 'true'

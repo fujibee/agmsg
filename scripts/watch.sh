@@ -1149,14 +1149,32 @@ EOF
     # _sqlite_sync_lit_into in sqlite-sync.sh, which documents the same hazard.
     _AGMSG_SQ="'"
     _arr="[$(printf '%s' "$OUT" | paste -sd, -)]"
-    # #777/#1045: build the statement into a temp file and pass it on STDIN, the way
-    # history.sh (#899) already does. Interpolating the pending batch into the SQL and
-    # handing the whole string to sqlite3 as ONE argv element exceeds the per-argument
-    # length ceiling once a backlog (or a single long body) grows past it; the call then
-    # fails, and because the failure was swallowed here the cursor never advanced and the
-    # SAME oversized batch came back every cycle -- a silent, self-locking outage. The
-    # temp file is removed inline (no EXIT trap, which would displace the watcher's own
-    # cleanup trap); the stuck-cursor guard below is the backstop for any OTHER cause.
+    # #777/#1045: this pair's undelivered backlog grows independently of
+    # anything this loop bounds, so interpolating it into ONE argv element
+    # eventually exceeds the OS's per-argument ceiling (Linux
+    # MAX_ARG_STRLEN=131,072 bytes; smaller still on Windows/macOS) and
+    # `agmsg_sqlite` fails with "Argument list too long" -- every single
+    # poll, since a single long body can carry it past the ceiling on its
+    # own too, and because the failure below was already swallowed by
+    # `|| true` and the read cursor is only advanced from
+    # FINAL_CURSOR/DELIVERED_IDS further down, a silently empty ROWS here
+    # left the cursor stuck forever, repeating the same failure on every
+    # future poll -- a silent, self-locking outage. Pass the statement on
+    # stdin instead, mirroring drivers/storage/sqlite-sync.sh:1301
+    # (`_sqlite_data_stdin`, #882) and history.sh/inbox.sh: printf is a bash
+    # builtin, so writing a large value to a temp file never execs and can
+    # hit neither that ceiling nor argv's at all.
+    #
+    # No trap here: this script installs `trap cleanup EXIT` and
+    # `trap 'exit 0' INT TERM HUP` once, near the top (bash traps do not
+    # stack -- the last one set wins), and this runs inside that same
+    # process's long-lived polling loop, once per pair per interval. Adding a
+    # loop-local trap here would silently replace those for the rest of the
+    # process's life. The temp file is removed explicitly on every path
+    # instead; the one path that leaks it (a signal landing between mktemp
+    # and the following rm) is caught by the pre-existing INT/TERM/HUP
+    # handler tearing down the whole process. The stuck-cursor guard below is
+    # a separate backstop, for any OTHER cause that leaves the cursor stuck.
     _agmsg_watch_sql="$(mktemp "${TMPDIR:-/tmp}/agmsg-watch-rows.XXXXXX" 2>/dev/null || true)"
     if [ -n "$_agmsg_watch_sql" ]; then
       {
