@@ -1458,3 +1458,20 @@ CYG
     grep -Fq "There is NO register.sh" "$rendered"
   done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
 }
+
+@test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' comment" {
+  # The shared root SKILL.md used to carry two lines that read like slot
+  # markers right after the spawn slot -- "shared actas/drop guidance is
+  # supplied by the type overlay" and "drop guidance is supplied by the type
+  # overlay" -- but neither matched the renderer's <!-- agmsg:slot NAME -->
+  # pattern, so they were never replaced and leaked into every type's
+  # installed SKILL.md verbatim instead of the type's real actas/drop text.
+  local type rendered
+  while IFS= read -r type; do
+    rendered="$FAKE_HOME/$type-overlay-comment.md"
+    run bash -c 'source "$1/scripts/lib/type-registry.sh"; source "$1/scripts/lib/skill-render.sh"; SCRIPT_DIR="$1" agmsg_render_skill "$2" agmsg "$3"' _ "$BATS_TEST_DIRNAME/.." "$type" "$rendered"
+    [ "$status" -eq 0 ]
+    run grep -Fq "supplied by the type overlay" "$rendered"
+    [ "$status" -ne 0 ] || { echo "rendered $type still carries the unwired overlay comment" >&2; return 1; }
+  done < <(agmsg_renderable_types "$BATS_TEST_DIRNAME/..")
+}

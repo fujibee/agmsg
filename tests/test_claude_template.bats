@@ -40,6 +40,37 @@ setup() {
   grep -Fq 'Do not report the drop as complete without mentioning it' "$RENDERED"
 }
 
+@test "Claude rendered skill's actas/drop tell the agent to invoke the Monitor tool, not just 'start watch.sh' (#1083 regression)" {
+  # #1083's compose-from-root-and-overlay refactor accidentally replaced the
+  # detailed actas/drop steps with a short summary that never named the
+  # Monitor tool at all -- an agent reading only the rendered skill had no
+  # way to know watch.sh must be started THROUGH Monitor rather than, say,
+  # Bash. These assertions pin the specific facts that summary dropped.
+  grep -Fq 'invoke a fresh Monitor' "$RENDERED"
+  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code <name>`' "$RENDERED"
+  grep -Fq 'description: `agmsg inbox stream (acting as <name>)`' "$RENDERED"
+  grep -Fq 'persistent: true' "$RENDERED"
+  grep -Fq 'Run TaskList. Find any task whose description begins with "agmsg inbox stream"' "$RENDERED"
+  grep -Fq 'status=held team=<team> owner=<sid>' "$RENDERED"
+  # drop's own re-subscribe must be equally explicit, not just actas's.
+  grep -Fq 'command: `~/.agents/skills/agmsg/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" claude-code`' "$RENDERED"
+}
+
+@test "Claude rendered skill's actas ends by confirming the Monitor attached via TaskList, not the UI footer" {
+  grep -Fq 'Confirm the Monitor actually attached' "$RENDERED"
+  grep -Fq 'run TaskList once more and confirm a task whose description begins with `agmsg inbox stream` is present' "$RENDERED"
+  grep -Fq 'Do NOT read this off the terminal UI' "$RENDERED"
+}
+
+@test "no rendered skill of any type still carries the unwired 'supplied by the type overlay' placeholder text" {
+  # These two lines in the shared root SKILL.md looked like slot markers but
+  # were plain comments the renderer's <!-- agmsg:slot NAME --> matcher never
+  # recognized, so they passed straight through into every type's output
+  # instead of being replaced by that type's real actas/drop content.
+  run grep -Fq 'supplied by the type overlay' "$RENDERED"
+  [ "$status" -ne 0 ]
+}
+
 @test "Claude rendered skill names no terminal driver, so an agent has no name to reach for (#1171)" {
   # Measured on the pre-fix branch: tmux 4, herdr 0. The fix is not balancing
   # that count -- it is dropping terminal names from agent-facing text
