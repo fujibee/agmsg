@@ -826,6 +826,7 @@ EOF
   # A claude-code type can produce a readiness sentinel, but no watcher will be
   # started for this project, so waiting would only reach the timeout.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  bash "$SCRIPTS/delivery.sh" set off claude-code "$PROJ" >/dev/null
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
     --ready-timeout 2 --terminal "true # {cmd}"
   [ "$status" -eq 0 ]
@@ -848,6 +849,19 @@ EOF
     --ready-timeout 1 --terminal "true # {cmd}"
   [ "$status" -eq 3 ]
   grep -q "delivery status failed" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: an unrecognized delivery status from the real command keeps the wait fail-closed (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  run bash "$SCRIPTS/delivery.sh" status claude-code "$PROJ"
+  [ "$status" -eq 0 ]
+  grep -q "mode: off (unrecognized:" <<<"$output"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
   grep -q "status=timeout" <<<"$output"
   refute grep -q "no-monitor-delivery" <<<"$output"
 }

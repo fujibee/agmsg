@@ -925,7 +925,8 @@ if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
       "mode: monitor"*) DELIVERY_MODE=monitor ;;
       "mode: both"*)    DELIVERY_MODE=both ;;
       "mode: turn"*)    DELIVERY_MODE=turn ;;
-      "mode: off"*)     DELIVERY_MODE=off ;;
+      "mode: off (no agmsg delivery hooks installed for this project)"*) DELIVERY_MODE=off ;;
+      "mode: off (unrecognized:"*) DELIVERY_MODE=unknown ;;
       *)                DELIVERY_MODE=unknown ;;
     esac
     if [ "$DELIVERY_MODE" = "unknown" ]; then
