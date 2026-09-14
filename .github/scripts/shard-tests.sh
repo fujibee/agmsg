@@ -161,6 +161,17 @@ file_weight() {
 #     test_remote_engine_start_refusal.bats  679s / 2.408 = round(281.9) = 282
 #     test_remote_status_liveness.bats       293s / 2.408 = round(121.7) = 122
 #
+# STILL THESE VALUES after the integration+main merge grew the suite to 2550
+# @tests, even though they are now measurably under-seeded on this tree (the
+# reservation test test_ci_sharding.bats "a pinned file's shard is reserved,
+# not refilled" is red -- known, tracked, not fixed by this branch). A local
+# (non-Actions) remeasurement was tried and rejected: these two files are
+# wait/timeout-bound, not CPU-bound, so their cost does not scale with local
+# hardware speed the way the rest of the suite does, and a local per-file-wall
+# / local-whole-suite-avg ratio does not stand in for the same ratio on the
+# Actions runner. The refit needs a real Actions run's bats-timings artifact
+# (summarize-bats-timings.sh), same as the original #1159 measurement.
+#
 # The numerator (per-file wall) and the divisor (whole-suite avg) came from the
 # SAME run, so a refresh must re-derive BOTH together off one green run's
 # bats-timings artifacts (summarize-bats-timings.sh) -- never update one alone.
