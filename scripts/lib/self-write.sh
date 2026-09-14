@@ -47,7 +47,7 @@
 #   seat=<team>/<agent> sid=<owner> pane=<ref>        or
 #   seat=... none:<busy:<owner>|bad_ref|no_driver|lock_unknown:<r>|fence_unreadable:<r>>
 #   seat=... unsupported:<r>                            (plain: no pane exists)
-#   fence=<encoded-instance>:<terminal_id>
+#   fence[(-v2)]=<encoded-instance>:<terminal_id>
 #   record  attempt=<ok|failed:<r>>            readback=<verified|mismatch:<seen>|unavailable:<r>|not_attempted>
 #   label   attempt=<ok|failed:<rc>|skipped:<r>> readback=<...>
 #   key     attempt=<same as label: one terminal_name call> readback=<...>
@@ -121,7 +121,7 @@ _sw_fence_check() {   # <id> <instance> <tid> [<seat-pid>]
 # locator exactly (same kind, emulator and tty); its fence anchor holds BOTH
 # boot= and boot_start=. Prints "boot=<pid>,boot_start=<start>" or nothing.
 _sw_boot_carry() {   # <team> <agent> <new-ref>
-  local rec line ref anchor fence_value parsed kv boot="" boot_start=""
+  local rec line ref anchor fence_field parsed kv boot="" boot_start=""
   case "$3" in plain:*) ;; *) return 0 ;; esac
   rec="$(agmsg_spawn_path "$1" "$2")"
   line="$(head -1 "$rec" 2>/dev/null)" || return 0
@@ -129,8 +129,8 @@ _sw_boot_carry() {   # <team> <agent> <new-ref>
   [ "$ref" = "$3" ] || return 0
   case "$line" in
     *$'\t'fence=*)
-      fence_value="${line##*$'\t'fence=}"
-      parsed="$(agmsg_fence_split plain "fence=$fence_value" 2>/dev/null)" || return 0
+      fence_field="${line##*$'\t'}"
+      parsed="$(agmsg_fence_split plain "$fence_field" 2>/dev/null)" || return 0
       anchor="${parsed#*$'\t'}"
       ;;
     *) return 0 ;;
@@ -154,7 +154,7 @@ _sw_cell_record() {   # <team> <agent> <ref> <project> <type> <fence>
   if [ -z "$4" ] || [ -z "$5" ]; then
     printf 'attempt=failed:missing_fields readback=not_attempted\n'; return 0
   fi
-  content="$(printf '%s\t%s\t%s\tfence=%s' "$3" "$4" "$5" "$6")"
+  content="$(printf '%s\t%s\t%s\t%s' "$3" "$4" "$5" "$6")"
   mkdir -p "${rec%/*}" 2>/dev/null || true
   if ! agmsg_write_atomic "$rec" "$content" 2>/dev/null; then
     printf 'attempt=failed:write readback=not_attempted\n'; return 0
@@ -374,7 +374,7 @@ agmsg_self_write() {   # <team> <agent> <ref> <owner>
     return 2
   }
   _sw_say "$head"
-  _sw_say "fence=$fence"
+  _sw_say "$fence"
 
   project="$(agmsg_role_session_get "$team" "$agent" project 2>/dev/null || true)"
   type="$(agmsg_role_session_get "$team" "$agent" type 2>/dev/null || true)"

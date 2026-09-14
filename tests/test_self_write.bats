@@ -299,8 +299,9 @@ FAKE
   _fixture terminal_id term_AAA title "◐ claude" label "" key "" status idle kind claude
   run agmsg_self_write T alice herdr:w1:pB "$ME"
   [ "$status" -eq 0 ]
-  [ "$(_line fence)" = 'fence=v2%3A/tmp/herdr/sessions/a%3Ab.sock:term_AAA' ]
-  [ "$(agmsg_fence_split herdr "$(_line fence)")" = "$(printf '/tmp/herdr/sessions/a:b.sock\tterm_AAA')" ]
+  local fence_line; fence_line="$(printf '%s\n' "$output" | grep -E '^fence(-v2)?=')"
+  [ "$fence_line" = 'fence-v2=/tmp/herdr/sessions/a%3Ab.sock:term_AAA' ]
+  [ "$(agmsg_fence_split herdr "$fence_line")" = "$(printf '/tmp/herdr/sessions/a:b.sock\tterm_AAA')" ]
   [ "$(_line record)" = 'record attempt=ok readback=verified' ]
 }
 

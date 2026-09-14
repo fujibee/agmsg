@@ -112,11 +112,16 @@ teardown() { teardown_test_env; }
 @test "fence codec: legacy instances stay compatible and colon-bearing paths round-trip" {
   local old new
   old="$(agmsg_fence_compose herdr /run/herdr.sock 'term:old')"
-  [ "$old" = '/run/herdr.sock:term:old' ]
-  [ "$(agmsg_fence_split herdr "fence=$old")" = "$(printf '/run/herdr.sock\tterm:old')" ]
+  [ "$old" = 'fence=/run/herdr.sock:term:old' ]
+  [ "$(agmsg_fence_split herdr "$old")" = "$(printf '/run/herdr.sock\tterm:old')" ]
   new="$(agmsg_fence_compose herdr '/run/a:b.sock' 'term:new:anchor')"
-  [ "$new" = 'v2%3A/run/a%3Ab.sock:term:new:anchor' ]
-  [ "$(agmsg_fence_split herdr "fence=$new")" = "$(printf '/run/a:b.sock\tterm:new:anchor')" ]
+  [ "$new" = 'fence-v2=/run/a%3Ab.sock:term:new:anchor' ]
+  [ "$(agmsg_fence_split herdr "$new")" = "$(printf '/run/a:b.sock\tterm:new:anchor')" ]
+}
+
+@test "fence codec: a legacy instance beginning with the old marker stays byte-for-byte unchanged" {
+  local legacy='fence=v2%3A/run/socket:term_old'
+  [ "$(agmsg_fence_split herdr "$legacy")" = "$(printf '%s\t%s' 'v2%3A/run/socket' term_old)" ]
 }
 
 @test "split: unknown kind, no instance, bare pane and control characters are refused by name" {
