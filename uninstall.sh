@@ -185,7 +185,18 @@ for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   fi
 done
 
-# --- 2c. Remove native Windows helpers ---
+# --- 2c. Remove Antigravity skill ---
+for SKILL_DIR in "${SKILL_DIRS[@]}"; do
+  SKILL_NAME="$(basename "$SKILL_DIR")"
+  ANTIGRAVITY_SKILL="$HOME/.gemini/config/skills/$SKILL_NAME"
+  if [ -d "$ANTIGRAVITY_SKILL" ]; then
+    rm -rf "$ANTIGRAVITY_SKILL"
+    echo "  - removed /$SKILL_NAME skill from ~/.gemini/config/skills/"
+    REMOVED=true
+  fi
+done
+
+# --- 2d. Remove native Windows helpers ---
 for SKILL_DIR in "${SKILL_DIRS[@]}"; do
   SKILL_NAME="$(basename "$SKILL_DIR")"
   for helper in "$AGENTS_DIR/$SKILL_NAME.ps1" "$AGENTS_DIR/$SKILL_NAME-run.sh"; do

@@ -1069,6 +1069,55 @@ EOF
   grep -q "whoami.sh \"\$(pwd)\" grok-build" "$FAKE_HOME/.grok/skills/agmsg/SKILL.md"
 }
 
+# --- Antigravity skill (~/.gemini/config/skills/<name>/SKILL.md) ---
+
+@test "install: drops an Antigravity SKILL.md when ~/.gemini/config exists" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+  [ -f "$antigravity_skill" ]
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
+  grep -q "^name: agmsg" "$antigravity_skill"
+}
+
+@test "install: Antigravity skill uses the CLI marker when config is absent" {
+  mkdir -p "$FAKE_HOME/.gemini/antigravity-cli"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -f "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md" ]
+}
+
+@test "install: skips Antigravity skill when its markers are absent" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+}
+
+@test "install --update: installs Antigravity skill for upgraders without prior skill" {
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ ! -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  [ -f "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md" ]
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+}
+
+@test "install --update: refreshes the Antigravity skill" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  local antigravity_skill="$FAKE_HOME/.gemini/config/skills/agmsg/SKILL.md"
+  printf '%s\n' tampered > "$antigravity_skill"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --update
+  refute grep -q '^tampered$' "$antigravity_skill"
+  grep -q "whoami.sh \"\$(pwd)\" antigravity" "$antigravity_skill"
+}
+
+@test "uninstall: removes the Antigravity skill" {
+  mkdir -p "$FAKE_HOME/.gemini/config"
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg
+  [ -d "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+  HOME="$FAKE_HOME" bash "$REPO_ROOT/uninstall.sh" --yes
+  [ ! -e "$FAKE_HOME/.gemini/config/skills/agmsg" ]
+}
+
 @test "install: --agent-type grok-build makes shared SKILL.md Grok-typed" {
   HOME="$FAKE_HOME" bash "$REPO_ROOT/install.sh" --cmd agmsg --agent-type grok-build
   grep -q "whoami.sh \"\$(pwd)\" grok-build" "$SK/SKILL.md"
