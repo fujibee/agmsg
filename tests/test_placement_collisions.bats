@@ -41,21 +41,59 @@ _place() {
   grep -Fq "collisions: none" <<< "$output"
 }
 
-@test "herdr refs are never joined as a collision, even when the raw id repeats (#1144)" {
+@test "a BARE herdr ref (no socket) is never joined as a collision, even when the raw id repeats (#1144)" {
   _place alpha alice herdr:w1:p9
   _place beta bob herdr:w1:p9
 
   run bash "$SCRIPTS/placement-collisions.sh"
   [ "$status" -eq 0 ]
-  # The whole point: a bare herdr id is not an address (#1155). Record-only
-  # evidence cannot tell two live instances apart, so this must never read as
-  # a proven collision.
+  # A bare herdr id predates #1055's socket qualification and is not an
+  # address on its own (#1155). Record-only evidence cannot tell two live
+  # instances apart from it, so this must never read as a proven collision.
   refute grep -Fq "collisions: 1" <<< "$output"
   grep -Fq "collisions: none" <<< "$output"
   grep -Fq "unscoped_records: 2" <<< "$output"
   grep -Fq "ref: herdr:w1:p9" <<< "$output"
   grep -Fq -- "- alpha/alice" <<< "$output"
   grep -Fq -- "- beta/bob" <<< "$output"
+}
+
+@test "reports a canonical SOCKET-QUALIFIED herdr collision between two distinct seats (#1144, #1055)" {
+  _place alpha alice herdr:/tmp/herdr/a.sock:w1:p9
+  _place beta bob herdr:/tmp/herdr/a.sock:w1:p9
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "ref: herdr:/tmp/herdr/a.sock:w1:p9" <<< "$output"
+  grep -Fq -- "- alpha/alice" <<< "$output"
+  grep -Fq -- "- beta/bob" <<< "$output"
+  grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "unscoped_records: 0" <<< "$output"
+  grep -Fq "coverage: complete" <<< "$output"
+}
+
+@test "two different herdr instances sharing the same bare pane are NOT joined (#1144, #1055)" {
+  _place alpha alice herdr:/tmp/herdr/a.sock:w1:p9
+  _place beta bob herdr:/tmp/herdr/b.sock:w1:p9
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  refute grep -Fq "collisions: 1" <<< "$output"
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 0" <<< "$output"
+}
+
+@test "a socket-qualified herdr ref and a bare herdr ref sharing the same pane are not joined -- unscoped stays unscoped (#1144, #1055)" {
+  _place alpha alice herdr:/tmp/herdr/a.sock:w1:p9
+  _place beta bob herdr:w1:p9
+
+  run bash "$SCRIPTS/placement-collisions.sh"
+  [ "$status" -eq 0 ]
+  grep -Fq "collisions: none" <<< "$output"
+  grep -Fq "unscoped_records: 1" <<< "$output"
+  grep -Fq "ref: herdr:w1:p9" <<< "$output"
+  grep -Fq -- "- beta/bob" <<< "$output"
+  refute grep -Fq -- "- alpha/alice" <<< "$output"
 }
 
 @test "a legacy bare tmux ref with no socket is unscoped, not joined (#1144)" {

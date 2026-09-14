@@ -17,12 +17,15 @@ set -euo pipefail
 #     records on disk. No terminal is ever asked anything -- no
 #     terminal_pane_state, no agent_list, nothing that touches a live pane.
 #     A ref that cannot be resolved to a locator carrying an instance
-#     component (every herdr ref today; a legacy bare tmux %N/@N) is not
-#     silently joined by raw string equality -- it is reported as
-#     unscoped_record and excluded from both the collision count and a
-#     "collisions: none" verdict, because record-only evidence genuinely
-#     cannot tell such refs apart across terminal instances (measured for
-#     herdr in #1155: two live instances answered the same bare pane id).
+#     component (a BARE herdr id -- #1055 made the socket-qualified form
+#     possible, but a record written before that landed, or by an install
+#     still on an older skill version, still holds the bare one -- or a
+#     legacy bare tmux %N/@N) is not silently joined by raw string equality
+#     -- it is reported as unscoped_record and excluded from both the
+#     collision count and a "collisions: none" verdict, because record-only
+#     evidence genuinely cannot tell such refs apart across terminal
+#     instances (measured for herdr in #1155: two live instances answered
+#     the same bare pane id).
 #
 #   actual-location layer (interface only, NOT wired here)
 #     Does an individual seat's own claimed locator match where a census
@@ -141,10 +144,23 @@ for cfg in "$SKILL_DIR"/teams/*/config.json; do
           fi
           ;;
         *)
-          # herdr today, and any future scheme with no instance component in
-          # the ref: the record alone cannot name which live instance it
-          # belongs to, so it cannot be safely joined against another record.
-          printf '%s\t%s\t%s\n' "$ref" "$team" "$agent" >> "$COV_DIR/unscoped"
+          # herdr (#1055 gave its id an optional socket-qualified form,
+          # "<socket>:wN:pX") and any future scheme with the same split
+          # contract: a ref that HAS an instance component compares like
+          # tmux; one that does not -- a bare id, which is what every herdr
+          # record predating #1055 still holds, and what one written by an
+          # older install still writes -- cannot name which live instance it
+          # belongs to, so it stays unscoped exactly as before. The split
+          # goes through the driver's own terminal_id_split (loaded, never
+          # called against a live pane -- it is a string operation), so this
+          # file gains no second copy of a grammar the driver already owns.
+          split="$(_agmsg_terminal_id_split "$_AGMSG_PS_TERM" "$_AGMSG_PS_ID" 2>/dev/null)" || split=""
+          if [ -n "$split" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$_AGMSG_PS_TERM" "${split%%"$TAB"*}" "${split#*"$TAB"}" "$team" "$agent" >> "$COV_DIR/rows"
+          else
+            printf '%s\t%s\t%s\n' "$ref" "$team" "$agent" >> "$COV_DIR/unscoped"
+          fi
           ;;
       esac
     else
@@ -156,10 +172,12 @@ done
 # --- record-only collisions: group by canonical (kind, instance, pane) -----
 # Same exclusion as the original #1144 report: one agent name registered in
 # more than one team is one seat, not a collision, by itself. Rows in
-# $COV_DIR/rows are "<kind>\t<instance>\t<pane>\t<team>\t<agent>"; only tmux
-# rows with a resolved instance (socket) ever reach this file (see the main
-# walk above), so kind is always "tmux" today, but the join is written on the
-# three-field locator rather than assuming that.
+# $COV_DIR/rows are "<kind>\t<instance>\t<pane>\t<team>\t<agent>"; only a ref
+# with a resolved instance component ever reaches this file (see the main
+# walk above) -- tmux with a socket, herdr with one (#1055), never a bare id
+# of either -- and the join is written on the full four-field key, kind
+# included, so two different kinds could never be joined by a coincidental
+# instance+pane match even if one existed.
 #
 # awk prints two tagged line shapes so the shell loop below never has to
 # guess which fields a line carries: "GROUP\t<kind>\t<instance>\t<pane>" once
