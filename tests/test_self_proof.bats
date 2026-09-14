@@ -48,8 +48,10 @@ PSEOF
   source "$SKILL_DIR/scripts/lib/instance-id.sh"
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/actas-lock.sh"
-  # shellcheck disable=SC1090
-  source "$SKILL_DIR/scripts/lib/self-identity.sh"
+  # self-identity.sh is NOT sourced here on purpose: self-proof.sh sources its
+  # own dependency now, so this setup exercises the same load path production
+  # does. Removing self-proof.sh's own source line is what should turn tests in
+  # this file red -- not a source line here standing in for it.
   # shellcheck disable=SC1090
   source "$SKILL_DIR/scripts/lib/self-proof.sh"
   # shellcheck disable=SC1090
@@ -654,7 +656,6 @@ done
 printf '%s\t%s\n' "$$" "$AGMSG_OWNER_PID" >> "$PS_TREE"
 . "$SKILL_DIR/scripts/lib/instance-id.sh"
 . "$SKILL_DIR/scripts/lib/actas-lock.sh"
-. "$SKILL_DIR/scripts/lib/self-identity.sh"
 . "$SKILL_DIR/scripts/lib/self-proof.sh"
 . "$SKILL_DIR/scripts/lib/terminal-registry.sh"
 agmsg_terminal_load herdr
