@@ -19,6 +19,23 @@ fake_cc_instance() {
   echo "$sid" > "$RUN_DIR/cc-instance.$pid"
 }
 
+# Install a config.json + a one-line roster journal for <team>/<agent>, with
+# LITERAL, caller-chosen team_id/member_id -- not minted by join.sh. #1023
+# Review finding: a test that derives its expected id-keyed path by calling
+# _agmsg_id_key_for (the function under test) can never catch that function
+# being broken, since a broken resolver and the test's own expectation would
+# agree with each other. Writing the ids here lets a test assert the exact
+# literal path a real reader would compute, independent of this codebase's
+# own id-resolution code.
+_fixture_known_ids() {   # <team> <team_id> <agent> <member_id>
+  local team="$1" team_id="$2" agent="$3" member_id="$4" dir
+  dir="$SKILL_DIR/teams/$team"
+  mkdir -p "$dir"
+  printf '{"name":"%s","team_id":"%s","agents":{}}' "$team" "$team_id" > "$dir/config.json"
+  printf '{"type":"member_joined","id":"ev-fixture","member_id":"%s","name":"%s","at":"2026-01-01T00:00:00Z"}\n' \
+    "$member_id" "$agent" > "$dir/roster.jsonl"
+}
+
 # The role-keyed claim producer, addressed through its real interface: the
 # shared path-keyed core actas_lock_claim itself calls. There is no more a
 # role-keyed wrapper around it (removed as unused outside tests); this is the
@@ -558,4 +575,210 @@ _owner_only() {   # <team> <agent>
   # And nothing was published. This is the assertion that matters: refusing is
   # only worth anything if the broken file did not become the lock.
   refute test -f "$(actas_lock_path T alice)"
+}
+
+# --- #1023: id-keyed paths, so a team/agent name containing '__' cannot ------
+# collide with a different pair that happens to split at the same point -----
+
+@test "#1023: id-bearing pairs no longer collide across the team/agent boundary" {
+  # The issue's OWN reproduction: the ambiguity is in the JOIN POINT, not in
+  # either half alone -- ("a__b","c") and ("a","b__c") are TWO DIFFERENT TEAMS
+  # whose <team>__<agent> concatenation is identical either way. Known,
+  # literal ids (not minted by join.sh, not derived by calling the id-key
+  # resolver under test) so the expected path for all three functions is a
+  # literal the test wrote itself -- review finding: deriving the expectation
+  # from _agmsg_id_key_for would let a broken resolver agree with its own
+  # broken expectation. (A first version of this test compared two agents in
+  # the SAME team, which every member naming scheme already tells apart via a
+  # different member_id -- it could not have caught the encoder skipping the
+  # join entirely, and passed under a mutation that broke actas_lock_path
+  # outright. Caught by mutation, not by inspection.)
+  _fixture_known_ids "a__b" "tid-AB" c "mid-C"
+  _fixture_known_ids a "tid-A" "b__c" "mid-BC"
+  local dir; dir="$(_actas_lock_dir)"
+
+  [ "$(actas_lock_path "a__b" c)"   = "$dir/actas.tid-AB__mid-C.session" ]
+  [ "$(agmsg_ready_path "a__b" c)"  = "$dir/ready.tid-AB__mid-C" ]
+  [ "$(agmsg_spawn_path "a__b" c)"  = "$dir/spawn.tid-AB__mid-C" ]
+
+  [ "$(actas_lock_path a "b__c")"   = "$dir/actas.tid-A__mid-BC.session" ]
+  [ "$(agmsg_ready_path a "b__c")"  = "$dir/ready.tid-A__mid-BC" ]
+  [ "$(agmsg_spawn_path a "b__c")"  = "$dir/spawn.tid-A__mid-BC" ]
+
+  [ "$(actas_lock_path "a__b" c)" != "$(actas_lock_path a "b__c")" ]
+}
+
+@test "#1023: a team with no team_id still collides -- a decided scope cut, not silent" {
+  # No join.sh call at all: no config.json exists for this team, so
+  # _agmsg_id_key_for cannot resolve anything and every path function falls
+  # back to the original name-encoded form, unchanged. This is the explicit
+  # scope cut: an id-less team is not fixed by this change.
+  [ "$(actas_lock_path "a__b" c)" = "$(actas_lock_path a "b__c")" ]
+}
+
+@test "#1023: an id-bearing team, agent not yet in the roster, still collides" {
+  # The team has an id (join.sh minted one for T, above -- but "a__b" itself
+  # has never joined). agmsg_roster_name_owner returns nothing for a name that
+  # never joined, so the id key cannot be built and the path falls back to
+  # exactly what the OLD scheme produced -- not some new, different value.
+  bash "$SKILL_DIR/scripts/join.sh" T zzz claude-code /tmp/proj >/dev/null
+  local t a; t="$(_actas_lock_encode T)"; a="$(_actas_lock_encode "a__b")"
+  [ "$(actas_lock_path T "a__b")" = "$(printf '%s/actas.%s__%s.session' "$(_actas_lock_dir)" "$t" "$a")" ]
+}
+
+@test "#1023: migration -- an existing legacy-path lock keeps being served after ids exist" {
+  # A lock written before this change (or while the name was still
+  # unregistered) must not be orphaned the moment the pair gains an id: the
+  # path functions check the legacy location before handing back the new one.
+  bash "$SKILL_DIR/scripts/join.sh" T alice claude-code /tmp/proj >/dev/null
+  local legacy; legacy="$(printf '%s/actas.T__alice.session' "$(_actas_lock_dir)")"
+  mkdir -p "$(dirname "$legacy")"
+  echo "sid-old" > "$legacy"
+  [ "$(actas_lock_path T alice)" = "$legacy" ]
+  [ "$(cat "$(actas_lock_path T alice)")" = "sid-old" ]
+}
+
+@test "#1023: migration -- claiming an id-bearing pair with a pre-existing legacy lock never leaves the member locked at BOTH paths" {
+  # actas_lock_claim resolves the path exactly once (via actas_lock_path) and
+  # writes only there, so a lock written before the pair had ids cannot be
+  # orphaned by the id-keyed path springing into existence alongside it. This
+  # exercises the real claim flow, not just path resolution, since a caller
+  # that computed its own path independently of actas_lock_path would defeat
+  # the single-resolution guarantee without failing any test that only calls
+  # actas_lock_path directly. idpath is a LITERAL built from the fixture's own
+  # known ids, not derived via _agmsg_id_key_for -- same reason as
+  # the boundary-collision test above.
+  _fixture_known_ids T "tid-T" alice "mid-alice"
+  local legacy; legacy="$(printf '%s/actas.T__alice.session' "$(_actas_lock_dir)")"
+  echo "sid-old" > "$legacy"
+
+  local idpath; idpath="$(printf '%s/actas.tid-T__mid-alice.session' "$(_actas_lock_dir)")"
+
+  run actas_lock_claim T alice new-sid
+  [ "$status" -eq 0 ]
+  [ "$(cat "$legacy")" = new-sid ]
+  refute test -e "$idpath"
+}
+
+@test "#1023: both an id-keyed AND a legacy lock existing for the same member fails closed, not silently" {
+  # Review finding: the prior test coverage only exercised legacy-alone. A stale
+  # duplicate (crash mid-migration, a manual copy, or a caller that built its
+  # own path independently of these functions) must not resolve to EITHER file
+  # -- a warn-and-still-succeed form was tried and rejected on review: a caller
+  # (claim, in particular) would proceed as though it held sole ownership while
+  # an old-version reader could still honor the OTHER file, and several
+  # external callers of these path functions discard stderr, so a warning
+  # alone is not reliably seen. actas_lock_path must refuse outright.
+  _fixture_known_ids T "tid-T" eve "mid-eve"
+  local legacy idpath
+  legacy="$(printf '%s/actas.T__eve.session' "$(_actas_lock_dir)")"
+  idpath="$(printf '%s/actas.tid-T__mid-eve.session' "$(_actas_lock_dir)")"
+  echo "sid-legacy" > "$legacy"
+  echo "sid-idpath" > "$idpath"
+
+  # Manual capture, not `run`: bats' `run` merges stdout+stderr into $output
+  # by default, which would hide whether anything landed on stdout.
+  local err_log="$BATS_TEST_TMPDIR/err.log" out rc=0
+  out="$(actas_lock_path T eve 2>"$err_log")" || rc=$?
+
+  [ "$rc" -ne 0 ]
+  [ -z "$out" ]
+  [ -s "$err_log" ]
+  grep -Fq "$idpath" "$err_log"
+  grep -Fq "$legacy" "$err_log"
+}
+
+@test "#1023: actas_lock_read on a double-existing pair is a named unknown, not absent/unreadable" {
+  # Exercises the real read path, not a mock: distinguishing THIS unknown from
+  # the other two matters because a caller reading "absent" as free, or
+  # "unreadable" as "try again later", would both be wrong reasons for the
+  # same refusal.
+  _fixture_known_ids T "tid-T" frank "mid-frank"
+  echo "sid-legacy" > "$(printf '%s/actas.T__frank.session' "$(_actas_lock_dir)")"
+  echo "sid-idpath" > "$(printf '%s/actas.tid-T__mid-frank.session' "$(_actas_lock_dir)")"
+
+  local r
+  r="$(actas_lock_read T frank)"
+  [ "${r%%$'\t'*}" = "ambiguous" ]
+}
+
+@test "#1023: actas_lock_state on a double-existing pair is unknown:lock_ambiguous, refused like every other unknown" {
+  _fixture_known_ids T "tid-T" grace "mid-grace"
+  echo "sid-legacy" > "$(printf '%s/actas.T__grace.session' "$(_actas_lock_dir)")"
+  echo "sid-idpath" > "$(printf '%s/actas.tid-T__mid-grace.session' "$(_actas_lock_dir)")"
+
+  [ "$(actas_lock_state T grace sid-anyone)" = "unknown:lock_ambiguous" ]
+}
+
+@test "#1023: actas_lock_claim on a double-existing pair fails, and does not create or touch either file" {
+  # The caller-facing safety property: a real claim attempt against the real
+  # double state must not succeed, and must not silently pick a side by
+  # writing to it either.
+  _fixture_known_ids T "tid-T" heidi "mid-heidi"
+  local legacy idpath
+  legacy="$(printf '%s/actas.T__heidi.session' "$(_actas_lock_dir)")"
+  idpath="$(printf '%s/actas.tid-T__mid-heidi.session' "$(_actas_lock_dir)")"
+  echo "sid-legacy" > "$legacy"
+  echo "sid-idpath" > "$idpath"
+
+  # Manual capture, not `run`: `run` merges stdout+stderr into $output, and
+  # actas_lock_path's own stderr line would land in there alongside the
+  # verdict this asserts on.
+  local out rc=0
+  out="$(actas_lock_claim T heidi new-sid 2>/dev/null)" || rc=$?
+  [ "$rc" -ne 0 ]
+  [ "$out" = "unknown:lock_ambiguous" ]
+  [ "$(cat "$legacy")" = "sid-legacy" ]
+  [ "$(cat "$idpath")" = "sid-idpath" ]
+}
+
+@test "#1023: actas_lock_release on a double-existing pair deletes neither file" {
+  _fixture_known_ids T "tid-T" ivan "mid-ivan"
+  local legacy idpath
+  legacy="$(printf '%s/actas.T__ivan.session' "$(_actas_lock_dir)")"
+  idpath="$(printf '%s/actas.tid-T__mid-ivan.session' "$(_actas_lock_dir)")"
+  echo "sid-mine" > "$legacy"
+  echo "sid-mine" > "$idpath"
+
+  run actas_lock_release T ivan sid-mine
+  [ "$status" -ne 0 ]
+  [ -f "$legacy" ]
+  [ -f "$idpath" ]
+}
+
+@test "#1023: a fresh id-bearing pair with no file anywhere gets the NEW path" {
+  bash "$SKILL_DIR/scripts/join.sh" T bob claude-code /tmp/proj >/dev/null
+  local p; p="$(actas_lock_path T bob)"
+  local legacy; legacy="$(printf '%s/actas.T__bob.session' "$(_actas_lock_dir)")"
+  [ "$p" != "$legacy" ]
+  refute test -e "$p"
+}
+
+@test "#1023: a rename does not move an id-keyed lock (the #1017 side-benefit)" {
+  # member_id is stable across a rename; the path is derived from it, not from
+  # the display name, so the SAME file keeps backing the lock across a rename
+  # -- unlike the legacy name-keyed path, which would silently start pointing
+  # at a different (nonexistent) file the moment the name changed.
+  bash "$SKILL_DIR/scripts/join.sh" T carol claude-code /tmp/proj >/dev/null
+  local before; before="$(actas_lock_path T carol)"
+  echo "sid-me" > "$before"
+  bash "$SKILL_DIR/scripts/rename.sh" T carol dana >/dev/null 2>&1 || true
+  [ "$(actas_lock_path T dana)" = "$before" ]
+  [ "$(cat "$(actas_lock_path T dana)")" = "sid-me" ]
+}
+
+@test "#1023: a config.json with no team_id field falls back, does not error" {
+  mkdir -p "$SKILL_DIR/teams/notyet"
+  printf '{"name":"notyet","agents":{}}' > "$SKILL_DIR/teams/notyet/config.json"
+  run actas_lock_path notyet alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s/actas.notyet__alice.session' "$(_actas_lock_dir)")" ]
+}
+
+@test "#1023: corrupt team config.json falls back, does not error or hang" {
+  mkdir -p "$SKILL_DIR/teams/broken"
+  printf 'not json at all {{{' > "$SKILL_DIR/teams/broken/config.json"
+  run actas_lock_path broken alice
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s/actas.broken__alice.session' "$(_actas_lock_dir)")" ]
 }

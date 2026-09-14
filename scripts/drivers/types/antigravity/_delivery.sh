@@ -2,6 +2,12 @@
 # 設定はagmsg専用rulefileのマーカー。monitor設定だけではagyを起動しない。
 agmsg_delivery_apply() {
   local type="$1" project="$2" mode="$3"
+  # Refuse before any write: an empty SKILL_DIR would render broken guidance
+  # paths ("/scripts/where.sh" etc.) into the rule file, and rulefile_apply
+  # (below, and this function's own turn-mode migration check) removes the
+  # existing rule file before it writes -- an unreadable value must never be
+  # treated as "nothing to preserve" (#1234 review).
+  [ -n "${SKILL_DIR:-}" ] || { echo "agmsg_delivery_apply (antigravity): SKILL_DIR is not set; refusing rather than writing a broken rule file" >&2; return 1; }
   if [ "$mode" != monitor ]; then
     node "$SKILL_DIR/scripts/drivers/types/antigravity/antigravity-mode.mjs" stop "$project" || return 1
     rulefile_apply "$@"

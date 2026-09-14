@@ -12,6 +12,13 @@
 # setup_test_env. A file that deliberately exercises the switch itself
 # (test_self_name.bats, test_self_rename.bats) unsets this right after
 # loading -- that is a local, visible override, not a gap in this default.
+# Hard safety boundary: a test that opts back into self-naming must first install
+# a fake terminal. Clear every ambient terminal marker while this helper loads,
+# before any suite-level setup or test body can unset AGMSG_SELF_NAME. Tests that
+# deliberately model a real terminal restore these variables explicitly, using
+# a fake driver or a documented fixture socket.
+unset TMUX TMUX_PANE TMUX_TMPDIR
+unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
 export AGMSG_SELF_NAME=off
 
 setup_test_env() {
@@ -22,8 +29,8 @@ setup_test_env() {
   # pane would otherwise write the fixture's team:agent onto the developer's
   # own pane. Tests that want a terminal set these AFTER this call, against a
   # fake on PATH. CI runners carry none of these, so nothing changes there.
-  unset TMUX TMUX_PANE
-  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION
+  unset TMUX TMUX_PANE TMUX_TMPDIR
+  unset HERDR_ENV HERDR_PANE_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SESSION HERDR_BIN_PATH HERDR_STARTUP_CWD
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
@@ -134,6 +141,24 @@ _reap_test_skill_dir_procs() {
     sleep 0.1 2>/dev/null || true
     tries=$((tries + 1))
   done
+}
+
+# Derive the run-file path a real caller would use for (team, agent), instead
+# of a test hardcoding the pre-#1023 legacy literal "<team>__<agent>". join.sh
+# mints team_id unconditionally when it creates a brand-new team config, and
+# mints the member's member_id in the same call once team_id exists -- so a
+# freshly join.sh'd team/agent pair (the normal case in this suite) resolves
+# to the NEW id-keyed path, not the legacy one. A literal string baked into a
+# test fixture silently stops matching the path production code actually
+# reads or writes the moment #1023 lands, with no error at the mismatch site.
+_ready_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; agmsg_ready_path "$1" "$2" )
+}
+_spawn_record_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; agmsg_spawn_path "$1" "$2" )
+}
+_actas_session_path() {   # <team> <agent>
+  ( SKILL_DIR="$TEST_SKILL_DIR"; source "$TEST_SKILL_DIR/scripts/lib/actas-lock.sh"; actas_lock_path "$1" "$2" )
 }
 
 teardown_test_env() {

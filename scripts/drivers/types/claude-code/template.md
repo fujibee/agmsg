@@ -46,20 +46,50 @@ The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Cod
 <!-- /agmsg:slot execute-extra -->
 
 <!-- agmsg:slot actas -->
-If argument starts with "actas" followed by an agent name:
-1. Resolve the role and claim its actas lock with `actas-claim.sh`.
-2. Stop the old monitor task, then start `watch.sh` filtered to the new role when delivery is `mode: monitor` or `mode: both`.
-3. Read `delivery.sh status` before reporting completion. If it returns `mode: off (no agmsg delivery hooks installed for this project)`, leave delivery stopped but tell the user that automatic delivery is not configured. Do not report `actas` as complete without saying this.
-4. If it returns `mode: off (unrecognized: ...)`, leave delivery stopped and tell the user that the project configuration could not be identified. Do not report `actas` as complete without saying this.
-5. Set the session's active FROM to the role and tell the user that receive is restricted to it.
+If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
+1. Parse the new role name. If none was given (e.g. bare "actas", or the user asks you to suggest one), run `~/.agents/skills/__SKILL_NAME__/scripts/team.sh <team>` for each TEAM to see the current roster. Look for a naming convention already in play (e.g. a shared base name with role and number suffixes (`<base>-<role><n>`), or names derived from the team name) and, when one exists, propose 2-3 unused names that extend it; otherwise propose 2-3 short, distinctive identity names (not a bare tool-type label). Either way, names must not collide with the roster. Ask the user to pick one or type their own before continuing.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" __AGENT_TYPE__` to see whether the role is already registered for this (project, type).
+3. If the name does not appear in the output, join under the existing team. Read TEAMS from the in-session whoami state (it may be a single team or comma-separated). For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> __AGENT_TYPE__ "$(pwd)"`. For multiple teams, ask the user which team to join the new role into, then run join.sh for that team.
+4. **Pre-flight claim** the actas exclusivity lock so this role isn't already owned by another live session: `~/.agents/skills/__SKILL_NAME__/scripts/actas-claim.sh "$(pwd)" __AGENT_TYPE__ <name> "$CLAUDE_CODE_SESSION_ID"`. Read the `status=` line of the output:
+    - `status=ok ...`: proceed to step 5.
+    - `status=held team=<team> owner=<sid>`: another live session currently owns `<name>` in `<team>`. Tell the user: "Cannot actas as `<name>` — it is held by session `<sid>` in team `<team>`. Run `/__SKILL_NAME__ drop <name>` in that session first, then retry." Then abort — do NOT touch the running Monitor.
+    - `status=not_registered`: shouldn't happen if step 3 ran; treat as an error.
+5. **Switch receive too — exclusive role mode.**
+   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
+   b. **If a matching task is found**: TaskStop it.
+   c. **If no matching task is found** (typical when /__SKILL_NAME__ actas runs as the first command of a fresh session — SessionStart hasn't fired the Monitor directive yet, or you're invoking actas before the agent acted on it): skip TaskStop entirely. There is no Monitor to stop. Do NOT attempt TaskStop with a guessed or empty task_id — it will fail with "Invalid tool parameters" and confuse the flow.
+   d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"` and read its **first line**.
+      - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor, regardless of whether step b or c applied:
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__ <name>`
+        - description: `agmsg inbox stream (acting as <name>)`
+        - persistent: true
+      - **`mode: turn`**: leave it stopped, silently. `has_st=1` is the one case `delivery.sh` can actually confirm was a deliberate choice — someone configured turn-based delivery for this project — so `actas` starting nothing here needs no explanation.
+      - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped (`actas` must not start automatic delivery a project wasn't configured for), but **do not treat this as silently deliberate**. `delivery.sh` cannot tell whether someone ran `mode off` here or this project was simply never configured — both leave the exact same settings file (#687 review round 3). **Tell the user** — e.g. "agmsg delivery hooks are not installed for this project; automatic delivery remains stopped. Run `/__SKILL_NAME__ mode <choice>` if you want to configure it." Keep it matter-of-fact, not a warning. Do not report `actas` as complete without saying this.
+      - **`mode: off (unrecognized: ...)`**: leave it stopped too (same rule — do not guess a mode), but this is a stronger case than the no-hooks-installed one above: `delivery.sh` could not even find or read a settings file for this project, most often because the working directory does not match how the project was actually registered. **Tell the user explicitly** — e.g. "agmsg could not find a delivery configuration for this project at `<path from the message>` — delivery is stopped, but this may mean the project isn't registered here rather than that it was deliberately turned off. Check the path, or run `/__SKILL_NAME__ mode <choice>` to configure it explicitly." Do not report `actas` as complete without saying this — a silent stop here is indistinguishable from the other off cases and is what let this go unnoticed before (#687).
+   The 4th argument to `watch.sh` restricts the subscription to messages addressed to `<name>` only — other roles' inbound messages stop reaching this session until another `actas` or session end.
+6. Set the session's active FROM to `<name>` — use `<name>` in every `send.sh` call for the rest of this session.
+7. Tell the user: "Now acting as `<name>`. Sends use `<name>` as from; receive restricted to `<name>` only."
+8. **Only if this session was NOT launched via `spawn`** — check the environment variable `AGMSG_SPAWNED` (e.g. `printenv AGMSG_SPAWNED`): `spawn` exports `AGMSG_SPAWNED=1` and already named the session `<team>-<agent>` via `-n`, so when it is set, **skip this tip entirely**. When it is UNSET (a human typed `claude` then actas'd, so the session has no convention name), additionally suggest to the user: "Tip: rename this session to `<team>-<name>` with `/rename <team>-<name>` so it's easy to find in the `/resume` picker and stays labeled after a restart." `/rename` is a user-typed slash command — you cannot invoke it yourself, so only suggest it.
+9. **Confirm the Monitor actually attached** — only when step 5d invoked a fresh Monitor (`mode: monitor` or `mode: both`): run TaskList once more and confirm a task whose description begins with `agmsg inbox stream` is present. Do NOT read this off the terminal UI's background-task footer — it does not reliably reflect whether a Monitor is really streaming for this session; TaskList is the only check that does. If the task is missing, retry the Monitor invocation from step 5d once. If it is still missing after the retry, tell the user `actas` completed but delivery could not be confirmed as attached, and do not describe delivery as active.
 <!-- /agmsg:slot actas -->
 
 <!-- agmsg:slot drop -->
-If argument starts with "drop" followed by an agent name:
-1. Run `reset.sh "$(pwd)" __AGENT_TYPE__ <name> "$CLAUDE_CODE_SESSION_ID"` to release the role and its lock.
-2. Run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`, then restart the default monitor subscription when the project is configured for `mode: monitor` or `mode: both`.
-3. If it returns `mode: off (no agmsg delivery hooks installed for this project)`, leave delivery stopped but say so. Do not report the drop as complete without mentioning it.
-4. If it returns `mode: off (unrecognized: ...)`, leave delivery stopped and explain that the project configuration could not be identified. Do not report the drop as complete without mentioning it.
+If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
+1. Parse the role name.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" __AGENT_TYPE__ <name> "$CLAUDE_CODE_SESSION_ID"` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config. The 4th argument releases any actas exclusivity locks this session held on the role so peers can pick it up immediately (see #62).
+3. If the session's active FROM was `<name>`, clear that state. Then:
+   a. Run TaskList. Find any task whose description begins with "agmsg inbox stream".
+   b. **If a matching task is found**: TaskStop it.
+   c. **If no matching task is found**: skip TaskStop. Do NOT attempt TaskStop with a guessed or empty task_id.
+   d. Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status __AGENT_TYPE__ "$(pwd)"` and read its **first line**.
+      - **`mode: monitor` or `mode: both`**: invoke a fresh Monitor with the default subscription (no `actas` name filter — receives every (team, agent) pair currently registered for this project that isn't held by another session):
+        - command: `~/.agents/skills/__SKILL_NAME__/scripts/watch.sh $CLAUDE_CODE_SESSION_ID "$(pwd)" __AGENT_TYPE__`
+        - description: `agmsg inbox stream`
+        - persistent: true
+      - **`mode: turn`**: leave it stopped, silently — the one case `delivery.sh` can confirm was deliberate.
+      - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped, but say so — same reasoning as the `actas` step this mirrors: this state is indistinguishable from "never configured" (#687 review round 3), so do not report it as deliberate. Do not report the drop as complete without mentioning it.
+      - **`mode: off (unrecognized: ...)`**: leave it stopped, but say so with the stronger diagnostic — same reasoning as the `actas` step this mirrors (#687). Do not report the drop as complete without mentioning it.
+4. Tell the user: "Dropped role `<name>` from this project."
 <!-- /agmsg:slot drop -->
 
 <!-- agmsg:slot spawn -->

@@ -90,7 +90,7 @@ _emit_row() {
   local key_cell="$4" key_expected="$5" key_actual="$6"
   local session_cell="$7" session_expected="$8" session_actual="$9"
   shift 9
-  local consistency="$1"
+  local consistency="$1" reach_status="$2" reach_detail="$3"
   if [ "$OUTPUT_MODE" = json ]; then
     [ "$JSON_FIRST" -eq 1 ] || printf ',\n'
     JSON_FIRST=0
@@ -98,21 +98,24 @@ _emit_row() {
       "$container" "$activity" "$delivery" \
       "$label_cell" "$label_expected" "$label_actual" \
       "$key_cell" "$key_expected" "$key_actual" \
-      "$session_cell" "$session_expected" "$session_actual" "$consistency"
+      "$session_cell" "$session_expected" "$session_actual" "$consistency" \
+      "$reach_status" "$reach_detail"
   else
     agmsg_team_render_human_row "$member" "$type" "$project" "$terminal" "$pane" \
       "$container" "$activity" "$delivery" \
-      "$label_cell" "$key_cell" "$session_cell" "$consistency"
+      "$label_cell" "$key_cell" "$session_cell" "$consistency" \
+      "$reach_status" "$reach_detail"
   fi
 }
 
 _emit_unknown_row() {
   local member="$1" type="$2" project="$3" terminal="$4" pane="$5"
-  local container="$6" activity="$7" delivery="$8" reason="$9"
+  local container="$6" activity="$7" delivery="$8" reason="$9" reach_status="${10}"
   local cell="unknown:$reason"
   _emit_row "$member" "$type" "$project" "$terminal" "$pane" "$container" \
     "$activity" "$delivery" \
-    "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified
+    "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" "$cell" unverified \
+    "$reach_status" "$reason"
 }
 
 _member_status() {
@@ -120,20 +123,22 @@ _member_status() {
   local rec ref terminal pane location container delivery identity
   local activity pane_label agent_key cli_session consistency reason
   local _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session
+  local reach
   if [ "$registered" -eq 0 ]; then
     _emit_row "$agent" remote n/a:remote_registration \
       n/a:remote n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
       n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration \
-      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a
+      n/a:no_local_registration n/a:no_local_registration n/a:no_local_registration n/a \
+      cannot remote_registration
     return 0
   fi
   delivery="$(_member_delivery "$type" "$project")"
   if [ "$_agmsg_pl_rc" -ne 0 ] || ! declare -F agmsg_spawn_path >/dev/null 2>&1; then
     reason=terminal_support_not_loaded
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason" unknown
     return 0
   fi
   rec="$(agmsg_spawn_path "$team" "$agent" 2>/dev/null)" || rec=""
@@ -144,7 +149,7 @@ _member_status() {
     # never does.
     reason=no_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason" cannot
     return 0
   fi
   # The record also carries project/type, unused now that nothing here rewrites
@@ -153,7 +158,7 @@ _member_status() {
   if [ -z "$ref" ]; then
     reason=empty_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason" cannot
     return 0
   fi
   terminal="$(agmsg_terminal_ref_terminal "$ref" 2>/dev/null)" || terminal=""
@@ -161,7 +166,7 @@ _member_status() {
   if [ -z "$terminal" ] || [ -z "$pane" ]; then
     reason=invalid_placement_record
     _emit_unknown_row "$agent" "$type" "$project" unknown "unknown:$reason" \
-      "unknown:$reason" "unknown:$reason" "$delivery" "$reason"
+      "unknown:$reason" "unknown:$reason" "$delivery" "$reason" cannot
     return 0
   fi
   location="$(agmsg_team_location "$terminal" "$pane")"
@@ -173,6 +178,15 @@ EOF
     IFS="$(printf '\t')" read -r activity _actual_label _expected_label _actual_key _expected_key _actual_session _expected_session pane_label agent_key cli_session consistency <<EOF
 $identity
 EOF
+    # The location probe already ran, above, as a genuine per-target reachability
+    # check (each driver's terminal_where targets THIS pane's own recorded
+    # socket, not the caller's -- see agmsg_team_reach's own header for why that
+    # matters). Reuse its outcome rather than probing again.
+    local _location_ok=1 _location_reason=""
+    case "$container" in
+      unknown:*) _location_ok=0; _location_reason="${container#unknown:}" ;;
+    esac
+    reach="$(agmsg_team_reach "$terminal" "$pane" "$_location_ok" "$_location_reason")"
   else
     reason=terminal_driver_load_failed
     activity="unknown:$reason"; pane_label="unknown:$reason"
@@ -181,12 +195,14 @@ EOF
     _actual_key="$agent_key"; _expected_key="$agent_key"
     _actual_session="$cli_session"; _expected_session="$team-$agent"
     consistency=unverified
+    reach="unknown $reason"
   fi
   _emit_row "$agent" "$type" "$project" "$terminal" "$pane" "$container" \
     "$activity" "$delivery" \
     "$pane_label" "$_expected_label" "$_actual_label" \
     "$agent_key" "$_expected_key" "$_actual_key" \
-    "$cli_session" "$_expected_session" "$_actual_session" "$consistency"
+    "$cli_session" "$_expected_session" "$_actual_session" "$consistency" \
+    "${reach%% *}" "${reach#* }"
 }
 
 if [ "$OUTPUT_MODE" = json ]; then

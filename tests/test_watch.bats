@@ -354,7 +354,7 @@ _wait_for_file_contains() {
 
 @test "watch: actas-mode watcher creates a ready sentinel and removes it on exit" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  local ready="$TEST_SKILL_DIR/run/ready.team__alice"
+  local ready="$(_ready_path team alice)"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-ready" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- 4>&- &
   local w=$!
@@ -403,8 +403,8 @@ _wait_for_file_contains() {
   # guard removed so a broad watcher writes the sentinels, this test fails,
   # while the kill-then-assert form it replaces still passes.
   local rc=0 _s
-  for _s in ready.team__alice ready.team__bob; do
-    if [ -e "$TEST_SKILL_DIR/run/$_s" ]; then
+  for _s in "$(_ready_path team alice)" "$(_ready_path team bob)"; do
+    if [ -e "$_s" ]; then
       echo "broad watcher created $_s" >&2
       rc=1
     fi
@@ -415,7 +415,7 @@ _wait_for_file_contains() {
 
 @test "watch: ready sentinel records the owner session_id" {
   skip_on_windows "watcher background launch under Git Bash (#182)"
-  local ready="$TEST_SKILL_DIR/run/ready.team__alice"
+  local ready="$(_ready_path team alice)"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-own" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- 4>&- &
   local w=$! i
@@ -427,7 +427,7 @@ _wait_for_file_contains() {
 }
 
 @test "watch: cleanup leaves a sentinel that a successor session re-owned" {
-  local ready="$TEST_SKILL_DIR/run/ready.team__alice"
+  local ready="$(_ready_path team alice)"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-old" "$PROJ" claude-code alice \
     >/dev/null 2>&1 3>&- 4>&- &
   local w=$! i
@@ -917,7 +917,13 @@ _record_handover_events() {
   local out="$BATS_TEST_TMPDIR/hc.out"
   AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" "sess-hc" "$PROJ" claude-code >"$out" 2>/dev/null 3>&- 4>&- &
   local pid=$!
-  sleep 2                     # > one poll interval; a spinning watcher would re-emit
+  # #1023: startup now runs actas_lock_state once per subscribed pair (2 here:
+  # team/alice, team/bob), each resolving via _agmsg_id_key_for -- two extra
+  # sqlite3 spawns, ~40ms/call measured -- before the DB-health-check this test
+  # pins even runs. A base-vs-branch 3-run comparison at sleep 2 showed the
+  # branch losing the health-check race under load (2/3 vs 3/3); sleep 3 is
+  # still comfortably one poll interval and restored a clean run.
+  sleep 3                     # > one poll interval; a spinning watcher would re-emit
   kill "$pid" 2>/dev/null || true   # no-op if the healthcheck already exited
   wait "$pid" 2>/dev/null || true
   chmod 644 "$DB" 2>/dev/null || true

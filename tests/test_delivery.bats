@@ -3824,3 +3824,103 @@ EOF
   [ "$status" -eq 0 ]
   grep -Fq 'herdr [pane] [rename] [wC:p4] [nameteam:alice]' "$ARGV_LOG"
 }
+
+# --- #1234 review: an unreadable SKILL_DIR must refuse before any write, not
+# be treated as "nothing to preserve". agmsg_delivery_apply/rulefile_apply
+# each rm -f the existing rule file before rendering the new one; without a
+# guard placed BEFORE that removal, an empty SKILL_DIR would delete a correct
+# existing rule file and replace it with one whose guidance paths are broken
+# ("/scripts/where.sh" etc, from ${SKILL_DIR:-}-defaulted reads -- the shape
+# of the first attempt at this fix, which is exactly what this pins against).
+# delivery.sh itself always derives SKILL_DIR structurally and can never pass
+# it through empty, so these call the plug functions directly, the same way
+# delivery.sh's own sourced context would, with SKILL_DIR explicitly unset.
+
+@test "antigravity: SKILL_DIR unset refuses before writing, and an existing rule survives (#1234 review)" {
+  bash "$SCRIPTS/delivery.sh" set turn antigravity "$TEST_PROJECT" >/dev/null
+  local rule="$TEST_PROJECT/.agent/rules/agmsg.md"
+  [ -f "$rule" ]
+  local before; before="$(cat "$rule")"
+  run env -u SKILL_DIR bash -c '
+    resolve_hooks_file() { printf "%s\n" "'"$rule"'"; }
+    source "'"$SCRIPTS"'/lib/delivery-rulefile.sh"
+    source "'"$SCRIPTS"'/drivers/types/antigravity/_delivery.sh"
+    agmsg_delivery_apply antigravity "'"$TEST_PROJECT"'" turn
+  '
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q SKILL_DIR
+  [ -f "$rule" ]
+  [ "$(cat "$rule")" = "$before" ]
+}
+
+@test "cursor: SKILL_DIR unset refuses before writing, and an existing rule survives (#1234 review)" {
+  bash "$SCRIPTS/delivery.sh" set turn cursor "$TEST_PROJECT" >/dev/null
+  local rule="$TEST_PROJECT/.cursor/rules/agmsg.mdc"
+  [ -f "$rule" ]
+  local before; before="$(cat "$rule")"
+  run env -u SKILL_DIR bash -c '
+    resolve_hooks_file() { printf "%s\n" "'"$rule"'"; }
+    source "'"$SCRIPTS"'/drivers/types/cursor/_delivery.sh"
+    agmsg_delivery_apply cursor "'"$TEST_PROJECT"'" turn
+  '
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q SKILL_DIR
+  [ -f "$rule" ]
+  [ "$(cat "$rule")" = "$before" ]
+}
+
+@test "grok-build: SKILL_DIR unset refuses before writing, and an existing rule survives (#1234 review)" {
+  bash "$SCRIPTS/delivery.sh" set turn grok-build "$TEST_PROJECT" >/dev/null
+  local rule="$TEST_PROJECT/.grok/rules/agmsg.md"
+  [ -f "$rule" ]
+  local before; before="$(cat "$rule")"
+  run env -u SKILL_DIR bash -c '
+    resolve_hooks_file() { printf "%s\n" "'"$rule"'"; }
+    source "'"$SCRIPTS"'/drivers/types/grok-build/_delivery.sh"
+    agmsg_delivery_apply grok-build "'"$TEST_PROJECT"'" turn
+  '
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q SKILL_DIR
+  [ -f "$rule" ]
+  [ "$(cat "$rule")" = "$before" ]
+}
+
+@test "opencode: SKILL_DIR unset refuses before writing, and an existing rule survives (#1234 review)" {
+  bash "$SCRIPTS/delivery.sh" set turn opencode "$TEST_PROJECT" >/dev/null
+  # The exact rule path is opencode's own hooks_file; ask the type registry
+  # rather than hardcoding a guess that could silently stop testing anything.
+  local rule
+  rule="$(bash -c '
+    source "'"$SCRIPTS"'/lib/type-registry.sh" 2>/dev/null
+    rel="$(agmsg_type_get opencode hooks_file)"
+    printf "%s/%s\n" "'"$TEST_PROJECT"'" "$rel"
+  ')"
+  [ -f "$rule" ]
+  local before; before="$(cat "$rule")"
+  run env -u SKILL_DIR bash -c '
+    resolve_hooks_file() { printf "%s\n" "'"$rule"'"; }
+    source "'"$SCRIPTS"'/drivers/types/opencode/_delivery.sh"
+    agmsg_delivery_apply opencode "'"$TEST_PROJECT"'" turn
+  '
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q SKILL_DIR
+  [ -f "$rule" ]
+  [ "$(cat "$rule")" = "$before" ]
+}
+
+@test "rulefile_apply (via gemini, which has no guard of its own): SKILL_DIR unset refuses before writing, and an existing rule survives (#1234 review)" {
+  bash "$SCRIPTS/delivery.sh" set turn gemini "$TEST_PROJECT" >/dev/null
+  local rule="$TEST_PROJECT/.agent/rules/agmsg.md"
+  [ -f "$rule" ]
+  local before; before="$(cat "$rule")"
+  run env -u SKILL_DIR bash -c '
+    resolve_hooks_file() { printf "%s\n" "'"$rule"'"; }
+    source "'"$SCRIPTS"'/lib/delivery-rulefile.sh"
+    source "'"$SCRIPTS"'/drivers/types/gemini/_delivery.sh"
+    agmsg_delivery_apply gemini "'"$TEST_PROJECT"'" turn
+  '
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | grep -q SKILL_DIR
+  [ -f "$rule" ]
+  [ "$(cat "$rule")" = "$before" ]
+}

@@ -790,7 +790,7 @@ EOF
   bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ"
   # Forge a live owner for (myteam, alice).
   setup_live_owner "$TEST_SKILL_DIR/run" LIVESID
-  printf '%s\n' LIVESID > "$TEST_SKILL_DIR/run/actas.myteam__alice.session"
+  printf '%s\n' LIVESID > "$(_actas_session_path myteam alice)"
 
   run bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ"
   [ "$status" -ne 0 ]
@@ -803,7 +803,12 @@ EOF
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   bash "$SCRIPTS/delivery.sh" set monitor claude-code "$PROJ" >/dev/null
   mkdir -p "$TEST_SKILL_DIR/run"
-  local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
+  # alice must already be in the roster before resolving her ready path: #1023
+  # mints her member_id on join, and spawn.sh's OWN internal join.sh call (which
+  # runs before it resolves its own READY_PATH) will do the exact same thing --
+  # joining here first, idempotently, is what makes the two resolutions agree.
+  bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ" >/dev/null
+  local ready="$(_ready_path myteam alice)"
   # The terminal "launch" just touches the ready sentinel (and comments out the
   # boot script so its interactive shell never runs in the test).
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
@@ -1009,7 +1014,10 @@ EOF
   # distinguishes "started" from "typed but never ran". Only status=ready asserts it.
   bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
   mkdir -p "$TEST_SKILL_DIR/run"
-  local ready="$TEST_SKILL_DIR/run/ready.myteam__alice"
+  # See the readiness-handshake test above for why alice is joined before
+  # resolving her ready path.
+  bash "$SCRIPTS/join.sh" myteam alice claude-code "$PROJ" >/dev/null
+  local ready="$(_ready_path myteam alice)"
   run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
     --ready-timeout 10 --terminal "touch $ready # {cmd}"
   [ "$status" -eq 0 ]
@@ -1247,7 +1255,7 @@ STUB
   grep -q "pane run wT:pN" "$HERDR_CALL_LOG"
 
   # Placement record uses herdr: scheme tag.
-  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  local rec="$(_spawn_record_path myteam alice)"
   [ -f "$rec" ]
   local rec_id
   IFS=$'\t' read -r rec_id _ _ < "$rec"
@@ -1271,7 +1279,7 @@ STUB
   grep -q "tab create --workspace wT --label myteam:alice" "$HERDR_CALL_LOG"
   grep -q "pane run wT:pR" "$HERDR_CALL_LOG"
 
-  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  local rec="$(_spawn_record_path myteam alice)"
   [ -f "$rec" ]
   local rec_id
   IFS=$'\t' read -r rec_id _ _ < "$rec"
@@ -1322,7 +1330,7 @@ TMUXSTUB
 # the shapes that break positional matching.
 
 _spawn_recorded_id() {
-  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice" id
+  local rec="$(_spawn_record_path myteam alice)" id
   [ -f "$rec" ] || return 1
   IFS=$'\t' read -r id _ _ < "$rec"
   printf '%s' "$id"
@@ -1379,7 +1387,7 @@ _spawn_recorded_id() {
     # tests pin the exact reasons); spawn reports the placement failure and — the
     # contract that matters here — leaves NO placement record and renames/runs nothing.
     grep -q "placement failed" <<<"$output"
-    [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+    [ ! -f "$(_spawn_record_path myteam alice)" ]
     ! grep -q "pane run" "$HERDR_CALL_LOG"
   done
 }
@@ -1398,7 +1406,7 @@ _spawn_recorded_id() {
   grep -q "was not ready for input" <<<"$output"
   refute grep -q "pane run" "$HERDR_CALL_LOG"     # the boot was NOT typed
   grep -q "pane close" "$HERDR_CALL_LOG"          # the pane we created was closed
-  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]   # nothing launched -> no record
+  [ ! -f "$(_spawn_record_path myteam alice)" ]   # nothing launched -> no record
 }
 
 @test "spawn req1: UNKNOWN readiness (process-info errors) still types, warns BEFORE-typing, and records" {
@@ -1409,7 +1417,7 @@ _spawn_recorded_id() {
   [ "$status" -eq 0 ]
   grep -q "pane run" "$HERDR_CALL_LOG"            # arm 3 types anyway
   grep -q "BEFORE the boot was typed" <<<"$output"
-  [ -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+  [ -f "$(_spawn_record_path myteam alice)" ]
 }
 
 @test "spawn req1: null==null process-info is UNKNOWN, not READY (equality only after validation)" {
@@ -1512,7 +1520,7 @@ _spawn_recorded_id() {
   grep -q "unknown terminal driver" <<<"$output"
   refute grep -q "no team" <<<"$output"
   # Nothing was registered for the spawn target (it failed before the pre-join).
-  [ ! -f "$TEST_SKILL_DIR/run/spawn.myteam__alice" ]
+  [ ! -f "$(_spawn_record_path myteam alice)" ]
 }
 
 @test "spawn: a placement-record WRITE failure -> status=spawned-but-unrecorded, non-zero" {
@@ -1550,7 +1558,7 @@ T
   [ "$status" -eq 0 ]
   refute grep -qx -- 'iterm:/dev/ttys040' <<<"$output"
   grep -q "terminal template" <<<"$output"     # the OS-terminal path did run
-  local rec="$TEST_SKILL_DIR/run/spawn.myteam__alice"
+  local rec="$(_spawn_record_path myteam alice)"
   grep -Fq $'plain:iterm:/dev/ttys040\t' "$rec"
   grep -Fq $'\tfence=iterm:tty=/dev/ttys040,boot=123,boot_start=Sat_Sep_13_02:10:11_2026' "$rec"
 }
