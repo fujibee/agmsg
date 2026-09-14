@@ -883,6 +883,40 @@ EOF
   refute grep -q "no-monitor-delivery" <<<"$output"
 }
 
+@test "spawn: a known delivery prefix with a suffix remains unrecognized (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+printf 'mode: turnips\n'
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
+@test "spawn: a suffixed explicit off status does not skip readiness (#647)" {
+  bash "$SCRIPTS/join.sh" myteam existing claude-code "$PROJ"
+  local delivery="$SCRIPTS/delivery.sh"
+  mv "$delivery" "$delivery.real"
+  cat > "$delivery" <<'EOF'
+#!/usr/bin/env bash
+printf 'mode: off (no agmsg delivery hooks installed for this project) garbage\n'
+EOF
+  chmod +x "$delivery"
+  run env -u TMUX bash "$SCRIPTS/spawn.sh" claude-code alice --project "$PROJ" \
+    --ready-timeout 1 --terminal "true # {cmd}"
+  [ "$status" -eq 3 ]
+  grep -q "status output was not recognized" <<<"$output"
+  grep -q "status=timeout" <<<"$output"
+  refute grep -q "no-monitor-delivery" <<<"$output"
+}
+
 @test "spawn: --no-wait on a readiness_sentinel=YES type still reports launched-unconfirmed (no post-input confirmation)" {
   # Full-head review: --no-wait skips the readiness handshake by request, so startup is
   # NOT confirmed — exactly like readiness_sentinel=no. Both no-confirmation paths must report

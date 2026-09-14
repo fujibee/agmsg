@@ -922,12 +922,11 @@ if [ "$WAIT_READY" = "1" ] && [ "$SKIPPED_READINESS_BY_TYPE" = "0" ]; then
     echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; delivery status failed — keeping readiness wait" >&2
   else
     case "$_delivery_mode_line" in
-      "mode: monitor"*) DELIVERY_MODE=monitor ;;
-      "mode: both"*)    DELIVERY_MODE=both ;;
-      "mode: turn"*)    DELIVERY_MODE=turn ;;
-      "mode: off (no agmsg delivery hooks installed for this project)"*) DELIVERY_MODE=off ;;
-      "mode: off (unrecognized:"*) DELIVERY_MODE=unknown ;;
-      *)                DELIVERY_MODE=unknown ;;
+      "mode: monitor") DELIVERY_MODE=monitor ;;
+      "mode: both")    DELIVERY_MODE=both ;;
+      "mode: turn")    DELIVERY_MODE=turn ;;
+      "mode: off (no agmsg delivery hooks installed for this project)") DELIVERY_MODE=off ;;
+      *)               DELIVERY_MODE=unknown ;;
     esac
     if [ "$DELIVERY_MODE" = "unknown" ]; then
       echo "spawn: could not determine project delivery mode for '$AGENT_TYPE'; status output was not recognized — keeping readiness wait" >&2
