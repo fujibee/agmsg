@@ -791,6 +791,42 @@ test('TUI monitor は対話端末でない起動を拒否する', () => {
   assert.match(status.stdout, /tui-pty 未起動/);
 });
 
+test('TUI status refuses an unreadable process identity', () => {
+  runPython(`
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+spec = importlib.util.spec_from_file_location('supervisor', ${JSON.stringify(supervisor)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(tempfile.mkdtemp())
+(root / 'run').mkdir()
+state = root / 'run' / 'state.json'
+state.write_text(json.dumps({'project': '/tmp/project', 'team': 'fixture', 'role': 'worker'}))
+reservation = root / 'run' / 'antigravity-reservation.fixture.json'
+reservation.write_text(json.dumps({'pid': os.getpid(), 'start': 'start', 'state': str(state), 'kind': 'tui-pty'}))
+module.ROOT = root
+def unreadable(_pid, _start):
+    raise module.StartTimeUnreadable('synthetic read failure')
+module.process_still = unreadable
+sys.argv = ['supervisor.py', '--action', 'status', '--project', '/tmp/project', '--team', 'fixture', '--name', 'worker']
+stderr = io.StringIO()
+with contextlib.redirect_stderr(stderr):
+    try:
+        module.main()
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError('status accepted an unreadable process identity')
+assert 'TUI process identity is unreadable' in stderr.getvalue()
+`);
+});
+
 test('偽TUIを実PTYで起動し、受信後のreceipt確認からackまで進める', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agmsg-tui-pty-test-'));
   const install = path.join(dir, 'install');

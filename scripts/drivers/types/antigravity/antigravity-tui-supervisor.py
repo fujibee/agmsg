@@ -729,16 +729,24 @@ def main():
         return
     if a.action in ('status','stop','resume'):
         matches=[]
-        for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
-            try:
-                reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
-                if state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
-                live=False
-                try: live=process_still(int(reservation['pid']),reservation['start'])
-                except (ValueError,StartTimeUnreadable): pass
-                matches.append((file,reservation,state,live))
-            except (OSError,KeyError,TypeError,ValueError,json.JSONDecodeError):
-                continue
+        try:
+            for file in (ROOT/'run').glob('antigravity-reservation.*.json'):
+                try:
+                    reservation=json.loads(file.read_text()); state=json.loads(Path(reservation['state']).read_text())
+                    if state.get('project')!=str(Path(a.project).absolute()) or state.get('team')!=a.team or state.get('role')!=a.name or reservation.get('kind')!='tui-pty': continue
+                    live=False
+                    try: live=process_still(int(reservation['pid']),reservation['start'])
+                    except FileNotFoundError: live=False
+                    except ValueError as exc: raise RuntimeError(f'TUI reservation is malformed: {file}: {exc}') from exc
+                    except StartTimeUnreadable as exc: raise RuntimeError(f'TUI process identity is unreadable: {file}: {exc}') from exc
+                    matches.append((file,reservation,state,live))
+                except FileNotFoundError as exc:
+                    raise RuntimeError(f'TUI reservation disappeared while reading: {file}: {exc}') from exc
+                except (OSError,KeyError,TypeError,ValueError,json.JSONDecodeError) as exc:
+                    raise RuntimeError(f'TUI reservation is unreadable or malformed: {file}: {exc}') from exc
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
         if a.action=='status':
             if not matches: print('runtime: tui-pty 未起動'); return
             for _,reservation,state,live in matches:
