@@ -9,6 +9,9 @@ setup() {
 }
 
 agmsg_terminal_load() { return 0; }
+# Default: the terminal's manifest is present and readable. Tests of
+# agmsg_team_reach's own unreadable-manifest branch override this locally.
+agmsg_terminal_dir() { return 0; }
 
 install_team_fake_tmux() {
   local bindir="$BATS_TEST_TMPDIR/fakebin"
@@ -594,4 +597,43 @@ _herdr_observe_stub() {   # <entries-json>
   run agmsg_team_reach plain 'iterm:/dev/ttys040' 1 ""
   [ "$status" -eq 0 ]
   [ "$output" = "can peek" ]
+}
+
+# agmsg_terminal_get never fails on its own -- an unknown
+# terminal or an unreadable manifest silently degrades to its empty default,
+# indistinguishable from a REAL manifest that simply doesn't declare
+# peek/poke/arrange. The two must not both read as "cannot": the first is
+# "we don't know", the second is a fact about this driver's own manifest.
+@test "reach: an unreadable terminal manifest is unknown, never cannot" {
+  agmsg_terminal_dir() { return 1; }
+  agmsg_terminal_get() { printf ''; }
+  run agmsg_team_reach ghost-terminal some-pane 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "unknown terminal_manifest_unreadable" ]
+}
+
+@test "reach: a readable manifest that lists none of peek/poke/arrange is still cannot (unchanged by the manifest-unreadable guard)" {
+  agmsg_terminal_get() { printf 'spawn despawn'; }
+  run agmsg_team_reach agmsg-app - 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "cannot driver_does_not_support_these_ops" ]
+}
+
+# a mixed peek=cannot / arrange=unknown result must not
+# let cannot's reason leak into the unknown branch (they used to share one
+# "first reason wins" slot) -- the printed reason has to belong to the verdict
+# it is attached to.
+@test "reach: mixed cannot+unknown per-op results report the UNKNOWN op's own reason, never the cannot op's" {
+  agmsg_terminal_get() { printf 'spawn despawn peek poke arrange'; }
+  terminal_capability() {
+    case "$1" in
+      peek)    echo "unsupported: no adapter for peek" >&2; return 1 ;;
+      poke)    echo "adapter probe timed out for poke" >&2; return 2 ;;
+      arrange) echo "unsupported: no adapter for arrange" >&2; return 1 ;;
+    esac
+  }
+  run agmsg_team_reach plain 'iterm:/dev/ttys040' 1 ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "unknown adapter probe timed out for poke" ]
+  refute grep -qF 'no adapter for' <<<"$output"
 }

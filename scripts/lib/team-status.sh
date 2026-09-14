@@ -46,8 +46,19 @@
 agmsg_team_reach() {
   local terminal="$1" pane="$2" location_ok="$3" location_reason="$4"
   local caps op rc why has_hook=0
-  local can_ops="" any_cannot=0 any_unknown=0 first_reason=""
+  local can_ops="" any_cannot=0 any_unknown=0 cannot_reason="" unknown_reason=""
 
+  # agmsg_terminal_get itself never fails (an unknown terminal or unreadable
+  # manifest degrades silently to its default, empty here) -- so an empty
+  # caps read through it cannot distinguish "the manifest is real and simply
+  # doesn't declare these ops" (cannot) from "the manifest could not be read
+  # at all" (unknown, not the same claim). Check the manifest's own presence
+  # directly first rather than trusting agmsg_terminal_get's
+  # empty-on-failure default to mean the former.
+  if ! agmsg_terminal_dir "$terminal" >/dev/null 2>&1; then
+    printf 'unknown %s\n' "terminal_manifest_unreadable"
+    return 0
+  fi
   caps="$(agmsg_terminal_get "$terminal" capabilities 2>/dev/null)" || caps=""
   declare -F terminal_capability >/dev/null 2>&1 && has_hook=1
 
@@ -68,8 +79,12 @@ agmsg_team_reach() {
       why="$(terminal_capability "$op" "$pane" 2>&1 >/dev/null)" || rc=$?
       case "$rc" in
         0) can_ops="${can_ops:+$can_ops }$op" ;;
-        1) any_cannot=1;  [ -n "$first_reason" ] || first_reason="${why#unsupported: }" ;;
-        *) any_unknown=1; [ -n "$first_reason" ] || first_reason="${why:-terminal_capability_rc_$rc}" ;;
+        # Two separate reasons, never merged into one "first wins" slot
+        # a mixed peek=cannot/arrange=unknown result must not
+        # let the unknown branch below print the cannot op's reason, or the
+        # unsupported-shape claim survives into an indeterminate verdict.
+        1) any_cannot=1;  [ -n "$cannot_reason" ]  || cannot_reason="${why#unsupported: }" ;;
+        *) any_unknown=1; [ -n "$unknown_reason" ] || unknown_reason="${why:-terminal_capability_rc_$rc}" ;;
       esac
     else
       can_ops="${can_ops:+$can_ops }$op"
@@ -79,9 +94,9 @@ agmsg_team_reach() {
   if [ -n "$can_ops" ]; then
     printf 'can %s\n' "$can_ops"
   elif [ "$any_unknown" -eq 1 ]; then
-    printf 'unknown %s\n' "${first_reason:-could_not_verify}"
+    printf 'unknown %s\n' "${unknown_reason:-could_not_verify}"
   elif [ "$any_cannot" -eq 1 ]; then
-    printf 'cannot %s\n' "${first_reason:-unsupported}"
+    printf 'cannot %s\n' "${cannot_reason:-unsupported}"
   else
     printf 'cannot %s\n' "driver_does_not_support_these_ops"
   fi
