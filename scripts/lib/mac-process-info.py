@@ -23,16 +23,18 @@ def main(pid):
         buf = ctypes.create_string_buffer(PROC_BSDINFO_SIZE)
         size = libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, PROC_BSDINFO_SIZE)
     except OSError:
+        return 2
+    if size == 0:
         return 1
     if size < PROC_BSDINFO_SIZE:
-        return 1
+        return 2
     raw = buf.raw
     ppid = struct.unpack_from('<I', raw, 16)[0]
     status = struct.unpack_from('<I', raw, 4)[0]
     sec = struct.unpack_from('<Q', raw, 120)[0]
     usec = struct.unpack_from('<Q', raw, 128)[0]
     if not sec or usec >= 1_000_000:
-        return 1
+        return 2
     state = 'Z' if status == STATE_ZOMBIE else 'R'
     print(f'{ppid}\t{state}\tdarwin:{sec}:{usec:06d}')
     return 0
