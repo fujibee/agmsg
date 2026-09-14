@@ -258,6 +258,20 @@ install_antigravity_tui_shim() {
   fi
 }
 
+install_antigravity_skill() {
+  # Antigravity looks for global skills under ~/.gemini/config/skills, not the
+  # cross-vendor ~/.agents/skills tree. Treat either of the installed agy
+  # markers as evidence that this destination is available; the config tree
+  # itself may not exist yet on a fresh CLI install.
+  if [ ! -d "$HOME/.gemini/antigravity-cli" ] && [ ! -d "$HOME/.gemini/config" ]; then
+    return 0
+  fi
+  local skill_dir="$HOME/.gemini/config/skills/$CMD_NAME"
+  mkdir -p "$skill_dir"
+  agmsg_render_skill antigravity "$CMD_NAME" "$skill_dir/SKILL.md"
+  echo "  + installed /$CMD_NAME skill to ~/.gemini/config/skills/"
+}
+
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -434,6 +448,7 @@ if [ "$UPDATE_ONLY" = true ]; then
     mkdir -p "$GROK_SKILL_DIR"
     agmsg_render_skill grok-build "$SKILL_NAME" "$GROK_SKILL_DIR/SKILL.md"
   fi
+  install_antigravity_skill
   cp "$SCRIPT_DIR/openai.yaml" "$SKILL_DIR/agents/openai.yaml" 2>/dev/null || true
   # A team config written by an older release can be group- or world-writable,
   # and the sync engine refuses to read one that is (#804). Upgrading does not
@@ -727,6 +742,12 @@ if [ -d "$HOME/.grok" ]; then
   agmsg_render_skill grok-build "$CMD_NAME" "$GROK_SKILL_DIR/SKILL.md"
   echo "  + installed /$CMD_NAME skill to ~/.grok/skills/"
 fi
+
+# --- Install Antigravity skill ---
+# Antigravity (agy) reads global skills from ~/.gemini/config/skills/<name>/.
+# Its CLI may create ~/.gemini/antigravity-cli before the config directory, so
+# either path is a sufficient installation signal.
+install_antigravity_skill
 
 # Codex sandbox writable_roots are configured by configure_codex_sandbox() at
 # the "Done" step below — the single source of truth for db/, teams/, and run/.
