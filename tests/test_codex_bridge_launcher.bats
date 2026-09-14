@@ -155,11 +155,11 @@ put_record() {
 }
 
 write_request() {
-  local thread="$1"
+  local thread="$1" app_server="${2:-ws://127.0.0.1:1}"
   # #1254: the request file is keyed by AGMSG_CODEX_SEAT_KEY now, not a
   # project hash -- this file's setup() exports one fixed key for the whole
   # suite, which every launcher invocation below inherits.
-  printf 'codex\t%s\tws://127.0.0.1:1\n' "$thread" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
+  printf 'codex\t%s\t%s\n' "$thread" "$app_server" > "$RUN_DIR/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
 }
 
 # Start the dispatcher with enough lifetime to remain eligible under a loaded
@@ -240,6 +240,17 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   run_launcher
   [ "$(cat "$RUN_DIR/codex-bridge.team.alice.thread" 2>/dev/null)" = "rec-thread-1" ]
+}
+
+@test "launcher: ignores a stale request app-server URL and binds to its live server" {
+  put_record team alice rec-thread-1 "$PROJ" codex
+  write_request old-request-thread ws://127.0.0.1:2
+  run_launcher
+
+  [ -f "$CAPTURE" ]
+  grep -q -- "--app-server ws://127.0.0.1:1" "$CAPTURE"
+  refute grep -q -- "--app-server ws://127.0.0.1:2" "$CAPTURE"
+  [ "$(cat "$RUN_DIR/codex-bridge.team.alice.appserver" 2>/dev/null)" = "ws://127.0.0.1:1" ]
 }
 
 @test "launcher: replaces a stale role pidfile with the spawned bridge pid" {
