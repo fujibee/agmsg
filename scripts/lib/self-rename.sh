@@ -32,6 +32,13 @@
 #             "failed" on a screen we could not read. A title name still wrong ->
 #             failed. Either way, no second poke.
 #
+# Readable and wrong is also where the keystroke is gated on agmsg_self_proof
+# (#1206), the same proof `fix` requires before it writes: the placement-claim
+# guard below only catches a pane already recorded as someone else's, and a
+# pane nobody has claimed yet is not thereby proved to be this seat's. Only a
+# `proved` verdict authorizes typing; anything else is recorded as skipped and
+# nothing is poked.
+#
 # Two-tier opt-out, and it is VISIBLE on the mark, never silent: AGMSG_SELF_NAME=
 # off stops the whole self-naming family; AGMSG_SELF_RENAME=off stops only the
 # keystroke (more invasive than writing a label -- a person may accept the label
@@ -171,8 +178,35 @@ agmsg_self_rename_on_action() {
       # Cannot read the name now, so cannot verify a rename: do NOT type blindly.
       _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:${observed}" "$type" ;;
     *)
-      # Readable and wrong: type the rename ONCE, and mark "attempted" so the next
-      # action confirms instead of poking again.
+      # Readable and wrong: before typing, require the same proof `fix` requires
+      # before it writes (#1206). The claim guard above only catches a pane
+      # already RECORDED as someone else's; a pane nobody has claimed yet is not
+      # thereby proved to be this seat's -- an inherited environment can still
+      # name a pane this process never ran in. Load self-proof.sh the same
+      # lazy, best-effort way the claim guard above loads actas-lock.sh, since
+      # this is the same kind of already-loaded-elsewhere situation.
+      if ! declare -F agmsg_self_proof >/dev/null 2>&1 \
+         && [ -n "${SKILL_DIR:-}" ] && [ -r "$SKILL_DIR/scripts/lib/self-proof.sh" ]; then
+        # shellcheck disable=SC1090,SC1091
+        . "$SKILL_DIR/scripts/lib/self-proof.sh" 2>/dev/null || true
+      fi
+      local _proof_out="" _proof_rc=0 _proof_state="unsupported"
+      if declare -F agmsg_self_proof >/dev/null 2>&1; then
+        _proof_out="$(agmsg_self_proof "$team" "$agent" "$id")" || _proof_rc=$?
+        _proof_state="${_proof_out%%	*}"
+      else
+        _proof_rc=3   # self-proof.sh unavailable: the same as an unsupported proof.
+      fi
+      if [ "$_proof_rc" -ne 0 ] || [ "$_proof_state" != proved ]; then
+        # Not proved (or the proof itself is unavailable): never type into a pane
+        # we cannot show is our own. Same fail-closed direction as the claim
+        # guard above -- record why and leave the mark on a terminal "skipped"
+        # result rather than "attempted", so this generation is not retried.
+        _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" "skipped:unproved:${_proof_state:-no_proof}" "$type"
+        return 0
+      fi
+      # Readable, wrong, and proved: type the rename ONCE, and mark "attempted"
+      # so the next action confirms instead of poking again.
       if terminal_poke "$id" "$rename_cmd $expected" >/dev/null 2>&1; then
         _agmsg_self_rename_record "$team" "$agent" "$ref" "$epoch" attempted "$type"
       else
