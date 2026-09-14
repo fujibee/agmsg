@@ -180,6 +180,25 @@ print('ok')
 PY
   [ "$status" -eq 0 ]
   grep -q '^ok$' <<<"$output"
+
+  # libproc maps some read errors to a zero result while preserving errno;
+  # only ESRCH is a gone process. A different errno must stay unreadable.
+  run python3 - "$SCRIPTS/drivers/types/antigravity/mac-process-info.py" <<'PY'
+import ctypes, errno, importlib.util, sys
+spec=importlib.util.spec_from_file_location('process_info', sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+class FakeLib:
+    class Proc:
+        def __call__(self, *_args):
+            ctypes.set_errno(errno.EACCES)
+            return 0
+    proc_pidinfo=Proc()
+ctypes.CDLL=lambda *_args, **_kwargs: FakeLib()
+assert m.main(12345) == 2
+print('ok')
+PY
+  [ "$status" -eq 0 ]
+  grep -q '^ok$' <<<"$output"
 }
 
 @test "the mjs read-guard: turning delivery OFF still works on a non-Linux host" {

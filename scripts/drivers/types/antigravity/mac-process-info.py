@@ -21,10 +21,14 @@ def main(pid):
         libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
         libproc.proc_pidinfo.restype = ctypes.c_int
         buf = ctypes.create_string_buffer(PROC_BSDINFO_SIZE)
+        ctypes.set_errno(0)
         size = libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, PROC_BSDINFO_SIZE)
+        error = ctypes.get_errno()
     except OSError:
         return 2
-    if size == 0 or (size < 0 and ctypes.get_errno() == errno.ESRCH):
+    if size == 0:
+        return 1 if error == errno.ESRCH else 2
+    if size < 0 and error == errno.ESRCH:
         return 1
     if size < PROC_BSDINFO_SIZE:
         return 2
